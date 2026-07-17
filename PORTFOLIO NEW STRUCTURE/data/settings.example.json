@@ -1,0 +1,22 @@
+{
+  "constants": {
+    "quarter_pre86_factor": 0.8694109297,
+    "quarter_to_1g_ratio": 0.493733384,
+    "house_area_sqm": 90.2,
+    "house_mortgage_deduction": 400000000,
+    "swiss_gold_bar_1g_price": 25900000,
+    "swiss_gold_bar_2_5g_price": 61610000
+  },
+  "api_settings": {
+    "brs_url": "https://BrsApi.ir/Api/Market/Gold_Currency.php",
+    "brs_api_key": "PUT_YOUR_BRS_API_KEY_HERE",
+    "tsetmc_url": "https://BrsApi.ir/Api/Tsetmc/AllSymbols.php",
+    "tsetmc_symbol_url": "https://BrsApi.ir/Api/Tsetmc/Symbol.php",
+    "tsetmc_history_url": "https://BrsApi.ir/Api/Tsetmc/History.php",
+    "tsetmc_api_key": "PUT_YOUR_TSETMC_API_KEY_HERE"
+  },
+  "api_urls": {
+    "brsapi": "https://brsapi.ir/FreeTsetmcBourseApi/Api_Free_Gold_Currency_v2.json",
+    "tsetmc_base": "http://www.tsetmc.com/tsev2/data/instinfodata.aspx"
+  }
+}

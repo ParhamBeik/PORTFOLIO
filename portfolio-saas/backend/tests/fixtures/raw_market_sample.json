@@ -1,0 +1,18 @@
+{
+  "brsapi": {
+    "items": [
+      {"symbol": "IR_COIN_EMAMI", "name": "سکه امامی", "price": 480000000},
+      {"symbol": "IR_COIN_HALF", "name": "نیم سکه", "price": 240000000},
+      {"symbol": "IR_COIN_QUARTER", "name": "ربع سکه", "price": 125000000},
+      {"symbol": "IR_GOLD_18K", "name": "طلای ۱۸ عیار", "price": 57500000},
+      {"symbol": "USD", "name": "دلار", "price": 63200},
+      {"symbol": "BTC", "name": "بیتکوین", "price": 64500},
+      {"symbol": "USDT", "name": "تتر", "price": 1.0},
+      {"symbol": "EUR", "name": "یورو", "price": 68500},
+      {"symbol": "XAUUSD", "name": "انس طلا", "price": 2410}
+    ]
+  },
+  "tsetmc": [
+    {"l18": "کاما", "l30": "سپرما", "pl": 5230, "pc": 5200}
+  ]
+}
