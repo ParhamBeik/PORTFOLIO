@@ -12,13 +12,13 @@ from django.core.cache import cache
 from django.core.management import call_command
 
 from accounts.models import User
-from portfolios.models import Account, Price, Snapshot
+from portfolio.models import Account, Price, Snapshot
 
 pytestmark = pytest.mark.django_db
 
 
 def _patch_fetch(monkeypatch, payload):
-    import pricing.tasks as mod
+    import portfolio.tasks as mod
 
     monkeypatch.setattr(mod, "fetch_all_markets", lambda _settings: payload)
 

@@ -9,8 +9,8 @@ from decimal import Decimal
 import pytest
 from django.core.cache import cache
 
-from portfolios.models import Price
-from portfolios.services import get_latest_prices, invalidate_prices_cache
+from portfolio.models import Price
+from portfolio.services import get_latest_prices, invalidate_prices_cache
 
 pytestmark = pytest.mark.django_db
 
@@ -46,7 +46,7 @@ def test_invalidate_forces_refresh(asset_catalog, write_prices):
 
 
 def test_inactive_assets_are_excluded(asset_catalog, write_prices):
-    from portfolios.models import Asset
+    from portfolio.models import Asset
 
     write_prices({"emami_coin": Decimal("480000000")})
     Asset.objects.filter(key="emami_coin").update(is_active=False)

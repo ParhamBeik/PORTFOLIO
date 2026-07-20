@@ -6,7 +6,7 @@ database is needed.
 """
 from decimal import Decimal
 
-from pricing.extractor import extract_standard_prices
+from portfolio.live.extractor import extract_standard_prices
 
 # Mirror settings.MANUAL_PRICES plus the two derived-coin factors, in the shape
 # the legacy engine's `constants` dict expects.

@@ -10,7 +10,7 @@ import json
 import pytest
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
-from pricing.sse import format_event, user_from_token
+from portfolio.live.sse import format_event, user_from_token
 
 pytestmark = pytest.mark.django_db
 

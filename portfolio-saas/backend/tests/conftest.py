@@ -1,6 +1,6 @@
 """Shared pytest fixtures.
 
-Puts the legacy PORTFOLIO NEW STRUCTURE/src on sys.path so pricing.extractor can
+Puts the legacy PORTFOLIO NEW STRUCTURE/src on sys.path so portfolio.live.extractor can
 be parity-checked against the original engine (the codebase of record). The DB
 fixtures mirror seed_assets so tests do not depend on a seeded database.
 """
@@ -35,7 +35,7 @@ def legacy_engine():
 @pytest.fixture
 def asset_catalog(db):
     """The 14-asset catalog mirroring seed_assets (idempotent per test)."""
-    from portfolios.models import Asset
+    from portfolio.models import Asset
 
     entries = [
         ("emami_coin", "Gold", "IRT", False, False),
@@ -71,7 +71,7 @@ def asset_catalog(db):
 def write_prices(db):
     """Return a helper that writes Price rows and busts the latest-prices cache."""
     from django.core.cache import cache
-    from portfolios.models import Asset, Price
+    from portfolio.models import Asset, Price
 
     def _write(prices: dict) -> dict:
         for key, value in prices.items():

@@ -1,0 +1,208 @@
+"""Portfolio diagnostics: risk, return, drawdown, VaR for a current allocation.
+
+These metrics run over the live `daily_returns_matrix` and a user's current
+weights. They are deliberately explainable (no ML): the point is trustworthy
+numbers the frontend can plot next to the optimization suggestions.
+
+All metrics guard against NaN/inf: an asset with insufficient history still
+appears in the user's weights, but the metrics are computed over the eligible
+subset (assets whose columns actually exist in the returns df).
+"""
+from __future__ import annotations
+
+from decimal import Decimal
+
+import numpy as np
+import pandas as pd
+from sklearn.covariance import LedoitWolf
+
+from portfolio.services import value_user
+from .returns import daily_returns_matrix
+
+# Iran TSE risk-free proxy (Bahar Azadi bond yield ~30%). Annualized.
+RISK_FREE_RATE_ANNUAL = 0.30
+TRADING_DAYS_PER_YEAR = 252
+
+
+def _finite(value, default: float = 0.0) -> float:
+    """Return value if finite, else default (keeps payloads JSON-safe)."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    return f if np.isfinite(f) else default
+
+
+def _user_real_estate_value(user) -> Decimal:
+    """Sum of liquid-equivalent real-estate (house) value across the user's holdings.
+
+    Computed from the live valuation so it reflects the current house formula,
+    not a snapshot.
+    """
+    valuation = value_user(user)
+    total = Decimal("0")
+    for acct in valuation["accounts"]:
+        for item in acct["items"]:
+            if item["class"] == "Real Estate":
+                total += item["value"]
+    return total
+
+
+def _portfolio_returns(returns: pd.DataFrame, weights: dict[str, float]) -> pd.Series:
+    """Daily return series of the weighted portfolio over the eligible columns."""
+    cols = [k for k in weights if k in returns.columns]
+    if not cols:
+        return pd.Series(dtype=float)
+    w = np.array([weights[k] for k in cols], dtype=float)
+    w = w / w.sum() if w.sum() else w
+    sub = returns[cols].fillna(0.0).to_numpy()
+    return pd.Series(sub @ w, index=returns.index)
+
+
+def _annualized_volatility(port_series: pd.Series) -> float:
+    if port_series.empty:
+        return 0.0
+    return _finite(np.std(port_series, ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR))
+
+
+def _sharpe(port_series: pd.Series) -> float:
+    if port_series.empty:
+        return 0.0
+    ann_return = _finite(np.mean(port_series) * TRADING_DAYS_PER_YEAR)
+    ann_vol = _annualized_volatility(port_series)
+    if ann_vol == 0:
+        return 0.0
+    rf_daily = RISK_FREE_RATE_ANNUAL / TRADING_DAYS_PER_YEAR
+    excess = np.mean(port_series) - rf_daily
+    return _finite(excess / np.std(port_series, ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR))
+
+
+def _sortino(port_series: pd.Series) -> float:
+    """Sortino with downside deviation (returns < MAR=rf_daily)."""
+    if port_series.empty:
+        return 0.0
+    rf_daily = RISK_FREE_RATE_ANNUAL / TRADING_DAYS_PER_YEAR
+    excess = port_series - rf_daily
+    downside = excess.clip(upper=0.0)
+    dd = np.sqrt(np.mean(downside ** 2))
+    if dd == 0:
+        return 0.0
+    return _finite(np.mean(excess) / dd * np.sqrt(TRADING_DAYS_PER_YEAR))
+
+
+def _max_drawdown(port_series: pd.Series) -> tuple[float, int]:
+    """(max drawdown fraction [negative], days under water) for the series."""
+    if port_series.empty:
+        return 0.0, 0
+    wealth = (1.0 + port_series).cumprod()
+    running_max = wealth.cummax()
+    drawdown = (wealth - running_max) / running_max.replace(0, np.nan)
+    mdd = _finite(drawdown.min())
+    # Days under water: longest consecutive stretch below the running max.
+    under = (wealth < running_max).to_numpy()
+    longest = current = 0
+    for flag in under:
+        current = current + 1 if flag else 0
+        longest = max(longest, current)
+    return mdd, int(longest)
+
+
+def _calmar(port_series: pd.Series) -> float:
+    if port_series.empty:
+        return 0.0
+    mdd, _ = _max_drawdown(port_series)
+    if mdd == 0:
+        return 0.0
+    ann_return = _finite(np.mean(port_series) * TRADING_DAYS_PER_YEAR)
+    return _finite(ann_return / abs(mdd))
+
+
+def _historical_var_cvar(port_series: pd.Series, alpha: float = 0.95) -> tuple[float, float]:
+    """Historical VaR and CVaR at the (1-alpha) tail. Returns are losses (negative)."""
+    if port_series.empty:
+        return 0.0, 0.0
+    arr = port_series.dropna().to_numpy()
+    if arr.size == 0:
+        return 0.0, 0.0
+    var = _finite(np.quantile(arr, 1 - alpha))  # negative number for a loss
+    tail = arr[arr <= var]
+    cvar = _finite(np.mean(tail)) if tail.size else var
+    return var, cvar
+
+
+def _diversification_ratio(
+    returns: pd.DataFrame, weights: dict[str, float]
+) -> float:
+    """Weighted avg asset vol / portfolio vol, using shrunk annualized covariance."""
+    cols = [k for k in weights if k in returns.columns]
+    if len(cols) < 2:
+        return 1.0
+    w = np.array([weights[k] for k in cols], dtype=float)
+    if w.sum() <= 0:
+        return 1.0
+    w = w / w.sum()
+    sub = returns[cols].fillna(0.0)
+    try:
+        lw = LedoitWolf().fit(sub.to_numpy())
+        cov = lw.covariance_ * TRADING_DAYS_PER_YEAR
+    except Exception:
+        return 1.0
+    asset_vols = np.sqrt(np.diag(cov))
+    weighted_avg_vol = float(np.sum(w * asset_vols))
+    port_var = float(w @ cov @ w)
+    port_vol = np.sqrt(max(port_var, 0.0))
+    if port_vol == 0:
+        return 1.0
+    return _finite(weighted_avg_vol / port_vol)
+
+
+def portfolio_diagnostics(
+    current_weights: dict[str, float], total_value_tomans: Decimal, *, user=None
+) -> dict:
+    """Compute all diagnostics for the current portfolio.
+
+    `current_weights` is liquid weights only (real estate excluded upstream).
+    `user` (optional) is used to compute the real-estate block via the live
+    valuation — passed by the view; tests can omit it.
+    """
+    returns, excluded = daily_returns_matrix()
+    port_series = _portfolio_returns(returns, current_weights) if not returns.empty else pd.Series(dtype=float)
+
+    ann_vol = _annualized_volatility(port_series)
+    sharpe = _sharpe(port_series)
+    sortino = _sortino(port_series)
+    mdd, days_under = _max_drawdown(port_series)
+    calmar = _calmar(port_series)
+    var95, cvar95 = _historical_var_cvar(port_series, alpha=0.95)
+    div_ratio = _diversification_ratio(returns, current_weights) if not returns.empty else 1.0
+
+    eligible_assets = list(returns.columns) if not returns.empty else []
+
+    real_estate: dict = {"value_tomans": "0", "share_of_total": 0.0}
+    if user is not None:
+        re_value = _user_real_estate_value(user)
+        total_decimal = Decimal(str(total_value_tomans)) + re_value
+        share = float(re_value / total_decimal) if total_decimal > 0 else 0.0
+        real_estate = {
+            "value_tomans": str(re_value),
+            "share_of_total": _finite(share),
+        }
+
+    return {
+        "current_weights": current_weights,
+        "total_value_tomans": str(total_value_tomans),
+        "eligible_assets": eligible_assets,
+        "excluded_assets": excluded,
+        "metrics": {
+            "annualized_volatility": _finite(ann_vol),
+            "sharpe": _finite(sharpe),
+            "sortino": _finite(sortino),
+            "max_drawdown": _finite(mdd),
+            "days_under_water": int(days_under),
+            "calmar": _finite(calmar),
+            "historical_var_95": _finite(var95),
+            "historical_cvar_95": _finite(cvar95),
+            "diversification_ratio": max(_finite(div_ratio), 1.0),
+        },
+        "real_estate": real_estate,
+    }

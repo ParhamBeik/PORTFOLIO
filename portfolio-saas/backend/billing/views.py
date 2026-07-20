@@ -1,66 +1,100 @@
-"""Stripe Checkout creation + signature-verified webhook.
+"""Zarinpal payment flow: request an authority, then verify on callback.
 
-Raw Stripe (not dj-stripe): two endpoints, mapped to the existing User.customer_id
-/ User.tier. The tier flip is delegated to `accounts.services.set_user_tier`, so a
-local Iranian gateway can mirror this without touching the User model.
+Two endpoints replace the Stripe Checkout + webhook pair. Unlike Stripe's
+server-to-server webhook, Zarinpal redirects the *user's browser* back to our
+callback URL with `Authority` + `Status` query params; we verify server-side
+(never trust the browser), activate Pro idempotently, then redirect to the
+frontend with a status flag so the UI can show success/cancel.
 """
-import stripe
 from django.conf import settings
-from django.db import IntegrityError, transaction
-from django.http import HttpResponse
+from django.shortcuts import redirect
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import WebhookEvent
-from .services import apply_subscription_event
+from .models import Payment
+from .services import activate_pro
+from .zarinpal import ZarinpalError, request_payment, start_pay_url, verify_payment
 
-stripe.api_key = settings.STRIPE_SECRET_KEY
+
+def _amount_rial() -> int:
+    """Pro price in Rial. Our config is in Toman; Zarinpal takes Rial (×10)."""
+    return int(settings.PRO_PRICE_TOMAN) * 10
 
 
-class CheckoutView(APIView):
-    """Create a Stripe Checkout Session for the Pro subscription.
+class ZarinpalRequestView(APIView):
+    """Create a pending Payment and return the hosted payment redirect URL.
 
-    Returns the hosted Checkout URL for the frontend to redirect to.
+    The authority is obtained from Zarinpal *before* the Payment row is written,
+    so the row's unique `authority` is real from the moment it exists (no
+    placeholder, no unique-constraint race). On gateway refusal we return 502
+    without creating a row.
     """
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        session = stripe.checkout.Session.create(
-            mode="subscription",
-            line_items=[{"price": settings.STRIPE_PRO_PRICE_ID}],
-            client_reference_id=str(request.user.id),
-            customer_email=request.user.email,
-            success_url=settings.STRIPE_SUCCESS_URL,
-            cancel_url=settings.STRIPE_CANCEL_URL,
+        amount_rial = _amount_rial()
+        try:
+            authority = request_payment(
+                amount_rial=amount_rial,
+                description=f"Pro subscription - {request.user.email}",
+                callback_url=settings.ZARINPAL_CALLBACK_URL,
+            )
+        except (ZarinpalError, Exception):
+            # Gateway refused or unreachable. Surface a generic message; the
+            # detail is not safe/ useful to echo to the client.
+            return Response(
+                {"detail": "Payment gateway could not start the transaction."},
+                status=502,
+            )
+        Payment.objects.create(
+            user=request.user,
+            authority=authority,
+            amount_rial=amount_rial,
+            status=Payment.Status.PENDING,
         )
-        return Response({"url": session.url})
+        return Response({"redirect_url": start_pay_url(authority)})
 
 
 @csrf_exempt
-@require_POST
-def webhook(request):
-    """Stripe webhook: signature-verified, idempotent on the Stripe event id."""
-    sig = request.META.get("HTTP_STRIPE_SIGNATURE", "")
-    try:
-        event = stripe.Webhook.construct_event(
-            request.body, sig, settings.STRIPE_WEBHOOK_SECRET
-        )
-    except (ValueError, stripe.error.SignatureVerificationError):
-        return HttpResponse(status=400)
+def zarinpal_callback(request):
+    """Browser redirect from Zarinpal after the user pays (or cancels).
 
-    event_id = event.get("id", "")
-    event_type = event.get("type", "")
-    try:
-        with transaction.atomic():
-            # Inserting the event id first makes the whole change idempotent: a
-            # Stripe retry hits the unique constraint, the transaction rolls back,
-            # and we simply acknowledge.
-            WebhookEvent.objects.create(event_id=event_id, type=event_type)
-            apply_subscription_event(event)
-    except IntegrityError:
-        return HttpResponse(status=200)
-    return HttpResponse(status=200)
+    Verifies server-side, activates Pro (idempotent), then redirects to the
+    frontend billing page with a `status` query flag. CSRF-exempt because
+    Zarinpal GET-redirects here with no CSRF token.
+    """
+    authority = request.GET.get("Authority", "")
+    status = request.GET.get("Status", "")
+    front = settings.ZARINPAL_FRONTEND_URL
+
+    if status != "OK":
+        # User closed the page or cancelled on Zarinpal. No Payment state change
+        # (the row stays PENDING — harmless, and useful for reconciliation).
+        return redirect(f"{front}?status=cancel")
+
+    payment = Payment.objects.filter(authority=authority).first()
+    if payment is None:
+        return redirect(f"{front}?status=error")
+
+    if payment.status != Payment.Status.VERIFIED:
+        try:
+            ok, ref_id, _code = verify_payment(
+                authority=authority, amount_rial=payment.amount_rial
+            )
+        except Exception:
+            return redirect(f"{front}?status=error")
+        if not ok:
+            payment.status = Payment.Status.FAILED
+            payment.save(update_fields=["status"])
+            return redirect(f"{front}?status=cancel")
+        payment.ref_id = ref_id
+        payment.save(update_fields=["ref_id"])
+        activate_pro(payment)  # idempotent: no-ops if already verified
+
+    # Just activated, or a replay/refresh of an already-verified payment.
+    ref = payment.ref_id or ""
+    suffix = f"?status=success&ref_id={ref}" if ref else "?status=success"
+    return redirect(f"{front}{suffix}")

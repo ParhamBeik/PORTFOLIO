@@ -15,12 +15,12 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 app = Celery("portfolio")
 # Read all CELERY_* settings from Django settings.
 app.config_from_object("django.conf:settings", namespace="CELERY")
-# Discover tasks.py in each installed app (pricing.tasks.fetch_and_publish).
+# Discover tasks.py in each installed app (portfolio.tasks.fetch_and_publish).
 app.autodiscover_tasks()
 
 app.conf.beat_schedule = {
     "fetch-prices-every-2-min": {
-        "task": "pricing.tasks.fetch_and_publish",
+        "task": "portfolio.tasks.fetch_and_publish",
         "schedule": 120.0,
     },
 }

@@ -36,8 +36,8 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "accounts",
-    "portfolios",
-    "pricing",
+    "portfolio",
+    "marketdata",
     "billing",
 ]
 
@@ -164,6 +164,12 @@ TSETMC_URL = os.getenv("TSETMC_URL", "https://BrsApi.ir/Api/Tsetmc/AllSymbols.ph
 TSETMC_SYMBOL_URL = os.getenv(
     "TSETMC_SYMBOL_URL", "https://BrsApi.ir/Api/Tsetmc/Symbol.php"
 )
+# Seconds to sleep between BrsApi calls inside one sync task (paid API courtesy).
+MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "1.0"))
+# Extra TSE symbols to sync beyond assets with a tse_symbol (comma-separated).
+MARKETDATA_EXTRA_SYMBOLS = [
+    s.strip() for s in os.getenv("MARKETDATA_EXTRA_SYMBOLS", "").split(",") if s.strip()
+]
 TSETMC_HISTORY_URL = os.getenv(
     "TSETMC_HISTORY_URL", "https://BrsApi.ir/Api/Tsetmc/History.php"
 )
@@ -186,15 +192,16 @@ CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE  # defined above; Celery needs its own copy
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True  # survive a broker restart
 
-# Stripe billing. The Checkout price id and the webhook signing secret come from
-# the Stripe dashboard; the webhook endpoint is signature-verified and idempotent
-# (see billing/). All four fall back to empty/placeholder so the app still boots
-# and tests run without a Stripe account.
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-STRIPE_PRO_PRICE_ID = os.getenv("STRIPE_PRO_PRICE_ID", "")
-STRIPE_SUCCESS_URL = os.getenv("STRIPE_SUCCESS_URL", "http://localhost:5173/billing?status=success")
-STRIPE_CANCEL_URL = os.getenv("STRIPE_CANCEL_URL", "http://localhost:5173/billing?status=cancel")
+# Zarinpal billing (Iranian gateway — Stripe is unusable: Iranian cards can't
+# pay USD). MERCHANT_ID from the Zarinpal dashboard. Pro is annual-prepay in
+# Toman (no native recurring billing). SANDBOX=1 routes to the Zarinpal sandbox
+# (callback may be http://localhost). FRONTEND_URL is where the callback
+# redirects the browser after pay/cancel. See billing/.
+ZARINPAL_MERCHANT_ID = os.getenv("ZARINPAL_MERCHANT_ID", "")
+ZARINPAL_CALLBACK_URL = os.getenv("ZARINPAL_CALLBACK_URL", "http://localhost:5173/api/billing/zarinpal/callback/")
+ZARINPAL_FRONTEND_URL = os.getenv("ZARINPAL_FRONTEND_URL", "http://localhost:5173/billing")
+ZARINPAL_SANDBOX = os.getenv("ZARINPAL_SANDBOX", "0") == "1"
+PRO_PRICE_TOMAN = os.getenv("PRO_PRICE_TOMAN", "1000000")
 
 # Production-only security posture (M7, M8). These are evaluated at settings
 # import; tests/dev boot with DEBUG=True so neither branch runs there.
@@ -213,3 +220,28 @@ if not DEBUG:
         raise ImproperlyConfigured(
             "Refusing to start: CORS_ALLOWED_ORIGINS contains localhost with DEBUG=False."
         )
+
+# 12-factor logging: structured lines to stdout only (the container runtime
+# collects them). No files — disk in a container is ephemeral and stdout plays
+# well with `docker compose logs` / journald / your log shipper.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "console": {
+            "format": "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "console"},
+    },
+    "root": {"handlers": ["console"], "level": "INFO"},
+    "loggers": {
+        "django": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        # request/response lines (status + path), useful in prod.
+        "django.server": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "portfolio": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "marketdata": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "billing": {"handlers": ["console"], "level": "INFO", "propagate": False},
+    },
+}

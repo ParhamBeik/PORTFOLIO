@@ -1,166 +1,185 @@
-"""Stripe billing: Checkout creation + signature-verified, idempotent webhook.
+"""Zarinpal billing: authority request + browser-callback verify, idempotent.
 
-The Stripe SDK calls are mocked: we assert the request shape and the tier flips,
-not Stripe's network behaviour. `apply_subscription_event` is exercised through
-the real HTTP endpoint so the idempotency transaction is covered end-to-end.
+The gateway HTTP calls are mocked (`requests.post`), so we assert our own
+request shape, the Rial amount, the tier flip + expiry, and idempotency — not
+Zarinpal's network. The full request→pay→callback→verify→PRO path runs through
+the real endpoints so the Payment state machine is covered end-to-end.
 """
-import json
 from unittest import mock
 
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import User
-from billing.models import WebhookEvent
+from billing.models import Payment
 
 
 pytestmark = pytest.mark.django_db
 
 
-# ----- Checkout --------------------------------------------------------------
+# ----- helpers ---------------------------------------------------------------
 
 
-def test_checkout_creates_session_and_returns_url(make_user):
+def _fake_resp(payload, status_code=200):
+    """A stand-in `requests.Response` with a fixed JSON body."""
+    r = mock.Mock()
+    r.status_code = status_code
+    r.json.return_value = payload
+    r.raise_for_status.return_value = None
+    return r
+
+
+REQUEST_OK = _fake_resp({"data": {"code": 100, "authority": "A000001"}})
+VERIFY_100 = _fake_resp({"data": {"code": 100, "ref_id": "123456789"}})
+VERIFY_101 = _fake_resp({"data": {"code": 101}})  # already verified (idempotent)
+VERIFY_FAILED = _fake_resp({"data": {"code": -54}})  # unpaid / not found
+
+
+def _client(user):
+    c = APIClient()
+    c.force_authenticate(user=user)
+    return c
+
+
+def _seed_pending(user, authority="A000001"):
+    """The Payment row the request step would have created for a given authority."""
+    return Payment.objects.create(
+        user=user, authority=authority, amount_rial=10_000_000,
+        status=Payment.Status.PENDING,
+    )
+
+
+# ----- 1. request creates a pending Payment + redirect URL -------------------
+
+
+def test_request_creates_pending_payment_and_redirect_url(make_user):
     user = make_user(tier=User.Tier.FREE)
-    client = APIClient()
-    client.force_authenticate(user=user)
-
-    fake = mock.Mock()
-    fake.url = "https://checkout.stripe.com/c/cs_test_123"
-    with mock.patch("billing.views.stripe.checkout.Session.create", return_value=fake) as m:
-        resp = client.post("/api/billing/checkout/")
+    with mock.patch("billing.zarinpal.requests.post", return_value=REQUEST_OK) as m:
+        resp = _client(user).post("/api/billing/zarinpal/request/")
 
     assert resp.status_code == 200
-    assert resp.json()["url"] == "https://checkout.stripe.com/c/cs_test_123"
-    # The session pins the user id so the webhook can resolve them later.
+    assert resp.json()["redirect_url"].endswith("/A000001")
+
+    payment = Payment.objects.get(user=user)
+    assert payment.status == Payment.Status.PENDING
+    assert payment.authority == "A000001"
+    # Amount is sent in Rial: PRO_PRICE_TOMAN (1_000_000 default) × 10.
     _, kwargs = m.call_args
-    assert kwargs["mode"] == "subscription"
-    assert kwargs["client_reference_id"] == str(user.id)
-    assert kwargs["line_items"] == [{"price": ""}]  # empty default in tests
+    assert kwargs["json"]["amount"] == 10_000_000
+    assert "callback_url" in kwargs["json"]
 
 
-def test_checkout_requires_auth():
-    client = APIClient()
-    assert client.post("/api/billing/checkout/").status_code == 401
+# ----- 2. request requires auth ---------------------------------------------
 
 
-# ----- Webhook: happy paths --------------------------------------------------
+def test_request_requires_auth():
+    assert APIClient().post("/api/billing/zarinpal/request/").status_code == 401
 
 
-def _post_event(client, event):
-    """POST a (already-validated) event to the webhook endpoint."""
-    with mock.patch("billing.views.stripe.Webhook.construct_event", return_value=event):
-        return client.post(
-            "/api/billing/webhook/",
-            data=json.dumps(event),
-            content_type="application/json",
-            HTTP_STRIPE_SIGNATURE="t=1,v1=fakesig",
-        )
+# ----- 3. gateway refusal -> 502, no Payment row ----------------------------
 
 
-def test_webhook_upgrades_on_checkout_completed(make_user):
+def test_request_gateway_refusal_returns_502(make_user):
     user = make_user(tier=User.Tier.FREE)
-    client = APIClient()
+    # code != 100 and no authority -> request_payment raises ZarinpalError.
+    bad = _fake_resp({"data": {"code": 12}})
+    with mock.patch("billing.zarinpal.requests.post", return_value=bad):
+        resp = _client(user).post("/api/billing/zarinpal/request/")
+    assert resp.status_code == 502
+    assert not Payment.objects.filter(user=user).exists()
 
-    event = {
-        "id": "evt_completed_1",
-        "type": "checkout.session.completed",
-        "data": {"object": {"client_reference_id": str(user.id)}},
-    }
-    assert _post_event(client, event).status_code == 200
+
+# ----- 4. callback Status=OK + verify 100 -> PRO + expiry + verified ---------
+
+
+def test_callback_ok_verify_100_activates_pro(make_user):
+    user = make_user(tier=User.Tier.FREE)
+    _seed_pending(user)
+    client = APIClient()  # callback is unauthenticated (browser redirect)
+
+    with mock.patch("billing.zarinpal.requests.post", return_value=VERIFY_100):
+        resp = client.get("/api/billing/zarinpal/callback/?Authority=A000001&Status=OK")
+
+    assert resp.status_code == 302
+    assert "status=success" in resp["Location"]
+    assert "ref_id=123456789" in resp["Location"]
 
     user.refresh_from_db()
     assert user.tier == User.Tier.PRO
+    assert user.pro_expires_at is not None
+    assert user.pro_expires_at > timezone.now()
+    payment = Payment.objects.get(authority="A000001")
+    assert payment.status == Payment.Status.VERIFIED
+    assert payment.ref_id == "123456789"
+    assert payment.verified_at is not None
 
 
-def test_webhook_upgrades_on_invoice_paid_and_sets_customer(make_user):
+# ----- 5. verify 101 (already verified) is idempotent -----------------------
+
+
+def test_callback_verify_101_idempotent_no_double_activation(make_user):
     user = make_user(tier=User.Tier.FREE)
+    _seed_pending(user)
     client = APIClient()
 
-    event = {
-        "id": "evt_invoice_1",
-        "type": "invoice.paid",
-        "data": {"object": {"customer": "cus_abc"}},
-    }
-    # Resolve by customer id only after we stamp it on the user (second delivery).
-    _post_event(client, event)  # first time: no match (no customer on user yet) -> still 200
-
-    # Pretend the checkout already linked the customer to the user.
-    user.customer_id = "cus_abc"
-    user.save(update_fields=["customer_id"])
-
-    event2 = {**event, "id": "evt_invoice_2"}
-    assert _post_event(client, event2).status_code == 200
+    with mock.patch("billing.zarinpal.requests.post", return_value=VERIFY_101):
+        first = client.get("/api/billing/zarinpal/callback/?Authority=A000001&Status=OK")
     user.refresh_from_db()
     assert user.tier == User.Tier.PRO
+    first_expiry = user.pro_expires_at
+
+    # Replay the callback (page refresh / Zarinpal double-redirect). The Payment
+    # is now VERIFIED, so activate_pro must no-op and the expiry must NOT shift.
+    with mock.patch("billing.zarinpal.requests.post", return_value=VERIFY_101):
+        second = client.get("/api/billing/zarinpal/callback/?Authority=A000001&Status=OK")
+    assert first.status_code == second.status_code == 302
+    user.refresh_from_db()
+    assert user.pro_expires_at == first_expiry
 
 
-def test_webhook_downgrades_on_subscription_deleted(make_user):
-    user = make_user(tier=User.Tier.PRO, email="pro@test.test")
-    user.customer_id = "cus_xyz"
-    user.save(update_fields=["customer_id"])
+# ----- 6. Status=NOK (user cancelled) -> redirect cancel, no tier flip ------
+
+
+def test_callback_status_nok_redirects_cancel(make_user):
+    user = make_user(tier=User.Tier.FREE)
+    _seed_pending(user)
     client = APIClient()
 
-    event = {
-        "id": "evt_deleted_1",
-        "type": "customer.subscription.deleted",
-        "data": {"object": {"customer": "cus_xyz"}},
-    }
-    assert _post_event(client, event).status_code == 200
-
+    resp = client.get("/api/billing/zarinpal/callback/?Authority=A000001&Status=NOK")
+    assert resp.status_code == 302
+    assert "status=cancel" in resp["Location"]
     user.refresh_from_db()
     assert user.tier == User.Tier.FREE
+    # User backed out before paying — leave PENDING for reconciliation, not FAILED.
+    assert Payment.objects.get(authority="A000001").status == Payment.Status.PENDING
 
 
-# ----- Webhook: idempotency + error paths -----------------------------------
+# ----- 7. verify failure (code != 100/101) -> FAILED + cancel ---------------
 
 
-def test_webhook_is_idempotent_on_replay(make_user):
+def test_callback_verify_failure_marks_failed(make_user):
     user = make_user(tier=User.Tier.FREE)
+    _seed_pending(user)
     client = APIClient()
-    event = {
-        "id": "evt_replay",
-        "type": "checkout.session.completed",
-        "data": {"object": {"client_reference_id": str(user.id)}},
-    }
 
-    first = _post_event(client, event)
-    second = _post_event(client, event)  # Stripe retry: same event id
-    assert first.status_code == second.status_code == 200
-
-    assert WebhookEvent.objects.filter(event_id="evt_replay").count() == 1
-    user.refresh_from_db()
-    assert user.tier == User.Tier.PRO
-
-
-def test_webhook_bad_signature_returns_400(make_user):
-    import stripe
-
-    client = APIClient()
-    with mock.patch(
-        "billing.views.stripe.Webhook.construct_event",
-        side_effect=stripe.error.SignatureVerificationError("bad sig", "t=1,v1=x"),
-    ):
-        resp = client.post(
-            "/api/billing/webhook/",
-            data=b"{}",
-            content_type="application/json",
-            HTTP_STRIPE_SIGNATURE="t=1,v1=x",
-        )
-    assert resp.status_code == 400
-    assert WebhookEvent.objects.count() == 0  # nothing recorded on a bad signature
-
-
-def test_webhook_unhandled_event_recorded_without_tier_change(make_user):
-    user = make_user(tier=User.Tier.FREE)
-    client = APIClient()
-    event = {
-        "id": "evt_refund",
-        "type": "charge.refunded",
-        "data": {"object": {"customer": "cus_who"}},
-    }
-    assert _post_event(client, event).status_code == 200
-    # Recorded for auditability, but no tier flip and no user matched.
-    assert WebhookEvent.objects.filter(event_id="evt_refund", type="charge.refunded").exists()
+    with mock.patch("billing.zarinpal.requests.post", return_value=VERIFY_FAILED):
+        resp = client.get("/api/billing/zarinpal/callback/?Authority=A000001&Status=OK")
+    assert resp.status_code == 302
+    assert "status=cancel" in resp["Location"]
     user.refresh_from_db()
     assert user.tier == User.Tier.FREE
+    # User went through the flow but the money did not land -> FAILED.
+    assert Payment.objects.get(authority="A000001").status == Payment.Status.FAILED
+
+
+# ----- 8. unknown authority -> error redirect (no crash, no state change) ----
+
+
+def test_callback_unknown_authority_redirects_error(make_user):
+    user = make_user(tier=User.Tier.FREE)
+    client = APIClient()
+    resp = client.get("/api/billing/zarinpal/callback/?Authority=BOGUS&Status=OK")
+    assert resp.status_code == 302
+    assert "status=error" in resp["Location"]
+    assert not Payment.objects.filter(user=user).exists()

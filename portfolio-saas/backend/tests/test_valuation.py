@@ -1,14 +1,15 @@
 """Valuation engine: holdings x latest prices -> portfolio value.
 
-Covers the two non-trivial pieces of portfolios.services: the real-estate house
+Covers the two non-trivial pieces of portfolio.services: the real-estate house
 formula and the live aggregation across accounts.
 """
 from decimal import Decimal
 
 import pytest
 
-from portfolios.models import Account, Holding
-from portfolios.services import _asset_value, _house_value, value_account, value_user
+from portfolio.models import Account, Holding
+from portfolio.services import asset_value, value_account, value_user
+from portfolio.services.valuation import _house_value
 
 pytestmark = pytest.mark.django_db
 
@@ -25,13 +26,13 @@ def test_house_formula_zero_price_is_negative_deduction():
 def test_asset_value_uses_house_formula_for_real_estate(asset_catalog):
     house = asset_catalog["house_asset"]
     holding = Holding(asset=house, quantity=Decimal("50"))
-    assert _asset_value(holding, Decimal("0")) == _house_value(Decimal("50"))
+    assert asset_value(holding, Decimal("0")) == _house_value(Decimal("50"))
 
 
 def test_asset_value_multiplies_quantity_for_normal_asset(asset_catalog):
     emami = asset_catalog["emami_coin"]
     holding = Holding(asset=emami, quantity=Decimal("2"))
-    assert _asset_value(holding, Decimal("480000000")) == Decimal("960000000")
+    assert asset_value(holding, Decimal("480000000")) == Decimal("960000000")
 
 
 def test_value_account_multiplies_quantity_by_price(asset_catalog, write_prices, make_user):

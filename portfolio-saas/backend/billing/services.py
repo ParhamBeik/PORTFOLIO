@@ -1,60 +1,34 @@
-"""Map Stripe webhook events to tier changes via the shared set_user_tier service.
+"""Activate Pro on a verified Zarinpal payment.
 
-No Stripe SDK import here: the function takes a plain event dict, so it is trivial
-to unit-test and a local gateway (Zarinpal/NextPay) can reuse this exact mapping
-by passing its own event shape through `apply_subscription_event`.
+The Zarinpal `verify` call (code 100 paid / 101 already-verified) is the only
+trigger that flips a user to PRO — there is no recurring billing event to
+listen for. `Payment.authority` is unique and `activate_pro` no-ops on an
+already-verified row, so a callback replay or a page refresh cannot double-fire
+or extend the expiry twice.
 """
-from django.contrib.auth import get_user_model
+from datetime import timedelta
 
+from django.utils import timezone
+
+from accounts.models import User
 from accounts.services import set_user_tier
 
-User = get_user_model()
-
-PRO_EVENTS = {
-    "checkout.session.completed",
-    "invoice.paid",
-    "invoice.payment_succeeded",
-}
-DOWNGRADE_EVENTS = {"customer.subscription.deleted"}
+# Annual prepay (Zarinpal has no native recurring billing; this is the Iranian
+# SaaS norm). Expiry is stamped from the verify moment, not from any prior expiry.
+PRO_DURATION = timedelta(days=365)
 
 
-def _user_from_event(event_obj):
-    """Resolve the user for a webhook object.
+def activate_pro(payment) -> bool:
+    """Flip a Payment's user to PRO for one year. Idempotent.
 
-    By Stripe customer id first (set on the user after the first checkout); if
-    the user does not carry it yet (first-ever checkout), fall back to the
-    client_reference_id we passed when creating the Checkout Session.
+    Returns True if this call activated, False if the payment was already
+    verified (replay/refresh). Safe to call on an already-verified payment.
     """
-    customer_id = event_obj.get("customer")
-    if customer_id:
-        user = User.objects.filter(customer_id=customer_id).first()
-        if user:
-            return user, customer_id
-    ref = event_obj.get("client_reference_id")
-    if ref:
-        user = User.objects.filter(id=ref).first()
-        if user:
-            return user, customer_id or ""
-    return None, customer_id or ""
-
-
-def apply_subscription_event(event) -> bool:
-    """Apply the tier change implied by a Stripe event. Returns whether a user matched."""
-    event_type = event.get("type", "")
-    obj = event.get("data", {}).get("object", {})
-
-    if event_type in PRO_EVENTS:
-        user, customer_id = _user_from_event(obj)
-        if user is None:
-            return False
-        set_user_tier(user, User.Tier.PRO, customer_id=customer_id)
-        return True
-
-    if event_type in DOWNGRADE_EVENTS:
-        user, _ = _user_from_event(obj)
-        if user is None:
-            return False
-        set_user_tier(user, User.Tier.FREE)
-        return True
-
-    return False
+    if payment.status == payment.Status.VERIFIED:
+        return False
+    expires_at = timezone.now() + PRO_DURATION
+    set_user_tier(payment.user, User.Tier.PRO, expires_at=expires_at)
+    payment.status = payment.Status.VERIFIED
+    payment.verified_at = timezone.now()
+    payment.save(update_fields=["status", "verified_at"])
+    return True

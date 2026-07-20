@@ -1,14 +1,17 @@
 """User model with a subscription tier.
 
-`tier` is the single source of truth for free-vs-paid gating. A real billing
-provider (Stripe) flips this field via webhook; `set_tier` is the only other path.
+`tier` is the single source of truth for free-vs-paid gating, qualified by
+`pro_expires_at` (annual-prepay model: a verified payment stamps a 365-day
+expiry). `is_pro()` is the live gate every permission/endpoint checks — it
+returns False once the paid period lapses, without a separate downgrade job.
 
-Login is by email (no username field), so the model ships an email-based manager.
-The default UserManager still requires a username positional arg and would crash
-`create_user(email=..., password=...)` — including the register endpoint.
+Login is by email (no username field), so the model ships an email-based
+manager; the default UserManager requires a username positional arg and would
+crash `create_user(email=..., password=...)`.
 """
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
+from django.utils import timezone
 
 
 class UserManager(BaseUserManager):
@@ -51,8 +54,10 @@ class User(AbstractUser):
     tier = models.CharField(
         max_length=8, choices=Tier.choices, default=Tier.FREE, db_index=True
     )
-    # Stripe customer id once billing is wired in.
+    # Gateway customer reference (kept for audit; Zarinpal keys on Payment.authority).
     customer_id = models.CharField(max_length=64, blank=True, default="")
+    # Annual Pro expiry. None means "PRO with no expiry" (manual/grant tier).
+    pro_expires_at = models.DateTimeField(null=True, blank=True)
 
     objects = UserManager()
 
@@ -60,4 +65,9 @@ class User(AbstractUser):
     REQUIRED_FIELDS = []
 
     def is_pro(self) -> bool:
-        return self.tier == self.Tier.PRO
+        """A PRO tier whose paid period has not lapsed. None expiry never lapses."""
+        if self.tier != self.Tier.PRO:
+            return False
+        if self.pro_expires_at is None:
+            return True
+        return timezone.now() < self.pro_expires_at

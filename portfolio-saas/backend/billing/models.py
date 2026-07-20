@@ -1,21 +1,42 @@
+from django.conf import settings
 from django.db import models
 
 
-class WebhookEvent(models.Model):
-    """Idempotency guard for Stripe webhook delivery.
+class Payment(models.Model):
+    """One Zarinpal payment attempt for a Pro upgrade.
 
-    Stripe retries an event until it gets a 2xx, so without this the same tier
-    flip would be applied repeatedly. The unique `event_id` makes the second
-    delivery a no-op: the insert fails inside the same transaction that applies
-    the change, so the whole thing rolls back and we just acknowledge.
+    The flow: `ZarinpalRequestView` creates a PENDING row (authority issued by
+    Zarinpal), the user pays on Zarinpal's hosted page, Zarinpal redirects them
+    to our callback with `Authority` + `Status`, we verify server-side and flip
+    the row to VERIFIED (activating Pro in the same step via `activate_pro`).
+
+    Idempotency rests on two things: `authority` is unique, and activation only
+    fires when status != VERIFIED. A callback replay or a page refresh finds an
+    already-verified row and no-ops.
     """
 
-    event_id = models.CharField(max_length=120, unique=True)
-    type = models.CharField(max_length=120)
-    received_at = models.DateTimeField(auto_now_add=True)
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        VERIFIED = "verified", "Verified"
+        FAILED = "failed", "Failed"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="payments",
+    )
+    # Zarinpal's per-payment token; unique so a duplicate callback can't fork state.
+    authority = models.CharField(max_length=64, unique=True)
+    amount_rial = models.PositiveBigIntegerField()
+    status = models.CharField(
+        max_length=8, choices=Status.choices, default=Status.PENDING, db_index=True
+    )
+    ref_id = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        ordering = ["-received_at"]
+        ordering = ["-created_at"]
 
     def __str__(self) -> str:
-        return f"{self.type} ({self.event_id})"
+        return f"Payment {self.authority} ({self.status})"

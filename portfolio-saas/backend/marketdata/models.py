@@ -1,0 +1,230 @@
+"""Market-data warehouse: global TSE/gold/currency history, keyed by symbol.
+
+This app is a separate bounded context from `portfolio`:
+- No foreign keys to user-land (User, Asset, Account). Rows key on TSE symbol
+  strings and source-native Jalali date strings ("1403-10-19").
+- Written in daily batches by the backfill/sync tasks, read in range scans by
+  the analytics layer and the /api/market/* endpoints.
+- Dependency direction: `portfolio` may import from `marketdata` (analytics
+  reading history); `marketdata` never imports from `portfolio`.
+
+Idempotency: every append-only table carries a natural-key UniqueConstraint so
+re-running a backfill is free (`bulk_create(ignore_conflicts=True)`).
+"""
+from django.db import models
+
+class StockSymbolMetadata(models.Model):
+    """Detailed metadata and fundamental metrics for a TSE stock symbol."""
+
+    ins_code = models.BigIntegerField(db_index=True, unique=True)
+    l18 = models.CharField(max_length=64, db_index=True)
+    l30 = models.CharField(max_length=120)
+    l30_en = models.CharField(max_length=120, blank=True, default="")
+    isin = models.CharField(max_length=32, blank=True, default="")
+    code_12 = models.CharField(max_length=32, blank=True, default="")
+    code_5 = models.CharField(max_length=16, blank=True, default="")
+    code_4 = models.CharField(max_length=16, blank=True, default="")
+    market = models.CharField(max_length=64, blank=True, default="")
+    market_board = models.CharField(max_length=120, blank=True, default="")
+    sector = models.CharField(max_length=120, blank=True, default="")
+    sector_sub = models.CharField(max_length=120, blank=True, default="")
+    shares_count = models.BigIntegerField(default=0)
+    base_volume = models.BigIntegerField(default=0)
+    market_cap = models.BigIntegerField(default=0)
+    eps = models.DecimalField(max_digits=18, decimal_places=4, null=True, blank=True)
+    pe = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    g_pe = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    ps = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    free_float = models.DecimalField(max_digits=8, decimal_places=4, null=True, blank=True)
+    state = models.CharField(max_length=32, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["l18"]
+
+    def __str__(self) -> str:
+        return f"{self.l18} ({self.ins_code})"
+
+
+class DailyStockHistory(models.Model):
+    """Daily price history & Real/Legal (حقیقی/حقوقی) trade participant breakdown."""
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    date = models.CharField(max_length=10, db_index=True)  # Jalali format YYYY-MM-DD
+    time = models.CharField(max_length=8, blank=True, default="")
+    tno = models.IntegerField(default=0)
+    tvol = models.BigIntegerField(default=0)
+    tval = models.BigIntegerField(default=0)
+    pmin = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    pmax = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    py = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    pf = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    pl = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    plc = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    plp = models.FloatField(default=0.0)
+    pc = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    pcc = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    pcp = models.FloatField(default=0.0)
+    is_adjusted = models.BooleanField(default=False)
+
+    # Real / Legal participant distribution (حقیقی / حقوقی)
+    buy_count_i = models.IntegerField(null=True, blank=True)
+    buy_count_n = models.IntegerField(null=True, blank=True)
+    sell_count_i = models.IntegerField(null=True, blank=True)
+    sell_count_n = models.IntegerField(null=True, blank=True)
+    buy_i_volume = models.BigIntegerField(null=True, blank=True)
+    buy_n_volume = models.BigIntegerField(null=True, blank=True)
+    sell_i_volume = models.BigIntegerField(null=True, blank=True)
+    sell_n_volume = models.BigIntegerField(null=True, blank=True)
+    buy_i_value = models.BigIntegerField(null=True, blank=True)
+    buy_n_value = models.BigIntegerField(null=True, blank=True)
+    sell_i_value = models.BigIntegerField(null=True, blank=True)
+    sell_n_value = models.BigIntegerField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-date"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "date", "is_adjusted"],
+                name="uniq_stock_history_symbol_date_adj",
+            )
+        ]
+
+
+class MarketCandle(models.Model):
+    """OHLCV candlestick time series data."""
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    timeframe = models.CharField(max_length=16, db_index=True)  # e.g., 1m, 5m, 15m, 30m, 60m, 1d_adj, 1d_unadj
+    date_time = models.CharField(max_length=32, db_index=True)
+    open_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    high_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    low_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    close_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    volume = models.BigIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-date_time"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "timeframe", "date_time"],
+                name="uniq_market_candle_symbol_tf_dt",
+            )
+        ]
+
+
+class StockTransactionTick(models.Model):
+    """Intraday trade transaction tick records."""
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    date = models.CharField(max_length=10, db_index=True)
+    time = models.CharField(max_length=8)
+    row = models.IntegerField(default=0)
+    price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    volume = models.BigIntegerField(default=0)
+    canceled = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["date", "row"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "date", "row"],
+                name="uniq_stock_tick_symbol_date_row",
+            )
+        ]
+
+
+class ShareholderRecord(models.Model):
+    """Institutional shareholder ownership records and changes."""
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    date = models.CharField(max_length=10, blank=True, default="", db_index=True)
+    shareholder_id = models.BigIntegerField()
+    name = models.CharField(max_length=255)
+    volume = models.BigIntegerField(default=0)
+    percent = models.FloatField(default=0.0)
+    change = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+
+    class Meta:
+        ordering = ["-percent"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "date", "shareholder_id"],
+                name="uniq_shareholder_symbol_date_id",
+            )
+        ]
+
+
+class CodalAnnouncement(models.Model):
+    """Codal financial disclosures and corporate notices."""
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    company_name = models.CharField(max_length=255, blank=True, default="")
+    title = models.TextField()
+    code = models.CharField(max_length=64, blank=True, default="")
+    date_title = models.CharField(max_length=20, blank=True, default="")
+    date_send = models.CharField(max_length=10, blank=True, default="")
+    time_send = models.CharField(max_length=8, blank=True, default="")
+    date_publish = models.CharField(max_length=10, blank=True, default="")
+    time_publish = models.CharField(max_length=8, blank=True, default="")
+    link = models.URLField(max_length=1024, blank=True, default="")
+    link_pdf = models.URLField(max_length=1024, blank=True, default="")
+    link_excel = models.URLField(max_length=1024, blank=True, default="")
+    link_attachment = models.URLField(max_length=1024, blank=True, default="")
+
+    class Meta:
+        ordering = ["-date_publish", "-time_publish"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "code", "date_publish", "time_publish"],
+                name="uniq_codal_symbol_code_publish",
+            )
+        ]
+
+
+class GoldCurrencyHistory(models.Model):
+    """Gold, Fiat Currency, and Crypto daily and 24h price history."""
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    name = models.CharField(max_length=120, blank=True, default="")
+    unit = models.CharField(max_length=32, blank=True, default="")
+    date = models.CharField(max_length=10, db_index=True)
+    open_price = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
+    high_price = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
+    low_price = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
+    close_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+
+    class Meta:
+        ordering = ["-date"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "date"],
+                name="uniq_gold_currency_history_symbol_date",
+            )
+        ]
+
+
+class MarketIndexData(models.Model):
+    """Tehran Stock Exchange overall and equal-weight market index records."""
+
+    date = models.CharField(max_length=10, db_index=True)
+    time = models.CharField(max_length=8, blank=True, default="")
+    state = models.CharField(max_length=32, blank=True, default="")
+    index_overall = models.FloatField(default=0.0)
+    index_overall_change = models.FloatField(default=0.0)
+    index_equal_weight = models.FloatField(default=0.0)
+    index_equal_weight_change = models.FloatField(default=0.0)
+    market_value = models.BigIntegerField(default=0)
+    trade_number = models.IntegerField(default=0)
+    trade_value = models.BigIntegerField(default=0)
+    trade_volume = models.BigIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-date", "-time"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["date", "time"],
+                name="uniq_market_index_date_time",
+            )
+        ]
+

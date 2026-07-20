@@ -1,8 +1,8 @@
 from django.urls import path
 
-from .views import CheckoutView, webhook
+from .views import ZarinpalRequestView, zarinpal_callback
 
 urlpatterns = [
-    path("checkout/", CheckoutView.as_view(), name="billing-checkout"),
-    path("webhook/", webhook, name="billing-webhook"),
+    path("zarinpal/request/", ZarinpalRequestView.as_view(), name="billing-zarinpal-request"),
+    path("zarinpal/callback/", zarinpal_callback, name="billing-zarinpal-callback"),
 ]
