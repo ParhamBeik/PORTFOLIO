@@ -1,59 +1,25 @@
-# Dead-man's switch for the price feed (H8).
+# Dead-man's switch for the price feed — external probe.
 #
-# Celery beat is now the primary fetcher (every 2 min). This job is the backup:
-# it re-runs the fetch hourly AND asserts the feed is not stale. If the freshest
-# Price row is older than 15 min, the job fails (a red X in Actions = the alert)
-# — that means beat AND this fetch both missed, i.e. the feed is genuinely down.
-name: Fetch prices (dead-man)
+# The primary staleness alarm runs ON the VPS (cron hitting
+# /api/health/prices/ and restarting Celery on 503 — see DEPLOY.md §4).
+# This job is the outside view: it catches the whole VPS being down or
+# unreachable. The endpoint returns 503 when the freshest Price row is
+# older than 15 minutes, so a red X here = feed stale or site dark.
+#
+# Configure the repo variable DOMAIN (Settings → Variables), e.g. app.example.com.
+# No secrets, no DB access — GitHub runners can't reach an Iran-hosted
+# Postgres, and the probe doesn't need to.
+name: Price feed probe (dead-man)
 
 on:
   schedule:
-    - cron: "13 * * * *" # hourly backup (beat is the primary real-time loop)
+    - cron: "13 * * * *" # hourly, off the :00 rush
   workflow_dispatch: {} # manual run from the Actions tab
 
 jobs:
-  fetch:
+  probe:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run price fetcher (backup)
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DJANGO_SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
-          BRS_API_KEY: ${{ secrets.BRS_API_KEY }}
-          TSETMC_API_KEY: ${{ secrets.TSETMC_API_KEY }}
-        run: python manage.py fetch_prices
-
-      - name: Dead-man staleness check
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DJANGO_SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
+      - name: Probe /api/health/prices/
         run: |
-          python - <<'PY'
-          import os, sys
-          from datetime import timedelta
-          os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
-          import django
-          django.setup()
-          from django.utils import timezone
-          from portfolios.models import Price
-
-          latest = Price.objects.order_by("-fetched_at").first()
-          threshold = timedelta(minutes=15)
-          age = None if latest is None else timezone.now() - latest.fetched_at
-          if latest is None or age > threshold:
-              print(f"::error::Price feed is stale (age={age}). Celery beat and this fetch both failed?")
-              sys.exit(1)
-          print(f"OK: freshest price age={age}")
-          PY
+          curl -fsS -m 30 "https://${{ vars.DOMAIN }}/api/health/prices/"

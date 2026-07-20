@@ -1,16 +1,24 @@
-"""Liveness + readiness probes for the prod healthchecks and the load balancer.
+"""Liveness + readiness + feed-staleness probes.
 
 `/api/health/` (liveness) answers 200 as long as the process is up. The compose
-healthcheck and the CDN hit this. `/api/health/ready/` (readiness) adds a DB
-SELECT 1 and a cache roundtrip so a load balancer can stop routing traffic when
-the app is up but can't actually serve (DB down, cache gone).
+healthcheck hits this. `/api/health/ready/` (readiness) adds a DB SELECT 1 and a
+cache roundtrip so a load balancer can stop routing traffic when the app is up
+but can't actually serve (DB down, cache gone). `/api/health/prices/` is the
+dead-man's switch: 503 when the freshest Price row is older than the threshold,
+meaning Celery beat has stopped feeding the system. The on-VPS cron and the
+GitHub Actions probe both watch this endpoint.
 
-Both are public (permission_classes = []): healthchecks carry no auth token.
+All are public (permission_classes = []): healthchecks carry no auth token.
 """
+from datetime import timedelta
+
 from django.core.cache import cache
 from django.db import connection
+from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+PRICE_STALE_AFTER = timedelta(minutes=15)
 
 
 class HealthView(APIView):
@@ -45,4 +53,31 @@ class ReadyView(APIView):
         return Response(
             {"status": "ready" if ready else "degraded", "checks": checks},
             status=200 if ready else 503,
+        )
+
+
+class PriceFeedView(APIView):
+    """Dead-man's switch: 503 when the price feed has gone stale.
+
+    Lazy model import: config must not import app modules at load time
+    (apps aren't ready when settings import this module's siblings).
+    """
+
+    permission_classes = []
+
+    def get(self, request):
+        from portfolio.models import Price
+
+        latest = Price.objects.order_by("-fetched_at").values_list(
+            "fetched_at", flat=True
+        ).first()
+        age = None if latest is None else timezone.now() - latest
+        stale = age is None or age > PRICE_STALE_AFTER
+        return Response(
+            {
+                "status": "stale" if stale else "fresh",
+                "latest_price_age_seconds": None if age is None else int(age.total_seconds()),
+                "threshold_seconds": int(PRICE_STALE_AFTER.total_seconds()),
+            },
+            status=503 if stale else 200,
         )

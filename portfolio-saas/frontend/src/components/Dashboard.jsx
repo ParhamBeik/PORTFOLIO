@@ -13,6 +13,7 @@ import {
 } from "../api.js";
 import { subscribePrices } from "../sse.js";
 import { fmtNum, fmtToman } from "../format.js";
+import NetWorthChart from "./NetWorthChart.jsx";
 
 const RECONCILE_MS = 60000; // full refresh to pick up holding edits / recompute totals
 
@@ -116,6 +117,11 @@ export default function Dashboard() {
       </section>
 
       <section className="card">
+        <h2>Net worth · last 30 days</h2>
+        <NetWorthChart days={30} />
+      </section>
+
+      <section className="card">
         <h2>Accounts</h2>
         {accounts.length === 0 && <p className="muted">No accounts yet. Create one below.</p>}
         {accounts.map((acct) => {
@@ -160,7 +166,13 @@ export default function Dashboard() {
                     const editing = editHold && editHold.id === h.id;
                     return (
                       <tr key={h.id}>
-                        <td>{h.asset_name}</td>
+                        <td>
+                          {h.asset_name_fa ? (
+                            <span title={h.asset_name}>{h.asset_name_fa}</span>
+                          ) : (
+                            h.asset_name
+                          )}
+                        </td>
                         <td>{h.asset_class}</td>
                         <td>
                           {editing ? (

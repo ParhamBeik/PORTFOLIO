@@ -96,6 +96,38 @@ export const priceHistory = (assetKey, limit = 100) =>
   api(`/api/prices/history/?asset=${encodeURIComponent(assetKey)}&limit=${limit}`);
 export const insights = () => api("/api/insights/");
 
-// Billing — Stripe Checkout. Returns { url }; the browser redirects there.
-export const createCheckout = () =>
-  api("/api/billing/checkout/", { method: "POST" });
+// FREE: net-worth history for the trend chart (account=None snapshot series).
+export const snapshots = (days = 30) => api(`/api/snapshots/?days=${days}`);
+
+// Pro analytics & optimization. All gated by IsPro on the backend.
+export const analytics = () => api("/api/analytics/");
+export const optimize = (scenario, constraints = null) =>
+  api("/api/optimization/", {
+    method: "POST",
+    body: constraints ? { scenario, constraints } : { scenario },
+  });
+export const frontier = () => api("/api/optimization/frontier/");
+export const assetReturns = (days = 180) => api(`/api/assets/returns/?days=${days}`);
+
+// Billing — Zarinpal. Returns { redirect_url }; the browser redirects there.
+// After paying, Zarinpal calls our callback, which verifies and bounces the
+// browser back to /billing?status=success&ref_id=.. (or cancel/error).
+export const createZarinpalPayment = () =>
+  api("/api/billing/zarinpal/request/", { method: "POST" });
+
+// Market data (TSE). Symbols/candles/history/index are FREE;
+// announcements & shareholders are Pro (403 for free users).
+export const marketSymbols = () => api("/api/market/symbols/");
+export const marketCandles = (symbol, timeframe = "1d_adj", limit = 200) =>
+  api(
+    `/api/market/candles/?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=${limit}`
+  );
+export const marketHistory = (symbol, { adjusted = 0, limit = 365 } = {}) =>
+  api(
+    `/api/market/history/?symbol=${encodeURIComponent(symbol)}&adjusted=${adjusted}&limit=${limit}`
+  );
+export const marketIndex = (limit = 365) => api(`/api/market/index/?limit=${limit}`);
+export const marketAnnouncements = (symbol, limit = 20) =>
+  api(`/api/market/announcements/?symbol=${encodeURIComponent(symbol)}&limit=${limit}`);
+export const marketShareholders = (symbol) =>
+  api(`/api/market/shareholders/?symbol=${encodeURIComponent(symbol)}`);

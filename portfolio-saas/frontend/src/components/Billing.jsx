@@ -1,41 +1,36 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
-import { createCheckout, me } from "../api.js";
+import { me } from "../api.js";
+import { useUpgrade } from "../hooks/useUpgrade.js";
 
-// Hosts the Stripe redirect: success/cancel URLs land here as ?status=. We refresh
-// the user on arrival so the PRO flip from the webhook shows up immediately.
+// Hosts the Zarinpal callback redirect: it lands here as ?status=success
+// (optionally &ref_id=) / cancel / error. We refresh the user on arrival so the
+// PRO flip from the verify step shows up immediately.
 export default function Billing({ user, setUser }) {
   const [params] = useSearchParams();
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
+  const { upgrade, busy, error: err } = useUpgrade();
   const status = params.get("status");
+  const refId = params.get("ref_id");
 
   useEffect(() => {
-    if (status) me().then(setUser).catch(() => {});
+    if (status === "success") me().then(setUser).catch(() => {});
   }, [status, setUser]);
-
-  async function upgrade() {
-    if (busy) return;
-    setBusy(true);
-    setErr("");
-    try {
-      const { url } = await createCheckout();
-      window.location.href = url;
-    } catch (e) {
-      setErr(e.message || "Could not start checkout.");
-      setBusy(false);
-    }
-  }
 
   return (
     <div className="dashboard">
       <section className="card">
         <h2>Billing</h2>
         {status === "success" && (
-          <div className="ok">Thanks! Your Pro subscription is being confirmed.</div>
+          <div className="ok">
+            Thanks — your Pro subscription is active!
+            {refId && <span className="muted small"> (ref {refId})</span>}
+          </div>
         )}
         {status === "cancel" && (
-          <div className="muted">Checkout was cancelled — you can upgrade anytime.</div>
+          <div className="muted">Payment was cancelled — you can upgrade anytime.</div>
+        )}
+        {status === "error" && (
+          <div className="error">We could not verify the payment. If you were charged, contact support.</div>
         )}
 
         <h3>Current plan</h3>
@@ -43,13 +38,13 @@ export default function Billing({ user, setUser }) {
 
         {user.is_pro ? (
           <p className="muted">
-            You're on Pro. Manage or cancel your subscription in the Stripe customer portal.
+            You're on Pro (annual). It renews here each year — no auto-rebilling in between.
           </p>
         ) : (
           <>
             <p>
-              Pro unlocks allocation breakdowns, concentration-risk alerts, gold target
-              bands, and your net-worth trend.
+              Pro unlocks risk analytics (Sharpe, drawdown, VaR), portfolio optimization
+              (max Sharpe, risk parity, HRP), and your efficient frontier.
             </p>
             <button className="primary big" onClick={upgrade} disabled={busy}>
               {busy ? "Redirecting…" : "Upgrade to Pro"}

@@ -153,3 +153,45 @@ button.link.danger { color: var(--red); }
 /* Sparkline (dependency-free SVG) */
 .sparkline { width: 100%; max-width: 480px; height: 56px; color: var(--accent); display: block; margin-top: .5rem; }
 .sparkline.empty { color: var(--muted); font-size: .85rem; height: auto; }
+
+/* Recharts wrappers */
+.chart-wrap { width: 100%; }
+.recharts-default-tooltip { background: var(--panel-2) !important; border: 1px solid var(--border) !important; border-radius: 8px !important; }
+.recharts-cartesian-axis-tick text { fill: var(--muted); }
+
+/* Analytics metric cards */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: .75rem;
+}
+.metric {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: .7rem .85rem;
+}
+.metric-val { font-size: 1.25rem; font-weight: 700; color: var(--text); }
+.metric-label { font-size: .75rem; color: var(--muted); margin-top: .15rem; }
+
+/* Allocation donut + legend */
+.alloc-grid { display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: center; }
+.legend { display: flex; flex-direction: column; gap: .3rem; flex: 1; min-width: 180px; }
+.legend-row { display: flex; align-items: center; gap: .5rem; font-size: .85rem; }
+.legend-row .muted { margin-left: auto; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+
+/* Correlation heatmap */
+.heatmap { display: inline-flex; flex-direction: column; gap: 2px; overflow-x: auto; max-width: 100%; }
+.hm-row { display: flex; gap: 2px; align-items: center; }
+.hm-head { margin-bottom: .25rem; }
+.hm-col, .hm-row-label { font-size: .65rem; color: var(--muted); width: 34px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hm-row-label { width: 56px; text-align: right; padding-right: .35rem; }
+.hm-cell { width: 34px; height: 26px; display: grid; place-items: center; font-size: .65rem; color: #fff; border-radius: 3px; }
+
+/* Optimization scenario buttons */
+.scenario-row { display: flex; flex-wrap: wrap; gap: .5rem; }
+
+/* Table trade coloring */
+.pos { color: var(--green); font-weight: 600; }
+.neg { color: var(--red); font-weight: 600; }
