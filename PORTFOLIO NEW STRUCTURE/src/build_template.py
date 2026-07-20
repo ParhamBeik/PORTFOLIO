@@ -192,7 +192,7 @@ def sorted_snapshots(snapshots, reverse=True):
     return sorted(snapshots, key=sort_key, reverse=reverse)
 
 
-def _snapshot_class_values(snapshot):
+def _history_class_values(snapshot):
     """Group one snapshot into IRT/USD values by owner and asset class."""
     prices = snapshot.get("prices", {}) or {}
     usd_rate = prices.get("usdt_irt") or prices.get("usd_cash") or 0
@@ -259,7 +259,7 @@ def build_history_matrix(history_path):
             for cls in CLASS_ORDER
         }
         for entry in by_date[date_key]:
-            per = _snapshot_class_values(entry.get("snapshot", {}))
+            per = _history_class_values(entry.get("snapshot", {}))
             for cur in (IRT, USD):
                 for owner in owners:
                     for cls in CLASS_ORDER:
