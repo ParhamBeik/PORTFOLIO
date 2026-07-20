@@ -1,13 +1,15 @@
 """Build the v2 `.xlsx` dashboard workbook.
 
 This file is layout-heavy because it creates sheets, formulas, tables, and
-charts. Business rules should stay in `engine.py`, `analytics.py`, and
-`asset_classes.py`; this module should mostly decide how workbook data is shown.
+charts. Business rules stay in `engine.py`. Asset-class config and history
+analytics are colocated below because the workbook is their only consumer.
 """
 
 import datetime as _dt
+import json
 import os
 from collections import defaultdict
+from datetime import datetime
 from statistics import mean
 
 from openpyxl import Workbook
@@ -16,18 +18,294 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.utils import get_column_letter
 
-from analytics import load_history, matrix_to_rows, sorted_snapshots
-from asset_classes import (
-    CLASS_ORDER,
-    IRT,
-    USD,
-    LIVE_DATA_ORDER,
-    PRICE_KEY_LABELS,
-    PRICE_LABEL_KEYS,
-    USD_PRICE_KEYS,
-    classify,
-)
 from utils import log_step
+
+
+# ===== Asset classes =========================================================
+# Raw holding keys like `emami_coin` are grouped into readable classes. Kept
+# here so analytics and workbook code agree on the same categories.
+
+# This order is also the display order in charts and tables.
+GOLD = "Gold"
+CASH = "Cash"
+STOCK = "Stock"
+REAL_ESTATE = "Real Estate"
+CRYPTO = "Crypto"
+
+CLASS_ORDER = [GOLD, CASH, STOCK, REAL_ESTATE, CRYPTO]
+
+# Persian labels keep workbook sheets bilingual.
+CLASS_LABELS_FA = {
+    GOLD: "طلا",
+    CASH: "نقد / دلار",
+    STOCK: "سهام",
+    REAL_ESTATE: "ملک",
+    CRYPTO: "رمز ارز",
+}
+
+# Stable colors keep the same class recognizable across charts.
+CLASS_COLORS = {
+    GOLD: "E0A82E",         # gold
+    CASH: "4C9A2A",         # green
+    STOCK: "2E75B6",        # blue
+    REAL_ESTATE: "8B5E3C",  # brown
+    CRYPTO: "F2A900",       # bitcoin orange
+}
+
+# Keys come from `current_state.json` and `engine.build_snapshot`.
+ASSET_KEY_TO_CLASS = {
+    "emami_coin": GOLD,
+    "half_coin": GOLD,
+    "quarter_coin": GOLD,
+    "quarter_coin_pre86": GOLD,
+    "swiss_gold_bar_1g": GOLD,
+    "swiss_gold_bar_2_5g": GOLD,
+    "one_gram_coin": GOLD,
+    "gold_18k_gram": GOLD,
+    "usd_cash": CASH,
+    "tether": CASH,
+    "usdt_irt": CASH,
+    "kama_stock": STOCK,
+    "house_asset": REAL_ESTATE,
+    "bitcoin_usd": CRYPTO,
+    "bitcoin": CRYPTO,
+}
+
+# House value is tracked in totals but excluded from allocation percentage charts.
+CLASSES_EXCLUDED_FROM_ALLOCATION = {REAL_ESTATE}
+
+# Canonical mapping from internal price keys (engine output) to human labels.
+PRICE_KEY_LABELS = {
+    "bitcoin_usd": "Bitcoin",
+    "usdt_irt": "Tether",
+    "usd_cash": "US Dollar",
+    "emami_coin": "Emami Coin",
+    "half_coin": "Half Coin",
+    "quarter_coin": "Quarter Coin",
+    "quarter_coin_pre86": "Quarter Coin (Pre-86)",
+    "swiss_gold_bar_1g": "Swiss Gold Bar (1g)",
+    "swiss_gold_bar_2_5g": "Swiss Gold Bar (2.5g)",
+    "one_gram_coin": "1g Coin",
+    "gold_18k_gram": "Gold Gram (18K)",
+    "kama_stock": "KAMA Stock",
+    "euro_cash": "Euro",
+    "gold_ounce_usd": "Gold Ounce (Global)",
+}
+PRICE_LABEL_KEYS = {label: key for key, label in PRICE_KEY_LABELS.items()}
+
+# Stable row order so dashboard price tables stay familiar.
+LIVE_DATA_ORDER = [
+    "Bitcoin",
+    "Tether",
+    "US Dollar",
+    "Emami Coin",
+    "Half Coin",
+    "Quarter Coin",
+    "Quarter Coin (Pre-86)",
+    "Swiss Gold Bar (1g)",
+    "Swiss Gold Bar (2.5g)",
+    "1g Coin",
+    "Gold Gram (18K)",
+    "KAMA Stock",
+    "Euro",
+    "Gold Ounce (Global)",
+]
+
+# Prices quoted in USD rather than Tomans.
+USD_PRICE_KEYS = {"bitcoin_usd", "gold_ounce_usd"}
+
+IRT = "IRT"
+USD = "USD"
+CURRENCIES = [IRT, USD]
+
+CURRENCY_LABELS = {
+    IRT: "Tomans",
+    USD: "USDT",
+}
+
+
+def classify(asset_key):
+    """Return the class for a raw asset key, or None if unmapped."""
+    return ASSET_KEY_TO_CLASS.get(asset_key)
+
+
+def allocation_classes():
+    """Classes shown in the allocation-% charts (house excluded)."""
+    return [c for c in CLASS_ORDER if c not in CLASSES_EXCLUDED_FROM_ALLOCATION]
+
+
+def owners_from_state(current_state):
+    """Derive the ordered owner list from current_state.json."""
+    if not isinstance(current_state, dict):
+        return []
+    return [owner for owner, assets in current_state.items() if isinstance(assets, dict)]
+
+
+# ===== History analytics =====================================================
+# Reads `history_snapshots.jsonl` and turns raw snapshots into daily average
+# tables that the workbook charts consume.
+
+def load_history(history_path):
+    """Load all snapshots from the JSONL history file."""
+    snapshots = []
+    if not os.path.exists(history_path):
+        return snapshots
+    with open(history_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                snapshots.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return snapshots
+
+
+def group_snapshots_by_date(snapshots):
+    """Group snapshots by date (YYYY-MM-DD) from timestamp."""
+    by_date = defaultdict(list)
+    for entry in snapshots:
+        ts = entry.get("timestamp")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts)
+        except ValueError:
+            continue
+        date_key = dt.date().isoformat()
+        by_date[date_key].append(entry)
+    return by_date
+
+
+def sorted_snapshots(snapshots, reverse=True):
+    """Return snapshots sorted by timestamp, newest first by default."""
+    def sort_key(entry):
+        ts = entry.get("timestamp")
+        if not ts:
+            return datetime.min
+        try:
+            return datetime.fromisoformat(ts)
+        except ValueError:
+            return datetime.min
+
+    return sorted(snapshots, key=sort_key, reverse=reverse)
+
+
+def _snapshot_class_values(snapshot):
+    """Group one snapshot into IRT/USD values by owner and asset class."""
+    prices = snapshot.get("prices", {}) or {}
+    usd_rate = prices.get("usdt_irt") or prices.get("usd_cash") or 0
+
+    result = {IRT: defaultdict(lambda: defaultdict(float)),
+              USD: defaultdict(lambda: defaultdict(float))}
+
+    for owner, assets in snapshot.get("portfolios", {}).items():
+        if not isinstance(assets, dict):
+            continue
+        for asset_key, detail in assets.items():
+            if not isinstance(detail, dict):
+                continue
+            cls = classify(asset_key)
+            if cls is None:
+                continue
+            tomans = detail.get("total_value_tomans") or 0
+            result[IRT][owner][cls] += tomans
+            if usd_rate:
+                result[USD][owner][cls] += tomans / usd_rate
+
+    return result
+
+
+def build_history_matrix(history_path):
+    """Build the daily history matrix that feeds every v2 chart.
+
+    Returns (dates, owners, matrix) where:
+      * dates  -- sorted list of 'YYYY-MM-DD' strings (one per day)
+      * owners -- ordered owner list seen in history, plus the synthetic 'Total'
+      * matrix -- dict keyed (currency, owner, class) -> list aligned with dates,
+                  each entry the day's average value (0.0 when no data).
+                  'Total' owner is the sum across real owners for that class.
+    """
+    snapshots = load_history(history_path)
+    if not snapshots:
+        return [], [], {}
+
+    by_date = group_snapshots_by_date(snapshots)
+
+    # Keep owner columns stable even though the history file is newest-first.
+    owners = []
+    for entry in sorted_snapshots(snapshots, reverse=False):
+        for owner in entry.get("snapshot", {}).get("portfolios", {}):
+            if owner not in owners:
+                owners.append(owner)
+    owners_with_total = owners + ["Total"]
+
+    dates = sorted(by_date.keys())
+    # Each matrix cell stores one time-series list aligned with `dates`.
+    matrix = {
+        (cur, owner, cls): []
+        for cur in (IRT, USD)
+        for owner in owners_with_total
+        for cls in CLASS_ORDER
+    }
+
+    for date_key in dates:
+        # Average all runs from the same date into one daily value.
+        day_acc = {
+            (cur, owner, cls): []
+            for cur in (IRT, USD)
+            for owner in owners
+            for cls in CLASS_ORDER
+        }
+        for entry in by_date[date_key]:
+            per = _snapshot_class_values(entry.get("snapshot", {}))
+            for cur in (IRT, USD):
+                for owner in owners:
+                    for cls in CLASS_ORDER:
+                        day_acc[(cur, owner, cls)].append(
+                            per[cur].get(owner, {}).get(cls, 0.0)
+                        )
+
+        for cur in (IRT, USD):
+            for cls in CLASS_ORDER:
+                total_for_class = 0.0
+                for owner in owners:
+                    vals = day_acc[(cur, owner, cls)]
+                    avg = mean(vals) if vals else 0.0
+                    matrix[(cur, owner, cls)].append(avg)
+                    total_for_class += avg
+                matrix[(cur, "Total", cls)].append(total_for_class)
+
+    return dates, owners_with_total, matrix
+
+
+def matrix_to_rows(history_path):
+    """Flatten build_history_matrix into a header + rows table for Excel.
+
+    Example columns: Date, IRT_Mother_Gold, USD_Total_Cash.
+    """
+    dates, owners, matrix = build_history_matrix(history_path)
+    if not dates:
+        return [], []
+
+    columns = []  # ordered list of (currency, owner, class)
+    for cur in (IRT, USD):
+        for owner in owners:
+            for cls in CLASS_ORDER:
+                columns.append((cur, owner, cls))
+
+    header = ["Date"] + [f"{cur}_{owner}_{cls.replace(' ', '')}"
+                         for (cur, owner, cls) in columns]
+
+    rows = []
+    for i, date_key in enumerate(dates):
+        row = [date_key]
+        for col in columns:
+            row.append(round(matrix[col][i], 4))
+        rows.append(row)
+
+    return header, rows
 
 # --- Workbook paths ----------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -178,6 +456,7 @@ def _style_table(ws):
             cell.border = BORDER
             if cell.row == 1:
                 continue
+            cell.alignment = Alignment(horizontal="center")
             if isinstance(cell.value, (int, float)):
                 cell.number_format = '#,##0'
 
@@ -248,9 +527,10 @@ def _write_settings(ws):
     ]
     for row in settings:
         ws.append(row)
-    ws[4][1].number_format = "yyyy-mm-dd"
+    ws[4][1].number_format = "yyyy\\-mm\\-dd"
     ws[5][1].number_format = '#,##0'
-    _set_widths(ws, {"A": 24, "B": 24, "C": 62})
+    ws[6][1].number_format = "yyyy\\-mm\\-dd\\ h:mm:ss"
+    _set_widths(ws, {"A": 18, "B": 18, "C": 39})
     _style_table(ws)
 
 
@@ -277,13 +557,13 @@ def _write_history_data(ws, history_path):
     for cell in ws[1]:
         cell.alignment = Alignment(text_rotation=45, horizontal="center")
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
-        row[0].number_format = "yyyy-mm-dd"
+        row[0].number_format = "yyyy\\-mm\\-dd"
         for cell in row[1:]:
             cell.number_format = '#,##0'
     _style_table(ws)
-    _set_widths(ws, {"A": 14})
+    _set_widths(ws, {"A": 10})
     for column in range(2, ws.max_column + 1):
-        ws.column_dimensions[get_column_letter(column)].width = 16
+        ws.column_dimensions[get_column_letter(column)].width = 13
     _add_table(ws, "HistoryTable", f"A1:{get_column_letter(ws.max_column)}{ws.max_row}")
     ws.freeze_panes = "B2"
     return header, history_rows, price_header, price_rows
@@ -311,7 +591,7 @@ def _write_live_data(ws, snapshot, history_path):
         ws.append(["No prices", 0, "", "", timestamp])
 
     _style_table(ws)
-    _set_widths(ws, {"A": 28, "B": 18, "C": 12, "D": 24, "E": 24})
+    _set_widths(ws, {"A": 17, "B": 11, "C": 10, "D": 17, "E": 25})
     _add_table(ws, "LivePriceTable", f"A1:E{ws.max_row}")
 
 
@@ -349,7 +629,7 @@ def _write_allocation(ws, snapshot):
         row[3].number_format = '#,##0'
         row[4].number_format = '0.0%'
     _style_table(ws)
-    _set_widths(ws, {"A": 12, "B": 18, "C": 18, "D": 20, "E": 12})
+    _set_widths(ws, {"A": 13, "B": 11, "C": 14, "D": 13, "E": 11})
     _add_table(ws, "AllocationTable", f"A1:E{ws.max_row}")
 
     chart = PieChart()
@@ -389,13 +669,13 @@ def _write_trends(ws, header, history_rows):
         ws.append([_dt.date.today().isoformat()] + [0] * (len(trend_header) - 1))
 
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
-        row[0].number_format = "yyyy-mm-dd"
+        row[0].number_format = "yyyy\\-mm\\-dd"
         for cell in row[1:]:
             cell.number_format = '#,##0'
     _style_table(ws)
-    _set_widths(ws, {"A": 14})
+    _set_widths(ws, {"A": 10})
     for column in range(2, ws.max_column + 1):
-        ws.column_dimensions[get_column_letter(column)].width = 18
+        ws.column_dimensions[get_column_letter(column)].width = 13
     _add_table(ws, "TrendTable", f"A1:{get_column_letter(ws.max_column)}{ws.max_row}")
 
     total_chart = LineChart()
@@ -447,7 +727,7 @@ def _write_comparison(ws, snapshot, price_header, price_rows, history_row_count)
     ws["B5"] = f"={SH_DASH}!B4"
     for cell in ("A3", "A4", "A5"):
         ws[cell].font = DARK_FONT
-    ws["B3"].number_format = "yyyy-mm-dd"
+    ws["B3"].number_format = "yyyy\\-mm\\-dd"
     ws["B4"].number_format = '#,##0'
     ws["B5"].number_format = '#,##0'
 
@@ -522,8 +802,8 @@ def _write_dashboard(ws, header, history_rows, snapshot):
     cards = [
         ("A4", "Total Net Worth (IRT)", _snapshot_total(current_values, IRT, "Total")),
         ("D4", "Total Net Worth (USD)", _snapshot_total(current_values, USD, "Total")),
-        ("G4", "Latest Date", f"={SH_HISTDATA}!A{latest_row}"),
-        ("J4", "USD Rate", f'=IFERROR(XLOOKUP("Tether",Live_Data!A:A,Live_Data!B:B),XLOOKUP("US Dollar",Live_Data!A:A,Live_Data!B:B))'),
+        ("H4", "Latest Date", f"={SH_HISTDATA}!A{latest_row}"),
+        ("K4", "USD Rate", f"={SH_LIVE}!B4"),
     ]
     for cell_ref, title, formula in cards:
         col = ws[cell_ref].column
@@ -534,7 +814,7 @@ def _write_dashboard(ws, header, history_rows, snapshot):
         ws.cell(row + 1, col, formula)
         ws.cell(row + 1, col).font = Font(bold=True, size=13)
         ws.cell(row + 1, col).fill = CARD_FILL
-        ws.cell(row + 1, col).number_format = "yyyy-mm-dd" if title == "Latest Date" else '#,##0'
+        ws.cell(row + 1, col).number_format = "yyyy\\-mm\\-dd" if title == "Latest Date" else '#,##0'
 
     ws["A8"] = "Owner Split"
     ws["A8"].font = DARK_FONT
@@ -549,7 +829,7 @@ def _write_dashboard(ws, header, history_rows, snapshot):
         ws.cell(row, 1, owner)
         ws.cell(row, 2, _snapshot_total(current_values, IRT, owner))
         ws.cell(row, 3, _snapshot_total(current_values, USD, owner))
-        ws.cell(row, 4, f"=IFERROR(B{row}/B5,0)")
+        ws.cell(row, 4, f"=IFERROR(B{row}/A5,0)")
     owner_end = owner_start + max(1, len(real_owners))
 
     alloc_start = owner_end + 3
@@ -564,12 +844,12 @@ def _write_dashboard(ws, header, history_rows, snapshot):
         ws.cell(row, 1, cls)
         ws.cell(row, 2, current_values.get((IRT, "Total", cls), 0.0))
         ws.cell(row, 3, current_values.get((USD, "Total", cls), 0.0))
-        ws.cell(row, 4, f"=IFERROR(B{row}/B5,0)")
+        ws.cell(row, 4, f"=IFERROR(B{row}/A5,0)")
         ws.cell(row, 5, f"=IFERROR(C{row}/D5,0)")
     alloc_end = alloc_header_row + len(CLASS_ORDER)
 
     price_start = 8
-    price_col = 7
+    price_col = 8
     ws.cell(price_start, price_col, "Latest Prices")
     ws.cell(price_start, price_col).font = DARK_FONT
     for col, value in enumerate(["Asset", "Price", "Unit"], start=price_col):
@@ -589,6 +869,7 @@ def _write_dashboard(ws, header, history_rows, snapshot):
         for cell in row:
             if cell.value is not None:
                 cell.border = BORDER
+                cell.alignment = Alignment(horizontal="center")
     for row in range(owner_start + 1, owner_end + 1):
         ws.cell(row, 2).number_format = '#,##0'
         ws.cell(row, 3).number_format = '#,##0'
@@ -599,7 +880,7 @@ def _write_dashboard(ws, header, history_rows, snapshot):
         ws.cell(row, 4).number_format = '0.0%'
         ws.cell(row, 5).number_format = '0.0%'
 
-    _set_widths(ws, {"A": 22, "B": 20, "C": 18, "D": 14, "E": 14, "G": 28, "H": 18, "I": 12, "J": 18})
+    _set_widths(ws, {"A": 47, "B": 14, "C": 7, "D": 18, "E": 9, "F": 9, "G": 17, "I": 10, "J": 5, "K": 9, "L": 9})
 
     owner_chart = PieChart()
     owner_chart.title = "Owner Split - IRT"
