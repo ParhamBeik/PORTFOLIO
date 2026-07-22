@@ -165,14 +165,15 @@ TSETMC_SYMBOL_URL = os.getenv(
     "TSETMC_SYMBOL_URL", "https://BrsApi.ir/Api/Tsetmc/Symbol.php"
 )
 # Seconds to sleep between BrsApi calls inside one sync task (paid API courtesy).
-MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "1.0"))
+MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "0.25"))
 MARKETDATA_DAILY_REQUEST_LIMIT = int(os.getenv("MARKETDATA_DAILY_REQUEST_LIMIT", "9800"))
 MARKETDATA_WINDOW_LIMIT = int(os.getenv("MARKETDATA_WINDOW_LIMIT", "1000"))
 MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
 MARKETDATA_ARCHIVE_REQUEST_RESERVE = int(
     os.getenv("MARKETDATA_ARCHIVE_REQUEST_RESERVE", "8820")
 )
-MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "7"))
+MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "30"))
+
 MARKETDATA_QUOTA_TIMEZONE = os.getenv("MARKETDATA_QUOTA_TIMEZONE", "Asia/Tehran")
 # Extra TSE symbols to sync beyond assets with a tse_symbol (comma-separated).
 MARKETDATA_EXTRA_SYMBOLS = [

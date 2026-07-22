@@ -250,17 +250,37 @@ class SnapshotListView(APIView):
         since = timezone.now() - timedelta(days=days)
         account = _scope(request)
         snapshots = Snapshot.objects.filter(
-            user=request.user, timestamp__gte=since
+            user=request.user, timestamp__gte=since, total_value_tomans__gt=0
         )
         if account is not None:
             snapshots = snapshots.filter(account=account)
         else:
             snapshots = snapshots.filter(account=None)
-        rows = snapshots.order_by("timestamp").values("timestamp", "total_value_tomans")
-        series = [
-            {"timestamp": r["timestamp"].isoformat(), "total": str(r["total_value_tomans"])}
-            for r in rows
-        ]
+        prices = get_latest_prices()
+        usd_rate = Decimal(prices.get("usd_cash", 0) or 0)
+        rows = list(snapshots.order_by("timestamp").values("timestamp", "total_value_tomans"))
+        raw_values = [Decimal(r["total_value_tomans"]) for r in rows if Decimal(r["total_value_tomans"]) > 0]
+        
+        # Outlier filtering for pristine charts if we have enough points
+        median_val = sorted(raw_values)[len(raw_values) // 2] if raw_values else Decimal("0")
+        
+        series = []
+        for r in rows:
+            val_toman = Decimal(r["total_value_tomans"])
+            if val_toman <= 0:
+                continue
+            if len(raw_values) > 5 and median_val > 0:
+                if val_toman > median_val * Decimal("2.5") or val_toman < median_val * Decimal("0.3"):
+                    continue
+            val_usd = str(round(val_toman / usd_rate, 2)) if usd_rate > 0 else None
+            series.append({
+                "timestamp": r["timestamp"].isoformat(),
+                "total": str(r["total_value_tomans"]),
+                "total_usd": val_usd,
+            })
+        if len(series) < 2:
+            from portfolio.services.valuation import compute_dynamic_net_worth_series
+            series = compute_dynamic_net_worth_series(request.user, account, days=days)
         trades = (
             Transaction.objects.filter(account__user=request.user, timestamp__gte=since)
             .select_related("asset")

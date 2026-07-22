@@ -16,7 +16,7 @@ ASSETS = [
     ("one_gram_coin", "1g Coin", "سکه یک گرمی", Asset.AssetClass.GOLD, Asset.Currency.IRT, False, False, "", "IR_COIN_1G"),
     ("gold_18k_gram", "Gold Gram (18K)", "طلای ۱۸ عیار", Asset.AssetClass.GOLD, Asset.Currency.IRT, False, False, "", "IR_GOLD_18K"),
     ("usd_cash", "US Dollar", "دلار", Asset.AssetClass.CASH, Asset.Currency.USD, False, False, "", "USD"),
-    ("kama_stock", "KAMA Stock", "سهام کما", Asset.AssetClass.STOCK, Asset.Currency.IRT, False, False, "کاما", ""),
+    ("kama_stock", "KAMA Stock", "سهام کاما", Asset.AssetClass.STOCK, Asset.Currency.IRT, False, False, "کاما", ""),
 ]
 
 
@@ -41,10 +41,21 @@ class Command(BaseCommand):
             )
             created += int(was_created)
             # Keep warehouse join keys current on existing rows too (idempotent).
-            if not was_created and (asset.tse_symbol != tse or asset.brs_symbol != brs):
-                asset.tse_symbol = tse
-                asset.brs_symbol = brs
-                asset.save(update_fields=["tse_symbol", "brs_symbol"])
+            changes = {
+                "name": name,
+                "name_fa": name_fa,
+                "asset_class": cls,
+                "currency": currency,
+                "is_manual": manual,
+                "is_house": house,
+                "tse_symbol": tse,
+                "brs_symbol": brs,
+            }
+            dirty = [field for field, value in changes.items() if getattr(asset, field) != value]
+            if not was_created and dirty:
+                for field in dirty:
+                    setattr(asset, field, changes[field])
+                asset.save(update_fields=dirty)
         Asset.objects.exclude(key__in=[row[0] for row in ASSETS]).update(is_active=False)
         self.stdout.write(self.style.SUCCESS(
             f"Asset catalog ready ({created} new, {len(ASSETS)} total)."

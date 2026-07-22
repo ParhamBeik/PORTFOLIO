@@ -15,6 +15,7 @@ from django.db import transaction
 from accounts.models import User
 from portfolio.models import Asset, Price, Snapshot
 from portfolio.services import asset_value, invalidate_prices_cache
+from portfolio.services.valuation import guard_price_map
 from portfolio.live.extractor import extract_standard_prices
 from portfolio.live.fetcher import api_settings_from_django, fetch_all_markets
 from portfolio.live.pubsub import CHANNEL, get_redis
@@ -33,11 +34,12 @@ def run_price_fetch(*, dry_run=False, publish=True):
     last = _last_price_by_asset_key()  # one DISTINCT ON query (H3), not N+1
     prices = extract_standard_prices(raw, last_prices=last)
     active_keys = set(Asset.objects.filter(is_active=True).values_list("key", flat=True))
-    priced = {
-        key: float(value)
+    priced = guard_price_map({
+        key: value
         for key, value in prices.items()
         if key in active_keys and float(value) > 0
-    }
+    })
+    public_priced = {key: float(value) for key, value in priced.items()}
 
     written = False
     if priced and not dry_run:
@@ -51,9 +53,9 @@ def run_price_fetch(*, dry_run=False, publish=True):
         from portfolio.services.returns import invalidate_returns_cache
         invalidate_returns_cache()
         if publish:
-            publish_prices(priced)
+            publish_prices(public_priced)
         written = True
-    return {"priced": priced, "written": written}
+    return {"priced": public_priced, "written": written}
 
 
 def _last_price_by_asset_key() -> dict:
@@ -93,24 +95,31 @@ def _write_snapshots(priced: dict) -> None:
     a query per account/holding. Totals are computed in memory from `priced`
     (the prices just fetched/written), consistent with this fetch.
     """
-    prices = {k: Decimal(str(v)) for k, v in priced.items()}
+    guarded_priced = guard_price_map(priced)
+    prices = {k: Decimal(str(v)) for k, v in guarded_priced.items()}
     users = User.objects.prefetch_related("accounts__holdings__asset").iterator(chunk_size=1000)
     snapshots = []
     for user in users:
         user_total = Decimal("0")
+        has_holdings = False
         for account in user.accounts.all():
             account_total = Decimal("0")
             for holding in account.holdings.all():
-                value = asset_value(holding, prices.get(holding.asset.key))
+                has_holdings = True
+                unit_price = prices.get(holding.asset.key)
+                value = asset_value(holding, unit_price)
                 account_total += value
             user_total += account_total
-            snapshots.append(
-                Snapshot(user=user, account=account, total_value_tomans=account_total)
-            )
-        snapshots.append(Snapshot(user=user, account=None, total_value_tomans=user_total))
+            if account_total > 0 or not has_holdings:
+                snapshots.append(
+                    Snapshot(user=user, account=account, total_value_tomans=account_total)
+                )
+        if user_total > 0 or not has_holdings:
+            snapshots.append(Snapshot(user=user, account=None, total_value_tomans=user_total))
     if snapshots:
         Snapshot.objects.bulk_create(snapshots, batch_size=500)
         logger.info("Wrote %d net-worth snapshots.", len(snapshots))
+
 
 
 def publish_prices(priced: dict) -> None:

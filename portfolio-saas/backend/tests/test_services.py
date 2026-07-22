@@ -9,6 +9,7 @@ from decimal import Decimal
 import pytest
 from django.core.cache import cache
 
+from marketdata.models import GoldCurrencyHistory
 from portfolio.models import Price
 from portfolio.services import get_latest_prices, invalidate_prices_cache
 
@@ -53,3 +54,20 @@ def test_inactive_assets_are_excluded(asset_catalog, write_prices):
     cache.delete("prices:latest")
     prices = get_latest_prices()
     assert "emami_coin" not in prices
+
+
+def test_latest_price_uses_archive_when_latest_fetch_sharply_drops(asset_catalog):
+    gold = asset_catalog["emami_coin"]
+    gold.brs_symbol = "IR_COIN_EMAMI"
+    gold.save(update_fields=["brs_symbol"])
+    Price.objects.create(asset=gold, price=Decimal("480000000"), source="SEED")
+    Price.objects.create(asset=gold, price=Decimal("1"), source="BAD_FETCH")
+    GoldCurrencyHistory.objects.create(
+        symbol="IR_COIN_EMAMI",
+        date="1404-01-02",
+        close_price=Decimal("479000000"),
+    )
+    cache.delete("prices:latest")
+
+    prices = get_latest_prices()
+    assert prices["emami_coin"] == Decimal("479000000")

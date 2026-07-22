@@ -69,3 +69,17 @@ def test_value_user_aggregates_across_accounts(asset_catalog, write_prices, make
     valuation = value_user(user)
     assert valuation["total"] == Decimal("480000000") + Decimal("5230") * Decimal("100")
     assert {a["name"] for a in valuation["accounts"]} == {"Brokerage", "Cash"}
+
+
+def test_compute_dynamic_net_worth_series(asset_catalog, write_prices, make_user):
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+    write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
+    user = make_user(email="dynamic@test.test")
+    account = Account.objects.create(user=user, name="Dynamic")
+    Holding.objects.create(account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("1"))
+
+    series = compute_dynamic_net_worth_series(user, account, days=7)
+    assert len(series) == 7
+    assert "total" in series[0]
+    assert "total_usd" in series[0]
+    assert float(series[0]["total"]) > 0

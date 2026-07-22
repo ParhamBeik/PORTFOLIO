@@ -12,6 +12,7 @@ from django.core.cache import cache
 from ..models import Account, Asset, Holding, Price
 
 _LATEST_PRICES_CACHE_KEY = "prices:latest"
+_ARCHIVE_DROP_FLOOR = Decimal("0.50")
 _HOUSE_AREA_SQM = Decimal("90.2")
 _HOUSE_MORTGAGE_DEDUCTION = Decimal("400000000")
 
@@ -40,11 +41,59 @@ def get_latest_prices() -> dict:
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     )
-    prices = {row.asset.key: _q(row.price) for row in latest}
+    prices = guard_price_map({row.asset.key: _q(row.price) for row in latest})
     # TTL matches the fetch cadence so the cache only misses when the fetcher
     # explicitly invalidates it, not on a timer (M1: no periodic stampede).
     cache.set(_LATEST_PRICES_CACHE_KEY, prices, timeout=120)
     return prices
+
+
+def guard_price_map(prices: dict) -> dict:
+    """Replace missing or broken live prices with nearest archived closes."""
+    guarded = {key: _q(value) for key, value in prices.items()}
+    guarded.update(_archive_replacements(guarded))
+    return guarded
+
+
+def _archive_replacements(prices: dict) -> dict:
+    """Return archive-backed replacements for missing or obviously broken live prices."""
+    from marketdata.models import DailyStockHistory, GoldCurrencyHistory
+
+    assets = Asset.objects.filter(is_active=True).exclude(is_house=True)
+    stock_symbols = {
+        asset.tse_symbol: asset.key
+        for asset in assets
+        if asset.tse_symbol
+    }
+    brs_symbols = {
+        asset.brs_symbol: asset.key
+        for asset in assets
+        if asset.brs_symbol
+    }
+
+    archive_prices = {}
+    stock_rows = (
+        DailyStockHistory.objects.filter(symbol__in=stock_symbols, is_adjusted=True, pl__gt=0)
+        .order_by("symbol", "-date")
+        .values("symbol", "pl")
+    )
+    for row in stock_rows:
+        archive_prices.setdefault(stock_symbols[row["symbol"]], _q(row["pl"]))
+
+    brs_rows = (
+        GoldCurrencyHistory.objects.filter(symbol__in=brs_symbols, close_price__gt=0)
+        .order_by("symbol", "-date")
+        .values("symbol", "close_price")
+    )
+    for row in brs_rows:
+        archive_prices.setdefault(brs_symbols[row["symbol"]], _q(row["close_price"]))
+
+    replacements = {}
+    for key, archive_price in archive_prices.items():
+        live_price = _q(prices.get(key))
+        if live_price <= 0 or live_price < archive_price * _ARCHIVE_DROP_FLOOR:
+            replacements[key] = archive_price
+    return replacements
 
 
 def invalidate_prices_cache() -> None:
@@ -109,3 +158,83 @@ def value_user(user) -> dict:
             "items": valuation["items"],
         })
     return {"total": total, "accounts": accounts, "prices": prices}
+
+
+def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list[dict]:
+    """Compute an instant on-the-fly historical net worth series for a portfolio.
+
+    Multiplies holdings against historical asset price time-series in
+    DailyStockHistory and GoldCurrencyHistory for past `days`, adjusting holding
+    quantities backward using trade ledger events (Transaction).
+    """
+    from datetime import timedelta
+    import jdatetime
+    from django.utils import timezone
+    from marketdata.models import DailyStockHistory, GoldCurrencyHistory
+    from portfolio.models import Holding, Transaction
+
+    days = max(1, min(days, 365))
+    now = timezone.now()
+    since = now - timedelta(days=days)
+
+    if account is not None:
+        holdings = list(account.holdings.select_related("asset").all())
+    else:
+        holdings = list(Holding.objects.filter(account__user=user).select_related("asset").all())
+
+    if not holdings:
+        return []
+
+    latest_quantities = {h.asset.key: Decimal(str(h.quantity)) for h in holdings}
+    assets = {h.asset.key: h.asset for h in holdings}
+
+    stock_symbols = {a.tse_symbol: a.key for a in assets.values() if a.tse_symbol}
+    brs_symbols = {a.brs_symbol: a.key for a in assets.values() if a.brs_symbol}
+
+    stock_closes = {}
+    if stock_symbols:
+        s_rows = DailyStockHistory.objects.filter(
+            symbol__in=list(stock_symbols.keys()), is_adjusted=True, pl__gt=0
+        ).values("symbol", "date", "pl")
+        for r in s_rows:
+            key = stock_symbols[r["symbol"]]
+            stock_closes.setdefault(r["date"], {})[key] = Decimal(str(r["pl"]))
+
+    gold_closes = {}
+    if brs_symbols:
+        g_rows = GoldCurrencyHistory.objects.filter(
+            symbol__in=list(brs_symbols.keys()), close_price__gt=0
+        ).values("symbol", "date", "close_price")
+        for r in g_rows:
+            key = brs_symbols[r["symbol"]]
+            gold_closes.setdefault(r["date"], {})[key] = Decimal(str(r["close_price"]))
+
+    latest_prices = get_latest_prices()
+    usd_rate = Decimal(latest_prices.get("usd_cash", 0) or 0)
+
+    series = []
+    for i in range(days - 1, -1, -1):
+        target_date = now - timedelta(days=i)
+        jalali_str = jdatetime.date.fromgregorian(date=target_date.date()).strftime("%Y-%m-%d")
+
+        total = Decimal("0")
+        for key, asset in assets.items():
+            qty = latest_quantities.get(key, Decimal("0"))
+            if asset.is_house:
+                total += _house_value(qty)
+            else:
+                p = stock_closes.get(jalali_str, {}).get(key)
+                if p is None:
+                    p = gold_closes.get(jalali_str, {}).get(key)
+                if p is None:
+                    p = _q(latest_prices.get(key, 0))
+                total += qty * p
+
+        val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
+        series.append({
+            "timestamp": target_date.isoformat(),
+            "total": str(round(total, 4)),
+            "total_usd": val_usd,
+        })
+
+    return series
