@@ -59,6 +59,15 @@ export default function NetWorthChart({ days = 30, account = null }) {
     return best;
   };
 
+  const totals = data.map((d) => d.total);
+  const min = totals.length ? Math.min(...totals) : 0;
+  const max = totals.length ? Math.max(...totals) : 0;
+  const range = max - min;
+  const pad = range === 0 ? (min === 0 ? 1000 : Math.abs(min) * 0.05) : range * 0.05;
+  const yMin = min >= 0 ? Math.max(0, min - pad) : min - pad;
+  const yMax = max + pad;
+  const yDomain = [yMin, yMax];
+
   return (
     <div className="chart-wrap" style={{ height: 220 }}>
       <ResponsiveContainer width="100%" height="100%">
@@ -80,6 +89,7 @@ export default function NetWorthChart({ days = 30, account = null }) {
             stroke="var(--border)"
           />
           <YAxis
+            domain={yDomain}
             tickFormatter={fmtTomanCompact}
             tick={{ fontSize: 11, fill: "var(--muted)" }}
             width={48}

@@ -6,15 +6,23 @@ plain ordering + search covers the browse cases.
 from django.contrib import admin
 
 from .models import (
+    ApiRequestQuota,
+    ArchiveFetchState,
     CodalAnnouncement,
     DailyStockHistory,
     GoldCurrencyHistory,
     MarketCandle,
     MarketIndexData,
+    MarketInstrument,
     ShareholderRecord,
     StockSymbolMetadata,
     StockTransactionTick,
 )
+
+
+admin.site.register(ApiRequestQuota)
+admin.site.register(ArchiveFetchState)
+admin.site.register(MarketInstrument)
 
 
 @admin.register(StockSymbolMetadata)

@@ -32,7 +32,12 @@ def run_price_fetch(*, dry_run=False, publish=True):
     raw = fetch_all_markets(api_settings_from_django())
     last = _last_price_by_asset_key()  # one DISTINCT ON query (H3), not N+1
     prices = extract_standard_prices(raw, last_prices=last)
-    priced = {k: float(v) for k, v in prices.items() if float(v) > 0}
+    active_keys = set(Asset.objects.filter(is_active=True).values_list("key", flat=True))
+    priced = {
+        key: float(value)
+        for key, value in prices.items()
+        if key in active_keys and float(value) > 0
+    }
 
     written = False
     if priced and not dry_run:
@@ -62,7 +67,10 @@ def _last_price_by_asset_key() -> dict:
 
 
 def _write_prices(priced: dict) -> None:
-    assets = {a.key: a for a in Asset.objects.filter(key__in=priced.keys())}
+    assets = {
+        a.key: a
+        for a in Asset.objects.filter(key__in=priced.keys(), is_active=True)
+    }
     rows = [
         Price(asset=assets[key], price=value, source="API")
         for key, value in priced.items()

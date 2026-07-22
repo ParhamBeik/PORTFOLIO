@@ -77,7 +77,7 @@ class Command(BaseCommand):
 
         state = json.loads(state_path.read_text())
         history = self._latest_per_day(history_path)
-        assets = {a.key: a for a in Asset.objects.all()}
+        assets = {a.key: a for a in Asset.objects.filter(is_active=True)}
 
         with transaction.atomic():
             user = self._get_or_create_user()

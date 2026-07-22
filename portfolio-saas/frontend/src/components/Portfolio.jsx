@@ -7,6 +7,7 @@ import {
   removeHolding,
   trade,
   transactions,
+  deleteTransaction,
   updateAccount,
   updateHolding,
   valuation,
@@ -146,11 +147,32 @@ export default function Portfolio({ user }) {
     e.preventDefault();
     setTradeMsg("");
     if (!activeAcct) return;
-    const qty = Number(form.quantity);
-    if (!form.assetKey || !(qty > 0)) {
-      setTradeMsg("Pick an asset and a positive quantity.");
+
+    const rawQty = form.quantity;
+    if (rawQty === "" || rawQty === undefined || rawQty === null) {
+      setTradeMsg("Quantity is required.");
       return;
     }
+    const qty = Number(rawQty);
+    if (Number.isNaN(qty)) {
+      setTradeMsg("Quantity must be a valid number.");
+      return;
+    }
+    if (qty <= 0) {
+      setTradeMsg("Quantity must be a positive number greater than zero.");
+      return;
+    }
+
+    if (form.side === "sell") {
+      const assetObj = tradeable.find((a) => a.key === form.assetKey);
+      const holding = activeAcct.holdings.find((h) => h.asset_name === assetObj?.name);
+      const currentQty = holding ? Number(holding.quantity) : 0;
+      if (qty > currentQty) {
+        setTradeMsg(`Cannot sell ${qty}; only ${currentQty} is held.`);
+        return;
+      }
+    }
+
     setBusy(true);
     try {
       const res = await trade(activeAcct.id, {
@@ -337,7 +359,7 @@ export default function Portfolio({ user }) {
           ) : (
             <table className="holdings">
               <thead>
-                <tr><th>When</th><th>Side</th><th>Asset</th><th>Qty</th><th>Unit (T)</th></tr>
+                <tr><th>When</th><th>Side</th><th>Asset</th><th>Qty</th><th>Unit (T)</th><th></th></tr>
               </thead>
               <tbody>
                 {txns.slice(0, 20).map((t) => (
@@ -347,6 +369,25 @@ export default function Portfolio({ user }) {
                     <td>{t.asset_name || t.asset_key}</td>
                     <td>{fmtNum(t.quantity)}</td>
                     <td>{fmtNum(t.price_tomans)}</td>
+                    <td>
+                      <button
+                        className="link danger"
+                        title="Undo trade"
+                        onClick={async () => {
+                          if (window.confirm("Undo this trade? This will reverse its effect on holdings.")) {
+                            try {
+                              await deleteTransaction(t.id);
+                              refreshAll();
+                              transactions(365, activeAcct.id).then(setTxns).catch(() => {});
+                            } catch (err) {
+                              alert(err.message);
+                            }
+                          }
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -391,11 +432,14 @@ export default function Portfolio({ user }) {
         </section>
       )}
 
-      {/* Pro analytics, scoped to the active portfolio via ?account=. ProGate
-          renders the upsell for FREE users so the sections never dead-end. */}
-      <Analytics user={user} account={activeId} />
-      <Insights user={user} account={activeId} />
-      <Optimization user={user} account={activeId} />
+      {/* Pro analytics, scoped to the active portfolio via ?account=. Rendered on dashboard only for Pro users. */}
+      {user?.is_pro && (
+        <>
+          <Analytics user={user} account={activeId} />
+          <Insights user={user} account={activeId} />
+          <Optimization user={user} account={activeId} />
+        </>
+      )}
     </div>
   );
 }

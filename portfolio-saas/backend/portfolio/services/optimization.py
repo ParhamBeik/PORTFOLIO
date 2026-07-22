@@ -66,6 +66,16 @@ class UniverseTooSmall(Exception):
         self.eligible = eligible
 
 
+class SolverError(Exception):
+    """Raised when all solvers fail to solve the optimization problem."""
+    pass
+
+
+class NoAssetBeatsRiskFreeRate(Exception):
+    """Raised when no asset has expected returns above the risk-free rate."""
+    pass
+
+
 # ---------- helpers ----------------------------------------------------------
 
 
@@ -254,21 +264,40 @@ def _max_sharpe(
 ) -> dict[str, float]:
     mu = returns.mean() * TRADING_DAYS_PER_YEAR
     S = cov_daily * TRADING_DAYS_PER_YEAR
-    ef = EfficientFrontier(mu, S, weight_bounds=(0.0, max_weight_per_asset), solver="ECOS")
-    # Per-class caps as linear constraints. pypfopt gives us the variable `x`.
-    for cls, cap in max_weight_per_class.items():
-        idx = [i for i, k in enumerate(S.columns) if class_map.get(k) == cls]
-        if idx and cap < 1.0:
-            cap_f = float(cap)
-            ef.add_constraint(
-                lambda x, idx=idx, cap_f=cap_f: cp.sum(x[idx]) <= cap_f
-            )
-    try:
-        raw = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE_ANNUAL)
-    except Exception:
-        # Fall back without class caps if ECOS chokes on a degenerate input.
-        ef2 = EfficientFrontier(mu, S, weight_bounds=(0.0, max_weight_per_asset), solver="ECOS")
-        raw = ef2.max_sharpe(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+    
+    solvers = ["CLARABEL", "SCS", "OSQP"]
+    raw = None
+    last_exc = None
+
+    for solver in solvers:
+        try:
+            ef = EfficientFrontier(mu, S, weight_bounds=(0.0, max_weight_per_asset), solver=solver)
+            for cls, cap in max_weight_per_class.items():
+                idx = [i for i, k in enumerate(S.columns) if class_map.get(k) == cls]
+                if idx and cap < 1.0:
+                    cap_f = float(cap)
+                    ef.add_constraint(
+                        lambda x, idx=idx, cap_f=cap_f: cp.sum(x[idx]) <= cap_f
+                    )
+            raw = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+            break
+        except Exception as e:
+            last_exc = e
+            continue
+
+    if raw is None:
+        for solver in solvers:
+            try:
+                ef2 = EfficientFrontier(mu, S, weight_bounds=(0.0, max_weight_per_asset), solver=solver)
+                raw = ef2.max_sharpe(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+                break
+            except Exception as e:
+                last_exc = e
+                continue
+
+    if raw is None:
+        raise SolverError(f"All solvers (CLARABEL, SCS, OSQP) failed to solve Max-Sharpe: {last_exc}")
+
     weights = {k: float(v) for k, v in raw.items() if v > 1e-6}
     # Belt-and-braces: post-hoc cap in case a class constraint was relaxed.
     return _enforce_caps(
@@ -289,19 +318,40 @@ def _min_volatility(
 ) -> dict[str, float]:
     mu = returns.mean() * TRADING_DAYS_PER_YEAR
     S = cov_daily * TRADING_DAYS_PER_YEAR
-    ef = EfficientFrontier(mu, S, weight_bounds=(0.0, max_weight_per_asset), solver="ECOS")
-    for cls, cap in max_weight_per_class.items():
-        idx = [i for i, k in enumerate(S.columns) if class_map.get(k) == cls]
-        if idx and cap < 1.0:
-            cap_f = float(cap)
-            ef.add_constraint(
-                lambda x, idx=idx, cap_f=cap_f: cp.sum(x[idx]) <= cap_f
-            )
-    try:
-        raw = ef.min_volatility()
-    except Exception:
-        ef2 = EfficientFrontier(mu, S, weight_bounds=(0.0, max_weight_per_asset), solver="ECOS")
-        raw = ef2.min_volatility()
+    
+    solvers = ["CLARABEL", "SCS", "OSQP"]
+    raw = None
+    last_exc = None
+
+    for solver in solvers:
+        try:
+            ef = EfficientFrontier(mu, S, weight_bounds=(0.0, max_weight_per_asset), solver=solver)
+            for cls, cap in max_weight_per_class.items():
+                idx = [i for i, k in enumerate(S.columns) if class_map.get(k) == cls]
+                if idx and cap < 1.0:
+                    cap_f = float(cap)
+                    ef.add_constraint(
+                        lambda x, idx=idx, cap_f=cap_f: cp.sum(x[idx]) <= cap_f
+                    )
+            raw = ef.min_volatility()
+            break
+        except Exception as e:
+            last_exc = e
+            continue
+
+    if raw is None:
+        for solver in solvers:
+            try:
+                ef2 = EfficientFrontier(mu, S, weight_bounds=(0.0, max_weight_per_asset), solver=solver)
+                raw = ef2.min_volatility()
+                break
+            except Exception as e:
+                last_exc = e
+                continue
+
+    if raw is None:
+        raise SolverError(f"All solvers (CLARABEL, SCS, OSQP) failed to solve Min-Volatility: {last_exc}")
+
     weights = {k: float(v) for k, v in raw.items() if v > 1e-6}
     return _enforce_caps(
         weights,
@@ -339,17 +389,27 @@ def _risk_parity(
     # solution has values far above any fractional cap. Caps are enforced
     # post-hoc on the normalized weights via `_enforce_caps`.
     prob = cp.Problem(objective, [])
-    try:
-        prob.solve(solver=cp.ECOS)
-    except Exception:
+    
+    solvers = ["CLARABEL", "SCS", "ECOS"]
+    w_val = None
+    for s_name in solvers:
+        try:
+            if s_name in cp.installed_solvers():
+                prob.solve(solver=s_name)
+                if prob.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE) and w.value is not None:
+                    w_val = w.value
+                    break
+        except Exception:
+            continue
+            
+    if w_val is None:
         try:
             prob.solve()
+            if prob.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE) and w.value is not None:
+                w_val = w.value
         except Exception:
-            w_val = None
-        else:
-            w_val = w.value
-    else:
-        w_val = w.value
+            pass
+
     if w_val is None or not np.all(np.isfinite(w_val)):
         # Equal-weight fallback if the solver fails.
         equal = {k: 1.0 / n for k in keys}
@@ -453,6 +513,13 @@ def optimize(
     mu = returns.mean() * TRADING_DAYS_PER_YEAR
     cov_annual = cov_daily * TRADING_DAYS_PER_YEAR
 
+    if scenario == "max_sharpe":
+        if not (mu > RISK_FREE_RATE_ANNUAL).any():
+            raise NoAssetBeatsRiskFreeRate(
+                f"No asset in the eligible universe has an expected annualized return exceeding "
+                f"the risk-free rate of {int(RISK_FREE_RATE_ANNUAL * 100)}%."
+            )
+
     solver = _SCENARIO_DISPATCH[scenario]
     target = solver(
         returns,
@@ -489,6 +556,34 @@ def optimize(
 # ---------- efficient frontier -----------------------------------------------
 
 
+def _solve_ef_min_vol(mu, S, cap):
+    last_exc = None
+    for solver in ["CLARABEL", "SCS", "OSQP"]:
+        try:
+            ef = EfficientFrontier(mu, S, weight_bounds=(0.0, cap), solver=solver)
+            w = ef.min_volatility()
+            ret, vol, sharpe = ef.portfolio_performance(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+            return ef, w, ret, vol
+        except Exception as e:
+            last_exc = e
+            continue
+    raise SolverError(f"Failed to solve min volatility: {last_exc}")
+
+
+def _solve_ef_max_sharpe(mu, S, cap):
+    last_exc = None
+    for solver in ["CLARABEL", "SCS", "OSQP"]:
+        try:
+            ef = EfficientFrontier(mu, S, weight_bounds=(0.0, cap), solver=solver)
+            w = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+            ret, vol, sharpe = ef.portfolio_performance(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+            return ef, w, ret
+        except Exception as e:
+            last_exc = e
+            continue
+    raise SolverError(f"Failed to solve max Sharpe: {last_exc}")
+
+
 def _efficient_frontier(n_points: int = 30) -> dict:
     """Sample the efficient frontier + reference points.
 
@@ -512,12 +607,8 @@ def _efficient_frontier(n_points: int = 30) -> dict:
     cap = float(DEFAULT_CONSTRAINTS["max_weight_per_asset"])
     frontier: list[dict] = []
     try:
-        ef_min = EfficientFrontier(mu, S, weight_bounds=(0.0, cap), solver="ECOS")
-        w_min = ef_min.min_volatility()
-        ret_min, vol_min, _ = ef_min.portfolio_performance()
-        ef_max = EfficientFrontier(mu, S, weight_bounds=(0.0, cap), solver="ECOS")
-        ef_max.max_sharpe(risk_free_rate=RISK_FREE_RATE_ANNUAL)
-        ret_max_eff, _, _ = ef_max.portfolio_performance()
+        ef_min, w_min, ret_min, vol_min = _solve_ef_min_vol(mu, S, cap)
+        ef_max, w_max, ret_max_eff = _solve_ef_max_sharpe(mu, S, cap)
     except Exception:
         return {"frontier": [], "max_sharpe": None, "min_volatility": None}
 
@@ -525,9 +616,18 @@ def _efficient_frontier(n_points: int = 30) -> dict:
     seen: set[float] = set()
     for tr in target_returns:
         try:
-            ef = EfficientFrontier(mu, S, weight_bounds=(0.0, cap), solver="ECOS")
-            ef.efficient_return(target_return=float(tr))
-            _, vol, sharpe = ef.portfolio_performance(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+            solved = False
+            for solver in ["CLARABEL", "SCS", "OSQP"]:
+                try:
+                    ef = EfficientFrontier(mu, S, weight_bounds=(0.0, cap), solver=solver)
+                    ef.efficient_return(target_return=float(tr))
+                    _, vol, sharpe = ef.portfolio_performance(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+                    solved = True
+                    break
+                except Exception:
+                    continue
+            if not solved:
+                continue
             key = round(vol, 8)
             if key in seen:
                 continue

@@ -6,6 +6,10 @@ import Portfolio from "./components/Portfolio.jsx";
 import Billing from "./components/Billing.jsx";
 import MarketData from "./components/MarketData.jsx";
 import Logo from "./components/Logo.jsx";
+import OptimizationLayout from "./components/OptimizationLayout.jsx";
+import Optimization from "./components/Optimization.jsx";
+import Insights from "./components/Insights.jsx";
+import Analytics from "./components/Analytics.jsx";
 import { PortfolioProvider, usePortfolio } from "./components/PortfolioContext.jsx";
 
 export default function App() {
@@ -36,12 +40,17 @@ export default function App() {
             <Route index element={<Portfolio user={user} />} />
             <Route path="market" element={<MarketData user={user} />} />
             <Route path="billing" element={<Billing user={user} setUser={setUser} />} />
-            {/* Legacy deep links: pick the portfolio, then land on the single page. */}
+            {/* Legacy deep links */}
             <Route path="accounts/:id" element={<AccountRedirect />} />
             <Route path="dashboard" element={<Navigate to="/" replace />} />
-            <Route path="insights" element={<Navigate to="/" replace />} />
-            <Route path="analytics" element={<Navigate to="/" replace />} />
-            <Route path="optimization" element={<Navigate to="/" replace />} />
+            {/* Pro area: optimization, insights, analytics as sub-routes */}
+            <Route path="optimization" element={<OptimizationLayout user={user} />}>
+              <Route index element={<Optimization user={user} account={null} />} />
+              <Route path="insights" element={<Insights user={user} account={null} />} />
+              <Route path="analytics" element={<Analytics user={user} account={null} />} />
+            </Route>
+            <Route path="insights" element={<Navigate to="/optimization/insights" replace />} />
+            <Route path="analytics" element={<Navigate to="/optimization/analytics" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
@@ -95,6 +104,9 @@ function Shell({ user, setUser }) {
           </NavLink>
           <NavLink to="/market" className={({ isActive }) => (isActive ? "active" : "")}>
             Market
+          </NavLink>
+          <NavLink to="/optimization" className={({ isActive }) => (isActive ? "active" : "")}>
+            Optimization
           </NavLink>
           <NavLink to="/billing" className={({ isActive }) => (isActive ? "active" : "")}>
             Billing

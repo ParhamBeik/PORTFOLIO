@@ -4,6 +4,7 @@ Each module wraps one endpoint family; `base.fetch_json` provides retries and
 timeouts for all of them.
 """
 from .base import fetch_json  # noqa: F401
+from .catalog import fetch_all_symbols  # noqa: F401
 from .candlestick import fetch_candlesticks  # noqa: F401
 from .codal import fetch_codal_announcements  # noqa: F401
 from .gold_currency import (  # noqa: F401

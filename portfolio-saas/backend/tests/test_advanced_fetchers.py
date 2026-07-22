@@ -193,9 +193,9 @@ def test_fetch_daily_history_and_real_legal():
 def test_fetch_candlesticks():
     mock_payload = {
         "l18": "فملی",
-        "type": 6,
+        "type": 3,
         "count": 1,
-        "candle_daily": [
+        "candle_daily_adjusted": [
             {"date": "1404-02-24", "open": 7380, "high": 7400, "low": 7280, "close": 7340, "volume": 180715348}
         ]
     }
@@ -203,9 +203,9 @@ def test_fetch_candlesticks():
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = mock_payload
 
-        res = fetch_candlesticks("test_key", "فملی", candle_type=6)
+        res = fetch_candlesticks("test_key", "فملی", candle_type=3)
         assert res["l18"] == "فملی"
-        c_data = res["candle_daily"][0]
+        c_data = res["candle_daily_adjusted"][0]
 
         candle = MarketCandle.objects.create(
             symbol=res["l18"],

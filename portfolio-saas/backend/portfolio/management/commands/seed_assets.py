@@ -13,17 +13,10 @@ ASSETS = [
     ("emami_coin", "Emami Coin", "سکه امامی", Asset.AssetClass.GOLD, Asset.Currency.IRT, False, False, "", "IR_COIN_EMAMI"),
     ("half_coin", "Half Coin", "نیم سکه", Asset.AssetClass.GOLD, Asset.Currency.IRT, False, False, "", "IR_COIN_HALF"),
     ("quarter_coin", "Quarter Coin", "ربع سکه", Asset.AssetClass.GOLD, Asset.Currency.IRT, False, False, "", "IR_COIN_QUARTER"),
-    ("quarter_coin_pre86", "Quarter Coin (Pre-86)", "ربع سکه قبل ۸۶", Asset.AssetClass.GOLD, Asset.Currency.IRT, False, False, "", ""),
     ("one_gram_coin", "1g Coin", "سکه یک گرمی", Asset.AssetClass.GOLD, Asset.Currency.IRT, False, False, "", "IR_COIN_1G"),
-    ("swiss_gold_bar_1g", "Swiss Gold Bar (1g)", "شمش طلا ۱ گرمی", Asset.AssetClass.GOLD, Asset.Currency.IRT, True, False, "", ""),
-    ("swiss_gold_bar_2_5g", "Swiss Gold Bar (2.5g)", "شمش طلا ۲.۵ گرمی", Asset.AssetClass.GOLD, Asset.Currency.IRT, True, False, "", ""),
     ("gold_18k_gram", "Gold Gram (18K)", "طلای ۱۸ عیار", Asset.AssetClass.GOLD, Asset.Currency.IRT, False, False, "", "IR_GOLD_18K"),
     ("usd_cash", "US Dollar", "دلار", Asset.AssetClass.CASH, Asset.Currency.USD, False, False, "", "USD"),
-    ("usdt_irt", "Tether", "تتر", Asset.AssetClass.CASH, Asset.Currency.IRT, False, False, "", "USDT_IRT"),
-    ("euro_cash", "Euro", "یورو", Asset.AssetClass.CASH, Asset.Currency.IRT, False, False, "", "EUR"),
     ("kama_stock", "KAMA Stock", "سهام کما", Asset.AssetClass.STOCK, Asset.Currency.IRT, False, False, "کاما", ""),
-    ("bitcoin_usd", "Bitcoin", "بیت‌کوین", Asset.AssetClass.CRYPTO, Asset.Currency.USD, False, False, "", "BTC"),
-    ("house_asset", "Real Estate", "ملک", Asset.AssetClass.REAL_ESTATE, Asset.Currency.IRT, False, True, "", ""),
 ]
 
 
@@ -52,6 +45,7 @@ class Command(BaseCommand):
                 asset.tse_symbol = tse
                 asset.brs_symbol = brs
                 asset.save(update_fields=["tse_symbol", "brs_symbol"])
+        Asset.objects.exclude(key__in=[row[0] for row in ASSETS]).update(is_active=False)
         self.stdout.write(self.style.SUCCESS(
             f"Asset catalog ready ({created} new, {len(ASSETS)} total)."
         ))

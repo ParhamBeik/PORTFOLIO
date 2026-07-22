@@ -14,7 +14,7 @@ class AssetSerializer(serializers.ModelSerializer):
 
 class HoldingSerializer(serializers.ModelSerializer):
     asset_key = serializers.SlugRelatedField(
-        source="asset", slug_field="key", queryset=Asset.objects.all()
+        source="asset", slug_field="key", queryset=Asset.objects.filter(is_active=True)
     )
     asset_name = serializers.CharField(source="asset.name", read_only=True)
     asset_name_fa = serializers.CharField(source="asset.name_fa", read_only=True)

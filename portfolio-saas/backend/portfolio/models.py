@@ -12,6 +12,7 @@ Scale design:
   volatility. Current value is computed live from holdings x latest prices.
 """
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
@@ -55,6 +56,31 @@ class Asset(models.Model):
 
     class Meta:
         ordering = ["asset_class", "name"]
+
+    def clean(self):
+        if not self.is_active:
+            return
+        from marketdata.models import MarketInstrument
+
+        if not MarketInstrument.objects.exists():
+            return
+        if self.asset_class not in (self.AssetClass.GOLD, self.AssetClass.STOCK, self.AssetClass.CASH):
+            raise ValidationError("Active assets must be verified stocks, gold, or cash/currency instruments.")
+        source = "tsetmc" if self.asset_class == self.AssetClass.STOCK else "brs"
+        symbol = self.tse_symbol if source == "tsetmc" else self.brs_symbol
+        if not symbol:
+            raise ValidationError("Active assets require a provider symbol.")
+
+        if not MarketInstrument.objects.filter(
+            source=source,
+            symbol=symbol,
+            eligible=True,
+        ).exists():
+            raise ValidationError("Asset is not eligible in the verified provider catalog.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"{self.name} ({self.key})"

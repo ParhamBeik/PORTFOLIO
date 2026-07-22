@@ -23,6 +23,7 @@ from .views import (
     SnapshotListView,
     TradeView,
     TransactionListView,
+    TransactionDestroyView,
     ValuationView,
 )
 
@@ -37,6 +38,7 @@ urlpatterns = [
          name="holding-detail"),
     path("accounts/<int:account_id>/trades/", TradeView.as_view(), name="trade-create"),
     path("transactions/", TransactionListView.as_view(), name="transaction-list"),
+    path("transactions/<int:pk>/", TransactionDestroyView.as_view(), name="transaction-detail"),
     # Valuation + net-worth history (FREE)
     path("accounts/<int:account_id>/valuation/", AccountValuationView.as_view(),
          name="account-valuation"),

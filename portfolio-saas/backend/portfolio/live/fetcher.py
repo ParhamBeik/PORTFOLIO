@@ -3,9 +3,10 @@
 Historical/warehouse fetchers live in `marketdata.fetchers`.
 """
 import logging
-from urllib.parse import urlencode
-import requests
 from django.conf import settings
+
+from marketdata.fetchers.base import MarketDataFetchError, fetch_json
+from marketdata.quota import LIVE
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +24,6 @@ __all__ = [
     "fetch_all_markets",
     "api_settings_from_django",
 ]
-
-
-def _make_api_url(base_url, params):
-    separator = "&" if "?" in base_url else "?"
-    return f"{base_url}{separator}{urlencode(params)}"
 
 
 def _extract_price(record):
@@ -63,37 +59,39 @@ def _find_symbol_record(tsetmc_payload, symbol):
 
 def fetch_brsapi(brs_url, brs_api_key):
     try:
-        response = requests.get(
-            f"{brs_url}?key={brs_api_key}", headers=HEADERS, timeout=20
+        return fetch_json(
+            brs_url,
+            params={"key": brs_api_key},
+            headers=HEADERS,
+            quota_bucket=LIVE,
         )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as exc:
+    except MarketDataFetchError as exc:
         logger.warning("BRS fetch failed: %s", exc)
         return None
 
 
 def fetch_tsetmc(tsetmc_url, tsetmc_api_key):
     try:
-        response = requests.get(
-            f"{tsetmc_url}?key={tsetmc_api_key}&type=1", headers=HEADERS, timeout=20
+        return fetch_json(
+            tsetmc_url,
+            params={"key": tsetmc_api_key, "type": "1"},
+            headers=HEADERS,
+            quota_bucket=LIVE,
         )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as exc:
+    except MarketDataFetchError as exc:
         logger.warning("TSETMC fetch failed: %s", exc)
         return None
 
 
 def fetch_tsetmc_symbol(tsetmc_symbol_url, tsetmc_api_key, symbol):
     try:
-        response = requests.get(
-            _make_api_url(tsetmc_symbol_url, {"key": tsetmc_api_key, "l18": symbol}),
-            headers=HEADERS, timeout=20,
+        return fetch_json(
+            tsetmc_symbol_url,
+            params={"key": tsetmc_api_key, "l18": symbol},
+            headers=HEADERS,
+            quota_bucket=LIVE,
         )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as exc:
+    except MarketDataFetchError as exc:
         logger.warning("TSETMC symbol fetch failed for %s: %s", symbol, exc)
         return None
 

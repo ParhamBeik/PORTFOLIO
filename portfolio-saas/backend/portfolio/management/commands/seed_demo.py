@@ -41,11 +41,11 @@ class Command(BaseCommand):
             "emami_coin": 5,
             "quarter_coin": 8,
             "one_gram_coin": 4,
-            "usd_cash": 2000,
             "kama_stock": 100000,
-            "bitcoin_usd": 0.05,
         }
-        asset_map = {a.key: a for a in Asset.objects.filter(key__in=holdings)}
+        asset_map = {
+            a.key: a for a in Asset.objects.filter(key__in=holdings, is_active=True)
+        }
         for key, qty in holdings.items():
             if key in asset_map:
                 Holding.objects.create(account=account, asset=asset_map[key], quantity=qty)
@@ -55,19 +55,13 @@ class Command(BaseCommand):
             "emami_coin": 176000000,
             "half_coin": 92800000,
             "quarter_coin": 52900000,
-            "quarter_coin_pre86": 46000000,
             "one_gram_coin": 26100000,
-            "swiss_gold_bar_1g": 25900000,
-            "swiss_gold_bar_2_5g": 61610000,
             "gold_18k_gram": 6400000,
-            "usd_cash": 92000,
-            "usdt_irt": 91500,
-            "euro_cash": 99000,
             "kama_stock": 1780,
-            "bitcoin_usd": 6500000000,
-            "gold_ounce_usd": 24000000,
         }
-        asset_map = {a.key: a for a in Asset.objects.filter(key__in=seed_prices)}
+        asset_map = {
+            a.key: a for a in Asset.objects.filter(key__in=seed_prices, is_active=True)
+        }
         Price.objects.bulk_create([
             Price(asset=asset_map[k], price=v, source="SEED")
             for k, v in seed_prices.items() if k in asset_map

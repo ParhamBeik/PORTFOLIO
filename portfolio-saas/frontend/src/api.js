@@ -117,6 +117,8 @@ export const trade = (accountId, { assetKey, side, quantity, note = "" }) =>
 // Trade history (all accounts, or one via ?account=). Newest first.
 export const transactions = (days = 90, accountId = null) =>
   api(`/api/transactions/?days=${days}` + (accountId ? `&account=${accountId}` : ""));
+export const deleteTransaction = (id) =>
+  api(`/api/transactions/${id}/`, { method: "DELETE" });
 
 // Valuation & pricing
 //
@@ -166,6 +168,9 @@ export const createZarinpalPayment = () =>
 // Market data (TSE). Symbols/candles/history/index are FREE;
 // announcements & shareholders are Pro (403 for free users).
 export const marketSymbols = () => api("/api/market/symbols/");
+export const marketAssets = () => api("/api/market/assets/");
+export const marketPerformance = (asset, limit = 5000) =>
+  api(`/api/market/performance/?asset=${encodeURIComponent(asset)}&limit=${limit}`);
 export const marketCandles = (symbol, timeframe = "1d_adj", limit = 200) =>
   api(
     `/api/market/candles/?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=${limit}`

@@ -1,168 +1,175 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
   marketAnnouncements,
-  marketHistory,
-  marketIndex,
+  marketAssets,
+  marketPerformance,
   marketShareholders,
-  marketSymbols,
 } from "../api.js";
 import { fmtNum, fmtPct, fmtTomanCompact } from "../format.js";
 import ProGate from "./ProGate.jsx";
 
-// FREE: TSE market data. Symbol prices + overall index for everyone;
-// Codal announcements & shareholder moves sit behind ProGate.
+const WINDOWS = { "1Y": 365, "3Y": 1095, All: Infinity };
+
 export default function MarketData({ user }) {
-  const [symbols, setSymbols] = useState(null);
-  const [symbol, setSymbol] = useState("");
-  const [history, setHistory] = useState(null);
-  const [index, setIndex] = useState(null);
+  const [assets, setAssets] = useState(null);
+  const [assetKey, setAssetKey] = useState("");
+  const [performance, setPerformance] = useState(null);
+  const [windowName, setWindowName] = useState("1Y");
   const [err, setErr] = useState("");
 
   useEffect(() => {
-    marketSymbols()
+    marketAssets()
       .then((rows) => {
-        setSymbols(rows);
-        if (rows.length && !symbol) setSymbol(rows[0].symbol);
+        setAssets(rows);
+        if (rows.length) setAssetKey(rows[0].key);
       })
-      .catch((e) => setErr(e.message));
-    marketIndex(365).then(setIndex).catch(() => {});
+      .catch((error) => setErr(error.message));
   }, []);
 
   useEffect(() => {
-    if (!symbol) return;
-    setHistory(null);
-    marketHistory(symbol, { adjusted: 1, limit: 365 })
-      .then((rows) => setHistory(rows.map((r) => ({ ...r, close: Number(r.close) }))))
-      .catch((e) => setErr(e.message));
-  }, [symbol]);
+    if (!assetKey) return;
+    setPerformance(null);
+    setErr("");
+    marketPerformance(assetKey)
+      .then(setPerformance)
+      .catch((error) => setErr(error.message));
+  }, [assetKey]);
 
-  if (symbols === null && !err) return <p className="muted">Loading market data…</p>;
+  const selected = assets?.find((asset) => asset.key === assetKey);
+  const series = useMemo(() => {
+    const rows = performance?.series || [];
+    const size = WINDOWS[windowName];
+    const sliced = Number.isFinite(size) ? rows.slice(-size) : rows;
+    const base = sliced[0]?.close;
+    return sliced.map((row) => ({
+      ...row,
+      performance: base ? ((Number(row.close) / Number(base)) - 1) * 100 : 0,
+    }));
+  }, [performance, windowName]);
 
-  if (symbols !== null && symbols.length === 0) {
-    return (
-      <div className="dashboard">
-        <section className="card">
-          <h2>Market</h2>
-          <p className="muted">
-            No market data yet — run manage.py backfill_market_data
-          </p>
-        </section>
-      </div>
-    );
-  }
+  if (assets === null && !err) return <p className="muted">Loading market data…</p>;
 
-  const selected = symbols?.find((s) => s.symbol === symbol);
-  const indexData = (index || []).map((r) => ({
-    date: r.date,
-    index_overall: Number(r.index_overall),
-  }));
+  const first = series[0];
+  const last = series[series.length - 1];
+  const closes = series.map((row) => Number(row.close)).filter(Number.isFinite);
+  const totalReturn = first?.close
+    ? ((Number(last?.close) / Number(first.close)) - 1) * 100
+    : null;
 
   return (
     <div className="dashboard">
       {err && <div className="error">{err}</div>}
 
       <section className="card">
-        <h2>Market</h2>
+        <div className="card-head">
+          <h2>Market Performance</h2>
+          <div className="seg tf-seg">
+            {Object.keys(WINDOWS).map((name) => (
+              <button
+                key={name}
+                className={windowName === name ? "active" : ""}
+                onClick={() => setWindowName(name)}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div className="inline">
-          <select value={symbol} onChange={(e) => setSymbol(e.target.value)}>
-            {(symbols || []).map((s) => (
-              <option key={s.symbol} value={s.symbol}>
-                {s.symbol} — {s.name}
+          <select value={assetKey} onChange={(event) => setAssetKey(event.target.value)}>
+            {(assets || []).map((asset) => (
+              <option key={asset.key} value={asset.key}>
+                {asset.name}
               </option>
             ))}
           </select>
         </div>
+
         {selected && (
           <p className="muted small">
-            {selected.sector} · {selected.market} · EPS {fmtNum(selected.eps)} · P/E{" "}
-            {fmtNum(selected.pe)} · Mkt cap {fmtTomanCompact(selected.market_cap)}
+            {selected.source === "stock" ? "Stock" : "Gold"} · {selected.symbol} ·{" "}
+            {selected.records} archived days · {selected.first_date || "No data"} to{" "}
+            {selected.last_date || "No data"}
           </p>
         )}
-        {!history && <p className="muted small">Loading price history…</p>}
-        {history && history.length === 0 && (
-          <p className="muted small">No price history for this symbol yet.</p>
+
+        {!performance && !err && <p className="muted small">Loading price history…</p>}
+        {performance && series.length === 0 && (
+          <p className="muted small">No verified archive rows for this asset yet.</p>
         )}
-        {history && history.length > 0 && (
-          <div className="chart-wrap" style={{ height: 220 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={history} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="mk-fill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="var(--accent)" stopOpacity={0.45} />
-                    <stop offset="100%" stopColor="var(--accent)" stopOpacity={0.02} />
-                  </linearGradient>
-                </defs>
-                <XAxis
-                  dataKey="date"
-                  tick={{ fontSize: 11, fill: "var(--muted)" }}
-                  minTickGap={28}
-                  stroke="var(--border)"
-                />
-                <YAxis
-                  tickFormatter={fmtTomanCompact}
-                  tick={{ fontSize: 11, fill: "var(--muted)" }}
-                  width={48}
-                  stroke="var(--border)"
-                  domain={["auto", "auto"]}
-                />
-                <Tooltip
-                  formatter={(v) => [fmtNum(v), "Close"]}
-                  contentStyle={{ background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 8 }}
-                  labelStyle={{ color: "var(--muted)" }}
-                />
-                <Area type="monotone" dataKey="close" stroke="var(--accent)" strokeWidth={2} fill="url(#mk-fill)" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
+
+        {series.length > 0 && (
+          <>
+            <div className="metric-grid">
+              <Metric label="Period return" value={fmtPct(totalReturn)} className={totalReturn >= 0 ? "pos" : "neg"} />
+              <Metric label="Latest close" value={fmtNum(last.close)} />
+              <Metric label="Period high" value={fmtNum(Math.max(...closes))} />
+              <Metric label="Period low" value={fmtNum(Math.min(...closes))} />
+              <Metric label="Archived points" value={fmtNum(series.length)} />
+              <Metric label="Latest date" value={last.date} />
+            </div>
+
+            <div className="chart-wrap market-chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={series} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="performance-fill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="var(--accent)" stopOpacity={0.45} />
+                      <stop offset="100%" stopColor="var(--accent)" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <XAxis dataKey="date" minTickGap={28} stroke="var(--border)" />
+                  <YAxis
+                    tickFormatter={(value) => `${Number(value).toFixed(0)}%`}
+                    width={52}
+                    stroke="var(--border)"
+                    domain={["auto", "auto"]}
+                  />
+                  <Tooltip
+                    formatter={(value, name, item) => [
+                      `${Number(value).toFixed(2)}% (${fmtTomanCompact(item.payload.close)})`,
+                      "Performance",
+                    ]}
+                    contentStyle={{
+                      background: "var(--panel-2)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                    }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="performance"
+                    stroke="var(--accent)"
+                    strokeWidth={2}
+                    fill="url(#performance-fill)"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </>
         )}
       </section>
 
-      {indexData.length > 0 && (
-        <section className="card">
-          <h3>TSE overall index</h3>
-          <div className="chart-wrap" style={{ height: 220 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={indexData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="idx-fill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="var(--gold)" stopOpacity={0.45} />
-                    <stop offset="100%" stopColor="var(--gold)" stopOpacity={0.02} />
-                  </linearGradient>
-                </defs>
-                <XAxis
-                  dataKey="date"
-                  tick={{ fontSize: 11, fill: "var(--muted)" }}
-                  minTickGap={28}
-                  stroke="var(--border)"
-                />
-                <YAxis
-                  tickFormatter={fmtTomanCompact}
-                  tick={{ fontSize: 11, fill: "var(--muted)" }}
-                  width={48}
-                  stroke="var(--border)"
-                  domain={["auto", "auto"]}
-                />
-                <Tooltip
-                  formatter={(v) => [fmtNum(v), "Index"]}
-                  contentStyle={{ background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 8 }}
-                  labelStyle={{ color: "var(--muted)" }}
-                />
-                <Area type="monotone" dataKey="index_overall" stroke="var(--gold)" strokeWidth={2} fill="url(#idx-fill)" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
+      {selected?.source === "stock" && (
+        <ProGate user={user} pitch="Codal filings and shareholder moves are a Pro feature.">
+          <ProSections symbol={selected.symbol} isPro={user?.is_pro} />
+        </ProGate>
       )}
-
-      <ProGate user={user} pitch="Codal filings and shareholder moves are a Pro feature.">
-        <ProSections symbol={symbol} isPro={user?.is_pro} />
-      </ProGate>
     </div>
   );
 }
 
-// Pro-only fetches live below the gate so free users never trigger the 403s.
+function Metric({ label, value, className = "" }) {
+  return (
+    <div className="metric">
+      <div className={`metric-val ${className}`}>{value}</div>
+      <div className="metric-label">{label}</div>
+    </div>
+  );
+}
+
 function ProSections({ symbol, isPro }) {
   const [announcements, setAnnouncements] = useState(null);
   const [holders, setHolders] = useState(null);
@@ -178,31 +185,20 @@ function ProSections({ symbol, isPro }) {
   return (
     <>
       <section className="card">
-        <h3>Codal announcements</h3>
+        <h3>Codal Announcements</h3>
         {!announcements && <p className="muted small">Loading announcements…</p>}
-        {announcements && announcements.length === 0 && (
-          <p className="muted small">No announcements for this symbol.</p>
-        )}
-        {announcements && announcements.length > 0 && (
+        {announcements?.length === 0 && <p className="muted small">No announcements.</p>}
+        {announcements?.length > 0 && (
           <table className="holdings">
-            <thead>
-              <tr><th>Date</th><th>Title</th><th>Links</th></tr>
-            </thead>
+            <thead><tr><th>Date</th><th>Title</th><th>Links</th></tr></thead>
             <tbody>
-              {announcements.map((a, i) => (
-                <tr key={i}>
+              {announcements.map((announcement, index) => (
+                <tr key={index}>
+                  <td>{announcement.date_publish}</td>
+                  <td>{announcement.title}</td>
                   <td>
-                    {a.date_publish}
-                    {a.time_publish && <span className="muted small"> {a.time_publish}</span>}
-                  </td>
-                  <td>{a.title}</td>
-                  <td>
-                    {a.link && (
-                      <a href={a.link} target="_blank" rel="noreferrer">Codal</a>
-                    )}{" "}
-                    {a.link_pdf && (
-                      <a href={a.link_pdf} target="_blank" rel="noreferrer">PDF</a>
-                    )}
+                    {announcement.link && <a href={announcement.link} target="_blank" rel="noreferrer">Codal</a>}{" "}
+                    {announcement.link_pdf && <a href={announcement.link_pdf} target="_blank" rel="noreferrer">PDF</a>}
                   </td>
                 </tr>
               ))}
@@ -212,24 +208,20 @@ function ProSections({ symbol, isPro }) {
       </section>
 
       <section className="card">
-        <h3>Major shareholders</h3>
+        <h3>Major Shareholders</h3>
         {!holders && <p className="muted small">Loading shareholders…</p>}
-        {holders && holders.length === 0 && (
-          <p className="muted small">No shareholder data for this symbol.</p>
-        )}
-        {holders && holders.length > 0 && (
+        {holders?.length === 0 && <p className="muted small">No shareholder data.</p>}
+        {holders?.length > 0 && (
           <table className="holdings">
-            <thead>
-              <tr><th>Shareholder</th><th>Share</th><th>Volume</th><th>Change</th><th>Date</th></tr>
-            </thead>
+            <thead><tr><th>Shareholder</th><th>Share</th><th>Volume</th><th>Change</th><th>Date</th></tr></thead>
             <tbody>
-              {holders.map((h, i) => (
-                <tr key={i}>
-                  <td>{h.name}</td>
-                  <td>{fmtPct(h.percent)}</td>
-                  <td>{fmtNum(h.volume)}</td>
-                  <td className={Number(h.change) >= 0 ? "pos" : "neg"}>{fmtNum(h.change)}</td>
-                  <td>{h.date}</td>
+              {holders.map((holder, index) => (
+                <tr key={index}>
+                  <td>{holder.name}</td>
+                  <td>{fmtPct(holder.percent)}</td>
+                  <td>{fmtNum(holder.volume)}</td>
+                  <td className={Number(holder.change) >= 0 ? "pos" : "neg"}>{fmtNum(holder.change)}</td>
+                  <td>{holder.date}</td>
                 </tr>
               ))}
             </tbody>

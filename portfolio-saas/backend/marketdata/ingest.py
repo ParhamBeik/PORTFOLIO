@@ -32,7 +32,7 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 # candle_type param of fetch_candlesticks -> stored timeframe label
-CANDLE_TIMEFRAMES = {1: "1m", 2: "5m", 3: "15m", 4: "30m", 5: "60m", 6: "1d_adj", 7: "1d_unadj"}
+CANDLE_TIMEFRAMES = {1: "intraday", 2: "1d_unadj", 3: "1d_adj"}
 
 
 def normalize_jalali(value) -> str:
@@ -142,8 +142,9 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
     timeframe = CANDLE_TIMEFRAMES.get(candle_type, str(candle_type))
     records = (payload or {}).get("candle_daily") if isinstance(payload, dict) else None
     if records is None and isinstance(payload, dict):
-        # Intraday responses use a different list key; accept either.
-        records = payload.get("candle")
+        records = payload.get("candle_daily_adjusted")
+    if records is None and isinstance(payload, dict):
+        records = payload.get("candle_intraday")
     if not isinstance(records, list):
         return 0, 0 if payload is None else 1
     rows, bad = [], 0

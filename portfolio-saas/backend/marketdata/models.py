@@ -13,6 +13,87 @@ re-running a backfill is free (`bulk_create(ignore_conflicts=True)`).
 """
 from django.db import models
 
+
+class ApiRequestQuota(models.Model):
+    """Persistent provider-call counter shared by every worker and endpoint."""
+
+    day = models.DateField(unique=True)
+    limit = models.PositiveIntegerField(default=9800)
+    used = models.PositiveIntegerField(default=0)
+    archive_used = models.PositiveIntegerField(default=0)
+    live_used = models.PositiveIntegerField(default=0)
+    other_used = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-day"]
+
+
+class MarketInstrument(models.Model):
+    """Provider-discovered catalog used to verify supported portfolio assets."""
+
+    class Source(models.TextChoices):
+        TSETMC = "tsetmc", "TSETMC"
+        BRS = "brs", "BRS"
+
+    class Category(models.TextChoices):
+        STOCK = "stock", "Stock"
+        GOLD = "gold", "Gold"
+        EXCLUDED = "excluded", "Excluded"
+
+    source = models.CharField(max_length=8, choices=Source.choices)
+    symbol = models.CharField(max_length=64)
+    name = models.CharField(max_length=160, blank=True, default="")
+    category = models.CharField(max_length=16, choices=Category.choices)
+    provider_group = models.CharField(max_length=64, blank=True, default="")
+    isin = models.CharField(max_length=32, blank=True, default="")
+    eligible = models.BooleanField(default=False, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["source", "symbol"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "symbol"],
+                name="uniq_market_instrument_source_symbol",
+            )
+        ]
+
+
+class ArchiveFetchState(models.Model):
+    """DB-verified archive progress for one provider endpoint and symbol."""
+
+    class Endpoint(models.TextChoices):
+        STOCK_HISTORY_UNADJUSTED = "stock_history_unadjusted", "Stock history unadjusted"
+        STOCK_HISTORY_ADJUSTED = "stock_history_adjusted", "Stock history adjusted"
+        STOCK_CANDLE_UNADJUSTED = "stock_candle_unadjusted", "Stock candle unadjusted"
+        STOCK_CANDLE_ADJUSTED = "stock_candle_adjusted", "Stock candle adjusted"
+        GOLD_DAILY = "gold_daily", "Gold daily"
+
+    endpoint = models.CharField(max_length=40, choices=Endpoint.choices)
+    symbol = models.CharField(max_length=64)
+    expected_rows = models.PositiveIntegerField(default=0)
+    stored_rows = models.PositiveIntegerField(default=0)
+    missing_rows = models.PositiveIntegerField(default=0)
+    first_date = models.CharField(max_length=32, blank=True, default="")
+    last_date = models.CharField(max_length=32, blank=True, default="")
+    verified_complete = models.BooleanField(default=False, db_index=True)
+    consecutive_failures = models.PositiveIntegerField(default=0)
+    last_error = models.CharField(max_length=500, blank=True, default="")
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    next_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        ordering = ["verified_complete", "-missing_rows", "last_attempt_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["endpoint", "symbol"],
+                name="uniq_archive_endpoint_symbol",
+            )
+        ]
+
+
 class StockSymbolMetadata(models.Model):
     """Detailed metadata and fundamental metrics for a TSE stock symbol."""
 
@@ -227,4 +308,3 @@ class MarketIndexData(models.Model):
                 name="uniq_market_index_date_time",
             )
         ]
-

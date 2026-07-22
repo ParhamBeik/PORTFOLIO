@@ -33,8 +33,8 @@ HISTORY_PAYLOAD = [
 ]
 
 CANDLE_PAYLOAD = {
-    "l18": "فملی", "type": 6, "count": 2,
-    "candle_daily": [
+    "l18": "فملی", "type": 3, "count": 2,
+    "candle_daily_adjusted": [
         {"date": "1404-02-24", "open": 7380, "high": 7400, "low": 7280, "close": 7340, "volume": 180715348},
         {"date": "1404/02/25", "open": 7340, "high": 7500, "low": 7300, "close": 7450, "volume": 150000000},
     ],
@@ -88,11 +88,11 @@ def test_ingest_daily_history_skips_malformed_record_keeps_rest():
 
 @pytest.mark.django_db
 def test_ingest_candles_timeframe_mapping_and_idempotency():
-    created, _ = ingest.ingest_candles("فملی", 6, CANDLE_PAYLOAD)
+    created, _ = ingest.ingest_candles("فملی", 3, CANDLE_PAYLOAD)
     assert created == 2
     assert MarketCandle.objects.filter(timeframe="1d_adj").count() == 2
     assert MarketCandle.objects.filter(date_time="1404-02-25").exists()
-    created, skipped = ingest.ingest_candles("فملی", 6, CANDLE_PAYLOAD)
+    created, skipped = ingest.ingest_candles("فملی", 3, CANDLE_PAYLOAD)
     assert created == 0 and skipped == 2
 
 

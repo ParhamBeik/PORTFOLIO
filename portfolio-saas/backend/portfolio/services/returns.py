@@ -219,7 +219,7 @@ def _build_returns_matrix(panel: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]
     if panel.empty:
         return pd.DataFrame(), []
 
-    returns = panel.pct_change()
+    returns = panel.ffill().pct_change()
     excluded: list[dict] = []
     keep: list[str] = []
     for key in returns.columns:

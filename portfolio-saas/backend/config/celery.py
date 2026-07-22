@@ -22,7 +22,11 @@ app.autodiscover_tasks()
 app.conf.beat_schedule = {
     "fetch-prices-every-2-min": {
         "task": "portfolio.tasks.fetch_and_publish",
-        "schedule": 120.0,
+        "schedule": 300.0,
+    },
+    "marketdata-archive-every-minute": {
+        "task": "marketdata.tasks.archive_tick",
+        "schedule": 60.0,
     },
     # Warehouse sync after TSE close (~18:15 Tehran = 14:45 UTC): serial chain
     # over tracked symbols, then gold/currency history and the index snapshot.
@@ -34,6 +38,10 @@ app.conf.beat_schedule = {
     "marketdata-weekly-meta": {
         "task": "marketdata.tasks.weekly_metadata_sync",
         "schedule": crontab(day_of_week=4, hour=6, minute=0),
+    },
+    "marketdata-daily-catalog": {
+        "task": "marketdata.tasks.catalog_sync",
+        "schedule": crontab(hour=0, minute=10),
     },
 }
 
