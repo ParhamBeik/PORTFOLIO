@@ -26,7 +26,7 @@ app.conf.beat_schedule = {
     },
     "marketdata-archive-every-minute": {
         "task": "marketdata.tasks.archive_tick",
-        "schedule": 60.0,
+        "schedule": 15.0,
     },
     # Warehouse sync after TSE close (~18:15 Tehran = 14:45 UTC): serial chain
     # over tracked symbols, then gold/currency history and the index snapshot.
@@ -42,6 +42,16 @@ app.conf.beat_schedule = {
     "marketdata-daily-catalog": {
         "task": "marketdata.tasks.catalog_sync",
         "schedule": crontab(hour=0, minute=10),
+    },
+    # 24/7 Gold/Currency/Crypto 23:59 Tehran (20:29 UTC) midnight EOD aggregation
+    "aggregate-gold-currency-daily-2359": {
+        "task": "marketdata.tasks.aggregate_daily_gold_currency_history",
+        "schedule": crontab(hour=20, minute=29),
+    },
+    # Stock session 17:00 Tehran (13:30 UTC) market close EOD aggregation
+    "aggregate-stock-daily-market-close": {
+        "task": "marketdata.tasks.aggregate_daily_stock_history",
+        "schedule": crontab(hour=13, minute=30),
     },
 }
 

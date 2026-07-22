@@ -170,3 +170,137 @@ def archive_tick(max_seconds: float = 50.0):
 def catalog_sync():
     result = sync_provider_catalog()
     logger.info("catalog_sync: %d seen, %d eligible", result["seen"], result["eligible"])
+
+
+@shared_task(ignore_result=True)
+def aggregate_daily_gold_currency_history(date_str: str = None):
+    """Aggregate 24-hour (00:00 to 23:59) price ticks for Gold/Currency/Crypto at 23:59 daily."""
+    from datetime import timedelta
+    import jdatetime
+    from django.db.models import Max, Min
+    from django.utils import timezone
+    from portfolio.models import Asset, Price
+    from .models import GoldCurrencyHistory, MarketCandle
+
+    today_jalali = date_str or jdatetime.date.today().strftime("%Y-%m-%d")
+    now = timezone.now()
+    since = now - timedelta(hours=24)
+
+    assets = Asset.objects.filter(
+        asset_class__in=(Asset.AssetClass.GOLD, Asset.AssetClass.CASH)
+    ).exclude(brs_symbol="")
+
+    created_count = 0
+    for asset in assets:
+        symbol = asset.brs_symbol
+        ticks = Price.objects.filter(asset=asset, fetched_at__gte=since).order_by("fetched_at")
+        if not ticks.exists():
+            continue
+
+        open_p = ticks.first().price
+        close_p = ticks.last().price
+        stats = ticks.aggregate(high=Max("price"), low=Min("price"))
+        high_p = stats["high"] or close_p
+        low_p = stats["low"] or close_p
+
+        GoldCurrencyHistory.objects.update_or_create(
+            symbol=symbol,
+            date=today_jalali,
+            defaults={
+                "name": asset.name,
+                "unit": asset.currency,
+                "open_price": open_p,
+                "high_price": high_p,
+                "low_price": low_p,
+                "close_price": close_p,
+            },
+        )
+        MarketCandle.objects.update_or_create(
+            symbol=symbol,
+            timeframe="1d_adj",
+            date_time=today_jalali,
+            defaults={
+                "open_price": open_p,
+                "high_price": high_p,
+                "low_price": low_p,
+                "close_price": close_p,
+                "volume": 0,
+            },
+        )
+        created_count += 1
+
+    if created_count:
+        _invalidate_returns()
+    logger.info("aggregate_daily_gold_currency_history: processed %d symbols for %s", created_count, today_jalali)
+
+
+@shared_task(ignore_result=True)
+def aggregate_daily_stock_history(date_str: str = None):
+    """Aggregate trading session price ticks for stocks at market close (17:00 Tehran time)."""
+    from datetime import timedelta
+    import jdatetime
+    from django.db.models import Max, Min, Sum
+    from django.utils import timezone
+    from portfolio.models import Asset, Price
+    from .models import DailyStockHistory, MarketCandle, StockTransactionTick
+
+    today_jalali = date_str or jdatetime.date.today().strftime("%Y-%m-%d")
+    now = timezone.now()
+    since = now - timedelta(hours=12)
+
+    assets = Asset.objects.filter(
+        asset_class=Asset.AssetClass.STOCK
+    ).exclude(tse_symbol="")
+
+    created_count = 0
+    for asset in assets:
+        symbol = asset.tse_symbol
+        ticks = StockTransactionTick.objects.filter(symbol=symbol, date=today_jalali).order_by("row")
+        if ticks.exists():
+            open_p = ticks.first().price
+            close_p = ticks.last().price
+            stats = ticks.aggregate(high=Max("price"), low=Min("price"), vol=Sum("volume"))
+            high_p = stats["high"] or close_p
+            low_p = stats["low"] or close_p
+            vol = stats["vol"] or 0
+        else:
+            p_ticks = Price.objects.filter(asset=asset, fetched_at__gte=since).order_by("fetched_at")
+            if not p_ticks.exists():
+                continue
+            open_p = p_ticks.first().price
+            close_p = p_ticks.last().price
+            stats = p_ticks.aggregate(high=Max("price"), low=Min("price"))
+            high_p = stats["high"] or close_p
+            low_p = stats["low"] or close_p
+            vol = 0
+
+        DailyStockHistory.objects.update_or_create(
+            symbol=symbol,
+            date=today_jalali,
+            is_adjusted=True,
+            defaults={
+                "pf": open_p,
+                "pl": close_p,
+                "pc": close_p,
+                "pmin": low_p,
+                "pmax": high_p,
+                "tvol": vol,
+            },
+        )
+        MarketCandle.objects.update_or_create(
+            symbol=symbol,
+            timeframe="1d_adj",
+            date_time=today_jalali,
+            defaults={
+                "open_price": open_p,
+                "high_price": high_p,
+                "low_price": low_p,
+                "close_price": close_p,
+                "volume": vol,
+            },
+        )
+        created_count += 1
+
+    if created_count:
+        _invalidate_returns()
+    logger.info("aggregate_daily_stock_history: processed %d stock symbols for %s", created_count, today_jalali)

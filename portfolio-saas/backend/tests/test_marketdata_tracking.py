@@ -5,7 +5,7 @@ import pytest
 from django.core.exceptions import ValidationError
 
 from marketdata.archive import run_archive_state
-from marketdata.catalog import is_ordinary_stock
+from marketdata.catalog import is_ordinary_stock, sync_provider_catalog
 from marketdata.fetchers.base import PermanentMarketDataError, fetch_json
 from marketdata.models import (
     ApiRequestQuota,
@@ -48,6 +48,27 @@ def test_catalog_accepts_shares_and_rejects_rights_and_funds():
     assert is_ordinary_stock({"isin": "IRO3TEST0001"})
     assert not is_ordinary_stock({"isin": "IRR1TEST0101"})
     assert not is_ordinary_stock({"isin": "IRT1TEST0001"})
+
+
+def test_catalog_accepts_all_provider_currencies(settings):
+    """We choose an integration test because provider catalog sync crosses fetcher payload parsing and DB persistence."""
+    settings.TSETMC_API_KEY = "test-key"
+    settings.BRS_API_KEY = "test-key"
+    with (
+        patch("marketdata.catalog.fetch_all_symbols", return_value=[]),
+        patch("marketdata.catalog.fetch_gold_currency_free", return_value={
+            "currency": [
+                {"symbol": "USD", "name": "Dollar"},
+                {"symbol": "EUR", "name": "Euro"},
+            ],
+            "crypto": [{"symbol": "BTC", "name": "Bitcoin"}],
+        }),
+    ):
+        sync_provider_catalog()
+
+    assert MarketInstrument.objects.filter(source="brs", symbol="USD", eligible=True).exists()
+    assert MarketInstrument.objects.filter(source="brs", symbol="EUR", eligible=True).exists()
+    assert MarketInstrument.objects.filter(source="brs", symbol="BTC", eligible=False).exists()
 
 
 def test_archive_state_is_complete_only_after_rows_exist(settings):
@@ -111,11 +132,16 @@ def test_active_asset_must_exist_in_verified_catalog():
 
 def test_5m_window_rate_limit(settings):
     """We choose a unit test because verifying 5-minute rolling window rate limits tests fast, isolated business rules at the base of the test pyramid."""
+    from marketdata import quota
     from marketdata.quota import get_quota_status
     settings.MARKETDATA_DAILY_REQUEST_LIMIT = 100
     settings.MARKETDATA_ARCHIVE_REQUEST_RESERVE = 0
     settings.MARKETDATA_WINDOW_LIMIT = 3
     settings.MARKETDATA_WINDOW_SECONDS = 300
+    quota._LOCAL_WINDOW.clear()
+    client = quota.get_redis()
+    if client is not None:
+        client.delete("quota:window:5m")
 
     reserve_request(ARCHIVE)
     reserve_request(ARCHIVE)
@@ -127,4 +153,3 @@ def test_5m_window_rate_limit(settings):
     status = get_quota_status()
     assert status["window_used"] >= 3
     assert status["remaining_window"] == 0
-

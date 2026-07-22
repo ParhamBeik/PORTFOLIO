@@ -47,7 +47,7 @@ def sync_provider_catalog():
                 symbol = str(record.get("symbol", "")).strip()
                 if not symbol:
                     continue
-                eligible = provider_group == "gold" or symbol in ("USD", "USDT_IRT")
+                eligible = provider_group in ("gold", "currency")
                 rows.append(MarketInstrument(
                     source=MarketInstrument.Source.BRS,
                     symbol=symbol,
