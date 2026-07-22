@@ -179,10 +179,16 @@ export const marketHistory = (symbol, { adjusted = 0, limit = 365 } = {}) =>
   api(
     `/api/market/history/?symbol=${encodeURIComponent(symbol)}&adjusted=${adjusted}&limit=${limit}`
   );
+export const marketTicks = (symbol, date = "", limit = 500) =>
+  api(
+    `/api/market/ticks/?symbol=${encodeURIComponent(symbol)}${date ? `&date=${encodeURIComponent(date)}` : ""}&limit=${limit}`
+  );
 export const marketIndex = (limit = 365) => api(`/api/market/index/?limit=${limit}`);
 export const marketAnnouncements = (symbol, limit = 20) =>
   api(`/api/market/announcements/?symbol=${encodeURIComponent(symbol)}&limit=${limit}`);
 export const marketShareholders = (symbol) =>
   api(`/api/market/shareholders/?symbol=${encodeURIComponent(symbol)}`);
 export const marketQuota = () => api("/api/market/quota/");
+export const adminStatus = () => api("/api/market/admin/status/");
+
 

@@ -74,6 +74,8 @@ services:
       redis:
         condition: service_started
     environment: *backend-env
+    volumes:
+      - ./backend:/app
     command: celery -A config worker -l info --concurrency=2
 
   celery_beat:
@@ -84,7 +86,10 @@ services:
       celery_worker:
         condition: service_started
     environment: *backend-env
+    volumes:
+      - ./backend:/app
     command: celery -A config beat -l info
+
 
   frontend:
     build: ./frontend

@@ -200,6 +200,80 @@ button.link.danger { color: var(--red); }
 .recharts-default-tooltip { background: var(--panel-2) !important; border: 1px solid var(--border) !important; border-radius: 8px !important; }
 .recharts-cartesian-axis-tick text { fill: var(--muted); }
 
+.market-class-tabs {
+  margin: 1rem 0 .75rem;
+  max-width: 460px;
+}
+.market-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: .75rem;
+  margin: 1rem 0;
+}
+.market-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: .75rem;
+  background: var(--panel-2);
+}
+.market-group-head {
+  display: flex;
+  justify-content: space-between;
+  gap: .75rem;
+  margin-bottom: .6rem;
+}
+.market-sector { margin-top: .65rem; }
+.market-sector:first-of-type { margin-top: 0; }
+.market-sector-name {
+  color: var(--muted);
+  font-size: .75rem;
+  margin-bottom: .35rem;
+}
+.market-assets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .35rem;
+}
+.market-assets button {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: .1rem;
+  max-width: 100%;
+  padding: .4rem .55rem;
+  text-align: left;
+}
+.market-assets button.active {
+  border-color: var(--accent);
+  background: rgba(76,154,255,.14);
+}
+.market-assets small {
+  color: var(--muted);
+  font-size: .7rem;
+  line-height: 1.2;
+}
+.market-selected-name {
+  display: flex;
+  flex-direction: column;
+  gap: .15rem;
+  margin: .5rem 0 1rem;
+}
+.comparison-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: .5rem;
+  margin-top: 1rem;
+}
+.comparison-row {
+  display: flex;
+  justify-content: space-between;
+  gap: .75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: .55rem .7rem;
+  background: var(--panel-2);
+}
+
 /* Analytics metric cards */
 .metric-grid {
   display: grid;
@@ -250,3 +324,258 @@ button.link.danger { color: var(--red); }
 }
 .sub-tabs a.active { background: var(--accent); color: #fff; }
 .sub-tabs a:hover:not(.active) { background: var(--panel-2); }
+
+/* Market Controls & Redesign */
+.market-controls-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 1rem;
+  margin-bottom: 1rem;
+  background: var(--panel-2);
+  padding: 1rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 220px;
+}
+
+.control-group.flex-1 {
+  flex: 1;
+}
+
+.control-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+}
+
+.market-select {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.55rem 0.85rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.market-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+
+.market-asset-banner {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.1) 0%, rgba(37, 99, 235, 0.03) 100%);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.asset-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.asset-symbol-badge {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.95rem;
+  padding: 0.25rem 0.65rem;
+  border-radius: 6px;
+}
+
+.asset-fullname {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 600;
+}
+
+.asset-meta-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  padding: 0.2rem 0.55rem;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.sector-badge { background: rgba(16, 185, 129, 0.15); color: var(--green); border-color: rgba(16, 185, 129, 0.3); }
+.sub-badge { background: rgba(139, 92, 246, 0.15); color: #a78bfa; border-color: rgba(139, 92, 246, 0.3); }
+.pro-badge { background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; border: none; font-weight: 700; }
+.muted-badge { color: var(--muted); }
+
+.market-chart-section {
+  margin-top: 1.5rem;
+}
+
+.chart-head-info h4 {
+  margin: 0 0 0.75rem 0;
+  font-size: 1rem;
+  color: var(--text);
+}
+
+.market-comparison-section {
+  margin-top: 1.75rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1.25rem;
+}
+
+.comparison-header h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.85rem;
+}
+
+.comparison-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  cursor: pointer;
+  transition: transform 0.15s, border-color 0.15s;
+}
+
+.comparison-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+}
+
+.comp-symbol {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--text);
+}
+
+.comp-name {
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 0.15rem;
+}
+
+.comp-meta {
+  font-size: 0.7rem;
+  color: var(--accent);
+  margin-top: 0.35rem;
+}
+
+/* Admin Portal Styles */
+.admin-portal {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.admin-header-card {
+  border-left: 4px solid var(--accent);
+}
+
+.admin-header-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.admin-header-title h2 {
+  margin: 0;
+}
+
+.admin-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.admin-tabs button {
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  font-weight: 600;
+}
+
+.progress-bar-wrap {
+  width: 100%;
+  height: 10px;
+  background: var(--panel-2);
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 1rem 0;
+  border: 1px solid var(--border);
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #10b981 0%, #3b82f6 100%);
+  border-radius: 6px;
+  transition: width 0.4s ease;
+}
+
+.btn-secondary {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 0.45rem 0.9rem;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background 0.15s;
+}
+
+.btn-secondary:hover {
+  background: var(--border);
+}
+
+.link-btn {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.link-btn:hover {
+  border-color: var(--accent);
+}
+
+.truncate {
+  max-width: 250px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+

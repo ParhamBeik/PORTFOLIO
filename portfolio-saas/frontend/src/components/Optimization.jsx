@@ -24,6 +24,9 @@ const SCENARIOS = [
   { key: "hrp", label: "HRP", hint: "Hierarchical risk parity" },
 ];
 
+const signedPct = (value) => `${value >= 0 ? "+" : ""}${fmtPct(value)}`;
+const signedToman = (value) => `${Number(value) >= 0 ? "+" : "-"}${fmtToman(Math.abs(Number(value)))}`;
+
 // Pro: scenario optimizer + efficient frontier. The frontier is fetched once;
 // re-running a scenario hits the cached returns matrix on the backend.
 export default function Optimization({ user, account = null }) {
@@ -163,19 +166,36 @@ export default function Optimization({ user, account = null }) {
             ) : (
               <table className="holdings">
                 <thead>
-                  <tr><th>Asset</th><th>Action</th><th>Δ weight</th><th>Δ value (T)</th></tr>
+                  <tr>
+                    <th>Asset</th>
+                    <th>Action</th>
+                    <th>Current</th>
+                    <th>Target</th>
+                    <th>Δ weight</th>
+                    <th>Δ value (T)</th>
+                  </tr>
                 </thead>
                 <tbody>
-                  {result.rebalance_trades.map((t) => (
-                    <tr key={t.key}>
-                      <td>{labelOf(t.key)}</td>
-                      <td className={t.action === "buy" ? "pos" : "neg"}>
-                        {t.action.toUpperCase()}
-                      </td>
-                      <td>{fmtPct(Math.abs(t.delta_weight_pct))}</td>
-                      <td>{fmtToman(t.delta_value_tomans)}</td>
-                    </tr>
-                  ))}
+                  {result.rebalance_trades.map((t) => {
+                    const current = (result.current_weights[t.key] || 0) * 100;
+                    const target = (result.target_weights[t.key] || 0) * 100;
+                    const delta = target - current;
+                    const signedValue = Math.abs(Number(t.delta_value_tomans)) * (t.action === "buy" ? 1 : -1);
+                    return (
+                      <tr key={t.key}>
+                        <td>{labelOf(t.key)}</td>
+                        <td className={t.action === "buy" ? "pos" : "neg"}>
+                          {t.action.toUpperCase()}
+                        </td>
+                        <td>{fmtPct(current)}</td>
+                        <td>{fmtPct(target)}</td>
+                        <td className={delta >= 0 ? "pos" : "neg"}>{signedPct(delta)} pp</td>
+                        <td className={signedValue >= 0 ? "pos" : "neg"}>
+                          {signedToman(signedValue)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )}

@@ -15,9 +15,6 @@ import {
 import { subscribePrices } from "../sse.js";
 import { fmtNum, fmtTehranTime, fmtToman } from "../format.js";
 import NetWorthChart from "./NetWorthChart.jsx";
-import Analytics from "./Analytics.jsx";
-import Insights from "./Insights.jsx";
-import Optimization from "./Optimization.jsx";
 import { usePortfolio } from "./PortfolioContext.jsx";
 
 const RECONCILE_MS = 60000; // full refresh to pick up holding edits / recompute totals
@@ -32,7 +29,7 @@ export default function Portfolio({ user }) {
   const [error, setError] = useState("");
   const [lastUpdate, setLastUpdate] = useState(null);
   // Net-worth chart timeframe (days). "All" maps to the backend's 365-day cap.
-  const [chartDays, setChartDays] = useState(30);
+  const [chartDays, setChartDays] = useState(7);
 
   // New-account form
   const [accName, setAccName] = useState("");
@@ -432,14 +429,6 @@ export default function Portfolio({ user }) {
         </section>
       )}
 
-      {/* Pro analytics, scoped to the active portfolio via ?account=. Rendered on dashboard only for Pro users. */}
-      {user?.is_pro && (
-        <>
-          <Analytics user={user} account={activeId} />
-          <Insights user={user} account={activeId} />
-          <Optimization user={user} account={activeId} />
-        </>
-      )}
     </div>
   );
 }

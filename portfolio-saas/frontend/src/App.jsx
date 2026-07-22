@@ -10,7 +10,9 @@ import OptimizationLayout from "./components/OptimizationLayout.jsx";
 import Optimization from "./components/Optimization.jsx";
 import Insights from "./components/Insights.jsx";
 import Analytics from "./components/Analytics.jsx";
+import AdminPortal from "./components/AdminPortal.jsx";
 import { PortfolioProvider, usePortfolio } from "./components/PortfolioContext.jsx";
+
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -40,6 +42,8 @@ export default function App() {
             <Route index element={<Portfolio user={user} />} />
             <Route path="market" element={<MarketData user={user} />} />
             <Route path="billing" element={<Billing user={user} setUser={setUser} />} />
+            <Route path="admin" element={<AdminPortal user={user} />} />
+
             {/* Legacy deep links */}
             <Route path="accounts/:id" element={<AccountRedirect />} />
             <Route path="dashboard" element={<Navigate to="/" replace />} />
@@ -111,6 +115,10 @@ function Shell({ user, setUser }) {
           <NavLink to="/billing" className={({ isActive }) => (isActive ? "active" : "")}>
             Billing
           </NavLink>
+          <NavLink to="/admin" className={({ isActive }) => (isActive ? "active" : "")}>
+            Admin
+          </NavLink>
+
         </nav>
         <div className="userbox">
           <span className="tier-badge">{user.is_pro ? "PRO" : "FREE"}</span>
