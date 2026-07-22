@@ -59,3 +59,13 @@ def test_stream_endpoint_rejects_anonymous(monkeypatch):
     assert resp.status_code == 401
     resp = client.get("/api/prices/stream/?token=garbage")
     assert resp.status_code == 401
+
+
+def test_sse_rate_limit_constants():
+    """Verify stream concurrency cap and connection TTL constants."""
+    from portfolio.live.sse import CONN_TTL_SECONDS, MAX_STREAMS_PER_IP, MAX_STREAMS_PER_USER
+
+    assert MAX_STREAMS_PER_USER == 10
+    assert MAX_STREAMS_PER_IP == 30
+    assert CONN_TTL_SECONDS == 60
+

@@ -184,3 +184,5 @@ export const marketAnnouncements = (symbol, limit = 20) =>
   api(`/api/market/announcements/?symbol=${encodeURIComponent(symbol)}&limit=${limit}`);
 export const marketShareholders = (symbol) =>
   api(`/api/market/shareholders/?symbol=${encodeURIComponent(symbol)}`);
+export const marketQuota = () => api("/api/market/quota/");
+

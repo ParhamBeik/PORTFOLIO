@@ -19,10 +19,10 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from portfolio.services import get_latest_prices
 from .pubsub import CHANNEL, get_redis
 
-MAX_STREAMS_PER_USER = 3
-MAX_STREAMS_PER_IP = 10  # H5: cap concurrent streams per source address
+MAX_STREAMS_PER_USER = 10
+MAX_STREAMS_PER_IP = 30  # H5: cap concurrent streams per source address
 HEARTBEAT_SECONDS = 15
-CONN_TTL_SECONDS = 3600
+CONN_TTL_SECONDS = 60
 
 
 def format_event(event_type: str, data) -> str:

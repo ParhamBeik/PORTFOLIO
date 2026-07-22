@@ -135,11 +135,15 @@ class MarketAssetsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from .models import MarketInstrument
+
+        # Standard active template assets first
         assets = (
             Asset.objects.filter(is_active=True)
             .exclude(tse_symbol="", brs_symbol="")
             .order_by("asset_class", "name")
         )
+        seen_symbols = set()
         rows = []
         for asset in assets:
             if asset.tse_symbol:
@@ -153,6 +157,7 @@ class MarketAssetsView(APIView):
                 series = GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol)
                 source = "gold"
                 symbol = asset.brs_symbol
+            seen_symbols.add(symbol)
             dates = series.order_by("date").values_list("date", flat=True)
             first = dates.first()
             last = dates.last()
@@ -165,43 +170,97 @@ class MarketAssetsView(APIView):
                 "first_date": first,
                 "last_date": last,
             })
+
+        # Include all eligible provider catalog instruments not already listed
+        instruments = MarketInstrument.objects.filter(eligible=True).order_by("category", "symbol")
+        for inst in instruments:
+            if inst.symbol in seen_symbols:
+                continue
+            seen_symbols.add(inst.symbol)
+            if inst.source == MarketInstrument.Source.TSETMC or inst.category == MarketInstrument.Category.STOCK:
+                series = DailyStockHistory.objects.filter(symbol=inst.symbol)
+                source = "stock"
+            else:
+                series = GoldCurrencyHistory.objects.filter(symbol=inst.symbol)
+                source = "gold"
+            dates = series.order_by("date").values_list("date", flat=True)
+            first = dates.first()
+            last = dates.last()
+            rows.append({
+                "key": f"sym:{inst.symbol}",
+                "name": inst.name or inst.symbol,
+                "symbol": inst.symbol,
+                "source": source,
+                "records": series.count(),
+                "first_date": first,
+                "last_date": last,
+            })
+
         return Response(rows)
 
 
 class PerformanceView(APIView):
-    """Unified full-history OHLC performance for one supported asset."""
+    """Unified full-history OHLC performance for any supported asset or symbol."""
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        asset_key = request.query_params.get("asset")
+        from .models import MarketInstrument
+
+        asset_key = request.query_params.get("asset", "").strip()
+        if not asset_key:
+            return Response({"detail": "asset query param required."}, status=400)
+
+        # 1. Check if asset_key matches an Asset.key
         asset = Asset.objects.filter(key=asset_key, is_active=True).first()
-        if asset is None:
-            return Response({"detail": "Unknown or unsupported asset."}, status=400)
         limit = _limit(request, 5000, 5000)
-        if asset.tse_symbol:
+
+        symbol = ""
+        source = ""
+        name = ""
+
+        if asset:
+            name = asset.name
+            if asset.tse_symbol:
+                symbol = asset.tse_symbol
+                source = "stock"
+            elif asset.brs_symbol:
+                symbol = asset.brs_symbol
+                source = "gold"
+        else:
+            # 2. Check if asset_key is a raw symbol or sym:<symbol>
+            raw_sym = asset_key.replace("sym:", "").strip()
+            inst = MarketInstrument.objects.filter(symbol=raw_sym).first()
+            if inst:
+                symbol = inst.symbol
+                name = inst.name or inst.symbol
+                source = "stock" if inst.source == MarketInstrument.Source.TSETMC else "gold"
+            else:
+                symbol = raw_sym
+                name = raw_sym
+                source = "stock"
+
+        if source == "stock" or DailyStockHistory.objects.filter(symbol=symbol).exists():
             rows = list(
                 DailyStockHistory.objects.filter(
-                    symbol=asset.tse_symbol,
-                    is_adjusted=True,
+                    symbol=symbol,
                 ).order_by("-date")[:limit]
             )
             series = [
                 {
                     "date": row.date,
-                    "open": float(row.pf),
-                    "high": float(row.pmax),
-                    "low": float(row.pmin),
+                    "open": float(row.pf) if row.pf is not None else float(row.pl),
+                    "high": float(row.pmax) if row.pmax is not None else float(row.pl),
+                    "low": float(row.pmin) if row.pmin is not None else float(row.pl),
                     "close": float(row.pl),
                     "volume": row.tvol,
                 }
                 for row in reversed(rows)
             ]
             source = "stock"
-            symbol = asset.tse_symbol
-        elif asset.brs_symbol:
+        else:
             rows = list(
-                GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol)
+                GoldCurrencyHistory.objects.filter(symbol=symbol)
                 .order_by("-date")[:limit]
             )
             series = [
@@ -216,14 +275,11 @@ class PerformanceView(APIView):
                 for row in reversed(rows)
             ]
             source = "gold"
-            symbol = asset.brs_symbol
-        else:
-            return Response({"detail": "Asset has no verified provider source."}, status=400)
 
         return Response({
             "asset": {
-                "key": asset.key,
-                "name": asset.name,
+                "key": asset_key,
+                "name": name,
                 "symbol": symbol,
                 "source": source,
             },
@@ -288,3 +344,26 @@ class ShareholdersView(APIView):
             }
             for r in rows
         ])
+
+
+class QuotaStatusView(APIView):
+    """GET /api/market/quota/ - Returns daily quota usage, 5-min window quota, and archive backfill progress."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .models import ArchiveFetchState
+        from .quota import get_quota_status
+
+        status_data = get_quota_status()
+        total_states = ArchiveFetchState.objects.count()
+        complete_states = ArchiveFetchState.objects.filter(verified_complete=True).count()
+        progress_pct = round((complete_states / total_states * 100), 2) if total_states > 0 else 0.0
+        status_data["archive_progress"] = {
+            "total_states": total_states,
+            "complete_states": complete_states,
+            "pending_states": max(0, total_states - complete_states),
+            "progress_pct": progress_pct,
+        }
+        return Response(status_data)
+

@@ -13,10 +13,10 @@ from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-insecure-change-me")
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-insecure-change-me-must-be-at-least-32-bytes-long-for-jwt-hs256!")
 DEBUG = os.getenv("DJANGO_DEBUG", "1") == "1"
 # H7: refuse to boot a non-debug server on the committed default key.
-if not DEBUG and SECRET_KEY == "dev-insecure-change-me":
+if not DEBUG and SECRET_KEY.startswith("dev-insecure-change-me"):
     raise ImproperlyConfigured("Set DJANGO_SECRET_KEY when DJANGO_DEBUG=0.")
 ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,backend").split(",")
 
@@ -167,6 +167,8 @@ TSETMC_SYMBOL_URL = os.getenv(
 # Seconds to sleep between BrsApi calls inside one sync task (paid API courtesy).
 MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "1.0"))
 MARKETDATA_DAILY_REQUEST_LIMIT = int(os.getenv("MARKETDATA_DAILY_REQUEST_LIMIT", "9800"))
+MARKETDATA_WINDOW_LIMIT = int(os.getenv("MARKETDATA_WINDOW_LIMIT", "1000"))
+MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
 MARKETDATA_ARCHIVE_REQUEST_RESERVE = int(
     os.getenv("MARKETDATA_ARCHIVE_REQUEST_RESERVE", "8820")
 )

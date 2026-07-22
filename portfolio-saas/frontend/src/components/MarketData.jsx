@@ -4,6 +4,7 @@ import {
   marketAnnouncements,
   marketAssets,
   marketPerformance,
+  marketQuota,
   marketShareholders,
 } from "../api.js";
 import { fmtNum, fmtPct, fmtTomanCompact } from "../format.js";
@@ -15,8 +16,19 @@ export default function MarketData({ user }) {
   const [assets, setAssets] = useState(null);
   const [assetKey, setAssetKey] = useState("");
   const [performance, setPerformance] = useState(null);
+  const [quota, setQuota] = useState(null);
   const [windowName, setWindowName] = useState("1Y");
   const [err, setErr] = useState("");
+
+  const refreshQuota = () => {
+    marketQuota().then(setQuota).catch(() => {});
+  };
+
+  useEffect(() => {
+    refreshQuota();
+    const interval = setInterval(refreshQuota, 15000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     marketAssets()
@@ -61,6 +73,50 @@ export default function MarketData({ user }) {
     <div className="dashboard">
       {err && <div className="error">{err}</div>}
 
+      {quota && (
+        <section className="card quota-card" style={{ marginBottom: "1.5rem" }}>
+          <div className="card-head">
+            <h3>⚡ Rate Limit & Backfill Tracking System</h3>
+            <button
+              className="btn btn-sm"
+              onClick={() => {
+                refreshQuota();
+                marketAssets().then(setAssets);
+                if (assetKey) marketPerformance(assetKey).then(setPerformance);
+              }}
+            >
+              🔄 Refresh Status
+            </button>
+          </div>
+          <div className="metric-grid">
+            <div className="metric">
+              <span className="muted small">Daily Quota Used ({quota.day})</span>
+              <strong style={{ fontSize: "1.1rem" }}>
+                {fmtNum(quota.used)} / {fmtNum(quota.limit)}
+              </strong>
+              <span className="muted xsmall">{fmtNum(quota.remaining_daily)} remaining today</span>
+            </div>
+            <div className="metric">
+              <span className="muted small">5-Min Window Quota</span>
+              <strong style={{ fontSize: "1.1rem" }}>
+                {fmtNum(quota.window_used)} / {fmtNum(quota.window_limit)}
+              </strong>
+              <span className="muted xsmall">{fmtNum(quota.remaining_window)} remaining in 5m</span>
+            </div>
+            <div className="metric">
+              <span className="muted small">Archive Backfill Coverage</span>
+              <strong style={{ fontSize: "1.1rem" }}>
+                {fmtNum(quota.archive_progress?.complete_states || 0)} /{" "}
+                {fmtNum(quota.archive_progress?.total_states || 0)} states
+              </strong>
+              <span className="muted xsmall">
+                {quota.archive_progress?.progress_pct || 0}% verified complete
+              </span>
+            </div>
+          </div>
+        </section>
+      )}
+
       <section className="card">
         <div className="card-head">
           <h2>Market Performance</h2>
@@ -81,7 +137,7 @@ export default function MarketData({ user }) {
           <select value={assetKey} onChange={(event) => setAssetKey(event.target.value)}>
             {(assets || []).map((asset) => (
               <option key={asset.key} value={asset.key}>
-                {asset.name}
+                {asset.name} ({asset.symbol}) — {asset.records} days
               </option>
             ))}
           </select>

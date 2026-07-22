@@ -107,3 +107,24 @@ def test_active_asset_must_exist_in_verified_catalog():
             asset_class=Asset.AssetClass.GOLD,
             brs_symbol="NOT_REAL",
         )
+
+
+def test_5m_window_rate_limit(settings):
+    """We choose a unit test because verifying 5-minute rolling window rate limits tests fast, isolated business rules at the base of the test pyramid."""
+    from marketdata.quota import get_quota_status
+    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 100
+    settings.MARKETDATA_ARCHIVE_REQUEST_RESERVE = 0
+    settings.MARKETDATA_WINDOW_LIMIT = 3
+    settings.MARKETDATA_WINDOW_SECONDS = 300
+
+    reserve_request(ARCHIVE)
+    reserve_request(ARCHIVE)
+    reserve_request(ARCHIVE)
+
+    with pytest.raises(QuotaExhausted):
+        reserve_request(ARCHIVE)
+
+    status = get_quota_status()
+    assert status["window_used"] >= 3
+    assert status["remaining_window"] == 0
+

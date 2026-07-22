@@ -61,9 +61,10 @@ export function subscribePrices({ onPrices, onOpen, onError } = {}) {
       if (failures >= 3) {
         startPolling(); // SSE unreliable here; keep data flowing via polling
         onError?.(new Error("SSE unavailable; polling"));
+      } else {
+        backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+        setTimeout(connect, backoff);
       }
-      backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
-      setTimeout(connect, backoff);
     });
   };
 

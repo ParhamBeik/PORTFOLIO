@@ -136,16 +136,31 @@ def weekly_metadata_sync():
 
 
 @shared_task(ignore_result=True)
-def archive_tick():
-    """Claim a quota-safe batch and verify every provider row exists in PostgreSQL."""
+def archive_tick(max_seconds: float = 50.0):
+    """Claim quota-safe batches and continuously backfill PostgreSQL as long as quota remains."""
     ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
     completed = 0
-    for state_id in claim_archive_batch():
-        try:
-            state = run_archive_state(state_id)
-        except QuotaExhausted:
+    start_time = time.monotonic()
+
+    while time.monotonic() - start_time < max_seconds:
+        batch = claim_archive_batch()
+        if not batch:
             break
-        completed += int(state.verified_complete)
+        processed_in_batch = False
+        for state_id in batch:
+            try:
+                state = run_archive_state(state_id)
+                completed += int(state.verified_complete)
+                processed_in_batch = True
+            except QuotaExhausted as err:
+                logger.info("archive_tick paused: %s", err)
+                if completed:
+                    _invalidate_returns()
+                logger.info("archive_tick finished: %d states verified complete", completed)
+                return
+        if not processed_in_batch:
+            break
+
     if completed:
         _invalidate_returns()
     logger.info("archive_tick: %d states verified complete", completed)

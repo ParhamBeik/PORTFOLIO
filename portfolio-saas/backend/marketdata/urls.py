@@ -12,4 +12,5 @@ urlpatterns = [
     path("performance/", views.PerformanceView.as_view(), name="market-performance"),
     path("announcements/", views.AnnouncementsView.as_view(), name="market-announcements"),
     path("shareholders/", views.ShareholdersView.as_view(), name="market-shareholders"),
+    path("quota/", views.QuotaStatusView.as_view(), name="market-quota"),
 ]

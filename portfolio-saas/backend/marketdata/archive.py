@@ -25,18 +25,22 @@ STOCK_ENDPOINTS = (
 )
 
 
-def ensure_archive_states(stock_symbols, gold_symbols):
+def ensure_archive_states(stock_symbols=None, gold_symbols=None):
     from .models import MarketInstrument
     from .catalog import sync_provider_catalog
 
-    if not MarketInstrument.objects.exists():
+    if not MarketInstrument.objects.filter(eligible=True).exists():
         try:
             sync_provider_catalog()
-            from .tasks import tracked_tse_symbols, tracked_brs_symbols
-            stock_symbols = tracked_tse_symbols()
-            gold_symbols = tracked_brs_symbols()
         except Exception:
             pass
+
+    if stock_symbols is None or not stock_symbols:
+        from .tasks import tracked_tse_symbols
+        stock_symbols = tracked_tse_symbols()
+    if gold_symbols is None or not gold_symbols:
+        from .tasks import tracked_brs_symbols
+        gold_symbols = tracked_brs_symbols()
 
     rows = [
         ArchiveFetchState(endpoint=endpoint, symbol=symbol)
@@ -50,7 +54,8 @@ def ensure_archive_states(stock_symbols, gold_symbols):
         )
         for symbol in gold_symbols
     ]
-    ArchiveFetchState.objects.bulk_create(rows, ignore_conflicts=True)
+    if rows:
+        ArchiveFetchState.objects.bulk_create(rows, ignore_conflicts=True)
 
 
 def _fetch_and_ingest(state):
