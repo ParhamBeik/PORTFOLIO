@@ -1,8 +1,16 @@
 """API tests for the /api/market/ warehouse endpoints (FREE vs PRO gating)."""
+from decimal import Decimal
+
 import pytest
 from rest_framework.test import APIClient
 
-from marketdata.models import CodalAnnouncement, GoldCurrencyHistory, MarketCandle
+from marketdata.models import (
+    CodalAnnouncement,
+    DailyStockHistory,
+    GoldCurrencyHistory,
+    MarketCandle,
+    StockSymbolMetadata,
+)
 from portfolio.models import Asset
 
 pytestmark = pytest.mark.django_db
@@ -90,7 +98,10 @@ def test_market_assets_and_gold_performance(make_user, asset_catalog):
     ])
     client = _auth(make_user())
     assets = client.get("/api/market/assets/").json()
-    assert any(row["key"] == "emami_coin" and row["records"] == 2 for row in assets)
+    row = next(row for row in assets if row["key"] == "emami_coin")
+    assert row["records"] == 2
+    assert row["asset_class"] == "Gold"
+    assert row["source"] == "gold"
     response = client.get("/api/market/performance/?asset=emami_coin")
     assert response.status_code == 200
     body = response.json()
@@ -104,3 +115,65 @@ def test_performance_rejects_inactive_asset(make_user, asset_catalog):
     asset.save(update_fields=["is_active"])
     response = _auth(make_user()).get("/api/market/performance/?asset=bitcoin_usd")
     assert response.status_code == 400
+
+
+def test_market_assets_include_stock_industry_and_currency_groups(make_user, asset_catalog):
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    usd = asset_catalog["usd_cash"]
+    usd.brs_symbol = "USD"
+    usd.save(update_fields=["brs_symbol"])
+    StockSymbolMetadata.objects.create(
+        ins_code=1,
+        l18="کاما",
+        l30="Bama",
+        sector="Mining",
+        sector_sub="Lead and zinc",
+    )
+    DailyStockHistory.objects.create(
+        symbol="کاما",
+        date="1404-01-02",
+        pl=Decimal("7000"),
+        pc=Decimal("7000"),
+        is_adjusted=True,
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USD",
+        date="1404-01-02",
+        close_price=Decimal("63200"),
+    )
+
+    rows = _auth(make_user()).get("/api/market/assets/").json()
+    kama = next(row for row in rows if row["key"] == "kama_stock")
+    dollar = next(row for row in rows if row["key"] == "usd_cash")
+    assert kama["asset_class"] == "Stock"
+    assert kama["source"] == "stock"
+    assert kama["sector"] == "Mining"
+    assert kama["sector_sub"] == "Lead and zinc"
+    assert dollar["asset_class"] == "Cash"
+    assert dollar["source"] == "currency"
+
+
+def test_ticks_returns_series(make_user):
+    from marketdata.models import StockTransactionTick
+    StockTransactionTick.objects.create(
+        symbol="کاما",
+        date="1404-01-02",
+        time="09:30:00",
+        row=1,
+        price=Decimal("7050"),
+        volume=5000,
+        canceled=False,
+    )
+    resp = _auth(make_user()).get("/api/market/ticks/?symbol=کاما")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["price"] == 7050.0
+    assert body[0]["volume"] == 5000
+
+
+def test_ticks_requires_symbol(make_user):
+    resp = _auth(make_user()).get("/api/market/ticks/")
+    assert resp.status_code == 400

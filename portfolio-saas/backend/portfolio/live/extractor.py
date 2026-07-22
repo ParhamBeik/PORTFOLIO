@@ -108,6 +108,19 @@ def _price_from_tsetmc_record(record):
     return Decimal("0")
 
 
+def _normalize_toman_price(price: Decimal, symbol: str) -> Decimal:
+    """Normalize raw provider prices into Tomans (TMN).
+
+    BrsApi returns fiat currency quotes (USD, EUR, GBP, AED, etc.) in Rials (IRR).
+    Dividing raw quotes over 500,000 by 10 converts them accurately to Tomans.
+    """
+    if price <= 0:
+        return Decimal("0")
+    if symbol in ("USD", "EUR", "GBP", "AED", "CNY", "CAD", "AUD", "CHF") and price > 500000:
+        return (price / Decimal("10")).quantize(Decimal("1"))
+    return price
+
+
 def extract_standard_prices(raw_data, last_prices=None):
     """Create the standard price map used by snapshots and valuation.
 
@@ -123,7 +136,7 @@ def extract_standard_prices(raw_data, last_prices=None):
     prices["half_coin"] = _lookup_price(lookup, ["IR_COIN_HALF"])
     prices["quarter_coin"] = _lookup_price(lookup, ["IR_COIN_QUARTER"])
     prices["gold_18k_gram"] = _lookup_price(lookup, ["IR_GOLD_18K"])
-    prices["usd_cash"] = _lookup_price(lookup, ["USD"])
+    prices["usd_cash"] = _normalize_toman_price(_lookup_price(lookup, ["USD"]), "USD")
     prices["bitcoin_usd"] = _lookup_price(
         lookup, ["BTC", "BTCUSDT", "BITCOIN", "Bitcoin", "بیتکوین", "بیت کوین"]
     )
@@ -133,7 +146,7 @@ def extract_standard_prices(raw_data, last_prices=None):
     prices["usdt_irt"] = _convert_usd_quote_to_tomans(
         tether_price, prices.get("usd_cash", Decimal("0"))
     )
-    prices["euro_cash"] = _lookup_price(lookup, ["EUR", "EURO", "Euro", "یورو"])
+    prices["euro_cash"] = _normalize_toman_price(_lookup_price(lookup, ["EUR", "EURO", "Euro", "یورو"]), "EUR")
     prices["gold_ounce_usd"] = _lookup_price(
         lookup, ["XAUUSD", "XAU", "GOLD_OUNCE", "Gold Ounce (Global)", "اونس طلا", "انس طلا"]
     )
