@@ -237,12 +237,28 @@ class ShareholderRecord(models.Model):
 
 
 class CodalAnnouncement(models.Model):
-    """Codal financial disclosures and corporate notices."""
+    """Codal financial disclosures, quarterly reports, and corporate notices (Categories 1-11)."""
+
+    class Category(models.IntegerChoices):
+        GENERAL = 1, "General Disclosures"
+        STATEMENTS = 2, "Periodic Financial Statements"
+        PRODUCTION_SALES = 3, "Monthly Production & Sales"
+        BOARD_REPORT = 4, "Board of Directors Report"
+        AUDITOR_REPORT = 5, "Auditor Notes & Opinion"
+        ASSEMBLY_DECISION = 6, "General Assembly Decision"
+        CAPITAL_INCREASE = 7, "Capital Increase Announcement"
+        PORTFOLIO = 8, "Monthly Investment Portfolio"
+        GOVERNANCE = 9, "Corporate Governance"
+        SUBSIDIARIES = 10, "Subsidiary Financial Statements"
+        PROSPECTUS = 11, "IPO & Bond Prospectus"
 
     symbol = models.CharField(max_length=64, db_index=True)
     company_name = models.CharField(max_length=255, blank=True, default="")
     title = models.TextField()
     code = models.CharField(max_length=64, blank=True, default="")
+    category = models.IntegerField(choices=Category.choices, null=True, blank=True, db_index=True)
+    category_title = models.CharField(max_length=120, blank=True, default="")
+    is_audited = models.BooleanField(null=True, blank=True)
     date_title = models.CharField(max_length=20, blank=True, default="")
     date_send = models.CharField(max_length=10, blank=True, default="")
     time_send = models.CharField(max_length=8, blank=True, default="")

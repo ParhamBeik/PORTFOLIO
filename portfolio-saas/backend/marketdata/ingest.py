@@ -223,11 +223,15 @@ def ingest_codal(payload) -> tuple[int, int]:
     rows, bad = [], 0
     for rec in records:
         try:
+            cat_val = rec.get("category")
             rows.append(CodalAnnouncement(
                 symbol=rec.get("l18", "") or "",
                 company_name=rec.get("l30", "") or "",
                 title=rec["title"],
                 code=rec.get("code", "") or "",
+                category=int(cat_val) if cat_val is not None else None,
+                category_title=rec.get("category_title", "") or "",
+                is_audited=rec.get("is_audited") if isinstance(rec.get("is_audited"), bool) else None,
                 date_title=normalize_jalali(rec.get("date_title", "")),
                 date_send=normalize_jalali(rec.get("date_send", "")),
                 time_send=rec.get("time_send", "") or "",
@@ -249,25 +253,43 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
     """Gold_Currency_Pro.php history=2 payload -> GoldCurrencyHistory rows.
 
     The payload carries symbol/name/unit at the top level and the day records
-    under `history_daily`.
+    under `history_daily`. Converts raw provider Rial quotes into Tomans.
     """
     if not isinstance(payload, dict) or not isinstance(payload.get("history_daily"), list):
         return 0, 0 if payload is None else 1
     symbol = payload.get("symbol", "") or ""
     name = payload.get("name", "") or ""
-    unit = payload.get("unit", "") or ""
+    raw_unit = payload.get("unit", "") or ""
+
+    is_rial = (
+        raw_unit == "ریال"
+        or symbol in ("USD", "EUR", "GBP", "AED", "CNY", "CAD", "AUD", "CHF")
+    )
+    unit = "تومان" if is_rial else raw_unit
+
     rows, bad = [], 0
     for rec in payload["history_daily"]:
         try:
+            c = float(rec["close"])
+            o = float(rec.get("open")) if rec.get("open") is not None else c
+            h = float(rec.get("high")) if rec.get("high") is not None else c
+            l = float(rec.get("low")) if rec.get("low") is not None else c
+
+            if is_rial and c > 500000:
+                c /= 10.0
+                o /= 10.0
+                h /= 10.0
+                l /= 10.0
+
             rows.append(GoldCurrencyHistory(
                 symbol=symbol,
                 name=name,
                 unit=unit,
                 date=normalize_jalali(rec["date"]),
-                open_price=rec.get("open"),
-                high_price=rec.get("high"),
-                low_price=rec.get("low"),
-                close_price=rec["close"],
+                open_price=round(o, 4),
+                high_price=round(h, 4),
+                low_price=round(l, 4),
+                close_price=round(c, 4),
             ))
         except (KeyError, TypeError, ValueError):
             bad += 1
