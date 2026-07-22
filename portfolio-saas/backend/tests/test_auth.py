@@ -63,3 +63,27 @@ def test_jwt_access_token_authenticates_me():
     resp = client.get("/api/auth/me/")
     assert resp.status_code == 200
     assert resp.json()["email"] == "jwt@test.test"
+
+
+def test_register_rejects_weak_all_numeric_password():
+    """AUTH_PASSWORD_VALIDATORS must apply on register (previously bypassed)."""
+    resp = APIClient().post(
+        "/api/auth/register/",
+        {"email": "weak@test.test", "password": "12345678"},
+        format="json",
+    )
+    assert resp.status_code == 400
+    assert "password" in resp.json()
+
+    from accounts.models import User
+    assert not User.objects.filter(email="weak@test.test").exists()
+
+
+def test_register_rejects_too_short_password():
+    resp = APIClient().post(
+        "/api/auth/register/",
+        {"email": "short@test.test", "password": "Ab1!"},
+        format="json",
+    )
+    assert resp.status_code == 400
+    assert "password" in resp.json()

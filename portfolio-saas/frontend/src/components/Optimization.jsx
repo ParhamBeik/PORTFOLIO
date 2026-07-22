@@ -26,7 +26,7 @@ const SCENARIOS = [
 
 // Pro: scenario optimizer + efficient frontier. The frontier is fetched once;
 // re-running a scenario hits the cached returns matrix on the backend.
-export default function Optimization({ user }) {
+export default function Optimization({ user, account = null }) {
   const [scenario, setScenario] = useState("max_sharpe");
   const [result, setResult] = useState(null);
   const [front, setFront] = useState(null);
@@ -39,16 +39,22 @@ export default function Optimization({ user }) {
 
   useEffect(() => {
     if (!user.is_pro) return;
+    let current = true;
     setErr("");
-    optimize(scenario)
-      .then((r) => { setResult(r); setErr(""); })
-      .catch((e) => { setResult(null); setErr(e.message); });
-  }, [scenario, user.is_pro]);
+    optimize(scenario, null, account)
+      .then((r) => { if (current) { setResult(r); setErr(""); } })
+      .catch((e) => { if (current) { setResult(null); setErr(e.message); } });
+    return () => { current = false; };
+  }, [scenario, user.is_pro, account]);
 
   useEffect(() => {
     if (!user.is_pro) return;
-    frontier().then(setFront).catch(() => {});
-  }, [user.is_pro]);
+    let current = true;
+    frontier(account)
+      .then((value) => { if (current) setFront(value); })
+      .catch(() => {});
+    return () => { current = false; };
+  }, [user.is_pro, account]);
 
   const labelOf = useMemo(() => {
     const m = new Map(catalog.map((a) => [a.key, a.name_fa || a.name]));

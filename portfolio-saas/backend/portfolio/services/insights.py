@@ -8,7 +8,7 @@ it so the frontend can render it consistently.
 from decimal import Decimal
 
 from portfolio.models import Snapshot
-from portfolio.services import value_user
+from portfolio.services import value_account, value_user
 
 # A healthy portfolio keeps any single liquid asset below this share.
 CONCENTRATION_THRESHOLD = Decimal("0.40")
@@ -17,7 +17,11 @@ GOLD_BAND = (Decimal("0.20"), Decimal("0.50"))
 
 
 def _liquid_items(valuation: dict) -> list:
-    items = [i for acct in valuation["accounts"] for i in acct["items"]]
+    # value_user() returns {'accounts': [...]}; value_account() returns {'items': [...]}
+    # with no 'accounts' key. Tolerate both so the same helpers serve per-account
+    # and whole-user scopes.
+    accounts = valuation.get("accounts") or [{"items": valuation.get("items", [])}]
+    items = [i for acct in accounts for i in acct["items"]]
     return [i for i in items if i["class"] != "Real Estate"]
 
 
@@ -77,11 +81,18 @@ def gold_band_suggestion(valuation: dict) -> dict:
     return {"severity": "ok", "message": f"Gold allocation ({gold}%) is within target band."}
 
 
-def net_worth_trend(user, days: int = 7) -> dict:
-    """Net worth change over the last N snapshot days."""
-    recent = list(
-        user.snapshots.order_by("-timestamp")[: days * 4]  # up to a few per day
-    )
+def net_worth_trend(user, account=None, days: int = 7) -> dict:
+    """Net worth change over the last N snapshot days.
+
+    `account=None` reads the user-total series (account=None rows); passing an
+    account reads that account's per-account snapshot series.
+    """
+    snaps = user.snapshots
+    if account is not None:
+        snaps = snaps.filter(account=account)
+    else:
+        snaps = snaps.filter(account=None)
+    recent = list(snaps.order_by("-timestamp")[: days * 4])  # up to a few per day
     if len(recent) < 2:
         return {"severity": "info", "message": "Not enough history yet.", "delta_pct": 0}
     newest, oldest = recent[0], recent[-1]
@@ -97,9 +108,13 @@ def net_worth_trend(user, days: int = 7) -> dict:
     }
 
 
-def build_insights(user) -> dict:
-    """Run all insights for a user. Only callable by PRO users (IsPro gate)."""
-    valuation = value_user(user)
+def build_insights(user, account=None) -> dict:
+    """Run all insights for a user. Only callable by PRO users (IsPro gate).
+
+    `account=None` analyzes the whole-user portfolio; passing an account scopes
+    every insight to that single portfolio.
+    """
+    valuation = value_account(account) if account is not None else value_user(user)
     return {
         "valuation": {
             "total": valuation["total"],
@@ -108,5 +123,5 @@ def build_insights(user) -> dict:
         "allocation": allocation_breakdown(valuation),
         "concentration": concentration_risk(valuation),
         "gold_band": gold_band_suggestion(valuation),
-        "net_worth_trend": net_worth_trend(user),
+        "net_worth_trend": net_worth_trend(user, account),
     }

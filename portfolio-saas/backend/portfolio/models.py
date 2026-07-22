@@ -73,6 +73,9 @@ class Account(models.Model):
     )
     name = models.CharField(max_length=120)
     broker = models.CharField(max_length=120, blank=True, default="")
+    # Free-form purpose tag for this portfolio (e.g. "Retirement", "Trading",
+    # "Speculative", "Cash"). Drives the per-portfolio settings surface.
+    goal = models.CharField(max_length=40, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -125,6 +128,47 @@ class Price(models.Model):
             # Latest-price-per-asset lookups.
             models.Index(fields=["asset", "-fetched_at"], name="idx_price_asset_time"),
         ]
+
+
+class Transaction(models.Model):
+    """Append-only trade ledger: the durable source of truth for a portfolio.
+
+    `Holding.quantity` is DERIVED state (the running sum of buys minus sells);
+    this table records the EVENTS that produced it. Keeping the ledger means:
+      * the net-worth chart can annotate the exact buy/sell moments;
+      * true time-weighted return is computable later (cash flows are separable
+        from market moves — snapshot deltas alone conflate the two);
+      * holdings can always be rebuilt from history if the schema changes.
+
+    `price_tomans` is the unit price captured at execution (the latest Price at
+    the time of the trade), so historical valuation of the event never depends
+    on today's price map. Rows are never updated or deleted.
+    """
+
+    class Side(models.TextChoices):
+        BUY = "buy", "Buy"
+        SELL = "sell", "Sell"
+
+    account = models.ForeignKey(
+        Account, on_delete=models.CASCADE, related_name="transactions"
+    )
+    asset = models.ForeignKey(Asset, on_delete=models.PROTECT, related_name="transactions")
+    side = models.CharField(max_length=4, choices=Side.choices)
+    # Always positive; `side` carries the direction.
+    quantity = models.DecimalField(max_digits=20, decimal_places=6)
+    # Unit price in Tomans at execution; 0 when the asset had no price yet.
+    price_tomans = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    note = models.CharField(max_length=200, blank=True, default="")
+    timestamp = models.DateTimeField(db_index=True, auto_now_add=True)
+
+    class Meta:
+        ordering = ["-timestamp"]
+        indexes = [
+            models.Index(fields=["account", "-timestamp"], name="idx_txn_account_time"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.side} {self.quantity} {self.asset.key} @ {self.price_tomans}"
 
 
 class Snapshot(models.Model):

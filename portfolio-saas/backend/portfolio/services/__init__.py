@@ -12,3 +12,9 @@ from .valuation import (  # noqa: F401
     value_account,
     value_user,
 )
+from .trades import (  # noqa: F401
+    InsufficientHolding,
+    ManualAssetTrade,
+    TradeError,
+    execute_trade,
+)

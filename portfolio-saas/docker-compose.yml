@@ -20,6 +20,7 @@ x-backend-env: &backend-env
   BRS_URL: ${BRS_URL:-https://BrsApi.ir/Api/Market/Gold_Currency.php}
   TSETMC_API_KEY: ${TSETMC_API_KEY:-}
   TSETMC_URL: ${TSETMC_URL:-https://BrsApi.ir/Api/Tsetmc/AllSymbols.php}
+  REAL_PORTFOLIO_DATA_DIR: /portfolio-data
 
 services:
   db:
@@ -54,6 +55,10 @@ services:
       redis:
         condition: service_started
     environment: *backend-env
+    command: gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --workers 1 --reload
+    volumes:
+      - ./backend:/app
+      - "../PORTFOLIO NEW STRUCTURE/data:/portfolio-data:ro"
     ports:
       - "8000:8000"
 
@@ -62,6 +67,8 @@ services:
     restart: unless-stopped
     entrypoint: []        # skip migrate/seed; the backend service owns DB setup
     depends_on:
+      backend:
+        condition: service_started
       db:
         condition: service_healthy
       redis:
@@ -74,7 +81,8 @@ services:
     restart: unless-stopped
     entrypoint: []
     depends_on:
-      - celery_worker
+      celery_worker:
+        condition: service_started
     environment: *backend-env
     command: celery -A config beat -l info
 
@@ -85,6 +93,15 @@ services:
       - backend
     environment:
       VITE_API_URL: ${VITE_API_URL:-}
+      # Server-side Vite proxy target — the browser uses relative /api (above is
+      # empty), Vite forwards it to the backend service inside the compose network.
+      VITE_PROXY_TARGET: ${VITE_PROXY_TARGET:-http://backend:8000}
+      # Docker-on-Mac/Windows doesn't propagate host FS events into the VM, so
+      # Vite's watcher must poll to see your edits and trigger HMR.
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./frontend:/app        # host source -> container, so saves reach Vite (HMR)
+      - /app/node_modules      # keep the image's installed deps, don't shadow them
     ports:
       - "5173:5173"
 

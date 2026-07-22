@@ -35,10 +35,12 @@ def test_fetch_writes_prices_and_snapshots(asset_catalog, raw_market_sample, mon
 
     keys = set(Price.objects.values_list("asset__key", flat=True))
     assert {"emami_coin", "kama_stock", "usd_cash"}.issubset(keys)
-    assert Snapshot.objects.filter(user=user).count() == 1
-    snap = Snapshot.objects.get(user=user)
-    # M4: snapshots store only the derived total now (the global price map lives
-    # once in the Price table). This account has no holdings, so its total is 0.
+    # One account=None whole-user row + one per-account row (the user has a
+    # single empty account), so both the aggregate and per-portfolio charts
+    # have history. Both are 0: the account holds nothing.
+    assert Snapshot.objects.filter(user=user).count() == 2
+    assert Snapshot.objects.filter(user=user, account=None).count() == 1
+    snap = Snapshot.objects.get(user=user, account=None)
     assert snap.total_value_tomans == 0
 
 

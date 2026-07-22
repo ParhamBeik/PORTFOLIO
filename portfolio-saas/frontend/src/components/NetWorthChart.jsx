@@ -1,27 +1,45 @@
 import { useEffect, useState } from "react";
-import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Area,
+  AreaChart,
+  ReferenceDot,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { snapshots } from "../api.js";
 import { fmtTehranTime, fmtTomanCompact } from "../format.js";
 
-// FREE: net-worth trend from the snapshot series the cron writes after each
-// price fetch. Stays light — one small GET, no Pro dependency.
-export default function NetWorthChart({ days = 30 }) {
+// FREE: net-worth trend from the snapshot series (cron after each price fetch,
+// plus one per trade). Buy/sell events are overlaid as dots so you can see where
+// holdings changed vs. where the market moved. One small GET, no Pro dependency.
+export default function NetWorthChart({ days = 30, account = null }) {
   const [data, setData] = useState(null);
+  const [trades, setTrades] = useState([]);
   const [err, setErr] = useState("");
 
   useEffect(() => {
-    snapshots(days)
-      .then((rows) => {
+    let current = true;
+    snapshots(days, account)
+      .then((res) => {
+        if (!current) return;
+        // Backend returns { series, trades }. Guard against the old bare-array
+        // shape so a stale cache/older backend still renders the line.
+        const series = Array.isArray(res) ? res : res.series || [];
+        const markers = Array.isArray(res) ? [] : res.trades || [];
         setData(
-          rows.map((r) => ({
+          series.map((r) => ({
             ts: new Date(r.timestamp).getTime(),
             total: Number(r.total),
           }))
         );
+        setTrades(markers);
         setErr("");
       })
-      .catch((e) => setErr(e.message));
-  }, [days]);
+      .catch((e) => { if (current) setErr(e.message); });
+    return () => { current = false; };
+  }, [days, account]);
 
   if (err) return <p className="muted small">{err}</p>;
   if (data === null) return <p className="muted small">Loading history…</p>;
@@ -31,6 +49,15 @@ export default function NetWorthChart({ days = 30 }) {
         Net-worth history builds up as prices are fetched (every few minutes).
       </p>
     );
+
+  // Snap each trade to the nearest snapshot point so the dot sits on the line.
+  const nearestTotal = (tradeTs) => {
+    let best = data[0];
+    for (const p of data) {
+      if (Math.abs(p.ts - tradeTs) < Math.abs(best.ts - tradeTs)) best = p;
+    }
+    return best;
+  };
 
   return (
     <div className="chart-wrap" style={{ height: 220 }}>
@@ -44,6 +71,9 @@ export default function NetWorthChart({ days = 30 }) {
           </defs>
           <XAxis
             dataKey="ts"
+            type="number"
+            domain={["dataMin", "dataMax"]}
+            scale="time"
             tickFormatter={(t) => fmtTehranTime(new Date(t).toISOString())}
             tick={{ fontSize: 11, fill: "var(--muted)" }}
             minTickGap={28}
@@ -62,6 +92,24 @@ export default function NetWorthChart({ days = 30 }) {
             labelStyle={{ color: "var(--muted)" }}
           />
           <Area type="monotone" dataKey="total" stroke="var(--accent)" strokeWidth={2} fill="url(#nw-fill)" />
+          {trades.map((t, i) => {
+            const ts = new Date(t.timestamp).getTime();
+            const point = nearestTotal(ts);
+            // Buy = green, sell = red.
+            const color = t.side === "buy" ? "#22c55e" : "#ef4444";
+            return (
+              <ReferenceDot
+                key={i}
+                x={point.ts}
+                y={point.total}
+                r={5}
+                fill={color}
+                stroke="var(--panel-2)"
+                strokeWidth={2}
+                isFront
+              />
+            );
+          })}
         </AreaChart>
       </ResponsiveContainer>
     </div>

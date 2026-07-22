@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Account, Asset, Holding, Price, Snapshot
+from .models import Account, Asset, Holding, Price, Snapshot, Transaction
 
 
 class HoldingInline(admin.TabularInline):
@@ -32,3 +32,11 @@ class PriceAdmin(admin.ModelAdmin):
 
 admin.site.register(Holding)
 admin.site.register(Snapshot)
+
+
+@admin.register(Transaction)
+class TransactionAdmin(admin.ModelAdmin):
+    list_display = ("timestamp", "account", "asset", "side", "quantity", "price_tomans")
+    list_filter = ("side", "asset__asset_class")
+    search_fields = ("account__name", "asset__key", "account__user__email")
+    date_hierarchy = "timestamp"

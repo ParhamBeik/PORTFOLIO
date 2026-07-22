@@ -1,6 +1,8 @@
 from rest_framework import serializers
 
 from .models import User
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -10,6 +12,20 @@ class RegisterSerializer(serializers.ModelSerializer):
         model = User
         fields = ("id", "email", "password", "first_name", "last_name")
         read_only_fields = ("id",)
+
+    def validate_password(self, value):
+        # ModelSerializer.create bypasses AUTH_PASSWORD_VALIDATORS, so enforce
+        # them here; user attrs let UserAttributeSimilarityValidator compare.
+        user = User(
+            email=self.initial_data.get("email", ""),
+            first_name=self.initial_data.get("first_name", ""),
+            last_name=self.initial_data.get("last_name", ""),
+        )
+        try:
+            validate_password(value, user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages))
+        return value
 
     def create(self, validated_data):
         return User.objects.create_user(

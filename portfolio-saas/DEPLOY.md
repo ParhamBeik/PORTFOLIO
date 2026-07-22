@@ -78,12 +78,12 @@ curl -fsS https://app.example.com/api/health/ready/   # {"status":"ready","check
 curl -fsS https://app.example.com/api/health/prices/  # {"status":"fresh",...} after ~2 min
 ```
 
-If readiness reports `degraded`, check `docker compose -f docker-compose.prod.yml logs backend`.
+If readiness reports `degraded`, check `docker compose -f docker-compose.prod.yml --env-file .env.production logs backend`.
 
 Then load the historical warehouse (one-time, ~minutes; idempotent — safe to re-run):
 
 ```sh
-docker compose -f docker-compose.prod.yml exec backend \
+docker compose -f docker-compose.prod.yml --env-file .env.production exec backend \
   python manage.py backfill_market_data --all --days 365
 ```
 
@@ -100,7 +100,7 @@ stale while everything else looks healthy. Two watchers, one signal —
 
    ```sh
    cat > /etc/cron.d/price-feed-watch <<'CRON'
-   */10 * * * * root curl -fsS -m 10 http://localhost/api/health/prices/ >/dev/null || (cd /opt/portfolio-saas && docker compose -f docker-compose.prod.yml restart celery_worker celery_beat)
+   */10 * * * * root curl -fsS -m 10 http://localhost/api/health/prices/ >/dev/null || (cd /opt/portfolio-saas && docker compose -f docker-compose.prod.yml --env-file .env.production restart celery_worker celery_beat)
    CRON
    ```
 
@@ -118,7 +118,7 @@ beat task performs.
 
 ## 5. Operations
 
-- **Logs** are stdout-only (12-factor): `docker compose -f docker-compose.prod.yml logs -f backend`.
+- **Logs** are stdout-only (12-factor): `docker compose -f docker-compose.prod.yml --env-file .env.production logs -f backend`.
 - **Prices** are fetched centrally by Celery beat (every ~2 min) and published to
   Redis; one fetch updates every user.
 - **Market history** syncs daily after TSE close (beat task `marketdata-daily-sync`);

@@ -12,6 +12,9 @@ python manage.py seed_assets || true
 # Demo user is dev-only: never auto-create accounts in production.
 if [ "${DJANGO_DEBUG:-1}" = "1" ]; then
   python manage.py seed_demo || true
+  # Load the real Father/Mother portfolios (exact holdings + real daily history)
+  # from the tracker data files. Idempotent: re-runs correct the state.
+  python manage.py import_real_portfolios --data-dir "${REAL_PORTFOLIO_DATA_DIR:-/portfolio-data}" || true
 fi
 
 echo "Collecting static files..."

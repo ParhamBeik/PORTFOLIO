@@ -1,0 +1,27 @@
+# Caddy fronts the whole site: automatic HTTPS for $DOMAIN, reverse-proxies
+# /api/* to the Django backend (with flush_interval -1 so SSE streams flush
+# immediately instead of buffering), and everything else to the nginx-served SPA.
+#
+# DOMAIN comes from docker-compose.prod.yml (env). Caddy obtains and renews the
+# Let's Encrypt cert automatically on first boot — make sure 80/443 are open.
+
+{$DOMAIN} {
+	tls {$LE_EMAIL}
+	encode gzip zstd
+
+	# API + real-time SSE. flush_interval -1 disables Caddy's response buffer so
+	# each SSE event is forwarded to the client the instant the backend writes it
+	# (critical for /api/prices/stream/ to feel live rather than choppy).
+	handle /api/* {
+		reverse_proxy backend:8000 {
+			flush_interval -1
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	# SPA: nginx serves the built bundle with an SPA fallback for client routing.
+	handle {
+		reverse_proxy frontend:80
+	}
+}

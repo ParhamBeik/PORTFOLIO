@@ -2,16 +2,18 @@ import { useEffect, useState } from "react";
 import { insights as fetchInsights } from "../api.js";
 import ProGate from "./ProGate.jsx";
 
-export default function Insights({ user }) {
+export default function Insights({ user, account = null }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     if (!user.is_pro) return;
-    fetchInsights()
-      .then((d) => { setData(d); setError(""); })
-      .catch((e) => setError(e.message));
-  }, [user.is_pro]);
+    let current = true;
+    fetchInsights(account)
+      .then((d) => { if (current) { setData(d); setError(""); } })
+      .catch((e) => { if (current) setError(e.message); });
+    return () => { current = false; };
+  }, [user.is_pro, account]);
 
   return (
     <ProGate

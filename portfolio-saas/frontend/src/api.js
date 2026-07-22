@@ -51,9 +51,24 @@ export async function api(path, { method = "GET", body, _retried = false } = {})
   }
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
-    throw new Error(detail.detail || JSON.stringify(detail) || res.statusText);
+    throw new Error(extractError(detail) || res.statusText);
   }
   return res.status === 204 ? null : res.json();
+}
+
+// DRF errors come in several shapes: {"detail": "..."} for auth/permission,
+// {"field": ["msg", ...]} for validation, {"non_field_errors": [...]} for
+// object-level. Flatten whichever we got into one readable line so the UI never
+// shows a bare "{}" or "[object Object]".
+function extractError(detail) {
+  if (!detail || typeof detail !== "object") return String(detail || "");
+  if (typeof detail.detail === "string") return detail.detail;
+  const parts = [];
+  for (const [field, val] of Object.entries(detail)) {
+    const msg = Array.isArray(val) ? val.join(" ") : String(val);
+    parts.push(field === "non_field_errors" ? msg : `${field}: ${msg}`);
+  }
+  return parts.join(" · ");
 }
 
 // Auth
@@ -69,8 +84,11 @@ export const listAssets = () => api("/api/assets/");
 export const listAccounts = () => api("/api/accounts/");
 export const createAccount = (name, broker = "") =>
   api("/api/accounts/", { method: "POST", body: { name, broker } });
-export const updateAccount = (id, { name, broker }) =>
-  api(`/api/accounts/${id}/`, { method: "PATCH", body: { name, broker } });
+export const updateAccount = (id, { name, broker, goal }) =>
+  api(`/api/accounts/${id}/`, {
+    method: "PATCH",
+    body: { name, broker, goal },
+  });
 export const deleteAccount = (id) =>
   api(`/api/accounts/${id}/`, { method: "DELETE" });
 export const accountValuation = (id) => api(`/api/accounts/${id}/valuation/`);
@@ -89,24 +107,54 @@ export const updateHolding = (accountId, id, quantity) =>
 export const removeHolding = (accountId, id) =>
   api(`/api/accounts/${accountId}/holdings/${id}/`, { method: "DELETE" });
 
+// Buy/sell: the ledger write path. Appends a Transaction, updates the holding
+// balance, and stamps a net-worth snapshot — all atomically on the backend.
+export const trade = (accountId, { assetKey, side, quantity, note = "" }) =>
+  api(`/api/accounts/${accountId}/trades/`, {
+    method: "POST",
+    body: { asset_key: assetKey, side, quantity: Number(quantity), note },
+  });
+// Trade history (all accounts, or one via ?account=). Newest first.
+export const transactions = (days = 90, accountId = null) =>
+  api(`/api/transactions/?days=${days}` + (accountId ? `&account=${accountId}` : ""));
+
 // Valuation & pricing
-export const valuation = () => api("/api/valuation/");
+//
+// `account` is the active-portfolio id (null = "All portfolios", the aggregate).
+// It threads `?account=` into the per-portfolio endpoints so the whole UI scopes
+// to the portfolio selected in the top bar.
+const accountParam = (account) => (account ? `account=${account}` : "");
+export const valuation = (account = null) =>
+  api(`/api/valuation/${accountParam(account) ? "?" + accountParam(account) : ""}`);
 export const latestPrices = () => api("/api/prices/latest/");
 export const priceHistory = (assetKey, limit = 100) =>
   api(`/api/prices/history/?asset=${encodeURIComponent(assetKey)}&limit=${limit}`);
-export const insights = () => api("/api/insights/");
+export const insights = (account = null) =>
+  api(`/api/insights/${accountParam(account) ? "?" + accountParam(account) : ""}`);
 
-// FREE: net-worth history for the trend chart (account=None snapshot series).
-export const snapshots = (days = 30) => api(`/api/snapshots/?days=${days}`);
+// FREE: net-worth history for the trend chart. account=None -> aggregate series;
+// an account id -> that portfolio's per-account snapshot series.
+export const snapshots = (days = 30, account = null) =>
+  api(
+    `/api/snapshots/?days=${days}` + (account ? `&${accountParam(account)}` : "")
+  );
 
-// Pro analytics & optimization. All gated by IsPro on the backend.
-export const analytics = () => api("/api/analytics/");
-export const optimize = (scenario, constraints = null) =>
-  api("/api/optimization/", {
-    method: "POST",
-    body: constraints ? { scenario, constraints } : { scenario },
-  });
-export const frontier = () => api("/api/optimization/frontier/");
+// Pro analytics & optimization. All gated by IsPro on the backend. All scope to
+// the active portfolio via ?account=.
+export const analytics = (account = null) =>
+  api(`/api/analytics/${accountParam(account) ? "?" + accountParam(account) : ""}`);
+export const optimize = (scenario, constraints = null, account = null) =>
+  api(
+    `/api/optimization/${accountParam(account) ? "?" + accountParam(account) : ""}`,
+    {
+      method: "POST",
+      body: constraints ? { scenario, constraints } : { scenario },
+    }
+  );
+export const frontier = (account = null) =>
+  api(
+    `/api/optimization/frontier/${accountParam(account) ? "?" + accountParam(account) : ""}`
+  );
 export const assetReturns = (days = 180) => api(`/api/assets/returns/?days=${days}`);
 
 // Billing — Zarinpal. Returns { redirect_url }; the browser redirects there.

@@ -17,9 +17,16 @@ from rest_framework.views import APIView
 
 from accounts.permissions import IsPro
 
-from .models import Account, Asset, Holding, Price, Snapshot
-from .serializers import AccountSerializer, AssetSerializer, HoldingSerializer
-from .services import get_latest_prices, value_account, value_user
+from .models import Account, Asset, Holding, Price, Snapshot, Transaction
+from .serializers import (
+    AccountSerializer,
+    AssetSerializer,
+    HoldingSerializer,
+    TradeInputSerializer,
+    TransactionSerializer,
+)
+from .services import execute_trade, get_latest_prices, value_account, value_user
+from .services.trades import TradeError
 from .services.diagnostics import portfolio_diagnostics
 from .services.insights import _liquid_items, _total, build_insights
 from .services.optimization import (
@@ -73,6 +80,9 @@ class HoldingListCreateView(generics.ListCreateAPIView):
         if account is None:
             from rest_framework.exceptions import NotFound
             raise NotFound("Account not found")
+        if not serializer.validated_data["asset"].is_house:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("Tradeable assets must be changed through the buy/sell endpoint.")
         serializer.save(account=account)
 
 
@@ -82,12 +92,93 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         return Holding.objects.filter(account__user=self.request.user)
 
+    def perform_update(self, serializer):
+        if not serializer.instance.asset.is_house:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("Tradeable assets must be changed through the buy/sell endpoint.")
+        serializer.save()
 
-class ValuationView(APIView):
-    """Current valuation for the whole user (all accounts)."""
+    def perform_destroy(self, instance):
+        if not instance.asset.is_house:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("Tradeable assets must be changed through the buy/sell endpoint.")
+        instance.delete()
+
+
+class TradeView(APIView):
+    """Execute a buy/sell in one account (the ledger write path).
+
+    POST /accounts/<id>/trades/  {asset_key, side, quantity, note?}
+    Atomically appends a Transaction, updates the Holding balance, and snapshots
+    net worth so the history chart steps at the trade moment.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, account_id):
+        account = request.user.accounts.filter(pk=account_id).first()
+        if account is None:
+            return Response({"detail": "Account not found."}, status=status.HTTP_404_NOT_FOUND)
+        form = TradeInputSerializer(data=request.data)
+        form.is_valid(raise_exception=True)
+        data = form.validated_data
+        asset = Asset.objects.filter(key=data["asset_key"], is_active=True).first()
+        if asset is None:
+            return Response({"detail": "Unknown asset_key."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            result = execute_trade(
+                account=account,
+                asset=asset,
+                side=data["side"],
+                quantity=data["quantity"],
+                note=data.get("note", ""),
+            )
+        except TradeError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result, status=status.HTTP_201_CREATED)
+
+
+class TransactionListView(APIView):
+    """Trade history for the user (all accounts), newest first, capped by ?days=."""
+
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        return Response(_with_usd(value_user(request.user)))
+        try:
+            days = int(request.query_params.get("days", "90"))
+        except (TypeError, ValueError):
+            days = 90
+        days = max(1, min(days, 3650))
+        since = timezone.now() - timedelta(days=days)
+        rows = Transaction.objects.filter(
+            account__user=request.user, timestamp__gte=since
+        ).select_related("asset")
+        account_id = request.query_params.get("account")
+        if account_id:
+            # Non-numeric ?account= would raise ValueError -> 500; ignore it.
+            try:
+                rows = rows.filter(account_id=int(account_id))
+            except (TypeError, ValueError):
+                return Response({"detail": "account must be an integer id."}, status=400)
+        return Response(TransactionSerializer(rows, many=True).data)
+
+
+class ValuationView(APIView):
+    """Current valuation, optionally scoped to one portfolio via `?account=`.
+
+    No `?account=` (or "All portfolios") aggregates every account the user owns.
+    """
+
+    def get(self, request):
+        account = _scope(request)
+        if account is not None:
+            valuation = value_account(account)
+            # value_account omits the price map; attach it so _with_usd can
+            # convert to USD like the aggregate path does.
+            valuation["prices"] = get_latest_prices()
+        else:
+            valuation = value_user(request.user)
+        return Response(_with_usd(valuation))
 
 
 class AccountValuationView(APIView):
@@ -105,6 +196,22 @@ class AccountValuationView(APIView):
         })
 
 
+def _scope(request):
+    """Resolve the active portfolio from `?account=<id>`, owned by the user.
+
+    Returns the Account or None. None means "all portfolios" (the aggregate
+    view). An absent or non-numeric param, or an id the user does not own,
+    all collapse to None rather than 400 — the client falls back to aggregate.
+    """
+    raw = request.query_params.get("account")
+    if not raw:
+        return None
+    try:
+        return request.user.accounts.filter(pk=int(raw)).first()
+    except (TypeError, ValueError):
+        return None
+
+
 def _with_usd(valuation: dict) -> dict:
     """Attach a USD equivalent of the total using the USD price in Tomans.
 
@@ -119,10 +226,15 @@ def _with_usd(valuation: dict) -> dict:
 
 
 class SnapshotListView(APIView):
-    """Per-user net-worth history for the FREE trend chart.
+    """Per-user net-worth history for the FREE trend chart, plus trade markers.
 
     The cron stamps one `account=None` row per user per fetch (the whole-portfolio
-    total); this endpoint returns that series, oldest-first, capped at `days`.
+    total), and every trade stamps one too; this endpoint returns that series
+    oldest-first, capped at `days`. `trades` carries the buy/sell events in the
+    same window so the chart can annotate the exact points where holdings changed.
+
+    `?account=<id>` scopes both the snapshot series and the trade markers to one
+    portfolio (reads that account's per-account snapshot rows); absent = aggregate.
     """
 
     permission_classes = [IsAuthenticated]
@@ -134,17 +246,38 @@ class SnapshotListView(APIView):
             days = 30
         days = max(1, min(days, 365))
         since = timezone.now() - timedelta(days=days)
-        rows = (
-            Snapshot.objects.filter(user=request.user, account=None, timestamp__gte=since)
+        account = _scope(request)
+        snapshots = Snapshot.objects.filter(
+            user=request.user, timestamp__gte=since
+        )
+        if account is not None:
+            snapshots = snapshots.filter(account=account)
+        else:
+            snapshots = snapshots.filter(account=None)
+        rows = snapshots.order_by("timestamp").values("timestamp", "total_value_tomans")
+        series = [
+            {"timestamp": r["timestamp"].isoformat(), "total": str(r["total_value_tomans"])}
+            for r in rows
+        ]
+        trades = (
+            Transaction.objects.filter(account__user=request.user, timestamp__gte=since)
+            .select_related("asset")
             .order_by("timestamp")
-            .values("timestamp", "total_value_tomans")
         )
-        return Response(
-            [
-                {"timestamp": r["timestamp"].isoformat(), "total": str(r["total_value_tomans"])}
-                for r in rows
-            ]
-        )
+        if account is not None:
+            trades = trades.filter(account=account)
+        markers = [
+            {
+                "timestamp": t.timestamp.isoformat(),
+                "side": t.side,
+                "asset_key": t.asset.key,
+                "asset_name": t.asset.name,
+                "quantity": str(t.quantity),
+                "price_tomans": str(t.price_tomans),
+            }
+            for t in trades
+        ]
+        return Response({"series": series, "trades": markers})
 
 
 class LatestPricesView(APIView):
@@ -184,12 +317,16 @@ class InsightsView(APIView):
     permission_classes = [IsAuthenticated, IsPro]
 
     def get(self, request):
-        return Response(build_insights(request.user))
+        return Response(build_insights(request.user, _scope(request)))
 
 
-def _current_weights_and_total(user) -> tuple[dict[str, float], Decimal]:
-    """Liquid weights + liquid total for a user (real estate excluded)."""
-    valuation = value_user(user)
+def _current_weights_and_total(user, account=None) -> tuple[dict[str, float], Decimal]:
+    """Liquid weights + liquid total (real estate excluded).
+
+    `account=None` analyzes the whole-user portfolio; passing an account scopes
+    weights to that single portfolio.
+    """
+    valuation = value_account(account) if account is not None else value_user(user)
     items = _liquid_items(valuation)
     total = _total(items)
     if total <= 0:
@@ -208,7 +345,7 @@ class AnalyticsView(APIView):
     permission_classes = [IsAuthenticated, IsPro]
 
     def get(self, request):
-        weights, total = _current_weights_and_total(request.user)
+        weights, total = _current_weights_and_total(request.user, _scope(request))
         return Response(
             portfolio_diagnostics(weights, total, user=request.user)
         )
@@ -227,7 +364,7 @@ class OptimizationView(APIView):
                 status=400,
             )
         constraints = request.data.get("constraints")
-        weights, total = _current_weights_and_total(request.user)
+        weights, total = _current_weights_and_total(request.user, _scope(request))
         try:
             payload = optimize(
                 scenario=scenario,
@@ -253,7 +390,7 @@ class FrontierView(APIView):
     permission_classes = [IsAuthenticated, IsPro]
 
     def get(self, request):
-        weights, total = _current_weights_and_total(request.user)
+        weights, total = _current_weights_and_total(request.user, _scope(request))
         frontier = _efficient_frontier(n_points=30)
         # Inject the current portfolio point.
         returns, _ = daily_returns_matrix()

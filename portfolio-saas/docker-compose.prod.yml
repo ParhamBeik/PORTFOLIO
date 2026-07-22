@@ -1,0 +1,126 @@
+# Production stack: Postgres, Redis, Django API (ASGI/gunicorn), Celery
+# worker+beat, the built SPA behind nginx, and Caddy (auto-TLS, SSE-correct
+# proxying). Only Caddy is exposed to the host (80/443); everything else is
+# internal to the compose network.
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# Health: backend exposes /api/health/ (liveness) + /api/health/ready/ (DB +
+# cache). Caddy's healthcheck pings liveness through itself.
+x-backend-env: &backend-env
+  DJANGO_SETTINGS_MODULE: config.settings
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY}
+  DJANGO_DEBUG: "0"
+  ALLOWED_HOSTS: ${ALLOWED_HOSTS:?set ALLOWED_HOSTS}
+  POSTGRES_DB: ${POSTGRES_DB:-portfolio}
+  POSTGRES_USER: ${POSTGRES_USER:-portfolio}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+  POSTGRES_HOST: db
+  POSTGRES_PORT: "5432"
+  REDIS_URL: redis://redis:6379/1            # cache (DB 1)
+  CELERY_BROKER_URL: redis://redis:6379/2    # broker/result (DB 2)
+  CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS}
+  BRS_API_KEY: ${BRS_API_KEY:-}
+  BRS_URL: ${BRS_URL:-https://BrsApi.ir/Api/Market/Gold_Currency.php}
+  TSETMC_API_KEY: ${TSETMC_API_KEY:-}
+  TSETMC_URL: ${TSETMC_URL:-https://BrsApi.ir/Api/Tsetmc/AllSymbols.php}
+  ZARINPAL_MERCHANT_ID: ${ZARINPAL_MERCHANT_ID:?set ZARINPAL_MERCHANT_ID}
+  ZARINPAL_SANDBOX: ${ZARINPAL_SANDBOX:-0}
+  ZARINPAL_CALLBACK_URL: ${ZARINPAL_CALLBACK_URL:?set ZARINPAL_CALLBACK_URL}
+  ZARINPAL_FRONTEND_URL: ${ZARINPAL_FRONTEND_URL:?set ZARINPAL_FRONTEND_URL}
+  PRO_PRICE_TOMAN: ${PRO_PRICE_TOMAN:-1000000}
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-portfolio}
+      POSTGRES_USER: ${POSTGRES_USER:-portfolio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-portfolio}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: *backend-env
+    expose: ["8000"]          # internal only; Caddy fronts it
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H 'Host: ${DOMAIN}' -H 'X-Forwarded-Proto: https' http://localhost:8000/api/health/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  celery_worker:
+    build: ./backend
+    restart: unless-stopped
+    entrypoint: []            # skip migrate/seed; the backend service owns DB setup
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: *backend-env
+    command: celery -A config worker -l info --concurrency=2
+
+  celery_beat:
+    build: ./backend
+    restart: unless-stopped
+    entrypoint: []
+    depends_on:
+      - celery_worker
+    environment: *backend-env
+    command: celery -A config beat -l info
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    expose: ["80"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN}
+      LE_EMAIL: ${LE_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # TLS cert store — persist so renewal is cheap
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

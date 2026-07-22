@@ -19,7 +19,7 @@ const PALETTE = ["#4c9aff", "#3fb950", "#d29922", "#f85149", "#8b5cf6", "#06b6d4
 
 // Pro: risk/return diagnostics + allocation + correlation. Mirrors the Insights
 // upsell for non-Pro visitors so deep links don't dead-end.
-export default function Analytics({ user }) {
+export default function Analytics({ user, account = null }) {
   const [data, setData] = useState(null);
   const [corr, setCorr] = useState(null);
   const [catalog, setCatalog] = useState([]);
@@ -27,10 +27,18 @@ export default function Analytics({ user }) {
 
   useEffect(() => {
     if (!user.is_pro) return;
-    listAssets().then(setCatalog).catch(() => {});
-    analytics().then((d) => { setData(d); setErr(""); }).catch((e) => setErr(e.message));
-    assetReturns(180).then((r) => setCorr(r.correlation)).catch(() => {});
-  }, [user.is_pro]);
+    let current = true;
+    Promise.all([listAssets(), analytics(account), assetReturns(180)])
+      .then(([assets, diagnostics, returns]) => {
+        if (!current) return;
+        setCatalog(assets);
+        setData(diagnostics);
+        setCorr(returns.correlation);
+        setErr("");
+      })
+      .catch((e) => { if (current) setErr(e.message); });
+    return () => { current = false; };
+  }, [user.is_pro, account]);
 
   const labelOf = useMemo(() => {
     const m = new Map(catalog.map((a) => [a.key, a.name_fa || a.name]));
@@ -41,6 +49,17 @@ export default function Analytics({ user }) {
     ? Object.entries(data.current_weights).sort((a, b) => b[1] - a[1])
     : [];
   const pieData = weights.map(([k, v]) => ({ name: labelOf(k), value: v }));
+  const scopedCorr = useMemo(() => {
+    if (!corr) return null;
+    const wanted = new Set(weights.map(([key]) => key));
+    const indexes = corr.assets
+      .map((key, index) => (wanted.has(key) ? index : -1))
+      .filter((index) => index >= 0);
+    return {
+      assets: indexes.map((index) => corr.assets[index]),
+      matrix: indexes.map((row) => indexes.map((column) => corr.matrix[row][column])),
+    };
+  }, [corr, data]);
   const re = data?.real_estate;
 
   return (
@@ -119,13 +138,13 @@ export default function Analytics({ user }) {
             )}
           </section>
 
-          {corr && corr.assets.length > 1 && (
+          {scopedCorr && scopedCorr.assets.length > 1 && (
             <section className="card">
               <h3>Correlation</h3>
               <p className="muted small">
                 Daily-return correlation. Red = moves together, blue = moves opposite.
               </p>
-              <CorrHeatmap assets={corr.assets.map(labelOf)} matrix={corr.matrix} />
+              <CorrHeatmap assets={scopedCorr.assets.map(labelOf)} matrix={scopedCorr.matrix} />
             </section>
           )}
         </>

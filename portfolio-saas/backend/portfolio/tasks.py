@@ -74,21 +74,32 @@ def _write_prices(priced: dict) -> None:
 
 
 def _write_snapshots(priced: dict) -> None:
-    """Snapshot each user's net worth in bulk (one row per user).
+    """Snapshot each user's net worth in bulk.
+
+    For every user we stamp TWO kinds of row so both the aggregate chart and each
+    portfolio's own chart have history:
+      * one account=None row = the whole-user total (mirrors the trade path);
+      * one row per account = that portfolio's total.
 
     H4: prefetch users -> accounts -> holdings -> asset in two queries instead of
-    a query per account/holding. The total is computed in memory from `priced`
+    a query per account/holding. Totals are computed in memory from `priced`
     (the prices just fetched/written), consistent with this fetch.
     """
     prices = {k: Decimal(str(v)) for k, v in priced.items()}
     users = User.objects.prefetch_related("accounts__holdings__asset").iterator(chunk_size=1000)
     snapshots = []
     for user in users:
-        total = Decimal("0")
+        user_total = Decimal("0")
         for account in user.accounts.all():
+            account_total = Decimal("0")
             for holding in account.holdings.all():
-                total += asset_value(holding, prices.get(holding.asset.key))
-        snapshots.append(Snapshot(user=user, account=None, total_value_tomans=total))
+                value = asset_value(holding, prices.get(holding.asset.key))
+                account_total += value
+            user_total += account_total
+            snapshots.append(
+                Snapshot(user=user, account=account, total_value_tomans=account_total)
+            )
+        snapshots.append(Snapshot(user=user, account=None, total_value_tomans=user_total))
     if snapshots:
         Snapshot.objects.bulk_create(snapshots, batch_size=500)
         logger.info("Wrote %d net-worth snapshots.", len(snapshots))
