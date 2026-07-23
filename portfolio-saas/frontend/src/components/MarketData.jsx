@@ -6,7 +6,7 @@ import {
   marketPerformance,
   marketShareholders,
 } from "../api.js";
-import { fmtNum, fmtPct, fmtTomanCompact } from "../format.js";
+import { fmtChartTooltipDate, fmtDateTick, fmtNum, fmtPct, fmtTomanCompact } from "../format.js";
 import ProGate from "./ProGate.jsx";
 
 const WINDOWS = { "1Y": 365, "3Y": 1095, All: Infinity };
@@ -308,7 +308,7 @@ export default function MarketData({ user }) {
                 <h4>Price & Return Trend ({windowName})</h4>
               </div>
               <div className="chart-wrap market-chart">
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={200}>
                   <AreaChart data={series} margin={{ top: 12, right: 16, left: 0, bottom: 0 }}>
                     <defs>
                       <linearGradient id="performance-fill" x1="0" y1="0" x2="0" y2="1">
@@ -316,14 +316,22 @@ export default function MarketData({ user }) {
                         <stop offset="100%" stopColor="var(--accent)" stopOpacity={0.02} />
                       </linearGradient>
                     </defs>
-                    <XAxis dataKey="date" minTickGap={32} stroke="var(--border)" />
+                    <XAxis
+                      dataKey="date"
+                      tickFormatter={(val) => fmtDateTick(val, windowName)}
+                      minTickGap={36}
+                      stroke="var(--border)"
+                      tick={{ fontSize: 11, fill: "var(--muted)" }}
+                    />
                     <YAxis
                       tickFormatter={(value) => `${Number(value).toFixed(0)}%`}
                       width={56}
                       stroke="var(--border)"
+                      tick={{ fontSize: 11, fill: "var(--muted)" }}
                       domain={["auto", "auto"]}
                     />
                     <Tooltip
+                      labelFormatter={(label) => fmtChartTooltipDate(label)}
                       formatter={(value, name, item) => [
                         `${Number(value).toFixed(2)}% (${fmtTomanCompact(item.payload.close)})`,
                         "Performance",
@@ -334,6 +342,7 @@ export default function MarketData({ user }) {
                         borderRadius: 8,
                         boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
                       }}
+                      labelStyle={{ color: "var(--muted)" }}
                     />
                     <Area
                       type="monotone"

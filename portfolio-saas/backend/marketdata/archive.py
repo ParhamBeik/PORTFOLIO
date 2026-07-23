@@ -9,11 +9,22 @@ from django.utils import timezone
 from . import ingest
 from .fetchers import (
     fetch_candlesticks,
+    fetch_codal_announcements,
     fetch_daily_history,
     fetch_gold_currency_pro_history_daily,
+    fetch_shareholders,
+    fetch_transactions,
 )
 from .fetchers.base import MarketDataFetchError
-from .models import ArchiveFetchState, DailyStockHistory, GoldCurrencyHistory, MarketCandle
+from .models import (
+    ArchiveFetchState,
+    CodalAnnouncement,
+    DailyStockHistory,
+    GoldCurrencyHistory,
+    MarketCandle,
+    ShareholderRecord,
+    StockTransactionTick,
+)
 from .quota import QuotaExhausted, remaining_requests
 
 
@@ -22,6 +33,9 @@ STOCK_ENDPOINTS = (
     ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
+    ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
+    ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS,
+    ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
 )
 
 
@@ -89,6 +103,36 @@ def _fetch_and_ingest(state):
         stored = set(MarketCandle.objects.filter(
             symbol=symbol, timeframe="1d_adj", date_time__in=expected
         ).values_list("date_time", flat=True))
+    elif endpoint == ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS:
+        payload = fetch_codal_announcements(settings.TSETMC_API_KEY, symbol=symbol)
+        result = ingest.ingest_codal(payload)
+        expected = _codal_keys(payload)
+        stored = {
+            f"{code}_{dp}_{tp}"
+            for code, dp, tp in CodalAnnouncement.objects.filter(
+                symbol=symbol
+            ).values_list("code", "date_publish", "time_publish")
+        } & expected
+    elif endpoint == ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS:
+        payload = fetch_shareholders(settings.TSETMC_API_KEY, symbol=symbol)
+        result = ingest.ingest_shareholders(symbol, payload)
+        expected = _shareholder_keys(payload)
+        stored = {
+            f"{sid}_{dt}"
+            for sid, dt in ShareholderRecord.objects.filter(
+                symbol=symbol
+            ).values_list("shareholder_id", "date")
+        } & expected
+    elif endpoint == ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS:
+        payload = fetch_transactions(settings.TSETMC_API_KEY, symbol=symbol)
+        result = ingest.ingest_transactions(symbol, "", payload)
+        expected = _transaction_keys(payload)
+        stored = {
+            f"{row}_{dt}_{tm}"
+            for row, dt, tm in StockTransactionTick.objects.filter(
+                symbol=symbol
+            ).values_list("row", "date", "time")
+        } & expected
     else:
         payload = fetch_gold_currency_pro_history_daily(settings.BRS_API_KEY, symbol)
         result = ingest.ingest_gold_currency_history(payload)
@@ -131,6 +175,37 @@ def _gold_dates(payload):
         ingest.normalize_jalali(record.get("date"))
         for record in records
         if isinstance(record, dict) and record.get("date")
+    }
+
+
+def _codal_keys(payload):
+    records = payload.get("announcement") if isinstance(payload, dict) else None
+    if not isinstance(records, list):
+        return set()
+    return {
+        f"{rec.get('code', '') or ''}_{ingest.normalize_jalali(rec.get('date_publish', ''))}_{rec.get('time_publish', '') or ''}"
+        for rec in records
+        if isinstance(rec, dict)
+    }
+
+
+def _shareholder_keys(payload):
+    if not isinstance(payload, list):
+        return set()
+    return {
+        f"{rec.get('id')}_{ingest.normalize_jalali(rec.get('date', ''))}"
+        for rec in payload
+        if isinstance(rec, dict) and rec.get("id") is not None
+    }
+
+
+def _transaction_keys(payload):
+    if not isinstance(payload, list):
+        return set()
+    return {
+        f"{rec.get('row')}_{ingest.normalize_jalali(rec.get('date', ''))}_{rec.get('time', '') or ''}"
+        for rec in payload
+        if isinstance(rec, dict) and rec.get("row") is not None
     }
 
 

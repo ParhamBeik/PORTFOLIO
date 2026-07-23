@@ -42,3 +42,64 @@ export function fmtTehranTime(iso) {
     month: "2-digit",
   }).format(d);
 }
+
+// Timeframe-aware date formatter for chart X-axis ticks.
+// Handles timestamps (ms), ISO strings, and Jalali date strings (YYYY-MM-DD / YYYY/MM/DD).
+export function fmtDateTick(val, timeframe = 7) {
+  if (val === null || val === undefined || val === "") return "";
+
+  if (typeof val === "number" || (!isNaN(Number(val)) && !String(val).includes("-") && !String(val).includes("/"))) {
+    const ts = Number(val);
+    if (isNaN(ts)) return "";
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return "";
+
+    const days = typeof timeframe === "number" ? timeframe : (timeframe === "1Y" ? 365 : timeframe === "3Y" ? 1095 : 365);
+
+    if (days <= 1) {
+      return d.toLocaleTimeString("en-US", { timeZone: "Asia/Tehran", hour: "2-digit", minute: "2-digit", hour12: false });
+    }
+    if (days <= 30) {
+      const month = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${month}/${day}`;
+    }
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, "0");
+    return `${year}/${month}`;
+  }
+
+  const str = String(val).trim();
+  if (/^\d{4}[-/]\d{2}[-/]\d{2}/.test(str)) {
+    const parts = str.split(/[-T /]/);
+    const yr = parts[0];
+    const mo = parts[1];
+    const dy = parts[2];
+    if (timeframe === "All" || timeframe === "3Y" || timeframe === 3650) {
+      return `${yr}/${mo}`;
+    }
+    return `${mo}/${dy}`;
+  }
+
+  return str;
+}
+
+// Clean date/time string for chart tooltips
+export function fmtChartTooltipDate(val) {
+  if (val === null || val === undefined || val === "") return "—";
+  if (typeof val === "number" || (!isNaN(Number(val)) && !String(val).includes("-") && !String(val).includes("/"))) {
+    const d = new Date(Number(val));
+    if (isNaN(d.getTime())) return "—";
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Tehran",
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(d);
+  }
+  return String(val);
+}
+

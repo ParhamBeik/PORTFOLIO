@@ -7,7 +7,11 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import User
 from .permissions import IsPro
-from .serializers import RegisterSerializer, UserSerializer
+from .serializers import (
+    ChangePasswordSerializer,
+    RegisterSerializer,
+    UserSerializer,
+)
 
 
 def _tokens(user: User) -> dict:
@@ -34,6 +38,22 @@ class MeView(APIView):
     def get(self, request):
         return Response(UserSerializer(request.user).data)
 
+    def patch(self, request):
+        serializer = UserSerializer(request.user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+
+class ChangePasswordView(APIView):
+    def post(self, request):
+        serializer = ChangePasswordSerializer(
+            data=request.data, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({"detail": "Password updated successfully."})
+
 
 class ProCheckView(APIView):
     """Tiny endpoint proving the IsPro gate works (used by the demo)."""
@@ -42,3 +62,4 @@ class ProCheckView(APIView):
 
     def get(self, request):
         return Response({"message": "You are seeing Pro-only content."})
+

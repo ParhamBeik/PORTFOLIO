@@ -153,3 +153,64 @@ def test_5m_window_rate_limit(settings):
     status = get_quota_status()
     assert status["window_used"] >= 3
     assert status["remaining_window"] == 0
+
+
+def test_ensure_archive_states_covers_all_endpoints():
+    """We choose a unit test because verifying archive state generation across all provider endpoints tests pure data warehouse mapping logic at the base of the test pyramid."""
+    from marketdata.archive import ensure_archive_states
+    ensure_archive_states(stock_symbols=["KAMA"], gold_symbols=["USD"])
+    states = ArchiveFetchState.objects.filter(symbol="KAMA")
+    endpoints = set(states.values_list("endpoint", flat=True))
+    assert ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS in endpoints
+    assert ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS in endpoints
+    assert ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS in endpoints
+    assert len(endpoints) == 7  # 7 stock endpoints per TSE symbol
+
+
+def test_archive_state_for_codal_shareholder_and_ticks(settings):
+    """We choose an integration test because testing run_archive_state for Codal, Shareholder, and Ticks verifies fetcher response handling and database ingestion boundary logic."""
+    from marketdata.archive import run_archive_state
+    from marketdata.models import CodalAnnouncement, ShareholderRecord, StockTransactionTick
+
+    settings.TSETMC_API_KEY = "test-key"
+
+    codal_state = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
+        symbol="KAMA",
+    )
+    codal_payload = {
+        "announcement": [
+            {
+                "l18": "KAMA",
+                "title": "گزارش مالی",
+                "code": "C001",
+                "date_publish": "1404-01-01",
+                "time_publish": "10:00:00",
+            }
+        ]
+    }
+    with patch("marketdata.archive.fetch_codal_announcements", return_value=codal_payload):
+        run_archive_state(codal_state.pk)
+
+    assert CodalAnnouncement.objects.filter(symbol="KAMA", code="C001").exists()
+
+    sh_state = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS,
+        symbol="KAMA",
+    )
+    sh_payload = [{"id": 99, "name": "Bank Test", "volume": 1000, "percent": 5.0, "date": "1404-01-01"}]
+    with patch("marketdata.archive.fetch_shareholders", return_value=sh_payload):
+        run_archive_state(sh_state.pk)
+
+    assert ShareholderRecord.objects.filter(symbol="KAMA", shareholder_id=99).exists()
+
+    tick_state = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+        symbol="KAMA",
+    )
+    tick_payload = [{"row": 1, "price": 1500, "volume": 100, "time": "09:30:00", "date": "1404-01-01"}]
+    with patch("marketdata.archive.fetch_transactions", return_value=tick_payload):
+        run_archive_state(tick_state.pk)
+
+    assert StockTransactionTick.objects.filter(symbol="KAMA", row=1).exists()
+

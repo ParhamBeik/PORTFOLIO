@@ -91,8 +91,8 @@ def make_user(db):
     """Return a helper that creates a user with an explicit tier."""
     from accounts.models import User
 
-    def _make(email="user@test.test", tier=User.Tier.FREE, password="Sup3rSecret!"):
-        user = User.objects.create_user(email=email, password=password)
+    def _make(email="user@test.test", tier=User.Tier.FREE, password="Sup3rSecret!", first_name="", last_name=""):
+        user = User.objects.create_user(email=email, password=password, first_name=first_name, last_name=last_name)
         user.tier = tier
         user.save(update_fields=["tier"])
         return user

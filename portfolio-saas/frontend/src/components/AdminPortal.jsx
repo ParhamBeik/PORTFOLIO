@@ -10,6 +10,7 @@ export default function AdminPortal() {
   const [searchQuery, setSearchQuery] = useState("");
   const [endpointFilter, setEndpointFilter] = useState("ALL");
   const [statusFilter, setStatusFilter] = useState("ALL");
+  const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
 
   const loadStatus = () => {
     setLoading(true);
@@ -18,6 +19,7 @@ export default function AdminPortal() {
       .then((res) => {
         setData(res);
         setLoading(false);
+        setLastRefreshedAt(new Date());
       })
       .catch((error) => {
         setErr(error.message);
@@ -27,7 +29,7 @@ export default function AdminPortal() {
 
   useEffect(() => {
     loadStatus();
-    const interval = setInterval(loadStatus, 30000); // auto-refresh every 30s
+    const interval = setInterval(loadStatus, 15000); // auto-refresh synced database state every 15s
     return () => clearInterval(interval);
   }, []);
 
@@ -62,12 +64,22 @@ export default function AdminPortal() {
       <div className="card admin-header-card">
         <div className="admin-header-title">
           <div>
-            <h2>⚙️ System Diagnostics & Admin Portal</h2>
-            <p className="muted small">Real-time infrastructure health, data backfill tracking, rate limits, and analytics</p>
+            <h2>⚙️ System Diagnostics & Data Warehouse Portal</h2>
+            <p className="muted small">
+              Real-time database state, interval syncing, data backfill tracking, rate limits, and endpoint metrics
+            </p>
           </div>
-          <button type="button" className="btn-secondary" onClick={loadStatus}>
-            🔄 Refresh Status
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div className="live-sync-indicator" title="Synced with PostgreSQL database">
+              <span className="live-dot" />
+              <span className="small muted">
+                {lastRefreshedAt ? `Synced ${lastRefreshedAt.toLocaleTimeString()}` : "Syncing…"}
+              </span>
+            </div>
+            <button type="button" className="btn-secondary" onClick={loadStatus}>
+              🔄 Refresh Status
+            </button>
+          </div>
         </div>
 
         <div className="metric-grid admin-quick-stats">
@@ -76,24 +88,24 @@ export default function AdminPortal() {
             <div className="metric-label">Archive Completion</div>
           </div>
           <div className="metric">
+            <div className="metric-val">{fmtNum(database?.announcements || 0)}</div>
+            <div className="metric-label">Codal Reports</div>
+          </div>
+          <div className="metric">
+            <div className="metric-val">{fmtNum(database?.shareholders || 0)}</div>
+            <div className="metric-label">Shareholder Records</div>
+          </div>
+          <div className="metric">
+            <div className="metric-val">{fmtNum(database?.stock_transaction_ticks || 0)}</div>
+            <div className="metric-label">Intraday Trade Ledgers</div>
+          </div>
+          <div className="metric">
             <div className="metric-val">{fmtNum(remainingQuota)}</div>
             <div className="metric-label">Quota Headroom Left</div>
           </div>
           <div className="metric">
             <div className="metric-val">{users?.total || 0}</div>
             <div className="metric-label">Registered Users</div>
-          </div>
-          <div className="metric">
-            <div className="metric-val">{users?.pro || 0}</div>
-            <div className="metric-label">Pro Subscribers</div>
-          </div>
-          <div className="metric">
-            <div className="metric-val">{fmtNum(database?.prices || 0)}</div>
-            <div className="metric-label">Live Price Ticks</div>
-          </div>
-          <div className="metric">
-            <div className="metric-val">{fmtNum(database?.snapshots || 0)}</div>
-            <div className="metric-label">Net Worth Snapshots</div>
           </div>
         </div>
       </div>
@@ -134,7 +146,7 @@ export default function AdminPortal() {
       {activeTab === "archive" && (
         <section className="card">
           <div className="card-head">
-            <h3>Asset Data Archival Progress</h3>
+            <h3>Asset Data Archival Progress Across Endpoints</h3>
             <span className="badge">{archive?.progress_pct}% Complete</span>
           </div>
 
@@ -164,6 +176,29 @@ export default function AdminPortal() {
             </div>
           </div>
 
+          {/* Endpoint Category Breakdown */}
+          {archive?.category_summary && (
+            <div className="margin-top">
+              <h4>Endpoint Family Coverage Breakdown</h4>
+              <div className="metric-grid margin-top font-small" style={{ gap: "12px" }}>
+                {Object.entries(archive.category_summary).map(([key, info]) => (
+                  <div key={key} className="card-sub-metric" style={{ padding: "10px", borderRadius: "8px", background: "var(--panel-2)", border: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                      <strong>{info.label}</strong>
+                      <span className="pos">{info.progress_pct}%</span>
+                    </div>
+                    <div className="progress-bar-wrap" style={{ height: "6px", margin: "6px 0" }}>
+                      <div className="progress-bar-fill" style={{ width: `${info.progress_pct}%` }} />
+                    </div>
+                    <div className="muted small">
+                      {info.complete_states} / {info.total_states} states verified
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="margin-top" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" }}>
             <h4 style={{ margin: 0 }}>Priority Gaps & Backfill Queue ({filteredGaps.length} items)</h4>
             <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
@@ -181,12 +216,15 @@ export default function AdminPortal() {
                 onChange={(e) => setEndpointFilter(e.target.value)}
                 style={{ padding: "6px 12px", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--panel-2)", color: "var(--text)" }}
               >
-                <option value="ALL">All Endpoints</option>
+                <option value="ALL">All Endpoints (8 Families)</option>
                 <option value="stock_history_unadjusted">Stock History (Unadjusted)</option>
                 <option value="stock_history_adjusted">Stock History (Adjusted)</option>
                 <option value="stock_candle_unadjusted">Candles (Unadjusted)</option>
                 <option value="stock_candle_adjusted">Candles (Adjusted)</option>
                 <option value="gold_daily">Gold & Currency Daily</option>
+                <option value="codal_announcements">Codal Financial Disclosures</option>
+                <option value="shareholder_records">Shareholder Roster Data</option>
+                <option value="stock_transaction_ticks">Intraday Trade Ledgers</option>
               </select>
               <select
                 aria-label="Filter archive gaps by status"
@@ -347,19 +385,44 @@ export default function AdminPortal() {
             <h3>Database Storage & Row Counts</h3>
           </div>
 
+          <h4 style={{ margin: "10px 0 6px 0" }}>Market History & Trade Ledgers</h4>
           <div className="metric-grid">
             <div className="metric">
               <div className="metric-val">{fmtNum(database?.stock_history_rows || 0)}</div>
-              <div className="metric-label">Stock History Closes</div>
+              <div className="metric-label">Stock Daily Closes</div>
+            </div>
+            <div className="metric">
+              <div className="metric-val">{fmtNum(database?.candles || 0)}</div>
+              <div className="metric-label">OHLC Candlesticks</div>
             </div>
             <div className="metric">
               <div className="metric-val">{fmtNum(database?.gold_currency_rows || 0)}</div>
               <div className="metric-label">Gold/Currency History</div>
             </div>
             <div className="metric">
-              <div className="metric-val">{fmtNum(database?.candles || 0)}</div>
-              <div className="metric-label">Candlesticks (OHLC)</div>
+              <div className="metric-val pos">{fmtNum(database?.stock_transaction_ticks || 0)}</div>
+              <div className="metric-label">Intraday Trade Ledgers</div>
             </div>
+          </div>
+
+          <h4 style={{ margin: "16px 0 6px 0" }}>Financial Disclosures & Roster Data</h4>
+          <div className="metric-grid">
+            <div className="metric">
+              <div className="metric-val pos">{fmtNum(database?.announcements || 0)}</div>
+              <div className="metric-label">Codal Financial Reports</div>
+            </div>
+            <div className="metric">
+              <div className="metric-val pos">{fmtNum(database?.shareholders || 0)}</div>
+              <div className="metric-label">Shareholder Roster Rows</div>
+            </div>
+            <div className="metric">
+              <div className="metric-val">{fmtNum(database?.market_instruments || 0)}</div>
+              <div className="metric-label">Market Catalog Items</div>
+            </div>
+          </div>
+
+          <h4 style={{ margin: "16px 0 6px 0" }}>User & Portfolio Infrastructure</h4>
+          <div className="metric-grid">
             <div className="metric">
               <div className="metric-val">{fmtNum(database?.prices || 0)}</div>
               <div className="metric-label">Live Price Ticks</div>
@@ -369,16 +432,16 @@ export default function AdminPortal() {
               <div className="metric-label">Net Worth Snapshots</div>
             </div>
             <div className="metric">
-              <div className="metric-val">{fmtNum(database?.transactions || 0)}</div>
-              <div className="metric-label">Trade Ledger Rows</div>
+              <div className="metric-val">{fmtNum(database?.accounts || 0)}</div>
+              <div className="metric-label">Portfolio Accounts</div>
             </div>
             <div className="metric">
-              <div className="metric-val">{fmtNum(database?.announcements || 0)}</div>
-              <div className="metric-label">Codal Notices</div>
+              <div className="metric-val">{fmtNum(database?.holdings || 0)}</div>
+              <div className="metric-label">Total Holding Rows</div>
             </div>
             <div className="metric">
-              <div className="metric-val">{fmtNum(database?.shareholders || 0)}</div>
-              <div className="metric-label">Shareholder Roster Rows</div>
+              <div className="metric-val">{fmtNum(database?.portfolio_transactions || database?.transactions || 0)}</div>
+              <div className="metric-label">User Portfolio Transactions</div>
             </div>
           </div>
 

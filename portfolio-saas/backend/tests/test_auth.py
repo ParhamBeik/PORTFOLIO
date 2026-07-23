@@ -103,3 +103,106 @@ def test_register_rejects_too_short_password():
     )
     assert resp.status_code == 400
     assert "password" in resp.json()
+
+
+def test_update_user_profile(make_user):
+    user = make_user(email="profile@test.test")
+    user.first_name = "OldFirst"
+    user.last_name = "OldLast"
+    user.save()
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    resp = client.patch(
+        "/api/auth/me/",
+        {"first_name": "NewFirst", "last_name": "NewLast"},
+        format="json",
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["first_name"] == "NewFirst"
+    assert data["last_name"] == "NewLast"
+    user.refresh_from_db()
+    assert user.first_name == "NewFirst"
+    assert user.last_name == "NewLast"
+
+
+
+def test_change_password_success(make_user):
+    user = make_user(email="changepass@test.test")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    resp = client.post(
+        "/api/auth/change-password/",
+        {
+            "old_password": "Sup3rSecret!",
+            "new_password": "N3wSecretPass123!",
+            "confirm_password": "N3wSecretPass123!",
+        },
+        format="json",
+    )
+    assert resp.status_code == 200
+    assert resp.json()["detail"] == "Password updated successfully."
+
+    user.refresh_from_db()
+    assert user.check_password("N3wSecretPass123!")
+
+    # Verify login with new password
+    login_resp = APIClient().post(
+        "/api/auth/login/",
+        {"email": "changepass@test.test", "password": "N3wSecretPass123!"},
+        format="json",
+    )
+    assert login_resp.status_code == 200
+
+
+def test_change_password_wrong_old_password(make_user):
+    user = make_user(email="wrongold@test.test")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    resp = client.post(
+        "/api/auth/change-password/",
+        {
+            "old_password": "WrongPassword!",
+            "new_password": "N3wSecretPass123!",
+            "confirm_password": "N3wSecretPass123!",
+        },
+        format="json",
+    )
+    assert resp.status_code == 400
+    assert "old_password" in resp.json()
+
+
+def test_change_password_mismatched_or_weak(make_user):
+    user = make_user(email="mismatch@test.test")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    # Mismatched passwords
+    resp = client.post(
+        "/api/auth/change-password/",
+        {
+            "old_password": "Sup3rSecret!",
+            "new_password": "N3wSecretPass123!",
+            "confirm_password": "DifferentPass123!",
+        },
+        format="json",
+    )
+    assert resp.status_code == 400
+    assert "confirm_password" in resp.json()
+
+    # Weak password
+    resp = client.post(
+        "/api/auth/change-password/",
+        {
+            "old_password": "Sup3rSecret!",
+            "new_password": "123",
+            "confirm_password": "123",
+        },
+        format="json",
+    )
+    assert resp.status_code == 400
+    assert "new_password" in resp.json()
+

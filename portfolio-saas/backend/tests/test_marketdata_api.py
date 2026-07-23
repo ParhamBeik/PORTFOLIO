@@ -91,7 +91,11 @@ def test_admin_status_allows_staff_user(make_user):
     user.save(update_fields=["is_staff"])
     response = _auth(user).get("/api/market/admin/status/")
     assert response.status_code == 200
-    assert {"users", "database", "archive", "quota"} <= set(response.json())
+    res_data = response.json()
+    assert {"users", "database", "archive", "quota"} <= set(res_data)
+    assert "stock_transaction_ticks" in res_data["database"]
+    assert "category_summary" in res_data["archive"]
+
 
 
 def test_market_assets_and_gold_performance(make_user, asset_catalog):

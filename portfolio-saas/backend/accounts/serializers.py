@@ -59,3 +59,34 @@ class UserSerializer(serializers.ModelSerializer):
             "is_staff",
             "is_superuser",
         )
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    old_password = serializers.CharField(write_only=True, required=True)
+    new_password = serializers.CharField(write_only=True, required=True)
+    confirm_password = serializers.CharField(write_only=True, required=True)
+
+    def validate_old_password(self, value):
+        user = self.context["request"].user
+        if not user.check_password(value):
+            raise serializers.ValidationError("Current password is incorrect.")
+        return value
+
+    def validate(self, data):
+        if data["new_password"] != data["confirm_password"]:
+            raise serializers.ValidationError(
+                {"confirm_password": ["New passwords do not match."]}
+            )
+        user = self.context["request"].user
+        try:
+            validate_password(data["new_password"], user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"new_password": list(exc.messages)})
+        return data
+
+    def save(self, **kwargs):
+        user = self.context["request"].user
+        user.set_password(self.validated_data["new_password"])
+        user.save()
+        return user
+

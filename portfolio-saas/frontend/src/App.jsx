@@ -11,7 +11,9 @@ import Optimization from "./components/Optimization.jsx";
 import Insights from "./components/Insights.jsx";
 import Analytics from "./components/Analytics.jsx";
 import AdminPortal from "./components/AdminPortal.jsx";
+import Profile from "./components/Profile.jsx";
 import { PortfolioProvider, usePortfolio } from "./components/PortfolioContext.jsx";
+
 
 
 export default function App() {
@@ -36,16 +38,26 @@ export default function App() {
         <Routes>
           <Route
             path="/login"
-            element={user ? <Navigate to="/" replace /> : <Auth onAuthed={setUser} />}
+            element={user ? <Navigate to="/" replace /> : <Auth initialMode="login" onAuthed={setUser} />}
+          />
+          <Route
+            path="/register"
+            element={user ? <Navigate to="/" replace /> : <Auth initialMode="register" onAuthed={setUser} />}
+          />
+          <Route
+            path="/signup"
+            element={<Navigate to="/register" replace />}
           />
           <Route element={user ? <Shell user={user} setUser={setUser} /> : <Navigate to="/login" replace />}>
             <Route index element={<Portfolio user={user} />} />
             <Route path="market" element={<MarketData user={user} />} />
             <Route path="billing" element={<Billing user={user} setUser={setUser} />} />
+            <Route path="profile" element={<Profile user={user} setUser={setUser} />} />
             <Route
               path="admin"
               element={user?.is_staff ? <AdminPortal /> : <Navigate to="/" replace />}
             />
+
 
             {/* Legacy deep links */}
             <Route path="accounts/:id" element={<AccountRedirect />} />
@@ -126,6 +138,9 @@ function Shell({ user, setUser }) {
           <NavLink to="/billing" className={({ isActive }) => (isActive ? "active" : "")}>
             Billing
           </NavLink>
+          <NavLink to="/profile" className={({ isActive }) => (isActive ? "active" : "")}>
+            Profile
+          </NavLink>
           {user.is_staff && (
             <NavLink to="/admin" className={({ isActive }) => (isActive ? "active" : "")}>
               Admin
@@ -144,7 +159,9 @@ function Shell({ user, setUser }) {
             {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
           </button>
           <span className="tier-badge">{user.is_pro ? "PRO" : "FREE"}</span>
-          <span className="email">{user.email}</span>
+          <NavLink to="/profile" className="email-link" title="Account & Security Settings">
+            <span className="email">{user.email}</span>
+          </NavLink>
           <button
             onClick={() => {
               auth.logout();
@@ -155,6 +172,7 @@ function Shell({ user, setUser }) {
             Logout
           </button>
         </div>
+
       </header>
       <main>
         <Outlet />

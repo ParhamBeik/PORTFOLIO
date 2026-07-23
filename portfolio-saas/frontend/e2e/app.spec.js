@@ -4,29 +4,30 @@ const PASSWORD = "Sup3rSecret!";
 
 async function login(page, email) {
   await page.goto("/login");
-  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Email Address").fill(email);
   await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
-  await page.locator("button.primary", { hasText: "Sign in" }).click();
+  await page.getByRole("button", { name: "Sign In" }).click();
   await expect(page.getByRole("link", { name: "Portfolio" })).toBeVisible();
 }
 
 test("registration validates credentials and creates a session", async ({ page }) => {
-  await page.goto("/login");
-  await page.locator(".seg").getByRole("button", { name: "Create account" }).click();
+  await page.goto("/register");
 
-  await page.getByLabel("Email").fill("invalid");
+  await page.getByLabel("Email Address").fill("invalid");
   await page.getByLabel("Password", { exact: true }).fill("123");
-  await expect(page.getByText("Enter a valid email address.")).toBeVisible();
+  await expect(page.getByText("Please enter a valid email address")).toBeVisible();
   await expect(page.getByText("At least 8 characters")).toBeVisible();
-  await expect(page.locator("button.primary")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Create Account" })).toBeDisabled();
 
   await page.getByRole("button", { name: "Show password" }).click();
   await expect(page.getByLabel("Password", { exact: true })).toHaveAttribute("type", "text");
   await page.getByRole("button", { name: "Hide password" }).click();
 
-  await page.getByLabel("Email").fill(`e2e-new-${Date.now()}@portfolio.local`);
+  await page.getByLabel("First Name").fill("Test");
+  await page.getByLabel("Email Address").fill(`e2e-new-${Date.now()}@portfolio.local`);
   await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
-  await page.locator("button.primary", { hasText: "Create account" }).click();
+  await page.getByLabel("Confirm Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Create Account" }).click();
   await expect(page.getByRole("link", { name: "Portfolio" })).toBeVisible();
 });
 

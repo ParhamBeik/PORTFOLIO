@@ -459,7 +459,12 @@ class AdminStatusView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        from .models import ApiRequestQuota, ArchiveFetchState, MarketInstrument
+        from .models import (
+            ApiRequestQuota,
+            ArchiveFetchState,
+            MarketInstrument,
+            StockTransactionTick,
+        )
         from .quota import get_quota_status
 
         total_states = ArchiveFetchState.objects.count()
@@ -469,6 +474,19 @@ class AdminStatusView(APIView):
         latest_quota = ApiRequestQuota.objects.order_by("-day").first()
         users = User.objects.order_by("-date_joined")[:20]
         recent_snapshots = Snapshot.objects.order_by("-timestamp")[:10]
+
+        category_summary = {}
+        for ep_choice, ep_label in ArchiveFetchState.Endpoint.choices:
+            states = ArchiveFetchState.objects.filter(endpoint=ep_choice)
+            t_cnt = states.count()
+            c_cnt = states.filter(verified_complete=True).count()
+            category_summary[ep_choice] = {
+                "label": ep_label,
+                "total_states": t_cnt,
+                "complete_states": c_cnt,
+                "pending_states": max(0, t_cnt - c_cnt),
+                "progress_pct": round((c_cnt / t_cnt * 100), 2) if t_cnt else 0,
+            }
 
         return Response({
             "users": {
@@ -492,6 +510,8 @@ class AdminStatusView(APIView):
                 "prices": Price.objects.count(),
                 "snapshots": Snapshot.objects.count(),
                 "transactions": Transaction.objects.count(),
+                "portfolio_transactions": Transaction.objects.count(),
+                "stock_transaction_ticks": StockTransactionTick.objects.count(),
                 "market_instruments": MarketInstrument.objects.count(),
                 "stock_history_rows": DailyStockHistory.objects.count(),
                 "gold_currency_rows": GoldCurrencyHistory.objects.count(),
@@ -505,6 +525,7 @@ class AdminStatusView(APIView):
                 "pending_states": pending_states,
                 "failed_states": failures,
                 "progress_pct": round((complete_states / total_states * 100), 2) if total_states else 0,
+                "category_summary": category_summary,
                 "worst_gaps": [
                     {
                         "endpoint": row.endpoint,

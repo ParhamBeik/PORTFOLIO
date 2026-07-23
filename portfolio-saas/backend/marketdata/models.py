@@ -69,6 +69,9 @@ class ArchiveFetchState(models.Model):
         STOCK_CANDLE_UNADJUSTED = "stock_candle_unadjusted", "Stock candle unadjusted"
         STOCK_CANDLE_ADJUSTED = "stock_candle_adjusted", "Stock candle adjusted"
         GOLD_DAILY = "gold_daily", "Gold daily"
+        CODAL_ANNOUNCEMENTS = "codal_announcements", "Codal financial disclosures"
+        SHAREHOLDER_RECORDS = "shareholder_records", "Shareholder roster data"
+        STOCK_TRANSACTION_TICKS = "stock_transaction_ticks", "Intraday trade ledgers"
 
     endpoint = models.CharField(max_length=40, choices=Endpoint.choices)
     symbol = models.CharField(max_length=64)

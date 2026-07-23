@@ -72,12 +72,27 @@ function extractError(detail) {
 }
 
 // Auth
-export const register = (email, password) =>
-  api("/api/auth/register/", { method: "POST", body: { email, password } });
+export const register = (email, password, firstName = "", lastName = "") =>
+  api("/api/auth/register/", {
+    method: "POST",
+    body: { email, password, first_name: firstName, last_name: lastName },
+  });
 export const login = (email, password) =>
   api("/api/auth/login/", { method: "POST", body: { email, password } });
 export const me = () => api("/api/auth/me/");
+export const updateProfile = (data) =>
+  api("/api/auth/me/", { method: "PATCH", body: data });
+export const changePassword = (oldPassword, newPassword, confirmPassword) =>
+  api("/api/auth/change-password/", {
+    method: "POST",
+    body: {
+      old_password: oldPassword,
+      new_password: newPassword,
+      confirm_password: confirmPassword,
+    },
+  });
 // NOTE: tier upgrades go through billing (Part 3-B), not a self-service endpoint.
+
 
 // Catalog & accounts
 export const listAssets = () => api("/api/assets/");
