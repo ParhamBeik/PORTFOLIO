@@ -7,10 +7,12 @@ map is global — every client wants the same bytes.
 import os
 
 import redis
+import redis.asyncio as async_redis
 
 CHANNEL = "prices:update"
 
 _client = None
+_async_client = None
 
 
 def get_redis():
@@ -26,3 +28,14 @@ def get_redis():
     if _client is None:
         _client = redis.Redis.from_url(url, decode_responses=True)
     return _client
+
+
+def get_async_redis():
+    """Return the async Redis client used by ASGI SSE streams."""
+    global _async_client
+    url = os.getenv("REDIS_URL")
+    if not url:
+        return None
+    if _async_client is None:
+        _async_client = async_redis.Redis.from_url(url, decode_responses=True)
+    return _async_client

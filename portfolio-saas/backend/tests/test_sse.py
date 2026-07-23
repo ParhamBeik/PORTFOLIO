@@ -5,6 +5,7 @@ These cover the security-sensitive pieces (a query-param token must be a valid
 end-to-end publish -> streamed-event path needs a running Redis and is exercised
 manually via the verification steps.
 """
+import asyncio
 import json
 
 import pytest
@@ -61,6 +62,24 @@ def test_stream_endpoint_rejects_anonymous(monkeypatch):
     assert resp.status_code == 401
 
 
+def test_stream_endpoint_uses_async_iterator(make_user, monkeypatch):
+    from django.test import Client
+    from portfolio.live import sse
+
+    user = make_user(email="async-stream@test.test")
+    token = str(AccessToken.for_user(user))
+    monkeypatch.setattr(sse, "get_redis", lambda: None)
+    monkeypatch.setattr(sse, "get_async_redis", lambda: None)
+    monkeypatch.setattr(sse, "get_latest_prices", lambda: {"usd_cash": 1})
+
+    response = Client().get(f"/api/prices/stream/?token={token}")
+
+    assert response.status_code == 200
+    assert response.is_async
+    first_chunk = asyncio.run(anext(response.streaming_content))
+    assert first_chunk == b'event: hello\ndata: {"usd_cash": 1.0}\n\n'
+
+
 def test_sse_rate_limit_constants():
     """Verify stream concurrency cap and connection TTL constants."""
     from portfolio.live.sse import CONN_TTL_SECONDS, MAX_STREAMS_PER_IP, MAX_STREAMS_PER_USER
@@ -68,4 +87,3 @@ def test_sse_rate_limit_constants():
     assert MAX_STREAMS_PER_USER == 10
     assert MAX_STREAMS_PER_IP == 30
     assert CONN_TTL_SECONDS == 60
-

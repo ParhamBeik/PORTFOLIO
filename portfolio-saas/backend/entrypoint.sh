@@ -7,7 +7,7 @@ python manage.py migrate --noinput
 
 # Seed the asset catalog so valuations have something to look up. Always run —
 # it's idempotent and the catalog is needed in every environment.
-python manage.py seed_assets || true
+python manage.py seed_assets
 
 # Demo user is dev-only: never auto-create accounts in production.
 if [ "${DJANGO_DEBUG:-1}" = "1" ]; then

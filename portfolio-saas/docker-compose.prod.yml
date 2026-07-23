@@ -83,7 +83,7 @@ services:
       redis:
         condition: service_healthy
     environment: *backend-env
-    command: celery -A config worker -l info --concurrency=2
+    command: celery -A config worker -l info --concurrency=2 --uid=nobody --gid=nogroup
 
   celery_beat:
     build: ./backend

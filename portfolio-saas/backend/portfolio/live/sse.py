@@ -9,15 +9,16 @@ Auth: EventSource cannot set headers, so the access JWT rides as ?token=. Refres
 tokens are rejected. Concurrent streams per user are capped so one account cannot
 hold an unbounded number of long-lived connections.
 """
+import asyncio
 import json
-import time
 
+from asgiref.sync import sync_to_async
 from django.http import HttpResponse, StreamingHttpResponse
 from django.views import View
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from portfolio.services import get_latest_prices
-from .pubsub import CHANNEL, get_redis
+from .pubsub import CHANNEL, get_async_redis, get_redis
 
 MAX_STREAMS_PER_USER = 10
 MAX_STREAMS_PER_IP = 30  # H5: cap concurrent streams per source address
@@ -55,41 +56,43 @@ def user_from_token(token):
         return None
 
 
-def _stream_events(user, ip_key=None):
+async def _stream_events(user, ip_key=None):
     """Generator yielding SSE frames for one connected user.
 
     Emits `hello` immediately (hydration from the cache), then `price` ticks as
     they are published, with a `: ping` comment every HEARTBEAT_SECONDS to keep
     proxies from timing the idle connection out.
     """
-    client = get_redis()
-    yield format_event("hello", {k: float(v) for k, v in get_latest_prices().items()})
+    prices = await sync_to_async(get_latest_prices, thread_sensitive=True)()
+    yield format_event("hello", {k: float(v) for k, v in prices.items()})
 
+    client = get_async_redis()
     if client is None:
         # No Redis: keep the stream alive with heartbeats; client polls /latest.
         while True:
             yield ": ping\n\n"
-            time.sleep(HEARTBEAT_SECONDS)
+            await asyncio.sleep(HEARTBEAT_SECONDS)
         return
 
     pubsub = client.pubsub(ignore_subscribe_messages=True)
-    pubsub.subscribe(CHANNEL)
-    last_heartbeat = time.monotonic()
+    await pubsub.subscribe(CHANNEL)
+    loop = asyncio.get_running_loop()
+    last_heartbeat = loop.time()
     try:
         while True:
-            message = pubsub.get_message(timeout=1.0)
+            message = await pubsub.get_message(timeout=1.0)
             if message and message.get("type") == "message":
                 # Published payloads are already JSON strings — pass straight through.
                 yield format_event("price", message["data"])
-            if time.monotonic() - last_heartbeat >= HEARTBEAT_SECONDS:
+            if loop.time() - last_heartbeat >= HEARTBEAT_SECONDS:
                 yield ": ping\n\n"
-                last_heartbeat = time.monotonic()
+                last_heartbeat = loop.time()
     finally:
-        pubsub.close()
+        await pubsub.aclose()
         # Release the connection slots claimed in the view (per-user + per-IP).
-        client.decr(f"sse:conn:{user.id}")
+        await client.decr(f"sse:conn:{user.id}")
         if ip_key:
-            client.decr(ip_key)
+            await client.decr(ip_key)
 
 
 class PriceStreamView(View):
