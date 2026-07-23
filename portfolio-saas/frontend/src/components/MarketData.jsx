@@ -35,11 +35,11 @@ export default function MarketData({ user }) {
     marketAssets()
       .then((rows) => {
         setAssets(rows);
-        const first = rows.find((asset) => classOf(asset) === activeClass) || rows[0];
+        const first = rows.find((asset) => classOf(asset) === "Currency") || rows[0];
         if (first) setAssetKey(first.key);
       })
       .catch((error) => setErr(error.message));
-  }, [activeClass]);
+  }, []);
 
   useEffect(() => {
     if (!assetKey) return;
@@ -365,17 +365,16 @@ export default function MarketData({ user }) {
                 .filter((asset) => asset.key !== assetKey)
                 .slice(0, 8)
                 .map((asset) => (
-                  <div
+                  <button
+                    type="button"
                     key={asset.key}
                     className="comparison-card"
                     onClick={() => setAssetKey(asset.key)}
-                    role="button"
-                    tabIndex={0}
                   >
                     <div className="comp-symbol">{aliasOf(asset)}</div>
                     <div className="comp-name">{asset.name}</div>
                     <div className="comp-meta">{asset.records} archived days</div>
-                  </div>
+                  </button>
                 ))}
             </div>
           </div>
@@ -502,4 +501,3 @@ function ProSections({ symbol, isPro }) {
     </div>
   );
 }
-

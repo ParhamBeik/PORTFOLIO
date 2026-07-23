@@ -42,7 +42,10 @@ export default function App() {
             <Route index element={<Portfolio user={user} />} />
             <Route path="market" element={<MarketData user={user} />} />
             <Route path="billing" element={<Billing user={user} setUser={setUser} />} />
-            <Route path="admin" element={<AdminPortal user={user} />} />
+            <Route
+              path="admin"
+              element={user?.is_staff ? <AdminPortal /> : <Navigate to="/" replace />}
+            />
 
             {/* Legacy deep links */}
             <Route path="accounts/:id" element={<AccountRedirect />} />
@@ -115,9 +118,11 @@ function Shell({ user, setUser }) {
           <NavLink to="/billing" className={({ isActive }) => (isActive ? "active" : "")}>
             Billing
           </NavLink>
-          <NavLink to="/admin" className={({ isActive }) => (isActive ? "active" : "")}>
-            Admin
-          </NavLink>
+          {user.is_staff && (
+            <NavLink to="/admin" className={({ isActive }) => (isActive ? "active" : "")}>
+              Admin
+            </NavLink>
+          )}
 
         </nav>
         <div className="userbox">

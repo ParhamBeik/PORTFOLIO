@@ -2,11 +2,14 @@ import { useEffect, useState } from "react";
 import { adminStatus } from "../api.js";
 import { fmtNum, fmtTomanCompact } from "../format.js";
 
-export default function AdminPortal({ user }) {
+export default function AdminPortal() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [activeTab, setActiveTab] = useState("archive");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [endpointFilter, setEndpointFilter] = useState("ALL");
+  const [statusFilter, setStatusFilter] = useState("ALL");
 
   const loadStatus = () => {
     setLoading(true);
@@ -37,10 +40,6 @@ export default function AdminPortal({ user }) {
   // Calculate remaining rate limit headroom
   const remainingQuota = quota?.limit ? Math.max(0, quota.limit - quota.used) : 0;
   const quotaPct = quota?.limit ? Math.round((quota.used / quota.limit) * 100) : 0;
-
-  const [searchQuery, setSearchQuery] = useState("");
-  const [endpointFilter, setEndpointFilter] = useState("ALL");
-  const [statusFilter, setStatusFilter] = useState("ALL");
 
   const filteredGaps = (archive?.worst_gaps || []).filter((gap) => {
     if (endpointFilter !== "ALL" && gap.endpoint !== endpointFilter) return false;
@@ -169,6 +168,7 @@ export default function AdminPortal({ user }) {
             <h4 style={{ margin: 0 }}>Priority Gaps & Backfill Queue ({filteredGaps.length} items)</h4>
             <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
               <input
+                aria-label="Search archive gaps"
                 type="text"
                 placeholder="🔍 Search symbol / endpoint…"
                 value={searchQuery}
@@ -176,6 +176,7 @@ export default function AdminPortal({ user }) {
                 style={{ padding: "6px 12px", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--panel-2)", color: "var(--text)" }}
               />
               <select
+                aria-label="Filter archive gaps by endpoint"
                 value={endpointFilter}
                 onChange={(e) => setEndpointFilter(e.target.value)}
                 style={{ padding: "6px 12px", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--panel-2)", color: "var(--text)" }}
@@ -188,6 +189,7 @@ export default function AdminPortal({ user }) {
                 <option value="gold_daily">Gold & Currency Daily</option>
               </select>
               <select
+                aria-label="Filter archive gaps by status"
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
                 style={{ padding: "6px 12px", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--panel-2)", color: "var(--text)" }}

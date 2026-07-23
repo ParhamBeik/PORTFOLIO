@@ -459,6 +459,9 @@ button.link.danger { color: var(--red); }
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.75rem;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: transform 0.15s, border-color 0.15s;
 }
@@ -578,4 +581,3 @@ button.link.danger { color: var(--red); }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-

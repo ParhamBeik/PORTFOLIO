@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { me } from "../api.js";
 import { useUpgrade } from "../hooks/useUpgrade.js";
@@ -11,9 +11,25 @@ export default function Billing({ user, setUser }) {
   const { upgrade, busy, error: err } = useUpgrade();
   const status = params.get("status");
   const refId = params.get("ref_id");
+  const [refreshing, setRefreshing] = useState(status === "success");
+  const [refreshError, setRefreshError] = useState("");
 
   useEffect(() => {
-    if (status === "success") me().then(setUser).catch(() => {});
+    if (status !== "success") return;
+    let current = true;
+    setRefreshing(true);
+    setRefreshError("");
+    me()
+      .then((nextUser) => {
+        if (current) setUser(nextUser);
+      })
+      .catch((error) => {
+        if (current) setRefreshError(error.message);
+      })
+      .finally(() => {
+        if (current) setRefreshing(false);
+      });
+    return () => { current = false; };
   }, [status, setUser]);
 
   return (
@@ -22,8 +38,13 @@ export default function Billing({ user, setUser }) {
         <h2>Billing</h2>
         {status === "success" && (
           <div className="ok">
-            Thanks — your Pro subscription is active!
+            {refreshing ? "Payment verified — refreshing your plan…" : "Thanks — your Pro subscription is active!"}
             {refId && <span className="muted small"> (ref {refId})</span>}
+          </div>
+        )}
+        {refreshError && (
+          <div className="error">
+            Payment succeeded, but the plan could not refresh: {refreshError}
           </div>
         )}
         {status === "cancel" && (
@@ -38,7 +59,19 @@ export default function Billing({ user, setUser }) {
 
         {user.is_pro ? (
           <p className="muted">
-            You're on Pro (annual). It renews here each year — no auto-rebilling in between.
+            You're on Pro (annual)
+            {user.pro_expires_at && (
+              <>
+                {" "}until{" "}
+                <time dateTime={user.pro_expires_at}>
+                  {new Intl.DateTimeFormat("en-US", {
+                    dateStyle: "medium",
+                    timeZone: "Asia/Tehran",
+                  }).format(new Date(user.pro_expires_at))}
+                </time>
+              </>
+            )}
+            . Renew here each year; there is no automatic rebilling.
           </p>
         ) : (
           <>

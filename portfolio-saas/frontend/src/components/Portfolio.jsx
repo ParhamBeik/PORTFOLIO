@@ -84,7 +84,12 @@ export default function Portfolio({ user }) {
     if (activeId == null) { setTxns([]); return; }
     transactions(365, activeId)
       .then((rows) => { if (current) setTxns(rows); })
-      .catch(() => { if (current) setTxns([]); });
+      .catch((err) => {
+        if (current) {
+          setTxns([]);
+          setTradeMsg(`Could not load recent activity: ${err.message}`);
+        }
+      });
     return () => { current = false; };
   }, [activeId]);
 
@@ -102,42 +107,90 @@ export default function Portfolio({ user }) {
   async function doCreateAccount(e) {
     e.preventDefault();
     if (!accName.trim()) return;
-    await createAccount(accName.trim());
-    setAccName("");
-    refreshAll();
+    try {
+      await createAccount(accName.trim());
+      setAccName("");
+      setError("");
+      refreshAll();
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
   async function doUpdateAccount(e) {
     e.preventDefault();
-    await updateAccount(editAcc.id, {
-      name: editAcc.name,
-      broker: editAcc.broker,
-      goal: editAcc.goal,
-    });
-    setEditAcc(null);
-    refreshAll();
+    try {
+      await updateAccount(editAcc.id, {
+        name: editAcc.name,
+        broker: editAcc.broker,
+        goal: editAcc.goal,
+      });
+      setEditAcc(null);
+      setError("");
+      refreshAll();
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
   async function doDeleteAccount(acct) {
     if (!window.confirm(`Delete portfolio "${acct.name}" and all its holdings?`)) return;
-    await deleteAccount(acct.id);
-    if (activeId === acct.id) setActive(null);
-    refreshAll();
+    try {
+      await deleteAccount(acct.id);
+      if (activeId === acct.id) setActive(null);
+      setError("");
+      refreshAll();
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
   async function doAddHolding(e) {
     e.preventDefault();
     if (!activeAcct) return;
     if (!holdingDraft.asset || !holdingDraft.quantity) return;
-    await addHolding(activeAcct.id, holdingDraft.asset, holdingDraft.quantity);
-    setHoldingDraft({ asset: "", quantity: "" });
-    refreshAll();
+    try {
+      await addHolding(activeAcct.id, holdingDraft.asset, holdingDraft.quantity);
+      setHoldingDraft({ asset: "", quantity: "" });
+      setError("");
+      refreshAll();
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
   async function doSaveHolding() {
-    await updateHolding(activeAcct.id, editHold.id, editHold.quantity);
-    setEditHold(null);
-    refreshAll();
+    try {
+      await updateHolding(activeAcct.id, editHold.id, editHold.quantity);
+      setEditHold(null);
+      setError("");
+      refreshAll();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function doRemoveHolding(id) {
+    try {
+      await removeHolding(activeAcct.id, id);
+      setError("");
+      refreshAll();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function doUndoTrade(transactionId) {
+    if (!window.confirm("Undo this trade? This will reverse its effect on holdings.")) return;
+    setTradeMsg("");
+    try {
+      await deleteTransaction(transactionId);
+      setTradeMsg("Trade undone.");
+      refreshAll();
+      setTxns(await transactions(365, activeAcct.id));
+    } catch (err) {
+      setTradeMsg(err.message);
+    }
   }
 
   async function submitTrade(e) {
@@ -158,16 +211,6 @@ export default function Portfolio({ user }) {
     if (qty <= 0) {
       setTradeMsg("Quantity must be a positive number greater than zero.");
       return;
-    }
-
-    if (form.side === "sell") {
-      const assetObj = tradeable.find((a) => a.key === form.assetKey);
-      const holding = activeAcct.holdings.find((h) => h.asset_name === assetObj?.name);
-      const currentQty = holding ? Number(holding.quantity) : 0;
-      if (qty > currentQty) {
-        setTradeMsg(`Cannot sell ${qty}; only ${currentQty} is held.`);
-        return;
-      }
     }
 
     setBusy(true);
@@ -235,11 +278,11 @@ export default function Portfolio({ user }) {
           <div className="account-head">
             {editingThis ? (
               <form className="inline" onSubmit={doUpdateAccount}>
-                <input value={editAcc.name}
+                <input aria-label="Portfolio name" value={editAcc.name}
                   onChange={(e) => setEditAcc({ ...editAcc, name: e.target.value })} />
-                <input placeholder="broker (optional)" value={editAcc.broker}
+                <input aria-label="Broker" placeholder="broker (optional)" value={editAcc.broker}
                   onChange={(e) => setEditAcc({ ...editAcc, broker: e.target.value })} />
-                <input placeholder="goal (e.g. Retirement)" value={editAcc.goal}
+                <input aria-label="Portfolio goal" placeholder="goal (e.g. Retirement)" value={editAcc.goal}
                   onChange={(e) => setEditAcc({ ...editAcc, goal: e.target.value })} />
                 <button className="primary">Save</button>
                 <button type="button" onClick={() => setEditAcc(null)}>Cancel</button>
@@ -271,8 +314,9 @@ export default function Portfolio({ user }) {
                 <tr><td colSpan="6" className="muted">No holdings yet.</td></tr>
               )}
               {activeAcct.holdings.map((h) => {
-                const price = val?.prices?.[assetKeyFromName(assets, h.asset_name)] || 0;
-                const value = price * Number(h.quantity || 0);
+                const valuationItem = val?.items?.find((item) => item.key === h.asset_key);
+                const price = valuationItem?.unit_price ?? val?.prices?.[h.asset_key] ?? 0;
+                const value = valuationItem?.value ?? price * Number(h.quantity || 0);
                 const editing = editHold && editHold.id === h.id;
                 return (
                   <tr key={h.id}>
@@ -285,14 +329,15 @@ export default function Portfolio({ user }) {
                     <td>
                       {editing ? (
                         <span className="inline">
-                          <input type="number" step="any" value={editHold.quantity}
+                          <input aria-label={h.is_house ? "House price per square meter" : `Quantity of ${h.asset_name}`}
+                            type="number" step="any" min="0.000001" value={editHold.quantity}
                             onChange={(e) => setEditHold({ ...editHold, quantity: e.target.value })} />
                           <button className="primary" onClick={doSaveHolding}>✓</button>
                           <button type="button" onClick={() => setEditHold(null)}>✕</button>
                         </span>
                       ) : fmtNum(h.quantity)}
                     </td>
-                    <td>{fmtNum(price)}</td>
+                    <td>{h.is_house ? "—" : fmtNum(price)}</td>
                     <td>{fmtNum(value)}</td>
                     <td>
                       <span className="actions">
@@ -301,7 +346,8 @@ export default function Portfolio({ user }) {
                             <button className="link" title="Edit quantity"
                               onClick={() => setEditHold({ id: h.id, quantity: h.quantity })}>✎</button>
                             <button className="link danger" title="Remove"
-                              onClick={() => removeHolding(activeAcct.id, h.id).then(refreshAll)}>✕</button>
+                              aria-label={`Remove ${h.asset_name}`}
+                              onClick={() => doRemoveHolding(h.id)}>✕</button>
                           </>
                         )}
                       </span>
@@ -313,14 +359,15 @@ export default function Portfolio({ user }) {
           </table>
 
           <form className="inline" onSubmit={doAddHolding}>
-            <select value={holdingDraft.asset}
+            <select aria-label="Asset to add" value={holdingDraft.asset}
               onChange={(e) => setHoldingDraft({ ...holdingDraft, asset: e.target.value })}>
               <option value="">Add asset…</option>
               {assets.filter((a) => a.is_house).map((a) => (
                 <option key={a.id} value={a.key}>{a.name}</option>
               ))}
             </select>
-            <input type="number" step="any" placeholder="quantity"
+            <input aria-label="House price per square meter" type="number" step="any" min="0.000001"
+              placeholder="million Tomans per m²"
               value={holdingDraft.quantity}
               onChange={(e) => setHoldingDraft({ ...holdingDraft, quantity: e.target.value })} />
             <button>Add</button>
@@ -332,23 +379,23 @@ export default function Portfolio({ user }) {
             the net-worth chart. Selling more than you hold is rejected.
           </p>
           <form className="trade-form inline" onSubmit={submitTrade}>
-            <select value={form.side}
+            <select aria-label="Trade side" value={form.side}
               onChange={(e) => setForm((f) => ({ ...f, side: e.target.value }))}>
               <option value="buy">Buy</option>
               <option value="sell">Sell</option>
             </select>
-            <select value={form.assetKey}
+            <select aria-label="Trade asset" value={form.assetKey}
               onChange={(e) => setForm((f) => ({ ...f, assetKey: e.target.value }))}>
               {tradeable.map((a) => (
                 <option key={a.key} value={a.key}>{a.name}</option>
               ))}
             </select>
-            <input type="number" step="any" min="0" placeholder="Quantity"
+            <input aria-label="Trade quantity" type="number" step="any" min="0" placeholder="Quantity"
               value={form.quantity}
               onChange={(e) => setForm((f) => ({ ...f, quantity: e.target.value }))} />
             <button type="submit" disabled={busy}>{busy ? "…" : "Execute"}</button>
           </form>
-          {tradeMsg && <p className="muted small">{tradeMsg}</p>}
+          {tradeMsg && <p className="muted small" role="status">{tradeMsg}</p>}
 
           <h3 className="subhead">Recent activity</h3>
           {txns.length === 0 ? (
@@ -359,7 +406,7 @@ export default function Portfolio({ user }) {
                 <tr><th>When</th><th>Side</th><th>Asset</th><th>Qty</th><th>Unit (T)</th><th></th></tr>
               </thead>
               <tbody>
-                {txns.slice(0, 20).map((t) => (
+                {txns.slice(0, 20).map((t, index) => (
                   <tr key={t.id}>
                     <td>{fmtTehranTime(t.timestamp)}</td>
                     <td className={t.side === "buy" ? "pos" : "neg"}>{t.side}</td>
@@ -367,23 +414,16 @@ export default function Portfolio({ user }) {
                     <td>{fmtNum(t.quantity)}</td>
                     <td>{fmtNum(t.price_tomans)}</td>
                     <td>
-                      <button
-                        className="link danger"
-                        title="Undo trade"
-                        onClick={async () => {
-                          if (window.confirm("Undo this trade? This will reverse its effect on holdings.")) {
-                            try {
-                              await deleteTransaction(t.id);
-                              refreshAll();
-                              transactions(365, activeAcct.id).then(setTxns).catch(() => {});
-                            } catch (err) {
-                              alert(err.message);
-                            }
-                          }
-                        }}
-                      >
-                        ✕
-                      </button>
+                      {txns.findIndex((row) => row.asset_key === t.asset_key) === index && (
+                        <button
+                          className="link danger"
+                          title="Undo latest trade for this asset"
+                          aria-label={`Undo ${t.side} of ${t.asset_name || t.asset_key}`}
+                          onClick={() => doUndoTrade(t.id)}
+                        >
+                          Undo
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -422,7 +462,7 @@ export default function Portfolio({ user }) {
           )}
 
           <form className="inline" onSubmit={doCreateAccount}>
-            <input value={accName} onChange={(e) => setAccName(e.target.value)}
+            <input aria-label="New portfolio name" value={accName} onChange={(e) => setAccName(e.target.value)}
               placeholder="New portfolio name (e.g. Retirement, Trading)" />
             <button className="primary">Create portfolio</button>
           </form>
@@ -431,10 +471,4 @@ export default function Portfolio({ user }) {
 
     </div>
   );
-}
-
-// The valuation payload keys holdings by asset key; the account's holding only
-// carries the display name, so resolve name -> key from the catalog.
-function assetKeyFromName(assets, name) {
-  return assets.find((a) => a.name === name)?.key;
 }

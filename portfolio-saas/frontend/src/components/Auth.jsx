@@ -48,7 +48,7 @@ export default function Auth({ onAuthed }) {
       <form className="auth-card" onSubmit={submit}>
         <h1 className="brand-heading"><Logo size={30} /> Lattice</h1>
         <p className="subtitle">
-          Track multiple portfolios of gold, currency, KAMA stock, crypto, and
+          Track multiple portfolios of gold, currency, KAMA stock, and
           real estate — valued live in Tomans, with net-worth history.
         </p>
 
@@ -59,28 +59,24 @@ export default function Auth({ onAuthed }) {
             onClick={() => setMode("register")}>Create account</button>
         </div>
 
-        <label>
-          Email
-          <input type="email" required value={email}
-            onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
-        </label>
+        <label htmlFor="auth-email">Email</label>
+        <input id="auth-email" type="email" required value={email}
+          onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
         {registering && email && !emailValid && (
           <p className="hint" style={{ color: "var(--danger, #ef4444)" }}>
             Enter a valid email address.
           </p>
         )}
-        <label>
-          Password
-          <span className="pw-field">
-            <input type={showPw ? "text" : "password"} required value={password}
-              onChange={(e) => setPassword(e.target.value)} placeholder="min 8 chars" />
-            <button type="button" className="link pw-toggle"
-              onClick={() => setShowPw((v) => !v)}
-              aria-label={showPw ? "Hide password" : "Show password"}>
-              {showPw ? "Hide" : "Show"}
-            </button>
-          </span>
-        </label>
+        <label htmlFor="auth-password">Password</label>
+        <span className="pw-field">
+          <input id="auth-password" type={showPw ? "text" : "password"} required value={password}
+            onChange={(e) => setPassword(e.target.value)} placeholder="min 8 chars" />
+          <button type="button" className="link pw-toggle"
+            onClick={() => setShowPw((v) => !v)}
+            aria-label={showPw ? "Hide password" : "Show password"}>
+            {showPw ? "Hide" : "Show"}
+          </button>
+        </span>
         {registering && password && (
           <ul className="pw-rules">
             {checks.map((c) => (
