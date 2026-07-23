@@ -18,7 +18,7 @@ test.describe("Redesigned Auth & Registration Flow", () => {
     await page.goto("/login");
     await page.getByRole("tab", { name: "Create account" }).click();
     await expect(page).toHaveURL(/\/register$/);
-    await expect(page.getByLabel("Confirm Password")).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Confirm Password" })).toBeVisible();
 
     await page.getByRole("tab", { name: "Sign in" }).click();
     await expect(page).toHaveURL(/\/login$/);
@@ -32,7 +32,7 @@ test.describe("Redesigned Auth & Registration Flow", () => {
     await expect(page.getByLabel("Password", { exact: true })).toHaveValue("demo12345");
     await page.getByRole("button", { name: "Sign In" }).click();
 
-    await expect(page.getByRole("link", { name: "Portfolio" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Portfolio", exact: true })).toBeVisible();
   });
 
   test("real-time validation: email format, password strength meter, confirmation match", async ({ page }) => {
@@ -64,13 +64,13 @@ test.describe("Redesigned Auth & Registration Flow", () => {
     await expect(page.getByText(/Strength: Strong/i)).toBeVisible();
 
     // Check confirm password mismatch
-    await page.getByLabel("Confirm Password").fill("Mismatch123!");
+    await page.getByRole("textbox", { name: "Confirm Password" }).fill("Mismatch123!");
     await expect(page.getByText("Mismatch")).toBeVisible();
     await expect(page.getByText("Passwords do not match.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Create Account" })).toBeDisabled();
 
     // Match confirm password
-    await page.getByLabel("Confirm Password").fill(PASSWORD);
+    await page.getByRole("textbox", { name: "Confirm Password" }).fill(PASSWORD);
     await expect(page.getByText("✓ Match")).toBeVisible();
     await expect(page.getByRole("button", { name: "Create Account" })).toBeEnabled();
   });
@@ -97,10 +97,10 @@ test.describe("Redesigned Auth & Registration Flow", () => {
     await page.getByLabel("Last Name").fill("Smith");
     await page.getByLabel("Email Address").fill(testEmail);
     await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
-    await page.getByLabel("Confirm Password").fill(PASSWORD);
+    await page.getByRole("textbox", { name: "Confirm Password" }).fill(PASSWORD);
 
     await page.getByRole("button", { name: "Create Account" }).click();
-    await expect(page.getByRole("link", { name: "Portfolio" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Portfolio", exact: true })).toBeVisible();
     await expect(page.getByText(testEmail)).toBeVisible();
   });
 

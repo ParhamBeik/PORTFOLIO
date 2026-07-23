@@ -7,7 +7,7 @@ async function login(page, email) {
   await page.getByLabel("Email Address").fill(email);
   await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
   await page.getByRole("button", { name: "Sign In" }).click();
-  await expect(page.getByRole("link", { name: "Portfolio" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Portfolio", exact: true })).toBeVisible();
 }
 
 test("registration validates credentials and creates a session", async ({ page }) => {
@@ -26,9 +26,9 @@ test("registration validates credentials and creates a session", async ({ page }
   await page.getByLabel("First Name").fill("Test");
   await page.getByLabel("Email Address").fill(`e2e-new-${Date.now()}@portfolio.local`);
   await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
-  await page.getByLabel("Confirm Password").fill(PASSWORD);
+  await page.getByRole("textbox", { name: "Confirm Password" }).fill(PASSWORD);
   await page.getByRole("button", { name: "Create Account" }).click();
-  await expect(page.getByRole("link", { name: "Portfolio" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Portfolio", exact: true })).toBeVisible();
 });
 
 test("free user can manage a portfolio, holding, trades, and chart controls", async ({ page }) => {
@@ -172,7 +172,7 @@ test("Pro user can use optimizer, insights, analytics, and sees expiry", async (
 
 test("staff user can open and filter the admin portal", async ({ page }) => {
   await login(page, "e2e-admin@portfolio.local");
-  await page.getByRole("link", { name: "Admin" }).click();
+  await page.getByRole("link", { name: "Admin", exact: true }).click();
   await expect(page.getByRole("heading", { name: /System Diagnostics/ })).toBeVisible();
   await page.getByRole("button", { name: /Refresh Status/ }).click();
   await page.getByRole("button", { name: /Rate Limits/ }).click();
