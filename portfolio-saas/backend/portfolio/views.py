@@ -25,7 +25,7 @@ from .serializers import (
     TradeInputSerializer,
     TransactionSerializer,
 )
-from .services import execute_trade, get_latest_prices, value_account, value_user
+from .services import execute_trade, get_latest_prices, undo_trade, value_account, value_user
 from .services.trades import TradeError
 from .services.diagnostics import portfolio_diagnostics
 from .services.insights import _liquid_items, _total, build_insights
@@ -487,60 +487,15 @@ class AssetReturnsView(APIView):
 
 
 class TransactionDestroyView(APIView):
-    """Delete/undo a trade transaction, reversing its effect on holdings and net-worth snapshots."""
+    """Undo the latest trade for an asset and reverse its holding effect."""
 
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, pk):
-        from django.db import transaction as db_transaction
-        from rest_framework.exceptions import NotFound, ValidationError
-        
         try:
-            with db_transaction.atomic():
-                txn = Transaction.objects.select_for_update().filter(
-                    id=pk, account__user=request.user
-                ).first()
-                if not txn:
-                    raise NotFound("Transaction not found.")
-                
-                account = txn.account
-                asset = txn.asset
-                qty = txn.quantity
-                
-                holding = Holding.objects.select_for_update().filter(
-                    account=account, asset=asset
-                ).first()
-                current_qty = holding.quantity if holding else Decimal("0")
-                
-                if txn.side == Transaction.Side.BUY:
-                    if current_qty < qty:
-                        raise ValidationError("Undoing this trade would result in negative holdings.")
-                    new_qty = current_qty - qty
-                else:
-                    new_qty = current_qty + qty
-                    
-                if new_qty == 0:
-                    if holding:
-                        holding.delete()
-                else:
-                    if holding:
-                        holding.quantity = new_qty
-                        holding.save(update_fields=["quantity", "updated_at"])
-                    else:
-                        Holding.objects.create(account=account, asset=asset, quantity=new_qty)
-                
-                txn.delete()
-                
-                # Re-snapshot net worth
-                from .services import value_user, value_account
-                valuation = value_user(request.user)
-                account_total = value_account(account)["total"]
-                Snapshot.objects.bulk_create([
-                    Snapshot(user=request.user, account=None, total_value_tomans=valuation["total"]),
-                    Snapshot(user=request.user, account=account, total_value_tomans=account_total),
-                ])
-                
-                return Response({"detail": "Transaction undone successfully."}, status=status.HTTP_200_OK)
-        except ValidationError as exc:
-            return Response({"detail": exc.detail if hasattr(exc, 'detail') else str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
+            undo_trade(user=request.user, transaction_id=pk)
+        except Transaction.DoesNotExist:
+            return Response({"detail": "Transaction not found."}, status=status.HTTP_404_NOT_FOUND)
+        except TradeError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"detail": "Transaction undone successfully."})

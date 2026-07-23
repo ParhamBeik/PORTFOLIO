@@ -1,15 +1,17 @@
-"""Trade execution: the single write path for buying and selling assets.
+"""Trade execution and correction for buying and selling assets.
 
 A trade is three writes that must succeed or fail together, so the whole body
 runs in one `transaction.atomic()`:
-  1. append an immutable `Transaction` row (the event/ledger);
+  1. append a `Transaction` row (the event/ledger);
   2. upsert the derived `Holding.quantity` (running balance);
   3. stamp an immediate per-user `Snapshot` so the net-worth chart steps at the
      trade moment, not at the next 2-min cron tick.
 
 Selling more than is held is rejected (`InsufficientHolding`) — the ledger must
 never imply a negative position. The execution price is captured from the latest
-price map at call time so the historical event is self-describing.
+price map at call time so the historical event is self-describing. Mistakes can
+be undone only when they are the latest trade for that asset, preserving ledger
+chronology and the derived holding balance.
 """
 from __future__ import annotations
 
@@ -33,11 +35,25 @@ class ManualAssetTrade(TradeError):
     """Raised when trading a house asset (valued by formula, not quantity)."""
 
 
+class StaleTradeUndo(TradeError):
+    """Raised when undoing a trade would rewrite later history for that asset."""
+
+
 def _q(value) -> Decimal:
     try:
         return Decimal(str(value))
     except (TypeError, ValueError, ArithmeticError):
         return Decimal("0")
+
+
+def _stamp_snapshots(user, account: Account) -> dict:
+    valuation = value_user(user)
+    account_total = value_account(account)["total"]
+    Snapshot.objects.bulk_create([
+        Snapshot(user=user, account=None, total_value_tomans=valuation["total"]),
+        Snapshot(user=user, account=account, total_value_tomans=account_total),
+    ])
+    return valuation
 
 
 @transaction.atomic
@@ -75,7 +91,7 @@ def execute_trade(
 
     if side == Transaction.Side.SELL and qty > current_qty:
         raise InsufficientHolding(
-            f"cannot sell {qty}; only {current_qty} held"
+            f"Cannot sell {qty.normalize():f}; only {current_qty.normalize():f} is held."
         )
 
     new_qty = current_qty + qty if side == Transaction.Side.BUY else current_qty - qty
@@ -107,12 +123,7 @@ def execute_trade(
     # whole-portfolio row) AND this account's own total, so a per-account chart
     # also steps at the trade moment instead of waiting for the next cron tick.
     user = account.user
-    valuation = value_user(user)
-    account_total = value_account(account)["total"]
-    Snapshot.objects.bulk_create([
-        Snapshot(user=user, account=None, total_value_tomans=valuation["total"]),
-        Snapshot(user=user, account=account, total_value_tomans=account_total),
-    ])
+    valuation = _stamp_snapshots(user, account)
 
     return {
         "asset_key": asset.key,
@@ -123,3 +134,44 @@ def execute_trade(
         "cash_flow_tomans": str((price * qty).quantize(Decimal("0.0001"))),
         "total_value_tomans": str(valuation["total"]),
     }
+
+
+@transaction.atomic
+def undo_trade(*, user, transaction_id: int) -> None:
+    """Remove the latest trade for one asset and reverse its holding effect."""
+    trade = (
+        Transaction.objects.select_for_update()
+        .select_related("account", "asset")
+        .get(pk=transaction_id, account__user=user)
+    )
+    holding = (
+        Holding.objects.select_for_update()
+        .filter(account=trade.account, asset=trade.asset)
+        .first()
+    )
+    latest_id = (
+        Transaction.objects.filter(account=trade.account, asset=trade.asset)
+        .order_by("-timestamp", "-pk")
+        .values_list("pk", flat=True)
+        .first()
+    )
+    if latest_id != trade.pk:
+        raise StaleTradeUndo("Only the latest trade for this asset can be undone.")
+
+    current_qty = _q(holding.quantity) if holding else Decimal("0")
+    new_qty = current_qty - trade.quantity if trade.side == Transaction.Side.BUY else current_qty + trade.quantity
+    if new_qty < 0:
+        raise TradeError("Undoing this trade would result in negative holdings.")
+
+    if new_qty == 0:
+        if holding:
+            holding.delete()
+    elif holding:
+        holding.quantity = new_qty
+        holding.save(update_fields=["quantity", "updated_at"])
+    else:
+        Holding.objects.create(account=trade.account, asset=trade.asset, quantity=new_qty)
+
+    account = trade.account
+    trade.delete()
+    _stamp_snapshots(user, account)

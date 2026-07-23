@@ -1,5 +1,8 @@
 """Authentication: register, login, JWT-protected /me/."""
+from datetime import timedelta
+
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 pytestmark = pytest.mark.django_db
@@ -63,6 +66,19 @@ def test_jwt_access_token_authenticates_me():
     resp = client.get("/api/auth/me/")
     assert resp.status_code == 200
     assert resp.json()["email"] == "jwt@test.test"
+
+
+def test_me_exposes_pro_expiry(make_user):
+    user = make_user(tier="PRO")
+    user.pro_expires_at = timezone.now() + timedelta(days=30)
+    user.save(update_fields=["pro_expires_at"])
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    response = client.get("/api/auth/me/")
+
+    assert response.status_code == 200
+    assert response.json()["pro_expires_at"] is not None
 
 
 def test_register_rejects_weak_all_numeric_password():

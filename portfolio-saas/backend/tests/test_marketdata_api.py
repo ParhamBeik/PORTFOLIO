@@ -80,6 +80,20 @@ def test_anonymous_rejected():
     assert APIClient().get("/api/market/candles/?symbol=x").status_code in (401, 403)
 
 
+def test_admin_status_rejects_non_staff_user(make_user):
+    response = _auth(make_user()).get("/api/market/admin/status/")
+    assert response.status_code == 403
+
+
+def test_admin_status_allows_staff_user(make_user):
+    user = make_user()
+    user.is_staff = True
+    user.save(update_fields=["is_staff"])
+    response = _auth(user).get("/api/market/admin/status/")
+    assert response.status_code == 200
+    assert {"users", "database", "archive", "quota"} <= set(response.json())
+
+
 def test_market_assets_and_gold_performance(make_user, asset_catalog):
     gold = asset_catalog["emami_coin"]
     gold.brs_symbol = "IR_COIN_EMAMI"

@@ -13,6 +13,11 @@ class AssetSerializer(serializers.ModelSerializer):
 
 
 class HoldingSerializer(serializers.ModelSerializer):
+    quantity = serializers.DecimalField(
+        max_digits=20,
+        decimal_places=6,
+        min_value=Decimal("0.000001"),
+    )
     asset_key = serializers.SlugRelatedField(
         source="asset", slug_field="key", queryset=Asset.objects.filter(is_active=True)
     )

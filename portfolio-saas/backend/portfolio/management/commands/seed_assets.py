@@ -17,6 +17,7 @@ ASSETS = [
     ("gold_18k_gram", "Gold Gram (18K)", "طلای ۱۸ عیار", Asset.AssetClass.GOLD, Asset.Currency.IRT, False, False, "", "IR_GOLD_18K"),
     ("usd_cash", "US Dollar", "دلار", Asset.AssetClass.CASH, Asset.Currency.USD, False, False, "", "USD"),
     ("kama_stock", "KAMA Stock", "سهام کاما", Asset.AssetClass.STOCK, Asset.Currency.IRT, False, False, "کاما", ""),
+    ("house_asset", "Real Estate", "", Asset.AssetClass.REAL_ESTATE, Asset.Currency.IRT, False, True, "", ""),
 ]
 
 
@@ -35,6 +36,7 @@ class Command(BaseCommand):
                     "currency": currency,
                     "is_manual": manual,
                     "is_house": house,
+                    "is_active": True,
                     "tse_symbol": tse,
                     "brs_symbol": brs,
                 },
@@ -48,6 +50,7 @@ class Command(BaseCommand):
                 "currency": currency,
                 "is_manual": manual,
                 "is_house": house,
+                "is_active": True,
                 "tse_symbol": tse,
                 "brs_symbol": brs,
             }

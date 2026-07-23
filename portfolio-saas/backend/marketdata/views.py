@@ -5,7 +5,7 @@ request handler (the sync/backfill tasks own fetching). Public market charts
 (candles, history, index, symbols) are FREE; "smart-money" data (Codal filings,
 shareholder moves) is a Pro differentiator alongside the analytics endpoints.
 """
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -456,12 +456,9 @@ class QuotaStatusView(APIView):
 class AdminStatusView(APIView):
     """Staff-only operational snapshot for data coverage, users, and storage."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
-        if not request.user.is_staff:
-            return Response({"detail": "Admin access required."}, status=403)
-
         from .models import ApiRequestQuota, ArchiveFetchState, MarketInstrument
         from .quota import get_quota_status
 

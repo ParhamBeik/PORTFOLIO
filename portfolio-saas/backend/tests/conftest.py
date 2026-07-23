@@ -34,7 +34,7 @@ def legacy_engine():
 
 @pytest.fixture
 def asset_catalog(db):
-    """The 14-asset catalog mirroring seed_assets (idempotent per test)."""
+    """Broad test catalog covering production and legacy/manual asset paths."""
     from portfolio.models import Asset
 
     entries = [

@@ -60,6 +60,8 @@ class Asset(models.Model):
     def clean(self):
         if not self.is_active:
             return
+        if self.is_house:
+            return
         from marketdata.models import MarketInstrument
 
         if not MarketInstrument.objects.exists():
@@ -157,7 +159,7 @@ class Price(models.Model):
 
 
 class Transaction(models.Model):
-    """Append-only trade ledger: the durable source of truth for a portfolio.
+    """Trade ledger: the durable source of truth for a portfolio.
 
     `Holding.quantity` is DERIVED state (the running sum of buys minus sells);
     this table records the EVENTS that produced it. Keeping the ledger means:
@@ -168,7 +170,8 @@ class Transaction(models.Model):
 
     `price_tomans` is the unit price captured at execution (the latest Price at
     the time of the trade), so historical valuation of the event never depends
-    on today's price map. Rows are never updated or deleted.
+    on today's price map. Rows are never updated; the latest trade for an asset
+    may be deleted explicitly to correct an input mistake.
     """
 
     class Side(models.TextChoices):

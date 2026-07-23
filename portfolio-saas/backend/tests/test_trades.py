@@ -13,8 +13,10 @@ from portfolio.models import Account, Holding, Snapshot, Transaction
 from portfolio.services.trades import (
     InsufficientHolding,
     ManualAssetTrade,
+    StaleTradeUndo,
     TradeError,
     execute_trade,
+    undo_trade,
 )
 
 pytestmark = pytest.mark.django_db
@@ -110,6 +112,55 @@ def test_buy_without_price_records_zero_execution_price(account, asset_catalog):
     assert Transaction.objects.get(account=account).price_tomans == Decimal("0")
 
 
+def test_undo_latest_trade_reverses_holding_and_stamps_snapshots(
+    account, asset_catalog, write_prices
+):
+    write_prices({"emami_coin": Decimal("176000000")})
+    execute_trade(
+        account=account,
+        asset=asset_catalog["emami_coin"],
+        side="buy",
+        quantity=Decimal("3"),
+    )
+    trade = Transaction.objects.get(account=account)
+
+    undo_trade(user=account.user, transaction_id=trade.id)
+
+    assert not Transaction.objects.filter(pk=trade.id).exists()
+    assert not Holding.objects.filter(
+        account=account, asset=asset_catalog["emami_coin"]
+    ).exists()
+    assert Snapshot.objects.filter(user=account.user, account=None).count() == 2
+    assert Snapshot.objects.filter(user=account.user, account=account).count() == 2
+
+
+def test_undo_rejects_older_trade_for_same_asset(
+    account, asset_catalog, write_prices
+):
+    write_prices({"emami_coin": Decimal("176000000")})
+    execute_trade(
+        account=account,
+        asset=asset_catalog["emami_coin"],
+        side="buy",
+        quantity=Decimal("3"),
+    )
+    first = Transaction.objects.get(account=account)
+    execute_trade(
+        account=account,
+        asset=asset_catalog["emami_coin"],
+        side="sell",
+        quantity=Decimal("1"),
+    )
+
+    with pytest.raises(StaleTradeUndo):
+        undo_trade(user=account.user, transaction_id=first.id)
+
+    assert Transaction.objects.filter(account=account).count() == 2
+    assert Holding.objects.get(
+        account=account, asset=asset_catalog["emami_coin"]
+    ).quantity == Decimal("2")
+
+
 class TestTradeEndpoint:
     """The HTTP surface: auth, ownership, and error mapping."""
 
@@ -170,3 +221,32 @@ class TestTradeEndpoint:
         )
         assert resp.status_code == 400
         assert not account.holdings.exists()
+
+    def test_house_holding_rejects_nonpositive_price(self, account, asset_catalog):
+        response = self._client(account.user).post(
+            f"/api/accounts/{account.id}/holdings/",
+            {"asset_key": "house_asset", "quantity": 0},
+            format="json",
+        )
+
+        assert response.status_code == 400
+        assert not account.holdings.exists()
+
+    def test_cannot_undo_another_users_trade(
+        self, account, asset_catalog, write_prices, make_user
+    ):
+        write_prices({"emami_coin": Decimal("176000000")})
+        execute_trade(
+            account=account,
+            asset=asset_catalog["emami_coin"],
+            side="buy",
+            quantity=Decimal("2"),
+        )
+        trade = Transaction.objects.get(account=account)
+
+        response = self._client(make_user(email="other-trader@test.test")).delete(
+            f"/api/transactions/{trade.id}/"
+        )
+
+        assert response.status_code == 404
+        assert Transaction.objects.filter(pk=trade.id).exists()
