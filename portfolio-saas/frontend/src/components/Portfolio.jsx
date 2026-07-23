@@ -17,28 +17,24 @@ import { fmtNum, fmtTehranTime, fmtToman } from "../format.js";
 import NetWorthChart from "./NetWorthChart.jsx";
 import { usePortfolio } from "./PortfolioContext.jsx";
 
-const RECONCILE_MS = 60000; // full refresh to pick up holding edits / recompute totals
+const RECONCILE_MS = 60000;
 
-// The single portfolio page. The top-bar selector picks the active portfolio
-// (`activeId`: null = "All portfolios" aggregate, or an account id); everything
-// below — hero, net-worth chart, holdings, and the Pro analytics — scopes to it.
 export default function Portfolio({ user }) {
   const { accounts, activeId, setActive, reload } = usePortfolio();
   const [assets, setAssets] = useState([]);
   const [val, setVal] = useState(null);
   const [error, setError] = useState("");
   const [lastUpdate, setLastUpdate] = useState(null);
-  // Net-worth chart timeframe (days). "All" maps to the backend's 365-day cap.
   const [chartDays, setChartDays] = useState(7);
 
   // New-account form
   const [accName, setAccName] = useState("");
-  // New-holding draft for the active account: { asset, quantity }
+  // New-holding draft
   const [holdingDraft, setHoldingDraft] = useState({ asset: "", quantity: "" });
-  // Inline editors.
-  const [editAcc, setEditAcc] = useState(null); // { id, name, broker, goal }
-  const [editHold, setEditHold] = useState(null); // { id, quantity }
-  // Buy/sell panel + ledger (single-account mode only).
+  // Inline editors
+  const [editAcc, setEditAcc] = useState(null);
+  const [editHold, setEditHold] = useState(null);
+  // Buy/sell form & ledger
   const [txns, setTxns] = useState([]);
   const [form, setForm] = useState({ assetKey: "", side: "buy", quantity: "" });
   const [busy, setBusy] = useState(false);
@@ -64,8 +60,6 @@ export default function Portfolio({ user }) {
 
   useEffect(() => {
     loadVal();
-    // Reconcile holdings/edits and the hero total periodically; live price ticks
-    // arrive over SSE and merge into val.prices between these full refreshes.
     const fullId = setInterval(loadVal, RECONCILE_MS);
     const stop = subscribePrices({
       onPrices: (prices) => {
@@ -73,24 +67,32 @@ export default function Portfolio({ user }) {
         setLastUpdate(new Date());
       },
     });
-    return () => { clearInterval(fullId); stop(); };
+    return () => {
+      clearInterval(fullId);
+      stop();
+    };
   }, [loadVal]);
 
-  // Load this portfolio's trade ledger (and default the buy dropdown) only in
-  // single-account mode. "All portfolios" has no single ledger to show.
   useEffect(() => {
     let current = true;
     setTradeMsg("");
-    if (activeId == null) { setTxns([]); return; }
+    if (activeId == null) {
+      setTxns([]);
+      return;
+    }
     transactions(365, activeId)
-      .then((rows) => { if (current) setTxns(rows); })
+      .then((rows) => {
+        if (current) setTxns(rows);
+      })
       .catch((err) => {
         if (current) {
           setTxns([]);
           setTradeMsg(`Could not load recent activity: ${err.message}`);
         }
       });
-    return () => { current = false; };
+    return () => {
+      current = false;
+    };
   }, [activeId]);
 
   useEffect(() => {
@@ -100,9 +102,10 @@ export default function Portfolio({ user }) {
     }
   }, [assets, form.assetKey]);
 
-  // Refresh the context's account list (holdings/ids) after any write, so the
-  // editor and the "All portfolios" breakdown stay in sync with the backend.
-  const refreshAll = () => { loadVal(); reload(); };
+  const refreshAll = () => {
+    loadVal();
+    reload();
+  };
 
   async function doCreateAccount(e) {
     e.preventDefault();
@@ -204,12 +207,8 @@ export default function Portfolio({ user }) {
       return;
     }
     const qty = Number(rawQty);
-    if (Number.isNaN(qty)) {
-      setTradeMsg("Quantity must be a valid number.");
-      return;
-    }
-    if (qty <= 0) {
-      setTradeMsg("Quantity must be a positive number greater than zero.");
+    if (Number.isNaN(qty) || qty <= 0) {
+      setTradeMsg("Quantity must be a positive number.");
       return;
     }
 
@@ -221,7 +220,9 @@ export default function Portfolio({ user }) {
         quantity: form.quantity,
       });
       const verb = res.side === "buy" ? "Bought" : "Sold";
-      setTradeMsg(`${verb} ${fmtNum(res.quantity)} ${res.asset_key} — holding now ${fmtNum(res.holding_quantity)}.`);
+      setTradeMsg(
+        `${verb} ${fmtNum(res.quantity)} ${res.asset_key} — holding now ${fmtNum(res.holding_quantity)}.`
+      );
       setForm((f) => ({ ...f, quantity: "" }));
       refreshAll();
       transactions(365, activeAcct.id).then(setTxns).catch(() => {});
@@ -235,57 +236,219 @@ export default function Portfolio({ user }) {
   const editingThis = editAcc && activeAcct && editAcc.id === activeAcct.id;
   const tradeable = assets.filter((a) => !a.is_house && a.is_active);
 
+  // Compute Asset Class Breakdown & Allocation Metrics
+  const computeAllocation = () => {
+    const rawItems =
+      activeId == null
+        ? val?.accounts?.flatMap((a) => a.items || []) || []
+        : val?.items || [];
+
+    const totalVal = Number(val?.total || 0);
+    const breakdown = {
+      Gold: { label: "Gold & Currency", val: 0, color: "var(--gold)" },
+      Stock: { label: "TSE Stocks", val: 0, color: "var(--accent)" },
+      "Real Estate": { label: "Real Estate", val: 0, color: "var(--amber)" },
+      Cash: { label: "Cash & Liquid", val: 0, color: "var(--green)" },
+      Other: { label: "Other Assets", val: 0, color: "var(--muted)" },
+    };
+
+    rawItems.forEach((item) => {
+      const v = Number(item.value || 0);
+      const c = item.class || "Other";
+      if (breakdown[c]) {
+        breakdown[c].val += v;
+      } else {
+        breakdown.Other.val += v;
+      }
+    });
+
+    const segments = Object.entries(breakdown)
+      .map(([key, info]) => ({
+        key,
+        label: info.label,
+        val: info.val,
+        pct: totalVal > 0 ? (info.val / totalVal) * 100 : 0,
+        color: info.color,
+      }))
+      .filter((s) => s.val > 0);
+
+    const topItem = [...rawItems].sort(
+      (a, b) => Number(b.value || 0) - Number(a.value || 0)
+    )[0];
+
+    const liquidVal =
+      breakdown.Gold.val + breakdown.Stock.val + breakdown.Cash.val;
+    const liquidPct = totalVal > 0 ? (liquidVal / totalVal) * 100 : 100;
+
+    return { segments, totalVal, topItem, liquidPct };
+  };
+
+  const { segments, totalVal, topItem, liquidPct } = computeAllocation();
+
   return (
     <div className="dashboard">
       {error && <div className="error">{error}</div>}
 
+      {/* Hero Section */}
       <section className="hero">
         <div>
           <div className="hero-label">
-            {activeAcct ? activeAcct.name : "All portfolios"} · Net worth (Tomans)
+            {activeAcct ? activeAcct.name : "All portfolios"} · Total Net Worth (Tomans)
           </div>
           <div className="hero-value">{fmtToman(val?.total)}</div>
           <div className="hero-sub">≈ ${fmtNum(val?.total_usd)} USD</div>
         </div>
         <div className="hero-meta">
           <span className="pulse" />
-          Live · updated {lastUpdate ? lastUpdate.toLocaleTimeString() : "—"}
+          Live valuation · updated {lastUpdate ? lastUpdate.toLocaleTimeString() : "—"}
         </div>
       </section>
 
+      {/* Upgraded Net Worth Chart Section with Separated Controls */}
       <section className="card">
-        <div className="card-head">
-          <h2>Net worth</h2>
-          <div className="seg tf-seg">
-            {[
-              { d: 7, label: "7D" },
-              { d: 30, label: "30D" },
-              { d: 90, label: "90D" },
-              { d: 365, label: "All" },
-            ].map(({ d, label }) => (
-              <button key={d} type="button"
-                className={chartDays === d ? "active" : ""}
-                onClick={() => setChartDays(d)}>{label}</button>
-            ))}
-          </div>
-        </div>
-        <NetWorthChart days={chartDays} account={activeId} />
+        <NetWorthChart
+          days={chartDays}
+          onDaysChange={setChartDays}
+          account={activeId}
+        />
       </section>
 
-      {activeAcct ? (
-        // Single-portfolio mode: full holdings editor + buy/sell + ledger.
+      {/* Insights & Asset Allocation Section below the chart */}
+      {activeId === null ? (
+        <section className="allocation-insights-container">
+          <h2 className="subhead" style={{ fontSize: "1.2rem", marginBottom: "0.5rem" }}>
+            Portfolio Allocation & Insights Breakdown
+          </h2>
+          <p className="muted small" style={{ marginBottom: "1rem" }}>
+            Real-time insight into total asset distribution, portfolio divisions, and liquid capital.
+          </p>
+
+          <div className="allocation-insights-section">
+            {/* Division of Portfolios (N portfolios making up the total chart) */}
+            <div className="portfolio-card" style={{ gridColumn: "span 2" }}>
+              <div className="portfolio-card-head">
+                <span className="portfolio-card-title">Portfolios Breakdown ({accounts.length})</span>
+                <span className="tag">Division Share</span>
+              </div>
+              <p className="muted small">
+                Division of holdings across your active portfolios contributing to total net worth.
+              </p>
+
+              {val?.accounts?.map((a) => {
+                const acct = accounts.find((x) => x.id === a.id);
+                const acctVal = Number(a.total || 0);
+                const sharePct = totalVal > 0 ? (acctVal / totalVal) * 100 : 0;
+                return (
+                  <div key={a.id} style={{ margin: "1rem 0" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <strong>{a.name}</strong>
+                        {acct?.goal && <span className="tag">{acct.goal}</span>}
+                        {a.broker && <span className="muted small"> · {a.broker}</span>}
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <span className="portfolio-weight-badge">{sharePct.toFixed(1)}%</span>
+                        <div style={{ fontWeight: 600, fontSize: "0.9rem", marginTop: 2 }}>
+                          {fmtToman(a.total)}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="progress-track">
+                      <div
+                        className="progress-fill"
+                        style={{ width: `${Math.min(100, Math.max(2, sharePct))}%` }}
+                      />
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem", color: "var(--muted)" }}>
+                      <span>{acct?.holdings?.length || 0} holdings</span>
+                      <button className="link" onClick={() => setActive(a.id)}>
+                        Open Portfolio →
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              <form className="inline" onSubmit={doCreateAccount} style={{ marginTop: "1.25rem" }}>
+                <input
+                  aria-label="New portfolio name"
+                  value={accName}
+                  onChange={(e) => setAccName(e.target.value)}
+                  placeholder="New portfolio name (e.g. Retirement, Trading)"
+                />
+                <button className="primary">Create portfolio</button>
+              </form>
+            </div>
+
+            {/* Asset Class Allocation Card */}
+            <div className="portfolio-card">
+              <div className="portfolio-card-head">
+                <span className="portfolio-card-title">Asset Class Allocation</span>
+                <span className="tag">Combined</span>
+              </div>
+
+              <div className="asset-allocation-bar">
+                {segments.map((s) => (
+                  <div
+                    key={s.key}
+                    className="asset-seg-fill"
+                    style={{ width: `${s.pct}%`, background: s.color }}
+                    title={`${s.label}: ${s.pct.toFixed(1)}%`}
+                  />
+                ))}
+              </div>
+
+              <div className="asset-legend">
+                {segments.map((s) => (
+                  <div key={s.key} className="legend-item">
+                    <span className="legend-dot" style={{ background: s.color }} />
+                    <span>{s.label}: <strong>{s.pct.toFixed(1)}%</strong></span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="insight-metric-grid">
+                <div className="insight-metric-box">
+                  <div className="insight-metric-label">Liquidity Ratio</div>
+                  <div className="insight-metric-val">{liquidPct.toFixed(1)}%</div>
+                </div>
+                <div className="insight-metric-box">
+                  <div className="insight-metric-label">Top Asset</div>
+                  <div className="insight-metric-val" style={{ fontSize: "0.85rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {topItem ? topItem.asset : "None"}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : (
+        /* Single Portfolio Mode: Asset Allocation + Holdings + Buy/Sell Ledger */
         <section className="card">
           <div className="account-head">
             {editingThis ? (
               <form className="inline" onSubmit={doUpdateAccount}>
-                <input aria-label="Portfolio name" value={editAcc.name}
-                  onChange={(e) => setEditAcc({ ...editAcc, name: e.target.value })} />
-                <input aria-label="Broker" placeholder="broker (optional)" value={editAcc.broker}
-                  onChange={(e) => setEditAcc({ ...editAcc, broker: e.target.value })} />
-                <input aria-label="Portfolio goal" placeholder="goal (e.g. Retirement)" value={editAcc.goal}
-                  onChange={(e) => setEditAcc({ ...editAcc, goal: e.target.value })} />
+                <input
+                  aria-label="Portfolio name"
+                  value={editAcc.name}
+                  onChange={(e) => setEditAcc({ ...editAcc, name: e.target.value })}
+                />
+                <input
+                  aria-label="Broker"
+                  placeholder="broker (optional)"
+                  value={editAcc.broker}
+                  onChange={(e) => setEditAcc({ ...editAcc, broker: e.target.value })}
+                />
+                <input
+                  aria-label="Portfolio goal"
+                  placeholder="goal (e.g. Retirement)"
+                  value={editAcc.goal}
+                  onChange={(e) => setEditAcc({ ...editAcc, goal: e.target.value })}
+                />
                 <button className="primary">Save</button>
-                <button type="button" onClick={() => setEditAcc(null)}>Cancel</button>
+                <button type="button" onClick={() => setEditAcc(null)}>
+                  Cancel
+                </button>
               </form>
             ) : (
               <>
@@ -293,25 +456,74 @@ export default function Portfolio({ user }) {
                 {activeAcct.broker && <span className="muted"> · {activeAcct.broker}</span>}
                 {activeAcct.goal && <span className="tag">{activeAcct.goal}</span>}
                 <span className="actions">
-                  <button className="link" title="Edit portfolio"
-                    onClick={() => setEditAcc({
-                      id: activeAcct.id, name: activeAcct.name,
-                      broker: activeAcct.broker || "", goal: activeAcct.goal || "",
-                    })}>✎</button>
-                  <button className="link danger" title="Delete portfolio"
-                    onClick={() => doDeleteAccount(activeAcct)}>🗑</button>
+                  <button
+                    className="link"
+                    title="Edit portfolio"
+                    onClick={() =>
+                      setEditAcc({
+                        id: activeAcct.id,
+                        name: activeAcct.name,
+                        broker: activeAcct.broker || "",
+                        goal: activeAcct.goal || "",
+                      })
+                    }
+                  >
+                    ✎
+                  </button>
+                  <button
+                    className="link danger"
+                    title="Delete portfolio"
+                    onClick={() => doDeleteAccount(activeAcct)}
+                  >
+                    🗑
+                  </button>
                 </span>
               </>
             )}
           </div>
 
+          {/* Asset Class Allocation Progress Bar for Single Portfolio */}
+          <div style={{ marginBottom: "1.5rem" }}>
+            <h3 className="subhead">Asset Allocation</h3>
+            <div className="asset-allocation-bar">
+              {segments.map((s) => (
+                <div
+                  key={s.key}
+                  className="asset-seg-fill"
+                  style={{ width: `${s.pct}%`, background: s.color }}
+                  title={`${s.label}: ${s.pct.toFixed(1)}%`}
+                />
+              ))}
+            </div>
+            <div className="asset-legend">
+              {segments.map((s) => (
+                <div key={s.key} className="legend-item">
+                  <span className="legend-dot" style={{ background: s.color }} />
+                  <span>{s.label}: <strong>{s.pct.toFixed(1)}%</strong></span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <h3 className="subhead">Holdings</h3>
           <table className="holdings">
             <thead>
-              <tr><th>Asset</th><th>Class</th><th>Qty</th><th>Unit (T)</th><th>Value (T)</th><th></th></tr>
+              <tr>
+                <th>Asset</th>
+                <th>Class</th>
+                <th>Qty</th>
+                <th>Unit (T)</th>
+                <th>Value (T)</th>
+                <th></th>
+              </tr>
             </thead>
             <tbody>
               {activeAcct.holdings.length === 0 && (
-                <tr><td colSpan="6" className="muted">No holdings yet.</td></tr>
+                <tr>
+                  <td colSpan="6" className="muted">
+                    No holdings yet. Add or buy assets below.
+                  </td>
+                </tr>
               )}
               {activeAcct.holdings.map((h) => {
                 const valuationItem = val?.items?.find((item) => item.key === h.asset_key);
@@ -323,19 +535,38 @@ export default function Portfolio({ user }) {
                     <td>
                       {h.asset_name_fa ? (
                         <span title={h.asset_name}>{h.asset_name_fa}</span>
-                      ) : h.asset_name}
+                      ) : (
+                        h.asset_name
+                      )}
                     </td>
                     <td>{h.asset_class}</td>
                     <td>
                       {editing ? (
                         <span className="inline">
-                          <input aria-label={h.is_house ? "House price per square meter" : `Quantity of ${h.asset_name}`}
-                            type="number" step="any" min="0.000001" value={editHold.quantity}
-                            onChange={(e) => setEditHold({ ...editHold, quantity: e.target.value })} />
-                          <button className="primary" onClick={doSaveHolding}>✓</button>
-                          <button type="button" onClick={() => setEditHold(null)}>✕</button>
+                          <input
+                            aria-label={
+                              h.is_house
+                                ? "House price per square meter"
+                                : `Quantity of ${h.asset_name}`
+                            }
+                            type="number"
+                            step="any"
+                            min="0.000001"
+                            value={editHold.quantity}
+                            onChange={(e) =>
+                              setEditHold({ ...editHold, quantity: e.target.value })
+                            }
+                          />
+                          <button className="primary" onClick={doSaveHolding}>
+                            ✓
+                          </button>
+                          <button type="button" onClick={() => setEditHold(null)}>
+                            ✕
+                          </button>
                         </span>
-                      ) : fmtNum(h.quantity)}
+                      ) : (
+                        fmtNum(h.quantity)
+                      )}
                     </td>
                     <td>{h.is_house ? "—" : fmtNum(price)}</td>
                     <td>{fmtNum(value)}</td>
@@ -343,11 +574,21 @@ export default function Portfolio({ user }) {
                       <span className="actions">
                         {h.is_house && (
                           <>
-                            <button className="link" title="Edit quantity"
-                              onClick={() => setEditHold({ id: h.id, quantity: h.quantity })}>✎</button>
-                            <button className="link danger" title="Remove"
+                            <button
+                              className="link"
+                              title="Edit quantity"
+                              onClick={() => setEditHold({ id: h.id, quantity: h.quantity })}
+                            >
+                              ✎
+                            </button>
+                            <button
+                              className="link danger"
+                              title="Remove"
                               aria-label={`Remove ${h.asset_name}`}
-                              onClick={() => doRemoveHolding(h.id)}>✕</button>
+                              onClick={() => doRemoveHolding(h.id)}
+                            >
+                              ✕
+                            </button>
                           </>
                         )}
                       </span>
@@ -358,52 +599,94 @@ export default function Portfolio({ user }) {
             </tbody>
           </table>
 
-          <form className="inline" onSubmit={doAddHolding}>
-            <select aria-label="Asset to add" value={holdingDraft.asset}
-              onChange={(e) => setHoldingDraft({ ...holdingDraft, asset: e.target.value })}>
-              <option value="">Add asset…</option>
-              {assets.filter((a) => a.is_house).map((a) => (
-                <option key={a.id} value={a.key}>{a.name}</option>
-              ))}
+          <form className="inline" onSubmit={doAddHolding} style={{ marginTop: "1rem" }}>
+            <select
+              aria-label="Asset to add"
+              value={holdingDraft.asset}
+              onChange={(e) =>
+                setHoldingDraft({ ...holdingDraft, asset: e.target.value })
+              }
+            >
+              <option value="">Add real estate asset…</option>
+              {assets
+                .filter((a) => a.is_house)
+                .map((a) => (
+                  <option key={a.id} value={a.key}>
+                    {a.name}
+                  </option>
+                ))}
             </select>
-            <input aria-label="House price per square meter" type="number" step="any" min="0.000001"
+            <input
+              aria-label="House price per square meter"
+              type="number"
+              step="any"
+              min="0.000001"
               placeholder="million Tomans per m²"
               value={holdingDraft.quantity}
-              onChange={(e) => setHoldingDraft({ ...holdingDraft, quantity: e.target.value })} />
+              onChange={(e) =>
+                setHoldingDraft({ ...holdingDraft, quantity: e.target.value })
+              }
+            />
             <button>Add</button>
           </form>
 
-          <h3 className="subhead">Buy / Sell</h3>
+          <h3 className="subhead">Buy / Sell Execution</h3>
           <p className="muted small">
-            Trades update this portfolio's value immediately and drop a marker on
-            the net-worth chart. Selling more than you hold is rejected.
+            Trades update this portfolio's value immediately and drop a marker on the net-worth chart.
           </p>
           <form className="trade-form inline" onSubmit={submitTrade}>
-            <select aria-label="Trade side" value={form.side}
-              onChange={(e) => setForm((f) => ({ ...f, side: e.target.value }))}>
+            <select
+              aria-label="Trade side"
+              value={form.side}
+              onChange={(e) => setForm((f) => ({ ...f, side: e.target.value }))}
+            >
               <option value="buy">Buy</option>
               <option value="sell">Sell</option>
             </select>
-            <select aria-label="Trade asset" value={form.assetKey}
-              onChange={(e) => setForm((f) => ({ ...f, assetKey: e.target.value }))}>
+            <select
+              aria-label="Trade asset"
+              value={form.assetKey}
+              onChange={(e) => setForm((f) => ({ ...f, assetKey: e.target.value }))}
+            >
               {tradeable.map((a) => (
-                <option key={a.key} value={a.key}>{a.name}</option>
+                <option key={a.key} value={a.key}>
+                  {a.name}
+                </option>
               ))}
             </select>
-            <input aria-label="Trade quantity" type="number" step="any" min="0" placeholder="Quantity"
+            <input
+              aria-label="Trade quantity"
+              type="number"
+              step="any"
+              min="0"
+              placeholder="Quantity"
               value={form.quantity}
-              onChange={(e) => setForm((f) => ({ ...f, quantity: e.target.value }))} />
-            <button type="submit" disabled={busy}>{busy ? "…" : "Execute"}</button>
+              onChange={(e) => setForm((f) => ({ ...f, quantity: e.target.value }))}
+            />
+            <button type="submit" disabled={busy}>
+              {busy ? "…" : "Execute"}
+            </button>
           </form>
-          {tradeMsg && <p className="muted small" role="status">{tradeMsg}</p>}
+          {tradeMsg && (
+            <p className="muted small" role="status">
+              {tradeMsg}
+            </p>
+          )}
 
-          <h3 className="subhead">Recent activity</h3>
+          <h3 className="subhead">Recent Activity</h3>
           {txns.length === 0 ? (
             <p className="muted">No trades recorded for this portfolio yet.</p>
           ) : (
             <table className="holdings">
               <thead>
-                <tr><th>When</th><th>Side</th><th>Asset</th><th>Qty</th><th>Unit (T)</th><th></th></tr>
+                <tr>
+                  <th>When</th>
+                  <th>Side</th>
+                  <th>Asset</th>
+                  <th>Qty</th>
+                  <th>Unit (T)</th>
+                  <th></th>
+                </tr>
               </thead>
               <tbody>
                 {txns.slice(0, 20).map((t, index) => (
@@ -431,44 +714,7 @@ export default function Portfolio({ user }) {
             </table>
           )}
         </section>
-      ) : (
-        // "All portfolios" mode: aggregate breakdown + create form.
-        <section className="card">
-          <h2>Portfolios</h2>
-          {accounts.length === 0 && <p className="muted">No portfolios yet. Create one below.</p>}
-          {val?.accounts?.length > 0 && (
-            <table className="holdings">
-              <thead>
-                <tr><th>Name</th><th>Goal</th><th>Broker</th><th>Holdings</th><th>Total (T)</th><th></th></tr>
-              </thead>
-              <tbody>
-                {val.accounts.map((a) => {
-                  const acct = accounts.find((x) => x.id === a.id);
-                  return (
-                    <tr key={a.id}>
-                      <td><strong>{a.name}</strong></td>
-                      <td>{acct?.goal ? <span className="tag">{acct.goal}</span> : <span className="muted">—</span>}</td>
-                      <td>{a.broker || <span className="muted">—</span>}</td>
-                      <td>{acct?.holdings?.length || 0}</td>
-                      <td>{fmtToman(a.total)}</td>
-                      <td>
-                        <button className="link" onClick={() => setActive(a.id)}>Open →</button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-
-          <form className="inline" onSubmit={doCreateAccount}>
-            <input aria-label="New portfolio name" value={accName} onChange={(e) => setAccName(e.target.value)}
-              placeholder="New portfolio name (e.g. Retirement, Trading)" />
-            <button className="primary">Create portfolio</button>
-          </form>
-        </section>
       )}
-
     </div>
   );
 }

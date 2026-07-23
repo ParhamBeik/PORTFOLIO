@@ -80,6 +80,14 @@ function AccountRedirect() {
 function Shell({ user, setUser }) {
   const navigate = useNavigate();
   const { accounts, activeId, setActive } = usePortfolio();
+  const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  const toggleTheme = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
 
   return (
     <div className="app">
@@ -126,6 +134,15 @@ function Shell({ user, setUser }) {
 
         </nav>
         <div className="userbox">
+          <button
+            type="button"
+            className="theme-toggle-btn"
+            onClick={toggleTheme}
+            title="Toggle theme (Light / Dark)"
+            aria-label="Toggle theme mode"
+          >
+            {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
+          </button>
           <span className="tier-badge">{user.is_pro ? "PRO" : "FREE"}</span>
           <span className="email">{user.email}</span>
           <button

@@ -261,26 +261,39 @@ class SnapshotListView(APIView):
         rows = list(snapshots.order_by("timestamp").values("timestamp", "total_value_tomans"))
         raw_values = [Decimal(r["total_value_tomans"]) for r in rows if Decimal(r["total_value_tomans"]) > 0]
         
-        # Outlier filtering for pristine charts if we have enough points
+        # Sanity filtering for corrupted zero/extreme glitch rows
         median_val = sorted(raw_values)[len(raw_values) // 2] if raw_values else Decimal("0")
         
-        series = []
+        # Group snapshots by calendar date: YYYY-MM-DD -> latest valid snapshot entry
+        snapshot_by_day = {}
         for r in rows:
             val_toman = Decimal(r["total_value_tomans"])
             if val_toman <= 0:
                 continue
-            if len(raw_values) > 5 and median_val > 0:
-                if val_toman > median_val * Decimal("2.5") or val_toman < median_val * Decimal("0.3"):
+            if len(raw_values) > 10 and median_val > 0:
+                if val_toman > median_val * Decimal("50.0") or val_toman < median_val * Decimal("0.01"):
                     continue
             val_usd = str(round(val_toman / usd_rate, 2)) if usd_rate > 0 else None
-            series.append({
+            d_str = r["timestamp"].strftime("%Y-%m-%d")
+            snapshot_by_day[d_str] = {
                 "timestamp": r["timestamp"].isoformat(),
+                "date": d_str,
                 "total": str(r["total_value_tomans"]),
                 "total_usd": val_usd,
-            })
-        if len(series) < 2:
-            from portfolio.services.valuation import compute_dynamic_net_worth_series
-            series = compute_dynamic_net_worth_series(request.user, account, days=days)
+            }
+
+        # Dynamic daily history covering full `days` window (7, 30, 90, 365)
+        from portfolio.services.valuation import compute_dynamic_net_worth_series
+        base_series = compute_dynamic_net_worth_series(request.user, account, days=days)
+
+        # Merge snapshot rows into daily base series so missing days are backfilled
+        series = []
+        for point in base_series:
+            d_key = point.get("date")
+            if d_key and d_key in snapshot_by_day:
+                series.append(snapshot_by_day[d_key])
+            else:
+                series.append(point)
         trades = (
             Transaction.objects.filter(account__user=request.user, timestamp__gte=since)
             .select_related("asset")

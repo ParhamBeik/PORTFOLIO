@@ -212,9 +212,13 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     latest_prices = get_latest_prices()
     usd_rate = Decimal(latest_prices.get("usd_cash", 0) or 0)
 
+    # Track last known price for each asset to seamlessly fill non-trading days
+    last_known_prices = {key: _q(latest_prices.get(key, 0)) for key in assets}
+
     series = []
     for i in range(days - 1, -1, -1):
         target_date = now - timedelta(days=i)
+        date_str = target_date.strftime("%Y-%m-%d")
         jalali_str = jdatetime.date.fromgregorian(date=target_date.date()).strftime("%Y-%m-%d")
 
         total = Decimal("0")
@@ -226,13 +230,16 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
                 p = stock_closes.get(jalali_str, {}).get(key)
                 if p is None:
                     p = gold_closes.get(jalali_str, {}).get(key)
-                if p is None:
-                    p = _q(latest_prices.get(key, 0))
+                if p is not None:
+                    last_known_prices[key] = p
+                else:
+                    p = last_known_prices.get(key, _q(latest_prices.get(key, 0)))
                 total += qty * p
 
         val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
         series.append({
             "timestamp": target_date.isoformat(),
+            "date": date_str,
             "total": str(round(total, 4)),
             "total_usd": val_usd,
         })
