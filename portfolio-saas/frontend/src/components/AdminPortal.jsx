@@ -151,8 +151,8 @@ export default function AdminPortal() {
   const remainingQuota = Math.max(0, dailyLimit - dailyUsed);
   const quotaPct = Math.round((dailyUsed / dailyLimit) * 100);
 
-  const windowUsed = quota?.window_5m_used || 0;
-  const windowLimit = quota?.window_5m_limit || 1000;
+  const windowUsed = quota?.window_used || 0;
+  const windowLimit = quota?.window_limit || 1000;
   const windowPct = Math.round((windowUsed / windowLimit) * 100);
 
   // Filter logs for interactive console
