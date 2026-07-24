@@ -185,6 +185,8 @@ def _fetch_and_ingest(state):
         stored = set(GoldCurrencyHistory.objects.filter(
             symbol=symbol, date__in=expected
         ).values_list("date", flat=True))
+    if payload is None:
+        raise MarketDataFetchError("Provider returned empty/None payload.")
     return result, expected, stored
 
 
@@ -293,11 +295,11 @@ def run_archive_state(state_id):
     state.missing_rows = len(missing)
     state.first_date = min(expected) if expected else ""
     state.last_date = max(expected) if expected else ""
-    state.verified_complete = bool(expected) and not missing
+    state.verified_complete = not missing
     state.last_attempt_at = now
-    state.last_success_at = now if expected else state.last_success_at
-    state.last_error = "" if expected else "Provider returned no archive rows."
-    state.consecutive_failures = 0 if expected else state.consecutive_failures + 1
+    state.last_success_at = now
+    state.last_error = ""
+    state.consecutive_failures = 0
     if state.verified_complete:
         state.next_attempt_at = now + timedelta(hours=20)
     elif created:
