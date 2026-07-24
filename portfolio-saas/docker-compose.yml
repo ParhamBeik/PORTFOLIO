@@ -65,7 +65,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-    environment: *backend-env
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: backend
     command: gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --workers 1 --reload
     volumes:
       - ./backend:/app
@@ -95,7 +97,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-    environment: *backend-env
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: celery_worker
     volumes:
       - ./backend:/app
     command: celery -A config worker -l info --concurrency=2
@@ -116,7 +120,9 @@ services:
       # firing before the worker can consume becomes an actual problem.
       celery_worker:
         condition: service_started
-    environment: *backend-env
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: celery_beat
     volumes:
       - ./backend:/app
     command: celery -A config beat -l info

@@ -3,6 +3,10 @@ import collections
 import logging
 import threading
 import time
+import os
+from datetime import datetime, timezone
+
+SERVICE_NAME = os.environ.get("SERVICE_NAME", "backend")
 
 _LOG_BUFFER = collections.deque(maxlen=300)
 _LOCK = threading.Lock()
@@ -36,13 +40,15 @@ class SystemLogHandler(logging.Handler):
             elif "WARNING" in record.levelname or "WARN" in record.levelname:
                 category = "SYSTEM_WARN"
 
+            iso_ts = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat()
             entry = {
                 "id": f"{time.time()}:{record.created}",
-                "timestamp": time.strftime("%H:%M:%S", time.localtime(record.created)),
+                "timestamp": iso_ts,
                 "level": record.levelname,
                 "category": category,
                 "logger": record.name,
                 "message": msg,
+                "service": SERVICE_NAME,
             }
 
             with _LOCK:
@@ -55,6 +61,7 @@ class SystemLogHandler(logging.Handler):
                     category=category,
                     logger_name=record.name[:100],
                     message=msg,
+                    service=SERVICE_NAME,
                 )
             except Exception:
                 pass
@@ -93,11 +100,12 @@ def get_recent_logs(limit=100) -> list:
             return [
                 {
                     "id": f"{log.id}",
-                    "timestamp": log.timestamp.strftime("%H:%M:%S"),
+                    "timestamp": log.timestamp.isoformat(),
                     "level": log.level,
                     "category": log.category,
                     "logger": log.logger_name,
                     "message": log.message,
+                    "service": log.service,
                 }
                 for log in db_logs
             ]

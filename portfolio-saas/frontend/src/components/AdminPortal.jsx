@@ -12,7 +12,10 @@ export default function AdminPortal() {
   const [logSearch, setLogSearch] = useState("");
   const [logLevelFilter, setLogLevelFilter] = useState("ALL");
   const [logCategoryFilter, setLogCategoryFilter] = useState("ALL");
+  const [logServiceFilter, setLogServiceFilter] = useState("ALL");
   const [endpointFilter, setEndpointFilter] = useState("ALL");
+  const [gapSearch, setGapSearch] = useState("");
+  const [hideCompletedGaps, setHideCompletedGaps] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
 
   // Data Repair State
@@ -155,29 +158,58 @@ export default function AdminPortal() {
   const windowLimit = quota?.window_limit || 1000;
   const windowPct = Math.round((windowUsed / windowLimit) * 100);
 
+  const formatLogTime = (ts) => {
+    if (!ts) return "";
+    try {
+      if (ts.includes("T") || ts.includes("-")) {
+        const d = new Date(ts);
+        if (!isNaN(d.getTime())) {
+          return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+        }
+      }
+    } catch (e) {}
+    return ts;
+  };
+
   // Filter logs for interactive console
   const filteredLogs = recentLogs.filter((log) => {
+    // 1. Search text filter
+    if (logSearch.trim()) {
+      const q = logSearch.toLowerCase().trim();
+      const match = (
+        log.message.toLowerCase().includes(q) ||
+        (log.category && log.category.toLowerCase().includes(q)) ||
+        (log.logger && log.logger.toLowerCase().includes(q)) ||
+        log.level.toLowerCase().includes(q)
+      );
+      if (!match) return false;
+    }
+    // 2. Log level filter
     if (logLevelFilter !== "ALL") {
       const normalizedLevel = log.level === "WARN" ? "WARNING" : log.level;
       if (normalizedLevel !== logLevelFilter) return false;
     }
-    if (logCategoryFilter !== "ALL" && log.category !== logCategoryFilter) return false;
-    if (logSearch.trim()) {
-      const q = logSearch.toLowerCase().trim();
-      return (
-        log.message.toLowerCase().includes(q) ||
-        log.category.toLowerCase().includes(q) ||
-        log.level.toLowerCase().includes(q)
-      );
+    // 3. Category filter
+    if (logCategoryFilter !== "ALL" && log.category !== logCategoryFilter) {
+      return false;
+    }
+    // 4. Service container filter
+    if (logServiceFilter !== "ALL") {
+      const srv = log.service || "backend";
+      if (srv !== logServiceFilter) return false;
     }
     return true;
   });
 
   // Filter missing endpoint gaps
   const filteredGaps = worstGaps.filter((gap) => {
+    // 1. Endpoint family filter
     if (endpointFilter !== "ALL" && gap.endpoint !== endpointFilter) return false;
-    if (logSearch.trim()) {
-      const q = logSearch.toLowerCase().trim();
+    // 2. Hide completed filter
+    if (hideCompletedGaps && gap.missing_rows === 0 && gap.consecutive_failures === 0) return false;
+    // 3. Gap search filter (searches by symbol/endpoint specifically)
+    if (gapSearch.trim()) {
+      const q = gapSearch.toLowerCase().trim();
       return (
         gap.symbol.toLowerCase().includes(q) ||
         gap.endpoint.toLowerCase().includes(q) ||
@@ -265,25 +297,32 @@ export default function AdminPortal() {
         <div className="endpoint-matrix-grid">
           {Object.entries(categorySummary).map(([key, info]) => {
             const isDone = info.progress_pct >= 100;
+            const hasFailed = info.failed_states > 0;
+            const cardClass = isDone ? "complete" : hasFailed ? "failed" : "pending";
+            const pbClass = isDone ? "success" : hasFailed ? "error" : "active";
+
             return (
-              <div key={key} className={`endpoint-card ${isDone ? "complete" : info.pending_states > 0 ? "pending" : ""}`}>
+              <div key={key} className={`endpoint-card ${cardClass}`}>
                 <div className="endpoint-card-header">
                   <span className="endpoint-title">{info.label}</span>
-                  <span className={`endpoint-pct ${isDone ? "pos" : info.progress_pct < 50 ? "neg" : "muted"}`}>
+                  <span className={`endpoint-pct ${isDone ? "pos" : hasFailed ? "neg" : "muted"}`}>
                     {info.progress_pct}%
                   </span>
                 </div>
 
-                <div className="progress-bar-wrap">
+                <div className="progress-bar-wrap" style={{ margin: "8px 0" }}>
                   <div
-                    className={`progress-bar-fill ${isDone ? "success" : "active"}`}
+                    className={`progress-bar-fill ${pbClass}`}
                     style={{ width: `${info.progress_pct}%` }}
                   />
                 </div>
 
                 <div className="endpoint-card-stats">
                   <span>{info.complete_states} / {info.total_states} Verified</span>
-                  {info.pending_states > 0 && <span className="badge badge-warn">{info.pending_states} Pending</span>}
+                  <div style={{ display: "flex", gap: "4px" }}>
+                    {info.pending_states > 0 && <span className="badge badge-warn">{info.pending_states} Pending</span>}
+                    {hasFailed && <span className="badge badge-error">{info.failed_states} Failed</span>}
+                  </div>
                 </div>
               </div>
             );
@@ -374,6 +413,18 @@ export default function AdminPortal() {
           />
 
           <select
+            aria-label="Filter log service"
+            className="console-select"
+            value={logServiceFilter}
+            onChange={(e) => setLogServiceFilter(e.target.value)}
+          >
+            <option value="ALL">All Services (Any Container)</option>
+            <option value="backend">🖥️ Backend API</option>
+            <option value="celery_worker">⚙️ Celery Worker</option>
+            <option value="celery_beat">📅 Celery Beat</option>
+          </select>
+
+          <select
             aria-label="Filter log level"
             className="console-select"
             value={logLevelFilter}
@@ -415,16 +466,20 @@ export default function AdminPortal() {
 
                 return (
                   <div key={log.id} className={`terminal-row ${lvlClass}`}>
-                    <span className="log-time">{log.timestamp}</span>
+                    <span className="log-time">{formatLogTime(log.timestamp)}</span>
                     <span className={`log-badge ${lvlClass}`}>{log.level}</span>
                     <span className="log-cat">[{log.category}]</span>
+                    {log.service && (
+                      <span className="badge font-mono" style={{ fontSize: "0.65rem", padding: "0px 4px", border: "1px solid var(--border)", background: "rgba(255,255,255,0.05)", color: "var(--muted)" }}>
+                        {log.service}
+                      </span>
+                    )}
                     <span className="log-msg">{log.message}</span>
                   </div>
                 );
               })}
             </div>
           )}
-
         </div>
       </section>
 
@@ -436,27 +491,48 @@ export default function AdminPortal() {
             <span className="muted small">Ordered by highest missing historical data rows</span>
           </div>
 
-          <select
-            aria-label="Filter endpoint backfill gaps"
-            className="console-select"
-            value={endpointFilter}
-            onChange={(e) => setEndpointFilter(e.target.value)}
-          >
-            <option value="ALL">All 13 Endpoint Families</option>
-            <option value="stock_history_unadjusted">Stock History (Unadjusted)</option>
-            <option value="stock_history_adjusted">Stock History (Adjusted)</option>
-            <option value="stock_candle_unadjusted">Candles (Unadjusted)</option>
-            <option value="stock_candle_adjusted">Candles (Adjusted)</option>
-            <option value="gold_daily">Gold & Currency Daily</option>
-            <option value="crypto_daily">Cryptocurrency Daily</option>
-            <option value="commodity_daily">Commodities Daily</option>
-            <option value="market_index_daily">TSE Market Index Daily</option>
-            <option value="etf_nav_daily">ETF Funds NAV Daily</option>
-            <option value="option_contract_daily">Options Contracts Daily</option>
-            <option value="codal_announcements">Codal Disclosures</option>
-            <option value="shareholder_records">Shareholder Rosters</option>
-            <option value="stock_transaction_ticks">Intraday Trade Ledgers</option>
-          </select>
+          <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              aria-label="Search gaps symbol"
+              type="text"
+              className="console-input"
+              style={{ minWidth: "180px", height: "34px", padding: "4px 8px" }}
+              placeholder="🔍 Search symbol…"
+              value={gapSearch}
+              onChange={(e) => setGapSearch(e.target.value)}
+            />
+
+            <label style={{ display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "0.8rem", cursor: "pointer", color: "var(--text)" }}>
+              <input
+                type="checkbox"
+                checked={hideCompletedGaps}
+                onChange={(e) => setHideCompletedGaps(e.target.checked)}
+              />
+              Hide Completed
+            </label>
+
+            <select
+              aria-label="Filter endpoint backfill gaps"
+              className="console-select"
+              value={endpointFilter}
+              onChange={(e) => setEndpointFilter(e.target.value)}
+            >
+              <option value="ALL">All 13 Endpoint Families</option>
+              <option value="stock_history_unadjusted">Stock History (Unadjusted)</option>
+              <option value="stock_history_adjusted">Stock History (Adjusted)</option>
+              <option value="stock_candle_unadjusted">Candles (Unadjusted)</option>
+              <option value="stock_candle_adjusted">Candles (Adjusted)</option>
+              <option value="gold_daily">Gold & Currency Daily</option>
+              <option value="crypto_daily">Cryptocurrency Daily</option>
+              <option value="commodity_daily">Commodities Daily</option>
+              <option value="market_index_daily">TSE Market Index Daily</option>
+              <option value="etf_nav_daily">ETF Funds NAV Daily</option>
+              <option value="option_contract_daily">Options Contracts Daily</option>
+              <option value="codal_announcements">Codal Disclosures</option>
+              <option value="shareholder_records">Shareholder Rosters</option>
+              <option value="stock_transaction_ticks">Intraday Trade Ledgers</option>
+            </select>
+          </div>
         </div>
 
         <div style={{ maxHeight: "380px", overflowY: "auto", marginTop: "12px", border: "1px solid var(--border)", borderRadius: "8px" }}>
@@ -465,31 +541,51 @@ export default function AdminPortal() {
               <tr>
                 <th>Symbol</th>
                 <th>Endpoint Family</th>
-                <th>Stored Rows</th>
-                <th>Expected Rows</th>
+                <th>Stored / Expected Progress</th>
                 <th>Missing Rows</th>
-                <th>Consec. Failures</th>
+                <th>Status</th>
                 <th>Last Error Diagnostic</th>
               </tr>
             </thead>
             <tbody>
-              {filteredGaps.map((gap, idx) => (
-                <tr key={`${gap.endpoint}-${gap.symbol}-${idx}`}>
-                  <td><strong>{gap.symbol}</strong></td>
-                  <td><span className="badge">{gap.endpoint}</span></td>
-                  <td>{fmtNum(gap.stored_rows)}</td>
-                  <td>{fmtNum(gap.expected_rows)}</td>
-                  <td>
-                    <span className={gap.missing_rows > 0 ? "neg font-mono" : "pos font-mono"}>
-                      {fmtNum(gap.missing_rows)}
-                    </span>
-                  </td>
-                  <td>{gap.consecutive_failures > 0 ? <span className="badge badge-error">{gap.consecutive_failures}</span> : "0"}</td>
-                  <td className="muted small font-mono" style={{ maxWidth: "320px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {gap.last_error || "—"}
-                  </td>
-                </tr>
-              ))}
+              {filteredGaps.map((gap, idx) => {
+                const isComplete = gap.missing_rows === 0 && gap.consecutive_failures === 0;
+                const progressPct = gap.expected_rows > 0 ? Math.round((gap.stored_rows / gap.expected_rows) * 100) : isComplete ? 100 : 0;
+
+                let statusBadge = <span className="badge badge-success">Complete</span>;
+                let pbClass = "success";
+                if (gap.consecutive_failures > 0) {
+                  statusBadge = <span className="badge badge-error">Failed ({gap.consecutive_failures})</span>;
+                  pbClass = "error";
+                } else if (gap.missing_rows > 0) {
+                  statusBadge = <span className="badge badge-warn">Pending</span>;
+                  pbClass = "warning";
+                }
+
+                return (
+                  <tr key={`${gap.endpoint}-${gap.symbol}-${idx}`}>
+                    <td><strong>{gap.symbol}</strong></td>
+                    <td><span className="badge">{gap.endpoint}</span></td>
+                    <td style={{ minWidth: "120px" }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                        <span className="font-mono small">{fmtNum(gap.stored_rows)} / {fmtNum(gap.expected_rows)}</span>
+                        <div className="progress-bar-wrap" style={{ height: "6px", margin: 0, border: "none", background: "rgba(255,255,255,0.05)" }}>
+                          <div className={`progress-bar-fill ${pbClass}`} style={{ width: `${progressPct}%` }} />
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <span className={gap.missing_rows > 0 ? "neg font-mono" : "pos font-mono"}>
+                        {fmtNum(gap.missing_rows)}
+                      </span>
+                    </td>
+                    <td>{statusBadge}</td>
+                    <td className="muted small font-mono" style={{ maxWidth: "320px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={gap.last_error}>
+                      {gap.last_error || "—"}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

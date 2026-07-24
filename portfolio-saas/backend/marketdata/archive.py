@@ -1,5 +1,8 @@
 """Gap-driven archive worker that verifies provider rows landed in PostgreSQL."""
+import logging
 from datetime import timedelta
+
+logger = logging.getLogger(__name__)
 
 from django.conf import settings
 from django.db import transaction
@@ -268,13 +271,15 @@ def _transaction_keys(payload):
 def run_archive_state(state_id):
     state = ArchiveFetchState.objects.get(pk=state_id)
     now = timezone.now()
+    logger.info("[INGEST] Processing backfill for %s (%s)...", state.symbol, state.endpoint)
     try:
         (created, _), expected, stored = _fetch_and_ingest(state)
-    except QuotaExhausted:
+    except QuotaExhausted as exc:
         state.last_attempt_at = now
         state.next_attempt_at = now + timedelta(minutes=1)
         state.last_error = "Daily quota unavailable."
         state.save(update_fields=["last_attempt_at", "next_attempt_at", "last_error"])
+        logger.warning("[QUOTA] Daily API quota exhausted while processing %s (%s): %s", state.symbol, state.endpoint, exc)
         raise
     except MarketDataFetchError as exc:
         failures = state.consecutive_failures + 1
@@ -287,6 +292,7 @@ def run_archive_state(state_id):
             "consecutive_failures", "last_attempt_at", "next_attempt_at",
             "last_error", "verified_complete",
         ])
+        logger.error("[ARCHIVE_FETCH_ERROR] Failed backfill fetch for %s (%s): %s", state.symbol, state.endpoint, exc)
         return state
 
     missing = expected - stored
@@ -300,11 +306,15 @@ def run_archive_state(state_id):
     state.last_success_at = now
     state.last_error = ""
     state.consecutive_failures = 0
+    
     if state.verified_complete:
+        logger.info("[INGEST] Successfully backfilled %s (%s): verified complete (stored %d rows).", state.symbol, state.endpoint, state.stored_rows)
         state.next_attempt_at = now + timedelta(hours=20)
     elif created:
+        logger.info("[INGEST] Backfilled %s (%s): incomplete (stored %d/%d, %d missing).", state.symbol, state.endpoint, state.stored_rows, state.expected_rows, state.missing_rows)
         state.next_attempt_at = now + timedelta(minutes=1)
     else:
+        logger.info("[INGEST] Backfilled %s (%s): incomplete (stored %d/%d, %d missing).", state.symbol, state.endpoint, state.stored_rows, state.expected_rows, state.missing_rows)
         state.next_attempt_at = now + timedelta(
             hours=min(2 ** max(state.consecutive_failures - 1, 0), 24)
         )

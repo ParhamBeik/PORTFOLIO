@@ -457,11 +457,13 @@ class AdminStatusView(APIView):
             states = ArchiveFetchState.objects.filter(endpoint=ep_choice)
             t_cnt = states.count()
             c_cnt = states.filter(verified_complete=True).count()
+            f_cnt = states.filter(consecutive_failures__gt=0).count()
             category_summary[ep_choice] = {
                 "label": ep_label,
                 "total_states": t_cnt,
                 "complete_states": c_cnt,
                 "pending_states": max(0, t_cnt - c_cnt),
+                "failed_states": f_cnt,
                 "progress_pct": round((c_cnt / t_cnt * 100), 2) if t_cnt else 0,
             }
 
@@ -513,7 +515,7 @@ class AdminStatusView(APIView):
                         "last_error": row.last_error,
                         "consecutive_failures": row.consecutive_failures,
                     }
-                    for row in ArchiveFetchState.objects.order_by("-missing_rows", "-consecutive_failures")[:100]
+                    for row in ArchiveFetchState.objects.order_by("verified_complete", "-missing_rows", "-consecutive_failures")[:100]
                 ],
             },
             "quota": get_quota_status(),
@@ -625,11 +627,13 @@ class AdminStatusStreamView(View):
                         states = ArchiveFetchState.objects.filter(endpoint=ep_choice)
                         t_cnt = states.count()
                         c_cnt = states.filter(verified_complete=True).count()
+                        f_cnt = states.filter(consecutive_failures__gt=0).count()
                         category_summary[ep_choice] = {
                             "label": ep_label,
                             "total_states": t_cnt,
                             "complete_states": c_cnt,
                             "pending_states": max(0, t_cnt - c_cnt),
+                            "failed_states": f_cnt,
                             "progress_pct": round((c_cnt / t_cnt * 100), 2) if t_cnt else 0,
                         }
 
@@ -643,7 +647,7 @@ class AdminStatusStreamView(View):
                             "last_error": row.last_error,
                             "consecutive_failures": row.consecutive_failures,
                         }
-                        for row in ArchiveFetchState.objects.order_by("-missing_rows", "-consecutive_failures")[:100]
+                        for row in ArchiveFetchState.objects.order_by("verified_complete", "-missing_rows", "-consecutive_failures")[:100]
                     ]
 
                     db_counts = _get_cached_db_counts()

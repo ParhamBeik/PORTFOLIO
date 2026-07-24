@@ -1507,6 +1507,65 @@ button.link.danger { color: var(--red); }
 .log-badge.lvl-warn { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
 .log-badge.lvl-error { background: rgba(239, 68, 68, 0.2); color: #f87171; }
 
+/* Expanded Admin Portal Custom styling overrides */
+.terminal-row.lvl-error {
+  background: rgba(239, 68, 68, 0.05);
+}
+.terminal-row.lvl-error .log-msg {
+  color: #fca5a5;
+}
+
+.terminal-row.lvl-warn {
+  background: rgba(245, 158, 11, 0.03);
+}
+.terminal-row.lvl-warn .log-msg {
+  color: #fde047;
+}
+
+/* Badges color palette */
+.badge.badge-error {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.badge.badge-warn {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.badge.badge-success {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+/* Progress bar color configurations */
+.progress-bar-fill.success {
+  background: linear-gradient(90deg, #059669 0%, #10b981 100%) !important;
+}
+
+.progress-bar-fill.warning {
+  background: linear-gradient(90deg, #d97706 0%, #f59e0b 100%) !important;
+}
+
+.progress-bar-fill.active {
+  background: linear-gradient(90deg, #2563eb 0%, #3b82f6 100%) !important;
+}
+
+.progress-bar-fill.error {
+  background: linear-gradient(90deg, #dc2626 0%, #ef4444 100%) !important;
+}
+
+/* Endpoint Card Failing Indicators */
+.endpoint-card.failed {
+  border-left: 3px solid #ef4444;
+}
+.endpoint-card.failed .endpoint-pct {
+  color: #ef4444 !important;
+}
+
 .log-cat {
   color: #a78bfa;
   font-weight: 600;

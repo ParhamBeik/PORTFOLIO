@@ -423,6 +423,7 @@ class SystemLogEvent(models.Model):
     category = models.CharField(max_length=50, db_index=True)
     logger_name = models.CharField(max_length=100)
     message = models.TextField()
+    service = models.CharField(max_length=50, default="backend", db_index=True)
 
     class Meta:
         ordering = ["-timestamp"]
