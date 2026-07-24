@@ -38,7 +38,7 @@ test("free user can manage a portfolio, holding, trades, and chart controls", as
   const renamedPortfolio = `${portfolioName} edited`;
   await page.getByLabel("New portfolio name").fill(portfolioName);
   await page.getByRole("button", { name: "Create portfolio" }).click();
-  await page.getByRole("button", { name: "Open →" }).last().click();
+  await page.getByRole("button", { name: "Open Portfolio →" }).last().click();
   await expect(page.locator("strong", { hasText: portfolioName })).toBeVisible();
 
   await page.getByTitle("Edit portfolio").click();

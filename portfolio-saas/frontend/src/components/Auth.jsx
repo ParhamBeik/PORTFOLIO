@@ -30,7 +30,7 @@ function calculateStrength(pw, checks) {
   return { score: 100, label: "Strong", color: "var(--green, #22c55e)" };
 }
 
-export default function Auth({ initialMode = "login", onAuthed }) {
+export default function Auth({ initialMode = "login", onAuthed, currentUser = null }) {
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -111,6 +111,7 @@ export default function Auth({ initialMode = "login", onAuthed }) {
       }
       auth.tokens = data;
       onAuthed(await me());
+      navigate("/");
     } catch (err) {
       const msg = err.message || "An unexpected error occurred.";
       const lower = msg.toLowerCase();
@@ -145,6 +146,19 @@ export default function Auth({ initialMode = "login", onAuthed }) {
                 : "Welcome back! Sign in to access your portfolios, market analytics, and pro tools."}
             </p>
           </div>
+
+          {currentUser && (
+            <div style={{ padding: "10px 14px", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "16px", fontSize: "13px" }}>
+              ℹ️ Signed in as <strong>{currentUser.email}</strong>. You can sign in to another account below or{" "}
+              <button
+                type="button"
+                style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", textDecoration: "underline", padding: 0, font: "inherit" }}
+                onClick={() => navigate("/")}
+              >
+                return to Dashboard
+              </button>.
+            </div>
+          )}
 
           <div className="seg" role="tablist" aria-label="Authentication Options">
             <button

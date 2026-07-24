@@ -2,6 +2,7 @@
 import logging
 from typing import Any, Dict, Optional
 from marketdata.fetchers.base import fetch_json
+from marketdata.quota import ARCHIVE
 
 logger = logging.getLogger(__name__)
 
@@ -40,4 +41,4 @@ def fetch_codal_announcements(
         params["date_start"] = date_start
     if date_end:
         params["date_end"] = date_end
-    return fetch_json(CODAL_API_URL, params=params)
+    return fetch_json(CODAL_API_URL, params=params, quota_bucket=ARCHIVE)

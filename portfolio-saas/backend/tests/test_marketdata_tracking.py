@@ -164,7 +164,7 @@ def test_ensure_archive_states_covers_all_endpoints():
     assert ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS in endpoints
     assert ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS in endpoints
     assert ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS in endpoints
-    assert len(endpoints) == 7  # 7 stock endpoints per TSE symbol
+    assert len(endpoints) == 10  # 10 stock endpoints per TSE symbol
 
 
 def test_archive_state_for_codal_shareholder_and_ticks(settings):

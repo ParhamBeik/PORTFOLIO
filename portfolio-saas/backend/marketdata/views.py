@@ -5,6 +5,7 @@ request handler (the sync/backfill tasks own fetching). Public market charts
 (candles, history, index, symbols) are FREE; "smart-money" data (Codal filings,
 shareholder moves) is a Pro differentiator alongside the analytics endpoints.
 """
+from django.views import View
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -431,28 +432,6 @@ class ShareholdersView(APIView):
         ])
 
 
-class QuotaStatusView(APIView):
-    """GET /api/market/quota/ - Returns daily quota usage, 5-min window quota, and archive backfill progress."""
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        from .models import ArchiveFetchState
-        from .quota import get_quota_status
-
-        status_data = get_quota_status()
-        total_states = ArchiveFetchState.objects.count()
-        complete_states = ArchiveFetchState.objects.filter(verified_complete=True).count()
-        progress_pct = round((complete_states / total_states * 100), 2) if total_states > 0 else 0.0
-        status_data["archive_progress"] = {
-            "total_states": total_states,
-            "complete_states": complete_states,
-            "pending_states": max(0, total_states - complete_states),
-            "progress_pct": progress_pct,
-        }
-        return Response(status_data)
-
-
 class AdminStatusView(APIView):
     """Staff-only operational snapshot for data coverage, users, and storage."""
 
@@ -465,6 +444,7 @@ class AdminStatusView(APIView):
             MarketInstrument,
             StockTransactionTick,
         )
+        from .logs import get_recent_logs
         from .quota import get_quota_status
 
         total_states = ArchiveFetchState.objects.count()
@@ -541,6 +521,7 @@ class AdminStatusView(APIView):
             },
             "quota": get_quota_status(),
             "latest_quota_day": str(latest_quota.day) if latest_quota else None,
+            "recent_logs": get_recent_logs(100),
             "recent_snapshots": [
                 {
                     "id": row.id,
@@ -552,3 +533,117 @@ class AdminStatusView(APIView):
                 for row in recent_snapshots
             ],
         })
+
+
+def _get_cached_db_counts():
+    from django.core.cache import cache
+    cached = cache.get("db_counts_diagnostics")
+    if cached:
+        return cached
+
+    from portfolio.models import Account, Holding, Price, Snapshot, Transaction
+    from .models import StockTransactionTick, MarketInstrument, DailyStockHistory, GoldCurrencyHistory, MarketCandle, CodalAnnouncement, ShareholderRecord
+
+    counts = {
+        "accounts": Account.objects.count(),
+        "holdings": Holding.objects.count(),
+        "prices": Price.objects.count(),
+        "snapshots": Snapshot.objects.count(),
+        "transactions": Transaction.objects.count(),
+        "portfolio_transactions": Transaction.objects.count(),
+        "stock_transaction_ticks": StockTransactionTick.objects.count(),
+        "market_instruments": MarketInstrument.objects.count(),
+        "stock_history_rows": DailyStockHistory.objects.count(),
+        "gold_currency_rows": GoldCurrencyHistory.objects.count(),
+        "candles": MarketCandle.objects.count(),
+        "announcements": CodalAnnouncement.objects.count(),
+        "shareholders": ShareholderRecord.objects.count(),
+    }
+    cache.set("db_counts_diagnostics", counts, 10)
+    return counts
+
+
+class AdminStatusStreamView(View):
+    """Staff-only real-time SSE stream of system diagnostics, rate limits, and live logs."""
+
+    def get(self, request):
+        import json
+        import time
+        from django.http import StreamingHttpResponse, HttpResponseForbidden
+        from rest_framework_simplejwt.authentication import JWTAuthentication
+        from .logs import get_recent_logs
+        from .models import ApiRequestQuota, ArchiveFetchState, MarketInstrument, StockTransactionTick
+        from .quota import get_quota_status
+
+        user = request.user
+        if not user or not user.is_authenticated:
+            token_str = request.GET.get("token")
+            if token_str:
+                try:
+                    auth_layer = JWTAuthentication()
+                    validated_token = auth_layer.get_validated_token(token_str)
+                    user = auth_layer.get_user(validated_token)
+                except Exception:
+                    user = None
+
+        if not user or not (getattr(user, "is_staff", False) or getattr(user, "is_superuser", False)):
+            return HttpResponseForbidden("Admin access required for SSE system stream.")
+
+        def stream_generator():
+            iterations = 0
+            while iterations < 300:
+                iterations += 1
+                total_states = ArchiveFetchState.objects.count()
+                complete_states = ArchiveFetchState.objects.filter(verified_complete=True).count()
+                pending_states = max(0, total_states - complete_states)
+                failures = ArchiveFetchState.objects.filter(consecutive_failures__gt=0).count()
+                latest_quota = ApiRequestQuota.objects.order_by("-day").first()
+
+                category_summary = {}
+                for ep_choice, ep_label in ArchiveFetchState.Endpoint.choices:
+                    states = ArchiveFetchState.objects.filter(endpoint=ep_choice)
+                    t_cnt = states.count()
+                    c_cnt = states.filter(verified_complete=True).count()
+                    category_summary[ep_choice] = {
+                        "label": ep_label,
+                        "total_states": t_cnt,
+                        "complete_states": c_cnt,
+                        "pending_states": max(0, t_cnt - c_cnt),
+                        "progress_pct": round((c_cnt / t_cnt * 100), 2) if t_cnt else 0,
+                    }
+
+                payload = {
+                    "timestamp": time.time(),
+                    "database": _get_cached_db_counts(),
+                    "archive": {
+                        "total_states": total_states,
+                        "complete_states": complete_states,
+                        "pending_states": pending_states,
+                        "failed_states": failures,
+                        "progress_pct": round((complete_states / total_states * 100), 2) if total_states else 0,
+                        "category_summary": category_summary,
+                        "worst_gaps": [
+                            {
+                                "endpoint": row.endpoint,
+                                "symbol": row.symbol,
+                                "stored_rows": row.stored_rows,
+                                "expected_rows": row.expected_rows,
+                                "missing_rows": row.missing_rows,
+                                "last_error": row.last_error,
+                                "consecutive_failures": row.consecutive_failures,
+                            }
+                            for row in ArchiveFetchState.objects.order_by("-missing_rows", "-consecutive_failures")[:100]
+                        ],
+                    },
+                    "quota": get_quota_status(),
+                    "latest_quota_day": str(latest_quota.day) if latest_quota else None,
+                    "recent_logs": get_recent_logs(100),
+                }
+
+                yield f"data: {json.dumps(payload)}\n\n"
+                time.sleep(2.0)
+
+        response = StreamingHttpResponse(stream_generator(), content_type="text/event-stream")
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response

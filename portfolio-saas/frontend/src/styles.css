@@ -1370,4 +1370,183 @@ button.link.danger { color: var(--red); }
   font-weight: 500;
 }
 
+/* 13-Endpoint Family Progress Matrix Grid */
+.endpoint-matrix-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+  margin-top: 1rem;
+}
+
+.endpoint-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.15s ease;
+}
+
+.endpoint-card.complete {
+  border-left: 3px solid #10b981;
+}
+
+.endpoint-card.pending {
+  border-left: 3px solid #f59e0b;
+}
+
+.endpoint-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.endpoint-card-stats {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+/* Dark Terminal Log Console */
+.dark-console-card {
+  background: #090d16 !important;
+  border: 1px solid #1e293b !important;
+}
+
+.console-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.console-input, .console-select {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid #334155;
+  background: #0f172a;
+  color: #f8fafc;
+  font-size: 0.82rem;
+  font-family: monospace;
+}
+
+.terminal-window {
+  background: #020617;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  max-height: 400px;
+  overflow-y: auto;
+  font-family: monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.terminal-stream {
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+}
+
+.terminal-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.terminal-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.log-time {
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.log-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: bold;
+}
+
+.log-badge.lvl-info { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
+.log-badge.lvl-warn { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+.log-badge.lvl-error { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+
+.log-cat {
+  color: #a78bfa;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.log-msg {
+  color: #e2e8f0;
+  word-break: break-word;
+}
+
+.live-sync-indicator.connected .live-dot {
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+  animation: pulse-dot 1.5s infinite;
+}
+
+@keyframes pulse-dot {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(0.95); opacity: 0.8; }
+}
+
+/* Modern Pill Toggle Switch Button */
+.switch-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.switch-toggle {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 999px;
+  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.switch-toggle.active {
+  background: #6366f1;
+  border-color: #818cf8;
+  box-shadow: 0 0 12px rgba(99, 102, 241, 0.45);
+}
+
+.switch-slider {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  background: #ffffff;
+  border-radius: 50%;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.switch-toggle.active .switch-slider {
+  transform: translateX(20px);
+}
+
+
+
 

@@ -83,3 +83,20 @@ def test_compute_dynamic_net_worth_series(asset_catalog, write_prices, make_user
     assert "total" in series[0]
     assert "total_usd" in series[0]
     assert float(series[0]["total"]) > 0
+
+
+def test_guard_price_map_blocks_spikes_over_10_percent(asset_catalog, write_prices):
+    from portfolio.services.valuation import guard_price_map
+    write_prices({"emami_coin": Decimal("500000000")})
+    # Live price jumps 12% (560M > 550M 10% threshold)
+    guarded = guard_price_map({"emami_coin": Decimal("560000000")})
+    assert guarded["emami_coin"] == Decimal("500000000")  # Retains previous price
+
+
+def test_guard_price_map_forward_fills_missing_or_zero_prices(asset_catalog, write_prices):
+    from portfolio.services.valuation import guard_price_map
+    write_prices({"emami_coin": Decimal("500000000")})
+    # Live price fails / returns 0
+    guarded = guard_price_map({"emami_coin": Decimal("0")})
+    assert guarded["emami_coin"] == Decimal("500000000")  # Forward-fills previous price (flat-line)
+

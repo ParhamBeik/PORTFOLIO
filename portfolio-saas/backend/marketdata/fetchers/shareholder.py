@@ -2,6 +2,7 @@
 import logging
 from typing import Any, Dict, List, Optional
 from marketdata.fetchers.base import fetch_json
+from marketdata.quota import ARCHIVE
 
 logger = logging.getLogger(__name__)
 
@@ -17,4 +18,4 @@ def fetch_shareholders(
     params = {"key": api_key, "l18": symbol}
     if date:
         params["date"] = date
-    return fetch_json(SHAREHOLDER_API_URL, params=params)
+    return fetch_json(SHAREHOLDER_API_URL, params=params, quota_bucket=ARCHIVE)

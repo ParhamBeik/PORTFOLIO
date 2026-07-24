@@ -14,10 +14,20 @@ from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-insecure-change-me-must-be-at-least-32-bytes-long-for-jwt-hs256!")
-DEBUG = os.getenv("DJANGO_DEBUG", "1") == "1"
-# H7: refuse to boot a non-debug server on the committed default key.
-if not DEBUG and SECRET_KEY.startswith("dev-insecure-change-me"):
-    raise ImproperlyConfigured("Set DJANGO_SECRET_KEY when DJANGO_DEBUG=0.")
+DEBUG = os.getenv("DJANGO_DEBUG", "0") == "1"
+# ENVIRONMENT is a second, independent signal (not derived from DEBUG) so security
+# hardening below doesn't vanish just because someone flips DEBUG=1 for a one-off
+# debugging session in a prod-like environment.
+ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
+# H7: refuse to boot a non-debug server on a known-weak key. Checks a denylist of
+# known-bad values/prefixes (not just the exact committed default) plus a minimum
+# length, so a deploy can't trivially pass this guard with a different-but-weak key.
+_WEAK_SECRET_KEY_PREFIXES = ("dev-insecure-change-me", "changeme", "insecure", "django-insecure-")
+if not DEBUG:
+    if SECRET_KEY.lower().startswith(_WEAK_SECRET_KEY_PREFIXES):
+        raise ImproperlyConfigured("Set DJANGO_SECRET_KEY when DJANGO_DEBUG=0.")
+    if len(SECRET_KEY) < 50:
+        raise ImproperlyConfigured("DJANGO_SECRET_KEY must be at least 50 characters when DJANGO_DEBUG=0.")
 ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,backend").split(",")
 
 # Frontend origin(s) for CORS. Comma-separated in dev (Vite on 5173).
@@ -34,6 +44,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "accounts",
     "portfolio",
@@ -111,6 +122,11 @@ if os.getenv("REDIS_URL"):
             "OPTIONS": {"CONNECTION_CLASS_KWARGS": {"ssl_cert_reqs": None}},
         }
     }
+elif not DEBUG:
+    # LocMemCache is per-process: with multiple gunicorn workers each worker gets
+    # its own cache, silently breaking shared-cache correctness (stale prices,
+    # inconsistent valuations). Fail loudly in prod instead of degrading quietly.
+    raise ImproperlyConfigured("Set REDIS_URL when DJANGO_DEBUG=0 (LocMemCache is unsafe across gunicorn workers).")
 else:
     CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
@@ -139,9 +155,16 @@ REST_FRAMEWORK = {
     ),
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     # H5: throttle anonymous endpoints (login/register) by IP. Authenticated
-    # requests bypass AnonRateThrottle automatically.
-    "DEFAULT_THROTTLE_CLASSES": ("rest_framework.throttling.AnonRateThrottle",),
-    "DEFAULT_THROTTLE_RATES": {"anon": os.getenv("ANON_THROTTLE", "30/min")},
+    # users get their own per-user bucket so no single account can hammer the
+    # API; 120/min comfortably covers dashboard usage plus the 2-min price poll.
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": os.getenv("ANON_THROTTLE", "30/min"),
+        "user": os.getenv("USER_THROTTLE", "120/min"),
+    },
     # M5: render Decimal as a string so large Toman values stay exact on the wire.
     "DEFAULT_RENDERER_CLASSES": ("config.renderers.DecimalStringJSONRenderer",),
 }
@@ -151,7 +174,14 @@ SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
     "USER_ID_FIELD": "id",
     "USER_ID_CLAIM": "user_id",
+    # Rotate refresh tokens on use and blacklist the old one, so a stolen refresh
+    # token has a single-use window instead of being valid for the full 7 days.
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
 }
+# token_blacklist (INSTALLED_APPS above) is now available for a "log out all
+# devices" endpoint (blacklist a user's OutstandingToken set) — add it in
+# accounts/views.py, not here.
 
 # Market data sources. The BRS/TSETMC keys are the same shape as the original
 # PORTFOLIO project's settings.json, now 12-factor env vars.
@@ -190,10 +220,16 @@ MANUAL_PRICES = {
     "swiss_gold_bar_2_5g": Decimal(os.getenv("SWISS_GOLD_BAR_2_5G", "61610000")),
 }
 
-# Celery beat drives the real-time fetch loop. The broker uses Redis DB 2 to stay
-# clear of the cache (DB 1); both fall back to localhost when REDIS_URL is unset.
-_redis_default = os.getenv("REDIS_URL", "redis://localhost:6379/2").rsplit("/", 1)[0] + "/2"
+_redis_url = os.getenv("REDIS_URL", "")
+if _redis_url:
+    from urllib.parse import urlparse, urlunparse
+    _parsed = urlparse(_redis_url)
+    _redis_default = urlunparse((_parsed.scheme, _parsed.netloc, "/2", _parsed.params, _parsed.query, _parsed.fragment))
+else:
+    _redis_default = "redis://localhost:6379/2"
+
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", _redis_default)
+
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
@@ -210,11 +246,13 @@ ZARINPAL_MERCHANT_ID = os.getenv("ZARINPAL_MERCHANT_ID", "")
 ZARINPAL_CALLBACK_URL = os.getenv("ZARINPAL_CALLBACK_URL", "http://localhost:5173/api/billing/zarinpal/callback/")
 ZARINPAL_FRONTEND_URL = os.getenv("ZARINPAL_FRONTEND_URL", "http://localhost:5173/billing")
 ZARINPAL_SANDBOX = os.getenv("ZARINPAL_SANDBOX", "0") == "1"
-PRO_PRICE_TOMAN = os.getenv("PRO_PRICE_TOMAN", "1000000")
+PRO_PRICE_TOMAN = int(os.getenv("PRO_PRICE_TOMAN", "1000000"))
 
-# Production-only security posture (M7, M8). These are evaluated at settings
-# import; tests/dev boot with DEBUG=True so neither branch runs there.
-if not DEBUG:
+# Production-only security posture (M7, M8). Gated on ENVIRONMENT rather than
+# solely on DEBUG (belt and suspenders): flipping DEBUG=1 for a one-off debugging
+# session in a prod/staging environment must not silently drop HSTS/secure-cookie
+# hardening.
+if ENVIRONMENT != "dev" or not DEBUG:
     SECURE_SSL_REDIRECT = True
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
@@ -252,5 +290,8 @@ LOGGING = {
         "portfolio": {"handlers": ["console"], "level": "INFO", "propagate": False},
         "marketdata": {"handlers": ["console"], "level": "INFO", "propagate": False},
         "billing": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        # Suspicious-request signals (disallowed host, bad CSRF/session cookie,
+        # etc.) that Django's SecurityMiddleware/CommonMiddleware/CSRF raise.
+        "django.security": {"handlers": ["console"], "level": "INFO", "propagate": False},
     },
 }

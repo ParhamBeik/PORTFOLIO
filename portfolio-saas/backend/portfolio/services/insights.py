@@ -108,6 +108,9 @@ def net_worth_trend(user, account=None, days: int = 7) -> dict:
     }
 
 
+from portfolio.services.valuation import get_latest_prices
+
+
 def build_insights(user, account=None) -> dict:
     """Run all insights for a user. Only callable by PRO users (IsPro gate).
 
@@ -115,13 +118,17 @@ def build_insights(user, account=None) -> dict:
     every insight to that single portfolio.
     """
     valuation = value_account(account) if account is not None else value_user(user)
+    prices = valuation.get("prices") if isinstance(valuation.get("prices"), dict) else get_latest_prices()
+    usd_rate = Decimal(str(prices.get("usd_cash", 0) or 0))
+    total_usd = (valuation["total"] / usd_rate) if usd_rate > 0 else Decimal("0")
     return {
         "valuation": {
             "total": valuation["total"],
-            "total_usd": valuation.get("total_usd", 0),
+            "total_usd": total_usd,
         },
         "allocation": allocation_breakdown(valuation),
         "concentration": concentration_risk(valuation),
         "gold_band": gold_band_suggestion(valuation),
         "net_worth_trend": net_worth_trend(user, account),
     }
+

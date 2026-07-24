@@ -66,7 +66,8 @@ def _check_and_record_window():
 
 def reserve_request(bucket=OTHER):
     limit = settings.MARKETDATA_DAILY_REQUEST_LIMIT
-    non_archive_limit = limit - settings.MARKETDATA_ARCHIVE_REQUEST_RESERVE
+    archive_reserve = settings.MARKETDATA_ARCHIVE_REQUEST_RESERVE
+    non_archive_limit = limit - archive_reserve
     with transaction.atomic():
         row, _ = ApiRequestQuota.objects.select_for_update().get_or_create(
             day=quota_day(),
@@ -76,8 +77,13 @@ def reserve_request(bucket=OTHER):
             row.limit = limit
         if row.used >= row.limit:
             raise QuotaExhausted("Daily API request quota exhausted.")
-        if bucket != ARCHIVE and row.live_used + row.other_used >= non_archive_limit:
-            raise QuotaExhausted("Non-archive API request reserve exhausted.")
+
+        if bucket == ARCHIVE:
+            if archive_reserve > 0 and row.archive_used >= archive_reserve:
+                raise QuotaExhausted("Daily archive API reserve exhausted.")
+        else:
+            if row.live_used + row.other_used >= non_archive_limit:
+                raise QuotaExhausted("Non-archive API request reserve exhausted.")
 
         _check_and_record_window()
 

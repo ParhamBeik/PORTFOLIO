@@ -5,14 +5,19 @@ Two scale levers live here:
   1. latest prices are read once (DISTINCT ON) and cached, not per-asset;
   2. valuation is pure arithmetic over a preloaded holding set.
 """
+import logging
 from decimal import Decimal
 
 from django.core.cache import cache
 
 from ..models import Account, Asset, Holding, Price
 
+logger = logging.getLogger(__name__)
+
 _LATEST_PRICES_CACHE_KEY = "prices:latest"
 _ARCHIVE_DROP_FLOOR = Decimal("0.50")
+_ARCHIVE_SPIKE_CEILING = Decimal("2.00")
+_MAX_PRICE_JUMP_RATIO = Decimal("0.10")  # Max 10% move per 2-minute fetch cycle
 _HOUSE_AREA_SQM = Decimal("90.2")
 _HOUSE_MORTGAGE_DEDUCTION = Decimal("400000000")
 
@@ -49,8 +54,38 @@ def get_latest_prices() -> dict:
 
 
 def guard_price_map(prices: dict) -> dict:
-    """Replace missing or broken live prices with nearest archived closes."""
+    """Replace missing or broken live prices with previous prices or archive closes."""
     guarded = {key: _q(value) for key, value in prices.items()}
+    
+    # 1. Fetch latest recorded valid prices from DB for comparison
+    latest_db_rows = (
+        Price.objects.select_related("asset")
+        .filter(asset__is_active=True, price__gt=0)
+        .order_by("asset_id", "-fetched_at", "-id")
+        .distinct("asset_id")
+    )
+    prev_prices = {row.asset.key: _q(row.price) for row in latest_db_rows}
+
+    # 2. Check 10% spike/drop safeguard vs previous price & forward-fill missing prices
+    for key, live_price in list(guarded.items()):
+        prev_price = prev_prices.get(key)
+        if prev_price and prev_price > 0:
+            if live_price <= 0:
+                logger.info(
+                    "[LIVE_PRICE_FORWARD_FILL] Key='%s' missing or zero live price. Forward-filling previous price %s.",
+                    key, prev_price
+                )
+                guarded[key] = prev_price
+            else:
+                diff_ratio = abs(live_price - prev_price) / prev_price
+                if diff_ratio > _MAX_PRICE_JUMP_RATIO:
+                    logger.warning(
+                        "[PRICE_SPIKE_BLOCKED] Key='%s' Live=%s Prev=%s (Move: %.2f%% > 10%% cap). Retaining previous price.",
+                        key, live_price, prev_price, float(diff_ratio * 100)
+                    )
+                    guarded[key] = prev_price
+
+    # 3. Apply archive fallback for zero/missing or massive historical deviations
     guarded.update(_archive_replacements(guarded))
     return guarded
 
@@ -91,7 +126,14 @@ def _archive_replacements(prices: dict) -> dict:
     replacements = {}
     for key, archive_price in archive_prices.items():
         live_price = _q(prices.get(key))
-        if live_price <= 0 or live_price < archive_price * _ARCHIVE_DROP_FLOOR:
+        if live_price <= 0:
+            logger.warning("[PRICE_FALLBACK_ARCHIVE] Key='%s' Live=0. Using archive price %s", key, archive_price)
+            replacements[key] = archive_price
+        elif live_price < archive_price * _ARCHIVE_DROP_FLOOR or live_price > archive_price * _ARCHIVE_SPIKE_CEILING:
+            logger.warning(
+                "[PRICE_DEVIATION_ARCHIVE] Key='%s' Live=%s Archive=%s outside range [%s, %s]. Using archive price.",
+                key, live_price, archive_price, archive_price * _ARCHIVE_DROP_FLOOR, archive_price * _ARCHIVE_SPIKE_CEILING
+            )
             replacements[key] = archive_price
     return replacements
 
@@ -101,17 +143,22 @@ def invalidate_prices_cache() -> None:
     cache.delete(_LATEST_PRICES_CACHE_KEY)
 
 
-def _house_value(price_per_sqm_million: Decimal) -> Decimal:
+def _house_value(price_per_sqm_million: Decimal, area_sqm: Decimal = _HOUSE_AREA_SQM, mortgage_deduction: Decimal = _HOUSE_MORTGAGE_DEDUCTION) -> Decimal:
     """Port of engine.calculate_house_value: area * price/sqm - mortgage."""
     sqm_price = _q(price_per_sqm_million) * Decimal("1000000")
-    return sqm_price * _HOUSE_AREA_SQM - _HOUSE_MORTGAGE_DEDUCTION
+    area = _q(area_sqm) if area_sqm is not None else _HOUSE_AREA_SQM
+    mortgage = _q(mortgage_deduction) if mortgage_deduction is not None else _HOUSE_MORTGAGE_DEDUCTION
+    return sqm_price * area - mortgage
 
 
 def asset_value(holding: Holding, price: Decimal) -> Decimal:
     """Quantity x unit price, or the house formula for real estate."""
     if holding.asset.is_house:
-        return _house_value(holding.quantity)
+        area = getattr(holding, "area_sqm", _HOUSE_AREA_SQM)
+        mortgage = getattr(holding, "mortgage_deduction_tomans", _HOUSE_MORTGAGE_DEDUCTION)
+        return _house_value(holding.quantity, area_sqm=area, mortgage_deduction=mortgage)
     return _q(holding.quantity) * _q(price)
+
 
 
 def value_account(account: Account, prices: dict | None = None) -> dict:

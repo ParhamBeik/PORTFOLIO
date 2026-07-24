@@ -51,8 +51,11 @@ class ChangePasswordView(APIView):
             data=request.data, context={"request": request}
         )
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response({"detail": "Password updated successfully."})
+        user = serializer.save()
+        return Response(
+            {"detail": "Password updated successfully.", **_tokens(user)}
+        )
+
 
 
 class ProCheckView(APIView):

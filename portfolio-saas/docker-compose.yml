@@ -7,6 +7,7 @@ x-backend-env: &backend-env
   DJANGO_SETTINGS_MODULE: config.settings
   DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-insecure-change-me-must-be-at-least-32-bytes-long-for-jwt-hs256}
   DJANGO_DEBUG: ${DJANGO_DEBUG:-1}
+  ENVIRONMENT: ${ENVIRONMENT:-dev}
   ALLOWED_HOSTS: ${ALLOWED_HOSTS:-backend,localhost,127.0.0.1}
   POSTGRES_DB: ${POSTGRES_DB:-portfolio}
   POSTGRES_USER: ${POSTGRES_USER:-portfolio}
@@ -24,7 +25,7 @@ x-backend-env: &backend-env
 
 services:
   db:
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-portfolio}
@@ -39,12 +40,22 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512m
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.2-alpine
     restart: unless-stopped
     ports:
       - "6379:6379"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
 
   backend:
     build: ./backend
@@ -58,7 +69,7 @@ services:
     command: gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --workers 1 --reload
     volumes:
       - ./backend:/app
-      - "../PORTFOLIO NEW STRUCTURE/data:/portfolio-data:ro"
+      - "${IMPORT_DATA_DIR:-./import-data}:/portfolio-data:ro"
     ports:
       - "8000:8000"
     healthcheck:
@@ -67,6 +78,11 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
 
   celery_worker:
     build: ./backend
@@ -82,19 +98,33 @@ services:
     environment: *backend-env
     volumes:
       - ./backend:/app
-    command: celery -A config worker -l info --concurrency=2 --uid=nobody --gid=nogroup
+    command: celery -A config worker -l info --concurrency=2
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+
 
   celery_beat:
     build: ./backend
     restart: unless-stopped
     entrypoint: []
     depends_on:
+      # ponytail: celery_worker has no healthcheck in this compose file, so this
+      # stays service_started (weak). Add a worker healthcheck first if beat
+      # firing before the worker can consume becomes an actual problem.
       celery_worker:
         condition: service_started
     environment: *backend-env
     volumes:
       - ./backend:/app
     command: celery -A config beat -l info
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
 
 
   frontend:

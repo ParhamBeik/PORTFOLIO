@@ -29,7 +29,7 @@ async function refreshAccessToken() {
   });
   if (!res.ok) return null;
   const data = await res.json();
-  localStorage.setItem(ACCESS_KEY, data.access);
+  auth.tokens = { access: data.access, refresh: data.refresh };
   return data.access;
 }
 
@@ -203,7 +203,11 @@ export const marketAnnouncements = (symbol, limit = 20) =>
   api(`/api/market/announcements/?symbol=${encodeURIComponent(symbol)}&limit=${limit}`);
 export const marketShareholders = (symbol) =>
   api(`/api/market/shareholders/?symbol=${encodeURIComponent(symbol)}`);
-export const marketQuota = () => api("/api/market/quota/");
 export const adminStatus = () => api("/api/market/admin/status/");
-
-
+export const adminStatusStreamUrl = () => {
+  const token = auth.token;
+  return `${API_BASE}/api/market/admin/stream/${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+};
+export const adminCleanPricesScan = () => api("/api/admin/clean-prices/scan/");
+export const adminCleanPricesExecute = (confirm) =>
+  api("/api/admin/clean-prices/execute/", { method: "POST", body: { confirm } });

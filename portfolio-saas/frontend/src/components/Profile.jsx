@@ -10,9 +10,12 @@ export default function Profile({ user, setUser }) {
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [showPasswords, setShowPasswords] = useState(false);
+  const [showOldPw, setShowOldPw] = useState(false);
+  const [showNewPw, setShowNewPw] = useState(false);
+  const [showConfirmPw, setShowConfirmPw] = useState(false);
   const [savingPassword, setSavingPassword] = useState(false);
   const [passwordMsg, setPasswordMsg] = useState(null);
+
 
   const handleSaveProfile = async (e) => {
     e.preventDefault();
@@ -182,14 +185,14 @@ export default function Profile({ user, setUser }) {
                 <button
                   type="button"
                   className="link-button"
-                  onClick={() => setShowPasswords(!showPasswords)}
+                  onClick={() => setShowOldPw(!showOldPw)}
                 >
-                  {showPasswords ? "Hide Passwords" : "Show Passwords"}
+                  {showOldPw ? "Hide" : "Show"}
                 </button>
               </div>
               <input
                 id="old-password"
-                type={showPasswords ? "text" : "password"}
+                type={showOldPw ? "text" : "password"}
                 value={oldPassword}
                 onChange={(e) => setOldPassword(e.target.value)}
                 placeholder="Enter current password"
@@ -198,10 +201,19 @@ export default function Profile({ user, setUser }) {
             </div>
 
             <div className="form-group">
-              <label htmlFor="new-password">New Password</label>
+              <div className="label-with-action">
+                <label htmlFor="new-password">New Password</label>
+                <button
+                  type="button"
+                  className="link-button"
+                  onClick={() => setShowNewPw(!showNewPw)}
+                >
+                  {showNewPw ? "Hide" : "Show"}
+                </button>
+              </div>
               <input
                 id="new-password"
-                type={showPasswords ? "text" : "password"}
+                type={showNewPw ? "text" : "password"}
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 placeholder="At least 8 characters"
@@ -218,16 +230,26 @@ export default function Profile({ user, setUser }) {
             </div>
 
             <div className="form-group">
-              <label htmlFor="confirm-password">Confirm New Password</label>
+              <div className="label-with-action">
+                <label htmlFor="confirm-password">Confirm New Password</label>
+                <button
+                  type="button"
+                  className="link-button"
+                  onClick={() => setShowConfirmPw(!showConfirmPw)}
+                >
+                  {showConfirmPw ? "Hide" : "Show"}
+                </button>
+              </div>
               <input
                 id="confirm-password"
-                type={showPasswords ? "text" : "password"}
+                type={showConfirmPw ? "text" : "password"}
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="Re-enter new password"
                 required
               />
               {confirmPassword && newPassword !== confirmPassword && (
+
                 <small className="field-error">Passwords do not match</small>
               )}
             </div>

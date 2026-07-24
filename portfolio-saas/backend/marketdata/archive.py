@@ -16,12 +16,25 @@ from .fetchers import (
     fetch_transactions,
 )
 from .fetchers.base import MarketDataFetchError
+from .fetchers.expanded import (
+    fetch_commodity_history,
+    fetch_crypto_history,
+    fetch_etf_nav_history,
+    fetch_index_history,
+    fetch_option_contracts,
+    fetch_transaction_ticks,
+)
 from .models import (
     ArchiveFetchState,
     CodalAnnouncement,
+    CommodityHistory,
+    CryptoHistory,
     DailyStockHistory,
+    EtfNavHistory,
     GoldCurrencyHistory,
     MarketCandle,
+    MarketIndexData,
+    OptionContractHistory,
     ShareholderRecord,
     StockTransactionTick,
 )
@@ -33,6 +46,9 @@ STOCK_ENDPOINTS = (
     ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
+    ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY,
+    ArchiveFetchState.Endpoint.ETF_NAV_DAILY,
+    ArchiveFetchState.Endpoint.OPTION_CONTRACT_DAILY,
     ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
     ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS,
     ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
@@ -67,6 +83,10 @@ def ensure_archive_states(stock_symbols=None, gold_symbols=None):
             symbol=symbol,
         )
         for symbol in gold_symbols
+    ]
+    rows += [
+        ArchiveFetchState(endpoint=ArchiveFetchState.Endpoint.COMMODITY_DAILY, symbol="COMMODITIES"),
+        ArchiveFetchState(endpoint=ArchiveFetchState.Endpoint.CRYPTO_DAILY, symbol="CRYPTO"),
     ]
     if rows:
         ArchiveFetchState.objects.bulk_create(rows, ignore_conflicts=True)
@@ -103,6 +123,31 @@ def _fetch_and_ingest(state):
         stored = set(MarketCandle.objects.filter(
             symbol=symbol, timeframe="1d_adj", date_time__in=expected
         ).values_list("date_time", flat=True))
+    elif endpoint == ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY:
+        payload = fetch_index_history(symbol)
+        result = ingest.ingest_market_index(payload)
+        expected = {ingest.normalize_jalali(payload.get("date"))} if isinstance(payload, dict) and "date" in payload else set()
+        stored = set(MarketIndexData.objects.filter(date__in=expected).values_list("date", flat=True))
+    elif endpoint == ArchiveFetchState.Endpoint.ETF_NAV_DAILY:
+        payload = fetch_etf_nav_history(symbol)
+        result = ingest.ingest_etf_nav(symbol, payload)
+        expected = _generic_dates(payload)
+        stored = set(EtfNavHistory.objects.filter(symbol=symbol, date__in=expected).values_list("date", flat=True))
+    elif endpoint == ArchiveFetchState.Endpoint.OPTION_CONTRACT_DAILY:
+        payload = fetch_option_contracts(symbol)
+        result = ingest.ingest_option_contracts(symbol, payload)
+        expected = _generic_dates(payload)
+        stored = set(OptionContractHistory.objects.filter(symbol=symbol, date__in=expected).values_list("date", flat=True))
+    elif endpoint == ArchiveFetchState.Endpoint.COMMODITY_DAILY:
+        payload = fetch_commodity_history(symbol)
+        result = ingest.ingest_commodity_history(symbol, payload)
+        expected = _generic_dates(payload)
+        stored = set(CommodityHistory.objects.filter(date__in=expected).values_list("date", flat=True))
+    elif endpoint == ArchiveFetchState.Endpoint.CRYPTO_DAILY:
+        payload = fetch_crypto_history(symbol)
+        result = ingest.ingest_crypto_history(symbol, payload)
+        expected = _generic_dates(payload)
+        stored = set(CryptoHistory.objects.filter(date__in=expected).values_list("date", flat=True))
     elif endpoint == ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS:
         payload = fetch_codal_announcements(settings.TSETMC_API_KEY, symbol=symbol)
         result = ingest.ingest_codal(payload)
@@ -175,6 +220,15 @@ def _gold_dates(payload):
         ingest.normalize_jalali(record.get("date"))
         for record in records
         if isinstance(record, dict) and record.get("date")
+    }
+
+
+def _generic_dates(payload):
+    items = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
+    return {
+        ingest.normalize_jalali(rec.get("date") or rec.get("d"))
+        for rec in items
+        if isinstance(rec, dict) and (rec.get("date") or rec.get("d"))
     }
 
 

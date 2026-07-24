@@ -68,7 +68,12 @@ class ArchiveFetchState(models.Model):
         STOCK_HISTORY_ADJUSTED = "stock_history_adjusted", "Stock history adjusted"
         STOCK_CANDLE_UNADJUSTED = "stock_candle_unadjusted", "Stock candle unadjusted"
         STOCK_CANDLE_ADJUSTED = "stock_candle_adjusted", "Stock candle adjusted"
-        GOLD_DAILY = "gold_daily", "Gold daily"
+        GOLD_DAILY = "gold_daily", "Gold & currency daily"
+        CRYPTO_DAILY = "crypto_daily", "Cryptocurrency daily"
+        COMMODITY_DAILY = "commodity_daily", "Commodities daily"
+        MARKET_INDEX_DAILY = "market_index_daily", "TSE market index daily"
+        ETF_NAV_DAILY = "etf_nav_daily", "ETF funds NAV daily"
+        OPTION_CONTRACT_DAILY = "option_contract_daily", "Options contract daily"
         CODAL_ANNOUNCEMENTS = "codal_announcements", "Codal financial disclosures"
         SHAREHOLDER_RECORDS = "shareholder_records", "Shareholder roster data"
         STOCK_TRANSACTION_TICKS = "stock_transaction_ticks", "Intraday trade ledgers"
@@ -327,3 +332,99 @@ class MarketIndexData(models.Model):
                 name="uniq_market_index_date_time",
             )
         ]
+
+
+class EtfNavHistory(models.Model):
+    """ETF Funds daily NAV and market price history."""
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    date = models.CharField(max_length=10, db_index=True)
+    nav_stat = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    nav_issue = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    nav_cancel = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    market_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    discount_pct = models.FloatField(default=0.0)
+
+    class Meta:
+        ordering = ["-date", "symbol"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "date"],
+                name="uniq_etf_nav_symbol_date",
+            )
+        ]
+
+
+class OptionContractHistory(models.Model):
+    """Options contract trading quotes and underlying asset metrics."""
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    ua_symbol = models.CharField(max_length=64, db_index=True)  # Underlying asset
+    strike_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    expiry_date = models.CharField(max_length=10, blank=True, default="")
+    date = models.CharField(max_length=10, db_index=True)
+    settlement_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    open_interest = models.BigIntegerField(default=0)
+    notional_value = models.BigIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-date", "symbol"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "date"],
+                name="uniq_option_contract_symbol_date",
+            )
+        ]
+
+
+class CommodityHistory(models.Model):
+    """Industrial metals, energy, and global commodity price history."""
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    date = models.CharField(max_length=10, db_index=True)
+    close_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    unit = models.CharField(max_length=32, blank=True, default="")
+
+    class Meta:
+        ordering = ["-date", "symbol"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "date"],
+                name="uniq_commodity_symbol_date",
+            )
+        ]
+
+
+class CryptoHistory(models.Model):
+    """Cryptocurrency daily price, volume, and market cap history."""
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    date = models.CharField(max_length=10, db_index=True)
+    close_price_usd = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    close_price_toman = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    volume_24h = models.BigIntegerField(default=0)
+    market_cap = models.BigIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-date", "symbol"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "date"],
+                name="uniq_crypto_symbol_date",
+            )
+        ]
+
+
+class SystemLogEvent(models.Model):
+    """Database-backed system log event repository shared across Celery workers and Django processes."""
+
+    timestamp = models.DateTimeField(auto_now_add=True, db_index=True)
+    level = models.CharField(max_length=20)
+    category = models.CharField(max_length=50, db_index=True)
+    logger_name = models.CharField(max_length=100)
+    message = models.TextField()
+
+    class Meta:
+        ordering = ["-timestamp"]
+
+

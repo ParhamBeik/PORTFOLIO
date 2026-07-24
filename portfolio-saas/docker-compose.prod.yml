@@ -32,7 +32,7 @@ x-backend-env: &backend-env
 
 services:
   db:
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-portfolio}
@@ -45,16 +45,28 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512m
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.2-alpine
     restart: unless-stopped
     command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redisdata:/data   # --save 60 1 writes an RDB snapshot; persist it outside the container layer
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
 
   backend:
     build: ./backend
@@ -72,6 +84,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
 
   celery_worker:
     build: ./backend
@@ -83,16 +100,30 @@ services:
       redis:
         condition: service_healthy
     environment: *backend-env
-    command: celery -A config worker -l info --concurrency=2 --uid=nobody --gid=nogroup
+    command: celery -A config worker -l info --concurrency=2
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+
 
   celery_beat:
     build: ./backend
     restart: unless-stopped
     entrypoint: []
     depends_on:
+      # ponytail: celery_worker has no healthcheck in this compose file, so this
+      # stays a plain (unconditioned) dependency. Add a worker healthcheck first
+      # if beat firing before the worker can consume becomes an actual problem.
       - celery_worker
     environment: *backend-env
     command: celery -A config beat -l info
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
 
   frontend:
     build:
@@ -122,5 +153,6 @@ services:
 
 volumes:
   pgdata:
+  redisdata:
   caddy_data:
   caddy_config:

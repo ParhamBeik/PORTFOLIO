@@ -296,7 +296,11 @@ export default function Portfolio({ user }) {
             {activeAcct ? activeAcct.name : "All portfolios"} · Total Net Worth (Tomans)
           </div>
           <div className="hero-value">{fmtToman(val?.total)}</div>
-          <div className="hero-sub">≈ ${fmtNum(val?.total_usd)} USD</div>
+          {val?.total_usd != null && val.total_usd !== "" && !isNaN(val.total_usd) ? (
+            <div className="hero-sub">≈ ${fmtNum(val.total_usd)} USD</div>
+          ) : (
+            <div className="hero-sub">≈ $— USD</div>
+          )}
         </div>
         <div className="hero-meta">
           <span className="pulse" />
@@ -697,7 +701,7 @@ export default function Portfolio({ user }) {
                     <td>{fmtNum(t.quantity)}</td>
                     <td>{fmtNum(t.price_tomans)}</td>
                     <td>
-                      {txns.findIndex((row) => row.asset_key === t.asset_key) === index && (
+                      {(t.is_latest_for_asset ?? (txns.findIndex((row) => row.asset_key === t.asset_key) === index)) && (
                         <button
                           className="link danger"
                           title="Undo latest trade for this asset"
@@ -707,6 +711,7 @@ export default function Portfolio({ user }) {
                           Undo
                         </button>
                       )}
+
                     </td>
                   </tr>
                 ))}

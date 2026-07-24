@@ -140,6 +140,62 @@ class TradeView(APIView):
         return Response(result, status=status.HTTP_201_CREATED)
 
 
+class TransactionUndoView(APIView):
+    """Roll back a specific transaction by ID."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, tx_id):
+        try:
+            undo_trade(user=request.user, transaction_id=tx_id)
+        except Transaction.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        except TradeError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"detail": "Transaction undone successfully."}, status=status.HTTP_200_OK)
+
+
+
+import logging
+
+from rest_framework.permissions import IsAdminUser
+from portfolio.management.commands.clean_mispriced_data import audit_and_repair_prices
+
+admin_logger = logging.getLogger("portfolio.admin")
+
+
+class AdminCleanPricesScanView(APIView):
+    """Scan database for mispriced price rows and corrupted snapshots (Admin only)."""
+
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        stats = audit_and_repair_prices(fix=False)
+        return Response(stats)
+
+
+class AdminCleanPricesExecuteView(APIView):
+    """Execute database cleanup: delete corrupted price rows, repair snapshots, and log action (Admin only).
+
+    Destructive and irreversible (permanently deletes Price/Snapshot rows), so
+    it requires the caller to echo back CONFIRM_PHRASE rather than firing on a
+    bare POST — a single accidental click must not be enough to trigger it.
+    """
+
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    CONFIRM_PHRASE = "DELETE MISPRICED DATA"
+
+    def post(self, request):
+        if request.data.get("confirm") != self.CONFIRM_PHRASE:
+            return Response(
+                {"detail": f'This is destructive and irreversible. Send {{"confirm": "{self.CONFIRM_PHRASE}"}} to execute.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        stats = audit_and_repair_prices(fix=True)
+        admin_logger.info("[ADMIN_ACTION] %s executed price cleanup: %s", request.user.email, stats)
+        return Response(stats, status=status.HTTP_200_OK)
+
+
 class TransactionListView(APIView):
     """Trade history for the user (all accounts), newest first, capped by ?days=."""
 
@@ -258,42 +314,56 @@ class SnapshotListView(APIView):
             snapshots = snapshots.filter(account=None)
         prices = get_latest_prices()
         usd_rate = Decimal(prices.get("usd_cash", 0) or 0)
-        rows = list(snapshots.order_by("timestamp").values("timestamp", "total_value_tomans"))
-        raw_values = [Decimal(r["total_value_tomans"]) for r in rows if Decimal(r["total_value_tomans"]) > 0]
+        now = timezone.now()
+        since = now - timedelta(days=days)
+
+        # Choose grid step size based on days requested
+        if days <= 7:
+            step_minutes = 2
+        elif days <= 30:
+            step_minutes = 30
+        else:
+            step_minutes = 1440  # 1 day
+
+        rows = list(snapshots.order_by("timestamp").values("timestamp", "total_value_tomans", "is_estimated"))
         
-        # Sanity filtering for corrupted zero/extreme glitch rows
-        median_val = sorted(raw_values)[len(raw_values) // 2] if raw_values else Decimal("0")
-        
-        # Group snapshots by calendar date: YYYY-MM-DD -> latest valid snapshot entry
-        snapshot_by_day = {}
+        valid_rows = []
         for r in rows:
             val_toman = Decimal(r["total_value_tomans"])
             if val_toman <= 0:
                 continue
-            if len(raw_values) > 10 and median_val > 0:
-                if val_toman > median_val * Decimal("50.0") or val_toman < median_val * Decimal("0.01"):
-                    continue
-            val_usd = str(round(val_toman / usd_rate, 2)) if usd_rate > 0 else None
-            d_str = r["timestamp"].strftime("%Y-%m-%d")
-            snapshot_by_day[d_str] = {
-                "timestamp": r["timestamp"].isoformat(),
-                "date": d_str,
-                "total": str(r["total_value_tomans"]),
-                "total_usd": val_usd,
-            }
+            valid_rows.append((r["timestamp"], val_toman, r.get("is_estimated", False)))
 
-        # Dynamic daily history covering full `days` window (7, 30, 90, 365)
-        from portfolio.services.valuation import compute_dynamic_net_worth_series
-        base_series = compute_dynamic_net_worth_series(request.user, account, days=days)
+        # If no snapshot rows exist, fallback to live calculation total
+        if not valid_rows:
+            fallback_val = value_account(account)["total"] if account else value_user(request.user)["total"]
+            if fallback_val > 0:
+                valid_rows = [(since, fallback_val, False)]
 
-        # Merge snapshot rows into daily base series so missing days are backfilled
+        # Generate regular time grid slots from since to now with forward-fill (LOCF)
         series = []
-        for point in base_series:
-            d_key = point.get("date")
-            if d_key and d_key in snapshot_by_day:
-                series.append(snapshot_by_day[d_key])
-            else:
-                series.append(point)
+        curr = since
+        step = timedelta(minutes=step_minutes)
+        row_idx = 0
+        last_val = valid_rows[0][1] if valid_rows else Decimal("0")
+        last_estimated = valid_rows[0][2] if valid_rows else False
+
+        while curr <= now + timedelta(seconds=10):
+            while row_idx < len(valid_rows) and valid_rows[row_idx][0] <= curr:
+                last_val = valid_rows[row_idx][1]
+                last_estimated = valid_rows[row_idx][2]
+                row_idx += 1
+            
+            val_usd = str(round(last_val / usd_rate, 2)) if usd_rate > 0 else None
+            series.append({
+                "timestamp": curr.isoformat(),
+                "date": curr.strftime("%Y-%m-%d"),
+                "time": curr.strftime("%H:%M"),
+                "total": str(last_val),
+                "total_usd": val_usd,
+                "is_estimated": last_estimated,
+            })
+            curr += step
         trades = (
             Transaction.objects.filter(account__user=request.user, timestamp__gte=since)
             .select_related("asset")

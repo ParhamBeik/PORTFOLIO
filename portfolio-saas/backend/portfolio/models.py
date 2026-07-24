@@ -11,9 +11,11 @@ Scale design:
   so the write rate is bounded by schedule frequency, not by user count or price
   volatility. Current value is computed live from holdings x latest prices.
 """
+from decimal import Decimal
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
+
 
 
 class Asset(models.Model):
@@ -126,8 +128,11 @@ class Holding(models.Model):
     asset = models.ForeignKey(Asset, on_delete=models.PROTECT, related_name="holdings")
     quantity = models.DecimalField(max_digits=20, decimal_places=6, default=0)
     # For houses, quantity stores price-per-sqm-million (the formula input).
+    area_sqm = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("90.2"))
+    mortgage_deduction_tomans = models.DecimalField(max_digits=20, decimal_places=4, default=Decimal("400000000"))
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
 
     class Meta:
         ordering = ["asset__asset_class", "asset__name"]
@@ -217,6 +222,10 @@ class Snapshot(models.Model):
     )
     total_value_tomans = models.DecimalField(max_digits=24, decimal_places=4, default=0)
     timestamp = models.DateTimeField(db_index=True, auto_now_add=True)
+    is_estimated = models.BooleanField(
+        default=False,
+        help_text="True for downtime-gap backfilled rows (fabricated from recovery-time prices, not real history).",
+    )
 
     class Meta:
         ordering = ["-timestamp"]

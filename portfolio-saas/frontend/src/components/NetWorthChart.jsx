@@ -38,6 +38,7 @@ export default function NetWorthChart({
               dateStr: r.date || new Date(r.timestamp).toISOString().split("T")[0],
               total: Number(r.total),
               total_usd: r.total_usd != null ? Number(r.total_usd) : null,
+              isEstimated: !!r.is_estimated,
             };
           })
           .filter(Boolean);
@@ -185,7 +186,11 @@ export default function NetWorthChart({
             />
             <Tooltip
               labelFormatter={(t) => fmtChartTooltipDate(t)}
-              formatter={(v) => [formatValue(v), "Net Worth"]}
+              formatter={(v, name, props) => {
+                const isEst = props.payload?.isEstimated;
+                const formatted = formatValue(v);
+                return [isEst ? `${formatted} (Estimated)` : formatted, "Net Worth"];
+              }}
               contentStyle={{
                 background: "var(--panel)",
                 border: "1px solid var(--border)",

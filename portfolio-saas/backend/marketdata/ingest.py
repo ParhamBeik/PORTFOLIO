@@ -20,14 +20,147 @@ import logging
 
 from .models import (
     CodalAnnouncement,
+    CommodityHistory,
+    CryptoHistory,
     DailyStockHistory,
+    EtfNavHistory,
     GoldCurrencyHistory,
     MarketCandle,
     MarketIndexData,
+    OptionContractHistory,
     ShareholderRecord,
     StockSymbolMetadata,
     StockTransactionTick,
 )
+
+
+def ingest_etf_nav(symbol: str, payload) -> tuple[int, int]:
+    """EtfNav.php payload -> EtfNavHistory rows."""
+    items = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
+    if not items:
+        return 0, 0 if payload is None else 1
+    rows, bad = [], 0
+    for rec in items:
+        if not isinstance(rec, dict):
+            bad += 1
+            continue
+        try:
+            sym = rec.get("l18") or symbol
+            d_str = normalize_jalali(rec.get("date") or rec.get("d") or "")
+            if not sym or not d_str:
+                bad += 1
+                continue
+            rows.append(
+                EtfNavHistory(
+                    symbol=sym,
+                    date=d_str,
+                    nav_stat=rec.get("nav_stat") or rec.get("nav") or 0,
+                    nav_issue=rec.get("nav_issue") or 0,
+                    nav_cancel=rec.get("nav_cancel") or 0,
+                    market_price=rec.get("market_price") or rec.get("p") or 0,
+                    discount_pct=rec.get("discount_pct") or 0.0,
+                )
+            )
+        except Exception:
+            bad += 1
+    created, conflicts = _bulk(EtfNavHistory, rows)
+    return created, conflicts + bad
+
+
+def ingest_option_contracts(symbol: str, payload) -> tuple[int, int]:
+    """Option.php payload -> OptionContractHistory rows."""
+    items = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
+    if not items:
+        return 0, 0 if payload is None else 1
+    rows, bad = [], 0
+    for rec in items:
+        if not isinstance(rec, dict):
+            bad += 1
+            continue
+        try:
+            sym = rec.get("l18") or symbol
+            d_str = normalize_jalali(rec.get("date") or "")
+            if not sym or not d_str:
+                bad += 1
+                continue
+            rows.append(
+                OptionContractHistory(
+                    symbol=sym,
+                    ua_symbol=rec.get("ua_symbol") or rec.get("ua") or "",
+                    strike_price=rec.get("strike_price") or rec.get("k") or 0,
+                    expiry_date=normalize_jalali(rec.get("expiry_date") or rec.get("exp") or ""),
+                    date=d_str,
+                    settlement_price=rec.get("settlement_price") or rec.get("pc") or 0,
+                    open_interest=rec.get("open_interest") or rec.get("oi") or 0,
+                    notional_value=rec.get("notional_value") or rec.get("val") or 0,
+                )
+            )
+        except Exception:
+            bad += 1
+    created, conflicts = _bulk(OptionContractHistory, rows)
+    return created, conflicts + bad
+
+
+def ingest_commodity_history(symbol: str, payload) -> tuple[int, int]:
+    """Commodity.php payload -> CommodityHistory rows."""
+    items = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
+    if not items:
+        return 0, 0 if payload is None else 1
+    rows, bad = [], 0
+    for rec in items:
+        if not isinstance(rec, dict):
+            bad += 1
+            continue
+        try:
+            sym = rec.get("symbol") or symbol
+            d_str = normalize_jalali(rec.get("date") or "")
+            if not sym or not d_str:
+                bad += 1
+                continue
+            rows.append(
+                CommodityHistory(
+                    symbol=sym,
+                    date=d_str,
+                    close_price=rec.get("price") or rec.get("close") or 0,
+                    unit=rec.get("unit") or "",
+                )
+            )
+        except Exception:
+            bad += 1
+    created, conflicts = _bulk(CommodityHistory, rows)
+    return created, conflicts + bad
+
+
+def ingest_crypto_history(symbol: str, payload) -> tuple[int, int]:
+    """Crypto.php payload -> CryptoHistory rows."""
+    items = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
+    if not items:
+        return 0, 0 if payload is None else 1
+    rows, bad = [], 0
+    for rec in items:
+        if not isinstance(rec, dict):
+            bad += 1
+            continue
+        try:
+            sym = rec.get("symbol") or symbol
+            d_str = normalize_jalali(rec.get("date") or "")
+            if not sym or not d_str:
+                bad += 1
+                continue
+            rows.append(
+                CryptoHistory(
+                    symbol=sym,
+                    date=d_str,
+                    close_price_usd=rec.get("price_usd") or 0,
+                    close_price_toman=rec.get("price_toman") or 0,
+                    volume_24h=rec.get("volume_24h") or 0,
+                    market_cap=rec.get("market_cap") or 0,
+                )
+            )
+        except Exception:
+            bad += 1
+    created, conflicts = _bulk(CryptoHistory, rows)
+    return created, conflicts + bad
 
 logger = logging.getLogger(__name__)
 

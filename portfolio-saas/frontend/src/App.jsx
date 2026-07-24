@@ -38,15 +38,15 @@ export default function App() {
         <Routes>
           <Route
             path="/login"
-            element={user ? <Navigate to="/" replace /> : <Auth initialMode="login" onAuthed={setUser} />}
+            element={<Auth initialMode="login" onAuthed={setUser} currentUser={user} />}
           />
           <Route
             path="/register"
-            element={user ? <Navigate to="/" replace /> : <Auth initialMode="register" onAuthed={setUser} />}
+            element={<Auth initialMode="register" onAuthed={setUser} currentUser={user} />}
           />
           <Route
             path="/signup"
-            element={<Navigate to="/register" replace />}
+            element={<Auth initialMode="register" onAuthed={setUser} currentUser={user} />}
           />
           <Route element={user ? <Shell user={user} setUser={setUser} /> : <Navigate to="/login" replace />}>
             <Route index element={<Portfolio user={user} />} />
@@ -161,6 +161,9 @@ function Shell({ user, setUser }) {
           <span className="tier-badge">{user.is_pro ? "PRO" : "FREE"}</span>
           <NavLink to="/profile" className="email-link" title="Account & Security Settings">
             <span className="email">{user.email}</span>
+          </NavLink>
+          <NavLink to="/login" className="btn-secondary small" title="Switch or Sign In to Another Account" style={{ padding: "4px 8px", fontSize: "12px", textDecoration: "none" }}>
+            🔑 Sign In / Register
           </NavLink>
           <button
             onClick={() => {

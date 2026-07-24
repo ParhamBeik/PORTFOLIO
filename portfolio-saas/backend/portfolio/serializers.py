@@ -56,8 +56,19 @@ class TransactionSerializer(serializers.ModelSerializer):
 
     asset_key = serializers.CharField(source="asset.key", read_only=True)
     asset_name = serializers.CharField(source="asset.name", read_only=True)
+    is_latest_for_asset = serializers.SerializerMethodField()
 
     class Meta:
         model = Transaction
         fields = ("id", "asset_key", "asset_name", "side", "quantity",
-                  "price_tomans", "note", "timestamp")
+                  "price_tomans", "note", "timestamp", "is_latest_for_asset")
+
+    def get_is_latest_for_asset(self, obj) -> bool:
+        latest_id = (
+            Transaction.objects.filter(account=obj.account, asset=obj.asset)
+            .order_by("-timestamp", "-pk")
+            .values_list("pk", flat=True)
+            .first()
+        )
+        return latest_id == obj.pk
+

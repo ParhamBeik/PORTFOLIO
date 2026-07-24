@@ -19,15 +19,28 @@ app.config_from_object("django.conf:settings", namespace="CELERY")
 # Discover tasks.py in each installed app (portfolio.tasks, marketdata.tasks).
 app.autodiscover_tasks()
 
+# Global reliability defaults. Per-task retry policy (autoretry_for) belongs in
+# the individual tasks (e.g. portfolio/tasks.py), not here.
+app.conf.update(
+    task_acks_late=True,  # ack after the task runs, not on receipt: a killed worker redelivers the task
+    worker_prefetch_multiplier=1,  # pair with acks_late so one worker doesn't hoard several long tasks
+    result_expires=3600,  # results aren't polled here (fire-and-forget beat schedule); don't let them pile up in Redis
+)
+
+# All crontab times below are manually converted from Tehran time to UTC (see the
+# inline comments per entry). Iran currently observes no DST (abolished 2022) so
+# the offset is a flat +03:30 year-round; if that policy ever changes again, these
+# hours need to be re-derived by hand — this is a documented gap, not automated.
 app.conf.beat_schedule = {
     "fetch-prices-every-2-min": {
         "task": "portfolio.tasks.fetch_and_publish",
-        "schedule": 300.0,
+        "schedule": 120.0,
     },
     "marketdata-archive-every-minute": {
         "task": "marketdata.tasks.archive_tick",
-        "schedule": 15.0,
+        "schedule": 60.0,
     },
+
     # Warehouse sync after TSE close (~18:15 Tehran = 14:45 UTC): serial chain
     # over tracked symbols, then gold/currency history and the index snapshot.
     "marketdata-daily-sync": {
