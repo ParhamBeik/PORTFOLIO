@@ -173,10 +173,10 @@ def _fetch_and_ingest(state):
         result = ingest.ingest_transactions(symbol, "", payload)
         expected = _transaction_keys(payload)
         stored = {
-            f"{row}_{dt}_{tm}"
-            for row, dt, tm in StockTransactionTick.objects.filter(
+            f"{row}_{dt}"
+            for row, dt in StockTransactionTick.objects.filter(
                 symbol=symbol
-            ).values_list("row", "date", "time")
+            ).values_list("row", "date")
         } & expected
     else:
         payload = fetch_gold_currency_pro_history_daily(settings.BRS_API_KEY, symbol)
@@ -257,7 +257,7 @@ def _transaction_keys(payload):
     if not isinstance(payload, list):
         return set()
     return {
-        f"{rec.get('row')}_{ingest.normalize_jalali(rec.get('date', ''))}_{rec.get('time', '') or ''}"
+        f"{rec.get('row')}_{ingest.normalize_jalali(rec.get('date', ''))}"
         for rec in payload
         if isinstance(rec, dict) and rec.get("row") is not None
     }

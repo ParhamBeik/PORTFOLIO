@@ -54,14 +54,20 @@ export default function AdminPortal() {
       eventSource.onopen = () => {
         setConnectionMode("sse");
         setErr("");
-        if (fallbackInterval) clearInterval(fallbackInterval);
+        if (fallbackInterval) {
+          clearInterval(fallbackInterval);
+          fallbackInterval = null;
+        }
       };
 
       eventSource.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data);
           receivedStreamData = true;
-          if (fallbackTimeout) clearTimeout(fallbackTimeout);
+          if (fallbackTimeout) {
+            clearTimeout(fallbackTimeout);
+            fallbackTimeout = null;
+          }
           setStreamData(payload);
           setLastStreamTime(new Date());
           setConnectionMode("sse");
@@ -151,7 +157,10 @@ export default function AdminPortal() {
 
   // Filter logs for interactive console
   const filteredLogs = recentLogs.filter((log) => {
-    if (logLevelFilter !== "ALL" && log.level !== logLevelFilter) return false;
+    if (logLevelFilter !== "ALL") {
+      const normalizedLevel = log.level === "WARN" ? "WARNING" : log.level;
+      if (normalizedLevel !== logLevelFilter) return false;
+    }
     if (logCategoryFilter !== "ALL" && log.category !== logCategoryFilter) return false;
     if (logSearch.trim()) {
       const q = logSearch.toLowerCase().trim();
@@ -279,6 +288,51 @@ export default function AdminPortal() {
               </div>
             );
           })}
+        </div>
+      </section>
+
+      {/* Database Storage & Row Counts */}
+      <section className="card margin-top">
+        <div className="card-head">
+          <h3>📦 Database Storage & Row Counts</h3>
+          <span className="badge pos">Live DB Statistics</span>
+        </div>
+        <p className="muted small">
+          Total record counts stored across all PostgreSQL warehouse tables
+        </p>
+        <div className="metric-grid margin-top">
+          <div className="metric">
+            <div className="metric-val">{fmtNum(database.stock_history_rows || 0)}</div>
+            <div className="metric-label">Stock History Rows</div>
+          </div>
+          <div className="metric">
+            <div className="metric-val">{fmtNum(database.gold_currency_rows || 0)}</div>
+            <div className="metric-label">Gold/Currency History</div>
+          </div>
+          <div className="metric">
+            <div className="metric-val">{fmtNum(database.candles || 0)}</div>
+            <div className="metric-label">Market Candles (OHLC)</div>
+          </div>
+          <div className="metric">
+            <div className="metric-val">{fmtNum(database.prices || 0)}</div>
+            <div className="metric-label">Live Price Ticks</div>
+          </div>
+          <div className="metric">
+            <div className="metric-val">{fmtNum(database.snapshots || 0)}</div>
+            <div className="metric-label">Net Worth Snapshots</div>
+          </div>
+          <div className="metric">
+            <div className="metric-val">{fmtNum(database.transactions || 0)}</div>
+            <div className="metric-label">Trade Ledger Rows</div>
+          </div>
+          <div className="metric">
+            <div className="metric-val">{fmtNum(database.announcements || 0)}</div>
+            <div className="metric-label">Codal Notices</div>
+          </div>
+          <div className="metric">
+            <div className="metric-val">{fmtNum(database.shareholders || 0)}</div>
+            <div className="metric-label">Shareholder Records</div>
+          </div>
         </div>
       </section>
 
