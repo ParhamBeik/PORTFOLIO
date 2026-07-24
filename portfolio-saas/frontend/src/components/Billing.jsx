@@ -13,6 +13,7 @@ export default function Billing({ user, setUser }) {
   const refId = params.get("ref_id");
   const [refreshing, setRefreshing] = useState(status === "success");
   const [refreshError, setRefreshError] = useState("");
+  const [activationConfirmed, setActivationConfirmed] = useState(false);
 
   useEffect(() => {
     if (status !== "success") return;
@@ -21,7 +22,10 @@ export default function Billing({ user, setUser }) {
     setRefreshError("");
     me()
       .then((nextUser) => {
-        if (current) setUser(nextUser);
+        if (current) {
+          setUser(nextUser);
+          setActivationConfirmed(Boolean(nextUser.is_pro));
+        }
       })
       .catch((error) => {
         if (current) setRefreshError(error.message);
@@ -37,8 +41,12 @@ export default function Billing({ user, setUser }) {
       <section className="card">
         <h2>Billing</h2>
         {status === "success" && (
-          <div className="ok">
-            {refreshing ? "Payment verified — refreshing your plan…" : "Thanks — your Pro subscription is active!"}
+          <div className={refreshing || activationConfirmed ? "ok" : "error"} role="status">
+            {refreshing
+              ? "Payment returned successfully — confirming your plan…"
+              : activationConfirmed
+              ? "Thanks — your Pro subscription is active!"
+              : "Payment returned successfully, but Pro is not active yet. Retry shortly or contact support if you were charged."}
             {refId && <span className="muted small"> (ref {refId})</span>}
           </div>
         )}

@@ -85,14 +85,20 @@ async def _stream_events(user, ip_key=None):
                 # Published payloads are already JSON strings — pass straight through.
                 yield format_event("price", message["data"])
             if loop.time() - last_heartbeat >= HEARTBEAT_SECONDS:
+                await client.expire(f"sse:conn:{user.id}", CONN_TTL_SECONDS)
+                if ip_key:
+                    await client.expire(ip_key, CONN_TTL_SECONDS)
                 yield ": ping\n\n"
                 last_heartbeat = loop.time()
     finally:
         await pubsub.aclose()
         # Release the connection slots claimed in the view (per-user + per-IP).
-        await client.decr(f"sse:conn:{user.id}")
+        user_key = f"sse:conn:{user.id}"
+        if await client.decr(user_key) < 0:
+            await client.delete(user_key)
         if ip_key:
-            await client.decr(ip_key)
+            if await client.decr(ip_key) < 0:
+                await client.delete(ip_key)
 
 
 class PriceStreamView(View):

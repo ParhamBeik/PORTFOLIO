@@ -13,6 +13,8 @@ const ACTIVE_KEY = "lattice_active_account";
 
 export function PortfolioProvider({ children, enabled }) {
   const [accounts, setAccounts] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [activeId, setActiveId] = useState(() => {
     const stored = localStorage.getItem(ACTIVE_KEY);
     const id = stored ? Number(stored) : null;
@@ -20,6 +22,8 @@ export function PortfolioProvider({ children, enabled }) {
   });
 
   const reload = useCallback(async () => {
+    setLoading(true);
+    setError("");
     try {
       const list = await listAccounts();
       setAccounts(list);
@@ -28,8 +32,11 @@ export function PortfolioProvider({ children, enabled }) {
         cur != null && list.some((a) => a.id === cur) ? cur : null
       );
       return list;
-    } catch {
+    } catch (requestError) {
+      setError(requestError.message || "Could not load portfolios.");
       return [];
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -38,6 +45,8 @@ export function PortfolioProvider({ children, enabled }) {
     else {
       setAccounts([]);
       setActiveId(null);
+      setError("");
+      setLoading(false);
     }
   }, [enabled, reload]);
 
@@ -49,7 +58,7 @@ export function PortfolioProvider({ children, enabled }) {
 
   return (
     <PortfolioContext.Provider
-      value={{ accounts, activeId, setActive, reload }}
+      value={{ accounts, activeId, setActive, reload, loading, error }}
     >
       {children}
     </PortfolioContext.Provider>

@@ -79,7 +79,7 @@ services:
     environment: *backend-env
     expose: ["8000"]          # internal only; Caddy fronts it
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -H 'Host: ${DOMAIN}' -H 'X-Forwarded-Proto: https' http://localhost:8000/api/health/ || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS -H 'Host: ${DOMAIN}' -H 'X-Forwarded-Proto: https' http://localhost:8000/api/health/ready/ || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5

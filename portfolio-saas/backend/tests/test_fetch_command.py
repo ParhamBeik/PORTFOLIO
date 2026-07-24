@@ -55,7 +55,7 @@ def test_fetch_dry_run_writes_nothing(asset_catalog, raw_market_sample, monkeypa
 
 
 def test_fetch_kama_falls_back_to_last_price(asset_catalog, monkeypatch):
-    """TSETMC omitting KAMA -> the command reuses the last stored KAMA price."""
+    """TSETMC omitting KAMA keeps the stored price without stamping it fresh."""
     cache.delete("prices:latest")
     Price.objects.create(asset=asset_catalog["kama_stock"], price=Decimal("7777"), source="SEED")
 
@@ -65,6 +65,7 @@ def test_fetch_kama_falls_back_to_last_price(asset_catalog, monkeypatch):
     call_command("fetch_prices", stdout=out)
     latest = Price.objects.filter(asset__key="kama_stock").order_by("-id").first()
     assert latest is not None and latest.price == Decimal("7777")
+    assert Price.objects.filter(asset__key="kama_stock").count() == 1
 
 
 def test_fetch_snapshots_use_archive_guard_for_bad_latest_price(asset_catalog, monkeypatch):
@@ -93,6 +94,23 @@ def test_fetch_snapshots_use_archive_guard_for_bad_latest_price(asset_catalog, m
     snap = Snapshot.objects.get(user=user, account=None)
     assert latest.price == Decimal("479000000")
     assert snap.total_value_tomans == Decimal("958000000")
+
+
+def test_partial_fetch_keeps_previous_prices_in_snapshots(asset_catalog, monkeypatch):
+    gold = asset_catalog["emami_coin"]
+    Price.objects.create(asset=gold, price=Decimal("400000000"), source="SEED")
+    user = User.objects.create_user(email="partial@test.test", password="Sup3rSecret!")
+    account = Account.objects.create(user=user, name="Main")
+    account.holdings.create(asset=gold, quantity=Decimal("2"))
+    _patch_fetch(monkeypatch, {
+        "brsapi": {"currency": [{"symbol": "USD", "price": 63200}]},
+        "tsetmc": [],
+    })
+
+    call_command("fetch_prices", stdout=StringIO())
+
+    assert Snapshot.objects.get(user=user, account=None).total_value_tomans == Decimal("800000000")
+    assert Price.objects.filter(asset=gold).count() == 1
 
 
 def test_fetch_no_users_still_writes_prices(asset_catalog, raw_market_sample, monkeypatch):

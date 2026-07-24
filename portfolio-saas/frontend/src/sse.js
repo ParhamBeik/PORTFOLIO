@@ -53,8 +53,15 @@ export function subscribePrices({ onPrices, onOpen, onError } = {}) {
       stopPolling();
       onOpen?.();
     });
-    es.addEventListener("hello", (e) => onPrices?.(JSON.parse(e.data)));
-    es.addEventListener("price", (e) => onPrices?.(JSON.parse(e.data)));
+    const handlePrices = (event) => {
+      try {
+        onPrices?.(JSON.parse(event.data));
+      } catch {
+        onError?.(new Error("Invalid live price update"));
+      }
+    };
+    es.addEventListener("hello", handlePrices);
+    es.addEventListener("price", handlePrices);
     es.addEventListener("error", () => {
       es?.close();
       failures += 1;

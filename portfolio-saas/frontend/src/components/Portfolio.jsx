@@ -63,7 +63,47 @@ export default function Portfolio({ user }) {
     const fullId = setInterval(loadVal, RECONCILE_MS);
     const stop = subscribePrices({
       onPrices: (prices) => {
-        setVal((v) => (v ? { ...v, prices: { ...v.prices, ...prices } } : v));
+        setVal((current) => {
+          if (!current) return current;
+          const nextPrices = { ...current.prices, ...prices };
+          const repriceItems = (items = []) =>
+            items.map((item) => {
+              if (item.class === "Real Estate") return item;
+              const unitPrice = Number(nextPrices[item.key] ?? item.unit_price ?? 0);
+              return {
+                ...item,
+                unit_price: unitPrice,
+                value: unitPrice * Number(item.quantity || 0),
+              };
+            });
+
+          let total;
+          let items;
+          let accounts;
+          if (Array.isArray(current.accounts)) {
+            accounts = current.accounts.map((account) => {
+              const accountItems = repriceItems(account.items);
+              return {
+                ...account,
+                items: accountItems,
+                total: accountItems.reduce((sum, item) => sum + Number(item.value || 0), 0),
+              };
+            });
+            total = accounts.reduce((sum, account) => sum + Number(account.total || 0), 0);
+          } else {
+            items = repriceItems(current.items);
+            total = items.reduce((sum, item) => sum + Number(item.value || 0), 0);
+          }
+
+          const usdRate = Number(nextPrices.usd_cash || 0);
+          return {
+            ...current,
+            ...(accounts ? { accounts } : { items }),
+            prices: nextPrices,
+            total,
+            total_usd: usdRate > 0 ? total / usdRate : null,
+          };
+        });
         setLastUpdate(new Date());
       },
     });
@@ -111,10 +151,11 @@ export default function Portfolio({ user }) {
     e.preventDefault();
     if (!accName.trim()) return;
     try {
-      await createAccount(accName.trim());
+      const created = await createAccount(accName.trim());
       setAccName("");
       setError("");
-      refreshAll();
+      await reload();
+      setActive(created.id);
     } catch (err) {
       setError(err.message);
     }
@@ -174,6 +215,7 @@ export default function Portfolio({ user }) {
   }
 
   async function doRemoveHolding(id) {
+    if (!window.confirm("Remove this holding from the portfolio?")) return;
     try {
       await removeHolding(activeAcct.id, id);
       setError("");
@@ -463,6 +505,7 @@ export default function Portfolio({ user }) {
                   <button
                     className="link"
                     title="Edit portfolio"
+                    aria-label={`Edit ${activeAcct.name}`}
                     onClick={() =>
                       setEditAcc({
                         id: activeAcct.id,
@@ -477,6 +520,7 @@ export default function Portfolio({ user }) {
                   <button
                     className="link danger"
                     title="Delete portfolio"
+                    aria-label={`Delete ${activeAcct.name}`}
                     onClick={() => doDeleteAccount(activeAcct)}
                   >
                     🗑
@@ -581,6 +625,7 @@ export default function Portfolio({ user }) {
                             <button
                               className="link"
                               title="Edit quantity"
+                              aria-label={`Edit ${h.asset_name}`}
                               onClick={() => setEditHold({ id: h.id, quantity: h.quantity })}
                             >
                               ✎

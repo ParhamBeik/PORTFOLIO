@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 _LATEST_PRICES_CACHE_KEY = "prices:latest"
 _ARCHIVE_DROP_FLOOR = Decimal("0.50")
 _ARCHIVE_SPIKE_CEILING = Decimal("2.00")
-_MAX_PRICE_JUMP_RATIO = Decimal("0.10")  # Max 10% move per 2-minute fetch cycle
 _HOUSE_AREA_SQM = Decimal("90.2")
 _HOUSE_MORTGAGE_DEDUCTION = Decimal("400000000")
 
@@ -53,8 +52,9 @@ def get_latest_prices() -> dict:
     return prices
 
 
-def guard_price_map(prices: dict) -> dict:
+def guard_price_map(prices: dict, *, fill_missing=True) -> dict:
     """Replace missing or broken live prices with previous prices or archive closes."""
+    supplied_keys = set(prices)
     guarded = {key: _q(value) for key, value in prices.items()}
     
     # 1. Fetch latest recorded valid prices from DB for comparison
@@ -66,7 +66,8 @@ def guard_price_map(prices: dict) -> dict:
     )
     prev_prices = {row.asset.key: _q(row.price) for row in latest_db_rows}
 
-    # 2. Check 10% spike/drop safeguard vs previous price & forward-fill missing prices
+    # 2. Forward-fill missing prices. Large positive moves remain observable;
+    # archive corroboration below rejects only catastrophic deviations.
     for key, live_price in list(guarded.items()):
         prev_price = prev_prices.get(key)
         if prev_price and prev_price > 0:
@@ -76,17 +77,14 @@ def guard_price_map(prices: dict) -> dict:
                     key, prev_price
                 )
                 guarded[key] = prev_price
-            else:
-                diff_ratio = abs(live_price - prev_price) / prev_price
-                if diff_ratio > _MAX_PRICE_JUMP_RATIO:
-                    logger.warning(
-                        "[PRICE_SPIKE_BLOCKED] Key='%s' Live=%s Prev=%s (Move: %.2f%% > 10%% cap). Retaining previous price.",
-                        key, live_price, prev_price, float(diff_ratio * 100)
-                    )
-                    guarded[key] = prev_price
 
-    # 3. Apply archive fallback for zero/missing or massive historical deviations
-    guarded.update(_archive_replacements(guarded))
+    # 3. Apply archive fallback for zero/missing or massive historical deviations.
+    replacements = _archive_replacements(guarded)
+    guarded.update(
+        replacements if fill_missing else {
+            key: value for key, value in replacements.items() if key in supplied_keys
+        }
+    )
     return guarded
 
 

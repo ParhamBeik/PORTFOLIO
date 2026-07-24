@@ -39,3 +39,21 @@ def test_snapshot_daily_grouping_and_7d_pinning(make_user):
     assert "series" in data_year
     series_year = data_year["series"]
     assert len(series_year) >= 365
+
+
+@pytest.mark.django_db
+def test_snapshot_series_does_not_fabricate_pre_history(make_user):
+    user = make_user("chart_start@example.com")
+    snapshot_time = timezone.now() - timedelta(days=1)
+    Snapshot.objects.create(
+        user=user,
+        account=None,
+        total_value_tomans=Decimal("100000"),
+        timestamp=snapshot_time,
+    )
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    series = client.get("/api/snapshots/?days=30").json()["series"]
+
+    assert series[0]["timestamp"] >= snapshot_time.isoformat()

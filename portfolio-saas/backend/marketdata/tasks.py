@@ -14,6 +14,7 @@ configuration reads, not domain coupling.
 """
 import logging
 import time
+import uuid
 
 from celery import chain, shared_task
 from django.conf import settings
@@ -27,6 +28,7 @@ from .fetchers import (
     fetch_symbol_data,
 )
 from .quota import QuotaExhausted
+from portfolio.live.pubsub import get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -138,32 +140,48 @@ def weekly_metadata_sync():
 @shared_task(ignore_result=True)
 def archive_tick(max_seconds: float = 50.0):
     """Claim quota-safe batches and continuously backfill PostgreSQL as long as quota remains."""
-    ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
-    completed = 0
-    start_time = time.monotonic()
+    redis_client = get_redis()
+    lock_key = "lock:archive_tick"
+    lock_token = uuid.uuid4().hex
+    if redis_client and not redis_client.set(lock_key, lock_token, ex=600, nx=True):
+        logger.info("archive_tick skipped: another archive tick is still running")
+        return
+    try:
+        ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
+        completed = 0
+        start_time = time.monotonic()
 
-    while time.monotonic() - start_time < max_seconds:
-        batch = claim_archive_batch()
-        if not batch:
-            break
-        processed_in_batch = False
-        for state_id in batch:
-            try:
-                state = run_archive_state(state_id)
-                completed += int(state.verified_complete)
-                processed_in_batch = True
-            except QuotaExhausted as err:
-                logger.info("archive_tick paused: %s", err)
-                if completed:
-                    _invalidate_returns()
-                logger.info("archive_tick finished: %d states verified complete", completed)
-                return
-        if not processed_in_batch:
-            break
+        while time.monotonic() - start_time < max_seconds:
+            batch = claim_archive_batch()
+            if not batch:
+                break
+            processed_in_batch = False
+            for state_id in batch:
+                try:
+                    state = run_archive_state(state_id)
+                    completed += int(state.verified_complete)
+                    processed_in_batch = True
+                except QuotaExhausted as err:
+                    logger.info("archive_tick paused: %s", err)
+                    if completed:
+                        _invalidate_returns()
+                    logger.info("archive_tick finished: %d states verified complete", completed)
+                    return
+            if not processed_in_batch:
+                break
 
-    if completed:
-        _invalidate_returns()
-    logger.info("archive_tick: %d states verified complete", completed)
+        if completed:
+            _invalidate_returns()
+        logger.info("archive_tick: %d states verified complete", completed)
+    finally:
+        if redis_client:
+            redis_client.eval(
+                "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                "return redis.call('del', KEYS[1]) else return 0 end",
+                1,
+                lock_key,
+                lock_token,
+            )
 
 
 @shared_task(ignore_result=True)

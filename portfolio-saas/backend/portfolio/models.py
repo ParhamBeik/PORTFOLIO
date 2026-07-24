@@ -15,6 +15,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
 
 
@@ -221,7 +222,7 @@ class Snapshot(models.Model):
         Account, on_delete=models.CASCADE, related_name="snapshots", null=True, blank=True
     )
     total_value_tomans = models.DecimalField(max_digits=24, decimal_places=4, default=0)
-    timestamp = models.DateTimeField(db_index=True, auto_now_add=True)
+    timestamp = models.DateTimeField(db_index=True, default=timezone.now)
     is_estimated = models.BooleanField(
         default=False,
         help_text="True for downtime-gap backfilled rows (fabricated from recovery-time prices, not real history).",

@@ -80,6 +80,7 @@ def execute_trade(
         # tradeable count — editing them goes through the holding endpoint.
         raise ManualAssetTrade("house assets are not tradeable; edit the holding directly")
 
+    account = Account.objects.select_for_update().get(pk=account.pk)
     # Lock the holding row for the duration so concurrent trades on the same
     # asset can't race the balance check (SELECT ... FOR UPDATE).
     holding = (
@@ -96,8 +97,10 @@ def execute_trade(
 
     new_qty = current_qty + qty if side == Transaction.Side.BUY else current_qty - qty
 
-    # Capture execution price from the live map (0 if the asset has no price yet).
+    # Capture execution price from the live map.
     price = _q(get_latest_prices().get(asset.key, 0))
+    if price <= 0:
+        raise TradeError("No valid execution price is available.")
 
     Transaction.objects.create(
         account=account,

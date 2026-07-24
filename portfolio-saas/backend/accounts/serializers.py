@@ -3,6 +3,8 @@ from rest_framework import serializers
 from .models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -90,3 +92,8 @@ class ChangePasswordSerializer(serializers.Serializer):
         user.save()
         return user
 
+
+class PasswordAwareTokenRefreshSerializer(TokenRefreshSerializer):
+    def validate(self, attrs):
+        JWTAuthentication().get_user(self.token_class(attrs["refresh"]))
+        return super().validate(attrs)

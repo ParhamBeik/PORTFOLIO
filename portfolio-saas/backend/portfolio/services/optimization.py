@@ -14,8 +14,8 @@ Per-asset and per-class caps are enforced for max_sharpe / min_vol via pypfopt
 constraints, and for risk_parity / hrp via a post-hoc rescale-and-clip +
 renormalize pass (these methods have no native cap primitives).
 
-The whole payload is cached per (user, scenario, price-version, constraints
-hash) with a 600s TTL — a new price version auto-rotates the key.
+The whole payload is cached per (user, portfolio state, scenario, price-version,
+constraints hash) with a 600s TTL — a new price or holding state misses cleanly.
 """
 from __future__ import annotations
 
@@ -178,10 +178,6 @@ def _enforce_caps(
         if distributed <= 1e-12:
             break
 
-    # Final normalization to sum to 1 (if feasible).
-    total = sum(w.values())
-    if total > 0:
-        w = {k: v / total for k, v in w.items()}
     return {k: float(v) for k, v in w.items() if v > 1e-6}
 
 
@@ -478,8 +474,8 @@ def optimize(
     """Run one optimization scenario and return the full payload.
 
     The payload includes `cached` (bool) so the client can show whether this
-    came from the cache. Cache key is per (user, scenario, version, constraints
-    hash) so a new price version or a different constraint set misses cleanly.
+    came from the cache. Cache key includes the current portfolio state so
+    account-scoped weights and rebalance trades cannot leak across requests.
     """
     resolved = copy.deepcopy(DEFAULT_CONSTRAINTS)
     if constraints:
@@ -490,8 +486,12 @@ def optimize(
 
     version = _price_version_fingerprint()
     user_id = user.id if user is not None else 0
+    portfolio_hash = _constraints_hash({
+        "weights": current_weights,
+        "total": str(total_value_tomans),
+    })
     cache_key = (
-        f"opt:{user_id}:{scenario}:v{version}:{_constraints_hash(resolved)}"
+        f"opt:{user_id}:{portfolio_hash}:{scenario}:v{version}:{_constraints_hash(resolved)}"
     )
     cached = cache.get(cache_key)
     if cached is not None:
@@ -528,10 +528,9 @@ def optimize(
         max_weight_per_class=resolved["max_weight_per_class"],
         class_map=class_map,
     )
-    # Normalize defensively — some solvers drift.
     total = sum(target.values())
-    if total > 0:
-        target = {k: v / total for k, v in target.items()}
+    if abs(total - 1.0) > 1e-6:
+        raise SolverError("Constraints are infeasible for a fully invested portfolio.")
     target = {k: float(v) for k, v in target.items() if v > 1e-6}
 
     metrics = _portfolio_metrics(target, mu, cov_annual)

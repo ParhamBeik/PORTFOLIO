@@ -65,13 +65,14 @@ def fetch_json(
             if attempt > retries:
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)
                 logger.warning(
-                    "HTTP fetch failed for %s (params=%s): %s",
+                    "HTTP fetch failed for %s (params=%s): %s status=%s",
                     url,
                     _safe_params(params),
-                    exc,
+                    type(exc).__name__,
+                    status_code,
                 )
                 raise TransientMarketDataError(
-                    str(exc),
+                    f"Provider request failed ({type(exc).__name__}, status={status_code}).",
                     status_code=status_code,
                 ) from exc
             time.sleep(backoff_factor * (2 ** (attempt - 1)))

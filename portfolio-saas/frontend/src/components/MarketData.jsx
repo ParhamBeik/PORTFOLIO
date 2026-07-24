@@ -31,7 +31,9 @@ export default function MarketData({ user }) {
   const [activeClass, setActiveClass] = useState("Currency");
   const [err, setErr] = useState("");
 
-  useEffect(() => {
+  const loadAssets = () => {
+    setAssets(null);
+    setErr("");
     marketAssets()
       .then((rows) => {
         setAssets(rows);
@@ -39,6 +41,10 @@ export default function MarketData({ user }) {
         if (first) setAssetKey(first.key);
       })
       .catch((error) => setErr(error.message));
+  };
+
+  useEffect(() => {
+    loadAssets();
   }, []);
 
   useEffect(() => {
@@ -120,8 +126,6 @@ export default function MarketData({ user }) {
     return values;
   }, [series]);
 
-  if (assets === null && !err) return <p className="muted">Loading market data…</p>;
-
   const first = series[0];
   const last = series[series.length - 1];
   const closes = series.map((row) => Number(row.close)).filter(Number.isFinite);
@@ -137,7 +141,14 @@ export default function MarketData({ user }) {
 
   return (
     <div className="dashboard">
-      {err && <div className="error">{err}</div>}
+      {err && (
+        <div className="error" role="alert">
+          {err}
+          {assets === null && (
+            <button type="button" className="link" onClick={loadAssets}>Retry</button>
+          )}
+        </div>
+      )}
 
       <section className="card market-card">
         <div className="card-head">
@@ -158,12 +169,17 @@ export default function MarketData({ user }) {
           </div>
         </div>
 
+        {assets === null && !err && (
+          <p className="muted" role="status">Loading market data…</p>
+        )}
+
         {/* Asset Class Switcher */}
         <div className="seg market-class-tabs">
           {ASSET_CLASSES.map((name) => (
             <button
               key={name}
               type="button"
+              disabled={assets === null}
               className={activeClass === name ? "active" : ""}
               onClick={() => {
                 setActiveClass(name);
@@ -186,6 +202,7 @@ export default function MarketData({ user }) {
             <input
               id="search-input"
               type="text"
+              disabled={assets === null}
               className="market-select"
               placeholder="Filter by ticker/name..."
               value={searchQuery}
@@ -200,6 +217,7 @@ export default function MarketData({ user }) {
               </label>
               <select
                 id="sector-select"
+                disabled={assets === null}
                 className="market-select"
                 value={selectedSector}
                 onChange={(e) => setSelectedSector(e.target.value)}
@@ -220,6 +238,7 @@ export default function MarketData({ user }) {
             </label>
             <select
               id="asset-select"
+              disabled={assets === null}
               className="market-select"
               value={assetKey}
               onChange={(e) => setAssetKey(e.target.value)}
@@ -307,7 +326,11 @@ export default function MarketData({ user }) {
               <div className="chart-head-info">
                 <h4>Price & Return Trend ({windowName})</h4>
               </div>
-              <div className="chart-wrap market-chart">
+              <div
+                className="chart-wrap market-chart"
+                role="img"
+                aria-label={`${selected?.name || "Selected asset"} performance chart for ${windowName}`}
+              >
                 <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={200}>
                   <AreaChart data={series} margin={{ top: 12, right: 16, left: 0, bottom: 0 }}>
                     <defs>
@@ -389,7 +412,9 @@ export default function MarketData({ user }) {
           </div>
         )}
 
-        {!performance && !err && <p className="muted small">Loading price history…</p>}
+        {assets !== null && !performance && !err && (
+          <p className="muted small" role="status">Loading price history…</p>
+        )}
         {performance && series.length === 0 && (
           <p className="muted small">No verified archive rows for this asset yet.</p>
         )}
@@ -417,13 +442,21 @@ function Metric({ label, value, className = "" }) {
 function ProSections({ symbol, isPro }) {
   const [announcements, setAnnouncements] = useState(null);
   const [holders, setHolders] = useState(null);
+  const [announcementsError, setAnnouncementsError] = useState("");
+  const [holdersError, setHoldersError] = useState("");
 
   useEffect(() => {
     if (!isPro || !symbol) return;
     setAnnouncements(null);
     setHolders(null);
-    marketAnnouncements(symbol, 20).then(setAnnouncements).catch(() => setAnnouncements([]));
-    marketShareholders(symbol).then(setHolders).catch(() => setHolders([]));
+    setAnnouncementsError("");
+    setHoldersError("");
+    marketAnnouncements(symbol, 20)
+      .then(setAnnouncements)
+      .catch((error) => setAnnouncementsError(error.message));
+    marketShareholders(symbol)
+      .then(setHolders)
+      .catch((error) => setHoldersError(error.message));
   }, [isPro, symbol]);
 
   return (
@@ -433,7 +466,8 @@ function ProSections({ symbol, isPro }) {
           <h3>Codal Announcements</h3>
           <span className="badge pro-badge">Pro</span>
         </div>
-        {!announcements && <p className="muted small">Loading announcements…</p>}
+        {announcementsError && <p className="error small" role="alert">{announcementsError}</p>}
+        {!announcements && !announcementsError && <p className="muted small">Loading announcements…</p>}
         {announcements?.length === 0 && <p className="muted small">No announcements found.</p>}
         {announcements?.length > 0 && (
           <table className="holdings font-small">
@@ -480,7 +514,8 @@ function ProSections({ symbol, isPro }) {
           <h3>Major Shareholders</h3>
           <span className="badge pro-badge">Pro</span>
         </div>
-        {!holders && <p className="muted small">Loading shareholders…</p>}
+        {holdersError && <p className="error small" role="alert">{holdersError}</p>}
+        {!holders && !holdersError && <p className="muted small">Loading shareholders…</p>}
         {holders?.length === 0 && <p className="muted small">No shareholder data.</p>}
         {holders?.length > 0 && (
           <table className="holdings font-small">

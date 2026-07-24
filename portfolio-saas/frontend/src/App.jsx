@@ -1,78 +1,113 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, NavLink, Outlet, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { auth, me } from "./api.js";
-import Auth from "./components/Auth.jsx";
-import Portfolio from "./components/Portfolio.jsx";
-import Billing from "./components/Billing.jsx";
-import MarketData from "./components/MarketData.jsx";
+import { auth, me, SESSION_EXPIRED_EVENT } from "./api.js";
 import Logo from "./components/Logo.jsx";
-import OptimizationLayout from "./components/OptimizationLayout.jsx";
-import Optimization from "./components/Optimization.jsx";
-import Insights from "./components/Insights.jsx";
-import Analytics from "./components/Analytics.jsx";
-import AdminPortal from "./components/AdminPortal.jsx";
-import Profile from "./components/Profile.jsx";
 import { PortfolioProvider, usePortfolio } from "./components/PortfolioContext.jsx";
 
-
+const Auth = lazy(() => import("./components/Auth.jsx"));
+const Portfolio = lazy(() => import("./components/Portfolio.jsx"));
+const Billing = lazy(() => import("./components/Billing.jsx"));
+const MarketData = lazy(() => import("./components/MarketData.jsx"));
+const OptimizationLayout = lazy(() => import("./components/OptimizationLayout.jsx"));
+const Optimization = lazy(() => import("./components/Optimization.jsx"));
+const Insights = lazy(() => import("./components/Insights.jsx"));
+const Analytics = lazy(() => import("./components/Analytics.jsx"));
+const AdminPortal = lazy(() => import("./components/AdminPortal.jsx"));
+const Profile = lazy(() => import("./components/Profile.jsx"));
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [ready, setReady] = useState(false);
+  const [startupError, setStartupError] = useState("");
 
-  useEffect(() => {
-    if (!auth.token) return setReady(true);
+  const loadUser = () => {
+    setReady(false);
+    setStartupError("");
+    if (!auth.token) {
+      setReady(true);
+      return;
+    }
     me()
       .then(setUser)
-      .catch(() => auth.logout())
+      .catch((error) => {
+        if (auth.token) setStartupError(error.message || "Could not load your account.");
+      })
       .finally(() => setReady(true));
+  };
+
+  useEffect(() => {
+    loadUser();
+  }, []);
+
+  useEffect(() => {
+    const handleSessionExpired = () => setUser(null);
+    window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
   }, []);
 
   if (!ready) return <div className="loading">Loading…</div>;
+  if (startupError && auth.token) {
+    return (
+      <div className="loading startup-error" role="alert">
+        <p>We could not load your account: {startupError}</p>
+        <div className="inline">
+          <button type="button" className="primary" onClick={loadUser}>Retry</button>
+          <button
+            type="button"
+            onClick={() => {
+              auth.logout();
+              setUser(null);
+              setStartupError("");
+            }}
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // The shell (topbar + <Outlet/>) only renders behind auth; /login is standalone
   // so the Zarinpal redirect and unauthed deep links both land cleanly.
   return (
     <BrowserRouter>
       <PortfolioProvider key={user?.id ?? "anonymous"} enabled={Boolean(user)}>
-        <Routes>
-          <Route
-            path="/login"
-            element={<Auth initialMode="login" onAuthed={setUser} currentUser={user} />}
-          />
-          <Route
-            path="/register"
-            element={<Auth initialMode="register" onAuthed={setUser} currentUser={user} />}
-          />
-          <Route
-            path="/signup"
-            element={<Auth initialMode="register" onAuthed={setUser} currentUser={user} />}
-          />
-          <Route element={user ? <Shell user={user} setUser={setUser} /> : <Navigate to="/login" replace />}>
-            <Route index element={<Portfolio user={user} />} />
-            <Route path="market" element={<MarketData user={user} />} />
-            <Route path="billing" element={<Billing user={user} setUser={setUser} />} />
-            <Route path="profile" element={<Profile user={user} setUser={setUser} />} />
+        <Suspense fallback={<div className="route-loading" role="status">Loading page…</div>}>
+          <Routes>
             <Route
-              path="admin"
-              element={user?.is_staff ? <AdminPortal /> : <Navigate to="/" replace />}
+              path="/login"
+              element={<Auth initialMode="login" onAuthed={setUser} currentUser={user} />}
             />
-
-
-            {/* Legacy deep links */}
-            <Route path="accounts/:id" element={<AccountRedirect />} />
-            <Route path="dashboard" element={<Navigate to="/" replace />} />
-            {/* Pro area: optimization, insights, analytics as sub-routes */}
-            <Route path="optimization" element={<OptimizationLayout user={user} />}>
-              <Route index element={<Optimization user={user} account={null} />} />
-              <Route path="insights" element={<Insights user={user} account={null} />} />
-              <Route path="analytics" element={<Analytics user={user} account={null} />} />
+            <Route
+              path="/register"
+              element={<Auth initialMode="register" onAuthed={setUser} currentUser={user} />}
+            />
+            <Route
+              path="/signup"
+              element={<Auth initialMode="register" onAuthed={setUser} currentUser={user} />}
+            />
+            <Route element={user ? <Shell user={user} setUser={setUser} /> : <Navigate to="/login" replace />}>
+              <Route index element={<Portfolio user={user} />} />
+              <Route path="market" element={<MarketData user={user} />} />
+              <Route path="billing" element={<Billing user={user} setUser={setUser} />} />
+              <Route path="profile" element={<Profile user={user} setUser={setUser} />} />
+              <Route
+                path="admin"
+                element={user?.is_staff ? <AdminPortal /> : <Navigate to="/" replace />}
+              />
+              <Route path="accounts/:id" element={<AccountRedirect />} />
+              <Route path="dashboard" element={<Navigate to="/" replace />} />
+              <Route path="optimization" element={<OptimizationLayout user={user} />}>
+                <Route index element={<Optimization user={user} />} />
+                <Route path="insights" element={<Insights user={user} />} />
+                <Route path="analytics" element={<Analytics user={user} />} />
+              </Route>
+              <Route path="insights" element={<Navigate to="/optimization/insights" replace />} />
+              <Route path="analytics" element={<Navigate to="/optimization/analytics" replace />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
-            <Route path="insights" element={<Navigate to="/optimization/insights" replace />} />
-            <Route path="analytics" element={<Navigate to="/optimization/analytics" replace />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Route>
-        </Routes>
+          </Routes>
+        </Suspense>
       </PortfolioProvider>
     </BrowserRouter>
   );
@@ -91,7 +126,7 @@ function AccountRedirect() {
 
 function Shell({ user, setUser }) {
   const navigate = useNavigate();
-  const { accounts, activeId, setActive } = usePortfolio();
+  const { accounts, activeId, setActive, reload, loading, error } = usePortfolio();
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
 
   useEffect(() => {
@@ -103,15 +138,19 @@ function Shell({ user, setUser }) {
 
   return (
     <div className="app">
+      <a className="skip-link" href="#main-content">Skip to content</a>
       <header className="topbar">
-        <div className="brand">
+        <NavLink to="/" className="brand" aria-label="Lattice portfolio home">
           <Logo size={22} />
           <span className="brand-name">Lattice</span>
-        </div>
+        </NavLink>
         {/* The "slider at the top": pick which portfolio the whole page scopes to.
             null = "All portfolios" (the aggregate across every account). */}
+        <label className="sr-only" htmlFor="portfolio-scope">Active portfolio</label>
         <select
+          id="portfolio-scope"
           className="portfolio-select"
+          disabled={loading}
           value={activeId ?? ""}
           onChange={(e) => {
             const v = e.target.value;
@@ -125,7 +164,7 @@ function Shell({ user, setUser }) {
             </option>
           ))}
         </select>
-        <nav className="tabs">
+        <nav className="tabs" aria-label="Primary navigation">
           <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>
             Portfolio
           </NavLink>
@@ -162,8 +201,8 @@ function Shell({ user, setUser }) {
           <NavLink to="/profile" className="email-link" title="Account & Security Settings">
             <span className="email">{user.email}</span>
           </NavLink>
-          <NavLink to="/login" className="btn-secondary small" title="Switch or Sign In to Another Account" style={{ padding: "4px 8px", fontSize: "12px", textDecoration: "none" }}>
-            🔑 Sign In / Register
+          <NavLink to="/login" className="btn-secondary small switch-account-link" title="Switch to another account">
+            Switch account
           </NavLink>
           <button
             onClick={() => {
@@ -177,7 +216,13 @@ function Shell({ user, setUser }) {
         </div>
 
       </header>
-      <main>
+      <main id="main-content" tabIndex="-1">
+        {error && (
+          <div className="error" role="alert">
+            Could not load portfolios: {error}
+            <button type="button" className="link" onClick={reload}>Retry</button>
+          </div>
+        )}
         <Outlet />
       </main>
     </div>

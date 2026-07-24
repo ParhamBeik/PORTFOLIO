@@ -7,6 +7,7 @@ GitHub Actions (the dead-man's switch) and Celery beat stay in lockstep.
 """
 import json
 import logging
+import uuid
 from decimal import Decimal
 
 from celery import shared_task
@@ -32,23 +33,27 @@ def run_price_fetch(*, dry_run=False, publish=True):
     """
     redis_client = get_redis()
     lock_key = "lock:price_fetch"
-    lock_acquired = False
+    lock_token = None
     if redis_client and not dry_run:
-        # SETNX to acquire the lock with a 90-second TTL
-        lock_acquired = redis_client.set(lock_key, "1", ex=90, nx=True)
-        if not lock_acquired:
+        lock_token = uuid.uuid4().hex
+        if not redis_client.set(lock_key, lock_token, ex=300, nx=True):
             logger.warning("Another price fetch is already running (failed to acquire Redis lock). Skipping.")
             return {"priced": {}, "written": False}
 
     try:
         raw = fetch_all_markets(api_settings_from_django())
-        last = _last_price_by_asset_key()  # one DISTINCT ON query (H3), not N+1
-        prices = extract_standard_prices(raw, last_prices=last)
-        active_keys = set(Asset.objects.filter(is_active=True).values_list("key", flat=True))
+        prices = extract_standard_prices(raw)
+        active_keys = set(
+            Asset.objects.filter(is_active=True, is_house=False).values_list("key", flat=True)
+        )
         priced = guard_price_map({
             key: value
             for key, value in prices.items()
             if key in active_keys and float(value) > 0
+        }, fill_missing=False)
+        snapshot_prices = guard_price_map({
+            key: prices.get(key, 0)
+            for key in active_keys
         })
         public_priced = {key: float(value) for key, value in priced.items()}
 
@@ -56,7 +61,7 @@ def run_price_fetch(*, dry_run=False, publish=True):
         if priced and not dry_run:
             with transaction.atomic():
                 _write_prices(priced)
-                _write_snapshots(priced)
+                _write_snapshots(snapshot_prices)
             invalidate_prices_cache()
             # LAZY import: avoids a circular `portfolio.tasks -> portfolio.services.returns ->
             # portfolio.models` chain at module load. Outside the transaction on
@@ -68,18 +73,14 @@ def run_price_fetch(*, dry_run=False, publish=True):
             written = True
         return {"priced": public_priced, "written": written}
     finally:
-        if lock_acquired and redis_client:
-            redis_client.delete(lock_key)
-
-
-def _last_price_by_asset_key() -> dict:
-    """Newest stored price per asset in one query (H3: replaces a.prices.first() per asset)."""
-    rows = (
-        Price.objects.select_related("asset")
-        .order_by("asset_id", "-fetched_at", "-id")
-        .distinct("asset_id")
-    )
-    return {row.asset.key: row.price for row in rows}
+        if lock_token and redis_client:
+            redis_client.eval(
+                "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                "return redis.call('del', KEYS[1]) else return 0 end",
+                1,
+                lock_key,
+                lock_token,
+            )
 
 
 def _write_prices(priced: dict) -> None:

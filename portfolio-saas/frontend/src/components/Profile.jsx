@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { changePassword, updateProfile } from "../api.js";
+import { auth, changePassword, updateProfile } from "../api.js";
 
 export default function Profile({ user, setUser }) {
   const [firstName, setFirstName] = useState(user?.first_name || "");
@@ -54,6 +54,7 @@ export default function Profile({ user, setUser }) {
     setPasswordMsg(null);
     try {
       const res = await changePassword(oldPassword, newPassword, confirmPassword);
+      auth.tokens = res;
       setPasswordMsg({ type: "success", text: res.detail || "Password changed successfully!" });
       setOldPassword("");
       setNewPassword("");

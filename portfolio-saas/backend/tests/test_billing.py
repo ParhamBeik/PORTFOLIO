@@ -6,6 +6,7 @@ Zarinpal's network. The full request→pay→callback→verify→PRO path runs t
 the real endpoints so the Payment state machine is covered end-to-end.
 """
 from unittest import mock
+from datetime import timedelta
 
 import pytest
 from django.utils import timezone
@@ -136,6 +137,20 @@ def test_callback_verify_101_idempotent_no_double_activation(make_user):
     assert first.status_code == second.status_code == 302
     user.refresh_from_db()
     assert user.pro_expires_at == first_expiry
+
+
+def test_early_renewal_extends_existing_expiry(make_user):
+    user = make_user(tier=User.Tier.PRO)
+    old_expiry = timezone.now() + timedelta(days=100)
+    user.pro_expires_at = old_expiry
+    user.save(update_fields=["pro_expires_at"])
+    _seed_pending(user)
+
+    with mock.patch("billing.zarinpal.requests.post", return_value=VERIFY_100):
+        APIClient().get("/api/billing/zarinpal/callback/?Authority=A000001&Status=OK")
+
+    user.refresh_from_db()
+    assert user.pro_expires_at > old_expiry + timedelta(days=364)
 
 
 # ----- 6. Status=NOK (user cancelled) -> redirect cancel, no tier flip ------

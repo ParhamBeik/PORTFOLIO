@@ -90,9 +90,7 @@ def zarinpal_callback(request):
             payment.status = Payment.Status.FAILED
             payment.save(update_fields=["status"])
             return redirect(f"{front}?status=cancel")
-        payment.ref_id = ref_id
-        payment.save(update_fields=["ref_id"])
-        activate_pro(payment)  # idempotent: no-ops if already verified
+        payment = activate_pro(authority, ref_id)
 
     # Just activated, or a replay/refresh of an already-verified payment.
     ref = payment.ref_id or ""

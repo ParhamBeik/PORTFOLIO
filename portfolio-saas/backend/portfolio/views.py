@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from django.utils import timezone
 from rest_framework import generics, status
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -38,7 +39,7 @@ from .services.optimization import (
     _finite,
     optimize,
 )
-from .services.returns import correlation_matrix, daily_returns_matrix
+from .services.returns import daily_returns_matrix
 
 
 class AssetListView(generics.ListAPIView):
@@ -80,11 +81,11 @@ class HoldingListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         account = self._account()
         if account is None:
-            from rest_framework.exceptions import NotFound
             raise NotFound("Account not found")
         if not serializer.validated_data["asset"].is_house:
-            from rest_framework.exceptions import ValidationError
             raise ValidationError("Tradeable assets must be changed through the buy/sell endpoint.")
+        if account.holdings.filter(asset=serializer.validated_data["asset"]).exists():
+            raise ValidationError("This asset already exists in the account.")
         serializer.save(account=account)
 
 
@@ -92,7 +93,10 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = HoldingSerializer
 
     def get_queryset(self):
-        return Holding.objects.filter(account__user=self.request.user)
+        return Holding.objects.filter(
+            account__user=self.request.user,
+            account_id=self.kwargs["account_id"],
+        )
 
     def perform_update(self, serializer):
         if not serializer.instance.asset.is_house:
@@ -257,17 +261,20 @@ class AccountValuationView(APIView):
 def _scope(request):
     """Resolve the active portfolio from `?account=<id>`, owned by the user.
 
-    Returns the Account or None. None means "all portfolios" (the aggregate
-    view). An absent or non-numeric param, or an id the user does not own,
-    all collapse to None rather than 400 — the client falls back to aggregate.
+    Returns the Account or None. None means "all portfolios" only when the
+    parameter is absent; invalid or unowned ids are explicit client errors.
     """
     raw = request.query_params.get("account")
     if not raw:
         return None
     try:
-        return request.user.accounts.filter(pk=int(raw)).first()
+        account_id = int(raw)
     except (TypeError, ValueError):
-        return None
+        raise ValidationError("account must be an integer id.")
+    account = request.user.accounts.filter(pk=account_id).first()
+    if account is None:
+        raise NotFound("Account not found.")
+    return account
 
 
 def _with_usd(valuation: dict) -> dict:
@@ -340,13 +347,13 @@ class SnapshotListView(APIView):
             if fallback_val > 0:
                 valid_rows = [(since, fallback_val, False)]
 
-        # Generate regular time grid slots from since to now with forward-fill (LOCF)
+        # Generate regular time grid slots from the first known value to now.
         series = []
-        curr = since
+        curr = valid_rows[0][0] if valid_rows else since
         step = timedelta(minutes=step_minutes)
         row_idx = 0
-        last_val = valid_rows[0][1] if valid_rows else Decimal("0")
-        last_estimated = valid_rows[0][2] if valid_rows else False
+        last_val = Decimal("0")
+        last_estimated = False
 
         while curr <= now + timedelta(seconds=10):
             while row_idx < len(valid_rows) and valid_rows[row_idx][0] <= curr:
@@ -405,7 +412,11 @@ class PriceHistoryView(APIView):
         if not asset_key:
             return Response({"detail": "asset query param required."}, status=400)
         # Cap the window (H6): an unbounded ?limit= could pull the whole series.
-        limit = min(max(int(request.query_params.get("limit", "100")), 1), 500)
+        try:
+            limit = int(request.query_params.get("limit", "100"))
+        except (TypeError, ValueError):
+            return Response({"detail": "limit must be an integer."}, status=400)
+        limit = min(max(limit, 1), 500)
         rows = (
             Price.objects.filter(asset__key=asset_key)
             .order_by("-fetched_at")[:limit]
@@ -560,11 +571,15 @@ class AssetReturnsView(APIView):
             k: [None if np.isnan(v) else float(v) for v in df[k].tolist()]
             for k in assets
         }
+        corr = df.corr().fillna(0.0)
         return Response({
             "assets": assets,
             "dates": dates,
             "returns": returns_payload,
-            "correlation": correlation_matrix(),
+            "correlation": {
+                "assets": assets,
+                "matrix": np.nan_to_num(corr.to_numpy(), nan=0.0).tolist(),
+            },
             "excluded_assets": excluded,
         })
 

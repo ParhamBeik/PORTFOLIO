@@ -60,8 +60,7 @@ def test_analytics_scoped_to_one_account(asset_catalog, write_prices, make_user)
     assert Decimal(body_all["total_value_tomans"]) == Decimal("960523000")
 
 
-def test_analytics_ignores_account_owned_by_another_user(asset_catalog, write_prices, make_user):
-    """?account=<id> pointing at another user's account collapses to aggregate, not 403/leak."""
+def test_analytics_rejects_account_owned_by_another_user(asset_catalog, write_prices, make_user):
     write_prices({"emami_coin": Decimal("480000000"), "kama_stock": Decimal("5230")})
     pro = make_user(tier=User.Tier.PRO, email="owner@t.t")
     other = make_user(tier=User.Tier.PRO, email="other@t.t")
@@ -72,12 +71,13 @@ def test_analytics_ignores_account_owned_by_another_user(asset_catalog, write_pr
     theirs = Account.objects.create(user=other, name="Secret")
     Holding.objects.create(account=theirs, asset=asset_catalog["kama_stock"], quantity=Decimal("100"))
 
-    # pro asks for other's account id -> _scope returns None -> aggregate of pro's own.
     resp = _client(pro).get(f"/api/analytics/?account={theirs.id}")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert set(body["current_weights"]) == {"emami_coin"}  # only pro's holding; no leak
-    assert Decimal(body["total_value_tomans"]) == Decimal("960000000")
+    assert resp.status_code == 404
+
+
+def test_analytics_rejects_invalid_account_id(make_user):
+    pro = make_user(tier=User.Tier.PRO, email="invalid-scope@t.t")
+    assert _client(pro).get("/api/analytics/?account=abc").status_code == 400
 
 
 def test_aggregate_trend_ignores_account_snapshots(make_user):

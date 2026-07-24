@@ -157,6 +157,46 @@ def test_change_password_success(make_user):
     assert login_resp.status_code == 200
 
 
+def test_change_password_revokes_existing_tokens(make_user):
+    make_user(email="revoke@test.test")
+    client = APIClient()
+    old_tokens = client.post(
+        "/api/auth/login/",
+        {"email": "revoke@test.test", "password": "Sup3rSecret!"},
+        format="json",
+    ).json()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {old_tokens['access']}")
+
+    response = client.post(
+        "/api/auth/change-password/",
+        {
+            "old_password": "Sup3rSecret!",
+            "new_password": "N3wSecretPass123!",
+            "confirm_password": "N3wSecretPass123!",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 200
+    new_tokens = response.json()
+
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {old_tokens['access']}")
+    assert client.get("/api/auth/me/").status_code == 401
+    assert APIClient().post(
+        "/api/token/refresh/",
+        {"refresh": old_tokens["refresh"]},
+        format="json",
+    ).status_code == 401
+
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {new_tokens['access']}")
+    assert client.get("/api/auth/me/").status_code == 200
+    assert APIClient().post(
+        "/api/token/refresh/",
+        {"refresh": new_tokens["refresh"]},
+        format="json",
+    ).status_code == 200
+
+
 def test_change_password_wrong_old_password(make_user):
     user = make_user(email="wrongold@test.test")
     client = APIClient()
@@ -205,4 +245,3 @@ def test_change_password_mismatched_or_weak(make_user):
     )
     assert resp.status_code == 400
     assert "new_password" in resp.json()
-

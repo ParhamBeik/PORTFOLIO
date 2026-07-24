@@ -31,6 +31,7 @@ def test_run_price_fetch_concurrency_lock(asset_catalog, raw_market_sample, monk
     res2 = run_price_fetch(publish=False)
     assert res2["written"] is False
     assert res2["priced"] == {}
+    mock_redis.eval.assert_called_once()
 
 
 @pytest.mark.django_db
@@ -58,6 +59,8 @@ def test_run_price_fetch_downtime_gap_tagging(asset_catalog, raw_market_sample, 
     # Check that the backfilled snapshots are marked as estimated
     estimated_snaps = Snapshot.objects.filter(user=user, is_estimated=True)
     assert estimated_snaps.exists()
+    assert estimated_snaps.values("timestamp").distinct().count() > 1
+    assert estimated_snaps.order_by("timestamp").first().timestamp < timezone.now() - timedelta(minutes=2)
     
     # Real current snapshot must not be estimated
     current_snaps = Snapshot.objects.filter(user=user, is_estimated=False).order_by("-timestamp")

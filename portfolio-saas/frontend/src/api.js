@@ -4,6 +4,8 @@
 const API_BASE = import.meta.env.VITE_API_URL || "";
 const ACCESS_KEY = "ps_access";
 const REFRESH_KEY = "ps_refresh";
+export const SESSION_EXPIRED_EVENT = "lattice:session-expired";
+let refreshPromise = null;
 
 export const auth = {
   get token() {
@@ -20,17 +22,35 @@ export const auth = {
 };
 
 async function refreshAccessToken() {
+  if (refreshPromise) return refreshPromise;
   const refresh = localStorage.getItem(REFRESH_KEY);
   if (!refresh) return null;
-  const res = await fetch(`${API_BASE}/api/token/refresh/`, {
+  refreshPromise = fetch(`${API_BASE}/api/token/refresh/`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ refresh }),
-  });
-  if (!res.ok) return null;
-  const data = await res.json();
-  auth.tokens = { access: data.access, refresh: data.refresh };
-  return data.access;
+  })
+    .then(async (res) => {
+      if (!res.ok) return null;
+      const data = await res.json();
+      auth.tokens = { access: data.access, refresh: data.refresh };
+      return data.access;
+    })
+    .finally(() => {
+      refreshPromise = null;
+    });
+  return refreshPromise;
+}
+
+function expireSession() {
+  auth.logout();
+  window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+}
+
+function apiError(message, status) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
 }
 
 export async function api(path, { method = "GET", body, _retried = false } = {}) {
@@ -46,12 +66,12 @@ export async function api(path, { method = "GET", body, _retried = false } = {})
   if (res.status === 401 && !_retried && auth.token) {
     const fresh = await refreshAccessToken();
     if (fresh) return api(path, { method, body, _retried: true });
-    auth.logout();
-    throw new Error("Session expired");
+    expireSession();
+    throw apiError("Session expired", 401);
   }
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
-    throw new Error(extractError(detail) || res.statusText);
+    throw apiError(extractError(detail) || res.statusText, res.status);
   }
   return res.status === 204 ? null : res.json();
 }

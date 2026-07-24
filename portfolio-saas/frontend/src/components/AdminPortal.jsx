@@ -42,12 +42,10 @@ export default function AdminPortal() {
   };
 
   useEffect(() => {
-    // 1. Instant First Paint over HTTP
-    fetchStatusFallback();
-
-    // 2. Setup real-time SSE stream with polling fallback
     let eventSource = null;
     let fallbackInterval = null;
+    let fallbackTimeout = null;
+    let receivedStreamData = false;
 
     try {
       const streamUrl = adminStatusStreamUrl();
@@ -62,6 +60,8 @@ export default function AdminPortal() {
       eventSource.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data);
+          receivedStreamData = true;
+          if (fallbackTimeout) clearTimeout(fallbackTimeout);
           setStreamData(payload);
           setLastStreamTime(new Date());
           setConnectionMode("sse");
@@ -73,19 +73,25 @@ export default function AdminPortal() {
 
       eventSource.onerror = () => {
         setConnectionMode("polling");
-        // Start polling fallback every 3s if SSE drops
         if (!fallbackInterval) {
+          fetchStatusFallback();
           fallbackInterval = setInterval(fetchStatusFallback, 3000);
         }
       };
+
+      fallbackTimeout = setTimeout(() => {
+        if (!receivedStreamData) fetchStatusFallback();
+      }, 3000);
     } catch (e) {
       setConnectionMode("polling");
+      fetchStatusFallback();
       fallbackInterval = setInterval(fetchStatusFallback, 3000);
     }
 
     return () => {
       if (eventSource) eventSource.close();
       if (fallbackInterval) clearInterval(fallbackInterval);
+      if (fallbackTimeout) clearTimeout(fallbackTimeout);
     };
   }, []);
 
@@ -125,10 +131,6 @@ export default function AdminPortal() {
         setRepairMsg("Execution failed: " + e.message);
       });
   };
-
-  if (!streamData && !err) {
-    return <div className="loading">Loading Real-Time Admin System Portal…</div>;
-  }
 
   const database = streamData?.database || {};
   const archive = streamData?.archive || {};
@@ -205,6 +207,11 @@ export default function AdminPortal() {
         </div>
 
         {err && <div className="error-banner" style={{ marginTop: "12px", padding: "8px 12px", background: "var(--panel-2)", borderLeft: "4px solid var(--neg)", borderRadius: "4px" }}>{err}</div>}
+        {!streamData && !err && (
+          <div className="muted small margin-top" role="status">
+            Loading live diagnostics…
+          </div>
+        )}
 
         {/* Top Important Data Metric Gauges */}
         <div className="metric-grid admin-quick-stats margin-top">
@@ -287,15 +294,17 @@ export default function AdminPortal() {
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
-            <label
+            <button
+              type="button"
               className="switch-toggle-label"
               onClick={() => setAutoScroll(!autoScroll)}
+              aria-pressed={autoScroll}
             >
               <span>Auto-Scroll Log Stream</span>
               <div className={`switch-toggle ${autoScroll ? "active" : ""}`}>
                 <div className="switch-slider" />
               </div>
-            </label>
+            </button>
           </div>
         </div>
 

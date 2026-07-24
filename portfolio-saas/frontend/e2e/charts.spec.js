@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+test.use({ extraHTTPHeaders: { "X-Forwarded-For": "198.51.100.30" } });
+
 const PASSWORD = "Sup3rSecret!";
 const FAMILY_PASSWORD = "family12345";
 

@@ -16,6 +16,7 @@ import {
 import { frontier, listAssets, optimize } from "../api.js";
 import { fmtPct, fmtToman } from "../format.js";
 import ProGate from "./ProGate.jsx";
+import { usePortfolio } from "./PortfolioContext.jsx";
 
 const SCENARIOS = [
   { key: "max_sharpe", label: "Max Sharpe", hint: "Best risk-adjusted return" },
@@ -29,12 +30,14 @@ const signedToman = (value) => `${Number(value) >= 0 ? "+" : "-"}${fmtToman(Math
 
 // Pro: scenario optimizer + efficient frontier. The frontier is fetched once;
 // re-running a scenario hits the cached returns matrix on the backend.
-export default function Optimization({ user, account = null }) {
+export default function Optimization({ user }) {
+  const { activeId: account } = usePortfolio();
   const [scenario, setScenario] = useState("max_sharpe");
   const [result, setResult] = useState(null);
   const [front, setFront] = useState(null);
   const [catalog, setCatalog] = useState([]);
   const [err, setErr] = useState("");
+  const [frontErr, setFrontErr] = useState("");
 
   useEffect(() => {
     listAssets().then(setCatalog).catch(() => {});
@@ -44,6 +47,7 @@ export default function Optimization({ user, account = null }) {
     if (!user.is_pro) return;
     let current = true;
     setErr("");
+    setResult(null);
     optimize(scenario, null, account)
       .then((r) => { if (current) { setResult(r); setErr(""); } })
       .catch((e) => { if (current) { setResult(null); setErr(e.message); } });
@@ -53,9 +57,11 @@ export default function Optimization({ user, account = null }) {
   useEffect(() => {
     if (!user.is_pro) return;
     let current = true;
+    setFront(null);
+    setFrontErr("");
     frontier(account)
       .then((value) => { if (current) setFront(value); })
-      .catch(() => {});
+      .catch((error) => { if (current) setFrontErr(error.message); });
     return () => { current = false; };
   }, [user.is_pro, account]);
 
@@ -96,6 +102,7 @@ export default function Optimization({ user, account = null }) {
         <h2>Portfolio Optimization</h2>
       </div>
       {err && <div className="error">{err}</div>}
+      {!result && !err && <p className="muted" role="status">Calculating allocation…</p>}
 
       <section className="card">
         <h3>Scenario</h3>
@@ -105,6 +112,8 @@ export default function Optimization({ user, account = null }) {
               key={s.key}
               className={scenario === s.key ? "primary" : ""}
               title={s.hint}
+              aria-pressed={scenario === s.key}
+              disabled={!result && !err}
               onClick={() => setScenario(s.key)}
             >
               {s.label}
@@ -121,7 +130,12 @@ export default function Optimization({ user, account = null }) {
             {result.cached && (
               <p className="muted small">Cached result (recomputed when prices refresh).</p>
             )}
-            <div className="chart-wrap" style={{ height: 280 }}>
+            <div
+              className="chart-wrap"
+              style={{ height: 280 }}
+              role="img"
+              aria-label="Current and target portfolio allocation comparison"
+            >
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={barData} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
                   <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
@@ -206,7 +220,12 @@ export default function Optimization({ user, account = null }) {
       {front && frontierPts.length > 1 && (
         <section className="card">
           <h3>Efficient frontier</h3>
-          <div className="chart-wrap" style={{ height: 320 }}>
+          <div
+            className="chart-wrap"
+            style={{ height: 320 }}
+            role="img"
+            aria-label="Efficient frontier showing expected return versus volatility"
+          >
             <ResponsiveContainer width="100%" height="100%">
               <ScatterChart margin={{ top: 8, right: 16, left: 8, bottom: 24 }}>
                 <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
@@ -252,6 +271,7 @@ export default function Optimization({ user, account = null }) {
           </p>
         </section>
       )}
+      {frontErr && <p className="error small">Efficient frontier unavailable: {frontErr}</p>}
     </div>
     </ProGate>
   );

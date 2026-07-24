@@ -3,6 +3,7 @@ import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { analytics, assetReturns, listAssets } from "../api.js";
 import { fmtPct, fmtToman } from "../format.js";
 import ProGate from "./ProGate.jsx";
+import { usePortfolio } from "./PortfolioContext.jsx";
 
 const METRIC_DEFS = [
   { key: "annualized_volatility", label: "Volatility (ann.)", fmt: (v) => fmtPct(v * 100) },
@@ -19,7 +20,8 @@ const PALETTE = ["#4c9aff", "#3fb950", "#d29922", "#f85149", "#8b5cf6", "#06b6d4
 
 // Pro: risk/return diagnostics + allocation + correlation. Mirrors the Insights
 // upsell for non-Pro visitors so deep links don't dead-end.
-export default function Analytics({ user, account = null }) {
+export default function Analytics({ user }) {
+  const { activeId: account } = usePortfolio();
   const [data, setData] = useState(null);
   const [corr, setCorr] = useState(null);
   const [catalog, setCatalog] = useState([]);
@@ -28,6 +30,9 @@ export default function Analytics({ user, account = null }) {
   useEffect(() => {
     if (!user.is_pro) return;
     let current = true;
+    setData(null);
+    setCorr(null);
+    setErr("");
     Promise.all([listAssets(), analytics(account), assetReturns(180)])
       .then(([assets, diagnostics, returns]) => {
         if (!current) return;
@@ -96,7 +101,12 @@ export default function Analytics({ user, account = null }) {
           <section className="card">
             <h3>Allocation</h3>
             <div className="alloc-grid">
-              <div className="chart-wrap" style={{ height: 220, minWidth: 220 }}>
+              <div
+                className="chart-wrap"
+                style={{ height: 220, minWidth: 220 }}
+                role="img"
+                aria-label="Portfolio allocation by asset"
+              >
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie

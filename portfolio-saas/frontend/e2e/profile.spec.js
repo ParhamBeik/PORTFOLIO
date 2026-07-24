@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+test.use({ extraHTTPHeaders: { "X-Forwarded-For": "198.51.100.40" } });
+
 const PASSWORD = "X7#mK9$vP2qL5wZ8!";
 const NEW_PASSWORD = "V9!pL4#wK8$mZ2qX!";
 
@@ -70,11 +72,13 @@ test("user can change password and log in with new password", async ({ page }) =
   await expect(page.getByRole("status")).toContainText("Current password is incorrect.");
 
   // Change password with correct current password
+  const previousRefreshToken = await page.evaluate(() => localStorage.getItem("ps_refresh"));
   await page.getByLabel("Current Password").fill(PASSWORD);
   await page.getByLabel("New Password", { exact: true }).fill(NEW_PASSWORD);
   await page.getByLabel("Confirm New Password").fill(NEW_PASSWORD);
   await page.getByRole("button", { name: "Update Password" }).click();
   await expect(page.getByRole("status")).toContainText("Password updated successfully.");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("ps_refresh"))).not.toBe(previousRefreshToken);
 
 
   // Logout and verify sign in with old password fails, sign in with new password succeeds

@@ -178,6 +178,7 @@ SIMPLE_JWT = {
     # token has a single-use window instead of being valid for the full 7 days.
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
+    "CHECK_REVOKE_TOKEN": True,
 }
 # token_blacklist (INSTALLED_APPS above) is now available for a "log out all
 # devices" endpoint (blacklist a user's OutstandingToken set) — add it in

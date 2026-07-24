@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
 import { insights as fetchInsights } from "../api.js";
 import ProGate from "./ProGate.jsx";
+import { usePortfolio } from "./PortfolioContext.jsx";
 
-export default function Insights({ user, account = null }) {
+export default function Insights({ user }) {
+  const { activeId: account } = usePortfolio();
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     if (!user.is_pro) return;
     let current = true;
+    setData(null);
+    setError("");
     fetchInsights(account)
       .then((d) => { if (current) { setData(d); setError(""); } })
       .catch((e) => { if (current) setError(e.message); });

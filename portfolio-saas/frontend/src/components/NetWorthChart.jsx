@@ -157,7 +157,12 @@ export default function NetWorthChart({
       </div>
 
       {/* Modern 10x Area Chart View */}
-      <div className="chart-wrap" style={{ height: 260 }}>
+      <div
+        className="chart-wrap"
+        style={{ height: 260 }}
+        role="img"
+        aria-label={`Net worth history for the selected ${days}-day range in ${currency}`}
+      >
         <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={200}>
           <AreaChart data={data} margin={{ top: 12, right: 16, left: 4, bottom: 4 }}>
             <defs>

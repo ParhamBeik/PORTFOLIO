@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+test.use({ extraHTTPHeaders: { "X-Forwarded-For": "198.51.100.10" } });
+
 const PASSWORD = "Sup3rSecret!";
 
 async function login(page, email) {
@@ -38,7 +40,6 @@ test("free user can manage a portfolio, holding, trades, and chart controls", as
   const renamedPortfolio = `${portfolioName} edited`;
   await page.getByLabel("New portfolio name").fill(portfolioName);
   await page.getByRole("button", { name: "Create portfolio" }).click();
-  await page.getByRole("button", { name: "Open Portfolio →" }).last().click();
   await expect(page.locator("strong", { hasText: portfolioName })).toBeVisible();
 
   await page.getByTitle("Edit portfolio").click();
@@ -61,7 +62,7 @@ test("free user can manage a portfolio, holding, trades, and chart controls", as
   await expect(page.getByRole("cell", { name: "95", exact: true })).toBeVisible();
   await expect(page.getByRole("cell", { name: "8,169,000,000", exact: true })).toBeVisible();
 
-  for (const range of ["30D", "90D", "All", "7D"]) {
+  for (const range of ["30D", "90D", "ALL", "7D"]) {
     await page.getByRole("button", { name: range, exact: true }).click();
   }
 
@@ -91,8 +92,9 @@ test("free user can manage a portfolio, holding, trades, and chart controls", as
   await expect(page.getByRole("status")).toContainText("Trade undone");
 
   await page.getByRole("button", { name: "USD ($)" }).click();
-  await page.getByRole("button", { name: "Tomans (TMN)" }).click();
+  await page.getByRole("button", { name: "IRT (TMN)" }).click();
 
+  page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Remove Real Estate" }).click();
   await expect(page.getByRole("row", { name: /Real Estate/ })).toHaveCount(0);
 
@@ -134,13 +136,24 @@ test("free user can browse markets and sees Pro gates", async ({ page }) => {
   await page.getByRole("link", { name: "Billing" }).click();
   await expect(page.getByText("Free", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Upgrade to Pro" })).toBeVisible();
+  await page.goto("/billing?status=success&ref_id=UNVERIFIED");
+  await expect(page.getByRole("status")).toContainText("Pro is not active yet");
   await expect(page.getByRole("link", { name: "Admin" })).toHaveCount(0);
 });
 
 test("Pro user can use optimizer, insights, analytics, and sees expiry", async ({ page }) => {
   await login(page, "e2e-pro@portfolio.local");
 
+  const portfolioSelect = page.locator(".portfolio-select");
+  const accountValue = await portfolioSelect.locator("option:not([value=''])").first().getAttribute("value");
+  await portfolioSelect.selectOption(accountValue);
+
+  const scopedOptimization = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return url.pathname === "/api/optimization/" && url.searchParams.get("account") === accountValue;
+  });
   await page.getByRole("link", { name: "Optimization" }).click();
+  await scopedOptimization;
   await expect(page.getByRole("heading", { name: "Portfolio Optimization" })).toBeVisible();
   for (const scenario of ["Min Volatility", "Risk Parity", "HRP", "Max Sharpe"]) {
     await page.getByRole("button", { name: scenario }).click();
@@ -148,10 +161,20 @@ test("Pro user can use optimizer, insights, analytics, and sees expiry", async (
   }
   await expect(page.getByRole("heading", { name: "Rebalance trades" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Efficient frontier" })).toBeVisible();
+  const scopedInsights = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return url.pathname === "/api/insights/" && url.searchParams.get("account") === accountValue;
+  });
   await page.getByRole("link", { name: "Advanced Insights" }).click();
+  await scopedInsights;
   await expect(page.getByRole("heading", { name: "Advanced Insights" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Allocation by asset class" })).toBeVisible();
+  const scopedAnalytics = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return url.pathname === "/api/analytics/" && url.searchParams.get("account") === accountValue;
+  });
   await page.getByRole("link", { name: "Risk Analytics" }).click();
+  await scopedAnalytics;
   await expect(page.getByRole("heading", { name: "Portfolio Analytics" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Risk & return" })).toBeVisible();
   await expect(page.locator(".error")).toHaveCount(0);
@@ -173,18 +196,14 @@ test("Pro user can use optimizer, insights, analytics, and sees expiry", async (
 test("staff user can open and filter the admin portal", async ({ page }) => {
   await login(page, "e2e-admin@portfolio.local");
   await page.getByRole("link", { name: "Admin", exact: true }).click();
-  await expect(page.getByRole("heading", { name: /System Diagnostics/ })).toBeVisible();
-  await page.getByRole("button", { name: /Refresh Status/ }).click();
-  await page.getByRole("button", { name: /Rate Limits/ }).click();
-  await expect(page.getByRole("heading", { name: "TSETMC & Market Provider Quotas" })).toBeVisible();
-  await page.getByRole("button", { name: /User & Portfolio Health/ }).click();
-  await expect(page.getByRole("heading", { name: "User & Portfolio Analytics" })).toBeVisible();
-  await page.getByRole("button", { name: /Database & Storage Stats/ }).click();
-  await expect(page.getByRole("heading", { name: "Database Storage & Row Counts" })).toBeVisible();
-  await page.getByRole("button", { name: /Asset Archive/ }).click();
-  await page.getByLabel("Search archive gaps").fill("stock");
-  await page.getByLabel("Filter archive gaps by endpoint").selectOption("stock_history_unadjusted");
-  await page.getByLabel("Filter archive gaps by status").selectOption("PENDING");
+  await expect(page.getByRole("heading", { name: /Real-Time System Operations/ })).toBeVisible();
+  await page.getByRole("button", { name: /Refresh/ }).click();
+  await expect(page.getByRole("heading", { name: /13 BrsApi Endpoint Families/ })).toBeVisible();
+  await page.getByLabel("Search log console").fill("fetch");
+  await page.getByLabel("Filter log level").selectOption("WARNING");
+  await page.getByLabel("Filter log category").selectOption("FETCH_ERROR");
+  await expect(page.getByRole("heading", { name: /Priority Endpoint Backfill Queue/ })).toBeVisible();
+  await page.getByLabel("Filter endpoint backfill gaps").selectOption("stock_history_unadjusted");
 });
 
 test("logout clears the session and protects deep links", async ({ page }) => {

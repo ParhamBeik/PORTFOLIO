@@ -80,3 +80,21 @@ def test_fingerprint_rotates_on_warehouse_write(asset_catalog):
     _seed_warehouse_days("کاما", 1)
     after = _price_version_fingerprint()
     assert before != after
+
+
+def test_returns_cache_isolated_by_history_window(monkeypatch):
+    import pandas as pd
+    from django.core.cache import cache
+    import portfolio.services.returns as returns
+
+    calls = []
+
+    def fake_panel(days):
+        calls.append(days)
+        return pd.DataFrame()
+
+    cache.clear()
+    monkeypatch.setattr(returns, "_load_price_panel", fake_panel)
+    daily_returns_matrix(history_days=30)
+    daily_returns_matrix(history_days=180)
+    assert calls == [30, 180]

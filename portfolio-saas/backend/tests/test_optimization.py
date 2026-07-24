@@ -32,6 +32,7 @@ from portfolio.services.optimization import (
     optimize,
 )
 from portfolio.services.returns import (
+    DEFAULT_HISTORY_DAYS,
     RETURNS_CACHE_KEY,
     _price_version_fingerprint,
     daily_returns_matrix,
@@ -429,7 +430,9 @@ def test_returns_cache_invalidates_on_write(synthetic_history, asset_catalog):
     df1, _ = daily_returns_matrix()
     assert not df1.empty
     v1 = _price_version_fingerprint()
-    assert cache.get(RETURNS_CACHE_KEY.format(version=v1)) is not None
+    assert cache.get(RETURNS_CACHE_KEY.format(
+        version=v1, history_days=DEFAULT_HISTORY_DAYS
+    )) is not None
 
     Price.objects.create(
         asset=asset_catalog["emami_coin"],
@@ -441,7 +444,9 @@ def test_returns_cache_invalidates_on_write(synthetic_history, asset_catalog):
     assert v2 != v1
     # Old key gone after invalidate; new computation produces a fresh entry.
     df2, _ = daily_returns_matrix()
-    assert cache.get(RETURNS_CACHE_KEY.format(version=v2)) is not None
+    assert cache.get(RETURNS_CACHE_KEY.format(
+        version=v2, history_days=DEFAULT_HISTORY_DAYS
+    )) is not None
 
 
 # ---------- 12. optimization cached -----------------------------------------
@@ -460,6 +465,38 @@ def test_optimization_cached(synthetic_history):
     assert r1["cached"] is False
     r2 = optimize(**payload)
     assert r2["cached"] is True
+
+
+def test_optimization_cache_isolated_by_portfolio_state(synthetic_history):
+    user = User.objects.create_user(email="u7@t.t", password="Sup3rSecret!")
+    first = optimize(
+        scenario="max_sharpe",
+        current_weights={"emami_coin": 0.5, "bitcoin_usd": 0.3, "usd_cash": 0.2},
+        total_value_tomans=Decimal("1000000000"),
+        user=user,
+    )
+    second = optimize(
+        scenario="max_sharpe",
+        current_weights={"emami_coin": 0.2, "bitcoin_usd": 0.3, "usd_cash": 0.5},
+        total_value_tomans=Decimal("1000000000"),
+        user=user,
+    )
+    assert first["cached"] is False
+    assert second["cached"] is False
+    assert second["current_weights"]["usd_cash"] == 0.5
+
+
+def test_infeasible_caps_are_rejected():
+    from portfolio.services.optimization import _enforce_caps
+
+    constrained = _enforce_caps(
+        {"gold_a": 0.5, "gold_b": 0.3, "gold_c": 0.2},
+        max_weight_per_asset=0.4,
+        max_weight_per_class={"Gold": 0.6},
+        class_map={"gold_a": "Gold", "gold_b": "Gold", "gold_c": "Gold"},
+    )
+    assert sum(constrained.values()) == pytest.approx(0.6)
+    assert max(constrained.values()) <= 0.4
 
 
 # ---------- 13. analytics pro gated -----------------------------------------

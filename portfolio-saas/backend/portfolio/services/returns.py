@@ -39,7 +39,7 @@ DEFAULT_HISTORY_DAYS = 180
 # Drop an asset entirely if it has fewer non-NaN return rows than this.
 MIN_DAILY_RETURNS = 30
 # Cache key template — versioned by max(Price.id) so it auto-rotates on writes.
-RETURNS_CACHE_KEY = "returns:daily:v{version}"
+RETURNS_CACHE_KEY = "returns:daily:{history_days}d:v{version}"
 RETURNS_CACHE_TTL = 600
 # Asset keys whose raw price is in USD; multiply through by usd_cash to Toman.
 USD_QUOTED_KEYS = ("bitcoin_usd", "gold_ounce_usd")
@@ -245,7 +245,7 @@ def daily_returns_matrix(
     are daily simple returns (float).
     """
     version = _price_version_fingerprint()
-    key = RETURNS_CACHE_KEY.format(version=version)
+    key = RETURNS_CACHE_KEY.format(version=version, history_days=history_days)
     cached = cache.get(key)
     if cached is not None:
         # Stored as {"columns": [...], "index": [iso...], "data": [[col0,col1,...], ...]}.
@@ -298,7 +298,12 @@ def invalidate_returns_cache() -> None:
     Called from the fetch task after each write. The next reader recomputes.
     """
     try:
-        cache.delete(RETURNS_CACHE_KEY.format(version=_price_version_fingerprint()))
+        version = _price_version_fingerprint()
+        for history_days in (30, 90, DEFAULT_HISTORY_DAYS, 365):
+            cache.delete(RETURNS_CACHE_KEY.format(
+                version=version,
+                history_days=history_days,
+            ))
     except Exception:  # cache is best-effort; never crash a fetch on it
         pass
 

@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+test.use({ extraHTTPHeaders: { "X-Forwarded-For": "198.51.100.20" } });
+
 const PASSWORD = "Sup3rSecret!";
 
 test.describe("Redesigned Auth & Registration Flow", () => {

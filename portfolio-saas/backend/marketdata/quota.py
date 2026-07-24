@@ -1,6 +1,7 @@
 """Atomic daily and 5-minute window provider quota shared by every web and Celery process."""
 import collections
 import time
+import uuid
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
@@ -35,18 +36,26 @@ def _check_and_record_window():
     if client is not None:
         try:
             key = "quota:window:5m"
-            pipeline = client.pipeline()
-            pipeline.zremrangebyscore(key, 0, now - window_seconds)
-            pipeline.zcard(key)
-            results = pipeline.execute()
-            current_count = results[1]
-            if current_count >= window_limit:
+            current_count = client.eval(
+                "redis.call('zremrangebyscore', KEYS[1], 0, ARGV[1]); "
+                "local count = redis.call('zcard', KEYS[1]); "
+                "if count >= tonumber(ARGV[4]) then return -1 end; "
+                "redis.call('zadd', KEYS[1], ARGV[2], ARGV[3]); "
+                "redis.call('expire', KEYS[1], ARGV[5]); "
+                "return count + 1",
+                1,
+                key,
+                now - window_seconds,
+                now,
+                uuid.uuid4().hex,
+                window_limit,
+                window_seconds + 60,
+            )
+            if current_count < 0:
                 raise QuotaExhausted(
-                    f"5-minute window API request limit reached ({current_count}/{window_limit} req)."
+                    f"5-minute window API request limit reached ({window_limit}/{window_limit} req)."
                 )
-            client.zadd(key, {f"{now}:{time.perf_counter()}": now})
-            client.expire(key, window_seconds + 60)
-            return current_count + 1
+            return current_count
         except QuotaExhausted:
             raise
         except Exception:
@@ -148,4 +157,3 @@ def get_quota_status():
         "remaining_window": max(0, window_limit - window_used),
         "quota_history": history,
     }
-

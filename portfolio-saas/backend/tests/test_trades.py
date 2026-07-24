@@ -103,13 +103,16 @@ def test_bad_side_is_rejected(account, asset_catalog):
         execute_trade(account=account, asset=asset_catalog["emami_coin"], side="hold", quantity=Decimal("1"))
 
 
-def test_buy_without_price_records_zero_execution_price(account, asset_catalog):
-    # No price written for this asset yet -> execution price 0, trade still valid.
-    result = execute_trade(
-        account=account, asset=asset_catalog["one_gram_coin"], side="buy", quantity=Decimal("4")
-    )
-    assert result["price_tomans"] == "0"
-    assert Transaction.objects.get(account=account).price_tomans == Decimal("0")
+def test_buy_without_price_is_rejected_atomically(account, asset_catalog):
+    with pytest.raises(TradeError, match="No valid execution price"):
+        execute_trade(
+            account=account,
+            asset=asset_catalog["one_gram_coin"],
+            side="buy",
+            quantity=Decimal("4"),
+        )
+    assert not Transaction.objects.filter(account=account).exists()
+    assert not Holding.objects.filter(account=account).exists()
 
 
 def test_undo_latest_trade_reverses_holding_and_stamps_snapshots(
@@ -192,6 +195,17 @@ class TestTradeEndpoint:
         )
         assert resp.status_code == 400
 
+    def test_missing_execution_price_returns_400(self, account, asset_catalog):
+        response = self._client(account.user).post(
+            f"/api/accounts/{account.id}/trades/",
+            {"asset_key": "one_gram_coin", "side": "buy", "quantity": "1"},
+            format="json",
+        )
+
+        assert response.status_code == 400
+        assert response.data["detail"] == "No valid execution price is available."
+        assert not Transaction.objects.filter(account=account).exists()
+
     def test_cannot_trade_in_another_users_account(self, account, asset_catalog, make_user):
         other = make_user(email="intruder@test.test")
         client = self._client(other)
@@ -222,6 +236,22 @@ class TestTradeEndpoint:
         assert resp.status_code == 400
         assert not account.holdings.exists()
 
+    def test_holding_detail_rejects_wrong_parent_account(self, account, asset_catalog):
+        other = Account.objects.create(user=account.user, name="Other")
+        holding = Holding.objects.create(
+            account=account,
+            asset=asset_catalog["house_asset"],
+            quantity=Decimal("50"),
+        )
+        response = self._client(account.user).patch(
+            f"/api/accounts/{other.id}/holdings/{holding.id}/",
+            {"quantity": "55"},
+            format="json",
+        )
+        assert response.status_code == 404
+        holding.refresh_from_db()
+        assert holding.quantity == Decimal("50")
+
     def test_house_holding_rejects_nonpositive_price(self, account, asset_catalog):
         response = self._client(account.user).post(
             f"/api/accounts/{account.id}/holdings/",
@@ -231,6 +261,20 @@ class TestTradeEndpoint:
 
         assert response.status_code == 400
         assert not account.holdings.exists()
+
+    def test_duplicate_house_holding_returns_400(self, account, asset_catalog):
+        Holding.objects.create(
+            account=account,
+            asset=asset_catalog["house_asset"],
+            quantity=Decimal("50"),
+        )
+        response = self._client(account.user).post(
+            f"/api/accounts/{account.id}/holdings/",
+            {"asset_key": "house_asset", "quantity": "55"},
+            format="json",
+        )
+        assert response.status_code == 400
+        assert account.holdings.filter(asset=asset_catalog["house_asset"]).count() == 1
 
     def test_cannot_undo_another_users_trade(
         self, account, asset_catalog, write_prices, make_user

@@ -3,6 +3,7 @@ from django.contrib import admin
 from django.urls import include, path
 from rest_framework_simplejwt.views import TokenRefreshView
 
+from accounts.serializers import PasswordAwareTokenRefreshSerializer
 from .health import HealthView, PriceFeedView, ReadyView
 
 urlpatterns = [
@@ -14,5 +15,9 @@ urlpatterns = [
     path("api/", include("portfolio.urls")),
     path("api/market/", include("marketdata.urls")),
     path("api/billing/", include("billing.urls")),
-    path("api/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path(
+        "api/token/refresh/",
+        TokenRefreshView.as_view(serializer_class=PasswordAwareTokenRefreshSerializer),
+        name="token_refresh",
+    ),
 ]

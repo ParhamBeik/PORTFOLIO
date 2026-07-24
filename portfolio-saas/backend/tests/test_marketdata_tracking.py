@@ -1,4 +1,5 @@
 """Quota, provider classification, and DB-verified archive progress."""
+from unittest import mock
 from unittest.mock import patch
 
 import pytest
@@ -6,7 +7,11 @@ from django.core.exceptions import ValidationError
 
 from marketdata.archive import run_archive_state
 from marketdata.catalog import is_ordinary_stock, sync_provider_catalog
-from marketdata.fetchers.base import PermanentMarketDataError, fetch_json
+from marketdata.fetchers.base import (
+    PermanentMarketDataError,
+    TransientMarketDataError,
+    fetch_json,
+)
 from marketdata.models import (
     ApiRequestQuota,
     ArchiveFetchState,
@@ -41,6 +46,21 @@ def test_permanent_http_error_uses_one_call_without_retry(settings):
             fetch_json("https://example.test", retries=2)
     assert get.call_count == 1
     assert ApiRequestQuota.objects.get().used == 1
+
+
+def test_transient_http_error_does_not_leak_api_key(settings, caplog):
+    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 10
+    settings.MARKETDATA_ARCHIVE_REQUEST_RESERVE = 0
+    secret = "provider-secret"
+    from requests.exceptions import RequestException
+    with patch(
+        "marketdata.fetchers.base.requests.get",
+        side_effect=RequestException(f"failed https://example.test/?key={secret}"),
+    ):
+        with pytest.raises(TransientMarketDataError) as exc:
+            fetch_json("https://example.test", params={"key": secret}, retries=0)
+    assert secret not in caplog.text
+    assert secret not in str(exc.value)
 
 
 def test_catalog_accepts_shares_and_rejects_rights_and_funds():
@@ -155,6 +175,20 @@ def test_5m_window_rate_limit(settings):
     assert status["remaining_window"] == 0
 
 
+def test_window_quota_uses_one_atomic_redis_operation(settings, monkeypatch):
+    from marketdata import quota
+
+    settings.MARKETDATA_WINDOW_LIMIT = 3
+    settings.MARKETDATA_WINDOW_SECONDS = 300
+    client = mock.Mock()
+    client.eval.return_value = 1
+    monkeypatch.setattr(quota, "get_redis", lambda: client)
+
+    quota._check_and_record_window()
+
+    client.eval.assert_called_once()
+
+
 def test_ensure_archive_states_covers_all_endpoints():
     """We choose a unit test because verifying archive state generation across all provider endpoints tests pure data warehouse mapping logic at the base of the test pyramid."""
     from marketdata.archive import ensure_archive_states
@@ -213,4 +247,3 @@ def test_archive_state_for_codal_shareholder_and_ticks(settings):
         run_archive_state(tick_state.pk)
 
     assert StockTransactionTick.objects.filter(symbol="KAMA", row=1).exists()
-
