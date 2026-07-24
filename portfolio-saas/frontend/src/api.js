@@ -210,7 +210,7 @@ export const marketCandles = (symbol, timeframe = "1d_adj", limit = 200) =>
   api(
     `/api/market/candles/?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=${limit}`
   );
-export const marketHistory = (symbol, { adjusted = 0, limit = 365 } = {}) =>
+export const marketHistory = (symbol, { adjusted = 1, limit = 365 } = {}) =>
   api(
     `/api/market/history/?symbol=${encodeURIComponent(symbol)}&adjusted=${adjusted}&limit=${limit}`
   );

@@ -195,3 +195,38 @@ def test_ticks_returns_series(make_user):
 def test_ticks_requires_symbol(make_user):
     resp = _auth(make_user()).get("/api/market/ticks/")
     assert resp.status_code == 400
+
+
+def test_market_assets_and_performance_strictly_use_adjusted(make_user, asset_catalog):
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+
+    # Create one adjusted and one unadjusted record for the same day
+    DailyStockHistory.objects.create(
+        symbol="کاما",
+        date="1404-01-02",
+        pl=Decimal("7000"),
+        pc=Decimal("7000"),
+        is_adjusted=True,
+    )
+    DailyStockHistory.objects.create(
+        symbol="کاما",
+        date="1404-01-02",
+        pl=Decimal("8000"),
+        pc=Decimal("8000"),
+        is_adjusted=False,
+    )
+
+    client = _auth(make_user())
+
+    # 1. Assets list stats should only count the adjusted record
+    rows = client.get("/api/market/assets/").json()
+    kama = next(row for row in rows if row["key"] == "kama_stock")
+    assert kama["records"] == 1
+
+    # 2. Performance view should return the adjusted price (7000) instead of the unadjusted (8000)
+    perf = client.get("/api/market/performance/?asset=kama_stock").json()
+    assert perf["coverage"]["records"] == 1
+    assert perf["series"][0]["close"] == 7000.0
+

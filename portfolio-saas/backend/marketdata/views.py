@@ -28,10 +28,7 @@ from .models import (
 
 def _positive_stock_history(symbol):
     from django.db.models import Q
-    qs = DailyStockHistory.objects.filter(symbol=symbol)
-    if qs.filter(is_adjusted=True).filter(Q(pc__gt=0) | Q(pl__gt=0)).exists():
-        return qs.filter(is_adjusted=True).filter(Q(pc__gt=0) | Q(pl__gt=0))
-    return qs.filter(Q(pc__gt=0) | Q(pl__gt=0))
+    return DailyStockHistory.objects.filter(symbol=symbol, is_adjusted=True).filter(Q(pc__gt=0) | Q(pl__gt=0))
 
 
 def _positive_gold_history(symbol):
@@ -193,7 +190,7 @@ class MarketAssetsView(APIView):
 
         stock_stats = {
             r["symbol"]: r
-            for r in DailyStockHistory.objects.filter(Q(pc__gt=0) | Q(pl__gt=0))
+            for r in DailyStockHistory.objects.filter(is_adjusted=True).filter(Q(pc__gt=0) | Q(pl__gt=0))
             .values("symbol")
             .annotate(first_date=Min("date"), last_date=Max("date"), records=Count("id"))
         }
@@ -541,24 +538,37 @@ def _get_cached_db_counts():
     if cached:
         return cached
 
+    from django.db import connection
     from portfolio.models import Account, Holding, Price, Snapshot, Transaction
     from .models import StockTransactionTick, MarketInstrument, DailyStockHistory, GoldCurrencyHistory, MarketCandle, CodalAnnouncement, ShareholderRecord
 
-    counts = {
-        "accounts": Account.objects.count(),
-        "holdings": Holding.objects.count(),
-        "prices": Price.objects.count(),
-        "snapshots": Snapshot.objects.count(),
-        "transactions": Transaction.objects.count(),
-        "portfolio_transactions": Transaction.objects.count(),
-        "stock_transaction_ticks": StockTransactionTick.objects.count(),
-        "market_instruments": MarketInstrument.objects.count(),
-        "stock_history_rows": DailyStockHistory.objects.count(),
-        "gold_currency_rows": GoldCurrencyHistory.objects.count(),
-        "candles": MarketCandle.objects.count(),
-        "announcements": CodalAnnouncement.objects.count(),
-        "shareholders": ShareholderRecord.objects.count(),
+    models_map = {
+        "accounts": Account,
+        "holdings": Holding,
+        "prices": Price,
+        "snapshots": Snapshot,
+        "transactions": Transaction,
+        "portfolio_transactions": Transaction,
+        "stock_transaction_ticks": StockTransactionTick,
+        "market_instruments": MarketInstrument,
+        "stock_history_rows": DailyStockHistory,
+        "gold_currency_rows": GoldCurrencyHistory,
+        "candles": MarketCandle,
+        "announcements": CodalAnnouncement,
+        "shareholders": ShareholderRecord,
     }
+
+    counts = {}
+    with connection.cursor() as cursor:
+        for key, model in models_map.items():
+            table_name = model._meta.db_table
+            cursor.execute("SELECT reltuples FROM pg_class WHERE relname = %s", [table_name])
+            row = cursor.fetchone()
+            if row is not None and row[0] >= 0:
+                counts[key] = int(row[0])
+            else:
+                counts[key] = model.objects.count()
+
     cache.set("db_counts_diagnostics", counts, 10)
     return counts
 
