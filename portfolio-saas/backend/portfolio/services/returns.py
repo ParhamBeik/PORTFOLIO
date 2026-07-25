@@ -55,15 +55,16 @@ def _price_version_fingerprint() -> str:
     returns cache. Lazy import: portfolio -> marketdata is the allowed
     dependency direction (marketdata never imports portfolio's domain).
     """
-    from marketdata.models import DailyStockHistory, GoldCurrencyHistory
+    from marketdata.models import DailyStockHistory, GoldCurrencyHistory, MarketCandle
 
     def _max_id(qs):
         return qs.order_by("-id").values_list("id", flat=True).first() or 0
 
-    return "{}:{}:{}".format(
+    return "{}:{}:{}:{}".format(
         hex(_max_id(Price.objects))[2:],
         hex(_max_id(DailyStockHistory.objects))[2:],
         hex(_max_id(GoldCurrencyHistory.objects))[2:],
+        hex(_max_id(MarketCandle.objects))[2:],
     )
 
 
@@ -96,11 +97,12 @@ def _warehouse_series(asset: Asset, cutoff: dt.datetime) -> pd.Series | None:
     from marketdata.models import DailyStockHistory, GoldCurrencyHistory
 
     if asset.tse_symbol:
+        from marketdata.models import MarketCandle
         rows = (
-            DailyStockHistory.objects
-            .filter(symbol=asset.tse_symbol, is_adjusted=False)
-            .order_by("date")
-            .values_list("date", "pl")
+            MarketCandle.objects
+            .filter(symbol=asset.tse_symbol, timeframe="1d_adj", close_price__gt=0)
+            .order_by("date_time")
+            .values_list("date_time", "close_price")
         )
     elif asset.brs_symbol:
         rows = (

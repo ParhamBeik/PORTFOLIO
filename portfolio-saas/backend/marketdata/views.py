@@ -88,22 +88,40 @@ class DailyHistoryView(APIView):
         if not symbol:
             return Response({"detail": "symbol query param required."}, status=400)
         adjusted = request.query_params.get("adjusted", "1") == "1"
-        rows = (
-            DailyStockHistory.objects.filter(symbol=symbol, is_adjusted=adjusted, pl__gt=0)
-            .order_by("-date")[: _limit(request, 365, 730)]
-        )
-        return Response([
-            {
-                "date": r.date,
-                "close": float(r.pl),
-                "close_final": float(r.pc),
-                "min": float(r.pmin),
-                "max": float(r.pmax),
-                "volume": r.tvol,
-                "change_pct": r.plp,
-            }
-            for r in reversed(list(rows))
-        ])
+        if adjusted:
+            rows = (
+                MarketCandle.objects.filter(symbol=symbol, timeframe="1d_adj", close_price__gt=0)
+                .order_by("-date_time")[: _limit(request, 365, 730)]
+            )
+            return Response([
+                {
+                    "date": r.date_time,
+                    "close": float(r.close_price),
+                    "close_final": float(r.close_price),
+                    "min": float(r.low_price),
+                    "max": float(r.high_price),
+                    "volume": r.volume,
+                    "change_pct": 0.0,
+                }
+                for r in reversed(list(rows))
+            ])
+        else:
+            rows = (
+                DailyStockHistory.objects.filter(symbol=symbol, is_adjusted=False, pl__gt=0)
+                .order_by("-date")[: _limit(request, 365, 730)]
+            )
+            return Response([
+                {
+                    "date": r.date,
+                    "close": float(r.pl),
+                    "close_final": float(r.pc),
+                    "min": float(r.pmin),
+                    "max": float(r.pmax),
+                    "volume": r.tvol,
+                    "change_pct": r.plp,
+                }
+                for r in reversed(list(rows))
+            ])
 
 
 class TicksView(APIView):
@@ -184,15 +202,17 @@ class MarketAssetsView(APIView):
     def get(self, request):
         from django.db.models import Count, Max, Min, Q
         from .models import MarketInstrument
+        import numpy as np
+        from portfolio.services.returns import daily_returns_matrix
 
         # Bulk fetch metadata, stock stats, and gold stats in 3 fast queries
         all_metadata = {row.l18: row for row in StockSymbolMetadata.objects.all()}
 
         stock_stats = {
             r["symbol"]: r
-            for r in DailyStockHistory.objects.filter(is_adjusted=True).filter(Q(pc__gt=0) | Q(pl__gt=0))
+            for r in MarketCandle.objects.filter(timeframe="1d_adj", close_price__gt=0)
             .values("symbol")
-            .annotate(first_date=Min("date"), last_date=Max("date"), records=Count("id"))
+            .annotate(first_date=Min("date_time"), last_date=Max("date_time"), records=Count("id"))
         }
 
         gold_stats = {
@@ -201,6 +221,30 @@ class MarketAssetsView(APIView):
             .values("symbol")
             .annotate(first_date=Min("date"), last_date=Max("date"), records=Count("id"))
         }
+
+        # Compute 1-year performance metrics (returns, volatility, Sharpe) for active assets
+        perf_metrics = {}
+        try:
+            df, _ = daily_returns_matrix(history_days=365)
+            for col in df.columns:
+                series = df[col].dropna()
+                if not series.empty:
+                    daily_vol = series.std()
+                    ann_vol = daily_vol * np.sqrt(240)
+                    total_ret = (1 + series).prod() - 1
+                    n_days = len(series)
+                    years = n_days / 240.0
+                    ann_ret = (total_ret + 1) ** (1.0 / years) - 1 if years > 0 else 0.0
+                    sharpe = ann_ret / ann_vol if ann_vol > 0 else 0.0
+                    
+                    perf_metrics[col] = {
+                        "return_1y": float(total_ret),
+                        "volatility_1y": float(ann_vol),
+                        "sharpe_1y": float(sharpe),
+                    }
+        except Exception:
+            # Safeguard so if pandas returns matrix fails, market assets list still loads
+            pass
 
         assets = (
             Asset.objects.filter(is_active=True)
@@ -222,6 +266,8 @@ class MarketAssetsView(APIView):
 
             meta = all_metadata.get(symbol)
             seen_symbols.add(symbol)
+            
+            m = perf_metrics.get(asset.key) if asset.key in perf_metrics else None
             rows.append({
                 "key": asset.key,
                 "name": asset.name,
@@ -238,6 +284,9 @@ class MarketAssetsView(APIView):
                 "records": stats.get("records", 0),
                 "first_date": stats.get("first_date"),
                 "last_date": stats.get("last_date"),
+                "return_1y": m["return_1y"] if m else None,
+                "volatility_1y": m["volatility_1y"] if m else None,
+                "sharpe_1y": m["sharpe_1y"] if m else None,
             })
 
         instruments = MarketInstrument.objects.filter(eligible=True).order_by("category", "symbol")
@@ -275,6 +324,9 @@ class MarketAssetsView(APIView):
                 "records": stats.get("records", 0),
                 "first_date": stats.get("first_date"),
                 "last_date": stats.get("last_date"),
+                "return_1y": None,
+                "volatility_1y": None,
+                "sharpe_1y": None,
             })
 
         return Response(rows)
@@ -322,20 +374,19 @@ class PerformanceView(APIView):
                 name = raw_sym
                 source = "stock"
 
-        if source == "stock" or _positive_stock_history(symbol).exists():
+        if source == "stock" or MarketCandle.objects.filter(symbol=symbol, timeframe="1d_adj", close_price__gt=0).exists():
             rows = list(
-                _positive_stock_history(symbol).order_by("-date")[:limit]
+                MarketCandle.objects.filter(symbol=symbol, timeframe="1d_adj", close_price__gt=0).order_by("-date_time")[:limit]
             )
             series = []
             for row in reversed(rows):
-                c_price = float(row.pc) if (row.pc and row.pc > 0) else float(row.pl)
                 series.append({
-                    "date": row.date,
-                    "open": float(row.pf) if (row.pf and row.pf > 0) else c_price,
-                    "high": float(row.pmax) if (row.pmax and row.pmax > 0) else c_price,
-                    "low": float(row.pmin) if (row.pmin and row.pmin > 0) else c_price,
-                    "close": c_price,
-                    "volume": row.tvol,
+                    "date": row.date_time,
+                    "open": float(row.open_price),
+                    "high": float(row.high_price),
+                    "low": float(row.low_price),
+                    "close": float(row.close_price),
+                    "volume": row.volume,
                 })
             source = "stock"
         else:

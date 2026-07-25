@@ -105,6 +105,18 @@ export default function MarketData({ user }) {
     }
   }, [filteredAssets, assetKey]);
 
+  const highlights = useMemo(() => {
+    if (!filteredAssets || filteredAssets.length === 0) return null;
+    const withStats = filteredAssets.filter(a => a.return_1y !== undefined && a.return_1y !== null);
+    if (withStats.length === 0) return null;
+
+    const topReturn = [...withStats].sort((a, b) => b.return_1y - a.return_1y)[0];
+    const lowestVol = [...withStats].filter(a => a.volatility_1y > 0).sort((a, b) => a.volatility_1y - b.volatility_1y)[0];
+    const bestSharpe = [...withStats].sort((a, b) => b.sharpe_1y - a.sharpe_1y)[0];
+
+    return { topReturn, lowestVol, bestSharpe };
+  }, [filteredAssets]);
+
   const series = useMemo(() => {
     const rows = performance?.series || [];
     const size = WINDOWS[windowName];
@@ -382,7 +394,98 @@ export default function MarketData({ user }) {
         )}
 
         {/* Sector Comparison Benchmarks */}
-        {filteredAssets.length > 1 && (
+        {filteredAssets.length > 1 && highlights && (
+          <div className="market-comparison-section">
+            <div className="comparison-header">
+              <h4>Comparative Performance Metrics (1-Year)</h4>
+              <span className="muted small">Ranked relative to current tracked assets in {activeClass}</span>
+            </div>
+            
+            <div className="metrics-highlight-grid">
+              {highlights.topReturn && (
+                <button
+                  type="button"
+                  className={`highlight-card ${assetKey === highlights.topReturn.key ? "active" : ""}`}
+                  onClick={() => setAssetKey(highlights.topReturn.key)}
+                >
+                  <div className="highlight-tag top-return-tag">Top Return</div>
+                  <div className="highlight-symbol">{aliasOf(highlights.topReturn)}</div>
+                  <div className="highlight-value text-success">{fmtPct(highlights.topReturn.return_1y)}</div>
+                  <div className="highlight-name">{highlights.topReturn.name}</div>
+                </button>
+              )}
+              {highlights.lowestVol && (
+                <button
+                  type="button"
+                  className={`highlight-card ${assetKey === highlights.lowestVol.key ? "active" : ""}`}
+                  onClick={() => setAssetKey(highlights.lowestVol.key)}
+                >
+                  <div className="highlight-tag stability-tag">Most Stable</div>
+                  <div className="highlight-symbol">{aliasOf(highlights.lowestVol)}</div>
+                  <div className="highlight-value text-warning">{fmtPct(highlights.lowestVol.volatility_1y)} <span className="small-label">vol</span></div>
+                  <div className="highlight-name">{highlights.lowestVol.name}</div>
+                </button>
+              )}
+              {highlights.bestSharpe && (
+                <button
+                  type="button"
+                  className={`highlight-card ${assetKey === highlights.bestSharpe.key ? "active" : ""}`}
+                  onClick={() => setAssetKey(highlights.bestSharpe.key)}
+                >
+                  <div className="highlight-tag sharpe-tag">Best Risk-Adjusted</div>
+                  <div className="highlight-symbol">{aliasOf(highlights.bestSharpe)}</div>
+                  <div className="highlight-value text-accent">{highlights.bestSharpe.sharpe_1y.toFixed(2)} <span className="small-label">SR</span></div>
+                  <div className="highlight-name">{highlights.bestSharpe.name}</div>
+                </button>
+              )}
+            </div>
+
+            <div className="comparison-table-wrapper">
+              <table className="comparison-table">
+                <thead>
+                  <tr>
+                    <th>Asset</th>
+                    <th>Name</th>
+                    <th className="text-right">1Y Return</th>
+                    <th className="text-right">Volatility (1Y)</th>
+                    <th className="text-right">Sharpe Ratio (1Y)</th>
+                    <th className="text-right">History Length</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredAssets.map((asset) => {
+                    const isActive = asset.key === assetKey;
+                    const hasStats = asset.return_1y !== undefined && asset.return_1y !== null;
+                    return (
+                      <tr
+                        key={asset.key}
+                        className={`comparison-row ${isActive ? "active-row" : ""} ${hasStats ? "clickable-row" : "disabled-row"}`}
+                        onClick={() => hasStats && setAssetKey(asset.key)}
+                      >
+                        <td className="row-symbol">{aliasOf(asset)}</td>
+                        <td className="row-name">{asset.name}</td>
+                        <td className={`row-metric text-right ${hasStats ? (asset.return_1y >= 0 ? "text-success" : "text-danger") : "muted"}`}>
+                          {hasStats ? fmtPct(asset.return_1y) : "N/A"}
+                        </td>
+                        <td className="row-metric text-right font-mono">
+                          {hasStats ? fmtPct(asset.volatility_1y) : "N/A"}
+                        </td>
+                        <td className="row-metric text-right font-mono">
+                          {hasStats ? asset.sharpe_1y.toFixed(2) : "N/A"}
+                        </td>
+                        <td className="row-metric text-right font-mono muted small">
+                          {asset.records} days
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {filteredAssets.length > 1 && !highlights && (
           <div className="market-comparison-section">
             <div className="comparison-header">
               <h4>

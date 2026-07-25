@@ -11,7 +11,7 @@ import datetime as dt
 import jdatetime
 import pytest
 
-from marketdata.models import DailyStockHistory
+from marketdata.models import DailyStockHistory, MarketCandle
 from portfolio.models import Asset
 from portfolio.services.returns import (
     MIN_DAILY_RETURNS,
@@ -23,20 +23,25 @@ pytestmark = pytest.mark.django_db
 
 
 def _seed_warehouse_days(symbol: str, n: int, start_price: float = 8000.0):
-    """Write n consecutive daily closes ending today (Jalali-dated)."""
+    """Write n consecutive daily closes ending today (Jalali-dated) to MarketCandle (1d_adj)."""
     today = dt.date.today()
     rows = []
     for i in range(n):
         day = today - dt.timedelta(days=n - i)
         jday = jdatetime.date.fromgregorian(date=day)
-        rows.append(DailyStockHistory(
+        date_str = f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}"
+        price = start_price + i * 10
+        rows.append(MarketCandle(
             symbol=symbol,
-            date=f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}",
-            pl=start_price + i * 10,  # strictly increasing closes
-            pc=start_price + i * 10,
-            is_adjusted=False,
+            timeframe="1d_adj",
+            date_time=date_str,
+            open_price=price,
+            high_price=price,
+            low_price=price,
+            close_price=price,
+            volume=1000,
         ))
-    DailyStockHistory.objects.bulk_create(rows, ignore_conflicts=True)
+    MarketCandle.objects.bulk_create(rows, ignore_conflicts=True)
 
 
 def test_warehouse_series_used_when_deep_enough(asset_catalog, write_prices):

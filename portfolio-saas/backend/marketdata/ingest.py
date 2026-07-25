@@ -393,10 +393,12 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
     symbol = payload.get("symbol", "") or ""
     name = payload.get("name", "") or ""
     raw_unit = payload.get("unit", "") or ""
+    if symbol == "USDT":
+        symbol = "USDT_IRT"
 
     is_rial = (
         raw_unit == "ریال"
-        or symbol in ("USD", "EUR", "GBP", "AED", "CNY", "CAD", "AUD", "CHF")
+        or symbol in ("USD", "EUR", "GBP", "AED", "CNY", "CAD", "AUD", "CHF", "USDT_IRT")
     )
     unit = "تومان" if is_rial else raw_unit
 
@@ -408,7 +410,7 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
             h = float(rec.get("high")) if rec.get("high") is not None else c
             l = float(rec.get("low")) if rec.get("low") is not None else c
 
-            if is_rial and c > 500000:
+            if is_rial:
                 c /= 10.0
                 o /= 10.0
                 h /= 10.0

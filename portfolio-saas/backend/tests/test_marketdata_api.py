@@ -202,13 +202,16 @@ def test_market_assets_and_performance_strictly_use_adjusted(make_user, asset_ca
     stock.tse_symbol = "کاما"
     stock.save(update_fields=["tse_symbol"])
 
-    # Create one adjusted and one unadjusted record for the same day
-    DailyStockHistory.objects.create(
+    # Create one adjusted MarketCandle and one unadjusted DailyStockHistory record for the same day
+    MarketCandle.objects.create(
         symbol="کاما",
-        date="1404-01-02",
-        pl=Decimal("7000"),
-        pc=Decimal("7000"),
-        is_adjusted=True,
+        timeframe="1d_adj",
+        date_time="1404-01-02",
+        open_price=Decimal("7000"),
+        high_price=Decimal("7000"),
+        low_price=Decimal("7000"),
+        close_price=Decimal("7000"),
+        volume=1000,
     )
     DailyStockHistory.objects.create(
         symbol="کاما",

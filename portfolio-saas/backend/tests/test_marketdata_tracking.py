@@ -88,7 +88,7 @@ def test_catalog_accepts_all_provider_currencies(settings):
 
     assert MarketInstrument.objects.filter(source="brs", symbol="USD", eligible=True).exists()
     assert MarketInstrument.objects.filter(source="brs", symbol="EUR", eligible=True).exists()
-    assert MarketInstrument.objects.filter(source="brs", symbol="BTC", eligible=False).exists()
+    assert MarketInstrument.objects.filter(source="brs", symbol="BTC", eligible=True).exists()
 
 
 def test_archive_state_is_complete_only_after_rows_exist(settings):

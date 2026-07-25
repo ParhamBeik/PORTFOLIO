@@ -44,7 +44,8 @@ def fetch_gold_currency_pro_history_daily(
     """Fetch daily date-range price history for a gold or currency symbol."""
     if not api_key or not symbol:
         return None
-    params = {"key": api_key, "history": "2", "symbol": symbol}
+    fetch_symbol = "USDT" if symbol == "USDT_IRT" else symbol
+    params = {"key": api_key, "history": "2", "symbol": fetch_symbol}
     if date_start:
         params["date_start"] = date_start
     if date_end:
