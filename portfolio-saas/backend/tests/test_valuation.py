@@ -46,6 +46,33 @@ def test_value_account_multiplies_quantity_by_price(asset_catalog, write_prices,
     item = next(i for i in result["items"] if i["key"] == "emami_coin")
     assert item["unit_price"] == Decimal("480000000")
     assert item["value"] == Decimal("960000000")
+    assert item["source"] == "TEST"
+    assert item["priced_at"] is not None
+    assert item["age_seconds"] >= 0
+    assert item["quality_status"] == "live"
+    assert result["priced_assets"] == result["total_assets"] == 1
+
+
+def test_value_account_marks_missing_quote_unavailable(asset_catalog, make_user):
+    user = make_user(email="missing-price@test.test")
+    account = Account.objects.create(user=user, name="Missing")
+    Holding.objects.create(
+        account=account,
+        asset=asset_catalog["bitcoin_usd"],
+        quantity=Decimal("2"),
+    )
+
+    result = value_account(account, prices={})
+
+    assert result["total"] == 0
+    assert result["priced_assets"] == 0
+    assert result["total_assets"] == 1
+    assert result["quality_status"] == "unavailable"
+    assert result["items"][0]["value"] is None
+    assert result["items"][0]["quality_status"] == "unavailable"
+    assert result["excluded"] == [
+        {"asset_key": "bitcoin_usd", "reason": "missing_price"}
+    ]
 
 
 def test_value_account_applies_house_formula(asset_catalog, write_prices, make_user):

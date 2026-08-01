@@ -220,6 +220,52 @@ class AccountPerformanceView(APIView):
         return Response(payload)
 
 
+class AccountDataQualityView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, account_id):
+        from marketdata.integrity import compute_symbol_integrity
+
+        account = request.user.accounts.filter(pk=account_id).first()
+        if account is None:
+            raise NotFound("Account not found.")
+        assets = []
+        for holding in account.holdings.select_related("asset"):
+            asset = holding.asset
+            symbol = asset.tse_symbol or asset.brs_symbol
+            if asset.is_house or asset.is_manual or not symbol:
+                assets.append({
+                    "asset_key": asset.key,
+                    "symbol": symbol or None,
+                    "passes_gate": None,
+                    "quality_status": "manual",
+                    "reason_codes": ["manual_valuation"],
+                })
+                continue
+            try:
+                result = compute_symbol_integrity(
+                    symbol,
+                    start=request.query_params.get("from"),
+                    end=request.query_params.get("to"),
+                )
+            except (TypeError, ValueError) as exc:
+                return Response({"detail": str(exc)}, status=400)
+            assets.append({"asset_key": asset.key, **result})
+
+        assessed = [item for item in assets if item["passes_gate"] is not None]
+        return Response({
+            "account_id": account.id,
+            "assets": assets,
+            "passing_assets": sum(bool(item["passes_gate"]) for item in assessed),
+            "assessed_assets": len(assessed),
+            "quality_status": (
+                "complete" if assessed and all(item["passes_gate"] for item in assessed)
+                else "partial" if assessed
+                else "unavailable"
+            ),
+        })
+
+
 class TradeView(APIView):
     """Execute a buy/sell in one account (the ledger write path).
 

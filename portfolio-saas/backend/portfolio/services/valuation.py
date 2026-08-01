@@ -9,6 +9,7 @@ import logging
 from decimal import Decimal
 
 from django.core.cache import cache
+from django.utils import timezone
 
 from ..models import Account, Asset, Holding, Price
 
@@ -172,17 +173,56 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
     'unit_price','value'}]}
     """
     prices = prices if prices is not None else get_latest_prices()
-    items, total = [], Decimal("0")
+    items, excluded, total = [], [], Decimal("0")
     holdings = (
         account.holdings.select_related("asset")
         if account.pk
         else Holding.objects.none()
     )
+    holdings = list(holdings)
+    latest_rows = {
+        row.asset_id: row
+        for row in Price.objects.filter(asset_id__in=[h.asset_id for h in holdings])
+        .order_by("asset_id", "-fetched_at", "-id")
+        .distinct("asset_id")
+    }
+    now = timezone.now()
+    priced_assets = 0
     for holding in holdings:
         # None when the asset has no price yet — distinguishable from a real 0 (M2).
         unit_price = prices.get(holding.asset.key)
-        value = asset_value(holding, unit_price)
-        total += value
+        row = latest_rows.get(holding.asset_id)
+        if holding.asset.is_house:
+            value = asset_value(holding, unit_price)
+            source = "manual_valuation"
+            priced_at = holding.updated_at
+            age_seconds = max(0, int((now - holding.updated_at).total_seconds()))
+            quality_status = "fallback"
+        elif unit_price is None or _q(unit_price) <= 0:
+            value = None
+            source = None
+            priced_at = None
+            age_seconds = None
+            quality_status = "unavailable"
+            excluded.append({
+                "asset_key": holding.asset.key,
+                "reason": "missing_price",
+            })
+        else:
+            value = asset_value(holding, unit_price)
+            if row and _q(row.price) == _q(unit_price):
+                source = row.source
+                priced_at = row.fetched_at
+                age_seconds = max(0, int((now - row.fetched_at).total_seconds()))
+                quality_status = "live" if age_seconds <= 300 else "stale"
+            else:
+                source = "archive"
+                priced_at = None
+                age_seconds = None
+                quality_status = "fallback"
+        if value is not None:
+            total += value
+            priced_assets += 1
         items.append({
             "asset": holding.asset.name,
             "key": holding.asset.key,
@@ -190,17 +230,42 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
             "quantity": holding.quantity,
             "unit_price": unit_price,
             "value": value,
+            "source": source,
+            "priced_at": priced_at.isoformat() if priced_at else None,
+            "age_seconds": age_seconds,
+            "quality_status": quality_status,
         })
-    return {"total": total, "items": items}
+    total_assets = len(holdings)
+    if total_assets and priced_assets == 0:
+        quality_status = "unavailable"
+    elif excluded or any(item["quality_status"] != "live" for item in items):
+        quality_status = "partial"
+    else:
+        quality_status = "complete"
+    return {
+        "total": total,
+        "items": items,
+        "priced_assets": priced_assets,
+        "total_assets": total_assets,
+        "quality_status": quality_status,
+        "excluded": excluded,
+    }
 
 
 def value_user(user) -> dict:
     """Aggregate valuation across all of a user's accounts."""
     prices = get_latest_prices()
     accounts, total = [], Decimal("0")
+    priced_assets = total_assets = 0
+    excluded = []
     for account in user.accounts.all():
         valuation = value_account(account, prices)
         total += valuation["total"]
+        priced_assets += valuation["priced_assets"]
+        total_assets += valuation["total_assets"]
+        excluded.extend(
+            {"account_id": account.id, **item} for item in valuation["excluded"]
+        )
         accounts.append({
             "id": account.id,
             "name": account.name,
@@ -208,7 +273,19 @@ def value_user(user) -> dict:
             "total": valuation["total"],
             "items": valuation["items"],
         })
-    return {"total": total, "accounts": accounts, "prices": prices}
+    return {
+        "total": total,
+        "accounts": accounts,
+        "prices": prices,
+        "priced_assets": priced_assets,
+        "total_assets": total_assets,
+        "quality_status": (
+            "unavailable" if total_assets and priced_assets == 0
+            else "partial" if excluded or priced_assets < total_assets
+            else "complete"
+        ),
+        "excluded": excluded,
+    }
 
 
 def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list[dict]:
