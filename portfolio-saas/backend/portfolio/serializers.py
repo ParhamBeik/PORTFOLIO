@@ -2,7 +2,7 @@ from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import Account, Asset, Holding, Transaction, BacktestRun, BacktestYear, Watchlist, WatchlistItem
+from .models import Account, Asset, Holding, LedgerEntry, Transaction, BacktestRun, BacktestYear, Watchlist, WatchlistItem
 from marketdata.models import MarketCandle, GoldCurrencyHistory
 from marketdata.jalali import normalize_jalali
 import jdatetime
@@ -41,8 +41,54 @@ class AccountSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Account
-        fields = ("id", "name", "broker", "goal", "holdings", "created_at", "updated_at")
-        read_only_fields = ("id", "created_at", "updated_at")
+        fields = (
+            "id", "name", "broker", "goal", "holdings", "tracking_started_at",
+            "cash_balance_tomans", "ledger_complete", "created_at", "updated_at",
+        )
+        read_only_fields = (
+            "id", "tracking_started_at", "cash_balance_tomans", "ledger_complete",
+            "created_at", "updated_at",
+        )
+
+
+class LedgerEntryInputSerializer(serializers.Serializer):
+    kind = serializers.ChoiceField(choices=LedgerEntry.Kind.choices)
+    asset_key = serializers.SlugField(required=False)
+    quantity = serializers.DecimalField(
+        max_digits=20, decimal_places=6, min_value=Decimal("0.000001"), required=False
+    )
+    unit_price_tomans = serializers.DecimalField(
+        max_digits=20, decimal_places=4, min_value=Decimal("0.0001"), required=False
+    )
+    amount_tomans = serializers.DecimalField(
+        max_digits=24, decimal_places=4, min_value=Decimal("0.0001"), required=False
+    )
+    occurred_at = serializers.DateTimeField(required=False, default=timezone.now)
+    source = serializers.ChoiceField(choices=("manual", "csv"), default="manual")
+    note = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+    external_id = serializers.CharField(max_length=120, required=False, allow_blank=True, default="")
+
+    def validate_occurred_at(self, value):
+        if value > timezone.now():
+            raise serializers.ValidationError("Cannot be in the future.")
+        return value
+
+
+class LedgerEntrySerializer(serializers.ModelSerializer):
+    asset_key = serializers.CharField(source="asset.key", allow_null=True, read_only=True)
+    occurred_at = serializers.DateTimeField(source="timestamp", read_only=True)
+    unit_price_tomans = serializers.DecimalField(
+        source="price_tomans", max_digits=20, decimal_places=4, allow_null=True, read_only=True
+    )
+
+    class Meta:
+        model = LedgerEntry
+        fields = (
+            "id", "kind", "asset_key", "quantity", "unit_price_tomans",
+            "amount_tomans", "occurred_at", "source", "note", "external_id",
+            "reversal_of", "created_at",
+        )
+        read_only_fields = fields
 
 
 class TradeInputSerializer(serializers.Serializer):
@@ -104,9 +150,6 @@ class TradeInputSerializer(serializers.Serializer):
                     else:
                         raise serializers.ValidationError({"price_tomans": "Price omitted and no historical price found for this date."})
 
-        if not attrs.get('price_tomans'):
-             attrs['price_tomans'] = Decimal("0")
-             
         # Make sure timestamp is in attrs
         attrs['timestamp'] = timestamp
 
@@ -161,4 +204,3 @@ class WatchlistSerializer(serializers.ModelSerializer):
     class Meta:
         model = Watchlist
         fields = ("id", "account", "items", "created_at")
-

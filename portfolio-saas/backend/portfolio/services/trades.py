@@ -228,7 +228,6 @@ def undo_trade(*, user, transaction_id: int) -> None:
     """Remove the latest trade for one asset and reverse its holding effect."""
     trade = (
         Transaction.objects.select_for_update()
-        .select_related("account", "asset")
         .get(pk=transaction_id, account__user=user)
     )
     holding = (

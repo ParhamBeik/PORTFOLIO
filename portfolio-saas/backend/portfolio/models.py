@@ -107,6 +107,14 @@ class Account(models.Model):
     # Free-form purpose tag for this portfolio (e.g. "Retirement", "Trading",
     # "Speculative", "Cash"). Drives the per-portfolio settings surface.
     goal = models.CharField(max_length=40, blank=True, default="")
+    tracking_started_at = models.DateTimeField(null=True, blank=True)
+    cash_balance_tomans = models.DecimalField(
+        max_digits=24, decimal_places=4, default=0
+    )
+    ledger_complete = models.BooleanField(
+        default=False,
+        help_text="True when opening balances and subsequent cash flows are complete.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -164,8 +172,26 @@ class Price(models.Model):
         ]
 
 
-class Transaction(models.Model):
-    """Trade ledger: the durable source of truth for a portfolio.
+class ImportBatch(models.Model):
+    """Idempotency record for one committed CSV ledger import."""
+
+    account = models.ForeignKey(
+        Account, on_delete=models.CASCADE, related_name="import_batches"
+    )
+    file_hash = models.CharField(max_length=64)
+    row_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["account", "file_hash"], name="uniq_import_file_per_account"
+            )
+        ]
+
+
+class LedgerEntry(models.Model):
+    """Immutable account event and source of truth for positions and cash.
 
     `Holding.quantity` is DERIVED state (the running sum of buys minus sells);
     this table records the EVENTS that produced it. Keeping the ledger means:
@@ -184,22 +210,66 @@ class Transaction(models.Model):
         BUY = "buy", "Buy"
         SELL = "sell", "Sell"
 
+    class Kind(models.TextChoices):
+        OPENING_POSITION = "opening_position", "Opening position"
+        OPENING_CASH = "opening_cash", "Opening cash"
+        DEPOSIT = "deposit", "Deposit"
+        WITHDRAWAL = "withdrawal", "Withdrawal"
+        BUY = "buy", "Buy"
+        SELL = "sell", "Sell"
+        DIVIDEND = "dividend", "Dividend"
+        FEE = "fee", "Fee"
+
     account = models.ForeignKey(
         Account, on_delete=models.CASCADE, related_name="transactions"
     )
-    asset = models.ForeignKey(Asset, on_delete=models.PROTECT, related_name="transactions")
-    side = models.CharField(max_length=4, choices=Side.choices)
+    asset = models.ForeignKey(
+        Asset,
+        on_delete=models.PROTECT,
+        related_name="transactions",
+        null=True,
+        blank=True,
+    )
+    kind = models.CharField(max_length=24, choices=Kind.choices)
     # Always positive; `side` carries the direction.
-    quantity = models.DecimalField(max_digits=20, decimal_places=6)
+    quantity = models.DecimalField(
+        max_digits=20, decimal_places=6, null=True, blank=True
+    )
     # Unit price in Tomans at execution; 0 when the asset had no price yet.
-    price_tomans = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    price_tomans = models.DecimalField(
+        max_digits=20, decimal_places=4, null=True, blank=True
+    )
+    amount_tomans = models.DecimalField(
+        max_digits=24, decimal_places=4, null=True, blank=True
+    )
     note = models.CharField(max_length=200, blank=True, default="")
     timestamp = models.DateTimeField(db_index=True, default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
     source = models.CharField(
-        max_length=16, 
-        choices=(("manual", "manual"), ("imported", "imported"), ("inferred", "inferred")), 
+        max_length=16,
+        choices=(
+            ("manual", "manual"),
+            ("csv", "csv"),
+            ("system", "system"),
+            ("imported", "imported (legacy)"),
+            ("inferred", "inferred (legacy)"),
+        ),
         default="manual"
+    )
+    import_batch = models.ForeignKey(
+        ImportBatch,
+        on_delete=models.PROTECT,
+        related_name="entries",
+        null=True,
+        blank=True,
+    )
+    external_id = models.CharField(max_length=120, blank=True, default="")
+    reversal_of = models.OneToOneField(
+        "self",
+        on_delete=models.PROTECT,
+        related_name="reversed_by",
+        null=True,
+        blank=True,
     )
 
     class Meta:
@@ -207,9 +277,60 @@ class Transaction(models.Model):
         indexes = [
             models.Index(fields=["account", "-timestamp"], name="idx_txn_account_time"),
         ]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    ~models.Q(kind__in=["opening_position", "buy", "sell", "dividend"])
+                    | (models.Q(asset__isnull=False) & models.Q(quantity__gt=0))
+                ),
+                name="ledger_asset_event_fields",
+            ),
+            models.CheckConstraint(
+                check=(
+                    ~models.Q(kind__in=["opening_cash", "deposit", "withdrawal", "dividend", "fee"])
+                    | models.Q(amount_tomans__gt=0)
+                ),
+                name="ledger_cash_event_amount",
+            ),
+        ]
+
+    def __init__(self, *args, **kwargs):
+        side = kwargs.pop("side", None)
+        if side is not None and "kind" not in kwargs:
+            kwargs["kind"] = side
+        super().__init__(*args, **kwargs)
+
+    @property
+    def side(self):
+        return self.kind if self.kind in self.Side.values else ""
+
+    @side.setter
+    def side(self, value):
+        self.kind = value
+
+    @property
+    def occurred_at(self):
+        return self.timestamp
+
+    @occurred_at.setter
+    def occurred_at(self, value):
+        self.timestamp = value
+
+    @property
+    def unit_price_tomans(self):
+        return self.price_tomans
+
+    @unit_price_tomans.setter
+    def unit_price_tomans(self, value):
+        self.price_tomans = value
 
     def __str__(self) -> str:
-        return f"{self.side} {self.quantity} {self.asset.key} @ {self.price_tomans}"
+        asset = self.asset.key if self.asset_id else "cash"
+        return f"{self.kind} {self.quantity or self.amount_tomans} {asset}"
+
+
+# One-release Python compatibility for callers importing the former model name.
+Transaction = LedgerEntry
 
 
 class Snapshot(models.Model):

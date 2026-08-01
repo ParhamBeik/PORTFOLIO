@@ -18,16 +18,19 @@ from rest_framework.views import APIView
 
 from accounts.permissions import IsPro
 
-from .models import Account, Asset, Holding, Price, Snapshot, Transaction
+from .models import Account, Asset, Holding, LedgerEntry, Price, Snapshot, Transaction
 from .serializers import (
     AccountSerializer,
     AssetSerializer,
     HoldingSerializer,
+    LedgerEntryInputSerializer,
+    LedgerEntrySerializer,
     TradeInputSerializer,
     TransactionSerializer,
 )
 from .services import execute_trade, get_latest_prices, undo_trade, value_account, value_user
 from .services.trades import TradeError
+from .services.ledger import LedgerError, create_ledger_entry, reverse_ledger_entry
 from .services.diagnostics import portfolio_diagnostics
 from .services.insights import _liquid_items, _total, build_insights
 from .services.optimization import (
@@ -109,6 +112,63 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Tradeable assets must be changed through the buy/sell endpoint.")
         instance.delete()
+
+
+class LedgerListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _account(self, request, account_id):
+        account = request.user.accounts.filter(pk=account_id).first()
+        if account is None:
+            raise NotFound("Account not found.")
+        return account
+
+    def get(self, request, account_id):
+        account = self._account(request, account_id)
+        rows = LedgerEntry.objects.filter(account=account).select_related("asset")
+        return Response(LedgerEntrySerializer(rows, many=True).data)
+
+    def post(self, request, account_id):
+        account = self._account(request, account_id)
+        form = LedgerEntryInputSerializer(data=request.data)
+        form.is_valid(raise_exception=True)
+        data = form.validated_data
+        asset = None
+        if data.get("asset_key"):
+            asset = Asset.objects.filter(key=data["asset_key"], is_active=True).first()
+            if asset is None:
+                return Response({"detail": "Unknown asset_key."}, status=400)
+        try:
+            entry = create_ledger_entry(
+                account=account,
+                asset=asset,
+                kind=data["kind"],
+                quantity=data.get("quantity"),
+                unit_price_tomans=data.get("unit_price_tomans"),
+                amount_tomans=data.get("amount_tomans"),
+                occurred_at=data["occurred_at"],
+                source=data["source"],
+                note=data.get("note", ""),
+                external_id=data.get("external_id", ""),
+            )
+        except LedgerError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(LedgerEntrySerializer(entry).data, status=201)
+
+
+class LedgerReverseView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, account_id, entry_id):
+        try:
+            reversal = reverse_ledger_entry(
+                user=request.user, account_id=account_id, entry_id=entry_id
+            )
+        except LedgerEntry.DoesNotExist:
+            return Response({"detail": "Ledger entry not found."}, status=404)
+        except LedgerError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(LedgerEntrySerializer(reversal).data, status=201)
 
 
 class TradeView(APIView):

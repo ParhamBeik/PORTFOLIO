@@ -23,14 +23,15 @@ def holdings_as_of(user, account, date) -> Dict[str, Decimal]:
     holdings = Holding.objects.filter(account=account).select_related("asset")
     current_qty = {h.asset.key: _q(h.quantity) for h in holdings}
 
-    if hasattr(date, "date"):
-        target_date = date.date()
+    if isinstance(date, datetime.datetime):
+        target = date
     else:
-        target_date = date
+        target = datetime.datetime.combine(date, datetime.time.max)
+        target = timezone.make_aware(target, timezone.get_current_timezone())
         
     transactions = Transaction.objects.filter(
         account=account,
-        timestamp__date__gt=target_date
+        timestamp__gt=target
     ).select_related("asset")
 
     for txn in transactions:
