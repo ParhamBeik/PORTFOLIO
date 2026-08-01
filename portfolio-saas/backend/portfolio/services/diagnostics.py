@@ -157,8 +157,49 @@ def _diversification_ratio(
     return _finite(weighted_avg_vol / port_vol)
 
 
+def _load_index_returns(target_index: pd.Index, as_of: dt.datetime | None = None) -> pd.Series | None:
+    """Load index return series from MarketIndexData, aligned with target_index."""
+    from marketdata.models import MarketIndexData
+    import jdatetime
+    import datetime as dt
+    from portfolio.services.returns import to_jalali_str
+
+    qs = MarketIndexData.objects.order_by("date", "time")
+    if as_of is not None:
+        as_of_jalali = to_jalali_str(as_of)
+        qs = qs.filter(date__lte=as_of_jalali)
+
+    if not qs.exists():
+        return None
+
+    records: dict[dt.date, float] = {}
+    for row in qs:
+        try:
+            parts = [int(p) for p in row.date.split("-")]
+            greg_date = jdatetime.date(parts[0], parts[1], parts[2]).togregorian()
+            records[greg_date] = float(row.index_overall)
+        except Exception:
+            continue
+
+    if len(records) < 2:
+        return None
+
+    s = pd.Series(records).sort_index()
+    s_returns = s.pct_change()
+    s_returns.index = pd.to_datetime(s_returns.index, utc=True).normalize()
+    aligned = s_returns.reindex(target_index).ffill().bfill().fillna(0.0)
+    return aligned
+
+
 def portfolio_diagnostics(
-    current_weights: dict[str, float], total_value_tomans: Decimal, *, user=None
+    current_weights: dict[str, float],
+    total_value_tomans: Decimal,
+    *,
+    user=None,
+    history_days: int = 180,
+    as_of=None,
+    universe: list[str] | None = None,
+    basis: str = "nominal"
 ) -> dict:
     """Compute all diagnostics for the current portfolio.
 
@@ -166,7 +207,15 @@ def portfolio_diagnostics(
     `user` (optional) is used to compute the real-estate block via the live
     valuation — passed by the view; tests can omit it.
     """
-    returns, excluded = daily_returns_matrix()
+    from portfolio.services.returns import normalize_as_of
+    as_of_dt = normalize_as_of(as_of)
+
+    returns, excluded = daily_returns_matrix(
+        history_days=history_days,
+        as_of=as_of_dt,
+        universe=universe,
+        basis=basis
+    )
     port_series = _portfolio_returns(returns, current_weights) if not returns.empty else pd.Series(dtype=float)
 
     ann_vol = _annualized_volatility(port_series)
@@ -178,6 +227,35 @@ def portfolio_diagnostics(
     div_ratio = _diversification_ratio(returns, current_weights) if not returns.empty else 1.0
 
     eligible_assets = list(returns.columns) if not returns.empty else []
+
+    # Load index returns and compute benchmark metrics if index history exists
+    benchmark_metrics = {}
+    if not returns.empty and not port_series.empty:
+        index_returns = _load_index_returns(returns.index, as_of=as_of_dt)
+        if index_returns is not None:
+            beta = 0.0
+            cov_matrix = np.cov(port_series, index_returns)
+            benchmark_var = np.var(index_returns, ddof=1)
+            if benchmark_var > 0:
+                beta = cov_matrix[0][1] / benchmark_var
+            
+            ann_port_return = np.mean(port_series) * TRADING_DAYS_PER_YEAR
+            ann_index_return = np.mean(index_returns) * TRADING_DAYS_PER_YEAR
+            alpha = ann_port_return - (RISK_FREE_RATE_ANNUAL + beta * (ann_index_return - RISK_FREE_RATE_ANNUAL))
+            
+            active_returns = port_series - index_returns
+            tracking_error = np.std(active_returns, ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR)
+            
+            info_ratio = 0.0
+            if tracking_error > 0:
+                info_ratio = (np.mean(active_returns) * TRADING_DAYS_PER_YEAR) / tracking_error
+                
+            benchmark_metrics = {
+                "beta": _finite(beta),
+                "alpha": _finite(alpha),
+                "tracking_error": _finite(tracking_error),
+                "information_ratio": _finite(info_ratio),
+            }
 
     real_estate: dict = {"value_tomans": "0", "share_of_total": 0.0}
     if user is not None:
@@ -204,6 +282,7 @@ def portfolio_diagnostics(
             "historical_var_95": _finite(var95),
             "historical_cvar_95": _finite(cvar95),
             "diversification_ratio": max(_finite(div_ratio), 1.0),
+            **benchmark_metrics,
         },
         "real_estate": real_estate,
     }

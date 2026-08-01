@@ -11,6 +11,7 @@ import {
   updateAccount,
   updateHolding,
   valuation,
+  getPerformance,
 } from "../api.js";
 import { subscribePrices } from "../sse.js";
 import { fmtNum, fmtTehranTime, fmtToman } from "../format.js";
@@ -20,7 +21,7 @@ import { usePortfolio } from "./PortfolioContext.jsx";
 const RECONCILE_MS = 60000;
 
 export default function Portfolio({ user }) {
-  const { accounts, activeId, setActive, reload } = usePortfolio();
+  const { accounts, activeId, setActive, reload, basis } = usePortfolio();
   const [assets, setAssets] = useState([]);
   const [val, setVal] = useState(null);
   const [error, setError] = useState("");
@@ -36,7 +37,8 @@ export default function Portfolio({ user }) {
   const [editHold, setEditHold] = useState(null);
   // Buy/sell form & ledger
   const [txns, setTxns] = useState([]);
-  const [form, setForm] = useState({ assetKey: "", side: "buy", quantity: "" });
+  const [form, setForm] = useState({ assetKey: "", side: "buy", quantity: "", timestamp: "" });
+  const [perf, setPerf] = useState(null);
   const [busy, setBusy] = useState(false);
   const [tradeMsg, setTradeMsg] = useState("");
   const requestId = useRef(0);
@@ -46,7 +48,7 @@ export default function Portfolio({ user }) {
   const loadVal = useCallback(async () => {
     const id = ++requestId.current;
     try {
-      const [assetList, v] = await Promise.all([listAssets(), valuation(activeId)]);
+      const [assetList, v] = await Promise.all([listAssets(), valuation(activeId, basis)]);
       if (id !== requestId.current) return;
       setAssets(assetList);
       setVal(v);
@@ -56,7 +58,13 @@ export default function Portfolio({ user }) {
       if (id !== requestId.current) return;
       setError(err.message);
     }
-  }, [activeId]);
+  }, [activeId, basis]);
+
+  useEffect(() => {
+    if (user?.is_pro) {
+      getPerformance().then(setPerf).catch(console.error);
+    }
+  }, [user, activeId]);
 
   useEffect(() => {
     loadVal();
@@ -260,12 +268,13 @@ export default function Portfolio({ user }) {
         assetKey: form.assetKey,
         side: form.side,
         quantity: form.quantity,
+        timestamp: form.timestamp || undefined,
       });
       const verb = res.side === "buy" ? "Bought" : "Sold";
       setTradeMsg(
         `${verb} ${fmtNum(res.quantity)} ${res.asset_key} — holding now ${fmtNum(res.holding_quantity)}.`
       );
-      setForm((f) => ({ ...f, quantity: "" }));
+      setForm((f) => ({ ...f, quantity: "", timestamp: "" }));
       refreshAll();
       transactions(365, activeAcct.id).then(setTxns).catch(() => {});
     } catch (e2) {
@@ -342,6 +351,13 @@ export default function Portfolio({ user }) {
             <div className="hero-sub">≈ ${fmtNum(val.total_usd)} USD</div>
           ) : (
             <div className="hero-sub">≈ $— USD</div>
+          )}
+          {user?.is_pro && perf && (
+            <div style={{ display: "flex", gap: "1.5rem", marginTop: "0.75rem", fontSize: "0.9rem", color: "var(--muted)" }}>
+              <div>TWR: <span style={{ fontWeight: 700, color: "var(--green)" }}>{(perf.twr * 100).toFixed(1)}%</span></div>
+              <div>XIRR: <span style={{ fontWeight: 700, color: "var(--green)" }}>{(perf.xirr * 100).toFixed(1)}%</span></div>
+              <div>Cost Basis: <span style={{ fontWeight: 600, color: "var(--text)" }}>{fmtToman(perf.total_cost_basis)}</span></div>
+            </div>
           )}
         </div>
         <div className="hero-meta">
@@ -711,6 +727,13 @@ export default function Portfolio({ user }) {
               placeholder="Quantity"
               value={form.quantity}
               onChange={(e) => setForm((f) => ({ ...f, quantity: e.target.value }))}
+            />
+            <input
+              aria-label="Execution Date (Backdate)"
+              type="date"
+              value={form.timestamp}
+              onChange={(e) => setForm((f) => ({ ...f, timestamp: e.target.value }))}
+              style={{ width: "130px" }}
             />
             <button type="submit" disabled={busy}>
               {busy ? "…" : "Execute"}

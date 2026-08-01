@@ -14,6 +14,8 @@ const Insights = lazy(() => import("./components/Insights.jsx"));
 const Analytics = lazy(() => import("./components/Analytics.jsx"));
 const AdminPortal = lazy(() => import("./components/AdminPortal.jsx"));
 const Profile = lazy(() => import("./components/Profile.jsx"));
+const TimeMachine = lazy(() => import("./components/TimeMachine.jsx"));
+const Discovery = lazy(() => import("./components/Discovery.jsx"));
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -99,6 +101,8 @@ export default function App() {
               <Route path="dashboard" element={<Navigate to="/" replace />} />
               <Route path="optimization" element={<OptimizationLayout user={user} />}>
                 <Route index element={<Optimization user={user} />} />
+                <Route path="timemachine" element={<TimeMachine user={user} />} />
+                <Route path="discovery" element={<Discovery user={user} />} />
                 <Route path="insights" element={<Insights user={user} />} />
                 <Route path="analytics" element={<Analytics user={user} />} />
               </Route>
@@ -126,7 +130,7 @@ function AccountRedirect() {
 
 function Shell({ user, setUser }) {
   const navigate = useNavigate();
-  const { accounts, activeId, setActive, reload, loading, error } = usePortfolio();
+  const { accounts, activeId, setActive, reload, loading, error, basis, setBasis } = usePortfolio();
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
 
   useEffect(() => {
@@ -163,6 +167,16 @@ function Shell({ user, setUser }) {
               {a.name}{a.goal ? ` · ${a.goal}` : ""}
             </option>
           ))}
+        </select>
+        <select
+          id="basis-scope"
+          className="portfolio-select"
+          value={basis}
+          onChange={(e) => setBasis(e.target.value)}
+          style={{ marginLeft: "0.5rem" }}
+        >
+          <option value="nominal">Nominal Toman</option>
+          <option value="usd_real">Real USD Basis</option>
         </select>
         <nav className="tabs" aria-label="Primary navigation">
           <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>

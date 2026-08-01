@@ -228,3 +228,38 @@ def fetch_and_publish():
         market_state(), len(result["priced"]), result["written"],
     )
     return result
+
+
+@shared_task(ignore_result=True)
+def run_backtest_task(run_id: int):
+    """Run the backtest task asynchronously with queue-level verification."""
+    from portfolio.models import BacktestRun, BacktestUserQuota
+    from portfolio.services.backtest import run_backtest
+    from django.conf import settings
+    from django.utils import timezone
+
+    try:
+        run = BacktestRun.objects.get(pk=run_id)
+    except BacktestRun.DoesNotExist:
+        logger.error(f"BacktestRun with ID {run_id} does not exist.")
+        return
+
+    # Pro subscription boundary check
+    if run.user and not run.user.is_pro():
+        run.status = BacktestRun.Status.FAILED
+        run.error = "This insight requires a Pro subscription."
+        run.save()
+        return
+
+    # Quota limit boundary check
+    if run.user:
+        today = timezone.now().date()
+        limit = getattr(settings, "DAILY_BACKTEST_LIMIT", 10)
+        quota = BacktestUserQuota.objects.filter(user=run.user, day=today).first()
+        if quota and quota.count > limit:
+            run.status = BacktestRun.Status.FAILED
+            run.error = f"Daily backtest limit of {limit} runs exceeded."
+            run.save()
+            return
+
+    run_backtest(run_id)

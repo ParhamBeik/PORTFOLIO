@@ -427,12 +427,11 @@ def test_diagnostics_metrics_finite(synthetic_history):
 
 
 def test_returns_cache_invalidates_on_write(synthetic_history, asset_catalog):
+    from portfolio.services.returns import _returns_cache_key
     df1, _ = daily_returns_matrix()
     assert not df1.empty
     v1 = _price_version_fingerprint()
-    assert cache.get(RETURNS_CACHE_KEY.format(
-        version=v1, history_days=DEFAULT_HISTORY_DAYS
-    )) is not None
+    assert cache.get(_returns_cache_key(DEFAULT_HISTORY_DAYS, None, None, "nominal", v1)) is not None
 
     Price.objects.create(
         asset=asset_catalog["emami_coin"],
@@ -444,9 +443,7 @@ def test_returns_cache_invalidates_on_write(synthetic_history, asset_catalog):
     assert v2 != v1
     # Old key gone after invalidate; new computation produces a fresh entry.
     df2, _ = daily_returns_matrix()
-    assert cache.get(RETURNS_CACHE_KEY.format(
-        version=v2, history_days=DEFAULT_HISTORY_DAYS
-    )) is not None
+    assert cache.get(_returns_cache_key(DEFAULT_HISTORY_DAYS, None, None, "nominal", v2)) is not None
 
 
 # ---------- 12. optimization cached -----------------------------------------

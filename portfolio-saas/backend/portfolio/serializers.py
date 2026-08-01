@@ -2,7 +2,7 @@ from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import Account, Asset, Holding, Transaction
+from .models import Account, Asset, Holding, Transaction, BacktestRun, BacktestYear, Watchlist, WatchlistItem
 from marketdata.models import MarketCandle, GoldCurrencyHistory
 from marketdata.jalali import normalize_jalali
 import jdatetime
@@ -133,4 +133,32 @@ class TransactionSerializer(serializers.ModelSerializer):
             .first()
         )
         return latest_id == obj.pk
+
+
+class BacktestYearSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BacktestYear
+        fields = "__all__"
+
+
+class BacktestRunSerializer(serializers.ModelSerializer):
+    years = BacktestYearSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = BacktestRun
+        fields = "__all__"
+
+
+class WatchlistItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WatchlistItem
+        fields = ("id", "symbol", "force_include", "force_exclude", "created_at")
+
+
+class WatchlistSerializer(serializers.ModelSerializer):
+    items = WatchlistItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Watchlist
+        fields = ("id", "account", "items", "created_at")
 

@@ -144,16 +144,20 @@ export const removeHolding = (accountId, id) =>
 
 // Buy/sell: the ledger write path. Appends a Transaction, updates the holding
 // balance, and stamps a net-worth snapshot — all atomically on the backend.
-export const trade = (accountId, { assetKey, side, quantity, note = "" }) =>
+export const trade = (accountId, { assetKey, side, quantity, note = "", timestamp = null }) =>
   api(`/api/accounts/${accountId}/trades/`, {
     method: "POST",
-    body: { asset_key: assetKey, side, quantity: Number(quantity), note },
+    body: { asset_key: assetKey, side, quantity: Number(quantity), note, timestamp },
   });
 // Trade history (all accounts, or one via ?account=). Newest first.
 export const transactions = (days = 90, accountId = null) =>
   api(`/api/transactions/?days=${days}` + (accountId ? `&account=${accountId}` : ""));
 export const deleteTransaction = (id) =>
   api(`/api/transactions/${id}/`, { method: "DELETE" });
+export const getPerformance = () =>
+  api(`/api/performance/`);
+export const getIntegrity = () =>
+  api(`/api/integrity/`);
 
 // Valuation & pricing
 //
@@ -161,8 +165,16 @@ export const deleteTransaction = (id) =>
 // It threads `?account=` into the per-portfolio endpoints so the whole UI scopes
 // to the portfolio selected in the top bar.
 const accountParam = (account) => (account ? `account=${account}` : "");
-export const valuation = (account = null) =>
-  api(`/api/valuation/${accountParam(account) ? "?" + accountParam(account) : ""}`);
+export const valuation = (account = null, basis = null) => {
+  let url = `/api/valuation/`;
+  const params = [];
+  if (account) params.push(`account=${account}`);
+  if (basis) params.push(`basis=${basis}`);
+  if (params.length > 0) {
+    url += "?" + params.join("&");
+  }
+  return api(url);
+};
 export const latestPrices = () => api("/api/prices/latest/");
 export const priceHistory = (assetKey, limit = 100) =>
   api(`/api/prices/history/?asset=${encodeURIComponent(assetKey)}&limit=${limit}`);

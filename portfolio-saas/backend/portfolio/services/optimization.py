@@ -80,14 +80,35 @@ class NoAssetBeatsRiskFreeRate(Exception):
 # ---------- helpers ----------------------------------------------------------
 
 
-def _asset_class_map() -> dict[str, str]:
+def _asset_class_map(universe: list[str] | None = None) -> dict[str, str]:
     """{asset_key: asset_class} for the same universe the returns df uses."""
-    return {
-        key: cls
-        for key, cls in Asset.objects.filter(is_active=True)
-        .exclude(is_house=True)
-        .values_list("key", "asset_class")
-    }
+    from portfolio.services.returns import resolve_universe
+    resolved_univ = resolve_universe(universe)
+    cls_map = {}
+    for item in resolved_univ:
+        key = item["key"]
+        asset = item["asset"]
+        if asset is not None:
+            cls_map[key] = asset.asset_class
+        else:
+            from marketdata.models import MarketInstrument
+            mi = MarketInstrument.objects.filter(symbol=item["symbol"]).first()
+            if mi is not None:
+                if mi.category == MarketInstrument.Category.STOCK:
+                    cls_map[key] = "Stock"
+                elif mi.category == MarketInstrument.Category.GOLD:
+                    cls_map[key] = "Gold"
+                else:
+                    cls_map[key] = "Other"
+            else:
+                if "usd" in key.lower() or "usdt" in key.lower() or "eur" in key.lower():
+                    if "bitcoin" in key.lower() or "crypto" in key.lower():
+                        cls_map[key] = "Crypto"
+                    else:
+                        cls_map[key] = "Cash"
+                else:
+                    cls_map[key] = "Stock"
+    return cls_map
 
 
 def _shrunk_covariance(returns: pd.DataFrame) -> pd.DataFrame:
@@ -380,11 +401,6 @@ def _risk_parity(
     S = S + np.eye(n) * 1e-10
     w = cp.Variable(n, pos=True)
     objective = cp.Minimize(0.5 * cp.quad_form(w, cp.psd_wrap(S)) - (2.0 / n) * cp.sum(cp.log(w)))
-    # NB: per-asset caps are NOT applied here. The Spinu optimum is scale-free
-    # (its ERC property holds at any scaling), and adding `w <= cap` on the raw
-    # (unnormalized) variables would make the problem infeasible since the raw
-    # solution has values far above any fractional cap. Caps are enforced
-    # post-hoc on the normalized weights via `_enforce_caps`.
     prob = cp.Problem(objective, [])
     
     solvers = ["CLARABEL", "SCS", "ECOS"]
@@ -471,6 +487,11 @@ def optimize(
     total_value_tomans: Decimal,
     constraints: dict | None = None,
     user=None,
+    history_days: int = 180,
+    as_of=None,
+    universe: list[str] | None = None,
+    basis: str = "nominal",
+    universe_mode: str = "market",
 ) -> dict:
     """Run one optimization scenario and return the full payload.
 
@@ -485,14 +506,30 @@ def optimize(
     if scenario not in SCENARIOS:
         raise ValueError(f"unknown scenario: {scenario}")
 
+    from portfolio.services.returns import normalize_as_of, get_universe_by_mode
+    as_of_dt = normalize_as_of(as_of)
+
+    if universe is None:
+        account = user.accounts.first() if user is not None else None
+        universe = get_universe_by_mode(universe_mode, user=user, account=account)
+
     version = _price_version_fingerprint()
     user_id = user.id if user is not None else 0
     portfolio_hash = _constraints_hash({
         "weights": current_weights,
         "total": str(total_value_tomans),
     })
+
+    if universe is None:
+        univ_str = "default"
+    else:
+        sorted_univ = sorted(universe)
+        univ_str = hashlib.md5(",".join(sorted_univ).encode("utf-8")).hexdigest()[:16]
+
+    as_of_str = "latest" if as_of_dt is None else as_of_dt.date().isoformat()
+
     cache_key = (
-        f"opt:{user_id}:{portfolio_hash}:{scenario}:v{version}:{_constraints_hash(resolved)}"
+        f"opt:{user_id}:{portfolio_hash}:{scenario}:as_of:{as_of_str}:univ_mode:{universe_mode}:univ:{univ_str}:basis:{basis}:v{version}:{_constraints_hash(resolved)}"
     )
     cached = cache.get(cache_key)
     if cached is not None:
@@ -500,7 +537,12 @@ def optimize(
         payload["cached"] = True
         return payload
 
-    returns, excluded = daily_returns_matrix()
+    returns, excluded = daily_returns_matrix(
+        history_days=history_days,
+        as_of=as_of_dt,
+        universe=universe,
+        basis=basis
+    )
     if returns.empty or len(returns.columns) < 3:
         raise UniverseTooSmall(list(returns.columns) if not returns.empty else [])
     # Restrict the eligible universe to assets with any variance.
@@ -509,7 +551,7 @@ def optimize(
         raise UniverseTooSmall(eligible)
     returns = returns[eligible]
 
-    class_map = _asset_class_map()
+    class_map = _asset_class_map(universe)
     cov_daily = _shrunk_covariance(returns)
     mu = returns.mean() * TRADING_DAYS_PER_YEAR
     cov_annual = cov_daily * TRADING_DAYS_PER_YEAR
@@ -584,7 +626,14 @@ def _solve_ef_max_sharpe(mu, S, cap):
     raise SolverError(f"Failed to solve max Sharpe: {last_exc}")
 
 
-def _efficient_frontier(n_points: int = 30) -> dict:
+def _efficient_frontier(
+    n_points: int = 30,
+    *,
+    history_days: int = 180,
+    as_of=None,
+    universe: list[str] | None = None,
+    basis: str = "nominal",
+) -> dict:
     """Sample the efficient frontier + reference points.
 
     Sweeps target returns from min-vol to max-Sharpe and solves min-vol at each
@@ -592,14 +641,22 @@ def _efficient_frontier(n_points: int = 30) -> dict:
     point (None here — the view injects the live point) and max_sharpe / min_vol
     points. Reuses the cached returns matrix so it's cheap on a warm cache.
     """
-    returns, _ = daily_returns_matrix()
+    from portfolio.services.returns import normalize_as_of
+    as_of_dt = normalize_as_of(as_of)
+
+    returns, _ = daily_returns_matrix(
+        history_days=history_days,
+        as_of=as_of_dt,
+        universe=universe,
+        basis=basis
+    )
     if returns.empty or len(returns.columns) < 2:
         return {"frontier": [], "max_sharpe": None, "min_volatility": None}
     eligible = [k for k in returns.columns if returns[k].std(ddof=0) > 0]
     if len(eligible) < 2:
         return {"frontier": [], "max_sharpe": None, "min_volatility": None}
     returns = returns[eligible]
-    class_map = _asset_class_map()
+    class_map = _asset_class_map(universe)
     cov_daily = _shrunk_covariance(returns)
     mu = returns.mean() * TRADING_DAYS_PER_YEAR
     S = cov_daily * TRADING_DAYS_PER_YEAR

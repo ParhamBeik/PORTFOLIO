@@ -13,7 +13,6 @@ from portfolio.models import Account, Holding, Snapshot, Transaction
 from portfolio.services.trades import (
     InsufficientHolding,
     ManualAssetTrade,
-    StaleTradeUndo,
     TradeError,
     execute_trade,
     undo_trade,
@@ -155,7 +154,7 @@ def test_undo_rejects_older_trade_for_same_asset(
         quantity=Decimal("1"),
     )
 
-    with pytest.raises(StaleTradeUndo):
+    with pytest.raises(TradeError):
         undo_trade(user=account.user, transaction_id=first.id)
 
     assert Transaction.objects.filter(account=account).count() == 2

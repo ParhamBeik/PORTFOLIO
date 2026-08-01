@@ -52,11 +52,76 @@ def _stamp_snapshots(user, account: Account) -> dict:
     return valuation
 
 
+def provision_asset(symbol_or_key: str) -> Asset:
+    """Create an Asset on demand from MarketInstrument metadata if not exists.
+
+    Validates through Asset.full_clean() to ensure eligibility.
+    """
+    # Check if key matches directly
+    asset = Asset.objects.filter(key=symbol_or_key).first()
+    if asset:
+        return asset
+
+    # Try matching by symbols
+    asset = (
+        Asset.objects.filter(tse_symbol=symbol_or_key).first()
+        or Asset.objects.filter(brs_symbol=symbol_or_key).first()
+    )
+    if asset:
+        return asset
+
+    from marketdata.models import MarketInstrument
+    mi = (
+        MarketInstrument.objects.filter(symbol=symbol_or_key).first()
+        or MarketInstrument.objects.filter(symbol__iexact=symbol_or_key).first()
+    )
+    if not mi and "_" in symbol_or_key:
+        sym = symbol_or_key.split("_")[0]
+        mi = MarketInstrument.objects.filter(symbol__iexact=sym).first()
+
+    if not mi:
+        raise TradeError(f"No matching eligible MarketInstrument found for symbol: {symbol_or_key}")
+
+    # Map class
+    asset_class = Asset.AssetClass.STOCK
+    if mi.category == MarketInstrument.Category.STOCK:
+        asset_class = Asset.AssetClass.STOCK
+    elif mi.category == MarketInstrument.Category.GOLD:
+        asset_class = Asset.AssetClass.GOLD
+    else:
+        if mi.symbol.upper() in ["USD", "EUR", "GBP", "AED", "TRY"]:
+            asset_class = Asset.AssetClass.CASH
+        else:
+            asset_class = Asset.AssetClass.GOLD
+
+    import re
+    clean_sym = re.sub(r'[^a-zA-Z0-9_]', '', mi.symbol).lower()
+    key = f"{clean_sym}_stock" if asset_class == Asset.AssetClass.STOCK else clean_sym
+
+    # Check key again
+    existing = Asset.objects.filter(key=key).first()
+    if existing:
+        return existing
+
+    asset = Asset(
+        key=key,
+        name=mi.name or mi.symbol,
+        asset_class=asset_class,
+        currency=Asset.Currency.IRT,
+        tse_symbol=mi.symbol if mi.source == MarketInstrument.Source.TSETMC else "",
+        brs_symbol=mi.symbol if mi.source == MarketInstrument.Source.BRS else "",
+        is_active=True,
+    )
+    asset.full_clean()
+    asset.save()
+    return asset
+
+
 @transaction.atomic
 def execute_trade(
     *,
     account: Account,
-    asset: Asset,
+    asset: Asset | str,
     side: str,
     quantity,
     price_tomans: Decimal | None = None,
@@ -68,6 +133,8 @@ def execute_trade(
     Atomic: ledger row + holding balance + net-worth snapshot commit together.
     `quantity` must be positive; direction comes from `side`.
     """
+    if isinstance(asset, str):
+        asset = provision_asset(asset)
     if side not in Transaction.Side.values:
         raise TradeError(f"side must be one of {Transaction.Side.values}")
     qty = _q(quantity)

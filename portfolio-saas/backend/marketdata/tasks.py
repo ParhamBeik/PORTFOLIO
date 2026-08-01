@@ -104,6 +104,11 @@ def _invalidate_returns():
 )
 def sync_symbol(symbol: str):
     """Sync lower-priority disclosures and shareholder data for one stock."""
+    import re
+    if re.search(r"\d$", symbol):
+        logger.debug("sync_symbol(%s) skipped: derivative tickers do not file disclosures or shareholder records", symbol)
+        return
+
     key = settings.TSETMC_API_KEY
     if not key:
         logger.warning("sync_symbol(%s): no TSETMC_API_KEY, skipping", symbol)
@@ -136,10 +141,12 @@ def daily_sync():
     already serializes them.
     """
     from .quota import remaining_requests, ARCHIVE
+    import re
     if remaining_requests(ARCHIVE) <= 0:
         logger.info("daily_sync: quota exhausted, skipping dispatch")
         return
-    symbols = tracked_tse_symbols()
+    # Exclude derivative symbols ending in digits to avoid wasted API requests
+    symbols = [s for s in tracked_tse_symbols() if not re.search(r"\d$", s)]
     tasks = [sync_symbol.si(s) for s in symbols]
     if tasks:
         group(*tasks).apply_async()
@@ -152,7 +159,11 @@ def weekly_metadata_sync():
     key = settings.TSETMC_API_KEY
     if not key:
         return
+    import re
     for symbol in tracked_tse_symbols():
+        # Exclude derivative symbols ending in digits
+        if re.search(r"\d$", symbol):
+            continue
         ingest.ingest_symbol_metadata(fetch_symbol_data(key, symbol))
         _pause()
     logger.info("weekly_metadata_sync: done")
@@ -348,3 +359,12 @@ def aggregate_daily_stock_history(date_str: str = None):
     if created_count:
         _invalidate_returns()
     logger.info("aggregate_daily_stock_history: processed %d stock symbols for %s", created_count, today_jalali)
+
+
+@shared_task(ignore_result=True)
+def nightly_data_integrity():
+    """Run data integrity checks for all symbols nightly."""
+    from marketdata.integrity import update_all_symbols_integrity
+    logger.info("Starting nightly data integrity checks...")
+    results = update_all_symbols_integrity()
+    logger.info("Nightly data integrity checks completed for %d symbols.", len(results))

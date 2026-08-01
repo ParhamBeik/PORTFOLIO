@@ -128,10 +128,34 @@ def _brs_job(brs_url, brs_key):
 
 
 def _tsetmc_job(tsetmc_url, tsetmc_key, tsetmc_symbol_url):
+    from django.core.cache import cache
     result = {"tsetmc": fetch_tsetmc(tsetmc_url, tsetmc_key)}
     kama_record = _find_symbol_record(result["tsetmc"], KAMA_SYMBOL)
     if _extract_price(kama_record) <= 0:
-        result["tsetmc_symbol_kama"] = fetch_tsetmc_symbol(tsetmc_symbol_url, tsetmc_key, KAMA_SYMBOL)
+        cooldown_key = f"cooldown:fallback_fetch:{KAMA_SYMBOL}"
+        if cache.get(cooldown_key):
+            logger.debug("Fallback fetch for %s is on cooldown, skipping", KAMA_SYMBOL)
+        else:
+            kama_data = fetch_tsetmc_symbol(tsetmc_symbol_url, tsetmc_key, KAMA_SYMBOL)
+            result["tsetmc_symbol_kama"] = kama_data
+
+            # Normalize and extract price to check if the fetch succeeded
+            kama_record_fallback = None
+            if kama_data:
+                if isinstance(kama_data, dict):
+                    if kama_data.get("pl") or kama_data.get("pc"):
+                        kama_record_fallback = kama_data
+                    else:
+                        for value in kama_data.values():
+                            if isinstance(value, list) and value and isinstance(value[0], dict):
+                                kama_record_fallback = value[0]
+                                break
+                elif isinstance(kama_data, list) and kama_data and isinstance(kama_data[0], dict):
+                    kama_record_fallback = kama_data[0]
+
+            if _extract_price(kama_record_fallback) <= 0:
+                logger.info("Fallback fetch for %s failed or returned zero price. Setting cooldown for 30 minutes.", KAMA_SYMBOL)
+                cache.set(cooldown_key, True, timeout=1800)  # 30-minute cooldown
     return result
 
 

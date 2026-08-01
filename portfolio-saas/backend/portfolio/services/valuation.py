@@ -308,3 +308,76 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
         })
 
     return series
+
+
+def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
+    """Compute valuation of portfolio assets as of a specific date and basis."""
+    from django.utils import timezone
+    from portfolio.services.returns import normalize_as_of, to_jalali_str
+    from portfolio.services.timeline import holdings_as_of
+    from marketdata.models import MarketCandle, GoldCurrencyHistory
+    from portfolio.models import Asset
+
+    as_of_dt = normalize_as_of(as_of)
+    if as_of_dt is None:
+        as_of_dt = timezone.now()
+
+    jalali_str = to_jalali_str(as_of_dt)
+
+    accounts = [account] if account else user.accounts.all()
+    items = []
+    total = Decimal("0")
+
+    # Find USD cash rate for usd_real basis
+    usd_rate = Decimal("1")
+    if basis == "usd_real":
+        usd_hist = GoldCurrencyHistory.objects.filter(symbol="USD", date__lte=jalali_str).order_by("-date").first()
+        if usd_hist and usd_hist.close_price > 0:
+            usd_rate = Decimal(str(usd_hist.close_price))
+
+    # Resolve close price for each asset
+    for acc in accounts:
+        acc_holdings = holdings_as_of(user, acc, as_of_dt)
+        for key, qty in acc_holdings.items():
+            if qty <= 0:
+                continue
+            asset = Asset.objects.filter(key=key).first()
+            if not asset:
+                continue
+
+            # Find historical unit price
+            price = Decimal("0")
+            if asset.is_house:
+                price = _house_value(Decimal("1"))
+            else:
+                if asset.tse_symbol:
+                    candle = MarketCandle.objects.filter(symbol=asset.tse_symbol, timeframe="1d_adj", date_time__lte=jalali_str).order_by("-date_time").first()
+                    if candle:
+                        price = Decimal(str(candle.close_price))
+                elif asset.brs_symbol:
+                    hist = GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol, date__lte=jalali_str).order_by("-date").first()
+                    if hist:
+                        price = Decimal(str(hist.close_price))
+
+            # Apply basis
+            val = qty * price
+            if basis == "usd_real" and usd_rate > 0:
+                val = val / usd_rate
+                price = price / usd_rate
+
+            total += val
+            items.append({
+                "asset": asset.name,
+                "key": asset.key,
+                "class": asset.asset_class,
+                "quantity": float(qty),
+                "unit_price": float(price),
+                "value": float(val),
+            })
+
+    return {
+        "total": float(total),
+        "items": items,
+        "as_of": as_of_dt.isoformat(),
+        "basis": basis,
+    }

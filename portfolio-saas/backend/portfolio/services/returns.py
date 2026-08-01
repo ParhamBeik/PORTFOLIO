@@ -86,33 +86,223 @@ def _jalali_to_gregorian_index(dates: pd.Series) -> pd.DatetimeIndex:
     return pd.DatetimeIndex([convert(v) for v in dates])
 
 
-def _warehouse_series(asset: Asset, cutoff: dt.datetime) -> pd.Series | None:
+def normalize_as_of(as_of) -> dt.datetime | None:
+    """Normalize as_of to a timezone-aware datetime."""
+    if as_of is None:
+        return None
+    if isinstance(as_of, str):
+        try:
+            if "T" in as_of:
+                return dt.datetime.fromisoformat(as_of)
+            else:
+                y, m, d = (int(part) for part in as_of.split("-"))
+                return dt.datetime(y, m, d, 23, 59, 59, tzinfo=dt.timezone.utc)
+        except Exception:
+            return None
+    if isinstance(as_of, dt.date) and not isinstance(as_of, dt.datetime):
+        return dt.datetime(as_of.year, as_of.month, as_of.day, 23, 59, 59, tzinfo=dt.timezone.utc)
+    if isinstance(as_of, dt.datetime):
+        if as_of.tzinfo is None:
+            return as_of.replace(tzinfo=dt.timezone.utc)
+        return as_of
+    return None
+
+
+def to_jalali_str(greg_date: dt.date | dt.datetime) -> str:
+    """Convert a Gregorian date/datetime to a Jalali YYYY-MM-DD string."""
+    if isinstance(greg_date, dt.datetime):
+        greg_date = greg_date.date()
+    jday = jdatetime.date.fromgregorian(date=greg_date)
+    return f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}"
+
+
+def resolve_universe(universe: list[str] | None = None) -> list[dict]:
+    """Resolve universe items to dicts with key, symbol, and source.
+
+    Each item in resolved list has:
+      * 'key': column key to use in the DataFrame (e.g. 'kama_stock' or symbol)
+      * 'symbol': the warehouse symbol ('کاما', 'USD', etc.)
+      * 'source': 'tse' or 'brs'
+      * 'asset': Asset object if exists
+    """
+    from marketdata.models import MarketInstrument
+
+    resolved = []
+    assets = {a.key: a for a in Asset.objects.filter(is_active=True).exclude(is_house=True)}
+    asset_by_symbol = {}
+    for a in assets.values():
+        sym = a.tse_symbol or a.brs_symbol
+        if sym:
+            asset_by_symbol[sym] = a
+
+    if universe is None:
+        for a in assets.values():
+            resolved.append({
+                "key": a.key,
+                "symbol": a.tse_symbol or a.brs_symbol or "",
+                "source": "tse" if a.tse_symbol else "brs",
+                "asset": a
+            })
+        return resolved
+
+    for item in universe:
+        if item in assets:
+            a = assets[item]
+            resolved.append({
+                "key": a.key,
+                "symbol": a.tse_symbol or a.brs_symbol or "",
+                "source": "tse" if a.tse_symbol else "brs",
+                "asset": a
+            })
+        elif item in asset_by_symbol:
+            a = asset_by_symbol[item]
+            resolved.append({
+                "key": a.key,
+                "symbol": item,
+                "source": "tse" if a.tse_symbol else "brs",
+                "asset": a
+            })
+        else:
+            mi = MarketInstrument.objects.filter(symbol=item).first()
+            if mi:
+                resolved.append({
+                    "key": item,
+                    "symbol": item,
+                    "source": "tse" if mi.source == MarketInstrument.Source.TSETMC else "brs",
+                    "asset": None
+                })
+            else:
+                mi = MarketInstrument.objects.filter(symbol__iexact=item).first()
+                if mi:
+                    resolved.append({
+                        "key": item,
+                        "symbol": mi.symbol,
+                        "source": "tse" if mi.source == MarketInstrument.Source.TSETMC else "brs",
+                        "asset": None
+                    })
+                else:
+                    resolved.append({
+                        "key": item,
+                        "symbol": item,
+                        "source": "brs",
+                        "asset": None
+                    })
+    return resolved
+
+
+def get_universe_by_mode(mode: str, user=None, account=None) -> list[str] | None:
+    """Resolve the list of symbol keys based on the universe mode."""
+    from portfolio.models import Holding, WatchlistItem, Asset
+    
+    active_assets = list(Asset.objects.filter(is_active=True).exclude(is_house=True).values_list("key", flat=True))
+
+    if mode == "held":
+        res = []
+        if account is not None:
+            res = list(account.holdings.values_list("asset__key", flat=True))
+        elif user is not None:
+            res = list(Holding.objects.filter(account__user=user).values_list("asset__key", flat=True))
+        
+        if not res:
+            return active_assets
+        return res
+
+    elif mode == "watchlist":
+        held_keys = []
+        if account is not None:
+            held_keys = list(account.holdings.values_list("asset__key", flat=True))
+            items = WatchlistItem.objects.filter(watchlist__account=account)
+            forced_in = set(items.filter(force_include=True).values_list("symbol", flat=True))
+            forced_ex = set(items.filter(force_exclude=True).values_list("symbol", flat=True))
+            watchlist_keys = set(items.values_list("symbol", flat=True))
+            
+            res = (set(held_keys) | watchlist_keys | forced_in) - forced_ex
+            res_list = list(res)
+            return res_list if res_list else active_assets
+        elif user is not None:
+            account = user.accounts.first()
+            if account:
+                held_keys = list(account.holdings.values_list("asset__key", flat=True))
+                items = WatchlistItem.objects.filter(watchlist__account=account)
+                forced_in = set(items.filter(force_include=True).values_list("symbol", flat=True))
+                forced_ex = set(items.filter(force_exclude=True).values_list("symbol", flat=True))
+                watchlist_keys = set(items.values_list("symbol", flat=True))
+                
+                res = (set(held_keys) | watchlist_keys | forced_in) - forced_ex
+                res_list = list(res)
+                return res_list if res_list else active_assets
+        return active_assets
+
+    elif mode == "market":
+        from marketdata.models import MarketInstrument
+        if not MarketInstrument.objects.filter(eligible=True).exists():
+            return active_assets
+
+        from marketdata.universe import get_candidate_universe
+        candidates, _ = get_candidate_universe()
+        if account is not None:
+            items = WatchlistItem.objects.filter(watchlist__account=account)
+            forced_in = set(items.filter(force_include=True).values_list("symbol", flat=True))
+            forced_ex = set(items.filter(force_exclude=True).values_list("symbol", flat=True))
+            res = (set(candidates) | forced_in) - forced_ex
+            return list(res)
+        elif user is not None:
+            account = user.accounts.first()
+            if account:
+                items = WatchlistItem.objects.filter(watchlist__account=account)
+                forced_in = set(items.filter(force_include=True).values_list("symbol", flat=True))
+                forced_ex = set(items.filter(force_exclude=True).values_list("symbol", flat=True))
+                res = (set(candidates) | forced_in) - forced_ex
+                return list(res)
+        return candidates
+
+    return None
+
+
+def _returns_cache_key(history_days: int, as_of: dt.datetime | None, universe: list[str] | None, basis: str, version: str) -> str:
+    import hashlib
+    if universe is None:
+        univ_str = "default"
+    else:
+        sorted_univ = sorted(universe)
+        univ_str = hashlib.md5(",".join(sorted_univ).encode("utf-8")).hexdigest()[:16]
+
+    as_of_str = "latest" if as_of is None else as_of.date().isoformat()
+    return f"returns:daily:{history_days}d:as_of:{as_of_str}:univ:{univ_str}:basis:{basis}:v{version}"
+
+
+
+def _warehouse_series(
+    symbol: str,
+    source: str,
+    cutoff: dt.datetime,
+    as_of: dt.datetime | None = None,
+) -> pd.Series | None:
     """Daily close series for one asset from the warehouse, or None.
 
     DailyStockHistory (unadjusted `pl` close) for TSE assets, GoldCurrencyHistory
     for gold/currency/crypto. Returns None unless the series has at least
-    MIN_DAILY_RETURNS rows inside the window — below that the sparse Price
-    fallback is no worse, and one source per column keeps behavior predictable.
+    MIN_DAILY_RETURNS rows inside the window.
     """
-    from marketdata.models import DailyStockHistory, GoldCurrencyHistory
+    from marketdata.models import GoldCurrencyHistory, MarketCandle
 
-    if asset.tse_symbol:
-        from marketdata.models import MarketCandle
-        rows = (
-            MarketCandle.objects
-            .filter(symbol=asset.tse_symbol, timeframe="1d_adj", close_price__gt=0)
-            .order_by("date_time")
-            .values_list("date_time", "close_price")
-        )
-    elif asset.brs_symbol:
-        rows = (
-            GoldCurrencyHistory.objects
-            .filter(symbol=asset.brs_symbol)
-            .order_by("date")
-            .values_list("date", "close_price")
-        )
+    as_of_jalali = None
+    if as_of is not None:
+        as_of_jalali = to_jalali_str(as_of)
+
+    if source == "tse":
+        qs = MarketCandle.objects.filter(symbol=symbol, timeframe="1d_adj", close_price__gt=0)
+        if as_of_jalali is not None:
+            qs = qs.filter(date_time__lte=as_of_jalali)
+        rows = qs.order_by("date_time").values_list("date_time", "close_price")
+    elif source == "brs":
+        qs = GoldCurrencyHistory.objects.filter(symbol=symbol)
+        if as_of_jalali is not None:
+            qs = qs.filter(date__lte=as_of_jalali)
+        rows = qs.order_by("date").values_list("date", "close_price")
     else:
         return None
+
     if not rows:
         return None
 
@@ -126,51 +316,163 @@ def _warehouse_series(asset: Asset, cutoff: dt.datetime) -> pd.Series | None:
     series = series[series.index >= cutoff]
     if len(series) < MIN_DAILY_RETURNS:
         return None
-    # Collapse duplicate days (adjusted/unadjusted overlap edge cases): keep last.
+    # Collapse duplicate days: keep last.
     return series.groupby(series.index).last()
 
 
-def _load_price_panel(history_days: int) -> pd.DataFrame:
+def _load_price_panel(
+    history_days: int,
+    as_of: dt.datetime | None = None,
+    universe: list[str] | None = None,
+) -> tuple[pd.DataFrame, list[dict]]:
     """Per-asset daily close panel: warehouse series preferred, Price fallback.
 
     Columns are asset keys, indexed by (Gregorian) date. NaN where an asset had
     no row that day.
     """
-    cutoff = dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(
-        days=history_days + _HISTORY_BUFFER_DAYS
-    )
+    as_of_dt = normalize_as_of(as_of)
+    if as_of_dt is not None:
+        cutoff = as_of_dt - dt.timedelta(days=history_days + _HISTORY_BUFFER_DAYS)
+    else:
+        cutoff = dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(
+            days=history_days + _HISTORY_BUFFER_DAYS
+        )
 
-    assets = list(Asset.objects.filter(is_active=True).exclude(is_house=True))
+    from marketdata.models import SymbolIntegrity, MarketCandle, GoldCurrencyHistory
+    failed_symbols = {
+        si.symbol: si.reason
+        for si in SymbolIntegrity.objects.filter(passes_gate=False)
+    }
+
+    # Resolve universe items
+    resolved_univ = resolve_universe(universe)
+
+    # We must ensure usd_cash is loaded in the panel for currency conversion and basis conversion
+    usd_cash_in_univ = any(x["key"] == "usd_cash" for x in resolved_univ)
+    if not usd_cash_in_univ:
+        usd_cash_resolved = resolve_universe(["usd_cash"])[0]
+        resolved_univ.append(usd_cash_resolved)
+
+    # Separate by source for bulk querying
+    tse_symbols = []
+    brs_symbols = []
+    for item in resolved_univ:
+        if item["source"] == "tse":
+            tse_symbols.append(item["symbol"])
+        elif item["source"] == "brs":
+            brs_symbols.append(item["symbol"])
+
+    as_of_jalali = None
+    if as_of_dt is not None:
+        as_of_jalali = to_jalali_str(as_of_dt)
+
+    # Bulk query MarketCandle (TSE)
+    tse_rows = []
+    if tse_symbols:
+        qs_tse = MarketCandle.objects.filter(
+            symbol__in=tse_symbols,
+            timeframe="1d_adj",
+            close_price__gt=0
+        )
+        if as_of_jalali is not None:
+            qs_tse = qs_tse.filter(date_time__lte=as_of_jalali)
+        tse_rows = list(qs_tse.order_by("symbol", "date_time").values_list("symbol", "date_time", "close_price"))
+
+    # Bulk query GoldCurrencyHistory (BRS)
+    brs_rows = []
+    if brs_symbols:
+        qs_brs = GoldCurrencyHistory.objects.filter(
+            symbol__in=brs_symbols
+        )
+        if as_of_jalali is not None:
+            qs_brs = qs_brs.filter(date__lte=as_of_jalali)
+        brs_rows = list(qs_brs.order_by("symbol", "date").values_list("symbol", "date", "close_price"))
+
+    # Group data by symbol
+    tse_data = {}
+    for sym, dt_str, close in tse_rows:
+        tse_data.setdefault(sym, []).append((dt_str, close))
+
+    brs_data = {}
+    for sym, d_str, close in brs_rows:
+        brs_data.setdefault(sym, []).append((d_str, close))
+
     warehouse_cols: dict[str, pd.Series] = {}
     fallback_keys: list[str] = []
-    for asset in assets:
-        series = _warehouse_series(asset, cutoff)
-        if series is not None:
-            warehouse_cols[asset.key] = series
-        else:
-            fallback_keys.append(asset.key)
+    gate_excluded = []
 
-    fallback_panel = _load_live_price_panel(cutoff, fallback_keys)
+    for item in resolved_univ:
+        key = item["key"]
+        symbol = item["symbol"]
+        source = item["source"]
+
+        # Check data integrity gate
+        if symbol in failed_symbols:
+            gate_excluded.append({
+                "key": key,
+                "reason": "integrity_gate_failed",
+                "detail": failed_symbols[symbol]
+            })
+            continue
+
+        # Extract rows from bulk data
+        rows_data = tse_data.get(symbol, []) if source == "tse" else brs_data.get(symbol, [])
+        if not rows_data:
+            fallback_keys.append(key)
+            continue
+
+        dates, closes = zip(*rows_data)
+        series = pd.Series(
+            pd.to_numeric(pd.Series(closes), errors="coerce").values,
+            index=_jalali_to_gregorian_index(pd.Series(dates)),
+        )
+        series = series[series.index.notna()]
+        series = series[series > 0]
+        series = series[series.index >= cutoff]
+
+        # Survivorship guard: check if asset was trading at as_of
+        if as_of_dt is not None and not series.index.empty:
+            max_date = series.index.max()
+            if (as_of_dt - max_date).days > 30:
+                gate_excluded.append({
+                    "key": key,
+                    "reason": "survivorship_guard_failed",
+                    "detail": f"No price updates near as_of {as_of_dt.date()}"
+                })
+                continue
+
+        if len(series) < MIN_DAILY_RETURNS:
+            fallback_keys.append(key)
+            continue
+
+        series = series.groupby(series.index).last()
+        warehouse_cols[key] = series
+
+    fallback_panel = _load_live_price_panel(cutoff, as_of_dt, fallback_keys)
 
     if not warehouse_cols:
-        return fallback_panel
+        return fallback_panel, gate_excluded
     panel = pd.DataFrame(warehouse_cols)
     panel.index = panel.index.normalize()
     if not fallback_panel.empty:
         panel = panel.join(fallback_panel, how="outer")
-    return panel.sort_index()
+    return panel.sort_index(), gate_excluded
 
 
-def _load_live_price_panel(cutoff: dt.datetime, keys: list[str]) -> pd.DataFrame:
-    """The original Price-table loader, restricted to the given asset keys."""
+def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys: list[str]) -> pd.DataFrame:
+    """The original Price-table loader, restricted to the given asset keys and cutoff/as_of."""
     if not keys:
         return pd.DataFrame()
+    
+    qs = Price.objects.filter(
+        asset__is_active=True, asset__key__in=keys, fetched_at__gte=cutoff
+    ).exclude(asset__is_house=True)
+
+    if as_of is not None:
+        qs = qs.filter(fetched_at__lte=as_of)
+
     rows = (
-        Price.objects.filter(
-            asset__is_active=True, asset__key__in=keys, fetched_at__gte=cutoff
-        )
-        .exclude(asset__is_house=True)
-        .select_related("asset")
+        qs.select_related("asset")
         .order_by("asset__key", "fetched_at")
         .values("asset__key", "fetched_at", "price")
     )
@@ -237,7 +539,11 @@ def _build_returns_matrix(panel: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]
 
 
 def daily_returns_matrix(
-    *, history_days: int = DEFAULT_HISTORY_DAYS
+    *,
+    history_days: int = DEFAULT_HISTORY_DAYS,
+    as_of=None,
+    universe: list[str] | None = None,
+    basis: str = "nominal"
 ) -> tuple[pd.DataFrame, list[dict]]:
     """Return `(daily_returns_df, excluded)` for the eligible universe.
 
@@ -246,11 +552,11 @@ def daily_returns_matrix(
     key (TTL 600s). The df is indexed by date, columns are asset keys, values
     are daily simple returns (float).
     """
+    as_of_dt = normalize_as_of(as_of)
     version = _price_version_fingerprint()
-    key = RETURNS_CACHE_KEY.format(version=version, history_days=history_days)
+    key = _returns_cache_key(history_days, as_of_dt, universe, basis, version)
     cached = cache.get(key)
     if cached is not None:
-        # Stored as {"columns": [...], "index": [iso...], "data": [[col0,col1,...], ...]}.
         df = pd.DataFrame(
             data=cached["data"],
             index=pd.to_datetime(cached["index"], utc=True),
@@ -258,15 +564,32 @@ def daily_returns_matrix(
         )
         return df, cached["excluded"]
 
-    panel = _load_price_panel(history_days)
+    panel, gate_excluded = _load_price_panel(history_days, as_of=as_of_dt, universe=universe)
     panel = _convert_usd_to_toman(panel)
+
+    # Apply basis conversion
+    if basis == "usd_real" and "usd_cash" in panel.columns:
+        from portfolio.services.deflator import to_basis
+        usd_series = panel["usd_cash"]
+        for col in panel.columns:
+            panel[col] = to_basis(panel[col], basis, usd_series=usd_series)
+
     returns, excluded = _build_returns_matrix(panel)
+    excluded.extend(gate_excluded)
+
+    # Filter columns to only include the requested universe
+    resolved_univ = resolve_universe(universe)
+    requested_keys = [item["key"] for item in resolved_univ]
+    keep = [k for k in requested_keys if k in returns.columns]
+    returns = returns[keep] if keep else pd.DataFrame(index=returns.index)
+
+    # Filter excluded list to only include requested universe keys
+    requested_keys_set = set(requested_keys)
+    excluded = [e for e in excluded if e.get("key") in requested_keys_set]
 
     if returns.empty:
         payload = {"columns": [], "index": [], "data": []}
     else:
-        # Replace NaN with None so locmem (which uses pickle) round-trips fine
-        # and a later JSON encoder can also handle the values directly.
         payload = {
             "columns": list(returns.columns),
             "index": [d.isoformat() for d in returns.index],
@@ -280,13 +603,24 @@ def daily_returns_matrix(
     return returns, excluded
 
 
-def correlation_matrix() -> dict:
+def correlation_matrix(
+    *,
+    history_days: int = DEFAULT_HISTORY_DAYS,
+    as_of=None,
+    universe: list[str] | None = None,
+    basis: str = "nominal"
+) -> dict:
     """Correlation payload for the eligible universe from the returns df.
 
     NaN correlations (assets with no overlap) become 0 so the matrix is dense
     and JSON-serializable.
     """
-    df, _ = daily_returns_matrix()
+    df, _ = daily_returns_matrix(
+        history_days=history_days,
+        as_of=as_of,
+        universe=universe,
+        basis=basis
+    )
     if df.empty:
         return {"assets": [], "matrix": []}
     corr = df.corr().fillna(0.0)
@@ -302,10 +636,9 @@ def invalidate_returns_cache() -> None:
     try:
         version = _price_version_fingerprint()
         for history_days in (30, 90, DEFAULT_HISTORY_DAYS, 365):
-            cache.delete(RETURNS_CACHE_KEY.format(
-                version=version,
-                history_days=history_days,
-            ))
+            for basis in ("nominal", "usd_real"):
+                key = _returns_cache_key(history_days, None, None, basis, version)
+                cache.delete(key)
     except Exception:  # cache is best-effort; never crash a fetch on it
         pass
 

@@ -56,9 +56,16 @@ export function PortfolioProvider({ children, enabled }) {
     else localStorage.setItem(ACTIVE_KEY, String(id));
   }, []);
 
+  const [basis, setBasisState] = useState(() => localStorage.getItem("lattice_basis") || "nominal");
+
+  const setBasis = useCallback((newBasis) => {
+    setBasisState(newBasis);
+    localStorage.setItem("lattice_basis", newBasis);
+  }, []);
+
   return (
     <PortfolioContext.Provider
-      value={{ accounts, activeId, setActive, reload, loading, error }}
+      value={{ accounts, activeId, setActive, reload, loading, error, basis, setBasis }}
     >
       {children}
     </PortfolioContext.Provider>

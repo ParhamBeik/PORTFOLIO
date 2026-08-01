@@ -70,6 +70,7 @@ _FULL_HISTORY = (
     ArchiveFetchState.Endpoint.GOLD_DAILY,
     ArchiveFetchState.Endpoint.COMMODITY_DAILY,
     ArchiveFetchState.Endpoint.CRYPTO_DAILY,
+    ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY,
 )
 _RANGE_HISTORY = (ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,)
 
@@ -121,11 +122,19 @@ def ensure_archive_states(stock_symbols=None, gold_symbols=None):
         from .tasks import tracked_brs_symbols
         gold_symbols = tracked_brs_symbols()
 
-    rows = [
-        ArchiveFetchState(endpoint=endpoint, symbol=symbol)
-        for symbol in stock_symbols
-        for endpoint in STOCK_ENDPOINTS
-    ]
+    import re
+    rows = []
+    for symbol in stock_symbols:
+        is_derivative = bool(re.search(r"\d$", symbol))
+        for endpoint in STOCK_ENDPOINTS:
+            # Skip creating codal_announcements and shareholder_records for digit-suffixed symbols
+            if is_derivative and endpoint in (
+                ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
+                ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS,
+            ):
+                continue
+            rows.append(ArchiveFetchState(endpoint=endpoint, symbol=symbol))
+
     rows += [
         ArchiveFetchState(
             endpoint=ArchiveFetchState.Endpoint.GOLD_DAILY,
@@ -136,6 +145,7 @@ def ensure_archive_states(stock_symbols=None, gold_symbols=None):
     rows += [
         ArchiveFetchState(endpoint=ArchiveFetchState.Endpoint.COMMODITY_DAILY, symbol="COMMODITIES"),
         ArchiveFetchState(endpoint=ArchiveFetchState.Endpoint.CRYPTO_DAILY, symbol="CRYPTO"),
+        ArchiveFetchState(endpoint=ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY, symbol="TEDPIX"),
     ]
     if rows:
         ArchiveFetchState.objects.bulk_create(rows, ignore_conflicts=True)
@@ -244,6 +254,12 @@ def _fetch_and_ingest(state):
         # state stays incomplete and reschedules until the window is covered.
         expected = set(pending) | _tick_dates_stored(symbol)
         stored = _tick_dates_stored(symbol)
+    elif endpoint == ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY:
+        from .fetchers.index import fetch_market_index
+        payload = fetch_market_index(settings.TSETMC_API_KEY)
+        result = ingest.ingest_market_index(payload)
+        expected = {payload.get("date")} if (payload and isinstance(payload, dict) and payload.get("date")) else set()
+        stored = set(MarketIndexData.objects.filter(date__in=expected).values_list("date", flat=True))
     else:
         payload = fetch_gold_currency_pro_history_daily(settings.BRS_API_KEY, symbol)
         result = ingest.ingest_gold_currency_history(payload)

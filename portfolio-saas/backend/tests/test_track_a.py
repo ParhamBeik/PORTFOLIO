@@ -16,7 +16,7 @@ from marketdata.models import MarketCandle, GoldCurrencyHistory
 class TestTrackA:
     def test_reconcile_ledger_clean(self, django_user_model):
         """Unit test for reconcile_ledger command when ledger is clean."""
-        user = django_user_model.objects.create(username="test")
+        user = django_user_model.objects.create_user(email="test@example.com", password="password123")
         acc = Account.objects.create(user=user, name="Main")
         asset = Asset.objects.create(key="test_asset", name="Test", is_active=True)
         
@@ -27,7 +27,7 @@ class TestTrackA:
         
     def test_reconcile_ledger_drift(self, django_user_model):
         """Unit test for reconcile_ledger command when ledger drifts."""
-        user = django_user_model.objects.create(username="test")
+        user = django_user_model.objects.create_user(email="test2@example.com", password="password123")
         acc = Account.objects.create(user=user, name="Main")
         asset = Asset.objects.create(key="test_asset", name="Test", is_active=True)
         
@@ -43,7 +43,7 @@ class TestTrackA:
 
     def test_holdings_as_of(self, django_user_model):
         """Integration test for holdings_as_of backwards calculation."""
-        user = django_user_model.objects.create(username="test")
+        user = django_user_model.objects.create_user(email="test3@example.com", password="password123")
         acc = Account.objects.create(user=user, name="Main")
         asset = Asset.objects.create(key="test_asset", name="Test", is_active=True)
         

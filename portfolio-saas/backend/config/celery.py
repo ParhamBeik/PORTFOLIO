@@ -77,6 +77,11 @@ app.conf.beat_schedule = {
         "task": "marketdata.tasks.aggregate_daily_stock_history",
         "schedule": crontab(hour=13, minute=30),
     },
+    # Nightly data integrity gate checks at Tehran midnight (20:30 UTC)
+    "nightly-data-integrity": {
+        "task": "marketdata.tasks.nightly_data_integrity",
+        "schedule": crontab(hour=20, minute=30),
+    },
 }
 
 

@@ -13,6 +13,12 @@ export default function OptimizationLayout({ user }) {
             <NavLink to="/optimization" end className={({ isActive }) => (isActive ? "active" : "")}>
               Optimizer
             </NavLink>
+            <NavLink to="/optimization/timemachine" className={({ isActive }) => (isActive ? "active" : "")}>
+              Time Machine
+            </NavLink>
+            <NavLink to="/optimization/discovery" className={({ isActive }) => (isActive ? "active" : "")}>
+              Discovery
+            </NavLink>
             <NavLink to="/optimization/insights" className={({ isActive }) => (isActive ? "active" : "")}>
               Advanced Insights
             </NavLink>

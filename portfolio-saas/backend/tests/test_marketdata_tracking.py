@@ -217,14 +217,16 @@ def test_active_asset_must_exist_in_verified_catalog():
         )
 
 
-def test_5m_window_rate_limit(settings):
+def test_5m_window_rate_limit(settings, monkeypatch):
     """We choose a unit test because verifying 5-minute rolling window rate limits tests fast, isolated business rules at the base of the test pyramid."""
     from marketdata import quota
     from marketdata.quota import get_quota_status
+    monkeypatch.setattr(quota, "get_redis", lambda: None)
     settings.MARKETDATA_DAILY_REQUEST_LIMIT = 100
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 0
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
     settings.MARKETDATA_ARCHIVE_REQUEST_BUDGET = 100
+    settings.MARKETDATA_REQUIRE_SHARED_WINDOW = False
     # The window is per bucket, and with no Redis in the suite the degraded
     # per-process window applies, so back out both divisors to land on 3.
     settings.MARKETDATA_WINDOW_LIMIT = int(
@@ -232,9 +234,6 @@ def test_5m_window_rate_limit(settings):
     )
     settings.MARKETDATA_WINDOW_SECONDS = 300
     quota._LOCAL_WINDOWS.clear()
-    client = quota.get_redis()
-    if client is not None:
-        client.delete(quota._window_key(ARCHIVE))
 
     reserve_request(ARCHIVE)
     reserve_request(ARCHIVE)

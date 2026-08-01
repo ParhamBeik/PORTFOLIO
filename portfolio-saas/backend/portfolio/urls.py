@@ -28,6 +28,12 @@ from .views import (
     TransactionDestroyView,
     TransactionUndoView,
     ValuationView,
+    BacktestView,
+    BacktestDetailView,
+    DiscoveryView,
+    WatchlistView,
+    PerformanceView,
+    IntegrityView,
 )
 
 urlpatterns = [
@@ -61,4 +67,10 @@ urlpatterns = [
     path("optimization/", OptimizationView.as_view(), name="optimization"),
     path("optimization/frontier/", FrontierView.as_view(), name="optimization-frontier"),
     path("assets/returns/", AssetReturnsView.as_view(), name="assets-returns"),
+    path("backtest/", BacktestView.as_view(), name="backtest"),
+    path("backtest/<int:pk>/", BacktestDetailView.as_view(), name="backtest-detail"),
+    path("discovery/", DiscoveryView.as_view(), name="discovery"),
+    path("watchlist/", WatchlistView.as_view(), name="watchlist"),
+    path("performance/", PerformanceView.as_view(), name="performance"),
+    path("integrity/", IntegrityView.as_view(), name="integrity"),
 ]

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { adminCleanPricesExecute, adminCleanPricesScan, adminStatus, adminStatusStreamUrl } from "../api.js";
+import { adminCleanPricesExecute, adminCleanPricesScan, adminStatus, adminStatusStreamUrl, getIntegrity } from "../api.js";
 import { fmtNum } from "../format.js";
 
 export default function AdminPortal() {
@@ -22,6 +22,24 @@ export default function AdminPortal() {
   const [repairState, setRepairState] = useState(null);
   const [repairLoading, setRepairLoading] = useState(false);
   const [repairMsg, setRepairMsg] = useState("");
+
+  // Symbol Integrity & Rejected Records State
+  const [integrityData, setIntegrityData] = useState(null);
+  const [integrityLoading, setIntegrityLoading] = useState(false);
+  const [integrityError, setIntegrityError] = useState("");
+
+  const fetchIntegrityData = () => {
+    setIntegrityLoading(true);
+    setIntegrityError("");
+    getIntegrity()
+      .then(setIntegrityData)
+      .catch((e) => setIntegrityError(e.message || "Failed to load integrity data"))
+      .finally(() => setIntegrityLoading(false));
+  };
+
+  useEffect(() => {
+    fetchIntegrityData();
+  }, []);
 
   const terminalStreamRef = useRef(null);
 
@@ -634,6 +652,105 @@ export default function AdminPortal() {
             </div>
           </div>
         )}
+      </section>
+
+      {/* Symbol Integrity Gate Panel */}
+      <section className="card margin-top">
+        <div className="card-head" style={{ flexWrap: "wrap", gap: "10px" }}>
+          <div>
+            <h3 style={{ margin: 0 }}>🛡️ Symbols Warehouse Integrity Gate</h3>
+            <span className="muted small">Coverage & Gap metrics computed against active trading rules</span>
+          </div>
+          <button type="button" className="btn-secondary small" onClick={fetchIntegrityData} disabled={integrityLoading}>
+            {integrityLoading ? "Refreshing…" : "🔄 Refresh"}
+          </button>
+        </div>
+
+        {integrityError && <div className="error margin-top">{integrityError}</div>}
+
+        <div style={{ maxHeight: "300px", overflowY: "auto", marginTop: "12px", border: "1px solid var(--border)", borderRadius: "8px" }}>
+          <table className="holdings font-small" style={{ margin: 0 }}>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Coverage Ratio</th>
+                <th>Max Gap Days</th>
+                <th>Passes Gate</th>
+                <th>Failure Cause / Reason</th>
+                <th>Last Evaluated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!integrityData?.integrity || integrityData.integrity.length === 0 ? (
+                <tr>
+                  <td colSpan="6" style={{ textAlign: "center", color: "var(--muted)", padding: "1rem" }}>
+                    No symbol integrity data compiled. Run `data_integrity` command.
+                  </td>
+                </tr>
+              ) : (
+                integrityData.integrity.map((item, idx) => (
+                  <tr key={`${item.symbol}-${idx}`}>
+                    <td><strong>{item.symbol}</strong></td>
+                    <td className="font-mono">{(item.coverage_ratio * 100).toFixed(1)}%</td>
+                    <td className="font-mono">{item.max_gap_days} days</td>
+                    <td>
+                      <span className={item.passes_gate ? "badge badge-success" : "badge badge-error"}>
+                        {item.passes_gate ? "PASSED" : "FAILED"}
+                      </span>
+                    </td>
+                    <td className="muted" style={{ textTransform: "capitalize" }}>
+                      {item.reason ? item.reason.replace(/_/g, " ") : "—"}
+                    </td>
+                    <td className="muted small">{item.computed_at ? new Date(item.computed_at).toLocaleString() : "—"}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* Rejected Records Panel */}
+      <section className="card margin-top">
+        <div className="card-head">
+          <h3>❌ Rejected Data Ingest Records</h3>
+          <span className="muted small">Failed raw quality validations, ranked by occurrences</span>
+        </div>
+
+        <div style={{ maxHeight: "300px", overflowY: "auto", marginTop: "12px", border: "1px solid var(--border)", borderRadius: "8px" }}>
+          <table className="holdings font-small" style={{ margin: 0 }}>
+            <thead>
+              <tr>
+                <th>Natural Key</th>
+                <th>Endpoint</th>
+                <th>Reject Reason</th>
+                <th>Date</th>
+                <th style={{ textAlign: "right" }}>Occurrences</th>
+                <th>Last Seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!integrityData?.rejected || integrityData.rejected.length === 0 ? (
+                <tr>
+                  <td colSpan="6" style={{ textAlign: "center", color: "var(--muted)", padding: "1rem" }}>
+                    No rejected records stored. Data ingestion is healthy.
+                  </td>
+                </tr>
+              ) : (
+                integrityData.rejected.map((item) => (
+                  <tr key={item.id}>
+                    <td><strong>{item.symbol || "—"}</strong></td>
+                    <td><span className="badge">{item.endpoint}</span></td>
+                    <td className="neg" style={{ fontWeight: 600 }}>{item.reason}</td>
+                    <td className="font-mono">{item.date || "—"}</td>
+                    <td style={{ textAlign: "right", fontWeight: 700 }}>{fmtNum(item.occurrences)}</td>
+                    <td className="muted small">{item.last_seen ? new Date(item.last_seen).toLocaleString() : "—"}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </section>
     </div>
   );

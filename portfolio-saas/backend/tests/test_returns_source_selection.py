@@ -94,9 +94,9 @@ def test_returns_cache_isolated_by_history_window(monkeypatch):
 
     calls = []
 
-    def fake_panel(days):
+    def fake_panel(days, as_of=None, universe=None):
         calls.append(days)
-        return pd.DataFrame()
+        return pd.DataFrame(), []
 
     cache.clear()
     monkeypatch.setattr(returns, "_load_price_panel", fake_panel)

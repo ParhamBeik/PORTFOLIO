@@ -72,6 +72,7 @@ services:
     volumes:
       - ./backend:/app
       - "${IMPORT_DATA_DIR:-./import-data}:/portfolio-data:ro"
+      - ../PORTFOLIO NEW STRUCTURE:/PORTFOLIO NEW STRUCTURE:ro
     ports:
       - "8000:8000"
     healthcheck:

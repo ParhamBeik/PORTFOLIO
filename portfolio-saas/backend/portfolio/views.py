@@ -232,7 +232,17 @@ class ValuationView(APIView):
     """
 
     def get(self, request):
+        as_of = request.query_params.get("as_of")
+        basis = request.query_params.get("basis") or "nominal"
         account = _scope(request)
+
+        # Historical as-of (any basis) must use the warehouse path.
+        # Live requests keep the live price path; usd_real is applied after.
+        if as_of:
+            from portfolio.services.valuation import value_as_of
+            res = value_as_of(request.user, account=account, as_of=as_of, basis=basis)
+            return Response(res)
+
         if account is not None:
             valuation = value_account(account)
             # value_account omits the price map; attach it so _with_usd can
@@ -240,7 +250,10 @@ class ValuationView(APIView):
             valuation["prices"] = get_latest_prices()
         else:
             valuation = value_user(request.user)
-        return Response(_with_usd(valuation))
+        valuation = _with_usd(valuation)
+        if basis == "usd_real":
+            valuation = _express_usd_real(valuation)
+        return Response(valuation)
 
 
 class AccountValuationView(APIView):
@@ -250,11 +263,27 @@ class AccountValuationView(APIView):
         account = request.user.accounts.filter(pk=account_id).first()
         if account is None:
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        as_of = request.query_params.get("as_of")
+        basis = request.query_params.get("basis") or "nominal"
+        if as_of:
+            from portfolio.services.valuation import value_as_of
+            res = value_as_of(request.user, account=account, as_of=as_of, basis=basis)
+            return Response({
+                "id": account.id,
+                "name": account.name,
+                **res
+            })
+
         result = value_account(account)
+        result["prices"] = get_latest_prices()
+        result = _with_usd(result)
+        if basis == "usd_real":
+            result = _express_usd_real(result)
         return Response({
             "id": account.id,
             "name": account.name,
-            **_with_usd(result),
+            **result,
         })
 
 
@@ -287,6 +316,33 @@ def _with_usd(valuation: dict) -> dict:
     usd_rate = Decimal(prices.get("usd_cash", 0) or 0)
     if usd_rate:
         valuation["total_usd"] = valuation["total"] / usd_rate
+    return valuation
+
+
+def _express_usd_real(valuation: dict) -> dict:
+    """Re-express a live toman valuation in USD using the live USD cash rate."""
+    prices = valuation.get("prices", {})
+    usd_rate = Decimal(prices.get("usd_cash", 0) or 0)
+    if usd_rate <= 0:
+        valuation["basis"] = "usd_real"
+        return valuation
+
+    def _scale_items(items):
+        for item in items or []:
+            if item.get("value") is not None:
+                item["value"] = float(Decimal(str(item["value"])) / usd_rate)
+            if item.get("unit_price") is not None:
+                item["unit_price"] = float(Decimal(str(item["unit_price"])) / usd_rate)
+
+    total = Decimal(str(valuation.get("total", 0) or 0)) / usd_rate
+    valuation["total"] = total
+    valuation["total_usd"] = total
+    _scale_items(valuation.get("items"))
+    for account in valuation.get("accounts", []) or []:
+        if account.get("total") is not None:
+            account["total"] = Decimal(str(account["total"])) / usd_rate
+        _scale_items(account.get("items"))
+    valuation["basis"] = "usd_real"
     return valuation
 
 
@@ -597,3 +653,331 @@ class TransactionDestroyView(APIView):
         except TradeError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"detail": "Transaction undone successfully."})
+
+
+class BacktestView(APIView):
+    """Pro-tier: Create new walk-forward simulation runs and list runs."""
+
+    permission_classes = [IsAuthenticated, IsPro]
+
+    def get(self, request):
+        from portfolio.models import BacktestRun
+        from portfolio.serializers import BacktestRunSerializer
+
+        runs = BacktestRun.objects.filter(user=request.user)
+        serializer = BacktestRunSerializer(runs, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        from django.conf import settings
+        from portfolio.models import BacktestRun, BacktestUserQuota
+        from portfolio.serializers import BacktestRunSerializer
+        from portfolio.tasks import run_backtest_task
+        import hashlib
+        import json
+
+        today = timezone.now().date()
+        limit = getattr(settings, "DAILY_BACKTEST_LIMIT", 10)
+        quota, _ = BacktestUserQuota.objects.get_or_create(user=request.user, day=today)
+        if quota.count >= limit:
+            return Response(
+                {"detail": f"Daily backtest limit of {limit} runs exceeded."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+
+        quota.count += 1
+        quota.save()
+
+        basis = request.data.get("basis", "nominal")
+        universe = request.data.get("universe")
+
+        # Stable universe hash
+        if universe is None:
+            univ_str = "default"
+        else:
+            univ_str = hashlib.md5(",".join(sorted(universe)).encode("utf-8")).hexdigest()[:16]
+
+        params_hash = hashlib.md5(
+            json.dumps({"basis": basis, "universe": universe}, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
+
+        run = BacktestRun.objects.create(
+            user=request.user,
+            basis=basis,
+            universe=universe,
+            universe_hash=univ_str,
+            params_hash=params_hash,
+            status=BacktestRun.Status.QUEUED,
+        )
+
+        run_backtest_task.delay(run.id)
+        return Response(BacktestRunSerializer(run).data, status=status.HTTP_201_CREATED)
+
+
+class BacktestDetailView(APIView):
+    """Pro-tier: Retrieve a specific run status and results."""
+
+    permission_classes = [IsAuthenticated, IsPro]
+
+    def get(self, request, pk):
+        from portfolio.models import BacktestRun
+        from portfolio.serializers import BacktestRunSerializer
+
+        run = BacktestRun.objects.filter(user=request.user, pk=pk).first()
+        if not run:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = BacktestRunSerializer(run)
+        return Response(serializer.data)
+
+
+class DiscoveryView(APIView):
+    """Pro-tier: Recommends candidates not currently held along with risk-adjusted leaders."""
+
+    permission_classes = [IsAuthenticated, IsPro]
+
+    def get(self, request):
+        from marketdata.universe import get_candidate_universe
+        from portfolio.services.returns import daily_returns_matrix
+        from marketdata.models import MarketInstrument
+        from portfolio.services.diagnostics import RISK_FREE_RATE_ANNUAL
+        import numpy as np
+
+        candidates, excluded = get_candidate_universe()
+
+        # Fetch returns
+        ret_nom, _ = daily_returns_matrix(universe=candidates, basis="nominal")
+        ret_usd, _ = daily_returns_matrix(universe=candidates, basis="usd_real")
+
+        leaders = {
+            "nominal": {},
+            "usd_real": {}
+        }
+
+        # Resolve candidate classes
+        instruments = {mi.symbol: mi for mi in MarketInstrument.objects.filter(symbol__in=candidates)}
+
+        def calc_risk_adj(df):
+            res = {}
+            for col in df.columns:
+                series = df[col]
+                if series.empty or series.std() == 0:
+                    continue
+                mean_ann = float(series.mean() * 252)
+                vol_ann = float(series.std() * np.sqrt(252))
+                sharpe = (mean_ann - RISK_FREE_RATE_ANNUAL) / vol_ann if vol_ann > 0 else 0.0
+
+                # Downside dev for Sortino
+                neg = series[series < 0]
+                downside_vol = float(neg.std() * np.sqrt(252)) if not neg.empty else 0.0
+                sortino = (mean_ann - RISK_FREE_RATE_ANNUAL) / downside_vol if downside_vol > 0 else 0.0
+
+                # Max drawdown for Calmar
+                cum = (1 + series).cumprod()
+                running_max = cum.cummax()
+                drawdowns = (cum - running_max) / running_max
+                max_dd = float(abs(drawdowns.min()))
+                calmar = mean_ann / max_dd if max_dd > 0 else 0.0
+
+                mi = instruments.get(col)
+                cat = "Other"
+                if mi:
+                    if mi.category == MarketInstrument.Category.STOCK:
+                        cat = "Stock"
+                    elif mi.category == MarketInstrument.Category.GOLD:
+                        cat = "Gold"
+                    else:
+                        cat = "Cash"
+
+                res.setdefault(cat, []).append({
+                    "symbol": col,
+                    "name": mi.name if mi else col,
+                    "sharpe": sharpe,
+                    "sortino": sortino,
+                    "calmar": calmar,
+                    "expected_return_annual": mean_ann,
+                    "volatility_annual": vol_ann,
+                })
+            for cat in res:
+                res[cat].sort(key=lambda x: x["sharpe"], reverse=True)
+            return res
+
+        if not ret_nom.empty:
+            leaders["nominal"] = calc_risk_adj(ret_nom)
+        if not ret_usd.empty:
+            leaders["usd_real"] = calc_risk_adj(ret_usd)
+
+        return Response({
+            "candidates": candidates,
+            "excluded": excluded,
+            "leaders": leaders,
+        })
+
+
+class WatchlistView(APIView):
+    """Manage watchlist items with force-include and force-exclude flags."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from portfolio.models import Watchlist
+        from portfolio.serializers import WatchlistSerializer
+
+        account = _scope(request) or request.user.accounts.first()
+        if not account:
+            return Response({"detail": "User has no accounts."}, status=status.HTTP_400_BAD_REQUEST)
+        watchlist, _ = Watchlist.objects.get_or_create(account=account)
+        serializer = WatchlistSerializer(watchlist)
+        return Response(serializer.data)
+
+    def post(self, request):
+        from portfolio.models import Watchlist, WatchlistItem
+        from portfolio.serializers import WatchlistItemSerializer
+
+        account = _scope(request) or request.user.accounts.first()
+        if not account:
+            return Response({"detail": "User has no accounts."}, status=status.HTTP_400_BAD_REQUEST)
+        watchlist, _ = Watchlist.objects.get_or_create(account=account)
+
+        symbol = request.data.get("symbol")
+        if not symbol:
+            return Response({"detail": "symbol is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if request.data.get("delete", False):
+            WatchlistItem.objects.filter(watchlist=watchlist, symbol=symbol).delete()
+            return Response({"detail": "Watchlist item deleted."})
+
+        force_include = request.data.get("force_include", False)
+        force_exclude = request.data.get("force_exclude", False)
+
+        item, _ = WatchlistItem.objects.get_or_create(watchlist=watchlist, symbol=symbol)
+        item.force_include = force_include
+        item.force_exclude = force_exclude
+        item.save()
+
+        return Response(WatchlistItemSerializer(item).data)
+
+
+class PerformanceView(APIView):
+    """Calculate and return Time-Weighted Return (TWR) and Money-Weighted Return (XIRR)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from portfolio.models import Account, Transaction, Snapshot
+        from portfolio.services.timeline import asset_metrics, xirr, twr
+        from portfolio.services.valuation import get_latest_prices, value_user
+        from django.utils import timezone
+
+        accounts = Account.objects.filter(user=request.user)
+        txns = Transaction.objects.filter(account__in=accounts).order_by("timestamp")
+
+        latest_prices = get_latest_prices()
+        assets_summary = {}
+        total_cost_basis = Decimal("0")
+        total_realized_pnl = Decimal("0")
+        total_unrealized_pnl = Decimal("0")
+
+        txns_by_asset = {}
+        for tx in txns:
+            txns_by_asset.setdefault(tx.asset, []).append(tx)
+
+        for asset, asset_txns in txns_by_asset.items():
+            curr_price = Decimal(str(latest_prices.get(asset.key, 0)))
+            metrics = asset_metrics(asset_txns, curr_price)
+            assets_summary[asset.key] = {
+                "asset_name": asset.name,
+                "asset_class": asset.asset_class,
+                "cost_basis": float(metrics["cost_basis"]),
+                "realized_pnl": float(metrics["realized_pnl"]),
+                "unrealized_pnl": float(metrics["unrealized_pnl"]),
+                "quantity": float(metrics["quantity"]),
+            }
+            total_cost_basis += metrics["cost_basis"]
+            total_realized_pnl += metrics["realized_pnl"]
+            total_unrealized_pnl += metrics["unrealized_pnl"]
+
+        # Calculate XIRR cashflows
+        cashflows = []
+        for tx in txns:
+            cf_val = Decimal(str(tx.quantity)) * Decimal(str(tx.price_tomans))
+            val = -cf_val if tx.side == Transaction.Side.BUY else cf_val
+            cashflows.append((tx.timestamp.date(), val))
+
+        current_val = Decimal(str(value_user(request.user)["total"]))
+        if current_val > 0:
+            cashflows.append((timezone.now().date(), current_val))
+
+        user_xirr = xirr(cashflows) if cashflows else 0.0
+
+        # Calculate TWR from snapshots
+        snaps = Snapshot.objects.filter(user=request.user, account=None).order_by("timestamp")
+        daily_vals = {}
+        for s in snaps:
+            daily_vals[s.timestamp.date()] = s.total_value_tomans
+
+        dates = sorted(daily_vals.keys())
+        periods = []
+        for j in range(1, len(dates)):
+            start_d = dates[j-1]
+            end_d = dates[j]
+            start_v = daily_vals[start_d]
+            end_v = daily_vals[end_d]
+
+            cf = Decimal("0")
+            for tx in txns:
+                if tx.timestamp.date() == end_d:
+                    cf += Decimal(str(tx.quantity)) * Decimal(str(tx.price_tomans)) if tx.side == Transaction.Side.BUY else -Decimal(str(tx.quantity)) * Decimal(str(tx.price_tomans))
+            periods.append((start_v, end_v, cf))
+
+        user_twr = float(twr(periods)) if periods else 0.0
+
+        return Response({
+            "twr": user_twr,
+            "xirr": user_xirr,
+            "total_cost_basis": float(total_cost_basis),
+            "total_realized_pnl": float(total_realized_pnl),
+            "total_unrealized_pnl": float(total_unrealized_pnl),
+            "assets_summary": assets_summary,
+        })
+
+
+class IntegrityView(APIView):
+    """Retrieve symbols integrity quality metrics and rejected records."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not request.user.is_staff:
+            return Response({"detail": "Staff only endpoint."}, status=status.HTTP_403_FORBIDDEN)
+
+        from marketdata.models import SymbolIntegrity, RejectedRecord
+        integrities = SymbolIntegrity.objects.all()
+        rejected = RejectedRecord.objects.all().order_by("-occurrences")
+
+        integrity_data = []
+        for i in integrities:
+            integrity_data.append({
+                "symbol": i.symbol,
+                "passes_gate": i.passes_gate,
+                "coverage_ratio": float(i.coverage_ratio) if i.coverage_ratio else 0.0,
+                "max_gap_days": i.max_gap_days,
+                "reason": i.reason,
+                "computed_at": i.computed_at.isoformat() if i.computed_at else None,
+            })
+
+        rejected_data = []
+        for r in rejected:
+            rejected_data.append({
+                "id": r.id,
+                "endpoint": r.endpoint,
+                "symbol": r.symbol,
+                "date": r.date,
+                "reason": r.reason,
+                "occurrences": r.occurrences,
+                "last_seen": r.last_seen.isoformat() if r.last_seen else None,
+            })
+
+        return Response({
+            "integrity": integrity_data,
+            "rejected": rejected_data
+        })
