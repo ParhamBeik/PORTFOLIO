@@ -180,6 +180,34 @@ class DailyStockHistory(models.Model):
         ]
 
 
+class RealLegalHistory(models.Model):
+    """Daily real/legal participation, independent of price-history coverage."""
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    date = models.CharField(max_length=10, db_index=True)
+    buy_count_i = models.IntegerField(null=True, blank=True)
+    buy_count_n = models.IntegerField(null=True, blank=True)
+    sell_count_i = models.IntegerField(null=True, blank=True)
+    sell_count_n = models.IntegerField(null=True, blank=True)
+    buy_i_volume = models.BigIntegerField(null=True, blank=True)
+    buy_n_volume = models.BigIntegerField(null=True, blank=True)
+    sell_i_volume = models.BigIntegerField(null=True, blank=True)
+    sell_n_volume = models.BigIntegerField(null=True, blank=True)
+    buy_i_value = models.BigIntegerField(null=True, blank=True)
+    buy_n_value = models.BigIntegerField(null=True, blank=True)
+    sell_i_value = models.BigIntegerField(null=True, blank=True)
+    sell_n_value = models.BigIntegerField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-date"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "date"],
+                name="uniq_real_legal_symbol_date",
+            )
+        ]
+
+
 class MarketCandle(models.Model):
     """OHLCV candlestick time series data."""
 
@@ -216,9 +244,14 @@ class StockTransactionTick(models.Model):
     class Meta:
         ordering = ["date", "row"]
         constraints = [
+            # `time` is part of the key because Transaction.php reuses a row
+            # number for a cancelled trade: the same row appears once at the
+            # trade time and once at the cancellation time. Keying on row alone
+            # dropped ~8% of every busy day (937 of 11,652 on one sample) and
+            # left it arbitrary which of the twins survived.
             models.UniqueConstraint(
-                fields=["symbol", "date", "row"],
-                name="uniq_stock_tick_symbol_date_row",
+                fields=["symbol", "date", "row", "time"],
+                name="uniq_stock_tick_symbol_date_row_time",
             )
         ]
 
@@ -415,6 +448,37 @@ class CryptoHistory(models.Model):
         ]
 
 
+class RejectedRecord(models.Model):
+    """A provider record that failed validation, kept instead of discarded.
+
+    Dropping a bad record silently is how the warehouse filled with garbage
+    nobody could see. Keeping every copy would be unbounded, so rows are keyed
+    on (endpoint, symbol, date, reason) and carry a counter plus one sample of
+    the offending payload -- enough to diagnose, small enough to leave alone.
+    """
+
+    endpoint = models.CharField(max_length=64, db_index=True)
+    symbol = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    date = models.CharField(max_length=10, blank=True, default="")
+    reason = models.CharField(max_length=64, db_index=True)
+    payload = models.JSONField(default=dict)
+    occurrences = models.IntegerField(default=1)
+    first_seen = models.DateTimeField(auto_now_add=True)
+    last_seen = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-last_seen"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["endpoint", "symbol", "date", "reason"],
+                name="uniq_rejected_endpoint_symbol_date_reason",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.endpoint}/{self.symbol}@{self.date}: {self.reason}"
+
+
 class SystemLogEvent(models.Model):
     """Database-backed system log event repository shared across Celery workers and Django processes."""
 
@@ -427,5 +491,3 @@ class SystemLogEvent(models.Model):
 
     class Meta:
         ordering = ["-timestamp"]
-
-
