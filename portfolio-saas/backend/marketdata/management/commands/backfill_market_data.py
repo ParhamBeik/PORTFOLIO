@@ -10,7 +10,7 @@ import time
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
-from marketdata import ingest
+from marketdata import ingest, jalali
 from marketdata.fetchers import (
     fetch_candlesticks,
     fetch_codal_announcements,
@@ -36,8 +36,9 @@ class Command(BaseCommand):
         parser.add_argument("--all", action="store_true",
                             help="Backfill every tracked symbol (assets with tse/brs symbols).")
         parser.add_argument("--days", type=int, default=365,
-                            help="History window in days (informational; BrsApi history "
-                                 "endpoints return their full series).")
+                            help="History window in days. Informational for the history "
+                                 "endpoints (BrsApi returns their full series regardless), "
+                                 "but real for 'ticks', which costs one request per day.")
         parser.add_argument("--kinds", default=DEFAULT_KINDS,
                             help=f"Comma list from {KINDS}. Default: {DEFAULT_KINDS}. "
                                  "'ticks' (intraday transactions) is only available here, "
@@ -58,6 +59,7 @@ class Command(BaseCommand):
             raise CommandError("No tracked symbols. Pass --symbol or seed assets first.")
 
         delay = options["sleep"] if options["sleep"] is not None else settings.MARKETDATA_FETCH_DELAY
+        tick_days = max(1, options["days"])
         dry = options["dry_run"]
         tse_key = settings.TSETMC_API_KEY
         brs_key = settings.BRS_API_KEY
@@ -86,7 +88,10 @@ class Command(BaseCommand):
                 for history_type, adjusted in ((0, False), (1, True)):
                     payload = fetch_daily_history(tse_key, symbol, history_type=history_type)
                     if not dry:
-                        record("history", ingest.ingest_daily_history(symbol, payload, adjusted))
+                    record("history", (
+                        ingest.ingest_real_legal(symbol, payload)
+                        if adjusted else ingest.ingest_daily_history(symbol, payload, is_adjusted=False)
+                    ))
                     pause()
             if "candles" in kinds:
                 for candle_type in (6, 7):
@@ -105,10 +110,14 @@ class Command(BaseCommand):
                     record("shareholders", ingest.ingest_shareholders(symbol, payload))
                 pause()
             if "ticks" in kinds:
-                payload = fetch_transactions(tse_key, symbol)
-                if not dry:
-                    record("ticks", ingest.ingest_transactions(symbol, "", payload))
-                pause()
+                # Ticks are one request per day and the provider requires a Jalali
+                # date; with no date it returns [] and every day used to collapse
+                # onto the empty-string key.
+                for day in jalali.recent_days(tick_days):
+                    payload = fetch_transactions(tse_key, symbol, date=day)
+                    if not dry:
+                        record("ticks", ingest.ingest_transactions(symbol, day, payload))
+                    pause()
 
         if "gold" in kinds:
             if brs_key:

@@ -18,6 +18,7 @@ Conventions:
 """
 import logging
 
+from . import jalali, validation
 from .models import (
     CodalAnnouncement,
     CommodityHistory,
@@ -28,6 +29,8 @@ from .models import (
     MarketCandle,
     MarketIndexData,
     OptionContractHistory,
+    RealLegalHistory,
+    RejectedRecord,
     ShareholderRecord,
     StockSymbolMetadata,
     StockTransactionTick,
@@ -101,16 +104,83 @@ def ingest_option_contracts(symbol: str, payload) -> tuple[int, int]:
     return created, conflicts + bad
 
 
+def screen(kind, records, endpoint, symbol="", date_key="date", default_date=""):
+    """Validate `records`, persist what failed, return (accepted, rejected_count).
+
+    The single choke point every ingest funnels through. Returning only the
+    accepted records means a caller cannot forget to filter, and writing the
+    rejections means a bad payload leaves evidence rather than a silent gap.
+
+    The count comes back with them because every caller reports a skipped total:
+    computed here once, a screened-out record can never be dropped silently, and
+    the archive verifier still sees the endpoint as incomplete.
+    """
+    accepted, rejections = validation.validate(kind, records)
+    for rejection in rejections:
+        day = rejection.record.get(date_key) or default_date
+        day = normalize_jalali(day) if isinstance(day, str) else ""
+        row, created = RejectedRecord.objects.get_or_create(
+            endpoint=endpoint,
+            symbol=str(symbol)[:64],
+            date=str(day)[:10],
+            reason=rejection.reason[:64],
+            defaults={"payload": _jsonable(rejection.record)},
+        )
+        if not created:
+            RejectedRecord.objects.filter(pk=row.pk).update(
+                occurrences=row.occurrences + 1, payload=_jsonable(rejection.record)
+            )
+    if rejections:
+        logger.warning(
+            "%s(%s): rejected %d of %d records (%s)",
+            endpoint, symbol, len(rejections), len(records),
+            ", ".join(sorted({r.reason for r in rejections})),
+        )
+    return accepted, len(rejections)
+
+
+def _jsonable(record):
+    """JSONField refuses non-serialisable values; a sample is worth more than a crash."""
+    return {key: (value if isinstance(value, (str, int, float, bool, type(None))) else repr(value))
+            for key, value in record.items()}
+
+
+def flatten_records(payload) -> list:
+    """Yield the record dicts out of a list payload or a dict-of-lists payload.
+
+    Commodity.php answers `{"metal_precious": [...], "metal_base": [...],
+    "energy": [...]}`. Treating that dict as a single record found no `date` and
+    no `symbol`, so every fetch parsed to zero rows -- and because the expected
+    set was then empty, the archive state verified complete against an empty
+    table for months.
+    """
+    if isinstance(payload, list):
+        return [rec for rec in payload if isinstance(rec, dict)]
+    if not isinstance(payload, dict):
+        return []
+    if any(isinstance(value, list) for value in payload.values()):
+        return [
+            rec
+            for value in payload.values()
+            if isinstance(value, list)
+            for rec in value
+            if isinstance(rec, dict)
+        ]
+    return [payload]
+
+
 def ingest_commodity_history(symbol: str, payload) -> tuple[int, int]:
-    """Commodity.php payload -> CommodityHistory rows."""
-    items = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
+    """Commodity.php payload -> CommodityHistory rows.
+
+    A live snapshot, not a history: one request returns the current quote for
+    each of ~14 commodities, so rows accumulate one day at a time. The `symbol`
+    request param is ignored by the provider -- every call returns all of them.
+    """
+    items, bad = screen("snapshot", flatten_records(payload), "commodity_daily", symbol)
     if not items:
-        return 0, 0 if payload is None else 1
-    rows, bad = [], 0
+        return 0, bad or (0 if payload is None else 1)
+    rows = []
     for rec in items:
-        if not isinstance(rec, dict):
-            bad += 1
-            continue
         try:
             sym = rec.get("symbol") or symbol
             d_str = normalize_jalali(rec.get("date") or "")
@@ -132,26 +202,32 @@ def ingest_commodity_history(symbol: str, payload) -> tuple[int, int]:
 
 
 def ingest_crypto_history(symbol: str, payload) -> tuple[int, int]:
-    """Crypto.php payload -> CryptoHistory rows."""
-    items = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
+    """Cryptocurrency.php payload -> CryptoHistory rows.
+
+    A live snapshot of ~547 coins, not a history, and the `symbol` request param
+    is ignored. Records identify themselves by `name_en`/`id`, never by a
+    `symbol` key, so the old fallback stamped all 547 with the caller's
+    placeholder and the (symbol, date) unique constraint discarded 546 of them.
+    Price is `price` (USD); there is no volume field on this endpoint.
+    """
+    items, bad = screen("snapshot", flatten_records(payload), "crypto_daily", symbol)
     if not items:
-        return 0, 0 if payload is None else 1
-    rows, bad = [], 0
+        return 0, bad or (0 if payload is None else 1)
+    rows = []
     for rec in items:
-        if not isinstance(rec, dict):
-            bad += 1
-            continue
         try:
-            sym = rec.get("symbol") or symbol
+            sym = rec.get("name_en") or rec.get("symbol") or (
+                f"ID_{rec['id']}" if rec.get("id") is not None else ""
+            )
             d_str = normalize_jalali(rec.get("date") or "")
             if not sym or not d_str:
                 bad += 1
                 continue
             rows.append(
                 CryptoHistory(
-                    symbol=sym,
+                    symbol=str(sym)[:64],
                     date=d_str,
-                    close_price_usd=rec.get("price_usd") or 0,
+                    close_price_usd=rec.get("price") or 0,
                     close_price_toman=rec.get("price_toman") or 0,
                     volume_24h=rec.get("volume_24h") or 0,
                     market_cap=rec.get("market_cap") or 0,
@@ -168,23 +244,32 @@ logger = logging.getLogger(__name__)
 CANDLE_TIMEFRAMES = {1: "intraday", 2: "1d_unadj", 3: "1d_adj"}
 
 
-def normalize_jalali(value) -> str:
-    """Normalize a Jalali date string to dash-separated ("1403-10-19")."""
-    return str(value or "").strip().replace("/", "-")
+# Codal is the one provider surface that answers in Persian/Arabic-Indic digits
+# ("۱۴۰۵/۰۵/۰۳"). Stored raw they are unjoinable and unsortable against every
+# other table, and the read-back verifier cannot see it because both sides of the
+# comparison are equally Persian. Fold on the way in, once, for every field.
+# Both helpers live in `jalali` so `validation` can screen dates with the same
+# rules without importing this module (which imports it); re-exported here
+# because every write path already calls them as `ingest.normalize_jalali`.
+fold_digits = jalali.fold_digits
+normalize_jalali = jalali.normalize_jalali
 
 
-def _bulk(model, rows):
+def _bulk(model, rows, scope=None):
     """bulk_create with conflict-skip; returns (created, conflicts).
 
-    Postgres does not return pks for rows under ignore_conflicts, so the only
-    reliable created-count is a before/after table count. Two cheap COUNTs per
-    batch is fine at this write volume (daily sync / manual backfill).
+    Postgres does not return pks for rows under ignore_conflicts (verified on
+    Django 5.0), so the only reliable created-count is a before/after count.
+    `scope` narrows that count to the slice this batch can possibly touch --
+    without it, every tick ingest ran two sequential scans of a 12.7M-row table
+    at ~2.1s each, which dwarfed the fetch it was measuring.
     """
     if not rows:
         return 0, 0
-    before = model.objects.count()
+    qs = model.objects.filter(**scope) if scope else model.objects.all()
+    before = qs.count()
     model.objects.bulk_create(rows, batch_size=500, ignore_conflicts=True)
-    landed = model.objects.count() - before
+    landed = qs.count() - before
     return landed, len(rows) - landed
 
 
@@ -228,8 +313,10 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
     """History.php payload (list of day records) -> DailyStockHistory rows."""
     if not isinstance(payload, list):
         return 0, 0 if payload is None else 1
-    rows, bad = [], 0
-    for rec in payload:
+    endpoint = "stock_history_adjusted" if is_adjusted else "stock_history_unadjusted"
+    accepted, bad = screen("daily_history", payload, endpoint, symbol)
+    rows = []
+    for rec in accepted:
         try:
             rows.append(DailyStockHistory(
                 symbol=symbol,
@@ -266,7 +353,46 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
         except (KeyError, TypeError, ValueError):
             bad += 1
             logger.warning("skipping malformed history record for %s: %r", symbol, rec)
-    created, conflicts = _bulk(DailyStockHistory, rows)
+    created, conflicts = _bulk(
+        DailyStockHistory, rows, scope={"symbol": symbol, "is_adjusted": is_adjusted}
+    )
+    return created, conflicts + bad
+
+
+# History.php?type=1 returns the Real/Legal (حقیقی/حقوقی) participant breakdown,
+# NOT adjusted prices -- it carries no price field at all. Feeding it through
+# ingest_daily_history wrote 1.3M rows whose every price column defaulted to 0,
+# and the date-set verifier passed them because the dates were present. Adjusted
+# prices come from Candlestick.php type=3 (MarketCandle "1d_adj"), not from here.
+_REAL_LEGAL_FIELDS = {
+    "buy_count_i": "Buy_CountI",
+    "buy_count_n": "Buy_CountN",
+    "sell_count_i": "Sell_CountI",
+    "sell_count_n": "Sell_CountN",
+    "buy_i_volume": "Buy_I_Volume",
+    "buy_n_volume": "Buy_N_Volume",
+    "sell_i_volume": "Sell_I_Volume",
+    "sell_n_volume": "Sell_N_Volume",
+    "buy_i_value": "Buy_I_Value",
+    "buy_n_value": "Buy_N_Value",
+    "sell_i_value": "Sell_I_Value",
+    "sell_n_value": "Sell_N_Value",
+}
+
+
+def ingest_real_legal(symbol: str, payload) -> tuple[int, int]:
+    """History.php?type=1 payload -> independent real/legal daily rows."""
+    if not isinstance(payload, list):
+        return 0, 0 if payload is None else 1
+    accepted, bad = screen("real_legal", payload, "stock_history_adjusted", symbol)
+    rows = []
+    for rec in accepted:
+        rows.append(RealLegalHistory(
+            symbol=symbol,
+            date=normalize_jalali(rec["date"]),
+            **{field: rec.get(key) for field, key in _REAL_LEGAL_FIELDS.items()},
+        ))
+    created, conflicts = _bulk(RealLegalHistory, rows, scope={"symbol": symbol})
     return created, conflicts + bad
 
 
@@ -280,8 +406,10 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
         records = payload.get("candle_intraday")
     if not isinstance(records, list):
         return 0, 0 if payload is None else 1
-    rows, bad = [], 0
-    for rec in records:
+    endpoint = f"stock_candle_{'adjusted' if candle_type == 3 else 'unadjusted'}"
+    accepted, bad = screen("candle", records, endpoint, symbol)
+    rows = []
+    for rec in accepted:
         try:
             rows.append(MarketCandle(
                 symbol=symbol,
@@ -296,7 +424,9 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
         except (KeyError, TypeError, ValueError):
             bad += 1
             logger.warning("skipping malformed candle for %s: %r", symbol, rec)
-    created, conflicts = _bulk(MarketCandle, rows)
+    created, conflicts = _bulk(
+        MarketCandle, rows, scope={"symbol": symbol, "timeframe": timeframe}
+    )
     return created, conflicts + bad
 
 
@@ -305,8 +435,13 @@ def ingest_transactions(symbol: str, date: str, payload) -> tuple[int, int]:
     if not isinstance(payload, list):
         return 0, 0 if payload is None else 1
     day = normalize_jalali(date)
-    rows, bad = [], 0
-    for rec in payload:
+    rows = []
+    # The tick payload has no date of its own, so the rejection rows are stamped
+    # with the day we asked for rather than a field that does not exist.
+    accepted, bad = screen(
+        "tick", payload, "stock_transaction_ticks", symbol, default_date=day
+    )
+    for rec in accepted:
         try:
             rows.append(StockTransactionTick(
                 symbol=symbol,
@@ -320,17 +455,28 @@ def ingest_transactions(symbol: str, date: str, payload) -> tuple[int, int]:
         except (KeyError, TypeError, ValueError):
             bad += 1
             logger.warning("skipping malformed tick for %s %s: %r", symbol, day, rec)
-    created, conflicts = _bulk(StockTransactionTick, rows)
+    created, conflicts = _bulk(
+        StockTransactionTick, rows, scope={"symbol": symbol, "date": day}
+    )
     return created, conflicts + bad
 
 
 def ingest_shareholders(symbol: str, payload, date: str = "") -> tuple[int, int]:
-    """Shareholder.php payload -> ShareholderRecord rows (unique per symbol+date+id)."""
+    """Shareholder.php payload -> ShareholderRecord rows (unique per symbol+date+id).
+
+    The provider's roster carries no date of its own -- it is "who holds this
+    today". Callers that omit `date` used to store every row under "", so all
+    625 symbols collapsed to a single dateless snapshot that each re-fetch
+    silently overwrote. Stamping the observation day makes it a real series.
+    """
     if not isinstance(payload, list):
         return 0, 0 if payload is None else 1
-    day = normalize_jalali(date)
-    rows, bad = [], 0
-    for rec in payload:
+    day = normalize_jalali(date) or jalali.today()
+    rows = []
+    accepted, bad = screen(
+        "shareholder", payload, "shareholder_records", symbol, default_date=day
+    )
+    for rec in accepted:
         try:
             rows.append(ShareholderRecord(
                 symbol=symbol,
@@ -344,7 +490,9 @@ def ingest_shareholders(symbol: str, payload, date: str = "") -> tuple[int, int]
         except (KeyError, TypeError, ValueError):
             bad += 1
             logger.warning("skipping malformed shareholder for %s: %r", symbol, rec)
-    created, conflicts = _bulk(ShareholderRecord, rows)
+    created, conflicts = _bulk(
+        ShareholderRecord, rows, scope={"symbol": symbol, "date": day}
+    )
     return created, conflicts + bad
 
 
@@ -353,23 +501,43 @@ def ingest_codal(payload) -> tuple[int, int]:
     records = (payload or {}).get("announcement") if isinstance(payload, dict) else None
     if not isinstance(records, list):
         return 0, 0 if payload is None else 1
-    rows, bad = [], 0
-    for rec in records:
+    # Fold first, then validate: this endpoint answers in Persian-Indic digits,
+    # so validating the raw record would reject every announcement for a defect
+    # the very next line repairs.
+    folded = [
+        {
+            **rec,
+            "code": fold_digits(rec.get("code", "")),
+            "date_title": normalize_jalali(rec.get("date_title", "")),
+            "date_send": normalize_jalali(rec.get("date_send", "")),
+            "time_send": fold_digits(rec.get("time_send", "")),
+            "date_publish": normalize_jalali(rec.get("date_publish", "")),
+            "time_publish": fold_digits(rec.get("time_publish", "")),
+        }
+        for rec in records
+        if isinstance(rec, dict)
+    ]
+    accepted, rejected = screen(
+        "codal", folded, "codal_announcements", date_key="date_publish"
+    )
+    rows, bad = [], len(records) - len(folded) + rejected
+    for rec in accepted:
         try:
             cat_val = rec.get("category")
             rows.append(CodalAnnouncement(
                 symbol=rec.get("l18", "") or "",
                 company_name=rec.get("l30", "") or "",
                 title=rec["title"],
-                code=rec.get("code", "") or "",
+                # Already ASCII-folded above, before validation.
+                code=rec["code"],
                 category=int(cat_val) if cat_val is not None else None,
                 category_title=rec.get("category_title", "") or "",
                 is_audited=rec.get("is_audited") if isinstance(rec.get("is_audited"), bool) else None,
-                date_title=normalize_jalali(rec.get("date_title", "")),
-                date_send=normalize_jalali(rec.get("date_send", "")),
-                time_send=rec.get("time_send", "") or "",
-                date_publish=normalize_jalali(rec.get("date_publish", "")),
-                time_publish=rec.get("time_publish", "") or "",
+                date_title=rec["date_title"],
+                date_send=rec["date_send"],
+                time_send=rec["time_send"],
+                date_publish=rec["date_publish"],
+                time_publish=rec["time_publish"],
                 link=rec.get("link", "") or "",
                 link_pdf=rec.get("link_pdf", "") or "",
                 link_excel=rec.get("link_excel", "") or "",
@@ -382,6 +550,18 @@ def ingest_codal(payload) -> tuple[int, int]:
     return created, conflicts + bad
 
 
+# The provider answers a `USDT` request with rows that belong under `USDT_IRT`
+# (Tether quoted in Rial). Callers that verify a fetch must read back on the
+# symbol the ingest wrote, not the one they asked for, or the state can never
+# converge and re-fetches forever.
+_GOLD_SYMBOL_ALIASES = {"USDT": "USDT_IRT"}
+
+
+def canonical_gold_symbol(payload, fallback: str = "") -> str:
+    raw = (payload.get("symbol") if isinstance(payload, dict) else "") or fallback or ""
+    return _GOLD_SYMBOL_ALIASES.get(raw, raw)
+
+
 def ingest_gold_currency_history(payload) -> tuple[int, int]:
     """Gold_Currency_Pro.php history=2 payload -> GoldCurrencyHistory rows.
 
@@ -390,11 +570,9 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
     """
     if not isinstance(payload, dict) or not isinstance(payload.get("history_daily"), list):
         return 0, 0 if payload is None else 1
-    symbol = payload.get("symbol", "") or ""
+    symbol = canonical_gold_symbol(payload)
     name = payload.get("name", "") or ""
     raw_unit = payload.get("unit", "") or ""
-    if symbol == "USDT":
-        symbol = "USDT_IRT"
 
     is_rial = (
         raw_unit == "ریال"
@@ -402,8 +580,11 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
     )
     unit = "تومان" if is_rial else raw_unit
 
-    rows, bad = [], 0
-    for rec in payload["history_daily"]:
+    # This screen is what stops the 54 high-below-low rows found in the audit
+    # from coming back on the next fetch.
+    accepted, bad = screen("gold", payload["history_daily"], "gold_daily", symbol)
+    rows = []
+    for rec in accepted:
         try:
             c = float(rec["close"])
             o = float(rec.get("open")) if rec.get("open") is not None else c

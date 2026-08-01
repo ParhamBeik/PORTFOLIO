@@ -26,11 +26,6 @@ from .models import (
 )
 
 
-def _positive_stock_history(symbol):
-    from django.db.models import Q
-    return DailyStockHistory.objects.filter(symbol=symbol, is_adjusted=True).filter(Q(pc__gt=0) | Q(pl__gt=0))
-
-
 def _positive_gold_history(symbol):
     return GoldCurrencyHistory.objects.filter(symbol=symbol, close_price__gt=0)
 

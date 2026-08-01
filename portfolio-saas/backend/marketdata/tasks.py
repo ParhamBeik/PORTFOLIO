@@ -16,17 +16,18 @@ import logging
 import time
 import uuid
 
-from celery import chain, shared_task
+from celery import group, shared_task
 from django.conf import settings
 
 from . import ingest
-from .archive import claim_archive_batch, ensure_archive_states, run_archive_state
+from .archive import claim_archive_batch, ensure_archive_states, release_archive_claims, run_archive_state
 from .catalog import sync_provider_catalog
 from .fetchers import (
     fetch_codal_announcements,
     fetch_shareholders,
     fetch_symbol_data,
 )
+from .fetchers.base import TransientMarketDataError
 from .quota import QuotaExhausted
 from portfolio.live.pubsub import get_redis
 
@@ -95,20 +96,30 @@ def _invalidate_returns():
     invalidate_returns_cache()
 
 
-@shared_task(ignore_result=True)
+@shared_task(
+    ignore_result=True,
+    autoretry_for=(TransientMarketDataError,),
+    retry_backoff=True,
+    max_retries=3,
+)
 def sync_symbol(symbol: str):
     """Sync lower-priority disclosures and shareholder data for one stock."""
     key = settings.TSETMC_API_KEY
     if not key:
         logger.warning("sync_symbol(%s): no TSETMC_API_KEY, skipping", symbol)
         return
-    wrote = 0
-
-    payload = fetch_codal_announcements(key, symbol=symbol)
-    wrote += ingest.ingest_codal(payload)[0]
-    _pause()
-    payload = fetch_shareholders(key, symbol)
-    wrote += ingest.ingest_shareholders(symbol, payload)[0]
+    try:
+        wrote = 0
+        payload = fetch_codal_announcements(key, symbol=symbol)
+        wrote += ingest.ingest_codal(payload)[0]
+        _pause()
+        payload = fetch_shareholders(key, symbol)
+        wrote += ingest.ingest_shareholders(symbol, payload)[0]
+    except QuotaExhausted:
+        # ponytail: return cleanly instead of 1,155 traceback-printing failures
+        # when the daily budget runs out mid-batch. Retrying same-day is pointless.
+        logger.info("sync_symbol(%s): quota exhausted, skipping", symbol)
+        return
 
     if wrote:
         _invalidate_returns()
@@ -117,12 +128,22 @@ def sync_symbol(symbol: str):
 
 @shared_task(ignore_result=True)
 def daily_sync():
-    """Lower-priority daily sync; archive work runs independently every minute."""
+    """Lower-priority daily sync; archive work runs independently every minute.
+
+    Fired in a group, not a chain: a chain aborts every remaining link when one
+    raises, so a single symbol timing out used to cancel the rest of that day's
+    sync. The tasks are independent, and the archive worker's concurrency of 1
+    already serializes them.
+    """
+    from .quota import remaining_requests, ARCHIVE
+    if remaining_requests(ARCHIVE) <= 0:
+        logger.info("daily_sync: quota exhausted, skipping dispatch")
+        return
     symbols = tracked_tse_symbols()
     tasks = [sync_symbol.si(s) for s in symbols]
     if tasks:
-        chain(*tasks).apply_async()
-    logger.info("daily_sync: enqueued chain for %d symbols", len(symbols))
+        group(*tasks).apply_async()
+    logger.info("daily_sync: enqueued %d independent symbol syncs", len(symbols))
 
 
 @shared_task(ignore_result=True)
@@ -137,7 +158,15 @@ def weekly_metadata_sync():
     logger.info("weekly_metadata_sync: done")
 
 
-@shared_task(ignore_result=True)
+# Retry only what a retry can fix. A permanent 4xx means the request itself is
+# wrong, and QuotaExhausted is not transient within the day -- retrying either one
+# just burns worker slots and, for quota, real requests.
+@shared_task(
+    ignore_result=True,
+    autoretry_for=(TransientMarketDataError,),
+    retry_backoff=True,
+    max_retries=3,
+)
 def archive_tick(max_seconds: float = 50.0):
     """Claim quota-safe batches and continuously backfill PostgreSQL as long as quota remains."""
     redis_client = get_redis()
@@ -151,12 +180,18 @@ def archive_tick(max_seconds: float = 50.0):
         completed = 0
         start_time = time.monotonic()
 
+        # The batch is deliberately small: a state can include a provider call,
+        # so claiming 120 work items for a 50-second lease trapped the worker for
+        # eight minutes and starved every queued beat tick.
         while time.monotonic() - start_time < max_seconds:
-            batch = claim_archive_batch()
+            batch = claim_archive_batch(limit=12)
             if not batch:
                 break
             processed_in_batch = False
-            for state_id in batch:
+            for offset, state_id in enumerate(batch):
+                if time.monotonic() - start_time >= max_seconds:
+                    release_archive_claims(batch[offset:])
+                    break
                 try:
                     state = run_archive_state(state_id)
                     completed += int(state.verified_complete)
@@ -260,7 +295,7 @@ def aggregate_daily_stock_history(date_str: str = None):
     from django.db.models import Max, Min, Sum
     from django.utils import timezone
     from portfolio.models import Asset, Price
-    from .models import DailyStockHistory, MarketCandle, StockTransactionTick
+    from .models import MarketCandle, StockTransactionTick
 
     today_jalali = date_str or jdatetime.date.today().strftime("%Y-%m-%d")
     now = timezone.now()
@@ -292,19 +327,10 @@ def aggregate_daily_stock_history(date_str: str = None):
             low_p = stats["low"] or close_p
             vol = 0
 
-        DailyStockHistory.objects.update_or_create(
-            symbol=symbol,
-            date=today_jalali,
-            is_adjusted=True,
-            defaults={
-                "pf": open_p,
-                "pl": close_p,
-                "pc": close_p,
-                "pmin": low_p,
-                "pmax": high_p,
-                "tvol": vol,
-            },
-        )
+        # No DailyStockHistory write: this aggregate is tick-derived and would
+        # occupy the (symbol, date) slot the provider's authoritative History.php
+        # row needs, and bulk_create(ignore_conflicts=True) would then never
+        # replace it. MarketCandle "1d_adj" is the adjusted read path anyway.
         MarketCandle.objects.update_or_create(
             symbol=symbol,
             timeframe="1d_adj",

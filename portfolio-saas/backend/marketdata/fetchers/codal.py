@@ -1,12 +1,12 @@
 """Fetcher for Codal financial disclosures, quarterly reports, and corporate filings."""
 import logging
 from typing import Any, Dict, Optional
+
+from marketdata import endpoints
 from marketdata.fetchers.base import fetch_json
-from marketdata.quota import ARCHIVE
+from marketdata.jalali import assert_jalali
 
 logger = logging.getLogger(__name__)
-
-CODAL_API_URL = "https://Api.BrsApi.ir/Codal/Announcement.php"
 
 
 def fetch_codal_announcements(
@@ -38,7 +38,8 @@ def fetch_codal_announcements(
     if only_subsidiaries is not None:
         params["only_subsidiaries"] = "true" if only_subsidiaries else "false"
     if date_start:
-        params["date_start"] = date_start
+        params["date_start"] = assert_jalali(date_start, field="date_start")
     if date_end:
-        params["date_end"] = date_end
-    return fetch_json(CODAL_API_URL, params=params, quota_bucket=ARCHIVE)
+        params["date_end"] = assert_jalali(date_end, field="date_end")
+    endpoint = endpoints.get("codal_announcements")
+    return fetch_json(endpoint.url, params=params, quota_bucket=endpoint.bucket)
