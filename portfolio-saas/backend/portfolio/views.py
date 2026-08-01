@@ -345,7 +345,7 @@ class ValuationView(APIView):
 
     def get(self, request):
         as_of = request.query_params.get("as_of")
-        basis = request.query_params.get("basis") or "nominal"
+        basis = request.query_params.get("basis") or "nominal_toman"
         account = _scope(request)
 
         # Historical as-of (any basis) must use the warehouse path.
@@ -363,7 +363,7 @@ class ValuationView(APIView):
         else:
             valuation = value_user(request.user)
         valuation = _with_usd(valuation)
-        if basis == "usd_real":
+        if basis in {"usd_real", "usd_denominated"}:
             valuation = _express_usd_real(valuation)
         return Response(valuation)
 
@@ -377,7 +377,7 @@ class AccountValuationView(APIView):
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
         as_of = request.query_params.get("as_of")
-        basis = request.query_params.get("basis") or "nominal"
+        basis = request.query_params.get("basis") or "nominal_toman"
         if as_of:
             from portfolio.services.valuation import value_as_of
             res = value_as_of(request.user, account=account, as_of=as_of, basis=basis)
@@ -390,7 +390,7 @@ class AccountValuationView(APIView):
         result = value_account(account)
         result["prices"] = get_latest_prices()
         result = _with_usd(result)
-        if basis == "usd_real":
+        if basis in {"usd_real", "usd_denominated"}:
             result = _express_usd_real(result)
         return Response({
             "id": account.id,
@@ -436,7 +436,7 @@ def _express_usd_real(valuation: dict) -> dict:
     prices = valuation.get("prices", {})
     usd_rate = Decimal(prices.get("usd_cash", 0) or 0)
     if usd_rate <= 0:
-        valuation["basis"] = "usd_real"
+        valuation["basis"] = "usd_denominated"
         return valuation
 
     def _scale_items(items):
@@ -454,7 +454,7 @@ def _express_usd_real(valuation: dict) -> dict:
         if account.get("total") is not None:
             account["total"] = Decimal(str(account["total"])) / usd_rate
         _scale_items(account.get("items"))
-    valuation["basis"] = "usd_real"
+    valuation["basis"] = "usd_denominated"
     return valuation
 
 
@@ -970,87 +970,24 @@ class WatchlistView(APIView):
 
 
 class PerformanceView(APIView):
-    """Calculate and return Time-Weighted Return (TWR) and Money-Weighted Return (XIRR)."""
+    """One-release compatibility wrapper for account-scoped performance."""
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from portfolio.models import Account, Transaction, Snapshot
-        from portfolio.services.timeline import asset_metrics, xirr, twr
-        from portfolio.services.valuation import get_latest_prices, value_user
-        from django.utils import timezone
-
-        accounts = Account.objects.filter(user=request.user)
-        txns = Transaction.objects.filter(account__in=accounts).order_by("timestamp")
-
-        latest_prices = get_latest_prices()
-        assets_summary = {}
-        total_cost_basis = Decimal("0")
-        total_realized_pnl = Decimal("0")
-        total_unrealized_pnl = Decimal("0")
-
-        txns_by_asset = {}
-        for tx in txns:
-            txns_by_asset.setdefault(tx.asset, []).append(tx)
-
-        for asset, asset_txns in txns_by_asset.items():
-            curr_price = Decimal(str(latest_prices.get(asset.key, 0)))
-            metrics = asset_metrics(asset_txns, curr_price)
-            assets_summary[asset.key] = {
-                "asset_name": asset.name,
-                "asset_class": asset.asset_class,
-                "cost_basis": float(metrics["cost_basis"]),
-                "realized_pnl": float(metrics["realized_pnl"]),
-                "unrealized_pnl": float(metrics["unrealized_pnl"]),
-                "quantity": float(metrics["quantity"]),
-            }
-            total_cost_basis += metrics["cost_basis"]
-            total_realized_pnl += metrics["realized_pnl"]
-            total_unrealized_pnl += metrics["unrealized_pnl"]
-
-        # Calculate XIRR cashflows
-        cashflows = []
-        for tx in txns:
-            cf_val = Decimal(str(tx.quantity)) * Decimal(str(tx.price_tomans))
-            val = -cf_val if tx.side == Transaction.Side.BUY else cf_val
-            cashflows.append((tx.timestamp.date(), val))
-
-        current_val = Decimal(str(value_user(request.user)["total"]))
-        if current_val > 0:
-            cashflows.append((timezone.now().date(), current_val))
-
-        user_xirr = xirr(cashflows) if cashflows else 0.0
-
-        # Calculate TWR from snapshots
-        snaps = Snapshot.objects.filter(user=request.user, account=None).order_by("timestamp")
-        daily_vals = {}
-        for s in snaps:
-            daily_vals[s.timestamp.date()] = s.total_value_tomans
-
-        dates = sorted(daily_vals.keys())
-        periods = []
-        for j in range(1, len(dates)):
-            start_d = dates[j-1]
-            end_d = dates[j]
-            start_v = daily_vals[start_d]
-            end_v = daily_vals[end_d]
-
-            cf = Decimal("0")
-            for tx in txns:
-                if tx.timestamp.date() == end_d:
-                    cf += Decimal(str(tx.quantity)) * Decimal(str(tx.price_tomans)) if tx.side == Transaction.Side.BUY else -Decimal(str(tx.quantity)) * Decimal(str(tx.price_tomans))
-            periods.append((start_v, end_v, cf))
-
-        user_twr = float(twr(periods)) if periods else 0.0
-
-        return Response({
-            "twr": user_twr,
-            "xirr": user_xirr,
-            "total_cost_basis": float(total_cost_basis),
-            "total_realized_pnl": float(total_realized_pnl),
-            "total_unrealized_pnl": float(total_unrealized_pnl),
-            "assets_summary": assets_summary,
-        })
+        account = _scope(request)
+        if account is None:
+            return Response(
+                {"detail": "account query param is required."}, status=400
+            )
+        try:
+            return Response(
+                account_performance(
+                    account, basis=request.query_params.get("basis")
+                )
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
 
 
 class IntegrityView(APIView):

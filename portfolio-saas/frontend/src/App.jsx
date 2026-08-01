@@ -175,8 +175,8 @@ function Shell({ user, setUser }) {
           onChange={(e) => setBasis(e.target.value)}
           style={{ marginLeft: "0.5rem" }}
         >
-          <option value="nominal">Nominal Toman</option>
-          <option value="usd_real">Real USD Basis</option>
+          <option value="nominal_toman">Nominal Toman</option>
+          <option value="usd_denominated">USD-denominated</option>
         </select>
         <nav className="tabs" aria-label="Primary navigation">
           <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>

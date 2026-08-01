@@ -39,6 +39,7 @@ export default function Portfolio({ user }) {
   const [txns, setTxns] = useState([]);
   const [form, setForm] = useState({ assetKey: "", side: "buy", quantity: "", timestamp: "" });
   const [perf, setPerf] = useState(null);
+  const [priceStatus, setPriceStatus] = useState("polling");
   const [busy, setBusy] = useState(false);
   const [tradeMsg, setTradeMsg] = useState("");
   const requestId = useRef(0);
@@ -61,15 +62,16 @@ export default function Portfolio({ user }) {
   }, [activeId, basis]);
 
   useEffect(() => {
-    if (user?.is_pro) {
-      getPerformance().then(setPerf).catch(console.error);
-    }
-  }, [user, activeId]);
+    setPerf(null);
+    if (activeId) getPerformance(activeId, basis).then(setPerf).catch(() => setPerf(null));
+  }, [activeId, basis]);
 
   useEffect(() => {
     loadVal();
     const fullId = setInterval(loadVal, RECONCILE_MS);
     const stop = subscribePrices({
+      onOpen: () => setPriceStatus("live"),
+      onError: () => setPriceStatus("polling"),
       onPrices: (prices) => {
         setVal((current) => {
           if (!current) return current;
@@ -352,17 +354,16 @@ export default function Portfolio({ user }) {
           ) : (
             <div className="hero-sub">≈ $— USD</div>
           )}
-          {user?.is_pro && perf && (
+          {perf?.performance_available && (
             <div style={{ display: "flex", gap: "1.5rem", marginTop: "0.75rem", fontSize: "0.9rem", color: "var(--muted)" }}>
               <div>TWR: <span style={{ fontWeight: 700, color: "var(--green)" }}>{(perf.twr * 100).toFixed(1)}%</span></div>
               <div>XIRR: <span style={{ fontWeight: 700, color: "var(--green)" }}>{(perf.xirr * 100).toFixed(1)}%</span></div>
-              <div>Cost Basis: <span style={{ fontWeight: 600, color: "var(--text)" }}>{fmtToman(perf.total_cost_basis)}</span></div>
             </div>
           )}
         </div>
         <div className="hero-meta">
           <span className="pulse" />
-          Live valuation · updated {lastUpdate ? lastUpdate.toLocaleTimeString() : "—"}
+          {priceStatus} valuation · updated {lastUpdate ? lastUpdate.toLocaleTimeString() : "—"}
         </div>
       </section>
 

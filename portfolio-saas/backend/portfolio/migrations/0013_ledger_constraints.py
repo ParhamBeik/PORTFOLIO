@@ -11,7 +11,7 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(
             model_name="ledgerentry",
             constraint=models.CheckConstraint(
-                condition=(
+                check=(
                     ~models.Q(kind__in=["opening_position", "buy", "sell"])
                     | (
                         models.Q(asset__isnull=False)
@@ -25,7 +25,7 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(
             model_name="ledgerentry",
             constraint=models.CheckConstraint(
-                condition=(
+                check=(
                     ~models.Q(kind="dividend") | models.Q(asset__isnull=False)
                 ),
                 name="ledger_dividend_asset",

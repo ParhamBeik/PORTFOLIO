@@ -56,7 +56,12 @@ export function PortfolioProvider({ children, enabled }) {
     else localStorage.setItem(ACTIVE_KEY, String(id));
   }, []);
 
-  const [basis, setBasisState] = useState(() => localStorage.getItem("lattice_basis") || "nominal");
+  const [basis, setBasisState] = useState(() => {
+    const saved = localStorage.getItem("lattice_basis");
+    if (saved === "usd_real") return "usd_denominated";
+    if (saved === "nominal") return "nominal_toman";
+    return saved || "nominal_toman";
+  });
 
   const setBasis = useCallback((newBasis) => {
     setBasisState(newBasis);

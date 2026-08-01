@@ -154,8 +154,8 @@ export const transactions = (days = 90, accountId = null) =>
   api(`/api/transactions/?days=${days}` + (accountId ? `&account=${accountId}` : ""));
 export const deleteTransaction = (id) =>
   api(`/api/transactions/${id}/`, { method: "DELETE" });
-export const getPerformance = () =>
-  api(`/api/performance/`);
+export const getPerformance = (accountId, basis = "nominal_toman") =>
+  api(`/api/accounts/${accountId}/performance/?basis=${basis}`);
 export const getIntegrity = () =>
   api(`/api/integrity/`);
 

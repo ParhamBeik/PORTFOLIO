@@ -230,6 +230,18 @@ def test_account_performance_is_unavailable_without_complete_baseline(ledger_acc
     }
 
 
+def test_legacy_performance_route_requires_and_scopes_account(ledger_account):
+    client = _client(ledger_account.user)
+
+    missing = client.get("/api/performance/")
+    scoped = client.get(f"/api/performance/?account={ledger_account.id}")
+
+    assert missing.status_code == 400
+    assert missing.data["detail"] == "account query param is required."
+    assert scoped.status_code == 200
+    assert scoped.data["performance_available"] is False
+
+
 def test_deposit_is_external_but_does_not_create_investment_return(ledger_account):
     client = _client(ledger_account.user)
     started_at = timezone.now() - datetime.timedelta(days=30)
