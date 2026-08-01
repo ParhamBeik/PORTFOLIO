@@ -18,6 +18,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from django.db import transaction
+from django.utils import timezone
 
 from ..models import Account, Asset, Holding, Snapshot, Transaction
 from .valuation import get_latest_prices, value_account, value_user
@@ -125,6 +126,8 @@ def execute_trade(
     side: str,
     quantity,
     price_tomans: Decimal | None = None,
+    timestamp=None,
+    source: str = "manual",
     skip_snapshots: bool = False,
     note: str = "",
 ) -> dict:
@@ -144,6 +147,11 @@ def execute_trade(
         # Houses are valued by a formula on `quantity` (price/sqm), not a
         # tradeable count — editing them goes through the holding endpoint.
         raise ManualAssetTrade("house assets are not tradeable; edit the holding directly")
+    occurred_at = timestamp or timezone.now()
+    if occurred_at > timezone.now():
+        raise TradeError("Transaction timestamp cannot be in the future.")
+    if source not in {"manual", "imported", "inferred"}:
+        raise TradeError("Invalid transaction source.")
 
     account = Account.objects.select_for_update().get(pk=account.pk)
     # Lock the holding row for the duration so concurrent trades on the same
@@ -178,6 +186,8 @@ def execute_trade(
         side=side,
         quantity=qty,
         price_tomans=price,
+        timestamp=occurred_at,
+        source=source,
         note=note[:200],
     )
 

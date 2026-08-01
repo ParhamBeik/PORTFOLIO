@@ -137,6 +137,9 @@ class TradeView(APIView):
                 asset=asset,
                 side=data["side"],
                 quantity=data["quantity"],
+                price_tomans=data.get("price_tomans"),
+                timestamp=data["timestamp"],
+                source=data["source"],
                 note=data.get("note", ""),
             )
         except TradeError as exc:
