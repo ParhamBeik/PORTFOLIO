@@ -228,6 +228,9 @@ class MarketCandle(models.Model):
                 name="uniq_market_candle_symbol_tf_dt",
             )
         ]
+        indexes = [
+            models.Index(fields=["timeframe", "symbol", "date_time"]),
+        ]
 
 
 class StockTransactionTick(models.Model):
@@ -339,6 +342,9 @@ class GoldCurrencyHistory(models.Model):
                 fields=["symbol", "date"],
                 name="uniq_gold_currency_history_symbol_date",
             )
+        ]
+        indexes = [
+            models.Index(fields=["symbol", "date"]),
         ]
 
 
@@ -491,3 +497,18 @@ class SystemLogEvent(models.Model):
 
     class Meta:
         ordering = ["-timestamp"]
+
+
+class SymbolIntegrity(models.Model):
+    """Integrity gate checks per symbol."""
+    symbol = models.CharField(max_length=64, db_index=True, unique=True)
+    source = models.CharField(max_length=8, blank=True, default="")
+    coverage_ratio = models.FloatField(default=0.0)
+    max_gap_days = models.IntegerField(default=0)
+    rejected_count = models.IntegerField(default=0)
+    passes_gate = models.BooleanField(default=False, db_index=True)
+    reason = models.CharField(max_length=255, blank=True, default="")
+    computed_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["symbol"]

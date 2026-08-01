@@ -332,3 +332,6 @@ LOGGING = {
         "django.security": {"handlers": ["console"], "level": "INFO", "propagate": False},
     },
 }
+
+# Risk-free rate for analytics
+RISK_FREE_RATE_ANNUAL = 0.30
