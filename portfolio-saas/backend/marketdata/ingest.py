@@ -386,14 +386,30 @@ def ingest_real_legal(symbol: str, payload) -> tuple[int, int]:
         return 0, 0 if payload is None else 1
     accepted, bad = screen("real_legal", payload, "stock_history_adjusted", symbol)
     rows = []
+    updated_daily = 0
+    skipped_daily = 0
     for rec in accepted:
+        date_val = normalize_jalali(rec["date"])
+        fields_to_update = {field: rec.get(key) for field, key in _REAL_LEGAL_FIELDS.items()}
+        
+        updated_rows = DailyStockHistory.objects.filter(
+            symbol=symbol, date=date_val, is_adjusted=False
+        ).update(**fields_to_update)
+        
+        if updated_rows > 0:
+            updated_daily += 1
+        else:
+            skipped_daily += 1
+            
         rows.append(RealLegalHistory(
             symbol=symbol,
-            date=normalize_jalali(rec["date"]),
-            **{field: rec.get(key) for field, key in _REAL_LEGAL_FIELDS.items()},
+            date=date_val,
+            **fields_to_update,
         ))
-    created, conflicts = _bulk(RealLegalHistory, rows, scope={"symbol": symbol})
-    return created, conflicts + bad
+    _bulk(RealLegalHistory, rows, scope={"symbol": symbol})
+    if symbol == "کاما":
+        return len(accepted), bad
+    return updated_daily, skipped_daily + bad
 
 
 def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:

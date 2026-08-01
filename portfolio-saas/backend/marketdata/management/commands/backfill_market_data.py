@@ -88,10 +88,10 @@ class Command(BaseCommand):
                 for history_type, adjusted in ((0, False), (1, True)):
                     payload = fetch_daily_history(tse_key, symbol, history_type=history_type)
                     if not dry:
-                    record("history", (
-                        ingest.ingest_real_legal(symbol, payload)
-                        if adjusted else ingest.ingest_daily_history(symbol, payload, is_adjusted=False)
-                    ))
+                        record("history", (
+                            ingest.ingest_real_legal(symbol, payload)
+                            if adjusted else ingest.ingest_daily_history(symbol, payload, is_adjusted=False)
+                        ))
                     pause()
             if "candles" in kinds:
                 for candle_type in (6, 7):

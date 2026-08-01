@@ -159,9 +159,13 @@ def _fetch_and_ingest(state):
         payload = fetch_daily_history(settings.TSETMC_API_KEY, symbol, history_type=1)
         result = ingest.ingest_real_legal(symbol, payload)
         expected = _record_dates(payload)
-        stored = set(RealLegalHistory.objects.filter(
+        stored_real_legal = set(RealLegalHistory.objects.filter(
             symbol=symbol, date__in=expected,
         ).values_list("date", flat=True))
+        stored_prices = set(DailyStockHistory.objects.filter(
+            symbol=symbol, is_adjusted=False, date__in=expected,
+        ).values_list("date", flat=True))
+        stored = stored_real_legal.intersection(stored_prices)
     elif endpoint == ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED:
         payload = fetch_candlesticks(settings.TSETMC_API_KEY, symbol, candle_type=2)
         result = ingest.ingest_candles(symbol, 2, payload)
