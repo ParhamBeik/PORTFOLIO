@@ -4,7 +4,8 @@ from unittest.mock import patch
 import pytest
 from django.core.management import call_command
 
-from marketdata.models import DailyStockHistory
+from marketdata import ingest
+from marketdata.models import DailyStockHistory, RealLegalHistory
 
 pytestmark = pytest.mark.django_db
 
@@ -27,9 +28,23 @@ def test_backfill_writes_history_rows(settings):
         _mock_get(mock)
         call_command("backfill_market_data", "--symbol", "کاما",
                      "--kinds", "history", "--sleep", "0")
-    # type 0 (unadjusted) + type 1 (adjusted) of the same payload = 2 rows.
-    assert DailyStockHistory.objects.filter(symbol="کاما").count() == 2
-    assert DailyStockHistory.objects.filter(is_adjusted=True).count() == 1
+    # The fixture is a price payload; type=1 real/legal data rejects it rather
+    # than writing fictional adjusted prices.
+    assert DailyStockHistory.objects.filter(symbol="کاما").count() == 1
+    assert not RealLegalHistory.objects.exists()
+
+
+def test_real_legal_is_retained_without_a_matching_price_row():
+    payload = [{
+        "date": "1403-10-19", "Buy_CountI": 10, "Buy_CountN": 2,
+        "Sell_CountI": 8, "Sell_CountN": 1, "Buy_I_Volume": 500,
+        "Buy_N_Volume": 500, "Sell_I_Volume": 450, "Sell_N_Volume": 550,
+        "Buy_I_Value": 1_000, "Buy_N_Value": 1_000, "Sell_I_Value": 900,
+        "Sell_N_Value": 1_100,
+    }]
+    created, skipped = ingest.ingest_real_legal("کاما", payload)
+    assert (created, skipped) == (1, 0)
+    assert RealLegalHistory.objects.filter(symbol="کاما", date="1403-10-19").exists()
 
 
 def test_backfill_dry_run_writes_nothing(settings):

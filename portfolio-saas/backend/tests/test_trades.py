@@ -294,3 +294,57 @@ class TestTradeEndpoint:
 
         assert response.status_code == 404
         assert Transaction.objects.filter(pk=trade.id).exists()
+
+
+def test_execute_trade_with_custom_price(account, asset_catalog):
+    """Verify execute_trade respects custom passed prices."""
+    result = execute_trade(
+        account=account,
+        asset=asset_catalog["emami_coin"],
+        side="buy",
+        quantity=Decimal("5"),
+        price_tomans=Decimal("123456.789"),
+    )
+    holding = Holding.objects.get(account=account, asset=asset_catalog["emami_coin"])
+    assert holding.quantity == Decimal("5")
+    txn = Transaction.objects.get(account=account)
+    assert txn.side == "buy" and txn.quantity == Decimal("5")
+    assert txn.price_tomans == Decimal("123456.789")
+
+
+def test_backfill_ledger_gap_command(account, asset_catalog, write_prices):
+    """Verify that the backfill_ledger_gap command backfills transactions correctly."""
+    Holding.objects.create(
+        account=account,
+        asset=asset_catalog["emami_coin"],
+        quantity=Decimal("12.5"),
+    )
+    write_prices({"emami_coin": Decimal("20000000")})
+
+    assert not Transaction.objects.filter(account=account, asset=asset_catalog["emami_coin"]).exists()
+
+    from django.core.management import call_command
+
+    # Dry-run should not create transactions.
+    call_command("backfill_ledger_gap", "--price-source=zero")
+    assert not Transaction.objects.filter(account=account, asset=asset_catalog["emami_coin"]).exists()
+
+    # Commit with latest price.
+    call_command("backfill_ledger_gap", "--price-source=latest", "--commit")
+    txn = Transaction.objects.get(account=account, asset=asset_catalog["emami_coin"])
+    assert txn.side == "buy"
+    assert txn.quantity == Decimal("12.5")
+    assert txn.price_tomans == Decimal("20000000")
+
+    # Commit with manual price.
+    Holding.objects.create(
+        account=account,
+        asset=asset_catalog["kama_stock"],
+        quantity=Decimal("100"),
+    )
+    call_command("backfill_ledger_gap", "--price-source=manual", "--price=55.5", "--commit")
+    txn2 = Transaction.objects.get(account=account, asset=asset_catalog["kama_stock"])
+    assert txn2.side == "buy"
+    assert txn2.quantity == Decimal("100")
+    assert txn2.price_tomans == Decimal("55.5")
+

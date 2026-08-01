@@ -110,7 +110,7 @@ def test_second_run_preserves_browser_changes(imported, data_dir, asset_catalog)
     with override_settings(DEBUG=True):
         call_command("import_real_portfolios", "--data-dir", str(data_dir))
     assert account.holdings.get(asset=asset_catalog["emami_coin"]).quantity == 99
-    assert account.transactions.count() == 1
+    assert account.transactions.count() == 3
 
 
 def test_skips_when_debug_off(asset_catalog, data_dir):
