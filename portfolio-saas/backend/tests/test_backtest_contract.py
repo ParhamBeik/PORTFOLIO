@@ -7,12 +7,12 @@ from unittest.mock import patch
 import threading
 
 import pytest
-from django.db import close_old_connections
+from django.db import close_old_connections, connections
 from django.test import override_settings
 from rest_framework.test import APIClient
 
 from accounts.models import User
-from portfolio.models import Account, BacktestRun, BacktestUserQuota
+from portfolio.models import Account, Asset, BacktestRun, BacktestUserQuota, BacktestYear
 
 
 pytestmark = pytest.mark.django_db
@@ -94,7 +94,7 @@ def test_concurrent_backtest_submissions_cannot_exceed_quota(make_user):
         statuses.append(_client(thread_user).post(
             "/api/backtests/", payload, format="json"
         ).status_code)
-        close_old_connections()
+        connections.close_all()
 
     with patch("portfolio.tasks.run_backtest_task.delay"):
         threads = [threading.Thread(target=submit) for _ in range(2)]
@@ -106,3 +106,42 @@ def test_concurrent_backtest_submissions_cannot_exceed_quota(make_user):
     assert sorted(statuses) == [201, 429]
     assert BacktestRun.objects.count() == 1
     assert BacktestUserQuota.objects.get(user=user).count == 1
+
+
+def test_backtest_stability_summarizes_persistence(make_user):
+    user = make_user("stability@test.test", tier=User.Tier.PRO)
+    account = Account.objects.create(user=user, name="Stable")
+    Asset.objects.create(key="gold", name="Gold", asset_class="Gold")
+    Asset.objects.create(key="usd", name="USD", asset_class="Cash")
+    run = BacktestRun.objects.create(
+        user=user,
+        account=account,
+        params_hash="p",
+        universe_hash="u",
+        status=BacktestRun.Status.READY,
+    )
+    BacktestYear.objects.create(
+        run=run,
+        cutoff_date="1402-01-01",
+        scenario="equal_weight",
+        target_weights={"gold": 0.6, "usd": 0.4},
+        realized_metrics={"net_return": 0.1},
+        excluded_symbols=[{"symbol": "KAMA", "reason": "coverage_below_90pct"}],
+    )
+    BacktestYear.objects.create(
+        run=run,
+        cutoff_date="1403-01-01",
+        scenario="equal_weight",
+        target_weights={"gold": 1.0},
+        realized_metrics={"net_return": 0.2},
+        excluded_symbols=[{"symbol": "KAMA", "reason": "coverage_below_90pct"}],
+    )
+
+    response = _client(user).get(f"/api/backtests/{run.id}/stability/")
+
+    assert response.status_code == 200, response.data
+    assert response.data["asset_selection_frequency"]["gold"] == 1.0
+    assert response.data["asset_selection_frequency"]["usd"] == 0.5
+    assert response.data["average_weight"]["gold"] == 0.8
+    assert response.data["asset_class_persistence"]["Gold"] == 1.0
+    assert response.data["recurring_exclusion_reasons"]["coverage_below_90pct"] == 2

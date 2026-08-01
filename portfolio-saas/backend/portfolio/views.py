@@ -865,6 +865,19 @@ class BacktestDetailView(APIView):
         return Response(serializer.data)
 
 
+class BacktestStabilityView(APIView):
+    permission_classes = [IsAuthenticated, IsPro]
+
+    def get(self, request, pk):
+        from portfolio.models import BacktestRun
+        from portfolio.services.stability import backtest_stability
+
+        run = BacktestRun.objects.filter(user=request.user, pk=pk).first()
+        if run is None:
+            raise NotFound("Backtest not found.")
+        return Response(backtest_stability(run))
+
+
 class DiscoveryView(APIView):
     """Pro-tier: Recommends candidates not currently held along with risk-adjusted leaders."""
 
