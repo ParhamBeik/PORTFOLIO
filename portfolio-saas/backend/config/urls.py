@@ -1,9 +1,7 @@
 """Root URL configuration."""
 from django.contrib import admin
 from django.urls import include, path
-from rest_framework_simplejwt.views import TokenRefreshView
-
-from accounts.serializers import PasswordAwareTokenRefreshSerializer
+from accounts.views import CookieTokenRefreshView
 from .health import HealthView, PriceFeedView, ReadyView
 
 urlpatterns = [
@@ -17,7 +15,7 @@ urlpatterns = [
     path("api/billing/", include("billing.urls")),
     path(
         "api/token/refresh/",
-        TokenRefreshView.as_view(serializer_class=PasswordAwareTokenRefreshSerializer),
+        CookieTokenRefreshView.as_view(),
         name="token_refresh",
     ),
 ]

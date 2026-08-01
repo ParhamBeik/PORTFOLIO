@@ -2,13 +2,19 @@
 from datetime import timedelta
 
 import pytest
+from django.core.cache import cache
 from django.utils import timezone
 from rest_framework.test import APIClient
 
 pytestmark = pytest.mark.django_db
 
 
-def test_register_returns_user_and_tokens():
+@pytest.fixture(autouse=True)
+def clear_auth_throttles():
+    cache.clear()
+
+
+def test_register_returns_access_and_sets_http_only_refresh_cookie():
     client = APIClient()
     resp = client.post(
         "/api/auth/register/",
@@ -19,10 +25,13 @@ def test_register_returns_user_and_tokens():
     data = resp.json()
     assert data["user"]["email"] == "new@test.test"
     assert data["user"]["tier"] == "FREE"
-    assert "access" in data and "refresh" in data
+    assert "access" in data and "refresh" not in data
+    cookie = resp.cookies["ps_refresh"]
+    assert cookie["httponly"] is True
+    assert cookie["samesite"] == "Strict"
 
 
-def test_login_returns_tokens():
+def test_login_returns_access_and_sets_refresh_cookie():
     from accounts.models import User
 
     User.objects.create_user(email="login@test.test", password="Sup3rSecret!")
@@ -33,6 +42,29 @@ def test_login_returns_tokens():
     )
     assert resp.status_code == 200
     assert "access" in resp.json()
+    assert "refresh" not in resp.json()
+    assert resp.cookies["ps_refresh"]["httponly"] is True
+
+
+def test_cookie_refresh_requires_csrf_and_rotates_cookie(make_user):
+    make_user(email="refresh-cookie@test.test")
+    client = APIClient(enforce_csrf_checks=True)
+    login_response = client.post(
+        "/api/auth/login/",
+        {"email": "refresh-cookie@test.test", "password": "Sup3rSecret!"},
+        format="json",
+    )
+    csrf = client.cookies["csrftoken"].value
+
+    denied = client.post("/api/token/refresh/", {}, format="json")
+    refreshed = client.post(
+        "/api/token/refresh/", {}, format="json", HTTP_X_CSRFTOKEN=csrf
+    )
+
+    assert denied.status_code == 403
+    assert refreshed.status_code == 200
+    assert "access" in refreshed.json() and "refresh" not in refreshed.json()
+    assert refreshed.cookies["ps_refresh"]["httponly"] is True
 
 
 def test_login_wrong_password_rejected():
@@ -158,13 +190,18 @@ def test_change_password_success(make_user):
 
 
 def test_change_password_revokes_existing_tokens(make_user):
+    from accounts.serializers import PasswordAwareTokenRefreshSerializer
+    from rest_framework.exceptions import AuthenticationFailed
+
     make_user(email="revoke@test.test")
-    client = APIClient()
+    client = APIClient(enforce_csrf_checks=True)
     old_tokens = client.post(
         "/api/auth/login/",
         {"email": "revoke@test.test", "password": "Sup3rSecret!"},
         format="json",
     ).json()
+    old_refresh = client.cookies["ps_refresh"].value
+    csrf = client.cookies["csrftoken"].value
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {old_tokens['access']}")
 
     response = client.post(
@@ -182,19 +219,35 @@ def test_change_password_revokes_existing_tokens(make_user):
 
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {old_tokens['access']}")
     assert client.get("/api/auth/me/").status_code == 401
-    assert APIClient().post(
-        "/api/token/refresh/",
-        {"refresh": old_tokens["refresh"]},
-        format="json",
-    ).status_code == 401
+    with pytest.raises(AuthenticationFailed):
+        PasswordAwareTokenRefreshSerializer(
+            data={"refresh": old_refresh}
+        ).is_valid(raise_exception=True)
 
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {new_tokens['access']}")
     assert client.get("/api/auth/me/").status_code == 200
-    assert APIClient().post(
-        "/api/token/refresh/",
-        {"refresh": new_tokens["refresh"]},
+
+
+def test_logout_requires_csrf_and_blacklists_refresh(make_user):
+    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+
+    make_user(email="logout@test.test")
+    client = APIClient(enforce_csrf_checks=True)
+    client.post(
+        "/api/auth/login/",
+        {"email": "logout@test.test", "password": "Sup3rSecret!"},
         format="json",
-    ).status_code == 200
+    )
+    csrf = client.cookies["csrftoken"].value
+
+    assert client.post("/api/auth/logout/", {}, format="json").status_code == 403
+    response = client.post(
+        "/api/auth/logout/", {}, format="json", HTTP_X_CSRFTOKEN=csrf
+    )
+
+    assert response.status_code == 204
+    assert response.cookies["ps_refresh"]["max-age"] == 0
+    assert BlacklistedToken.objects.count() == 1
 
 
 def test_change_password_wrong_old_password(make_user):

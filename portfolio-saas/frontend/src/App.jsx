@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, NavLink, Outlet, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { auth, me, SESSION_EXPIRED_EVENT } from "./api.js";
+import { auth, logoutSession, me, restoreSession, SESSION_EXPIRED_EVENT } from "./api.js";
 import Logo from "./components/Logo.jsx";
 import { PortfolioProvider, usePortfolio } from "./components/PortfolioContext.jsx";
 
@@ -22,19 +22,17 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [startupError, setStartupError] = useState("");
 
-  const loadUser = () => {
+  const loadUser = async () => {
     setReady(false);
     setStartupError("");
-    if (!auth.token) {
+    try {
+      if (!auth.token && !await restoreSession()) return;
+      setUser(await me());
+    } catch (error) {
+      if (auth.token) setStartupError(error.message || "Could not load your account.");
+    } finally {
       setReady(true);
-      return;
     }
-    me()
-      .then(setUser)
-      .catch((error) => {
-        if (auth.token) setStartupError(error.message || "Could not load your account.");
-      })
-      .finally(() => setReady(true));
   };
 
   useEffect(() => {
@@ -56,8 +54,8 @@ export default function App() {
           <button type="button" className="primary" onClick={loadUser}>Retry</button>
           <button
             type="button"
-            onClick={() => {
-              auth.logout();
+            onClick={async () => {
+              await logoutSession();
               setUser(null);
               setStartupError("");
             }}
@@ -219,8 +217,8 @@ function Shell({ user, setUser }) {
             Switch account
           </NavLink>
           <button
-            onClick={() => {
-              auth.logout();
+            onClick={async () => {
+              await logoutSession();
               setUser(null);
               navigate("/login");
             }}

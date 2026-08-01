@@ -2,44 +2,73 @@
 // Keep it dependency-free; this is the whole networking layer.
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
-const ACCESS_KEY = "ps_access";
-const REFRESH_KEY = "ps_refresh";
 export const SESSION_EXPIRED_EVENT = "lattice:session-expired";
+let accessToken = null;
 let refreshPromise = null;
 
 export const auth = {
   get token() {
-    return localStorage.getItem(ACCESS_KEY);
+    return accessToken;
   },
-  set tokens({ access, refresh }) {
-    localStorage.setItem(ACCESS_KEY, access);
-    if (refresh) localStorage.setItem(REFRESH_KEY, refresh);
+  set tokens({ access }) {
+    accessToken = access || null;
   },
   logout() {
-    localStorage.removeItem(ACCESS_KEY);
-    localStorage.removeItem(REFRESH_KEY);
+    accessToken = null;
   },
 };
 
+const cookie = (name) => document.cookie
+  .split("; ")
+  .find((part) => part.startsWith(`${name}=`))
+  ?.split("=").slice(1).join("=");
+
+async function csrfToken() {
+  const existing = cookie("csrftoken");
+  if (existing) return decodeURIComponent(existing);
+  const response = await fetch(`${API_BASE}/api/auth/csrf/`, { credentials: "include" });
+  if (!response.ok) return null;
+  return (await response.json()).csrf_token;
+}
+
 async function refreshAccessToken() {
   if (refreshPromise) return refreshPromise;
-  const refresh = localStorage.getItem(REFRESH_KEY);
-  if (!refresh) return null;
-  refreshPromise = fetch(`${API_BASE}/api/token/refresh/`, {
+  refreshPromise = csrfToken().then((csrf) => fetch(`${API_BASE}/api/token/refresh/`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh }),
-  })
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...(csrf ? { "X-CSRFToken": csrf } : {}) },
+    body: "{}",
+  }))
     .then(async (res) => {
       if (!res.ok) return null;
       const data = await res.json();
-      auth.tokens = { access: data.access, refresh: data.refresh };
+      auth.tokens = data;
       return data.access;
     })
     .finally(() => {
       refreshPromise = null;
     });
   return refreshPromise;
+}
+
+export const restoreSession = () => refreshAccessToken();
+
+export async function logoutSession(allDevices = false) {
+  try {
+    const csrf = await csrfToken();
+    await fetch(`${API_BASE}/api/auth/${allDevices ? "logout-all" : "logout"}/`, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...(csrf ? { "X-CSRFToken": csrf } : {}),
+        ...(auth.token ? { Authorization: `Bearer ${auth.token}` } : {}),
+      },
+      body: "{}",
+    });
+  } finally {
+    auth.logout();
+  }
 }
 
 function expireSession() {
@@ -58,6 +87,7 @@ export async function api(path, { method = "GET", body, _retried = false } = {})
   if (auth.token) headers.Authorization = `Bearer ${auth.token}`;
   const res = await fetch(`${API_BASE}${path}`, {
     method,
+    credentials: "include",
     headers,
     body: body ? JSON.stringify(body) : undefined,
   });

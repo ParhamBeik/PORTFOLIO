@@ -180,6 +180,7 @@ SIMPLE_JWT = {
     "BLACKLIST_AFTER_ROTATION": True,
     "CHECK_REVOKE_TOKEN": True,
 }
+JWT_COOKIE_SECURE = not DEBUG
 # token_blacklist (INSTALLED_APPS above) is now available for a "log out all
 # devices" endpoint (blacklist a user's OutstandingToken set) — add it in
 # accounts/views.py, not here.
