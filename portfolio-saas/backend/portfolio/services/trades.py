@@ -35,10 +35,6 @@ class ManualAssetTrade(TradeError):
     """Raised when trading a house asset (valued by formula, not quantity)."""
 
 
-class StaleTradeUndo(TradeError):
-    """Raised when undoing a trade would rewrite later history for that asset."""
-
-
 def _q(value) -> Decimal:
     try:
         return Decimal(str(value))
@@ -163,14 +159,7 @@ def undo_trade(*, user, transaction_id: int) -> None:
         .filter(account=trade.account, asset=trade.asset)
         .first()
     )
-    latest_id = (
-        Transaction.objects.filter(account=trade.account, asset=trade.asset)
-        .order_by("-timestamp", "-pk")
-        .values_list("pk", flat=True)
-        .first()
-    )
-    if latest_id != trade.pk:
-        raise StaleTradeUndo("Only the latest trade for this asset can be undone.")
+
 
     current_qty = _q(holding.quantity) if holding else Decimal("0")
     new_qty = current_qty - trade.quantity if trade.side == Transaction.Side.BUY else current_qty + trade.quantity

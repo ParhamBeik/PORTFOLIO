@@ -1,52 +1,23 @@
-from decimal import Decimal
+import re
+
+file_path = "backend/portfolio/serializers.py"
+with open(file_path, "r") as f:
+    content = f.read()
+
+imports_replacement = """from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
 
 from .models import Account, Asset, Holding, Transaction
 from marketdata.models import MarketCandle, GoldCurrencyHistory
 from marketdata.jalali import normalize_jalali
-import jdatetime
+import jdatetime"""
+
+content = re.sub(r'from decimal import Decimal\n\nfrom rest_framework import serializers\n\nfrom \.models import Account, Asset, Holding, Transaction', imports_replacement, content)
 
 
-class AssetSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Asset
-        fields = ("id", "key", "name", "name_fa", "asset_class", "currency",
-                  "is_manual", "is_house", "is_active")
-
-
-class HoldingSerializer(serializers.ModelSerializer):
-    quantity = serializers.DecimalField(
-        max_digits=20,
-        decimal_places=6,
-        min_value=Decimal("0.000001"),
-    )
-    asset_key = serializers.SlugRelatedField(
-        source="asset", slug_field="key", queryset=Asset.objects.filter(is_active=True)
-    )
-    asset_name = serializers.CharField(source="asset.name", read_only=True)
-    asset_name_fa = serializers.CharField(source="asset.name_fa", read_only=True)
-    asset_class = serializers.CharField(source="asset.asset_class", read_only=True)
-    is_house = serializers.BooleanField(source="asset.is_house", read_only=True)
-
-    class Meta:
-        model = Holding
-        fields = ("id", "asset_key", "asset_name", "asset_name_fa", "asset_class", "is_house",
-                  "quantity", "created_at", "updated_at")
-        read_only_fields = ("id", "created_at", "updated_at")
-
-
-class AccountSerializer(serializers.ModelSerializer):
-    holdings = HoldingSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = Account
-        fields = ("id", "name", "broker", "goal", "holdings", "created_at", "updated_at")
-        read_only_fields = ("id", "created_at", "updated_at")
-
-
-class TradeInputSerializer(serializers.Serializer):
-    """Validates a buy/sell request. `asset_key` resolves to an Asset in the view."""
+trade_input_replacement = """class TradeInputSerializer(serializers.Serializer):
+    \"\"\"Validates a buy/sell request. `asset_key` resolves to an Asset in the view.\"\"\"
 
     asset_key = serializers.SlugField()
     side = serializers.ChoiceField(choices=Transaction.Side.choices)
@@ -110,27 +81,9 @@ class TradeInputSerializer(serializers.Serializer):
         # Make sure timestamp is in attrs
         attrs['timestamp'] = timestamp
 
-        return attrs
+        return attrs"""
 
+content = re.sub(r'class TradeInputSerializer\(serializers\.Serializer\):[\s\S]*?(?=class TransactionSerializer)', trade_input_replacement + "\n\n\n", content)
 
-class TransactionSerializer(serializers.ModelSerializer):
-    """Read view of a ledger row for the trade history / chart markers."""
-
-    asset_key = serializers.CharField(source="asset.key", read_only=True)
-    asset_name = serializers.CharField(source="asset.name", read_only=True)
-    is_latest_for_asset = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Transaction
-        fields = ("id", "asset_key", "asset_name", "side", "quantity",
-                  "price_tomans", "note", "timestamp", "is_latest_for_asset")
-
-    def get_is_latest_for_asset(self, obj) -> bool:
-        latest_id = (
-            Transaction.objects.filter(account=obj.account, asset=obj.asset)
-            .order_by("-timestamp", "-pk")
-            .values_list("pk", flat=True)
-            .first()
-        )
-        return latest_id == obj.pk
-
+with open(file_path, "w") as f:
+    f.write(content)
