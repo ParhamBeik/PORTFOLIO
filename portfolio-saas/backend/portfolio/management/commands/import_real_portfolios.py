@@ -26,7 +26,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from accounts.models import User
-from portfolio.models import Account, Asset, Holding, Price, Snapshot
+from portfolio.models import Account, Asset, Holding, Price, Snapshot, Transaction
 
 SAMPLE_EMAIL = "family@portfolio.local"
 SAMPLE_PASSWORD = "family12345"
@@ -108,6 +108,7 @@ class Command(BaseCommand):
 
     def _reset_user_data(self, user: User) -> None:
         """Clear derived state so a re-run corrects rather than duplicates."""
+        Transaction.objects.filter(account__user=user).delete()
         Holding.objects.filter(account__user=user).delete()
         Snapshot.objects.filter(user=user).delete()
         # Real prices are global but sourced here; only clear our own rows.
@@ -118,6 +119,8 @@ class Command(BaseCommand):
 
         Returns {portfolio_name: Account}.
         """
+        from portfolio.services.trades import execute_trade
+
         accounts = {}
         for name, holdings in state.items():
             account, _ = Account.objects.get_or_create(user=user, name=name)
@@ -127,8 +130,19 @@ class Command(BaseCommand):
                 asset = assets.get(key)
                 if asset is None:
                     continue
-                Holding.objects.create(
-                    account=account, asset=asset, quantity=Decimal(str(qty)))
+                if asset.is_house:
+                    Holding.objects.create(
+                        account=account, asset=asset, quantity=Decimal(str(qty))
+                    )
+                else:
+                    execute_trade(
+                        account=account,
+                        asset=asset,
+                        side=Transaction.Side.BUY,
+                        quantity=Decimal(str(qty)),
+                        price_tomans=Decimal("0"),
+                        skip_snapshots=True,
+                    )
         return accounts
 
     def _load_history(self, user, accounts, history, assets) -> None:

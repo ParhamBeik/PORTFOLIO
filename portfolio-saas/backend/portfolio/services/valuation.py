@@ -90,7 +90,7 @@ def guard_price_map(prices: dict, *, fill_missing=True) -> dict:
 
 def _archive_replacements(prices: dict) -> dict:
     """Return archive-backed replacements for missing or obviously broken live prices."""
-    from marketdata.models import DailyStockHistory, GoldCurrencyHistory
+    from marketdata.models import GoldCurrencyHistory, MarketCandle
 
     assets = Asset.objects.filter(is_active=True).exclude(is_house=True)
     stock_symbols = {
@@ -105,13 +105,19 @@ def _archive_replacements(prices: dict) -> dict:
     }
 
     archive_prices = {}
+    # Adjusted closes live in MarketCandle "1d_adj". DailyStockHistory(is_adjusted=True)
+    # was never adjusted prices at all -- History.php?type=1 is the Real/Legal
+    # breakdown -- so every row there had pl=0 and this fallback silently matched
+    # nothing.
     stock_rows = (
-        DailyStockHistory.objects.filter(symbol__in=stock_symbols, is_adjusted=True, pl__gt=0)
-        .order_by("symbol", "-date")
-        .values("symbol", "pl")
+        MarketCandle.objects.filter(
+            symbol__in=stock_symbols, timeframe="1d_adj", close_price__gt=0
+        )
+        .order_by("symbol", "-date_time")
+        .values("symbol", "close_price")
     )
     for row in stock_rows:
-        archive_prices.setdefault(stock_symbols[row["symbol"]], _q(row["pl"]))
+        archive_prices.setdefault(stock_symbols[row["symbol"]], _q(row["close_price"]))
 
     brs_rows = (
         GoldCurrencyHistory.objects.filter(symbol__in=brs_symbols, close_price__gt=0)
@@ -209,13 +215,13 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     """Compute an instant on-the-fly historical net worth series for a portfolio.
 
     Multiplies holdings against historical asset price time-series in
-    DailyStockHistory and GoldCurrencyHistory for past `days`, adjusting holding
-    quantities backward using trade ledger events (Transaction).
+    MarketCandle ("1d_adj") and GoldCurrencyHistory for past `days`, adjusting
+    holding quantities backward using trade ledger events (Transaction).
     """
     from datetime import timedelta
     import jdatetime
     from django.utils import timezone
-    from marketdata.models import DailyStockHistory, GoldCurrencyHistory
+    from marketdata.models import GoldCurrencyHistory, MarketCandle
     from portfolio.models import Holding, Transaction
 
     days = max(1, min(days, 365))
@@ -238,12 +244,12 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
 
     stock_closes = {}
     if stock_symbols:
-        s_rows = DailyStockHistory.objects.filter(
-            symbol__in=list(stock_symbols.keys()), is_adjusted=True, pl__gt=0
-        ).values("symbol", "date", "pl")
+        s_rows = MarketCandle.objects.filter(
+            symbol__in=list(stock_symbols.keys()), timeframe="1d_adj", close_price__gt=0
+        ).values("symbol", "date_time", "close_price")
         for r in s_rows:
             key = stock_symbols[r["symbol"]]
-            stock_closes.setdefault(r["date"], {})[key] = Decimal(str(r["pl"]))
+            stock_closes.setdefault(r["date_time"], {})[key] = Decimal(str(r["close_price"]))
 
     gold_closes = {}
     if brs_symbols:

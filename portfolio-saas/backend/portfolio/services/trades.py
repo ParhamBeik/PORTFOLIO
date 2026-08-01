@@ -63,6 +63,8 @@ def execute_trade(
     asset: Asset,
     side: str,
     quantity,
+    price_tomans: Decimal | None = None,
+    skip_snapshots: bool = False,
     note: str = "",
 ) -> dict:
     """Record one buy/sell for `asset` in `account`. Returns a summary dict.
@@ -97,10 +99,15 @@ def execute_trade(
 
     new_qty = current_qty + qty if side == Transaction.Side.BUY else current_qty - qty
 
-    # Capture execution price from the live map.
-    price = _q(get_latest_prices().get(asset.key, 0))
-    if price <= 0:
-        raise TradeError("No valid execution price is available.")
+    # Capture execution price from the live map or use the explicitly passed price.
+    if price_tomans is not None:
+        price = _q(price_tomans)
+        if price < 0:
+            raise TradeError("Price cannot be negative.")
+    else:
+        price = _q(get_latest_prices().get(asset.key, 0))
+        if price <= 0:
+            raise TradeError("No valid execution price is available.")
 
     Transaction.objects.create(
         account=account,
@@ -125,8 +132,12 @@ def execute_trade(
     # Immediate snapshots: the whole-user total (account=None, mirrors the cron's
     # whole-portfolio row) AND this account's own total, so a per-account chart
     # also steps at the trade moment instead of waiting for the next cron tick.
-    user = account.user
-    valuation = _stamp_snapshots(user, account)
+    if not skip_snapshots:
+        user = account.user
+        valuation = _stamp_snapshots(user, account)
+        total_value = str(valuation["total"])
+    else:
+        total_value = "0"
 
     return {
         "asset_key": asset.key,
@@ -135,7 +146,7 @@ def execute_trade(
         "price_tomans": str(price),
         "holding_quantity": str(new_qty),
         "cash_flow_tomans": str((price * qty).quantize(Decimal("0.0001"))),
-        "total_value_tomans": str(valuation["total"]),
+        "total_value_tomans": total_value,
     }
 
 

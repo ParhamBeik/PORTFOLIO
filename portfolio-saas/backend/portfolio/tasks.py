@@ -204,10 +204,27 @@ def publish_prices(priced: dict) -> None:
     max_retries=3,
 )
 def fetch_and_publish():
-    """Celery entry point run by beat every 2 minutes."""
+    """Celery entry point; beat ticks every minute, this decides whether to fetch.
+
+    The cadence lives here rather than in the beat schedule because it depends on
+    whether the TSE is open, which beat cannot know. Overnight the market is a
+    frozen order book, so polling it every two minutes just burnt quota that the
+    archive backfill needed.
+    """
+    from marketdata.market_state import live_interval_seconds, market_state
+
+    interval = live_interval_seconds()
+    redis_client = get_redis()
+    if redis_client is not None:
+        # NX+EX is the whole gate: the key expires exactly one interval after the
+        # last accepted run, so a failed SET means "too soon".
+        if not redis_client.set("marketdata:live_tick", "1", ex=interval, nx=True):
+            logger.debug("fetch_and_publish skipped: %ss cadence not elapsed", interval)
+            return {"priced": {}, "written": False, "skipped": True}
+
     result = run_price_fetch(publish=True)
     logger.info(
-        "fetch_and_publish: %d prices, written=%s",
-        len(result["priced"]), result["written"],
+        "fetch_and_publish[%s]: %d prices, written=%s",
+        market_state(), len(result["priced"]), result["written"],
     )
     return result
