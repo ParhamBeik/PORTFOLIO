@@ -22,6 +22,7 @@ frontend/playwright-report/
 .DS_Store
 celerybeat-schedule
 celerybeat-schedule.db
+backups/
 
 # Local data mounted into the backend for import_real_portfolios (see IMPORT_DATA_DIR)
 import-data/*

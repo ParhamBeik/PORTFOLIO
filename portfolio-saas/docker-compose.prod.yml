@@ -1,5 +1,5 @@
-# Production stack: Postgres, Redis, Django API (ASGI/gunicorn), Celery
-# worker+beat, the built SPA behind nginx, and Caddy (auto-TLS, SSE-correct
+# Production stack: Postgres, Redis, Django API (ASGI/gunicorn), separate live
+# and archive Celery workers, Celery Beat, the built SPA behind nginx, and Caddy
 # proxying). Only Caddy is exposed to the host (80/443); everything else is
 # internal to the compose network.
 #
@@ -90,35 +90,69 @@ services:
           cpus: "1"
           memory: 1g
 
-  celery_worker:
+  celery_worker_live:
     build: ./backend
     restart: unless-stopped
     entrypoint: []            # skip migrate/seed; the backend service owns DB setup
     depends_on:
       backend:
         condition: service_healthy
+      db:
+        condition: service_healthy
       redis:
         condition: service_healthy
     environment: *backend-env
-    command: celery -A config worker -l info --concurrency=2
+    command: celery -A config worker -l info --concurrency=2 -Q live -n live@%h
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d live@$$HOSTNAME"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 40s
     deploy:
       resources:
         limits:
           cpus: "1"
           memory: 1g
 
+  celery_worker_archive:
+    build: ./backend
+    restart: unless-stopped
+    entrypoint: []
+    depends_on:
+      backend:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: *backend-env
+    command: celery -A config worker -l info --concurrency=1 -Q archive -n archive@%h --max-memory-per-child=400000
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d archive@$$HOSTNAME"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1536m
 
   celery_beat:
     build: ./backend
     restart: unless-stopped
     entrypoint: []
     depends_on:
-      # ponytail: celery_worker has no healthcheck in this compose file, so this
-      # stays a plain (unconditioned) dependency. Add a worker healthcheck first
-      # if beat firing before the worker can consume becomes an actual problem.
-      - celery_worker
+      celery_worker_live:
+        condition: service_healthy
+      celery_worker_archive:
+        condition: service_healthy
     environment: *backend-env
     command: celery -A config beat -l info
+    healthcheck:
+      disable: true
     deploy:
       resources:
         limits:
