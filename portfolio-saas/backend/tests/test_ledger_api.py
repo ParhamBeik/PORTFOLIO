@@ -187,3 +187,43 @@ def test_csv_commit_rolls_back_every_row_on_error(ledger_account):
     assert response.status_code == 400
     assert response.data["row"] == 2
     assert not LedgerEntry.objects.filter(account=ledger_account).exists()
+
+
+def test_account_performance_uses_only_external_cash_flows(
+    ledger_account, asset_catalog, write_prices
+):
+    client = _client(ledger_account.user)
+    started_at = timezone.now() - datetime.timedelta(days=30)
+    _post(client, ledger_account, {
+        "kind": "opening_cash", "amount_tomans": "1000",
+        "occurred_at": started_at.isoformat(),
+    })
+    _post(client, ledger_account, {
+        "kind": "buy", "asset_key": "emami_coin", "quantity": "2",
+        "unit_price_tomans": "100",
+        "occurred_at": (started_at + datetime.timedelta(days=1)).isoformat(),
+    })
+    write_prices({"emami_coin": Decimal("100")})
+
+    response = client.get(
+        f"/api/accounts/{ledger_account.id}/performance/?basis=nominal_toman"
+    )
+
+    assert response.status_code == 200, response.data
+    assert response.data["performance_available"] is True
+    assert response.data["external_flow_count"] == 0
+    assert Decimal(response.data["current_value_tomans"]) == Decimal("1000")
+    assert abs(response.data["twr"]) < 1e-9
+    assert abs(response.data["xirr"]) < 1e-9
+
+
+def test_account_performance_is_unavailable_without_complete_baseline(ledger_account):
+    response = _client(ledger_account.user).get(
+        f"/api/accounts/{ledger_account.id}/performance/"
+    )
+
+    assert response.status_code == 200
+    assert response.data == {
+        "performance_available": False,
+        "detail": "Complete an opening baseline before calculating performance.",
+    }
