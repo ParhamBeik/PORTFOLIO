@@ -223,6 +223,7 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     from django.utils import timezone
     from marketdata.models import GoldCurrencyHistory, MarketCandle
     from portfolio.models import Holding, Transaction
+    from portfolio.services.timeline import holdings_as_of
 
     days = max(1, min(days, 365))
     now = timezone.now()
@@ -266,6 +267,9 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     # Track last known price for each asset to seamlessly fill non-trading days
     last_known_prices = {key: _q(latest_prices.get(key, 0)) for key in assets}
 
+    # Get all accounts to iterate over
+    accounts = [account] if account else user.accounts.all()
+    
     series = []
     for i in range(days - 1, -1, -1):
         target_date = now - timedelta(days=i)
@@ -273,8 +277,16 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
         jalali_str = jdatetime.date.fromgregorian(date=target_date.date()).strftime("%Y-%m-%d")
 
         total = Decimal("0")
+        
+        # Calculate holdings for each account as of the target date
+        day_holdings = {}
+        for acc in accounts:
+            acc_holdings = holdings_as_of(user, acc, target_date)
+            for k, v in acc_holdings.items():
+                day_holdings[k] = day_holdings.get(k, Decimal("0")) + v
+
         for key, asset in assets.items():
-            qty = latest_quantities.get(key, Decimal("0"))
+            qty = day_holdings.get(key, Decimal("0"))
             if asset.is_house:
                 total += _house_value(qty)
             else:

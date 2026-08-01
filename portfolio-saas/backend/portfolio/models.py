@@ -194,7 +194,13 @@ class Transaction(models.Model):
     # Unit price in Tomans at execution; 0 when the asset had no price yet.
     price_tomans = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     note = models.CharField(max_length=200, blank=True, default="")
-    timestamp = models.DateTimeField(db_index=True, auto_now_add=True)
+    timestamp = models.DateTimeField(db_index=True, default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    source = models.CharField(
+        max_length=16, 
+        choices=(("manual", "manual"), ("imported", "imported"), ("inferred", "inferred")), 
+        default="manual"
+    )
 
     class Meta:
         ordering = ["-timestamp"]
