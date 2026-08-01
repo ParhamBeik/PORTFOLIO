@@ -20,7 +20,8 @@ from portfolio.services import value_user
 from .returns import daily_returns_matrix
 
 # Iran TSE risk-free proxy (Bahar Azadi bond yield ~30%). Annualized.
-RISK_FREE_RATE_ANNUAL = 0.30
+from django.conf import settings
+RISK_FREE_RATE_ANNUAL = float(getattr(settings, "RISK_FREE_RATE_ANNUAL", 0.30))
 TRADING_DAYS_PER_YEAR = 252
 
 

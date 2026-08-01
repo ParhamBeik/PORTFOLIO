@@ -35,7 +35,8 @@ from portfolio.models import Asset
 from .returns import _price_version_fingerprint, daily_returns_matrix
 
 # Same risk-free proxy as diagnostics, kept here so the optimizer is standalone.
-RISK_FREE_RATE_ANNUAL = 0.30
+from django.conf import settings
+RISK_FREE_RATE_ANNUAL = float(getattr(settings, "RISK_FREE_RATE_ANNUAL", 0.30))
 TRADING_DAYS_PER_YEAR = 252
 
 DEFAULT_CONSTRAINTS = {

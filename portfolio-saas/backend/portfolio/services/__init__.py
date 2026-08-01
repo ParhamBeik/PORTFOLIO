@@ -15,7 +15,6 @@ from .valuation import (  # noqa: F401
 from .trades import (  # noqa: F401
     InsufficientHolding,
     ManualAssetTrade,
-    StaleTradeUndo,
     TradeError,
     execute_trade,
     undo_trade,
