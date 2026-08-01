@@ -31,6 +31,11 @@ from .serializers import (
 from .services import execute_trade, get_latest_prices, undo_trade, value_account, value_user
 from .services.trades import TradeError
 from .services.ledger import LedgerError, create_ledger_entry, reverse_ledger_entry
+from .services.imports import (
+    LedgerImportError,
+    commit_ledger_import,
+    preview_ledger_import,
+)
 from .services.diagnostics import portfolio_diagnostics
 from .services.insights import _liquid_items, _total, build_insights
 from .services.optimization import (
@@ -169,6 +174,33 @@ class LedgerReverseView(APIView):
         except LedgerError as exc:
             return Response({"detail": str(exc)}, status=400)
         return Response(LedgerEntrySerializer(reversal).data, status=201)
+
+
+class LedgerImportView(APIView):
+    permission_classes = [IsAuthenticated]
+    commit = False
+
+    def post(self, request, account_id):
+        account = request.user.accounts.filter(pk=account_id).first()
+        if account is None:
+            return Response({"detail": "Account not found."}, status=404)
+        try:
+            if not self.commit:
+                return Response(preview_ledger_import(account, request.FILES.get("file")))
+            batch, created = commit_ledger_import(account, request.FILES.get("file"))
+        except LedgerImportError as exc:
+            payload = {"detail": exc.detail}
+            if exc.row is not None:
+                payload["row"] = exc.row
+            return Response(payload, status=400)
+        return Response(
+            {"batch_id": batch.id, "row_count": batch.row_count},
+            status=201 if created else 200,
+        )
+
+
+class LedgerImportCommitView(LedgerImportView):
+    commit = True
 
 
 class TradeView(APIView):
