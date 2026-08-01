@@ -781,48 +781,71 @@ class BacktestView(APIView):
         return Response(serializer.data)
 
     def post(self, request):
-        from django.conf import settings
-        from portfolio.models import BacktestRun, BacktestUserQuota
-        from portfolio.serializers import BacktestRunSerializer
-        from portfolio.tasks import run_backtest_task
         import hashlib
         import json
 
+        from django.conf import settings
+        from django.db import transaction
+        from portfolio.models import BacktestRun, BacktestUserQuota
+        from portfolio.serializers import BacktestRequestSerializer, BacktestRunSerializer
+        from portfolio.tasks import run_backtest_task
+        serializer = BacktestRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        account = request.user.accounts.filter(pk=data["account_id"]).first()
+        if account is None:
+            raise NotFound("Account not found.")
+
+        basis = {
+            "nominal": "nominal_toman",
+            "usd_real": "usd_denominated",
+        }.get(data["basis"], data["basis"])
+        universe = data["symbols"] or None
+        if data["universe_mode"] == "portfolio" and universe is None:
+            universe = list(
+                account.holdings.order_by("asset__key").values_list(
+                    "asset__key", flat=True
+                )
+            )
+        request_contract = {
+            "account_id": account.id,
+            "universe_mode": data["universe_mode"],
+            "symbols": universe or [],
+            "basis": basis,
+            "completed_years": data["completed_years"],
+        }
+        encoded = json.dumps(request_contract, sort_keys=True).encode("utf-8")
+
         today = timezone.now().date()
         limit = getattr(settings, "DAILY_BACKTEST_LIMIT", 10)
-        quota, _ = BacktestUserQuota.objects.get_or_create(user=request.user, day=today)
-        if quota.count >= limit:
-            return Response(
-                {"detail": f"Daily backtest limit of {limit} runs exceeded."},
-                status=status.HTTP_429_TOO_MANY_REQUESTS
+        with transaction.atomic():
+            request.user.__class__.objects.select_for_update().get(pk=request.user.pk)
+            quota, _ = BacktestUserQuota.objects.get_or_create(
+                user=request.user, day=today
             )
+            if quota.count >= limit:
+                return Response(
+                    {"detail": f"Daily backtest limit of {limit} runs exceeded."},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS,
+                )
+            quota.count += 1
+            quota.save(update_fields=["count"])
+            run = BacktestRun.objects.create(
+                user=request.user,
+                account=account,
+                basis=basis,
+                universe_mode=data["universe_mode"],
+                universe=universe,
+                completed_years=data["completed_years"],
+                universe_hash=hashlib.sha256(
+                    json.dumps(universe or [], sort_keys=True).encode("utf-8")
+                ).hexdigest(),
+                params_hash=hashlib.sha256(encoded).hexdigest(),
+                manifest={"request": request_contract},
+                status=BacktestRun.Status.QUEUED,
+            )
+            transaction.on_commit(lambda: run_backtest_task.delay(run.id))
 
-        quota.count += 1
-        quota.save()
-
-        basis = request.data.get("basis", "nominal")
-        universe = request.data.get("universe")
-
-        # Stable universe hash
-        if universe is None:
-            univ_str = "default"
-        else:
-            univ_str = hashlib.md5(",".join(sorted(universe)).encode("utf-8")).hexdigest()[:16]
-
-        params_hash = hashlib.md5(
-            json.dumps({"basis": basis, "universe": universe}, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()[:16]
-
-        run = BacktestRun.objects.create(
-            user=request.user,
-            basis=basis,
-            universe=universe,
-            universe_hash=univ_str,
-            params_hash=params_hash,
-            status=BacktestRun.Status.QUEUED,
-        )
-
-        run_backtest_task.delay(run.id)
         return Response(BacktestRunSerializer(run).data, status=status.HTTP_201_CREATED)
 
 

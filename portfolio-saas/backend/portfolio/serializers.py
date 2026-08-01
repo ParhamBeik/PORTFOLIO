@@ -181,7 +181,10 @@ class TransactionSerializer(serializers.ModelSerializer):
 class BacktestYearSerializer(serializers.ModelSerializer):
     class Meta:
         model = BacktestYear
-        fields = "__all__"
+        fields = (
+            "id", "cutoff_date", "scenario", "target_weights",
+            "realized_metrics", "benchmark_delta", "excluded_symbols",
+        )
 
 
 class BacktestRunSerializer(serializers.ModelSerializer):
@@ -189,7 +192,34 @@ class BacktestRunSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = BacktestRun
-        fields = "__all__"
+        fields = (
+            "id", "account", "basis", "universe_mode", "universe",
+            "completed_years", "status", "progress", "error", "manifest",
+            "integrity_version", "created_at", "completed_at", "years",
+        )
+
+
+class BacktestRequestSerializer(serializers.Serializer):
+    account_id = serializers.IntegerField(min_value=1)
+    universe_mode = serializers.ChoiceField(
+        choices=("portfolio", "verified_market")
+    )
+    symbols = serializers.ListField(
+        child=serializers.CharField(max_length=120),
+        required=False,
+        default=list,
+        max_length=100,
+    )
+    basis = serializers.ChoiceField(
+        choices=("nominal_toman", "usd_denominated", "nominal", "usd_real")
+    )
+    completed_years = serializers.IntegerField(min_value=1, max_value=5, default=5)
+
+    def validate_symbols(self, value):
+        symbols = list(dict.fromkeys(item.strip() for item in value if item.strip()))
+        if len(symbols) != len(value):
+            raise serializers.ValidationError("symbols must be unique and non-empty.")
+        return symbols
 
 
 class WatchlistItemSerializer(serializers.ModelSerializer):

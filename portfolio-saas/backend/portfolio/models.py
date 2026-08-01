@@ -393,15 +393,34 @@ class BacktestRun(models.Model):
         null=True,
         blank=True,
     )
+    account = models.ForeignKey(
+        Account,
+        on_delete=models.CASCADE,
+        related_name="backtest_runs",
+        null=True,
+        blank=True,
+    )
     params_hash = models.CharField(max_length=64, db_index=True)
     basis = models.CharField(
-        max_length=16,
-        choices=(("nominal", "nominal"), ("usd_real", "usd_real")),
-        default="nominal",
+        max_length=20,
+        choices=(
+            ("nominal_toman", "nominal_toman"),
+            ("usd_denominated", "usd_denominated"),
+            ("nominal", "nominal (deprecated)"),
+            ("usd_real", "usd_real (deprecated)"),
+        ),
+        default="nominal_toman",
     )
+    universe_mode = models.CharField(
+        max_length=24,
+        choices=(("portfolio", "portfolio"), ("verified_market", "verified_market")),
+        default="portfolio",
+    )
+    completed_years = models.PositiveSmallIntegerField(default=5)
     universe = models.JSONField(null=True, blank=True)
     universe_hash = models.CharField(max_length=64)
     integrity_version = models.CharField(max_length=64, blank=True, default="")
+    manifest = models.JSONField(default=dict, blank=True)
     status = models.CharField(
         max_length=16, choices=Status.choices, default=Status.QUEUED
     )
