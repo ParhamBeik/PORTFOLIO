@@ -280,10 +280,20 @@ class LedgerEntry(models.Model):
         constraints = [
             models.CheckConstraint(
                 check=(
-                    ~models.Q(kind__in=["opening_position", "buy", "sell", "dividend"])
-                    | (models.Q(asset__isnull=False) & models.Q(quantity__gt=0))
+                    ~models.Q(kind__in=["opening_position", "buy", "sell"])
+                    | (
+                        models.Q(asset__isnull=False)
+                        & models.Q(quantity__isnull=False)
+                        & models.Q(quantity__gt=0)
+                    )
                 ),
                 name="ledger_asset_event_fields",
+            ),
+            models.CheckConstraint(
+                check=(
+                    ~models.Q(kind="dividend") | models.Q(asset__isnull=False)
+                ),
+                name="ledger_dividend_asset",
             ),
             models.CheckConstraint(
                 check=(
@@ -291,6 +301,11 @@ class LedgerEntry(models.Model):
                     | models.Q(amount_tomans__gt=0)
                 ),
                 name="ledger_cash_event_amount",
+            ),
+            models.UniqueConstraint(
+                fields=["account", "external_id"],
+                condition=~models.Q(external_id=""),
+                name="uniq_ledger_external_id_per_account",
             ),
         ]
 

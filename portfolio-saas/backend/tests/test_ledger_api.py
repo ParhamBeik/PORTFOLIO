@@ -8,6 +8,7 @@ from decimal import Decimal
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -248,3 +249,41 @@ def test_deposit_is_external_but_does_not_create_investment_return(ledger_accoun
     assert Decimal(response.data["current_value_tomans"]) == Decimal("1500")
     assert abs(response.data["twr"]) < 1e-9
     assert abs(response.data["xirr"]) < 1e-9
+
+
+def test_dividend_requires_an_asset_but_not_a_quantity(ledger_account, asset_catalog):
+    client = _client(ledger_account.user)
+    _post(client, ledger_account, {
+        "kind": "opening_cash", "amount_tomans": "1000",
+        "occurred_at": (timezone.now() - datetime.timedelta(days=1)).isoformat(),
+    })
+
+    response = _post(client, ledger_account, {
+        "kind": "dividend", "asset_key": "emami_coin",
+        "amount_tomans": "50", "occurred_at": timezone.now().isoformat(),
+    })
+
+    assert response.status_code == 201, response.data
+    assert response.data["quantity"] is None
+
+
+def test_external_id_is_unique_within_an_account(ledger_account):
+    fields = {
+        "account": ledger_account,
+        "kind": LedgerEntry.Kind.OPENING_CASH,
+        "amount_tomans": Decimal("100"),
+        "external_id": "bank-42",
+    }
+    LedgerEntry.objects.create(**fields)
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        LedgerEntry.objects.create(**fields)
+
+
+def test_dividend_asset_is_enforced_by_database(ledger_account):
+    with pytest.raises(IntegrityError), transaction.atomic():
+        LedgerEntry.objects.create(
+            account=ledger_account,
+            kind=LedgerEntry.Kind.DIVIDEND,
+            amount_tomans=Decimal("50"),
+        )
