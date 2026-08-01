@@ -321,6 +321,17 @@ def test_optimization_risk_parity(synthetic_history):
         current_weights=current_weights,
         total_value_tomans=Decimal("1000000000"),
         user=user,
+        # Equal risk contribution is exact only before concentration caps bind.
+        # Cap enforcement is covered independently by the HRP/cap tests.
+        constraints={
+            "max_weight_per_asset": 1.0,
+            "max_weight_per_class": {
+                "Gold": 1.0,
+                "Crypto": 1.0,
+                "Stock": 1.0,
+                "Cash": 1.0,
+            },
+        },
     )
     w = result["target_weights"]
     assert abs(sum(w.values()) - 1.0) < 1e-2
@@ -330,7 +341,9 @@ def test_optimization_risk_parity(synthetic_history):
     df, _ = daily_returns_matrix()
     keys = [k for k in w if k in df.columns]
     if len(keys) >= 2:
-        lw = LedoitWolf().fit(df[keys].fillna(0.0).to_numpy())
+        # Match the production estimator: incomplete observations are excluded,
+        # never converted into synthetic zero returns.
+        lw = LedoitWolf().fit(df[keys].dropna(how="any").to_numpy())
         cov = lw.covariance_ * 252
         wv = np.array([w[k] for k in keys])
         Sw = cov @ wv
