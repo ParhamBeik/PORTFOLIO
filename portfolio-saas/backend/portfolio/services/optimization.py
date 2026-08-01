@@ -1,6 +1,7 @@
 """Scenario optimization engine for Pro portfolios.
 
-Four portfolio-construction scenarios share one pipeline:
+Five portfolio-construction scenarios share one pipeline:
+  * `equal_weight`   — transparent baseline with one equal sleeve per asset.
   * `max_sharpe`     — EfficientFrontier tangency portfolio (pypfopt).
   * `min_volatility` — EfficientFrontier global-min-vol portfolio.
   * `risk_parity`    — convex ERC formulation solved in cvxpy (ECOS).
@@ -32,7 +33,8 @@ from pypfopt import EfficientFrontier, HRPOpt
 from sklearn.covariance import LedoitWolf
 
 from portfolio.models import Asset
-from .returns import _price_version_fingerprint, daily_returns_matrix
+from .deflator import normalize_basis
+from .returns import MIN_DAILY_RETURNS, _price_version_fingerprint, daily_returns_matrix
 
 # Same risk-free proxy as diagnostics, kept here so the optimizer is standalone.
 from django.conf import settings
@@ -50,7 +52,7 @@ DEFAULT_CONSTRAINTS = {
     },
 }
 
-SCENARIOS = ("max_sharpe", "min_volatility", "risk_parity", "hrp")
+SCENARIOS = ("equal_weight", "min_volatility", "max_sharpe", "risk_parity", "hrp")
 
 _OPT_CACHE_TTL = 600
 
@@ -113,7 +115,10 @@ def _asset_class_map(universe: list[str] | None = None) -> dict[str, str]:
 
 def _shrunk_covariance(returns: pd.DataFrame) -> pd.DataFrame:
     """Ledoit-Wolf shrunk covariance of daily returns (DataFrame, daily scale)."""
-    mat = returns.fillna(0.0).to_numpy()
+    complete = returns.dropna(how="any")
+    if complete.empty:
+        raise UniverseTooSmall([])
+    mat = complete.to_numpy()
     lw = LedoitWolf().fit(mat)
     return pd.DataFrame(lw.covariance_, index=returns.columns, columns=returns.columns)
 
@@ -270,6 +275,16 @@ def _constraints_hash(constraints: dict) -> str:
 
 
 # ---------- scenario solvers -------------------------------------------------
+
+
+def _equal_weight(
+    returns: pd.DataFrame,
+    cov_daily: pd.DataFrame,
+    **_constraints,
+) -> dict[str, float]:
+    """Unconstrained, fully invested reference portfolio."""
+    weight = 1.0 / len(returns.columns)
+    return {key: weight for key in returns.columns}
 
 
 def _max_sharpe(
@@ -454,7 +469,7 @@ def _hrp(
     max_weight_per_class: dict[str, float],
     class_map: dict[str, str],
 ) -> dict[str, float]:
-    hrp = HRPOpt(returns=returns.fillna(0.0))
+    hrp = HRPOpt(returns=returns.dropna(how="any"))
     try:
         raw = hrp.optimize()
     except Exception:
@@ -470,6 +485,7 @@ def _hrp(
 
 
 _SCENARIO_DISPATCH = {
+    "equal_weight": _equal_weight,
     "max_sharpe": _max_sharpe,
     "min_volatility": _min_volatility,
     "risk_parity": _risk_parity,
@@ -490,8 +506,9 @@ def optimize(
     history_days: int = 180,
     as_of=None,
     universe: list[str] | None = None,
-    basis: str = "nominal",
+    basis: str = "nominal_toman",
     universe_mode: str = "market",
+    min_observations: int = MIN_DAILY_RETURNS,
 ) -> dict:
     """Run one optimization scenario and return the full payload.
 
@@ -505,6 +522,7 @@ def optimize(
             resolved[k] = v
     if scenario not in SCENARIOS:
         raise ValueError(f"unknown scenario: {scenario}")
+    basis = normalize_basis(basis)
 
     from portfolio.services.returns import normalize_as_of, get_universe_by_mode
     as_of_dt = normalize_as_of(as_of)
@@ -545,11 +563,27 @@ def optimize(
     )
     if returns.empty or len(returns.columns) < 3:
         raise UniverseTooSmall(list(returns.columns) if not returns.empty else [])
-    # Restrict the eligible universe to assets with any variance.
-    eligible = [k for k in returns.columns if returns[k].std(ddof=0) > 0]
+    # Each optimized covariance uses one real, shared observation window. Rows
+    # with a missing return are unavailable, not zero-return days.
+    coverage = {key: float(returns[key].notna().mean()) for key in returns.columns}
+    eligible = [
+        key for key in returns.columns
+        if returns[key].notna().sum() >= min_observations
+        and returns[key].std(ddof=0) > 0
+    ]
+    for key in returns.columns:
+        if key not in eligible and not any(item.get("key") == key for item in excluded):
+            excluded.append({
+                "key": key,
+                "reason": "insufficient_optimization_observations",
+                "observations": int(returns[key].notna().sum()),
+                "coverage": coverage[key],
+            })
     if len(eligible) < 3:
         raise UniverseTooSmall(eligible)
-    returns = returns[eligible]
+    returns = returns[eligible].dropna(how="any")
+    if len(returns.index) < min_observations:
+        raise UniverseTooSmall(eligible)
 
     class_map = _asset_class_map(universe)
     cov_daily = _shrunk_covariance(returns)
@@ -579,15 +613,33 @@ def optimize(
     metrics = _portfolio_metrics(target, mu, cov_annual)
     trades = _rebalance_trades(current_weights, target, total_value_tomans)
 
+    constraints_applied = resolved if scenario != "equal_weight" else {
+        "long_only": True,
+        "weighting": "equal",
+    }
     payload = {
         "scenario": scenario,
+        "basis": basis,
+        "universe_mode": universe_mode,
         "eligible_assets": list(returns.columns),
         "excluded_assets": excluded,
         "target_weights": target,
         "target_metrics": metrics,
         "rebalance_trades": trades,
         "current_weights": current_weights,
-        "constraints_applied": resolved,
+        "constraints_applied": constraints_applied,
+        "data_window": {
+            "start": returns.index.min().isoformat(),
+            "end": returns.index.max().isoformat(),
+        },
+        "observations": len(returns.index),
+        "coverage": {key: coverage[key] for key in returns.columns},
+        "risk_free_rate_annual": RISK_FREE_RATE_ANNUAL,
+        "expected_return_method": "historical_arithmetic_mean_annualized_252",
+        "limitations": [
+            "Decision-support scenario; no portfolio is objectively best.",
+            "Expected returns are historical estimates, not forecasts.",
+        ],
         "price_version": version,
         "cached": False,
     }
@@ -632,7 +684,7 @@ def _efficient_frontier(
     history_days: int = 180,
     as_of=None,
     universe: list[str] | None = None,
-    basis: str = "nominal",
+    basis: str = "nominal_toman",
 ) -> dict:
     """Sample the efficient frontier + reference points.
 

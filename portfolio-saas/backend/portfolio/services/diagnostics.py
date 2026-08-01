@@ -17,6 +17,7 @@ import pandas as pd
 from sklearn.covariance import LedoitWolf
 
 from portfolio.services import value_user
+from .deflator import normalize_basis
 from .returns import daily_returns_matrix
 
 # Iran TSE risk-free proxy (Bahar Azadi bond yield ~30%). Annualized.
@@ -56,8 +57,8 @@ def _portfolio_returns(returns: pd.DataFrame, weights: dict[str, float]) -> pd.S
         return pd.Series(dtype=float)
     w = np.array([weights[k] for k in cols], dtype=float)
     w = w / w.sum() if w.sum() else w
-    sub = returns[cols].fillna(0.0).to_numpy()
-    return pd.Series(sub @ w, index=returns.index)
+    sub = returns[cols].dropna(how="any")
+    return pd.Series(sub.to_numpy() @ w, index=sub.index)
 
 
 def _annualized_volatility(port_series: pd.Series) -> float:
@@ -142,7 +143,9 @@ def _diversification_ratio(
     if w.sum() <= 0:
         return 1.0
     w = w / w.sum()
-    sub = returns[cols].fillna(0.0)
+    sub = returns[cols].dropna(how="any")
+    if sub.empty:
+        return 1.0
     try:
         lw = LedoitWolf().fit(sub.to_numpy())
         cov = lw.covariance_ * TRADING_DAYS_PER_YEAR
@@ -159,6 +162,9 @@ def _diversification_ratio(
 
 def _load_index_returns(target_index: pd.Index, as_of: dt.datetime | None = None) -> pd.Series | None:
     """Load index return series from MarketIndexData, aligned with target_index."""
+    from django.conf import settings
+    if not getattr(settings, "HISTORICAL_BENCHMARK_ENABLED", False):
+        return None
     from marketdata.models import MarketIndexData
     import jdatetime
     import datetime as dt
@@ -185,10 +191,9 @@ def _load_index_returns(target_index: pd.Index, as_of: dt.datetime | None = None
         return None
 
     s = pd.Series(records).sort_index()
-    s_returns = s.pct_change()
+    s_returns = s.pct_change(fill_method=None)
     s_returns.index = pd.to_datetime(s_returns.index, utc=True).normalize()
-    aligned = s_returns.reindex(target_index).ffill().bfill().fillna(0.0)
-    return aligned
+    return s_returns.reindex(target_index)
 
 
 def portfolio_diagnostics(
@@ -199,7 +204,7 @@ def portfolio_diagnostics(
     history_days: int = 180,
     as_of=None,
     universe: list[str] | None = None,
-    basis: str = "nominal"
+    basis: str = "nominal_toman"
 ) -> dict:
     """Compute all diagnostics for the current portfolio.
 
@@ -209,6 +214,7 @@ def portfolio_diagnostics(
     """
     from portfolio.services.returns import normalize_as_of
     as_of_dt = normalize_as_of(as_of)
+    basis = normalize_basis(basis)
 
     returns, excluded = daily_returns_matrix(
         history_days=history_days,
@@ -233,17 +239,27 @@ def portfolio_diagnostics(
     if not returns.empty and not port_series.empty:
         index_returns = _load_index_returns(returns.index, as_of=as_of_dt)
         if index_returns is not None:
+            aligned = pd.concat(
+                [port_series.rename("portfolio"), index_returns.rename("benchmark")],
+                axis=1,
+            ).dropna(how="any")
+            if len(aligned.index) < 2:
+                index_returns = None
+            else:
+                port_for_benchmark = aligned["portfolio"]
+                index_returns = aligned["benchmark"]
+        if index_returns is not None:
             beta = 0.0
-            cov_matrix = np.cov(port_series, index_returns)
+            cov_matrix = np.cov(port_for_benchmark, index_returns)
             benchmark_var = np.var(index_returns, ddof=1)
             if benchmark_var > 0:
                 beta = cov_matrix[0][1] / benchmark_var
             
-            ann_port_return = np.mean(port_series) * TRADING_DAYS_PER_YEAR
+            ann_port_return = np.mean(port_for_benchmark) * TRADING_DAYS_PER_YEAR
             ann_index_return = np.mean(index_returns) * TRADING_DAYS_PER_YEAR
             alpha = ann_port_return - (RISK_FREE_RATE_ANNUAL + beta * (ann_index_return - RISK_FREE_RATE_ANNUAL))
             
-            active_returns = port_series - index_returns
+            active_returns = port_for_benchmark - index_returns
             tracking_error = np.std(active_returns, ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR)
             
             info_ratio = 0.0
@@ -268,10 +284,17 @@ def portfolio_diagnostics(
         }
 
     return {
+        "basis": basis,
+        "analysis_type": "hypothetical_fixed_weight_exposure",
         "current_weights": current_weights,
         "total_value_tomans": str(total_value_tomans),
         "eligible_assets": eligible_assets,
         "excluded_assets": excluded,
+        "data_window": {
+            "start": returns.index.min().isoformat() if not returns.empty else None,
+            "end": returns.index.max().isoformat() if not returns.empty else None,
+            "observations": len(port_series.index),
+        },
         "metrics": {
             "annualized_volatility": _finite(ann_vol),
             "sharpe": _finite(sharpe),

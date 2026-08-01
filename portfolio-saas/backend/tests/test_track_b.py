@@ -4,6 +4,7 @@ from django.utils import timezone
 import jdatetime
 import datetime
 import pandas as pd
+from django.test import override_settings
 
 from marketdata.models import MarketInstrument, SymbolIntegrity, MarketIndexData, MarketCandle
 from marketdata.integrity import compute_symbol_integrity, update_all_symbols_integrity
@@ -78,6 +79,7 @@ class TestTrackB:
         assert excluded_keys["kama_stock"]["reason"] == "integrity_gate_failed"
         assert excluded_keys["kama_stock"]["detail"] == "Low coverage ratio"
 
+    @override_settings(HISTORICAL_BENCHMARK_ENABLED=True)
     def test_benchmark_diagnostics_calculation(self):
         """Verify that benchmark metrics are calculated when index data exists, and omitted when it is empty."""
         Asset.objects.all().delete()

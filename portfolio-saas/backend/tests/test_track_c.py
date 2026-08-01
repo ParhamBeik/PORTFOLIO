@@ -227,8 +227,9 @@ class TestTrackC:
         assert run.status == BacktestRun.Status.READY
         assert run.progress == 100
 
-        # Years counts: 5 cutoffs * 4 scenarios = 20
-        assert years.count() == 20
+        # Five completed years across the five supported scenarios.
+        from portfolio.services.optimization import SCENARIOS
+        assert years.count() == 5 * len(SCENARIOS)
 
         # Verify realized metrics structure of the first year
         y1 = years.filter(cutoff_date="1400-01-01").first()

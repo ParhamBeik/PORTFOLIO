@@ -2,6 +2,21 @@ import datetime as dt
 import pandas as pd
 import jdatetime
 
+_BASIS_ALIASES = {
+    "nominal": "nominal_toman",
+    "nominal_toman": "nominal_toman",
+    "usd_real": "usd_denominated",
+    "usd_denominated": "usd_denominated",
+}
+
+
+def normalize_basis(basis: str) -> str:
+    """Return the canonical valuation basis while accepting one-release aliases."""
+    try:
+        return _BASIS_ALIASES[basis]
+    except KeyError as exc:
+        raise ValueError("basis must be nominal_toman or usd_denominated") from exc
+
 def _jalali_to_gregorian_index(dates: pd.Series) -> pd.DatetimeIndex:
     """Jalali "1403-10-19" strings -> tz-aware Gregorian DatetimeIndex."""
     def convert(value):
@@ -19,14 +34,17 @@ def to_basis(
     basis: str,
     usd_series: pd.Series | None = None,
 ) -> pd.Series:
-    """Convert price series to the specified basis ('nominal' or 'usd_real').
+    """Convert a price series to nominal Toman or USD-denominated values.
 
-    For 'usd_real', divides the series by the daily USD exchange rate.
+    `nominal` and `usd_real` remain temporary aliases. USD conversion only uses
+    rates already known at each timestamp and carries them for at most five
+    sessions; unavailable rates remain unavailable.
     Index of the series is assumed to be DatetimeIndex.
     """
-    if basis == "nominal":
+    basis = normalize_basis(basis)
+    if basis == "nominal_toman":
         return series
-    if basis == "usd_real":
+    if basis == "usd_denominated":
         if usd_series is None:
             from marketdata.models import GoldCurrencyHistory
 
@@ -49,7 +67,7 @@ def to_basis(
                 )
 
             if not rows:
-                return series
+                return series * float("nan")
 
             dates, closes = zip(*rows)
             usd_series = pd.Series(
@@ -60,9 +78,6 @@ def to_basis(
             usd_series = usd_series[usd_series > 0]
             usd_series = usd_series.groupby(usd_series.index).last()
 
-        # Align usd_series to series.index
-        usd_aligned = usd_series.reindex(series.index).ffill().bfill()
-        usd_aligned = usd_aligned.fillna(1.0).replace(0.0, 1.0)
+        usd_aligned = usd_series.reindex(series.index).ffill(limit=5)
+        usd_aligned = usd_aligned.where(usd_aligned > 0)
         return series / usd_aligned
-
-    return series

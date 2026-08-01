@@ -32,6 +32,7 @@ import pandas as pd
 from django.core.cache import cache
 
 from portfolio.models import Asset, Price
+from .deflator import normalize_basis, to_basis
 
 # How many days of price history to load by default (the buffer is so a one-day
 # gap doesn't drop a return row off the front).
@@ -261,6 +262,7 @@ def get_universe_by_mode(mode: str, user=None, account=None) -> list[str] | None
 
 def _returns_cache_key(history_days: int, as_of: dt.datetime | None, universe: list[str] | None, basis: str, version: str) -> str:
     import hashlib
+    basis = normalize_basis(basis)
     if universe is None:
         univ_str = "default"
     else:
@@ -339,9 +341,11 @@ def _load_price_panel(
         )
 
     from marketdata.models import SymbolIntegrity, MarketCandle, GoldCurrencyHistory
-    failed_symbols = {
-        si.symbol: si.reason
-        for si in SymbolIntegrity.objects.filter(passes_gate=False)
+    # A current nightly assessment must not leak into a historical cutoff. Its
+    # window may contain observations that did not exist at that cutoff; the
+    # bounded panel checks below are the point-in-time integrity gate instead.
+    failed_symbols = {} if as_of_dt is not None else {
+        si.symbol: si.reason for si in SymbolIntegrity.objects.filter(passes_gate=False)
     }
 
     # Resolve universe items
@@ -449,6 +453,13 @@ def _load_price_panel(
         warehouse_cols[key] = series
 
     fallback_panel = _load_live_price_panel(cutoff, as_of_dt, fallback_keys)
+    for key in fallback_keys:
+        if key not in fallback_panel.columns:
+            gate_excluded.append({
+                "key": key,
+                "reason": "no_price_history",
+                "detail": "No trustworthy price observations in the requested window",
+            })
 
     if not warehouse_cols:
         return fallback_panel, gate_excluded
@@ -508,7 +519,7 @@ def _convert_usd_to_toman(panel: pd.DataFrame) -> pd.DataFrame:
     """
     if "usd_cash" not in panel.columns:
         return panel
-    fx = panel["usd_cash"].ffill()
+    fx = panel["usd_cash"].ffill(limit=5)
     for key in USD_QUOTED_KEYS:
         if key in panel.columns:
             panel[key] = panel[key] * fx
@@ -523,15 +534,37 @@ def _build_returns_matrix(panel: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]
     if panel.empty:
         return pd.DataFrame(), []
 
-    returns = panel.ffill().pct_change()
+    filled = panel.ffill(limit=5)
+    returns = filled.pct_change(fill_method=None)
     excluded: list[dict] = []
     keep: list[str] = []
     for key in returns.columns:
+        missing = panel[key].isna().to_numpy()
+        longest_gap = current_gap = 0
+        for is_missing in missing:
+            current_gap = current_gap + 1 if is_missing else 0
+            longest_gap = max(longest_gap, current_gap)
         non_nan = int(returns[key].notna().sum())
-        if non_nan < MIN_DAILY_RETURNS:
+        expected = max(len(returns.index) - 1, 0)
+        coverage = non_nan / expected if expected else 0.0
+        if longest_gap > 5:
+            excluded.append({
+                "key": key,
+                "reason": "price_gap_exceeded",
+                "max_gap_sessions": longest_gap,
+            })
+        elif non_nan < MIN_DAILY_RETURNS:
             excluded.append(
                 {"key": key, "reason": "insufficient_history", "days": non_nan}
             )
+        elif coverage < 0.90:
+            excluded.append({
+                "key": key,
+                "reason": "insufficient_coverage",
+                "observations": non_nan,
+                "expected_sessions": expected,
+                "coverage": coverage,
+            })
         else:
             keep.append(key)
     returns = returns[keep] if keep else pd.DataFrame(index=returns.index)
@@ -543,7 +576,7 @@ def daily_returns_matrix(
     history_days: int = DEFAULT_HISTORY_DAYS,
     as_of=None,
     universe: list[str] | None = None,
-    basis: str = "nominal"
+    basis: str = "nominal_toman"
 ) -> tuple[pd.DataFrame, list[dict]]:
     """Return `(daily_returns_df, excluded)` for the eligible universe.
 
@@ -553,6 +586,7 @@ def daily_returns_matrix(
     are daily simple returns (float).
     """
     as_of_dt = normalize_as_of(as_of)
+    basis = normalize_basis(basis)
     version = _price_version_fingerprint()
     key = _returns_cache_key(history_days, as_of_dt, universe, basis, version)
     cached = cache.get(key)
@@ -568,8 +602,7 @@ def daily_returns_matrix(
     panel = _convert_usd_to_toman(panel)
 
     # Apply basis conversion
-    if basis == "usd_real" and "usd_cash" in panel.columns:
-        from portfolio.services.deflator import to_basis
+    if basis == "usd_denominated" and "usd_cash" in panel.columns:
         usd_series = panel["usd_cash"]
         for col in panel.columns:
             panel[col] = to_basis(panel[col], basis, usd_series=usd_series)
@@ -608,7 +641,7 @@ def correlation_matrix(
     history_days: int = DEFAULT_HISTORY_DAYS,
     as_of=None,
     universe: list[str] | None = None,
-    basis: str = "nominal"
+    basis: str = "nominal_toman"
 ) -> dict:
     """Correlation payload for the eligible universe from the returns df.
 
@@ -623,9 +656,11 @@ def correlation_matrix(
     )
     if df.empty:
         return {"assets": [], "matrix": []}
-    corr = df.corr().fillna(0.0)
-    corr = np.nan_to_num(corr.to_numpy(), nan=0.0)
-    return {"assets": list(df.columns), "matrix": corr.tolist()}
+    eligible = [column for column in df if df[column].std(ddof=0) > 0]
+    corr = df[eligible].corr(min_periods=MIN_DAILY_RETURNS)
+    complete = [column for column in corr if corr.loc[column].notna().all()]
+    corr = corr.loc[complete, complete]
+    return {"assets": complete, "matrix": corr.to_numpy().tolist()}
 
 
 def invalidate_returns_cache() -> None:
@@ -636,7 +671,7 @@ def invalidate_returns_cache() -> None:
     try:
         version = _price_version_fingerprint()
         for history_days in (30, 90, DEFAULT_HISTORY_DAYS, 365):
-            for basis in ("nominal", "usd_real"):
+            for basis in ("nominal_toman", "usd_denominated"):
                 key = _returns_cache_key(history_days, None, None, basis, version)
                 cache.delete(key)
     except Exception:  # cache is best-effort; never crash a fetch on it

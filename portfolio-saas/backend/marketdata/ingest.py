@@ -634,17 +634,22 @@ def ingest_market_index(payload) -> tuple[int, int]:
     """Index.php payload (single snapshot dict) -> one MarketIndexData row."""
     if not isinstance(payload, dict) or "date" not in payload:
         return 0, 0 if payload is None else 1
-    rows = [MarketIndexData(
-        date=normalize_jalali(payload["date"]),
-        time=payload.get("time", "") or "",
-        state=payload.get("state", "") or "",
-        index_overall=payload.get("index") or 0.0,
-        index_overall_change=payload.get("index_change") or 0.0,
-        index_equal_weight=payload.get("index_equalWeight") or 0.0,
-        index_equal_weight_change=payload.get("index_equalWeight_change") or 0.0,
-        market_value=payload.get("mv") or 0,
-        trade_number=payload.get("tno") or 0,
-        trade_value=payload.get("tval") or 0,
-        trade_volume=payload.get("tvol") or 0,
-    )]
-    return _bulk(MarketIndexData, rows)
+    accepted, rejected = screen("index", [payload], "market_index", "TEDPIX")
+    rows = [
+        MarketIndexData(
+            date=normalize_jalali(record["date"]),
+            time=record.get("time", "") or "",
+            state=record.get("state", "") or "",
+            index_overall=record["index"],
+            index_overall_change=record.get("index_change") or 0.0,
+            index_equal_weight=record.get("index_equalWeight") or 0.0,
+            index_equal_weight_change=record.get("index_equalWeight_change") or 0.0,
+            market_value=record.get("mv") or 0,
+            trade_number=record.get("tno") or 0,
+            trade_value=record.get("tval") or 0,
+            trade_volume=record.get("tvol") or 0,
+        )
+        for record in accepted
+    ]
+    created, conflicts = _bulk(MarketIndexData, rows)
+    return created, conflicts + rejected

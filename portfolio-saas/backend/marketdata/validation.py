@@ -251,6 +251,26 @@ def _check_snapshot(rec):
     return None
 
 
+def _check_index(rec):
+    """Validate a live TEDPIX observation before it becomes benchmark data."""
+    reason = _bad_date(rec.get("date"))
+    if reason:
+        return reason
+    reason = _bad_time(rec.get("time"))
+    if reason:
+        return reason
+    overall = _num(rec.get("index"))
+    if overall is None:
+        return "index_not_numeric"
+    if overall <= 0:
+        return "index_not_positive"
+    for field in ("mv", "tno", "tval", "tvol"):
+        value = _num(rec.get(field))
+        if value is not None and value < 0:
+            return f"{field}_negative"
+    return None
+
+
 CHECKS = {
     "candle": _check_candle,
     "daily_history": _check_daily_history,
@@ -260,6 +280,7 @@ CHECKS = {
     "codal": _check_codal,
     "shareholder": _check_shareholder,
     "snapshot": _check_snapshot,
+    "index": _check_index,
 }
 
 
