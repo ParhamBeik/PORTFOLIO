@@ -7,6 +7,7 @@ import datetime
 from decimal import Decimal
 
 import pytest
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -118,3 +119,71 @@ def test_ledger_is_account_scoped(ledger_account, make_user):
     )
 
     assert response.status_code == 404
+
+
+def _csv_upload(content: str):
+    return SimpleUploadedFile("ledger.csv", content.encode("utf-8"), "text/csv")
+
+
+def test_csv_preview_validates_without_writing(ledger_account):
+    occurred_at = (timezone.now() - datetime.timedelta(days=5)).isoformat()
+    content = (
+        "external_id,occurred_at,kind,asset_key,quantity,unit_price_tomans,amount_tomans,note\n"
+        f"cash-1,{occurred_at},opening_cash,,,,1000,Starting cash\n"
+    )
+
+    response = _client(ledger_account.user).post(
+        f"/api/accounts/{ledger_account.id}/imports/preview/",
+        {"file": _csv_upload(content)},
+        format="multipart",
+    )
+
+    assert response.status_code == 200, response.data
+    assert response.data["valid"] is True
+    assert response.data["row_count"] == 1
+    assert not LedgerEntry.objects.filter(account=ledger_account).exists()
+
+
+def test_csv_commit_is_atomic_and_idempotent(ledger_account, asset_catalog):
+    occurred_at = (timezone.now() - datetime.timedelta(days=5)).isoformat()
+    content = (
+        "external_id,occurred_at,kind,asset_key,quantity,unit_price_tomans,amount_tomans,note\n"
+        f"cash-1,{occurred_at},opening_cash,,,,1000,Starting cash\n"
+        f"position-1,{occurred_at},opening_position,emami_coin,2,,,Starting position\n"
+    )
+    client = _client(ledger_account.user)
+
+    first = client.post(
+        f"/api/accounts/{ledger_account.id}/imports/commit/",
+        {"file": _csv_upload(content)},
+        format="multipart",
+    )
+    replay = client.post(
+        f"/api/accounts/{ledger_account.id}/imports/commit/",
+        {"file": _csv_upload(content)},
+        format="multipart",
+    )
+
+    assert first.status_code == 201, first.data
+    assert replay.status_code == 200, replay.data
+    assert replay.data["batch_id"] == first.data["batch_id"]
+    assert LedgerEntry.objects.filter(account=ledger_account).count() == 2
+
+
+def test_csv_commit_rolls_back_every_row_on_error(ledger_account):
+    occurred_at = (timezone.now() - datetime.timedelta(days=5)).isoformat()
+    content = (
+        "external_id,occurred_at,kind,asset_key,quantity,unit_price_tomans,amount_tomans,note\n"
+        f"cash-1,{occurred_at},opening_cash,,,,1000,Starting cash\n"
+        f"bad-1,{occurred_at},buy,unknown,2,100,,Bad asset\n"
+    )
+
+    response = _client(ledger_account.user).post(
+        f"/api/accounts/{ledger_account.id}/imports/commit/",
+        {"file": _csv_upload(content)},
+        format="multipart",
+    )
+
+    assert response.status_code == 400
+    assert response.data["row"] == 2
+    assert not LedgerEntry.objects.filter(account=ledger_account).exists()
