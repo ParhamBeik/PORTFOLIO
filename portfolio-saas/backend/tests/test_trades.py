@@ -5,9 +5,11 @@ Snapshot) inside one atomic transaction, so the value is in exercising them
 together against the DB, not in isolated logic. These verify the balance math,
 the ledger append, the immediate snapshot, and the oversell/guard rejections.
 """
+import datetime
 from decimal import Decimal
 
 import pytest
+from django.utils import timezone
 
 from portfolio.models import Account, Holding, Snapshot, Transaction
 from portfolio.services.trades import (
@@ -184,6 +186,29 @@ class TestTradeEndpoint:
         assert resp.status_code == 201
         assert Decimal(resp.data["holding_quantity"]) == Decimal("2")
 
+    def test_post_trade_preserves_historical_fields(self, account, asset_catalog):
+        occurred_at = timezone.now() - datetime.timedelta(days=30)
+        client = self._client(account.user)
+
+        response = client.post(
+            f"/api/accounts/{account.id}/trades/",
+            {
+                "asset_key": "emami_coin",
+                "side": "buy",
+                "quantity": "2",
+                "timestamp": occurred_at.isoformat(),
+                "price_tomans": "123456.75",
+                "source": "imported",
+            },
+            format="json",
+        )
+
+        assert response.status_code == 201, response.data
+        entry = Transaction.objects.get(account=account)
+        assert entry.timestamp == occurred_at
+        assert entry.price_tomans == Decimal("123456.7500")
+        assert entry.source == "imported"
+
     def test_oversell_returns_400(self, account, asset_catalog, write_prices):
         write_prices({"emami_coin": Decimal("176000000")})
         client = self._client(account.user)
@@ -346,4 +371,3 @@ def test_backfill_ledger_gap_command(account, asset_catalog, write_prices):
     assert txn2.side == "buy"
     assert txn2.quantity == Decimal("100")
     assert txn2.price_tomans == Decimal("55.5")
-
