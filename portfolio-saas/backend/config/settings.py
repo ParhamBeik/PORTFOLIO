@@ -188,22 +188,58 @@ SIMPLE_JWT = {
 # PORTFOLIO project's settings.json, now 12-factor env vars.
 BRS_API_KEY = os.getenv("BRS_API_KEY", "")
 BRS_URL = os.getenv(
-    "BRS_URL", "https://BrsApi.ir/Api/Market/Gold_Currency.php"
+    "BRS_URL", "https://Api.BrsApi.ir/Market/Gold_Currency.php"
 )
 TSETMC_API_KEY = os.getenv("TSETMC_API_KEY", "")
-TSETMC_URL = os.getenv("TSETMC_URL", "https://BrsApi.ir/Api/Tsetmc/AllSymbols.php")
+TSETMC_URL = os.getenv("TSETMC_URL", "https://Api.BrsApi.ir/Tsetmc/AllSymbols.php")
 TSETMC_SYMBOL_URL = os.getenv(
-    "TSETMC_SYMBOL_URL", "https://BrsApi.ir/Api/Tsetmc/Symbol.php"
+    "TSETMC_SYMBOL_URL", "https://Api.BrsApi.ir/Tsetmc/Symbol.php"
 )
 # Seconds to sleep between BrsApi calls inside one sync task (paid API courtesy).
-MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "0.25"))
+MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "0.05"))
 MARKETDATA_DAILY_REQUEST_LIMIT = int(os.getenv("MARKETDATA_DAILY_REQUEST_LIMIT", "9800"))
 MARKETDATA_WINDOW_LIMIT = int(os.getenv("MARKETDATA_WINDOW_LIMIT", "1000"))
 MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
-MARKETDATA_ARCHIVE_REQUEST_RESERVE = int(
-    os.getenv("MARKETDATA_ARCHIVE_REQUEST_RESERVE", "8820")
+
+# Per-bucket daily budget. LIVE gets a floor, not a leftover: live is the
+# customer-facing path, so it is reserved first and archive takes the remainder.
+# Replaces the legacy MARKETDATA_ARCHIVE_REQUEST_RESERVE=8820, which reserved for
+# archive and left live to fight for what was left -- backwards.
+MARKETDATA_LIVE_REQUEST_FLOOR = int(os.getenv("MARKETDATA_LIVE_REQUEST_FLOOR", "600"))
+MARKETDATA_LIVE_REQUEST_HEADROOM = int(os.getenv("MARKETDATA_LIVE_REQUEST_HEADROOM", "200"))
+MARKETDATA_ARCHIVE_REQUEST_BUDGET = int(os.getenv("MARKETDATA_ARCHIVE_REQUEST_BUDGET", "8800"))
+MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET", "200"))
+# Kept as a backwards-compatible alias so older management commands and tests that
+# still read it keep working; the archive budget above is the authoritative value.
+MARKETDATA_ARCHIVE_REQUEST_RESERVE = MARKETDATA_ARCHIVE_REQUEST_BUDGET
+MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "120"))
+
+# Per-day HISTORICAL_PER_DAY endpoints (ticks) walk one calendar day per request,
+# so the trailing window is bounded to keep cost finite. Trading days only -- a
+# non-trading day simply has no daily candle, so it is never requested.
+MARKETDATA_TICK_WINDOW_DAYS = int(os.getenv("MARKETDATA_TICK_WINDOW_DAYS", "90"))
+
+# Codal announcements are paged 20 per request and a mature symbol has ~50 pages,
+# so "all history for all symbols" is ~32,000 requests -- more than three days of
+# the whole archive budget. Only page 1 was ever fetched, which stored 2% and
+# still reported verified. Bound the target to the newest N pages per symbol so
+# the state can honestly converge; raise it when the backlog is otherwise idle.
+MARKETDATA_CODAL_MAX_PAGES = int(os.getenv("MARKETDATA_CODAL_MAX_PAGES", "5"))
+
+# Live poll cadence by market state (seconds). Beat still ticks every minute; the
+# task itself decides whether enough time has passed, so the cadence can change
+# without a beat restart. See marketdata/market_state.py for the arithmetic.
+# A flat 5 minutes across all three states: 288 cycles a day, every hour covered.
+MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "300"))
+MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "300"))
+MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "300"))
+
+# Provider calls one live cycle makes: one all-gold quote and one all-stock quote
+# (portfolio/live/fetcher.py). Per-symbol lookups only fire on a cache miss, so
+# this is the steady-state figure the archive reserve is sized against.
+MARKETDATA_LIVE_REQUESTS_PER_CYCLE = int(
+    os.getenv("MARKETDATA_LIVE_REQUESTS_PER_CYCLE", "2")
 )
-MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "30"))
 
 MARKETDATA_QUOTA_TIMEZONE = os.getenv("MARKETDATA_QUOTA_TIMEZONE", "Asia/Tehran")
 # Extra TSE symbols to sync beyond assets with a tse_symbol (comma-separated).
@@ -211,7 +247,7 @@ MARKETDATA_EXTRA_SYMBOLS = [
     s.strip() for s in os.getenv("MARKETDATA_EXTRA_SYMBOLS", "").split(",") if s.strip()
 ]
 TSETMC_HISTORY_URL = os.getenv(
-    "TSETMC_HISTORY_URL", "https://BrsApi.ir/Api/Tsetmc/History.php"
+    "TSETMC_HISTORY_URL", "https://Api.BrsApi.ir/Tsetmc/History.php"
 )
 
 # Manual prices for assets that have no reliable API (e.g. Swiss gold bars).

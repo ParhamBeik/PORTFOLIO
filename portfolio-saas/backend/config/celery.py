@@ -25,6 +25,15 @@ app.conf.update(
     task_acks_late=True,  # ack after the task runs, not on receipt: a killed worker redelivers the task
     worker_prefetch_multiplier=1,  # pair with acks_late so one worker doesn't hoard several long tasks
     result_expires=3600,  # results aren't polled here (fire-and-forget beat schedule); don't let them pile up in Redis
+    task_default_queue="live",
+    # Two queues, two workers. Archive ticks run for up to 50s each and used to
+    # sit in the same queue as the price loop, so a customer-facing price fetch
+    # could queue behind a backfill batch. Routing is by module: everything in
+    # marketdata is warehouse work, everything in portfolio is customer-facing.
+    task_routes={
+        "marketdata.tasks.*": {"queue": "archive"},
+        "portfolio.tasks.*": {"queue": "live"},
+    },
 )
 
 # All crontab times below are manually converted from Tehran time to UTC (see the
@@ -32,9 +41,11 @@ app.conf.update(
 # the offset is a flat +03:30 year-round; if that policy ever changes again, these
 # hours need to be re-derived by hand — this is a documented gap, not automated.
 app.conf.beat_schedule = {
-    "fetch-prices-every-2-min": {
+    # Beat ticks every minute; the task itself enforces the real cadence, which
+    # depends on whether the TSE is open (see marketdata/market_state.py).
+    "fetch-prices-every-minute": {
         "task": "portfolio.tasks.fetch_and_publish",
-        "schedule": 120.0,
+        "schedule": 60.0,
     },
     "marketdata-archive-every-minute": {
         "task": "marketdata.tasks.archive_tick",

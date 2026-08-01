@@ -21,9 +21,9 @@ x-backend-env: &backend-env
   CELERY_BROKER_URL: redis://redis:6379/2    # broker/result (DB 2)
   CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS}
   BRS_API_KEY: ${BRS_API_KEY:-}
-  BRS_URL: ${BRS_URL:-https://BrsApi.ir/Api/Market/Gold_Currency.php}
+  BRS_URL: ${BRS_URL:-https://Api.BrsApi.ir/Market/Gold_Currency.php}
   TSETMC_API_KEY: ${TSETMC_API_KEY:-}
-  TSETMC_URL: ${TSETMC_URL:-https://BrsApi.ir/Api/Tsetmc/AllSymbols.php}
+  TSETMC_URL: ${TSETMC_URL:-https://Api.BrsApi.ir/Tsetmc/AllSymbols.php}
   ZARINPAL_MERCHANT_ID: ${ZARINPAL_MERCHANT_ID:?set ZARINPAL_MERCHANT_ID}
   ZARINPAL_SANDBOX: ${ZARINPAL_SANDBOX:-0}
   ZARINPAL_CALLBACK_URL: ${ZARINPAL_CALLBACK_URL:?set ZARINPAL_CALLBACK_URL}

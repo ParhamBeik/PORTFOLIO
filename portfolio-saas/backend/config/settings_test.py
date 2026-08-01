@@ -34,3 +34,9 @@ CACHES = {
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 
 DEBUG = False
+
+# No Redis under test, so the shared 5-minute window limiter is unavailable.
+# Production refuses archive requests in that case (a per-process window would
+# multiply the provider's allowance by the worker count); the suite is one
+# process, so let it fall back to the local window and exercise the counters.
+MARKETDATA_REQUIRE_SHARED_WINDOW = False

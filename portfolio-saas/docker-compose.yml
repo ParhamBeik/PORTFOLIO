@@ -18,9 +18,9 @@ x-backend-env: &backend-env
   CELERY_BROKER_URL: redis://redis:6379/2    # broker/result (DB 2, kept off the cache)
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
   BRS_API_KEY: ${BRS_API_KEY:-}
-  BRS_URL: ${BRS_URL:-https://BrsApi.ir/Api/Market/Gold_Currency.php}
+  BRS_URL: ${BRS_URL:-https://Api.BrsApi.ir/Market/Gold_Currency.php}
   TSETMC_API_KEY: ${TSETMC_API_KEY:-}
-  TSETMC_URL: ${TSETMC_URL:-https://BrsApi.ir/Api/Tsetmc/AllSymbols.php}
+  TSETMC_URL: ${TSETMC_URL:-https://Api.BrsApi.ir/Tsetmc/AllSymbols.php}
   REAL_PORTFOLIO_DATA_DIR: /portfolio-data
 
 services:
@@ -44,7 +44,7 @@ services:
       resources:
         limits:
           cpus: "1"
-          memory: 512m
+          memory: 768m
 
   redis:
     image: redis:7.2-alpine
@@ -102,12 +102,54 @@ services:
       SERVICE_NAME: celery_worker
     volumes:
       - ./backend:/app
-    command: celery -A config worker -l info --concurrency=2
+    command: celery -A config worker -l info --concurrency=2 -Q live -n live@%h
+    # The image's Dockerfile HEALTHCHECK curls the Django health endpoint, which a
+    # worker does not serve, so it was permanently unhealthy. inspect ping asks
+    # this worker over the broker and is the real liveness signal.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d live@$$HOSTNAME"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 40s
     deploy:
       resources:
         limits:
           cpus: "1"
           memory: 1g
+
+  # Backfill runs long (up to 50s per tick) and is rationed by the shared quota
+  # limiter, so it gets its own worker at concurrency 1: more parallelism here
+  # would only queue behind the provider's 5-minute window anyway, and keeping it
+  # off the live queue means a customer price fetch never waits on a batch.
+  celery_worker_archive:
+    build: ./backend
+    restart: unless-stopped
+    entrypoint: []        # skip migrate/seed; the backend service owns DB setup
+    depends_on:
+      backend:
+        condition: service_started
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: celery_worker_archive
+    volumes:
+      - ./backend:/app
+    command: celery -A config worker -l info --concurrency=1 -Q archive -n archive@%h --max-memory-per-child=400000
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d archive@$$HOSTNAME"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1536m
 
 
   celery_beat:
@@ -115,17 +157,20 @@ services:
     restart: unless-stopped
     entrypoint: []
     depends_on:
-      # ponytail: celery_worker has no healthcheck in this compose file, so this
-      # stays service_started (weak). Add a worker healthcheck first if beat
-      # firing before the worker can consume becomes an actual problem.
       celery_worker:
-        condition: service_started
+        condition: service_healthy
+      celery_worker_archive:
+        condition: service_healthy
     environment:
       <<: *backend-env
       SERVICE_NAME: celery_beat
     volumes:
       - ./backend:/app
     command: celery -A config beat -l info
+    # Beat has no inspect endpoint and serves no HTTP, so the inherited curl
+    # healthcheck can only ever fail. There is nothing meaningful to probe.
+    healthcheck:
+      disable: true
     deploy:
       resources:
         limits:
