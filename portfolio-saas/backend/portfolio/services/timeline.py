@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 
 from django.utils import timezone
-from ..models import Account, Transaction, Holding
+from ..models import Account, LedgerEntry, Transaction, Holding
 
 def _q(value) -> Decimal:
     try:
@@ -29,19 +29,30 @@ def holdings_as_of(user, account, date) -> Dict[str, Decimal]:
         target = datetime.datetime.combine(date, datetime.time.max)
         target = timezone.make_aware(target, timezone.get_current_timezone())
         
-    transactions = Transaction.objects.filter(
+    transactions = LedgerEntry.objects.filter(
         account=account,
         timestamp__gt=target
     ).select_related("asset")
 
     for txn in transactions:
+        if txn.asset_id is None or txn.kind not in {
+            LedgerEntry.Kind.OPENING_POSITION,
+            LedgerEntry.Kind.BUY,
+            LedgerEntry.Kind.SELL,
+        }:
+            continue
         asset_key = txn.asset.key
         qty = _q(txn.quantity)
+        reversed_effect = txn.reversal_of_id is not None
         
         if asset_key not in current_qty:
             current_qty[asset_key] = Decimal("0")
             
-        if txn.side == Transaction.Side.BUY:
+        adds_position = txn.kind in {
+            LedgerEntry.Kind.OPENING_POSITION,
+            LedgerEntry.Kind.BUY,
+        }
+        if adds_position != reversed_effect:
             current_qty[asset_key] -= qty
         else:
             current_qty[asset_key] += qty
@@ -52,6 +63,38 @@ def holdings_as_of(user, account, date) -> Dict[str, Decimal]:
             result[k] = v
             
     return result
+
+
+def cash_as_of(user, account, at) -> Decimal:
+    """Return the derived account cash balance at an exact timestamp."""
+    if account.user_id != user.id:
+        return Decimal("0")
+    if isinstance(at, datetime.datetime):
+        target = at
+    else:
+        target = timezone.make_aware(
+            datetime.datetime.combine(at, datetime.time.max),
+            timezone.get_current_timezone(),
+        )
+    cash = _q(account.cash_balance_tomans)
+    positive = {
+        LedgerEntry.Kind.OPENING_CASH,
+        LedgerEntry.Kind.DEPOSIT,
+        LedgerEntry.Kind.SELL,
+        LedgerEntry.Kind.DIVIDEND,
+    }
+    negative = {
+        LedgerEntry.Kind.WITHDRAWAL,
+        LedgerEntry.Kind.BUY,
+        LedgerEntry.Kind.FEE,
+    }
+    for entry in LedgerEntry.objects.filter(account=account, timestamp__gt=target):
+        amount = _q(entry.amount_tomans)
+        effect = amount if entry.kind in positive else -amount if entry.kind in negative else Decimal("0")
+        if entry.reversal_of_id is not None:
+            effect = -effect
+        cash -= effect
+    return cash
 
 def xirr(cashflows: List[tuple[datetime.date, Decimal]]) -> float:
     """Calculate the Money-Weighted Return (XIRR)."""

@@ -227,3 +227,24 @@ def test_account_performance_is_unavailable_without_complete_baseline(ledger_acc
         "performance_available": False,
         "detail": "Complete an opening baseline before calculating performance.",
     }
+
+
+def test_deposit_is_external_but_does_not_create_investment_return(ledger_account):
+    client = _client(ledger_account.user)
+    started_at = timezone.now() - datetime.timedelta(days=30)
+    _post(client, ledger_account, {
+        "kind": "opening_cash", "amount_tomans": "1000",
+        "occurred_at": started_at.isoformat(),
+    })
+    _post(client, ledger_account, {
+        "kind": "deposit", "amount_tomans": "500",
+        "occurred_at": (started_at + datetime.timedelta(days=10)).isoformat(),
+    })
+
+    response = client.get(f"/api/accounts/{ledger_account.id}/performance/")
+
+    assert response.status_code == 200
+    assert response.data["external_flow_count"] == 1
+    assert Decimal(response.data["current_value_tomans"]) == Decimal("1500")
+    assert abs(response.data["twr"]) < 1e-9
+    assert abs(response.data["xirr"]) < 1e-9

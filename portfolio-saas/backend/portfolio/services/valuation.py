@@ -314,7 +314,7 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     """Compute valuation of portfolio assets as of a specific date and basis."""
     from django.utils import timezone
     from portfolio.services.returns import normalize_as_of, to_jalali_str
-    from portfolio.services.timeline import holdings_as_of
+    from portfolio.services.timeline import cash_as_of, holdings_as_of
     from marketdata.models import MarketCandle, GoldCurrencyHistory
     from portfolio.models import Asset
 
@@ -328,12 +328,31 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     items = []
     total = Decimal("0")
 
-    # Find USD cash rate for usd_real basis
+    basis = {
+        "nominal": "nominal_toman",
+        "nominal_toman": "nominal_toman",
+        "usd_real": "usd_denominated",
+        "usd_denominated": "usd_denominated",
+    }.get(basis)
+    if basis is None:
+        raise ValueError("basis must be nominal_toman or usd_denominated")
+
     usd_rate = Decimal("1")
-    if basis == "usd_real":
+    if basis == "usd_denominated":
         usd_hist = GoldCurrencyHistory.objects.filter(symbol="USD", date__lte=jalali_str).order_by("-date").first()
         if usd_hist and usd_hist.close_price > 0:
             usd_rate = Decimal(str(usd_hist.close_price))
+        else:
+            return {
+                "total": 0.0,
+                "items": [],
+                "as_of": as_of_dt.isoformat(),
+                "basis": basis,
+                "quality_status": "unavailable",
+                "excluded": [{"reason": "missing_usd_rate"}],
+            }
+
+    excluded = []
 
     # Resolve close price for each asset
     for acc in accounts:
@@ -348,7 +367,16 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
             # Find historical unit price
             price = Decimal("0")
             if asset.is_house:
-                price = _house_value(Decimal("1"))
+                holding = Holding.objects.filter(account=acc, asset=asset).first()
+                if holding is None:
+                    excluded.append({"asset_key": key, "reason": "missing_house_terms"})
+                    continue
+                val = _house_value(
+                    qty,
+                    area_sqm=holding.area_sqm,
+                    mortgage_deduction=holding.mortgage_deduction_tomans,
+                )
+                price = val / qty if qty else Decimal("0")
             else:
                 if asset.tse_symbol:
                     candle = MarketCandle.objects.filter(symbol=asset.tse_symbol, timeframe="1d_adj", date_time__lte=jalali_str).order_by("-date_time").first()
@@ -359,9 +387,14 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                     if hist:
                         price = Decimal(str(hist.close_price))
 
+                if price <= 0:
+                    excluded.append({"asset_key": key, "reason": "missing_price"})
+                    continue
+
             # Apply basis
-            val = qty * price
-            if basis == "usd_real" and usd_rate > 0:
+            if not asset.is_house:
+                val = qty * price
+            if basis == "usd_denominated" and usd_rate > 0:
                 val = val / usd_rate
                 price = price / usd_rate
 
@@ -375,9 +408,16 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                 "value": float(val),
             })
 
+        cash = cash_as_of(user, acc, as_of_dt)
+        if basis == "usd_denominated":
+            cash /= usd_rate
+        total += cash
+
     return {
         "total": float(total),
         "items": items,
         "as_of": as_of_dt.isoformat(),
         "basis": basis,
+        "quality_status": "partial" if excluded else "complete",
+        "excluded": excluded,
     }

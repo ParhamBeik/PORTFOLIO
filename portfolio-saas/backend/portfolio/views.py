@@ -36,6 +36,7 @@ from .services.imports import (
     commit_ledger_import,
     preview_ledger_import,
 )
+from .services.performance import account_performance
 from .services.diagnostics import portfolio_diagnostics
 from .services.insights import _liquid_items, _total, build_insights
 from .services.optimization import (
@@ -201,6 +202,22 @@ class LedgerImportView(APIView):
 
 class LedgerImportCommitView(LedgerImportView):
     commit = True
+
+
+class AccountPerformanceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, account_id):
+        account = request.user.accounts.filter(pk=account_id).first()
+        if account is None:
+            return Response({"detail": "Account not found."}, status=404)
+        try:
+            payload = account_performance(
+                account, basis=request.query_params.get("basis")
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(payload)
 
 
 class TradeView(APIView):
