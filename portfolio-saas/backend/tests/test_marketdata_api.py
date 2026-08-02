@@ -45,7 +45,9 @@ def test_candles_returns_series_for_free_user(make_user):
     assert resp.status_code == 200
     body = resp.json()
     assert len(body) == 3
-    assert {"date_time", "open", "high", "low", "close", "volume"} == set(body[0])
+    assert {
+        "date_time", "open", "high", "low", "close", "volume", "source"
+    } == set(body[0])
     # Oldest-first for charting.
     assert body[0]["date_time"] < body[-1]["date_time"]
 
@@ -232,4 +234,3 @@ def test_market_assets_and_performance_strictly_use_adjusted(make_user, asset_ca
     perf = client.get("/api/market/performance/?asset=kama_stock").json()
     assert perf["coverage"]["records"] == 1
     assert perf["series"][0]["close"] == 7000.0
-

@@ -230,7 +230,23 @@ def fetch_and_publish():
     return result
 
 
-@shared_task(ignore_result=True)
+# A walk-forward study is bounded work: at most five cutoffs x five scenarios
+# over a three-year training window. If it has not finished in 15 minutes it is
+# wedged, not slow, and it must not hold a live-queue slot indefinitely. The
+# soft limit raises SoftTimeLimitExceeded inside run_backtest, whose except
+# clause records the failure on the row; the hard limit is the backstop.
+BACKTEST_SOFT_TIME_LIMIT = 900
+BACKTEST_HARD_TIME_LIMIT = 960
+# A run still QUEUED or RUNNING this long after creation lost its worker
+# (redeploy, OOM kill, hard time limit) and will never report for itself.
+BACKTEST_STUCK_AFTER_SECONDS = 3600
+
+
+@shared_task(
+    ignore_result=True,
+    soft_time_limit=BACKTEST_SOFT_TIME_LIMIT,
+    time_limit=BACKTEST_HARD_TIME_LIMIT,
+)
 def run_backtest_task(run_id: int):
     """Run the backtest task asynchronously with queue-level verification."""
     from portfolio.models import BacktestRun, BacktestUserQuota
@@ -263,3 +279,32 @@ def run_backtest_task(run_id: int):
             return
 
     run_backtest(run_id)
+
+
+@shared_task(ignore_result=True)
+def recover_stuck_backtests():
+    """Fail runs whose worker died before it could report the failure itself.
+
+    `run_backtest` records its own exceptions, so anything still queued or
+    running an hour after submission lost its process (redeploy, OOM kill, hard
+    time limit). Without this the row stays "running" forever and the UI spins
+    on a job nobody is executing.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from portfolio.models import BacktestRun
+
+    cutoff = timezone.now() - timedelta(seconds=BACKTEST_STUCK_AFTER_SECONDS)
+    stuck = BacktestRun.objects.filter(
+        status__in=[BacktestRun.Status.QUEUED, BacktestRun.Status.RUNNING],
+        created_at__lt=cutoff,
+    )
+    failed = stuck.update(
+        status=BacktestRun.Status.FAILED,
+        error="Run did not complete; its worker was lost. Submit it again.",
+    )
+    if failed:
+        logger.warning("recover_stuck_backtests: failed %d abandoned run(s)", failed)
+    return {"failed": failed}

@@ -8,6 +8,7 @@ from django.conf import settings
 
 from marketdata.fetchers.base import MarketDataFetchError, fetch_json
 from marketdata.quota import LIVE, QuotaExhausted
+from marketdata.symbols import find_symbol_record
 
 logger = logging.getLogger(__name__)
 
@@ -42,20 +43,10 @@ def _extract_price(record):
 
 
 def _find_symbol_record(tsetmc_payload, symbol):
-    if not isinstance(tsetmc_payload, list):
-        return None
-    normalized_symbol = str(symbol).strip().casefold()
-    for record in tsetmc_payload:
-        if isinstance(record, dict) and str(record.get("l18", "")).strip().casefold() == normalized_symbol:
-            return record
-    for record in tsetmc_payload:
-        if not isinstance(record, dict):
-            continue
-        l18 = str(record.get("l18", "")).strip().casefold()
-        l30 = str(record.get("l30", "")).strip().casefold()
-        if normalized_symbol and (normalized_symbol in l18 or normalized_symbol in l30):
-            return record
-    return None
+    record = find_symbol_record(tsetmc_payload, symbol)
+    if record is None:
+        logger.warning("No exact TSETMC match for %s; skipping.", symbol)
+    return record
 
 
 def fetch_brsapi(brs_url, brs_api_key):

@@ -84,18 +84,27 @@ class Command(BaseCommand):
                         f"(qty={qty}) with price={price}..."
                     )
 
-                    # Reset the holding before calling execute_trade to avoid double-adding.
-                    # Since execute_trade expects holding to either not exist or have 0, we delete it first.
+                    # Opening position establishes quantity without inventing a
+                    # purchase that would also debit cash. Drop the orphan row
+                    # first so the ledger projection can recreate it cleanly.
                     holding_qty = holding.quantity
+                    account = holding.account
+                    asset = holding.asset
                     holding.delete()
 
-                    execute_trade(
-                        account=holding.account,
-                        asset=holding.asset,
-                        side=Transaction.Side.BUY,
+                    from portfolio.services.ledger import create_ledger_entry
+                    from portfolio.models import LedgerEntry
+
+                    # Openings on one account must share tracking_started_at.
+                    occurred_at = account.tracking_started_at
+                    create_ledger_entry(
+                        account=account,
+                        kind=LedgerEntry.Kind.OPENING_POSITION,
+                        asset=asset,
                         quantity=holding_qty,
-                        price_tomans=Decimal(str(price)),
-                        note="Backfilled opening balance transaction",
+                        occurred_at=occurred_at,
+                        source="system",
+                        note="Backfilled opening balance",
                     )
 
                 if not commit:

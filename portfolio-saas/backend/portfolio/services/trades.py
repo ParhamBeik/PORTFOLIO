@@ -1,17 +1,8 @@
-"""Trade execution and correction for buying and selling assets.
+"""Trade compatibility wrappers over the immutable ledger service.
 
-A trade is three writes that must succeed or fail together, so the whole body
-runs in one `transaction.atomic()`:
-  1. append a `Transaction` row (the event/ledger);
-  2. upsert the derived `Holding.quantity` (running balance);
-  3. stamp an immediate per-user `Snapshot` so the net-worth chart steps at the
-     trade moment, not at the next 2-min cron tick.
-
-Selling more than is held is rejected (`InsufficientHolding`) — the ledger must
-never imply a negative position. The execution price is captured from the latest
-price map at call time so the historical event is self-describing. Mistakes can
-be undone only when they are the latest trade for that asset, preserving ledger
-chronology and the derived holding balance.
+`/trades/` remains for one release as a thin caller of `create_ledger_entry` /
+`reverse_ledger_entry`. Corrections append reversal rows; ledger rows are never
+deleted. Holdings and cash stay derived projections updated by the ledger path.
 """
 from __future__ import annotations
 
@@ -20,7 +11,8 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from ..models import Account, Asset, Holding, Snapshot, Transaction
+from ..models import Account, Asset, Holding, LedgerEntry, Snapshot, Transaction
+from .ledger import LedgerError, create_ledger_entry, reverse_ledger_entry
 from .valuation import get_latest_prices, value_account, value_user
 
 
@@ -34,6 +26,15 @@ class InsufficientHolding(TradeError):
 
 class ManualAssetTrade(TradeError):
     """Raised when trading a house asset (valued by formula, not quantity)."""
+
+
+_SOURCE_MAP = {
+    "manual": "manual",
+    "imported": "csv",
+    "inferred": "system",
+    "csv": "csv",
+    "system": "system",
+}
 
 
 def _q(value) -> Decimal:
@@ -53,17 +54,23 @@ def _stamp_snapshots(user, account: Account) -> dict:
     return valuation
 
 
+def _map_ledger_error(exc: LedgerError) -> TradeError:
+    message = str(exc)
+    lower = message.lower()
+    if "holding" in lower:
+        return InsufficientHolding(message)
+    return TradeError(message)
+
+
 def provision_asset(symbol_or_key: str) -> Asset:
     """Create an Asset on demand from MarketInstrument metadata if not exists.
 
     Validates through Asset.full_clean() to ensure eligibility.
     """
-    # Check if key matches directly
     asset = Asset.objects.filter(key=symbol_or_key).first()
     if asset:
         return asset
 
-    # Try matching by symbols
     asset = (
         Asset.objects.filter(tse_symbol=symbol_or_key).first()
         or Asset.objects.filter(brs_symbol=symbol_or_key).first()
@@ -81,9 +88,10 @@ def provision_asset(symbol_or_key: str) -> Asset:
         mi = MarketInstrument.objects.filter(symbol__iexact=sym).first()
 
     if not mi:
-        raise TradeError(f"No matching eligible MarketInstrument found for symbol: {symbol_or_key}")
+        raise TradeError(
+            f"No matching eligible MarketInstrument found for symbol: {symbol_or_key}"
+        )
 
-    # Map class
     asset_class = Asset.AssetClass.STOCK
     if mi.category == MarketInstrument.Category.STOCK:
         asset_class = Asset.AssetClass.STOCK
@@ -96,10 +104,9 @@ def provision_asset(symbol_or_key: str) -> Asset:
             asset_class = Asset.AssetClass.GOLD
 
     import re
-    clean_sym = re.sub(r'[^a-zA-Z0-9_]', '', mi.symbol).lower()
+    clean_sym = re.sub(r"[^a-zA-Z0-9_]", "", mi.symbol).lower()
     key = f"{clean_sym}_stock" if asset_class == Asset.AssetClass.STOCK else clean_sym
 
-    # Check key again
     existing = Asset.objects.filter(key=key).first()
     if existing:
         return existing
@@ -131,10 +138,9 @@ def execute_trade(
     skip_snapshots: bool = False,
     note: str = "",
 ) -> dict:
-    """Record one buy/sell for `asset` in `account`. Returns a summary dict.
+    """Record one buy/sell via the ledger. Returns a summary dict.
 
-    Atomic: ledger row + holding balance + net-worth snapshot commit together.
-    `quantity` must be positive; direction comes from `side`.
+    Atomic: ledger row + holding/cash projections + optional net-worth snapshot.
     """
     if isinstance(asset, str):
         asset = provision_asset(asset)
@@ -144,70 +150,44 @@ def execute_trade(
     if qty <= 0:
         raise TradeError("quantity must be positive")
     if asset.is_house:
-        # Houses are valued by a formula on `quantity` (price/sqm), not a
-        # tradeable count — editing them goes through the holding endpoint.
-        raise ManualAssetTrade("house assets are not tradeable; edit the holding directly")
+        raise ManualAssetTrade(
+            "house assets are not tradeable; edit the holding directly"
+        )
     occurred_at = timestamp or timezone.now()
     if occurred_at > timezone.now():
         raise TradeError("Transaction timestamp cannot be in the future.")
-    if source not in {"manual", "imported", "inferred"}:
+    if source not in _SOURCE_MAP:
         raise TradeError("Invalid transaction source.")
+    ledger_source = _SOURCE_MAP[source]
 
-    account = Account.objects.select_for_update().get(pk=account.pk)
-    # Lock the holding row for the duration so concurrent trades on the same
-    # asset can't race the balance check (SELECT ... FOR UPDATE).
-    holding = (
-        Holding.objects.select_for_update()
-        .filter(account=account, asset=asset)
-        .first()
-    )
-    current_qty = _q(holding.quantity) if holding else Decimal("0")
-
-    if side == Transaction.Side.SELL and qty > current_qty:
-        raise InsufficientHolding(
-            f"Cannot sell {qty.normalize():f}; only {current_qty.normalize():f} is held."
-        )
-
-    new_qty = current_qty + qty if side == Transaction.Side.BUY else current_qty - qty
-
-    # Capture execution price from the live map or use the explicitly passed price.
     if price_tomans is not None:
         price = _q(price_tomans)
-        if price < 0:
-            raise TradeError("Price cannot be negative.")
+        if price <= 0:
+            raise TradeError("Price must be positive.")
     else:
         price = _q(get_latest_prices().get(asset.key, 0))
         if price <= 0:
             raise TradeError("No valid execution price is available.")
 
-    Transaction.objects.create(
-        account=account,
-        asset=asset,
-        side=side,
-        quantity=qty,
-        price_tomans=price,
-        timestamp=occurred_at,
-        source=source,
-        note=note[:200],
-    )
+    try:
+        entry = create_ledger_entry(
+            account=account,
+            kind=side,
+            asset=asset,
+            quantity=qty,
+            unit_price_tomans=price,
+            occurred_at=occurred_at,
+            source=ledger_source,
+            note=note,
+        )
+    except LedgerError as exc:
+        raise _map_ledger_error(exc) from exc
 
-    if holding is None:
-        holding = Holding.objects.create(account=account, asset=asset, quantity=new_qty)
-    elif new_qty == 0:
-        # A fully-closed position leaves the ledger intact but drops the balance
-        # row, so it stops appearing in valuation.
-        holding.delete()
-        holding = None
-    else:
-        holding.quantity = new_qty
-        holding.save(update_fields=["quantity", "updated_at"])
+    holding = Holding.objects.filter(account=account, asset=asset).first()
+    new_qty = _q(holding.quantity) if holding else Decimal("0")
 
-    # Immediate snapshots: the whole-user total (account=None, mirrors the cron's
-    # whole-portfolio row) AND this account's own total, so a per-account chart
-    # also steps at the trade moment instead of waiting for the next cron tick.
     if not skip_snapshots:
-        user = account.user
-        valuation = _stamp_snapshots(user, account)
+        valuation = _stamp_snapshots(account.user, account)
         total_value = str(valuation["total"])
     else:
         total_value = "0"
@@ -217,40 +197,23 @@ def execute_trade(
         "side": side,
         "quantity": str(qty),
         "price_tomans": str(price),
-        "holding_quantity": str(new_qty),
-        "cash_flow_tomans": str((price * qty).quantize(Decimal("0.0001"))),
+        "holding_quantity": format(new_qty.normalize(), "f"),
+        "cash_flow_tomans": str(entry.amount_tomans or Decimal("0")),
         "total_value_tomans": total_value,
+        "ledger_entry_id": entry.id,
     }
 
 
 @transaction.atomic
 def undo_trade(*, user, transaction_id: int) -> None:
-    """Remove the latest trade for one asset and reverse its holding effect."""
-    trade = (
-        Transaction.objects.select_for_update()
-        .get(pk=transaction_id, account__user=user)
+    """Append a reversal for a ledger entry; rows are never deleted."""
+    trade = LedgerEntry.objects.select_for_update().get(
+        pk=transaction_id, account__user=user
     )
-    holding = (
-        Holding.objects.select_for_update()
-        .filter(account=trade.account, asset=trade.asset)
-        .first()
-    )
-
-
-    current_qty = _q(holding.quantity) if holding else Decimal("0")
-    new_qty = current_qty - trade.quantity if trade.side == Transaction.Side.BUY else current_qty + trade.quantity
-    if new_qty < 0:
-        raise TradeError("Undoing this trade would result in negative holdings.")
-
-    if new_qty == 0:
-        if holding:
-            holding.delete()
-    elif holding:
-        holding.quantity = new_qty
-        holding.save(update_fields=["quantity", "updated_at"])
-    else:
-        Holding.objects.create(account=trade.account, asset=trade.asset, quantity=new_qty)
-
-    account = trade.account
-    trade.delete()
-    _stamp_snapshots(user, account)
+    try:
+        reverse_ledger_entry(
+            user=user, account_id=trade.account_id, entry_id=trade.id
+        )
+    except LedgerError as exc:
+        raise _map_ledger_error(exc) from exc
+    _stamp_snapshots(user, trade.account)

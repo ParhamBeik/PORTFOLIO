@@ -227,9 +227,9 @@ class TestTrackC:
         assert run.status == BacktestRun.Status.READY
         assert run.progress == 100
 
-        # Five completed years across the five supported scenarios.
+        # Five completed years across optimizer scenarios and three baselines.
         from portfolio.services.optimization import SCENARIOS
-        assert years.count() == 5 * len(SCENARIOS)
+        assert years.count() == 5 * (len(SCENARIOS) + 3)
 
         # The fixture intentionally has fewer than 252 pre-cutoff observations
         # for 1400, so inspect the first year that satisfies the approved data

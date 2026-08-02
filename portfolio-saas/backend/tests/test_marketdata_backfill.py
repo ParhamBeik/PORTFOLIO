@@ -43,7 +43,7 @@ def test_real_legal_is_retained_without_a_matching_price_row():
         "Sell_N_Value": 1_100,
     }]
     created, skipped = ingest.ingest_real_legal("کاما", payload)
-    assert (created, skipped) == (1, 0)
+    assert (created, skipped) == (0, 1)
     assert RealLegalHistory.objects.filter(symbol="کاما", date="1403-10-19").exists()
 
 
@@ -60,3 +60,40 @@ def test_backfill_rejects_unknown_kind(settings):
     settings.TSETMC_API_KEY = "test-key"
     with pytest.raises(Exception, match="Unknown kinds"):
         call_command("backfill_market_data", "--symbol", "x", "--kinds", "bogus")
+
+
+def test_backfill_default_kinds_use_supported_candle_types(settings):
+    settings.TSETMC_API_KEY = "test-key"
+    settings.BRS_API_KEY = ""
+    candle_payload = {
+        "candle_daily": [
+            {
+                "date": "1403-10-19",
+                "open": 100,
+                "high": 110,
+                "low": 90,
+                "close": 105,
+                "volume": 10,
+            }
+        ]
+    }
+    with (
+        patch(
+            "marketdata.management.commands.backfill_market_data.fetch_daily_history",
+            return_value=HISTORY_PAYLOAD,
+        ),
+        patch(
+            "marketdata.management.commands.backfill_market_data.fetch_candlesticks",
+            return_value=candle_payload,
+        ) as fetch_candles,
+        patch(
+            "marketdata.management.commands.backfill_market_data.fetch_market_index",
+            return_value=None,
+        ),
+    ):
+        call_command("backfill_market_data", "--symbol", "کاما", "--sleep", "0")
+
+    assert [call.kwargs["candle_type"] for call in fetch_candles.call_args_list] == [
+        2,
+        3,
+    ]

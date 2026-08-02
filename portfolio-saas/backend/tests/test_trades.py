@@ -1,9 +1,7 @@
 """Trade execution ledger — integration tests.
 
-Integration type: `execute_trade` spans three models (Transaction, Holding,
-Snapshot) inside one atomic transaction, so the value is in exercising them
-together against the DB, not in isolated logic. These verify the balance math,
-the ledger append, the immediate snapshot, and the oversell/guard rejections.
+Integration type: `execute_trade` spans the ledger, Holding, cash, and Snapshot
+inside one atomic transaction. Buys require funded cash; undos append reversals.
 """
 import datetime
 from decimal import Decimal
@@ -11,7 +9,8 @@ from decimal import Decimal
 import pytest
 from django.utils import timezone
 
-from portfolio.models import Account, Holding, Snapshot, Transaction
+from portfolio.models import Account, Holding, LedgerEntry, Snapshot, Transaction
+from portfolio.services.ledger import create_ledger_entry
 from portfolio.services.trades import (
     InsufficientHolding,
     ManualAssetTrade,
@@ -22,11 +21,21 @@ from portfolio.services.trades import (
 
 pytestmark = pytest.mark.django_db
 
+# Large enough for every buy quantity x price used in this module.
+_FUND = Decimal("100000000000000")
+
 
 @pytest.fixture
 def account(asset_catalog, make_user):
     user = make_user(email="trader@test.test")
-    return Account.objects.create(user=user, name="Main")
+    acc = Account.objects.create(user=user, name="Main")
+    create_ledger_entry(
+        account=acc,
+        kind=LedgerEntry.Kind.OPENING_CASH,
+        amount_tomans=_FUND,
+        note="Test funding",
+    )
+    return acc
 
 
 def test_buy_creates_holding_ledger_and_snapshot(account, asset_catalog, write_prices):
@@ -37,13 +46,14 @@ def test_buy_creates_holding_ledger_and_snapshot(account, asset_catalog, write_p
 
     holding = Holding.objects.get(account=account, asset=asset_catalog["emami_coin"])
     assert holding.quantity == Decimal("3")
-    txn = Transaction.objects.get(account=account)
-    assert txn.side == "buy" and txn.quantity == Decimal("3")
-    # Price is captured at execution.
+    txn = Transaction.objects.filter(account=account, kind="buy").get()
+    assert txn.quantity == Decimal("3")
     assert txn.price_tomans == Decimal("176000000.0000")
-    # One snapshot stamped immediately (chart steps at the trade moment).
     assert Snapshot.objects.filter(user=account.user, account=None).count() == 1
     assert result["holding_quantity"] == "3"
+    assert Decimal(result["holding_quantity"]) == Decimal("3")
+    account.refresh_from_db()
+    assert account.cash_balance_tomans == _FUND - (Decimal("176000000") * 3)
 
 
 def test_buy_accumulates_into_existing_holding(account, asset_catalog, write_prices):
@@ -52,7 +62,7 @@ def test_buy_accumulates_into_existing_holding(account, asset_catalog, write_pri
     execute_trade(account=account, asset=asset_catalog["emami_coin"], side="buy", quantity=Decimal("1.5"))
     holding = Holding.objects.get(account=account, asset=asset_catalog["emami_coin"])
     assert holding.quantity == Decimal("3.5")
-    assert Transaction.objects.filter(account=account).count() == 2
+    assert Transaction.objects.filter(account=account, kind="buy").count() == 2
 
 
 def test_sell_reduces_holding(account, asset_catalog, write_prices):
@@ -68,8 +78,7 @@ def test_full_sell_removes_holding_but_keeps_ledger(account, asset_catalog, writ
     execute_trade(account=account, asset=asset_catalog["kama_stock"], side="buy", quantity=Decimal("100"))
     execute_trade(account=account, asset=asset_catalog["kama_stock"], side="sell", quantity=Decimal("100"))
     assert not Holding.objects.filter(account=account, asset=asset_catalog["kama_stock"]).exists()
-    # Ledger is append-only: both events survive the closed position.
-    assert Transaction.objects.filter(account=account).count() == 2
+    assert Transaction.objects.filter(account=account, kind__in=["buy", "sell"]).count() == 2
 
 
 def test_oversell_is_rejected_and_atomic(account, asset_catalog, write_prices):
@@ -77,8 +86,7 @@ def test_oversell_is_rejected_and_atomic(account, asset_catalog, write_prices):
     execute_trade(account=account, asset=asset_catalog["emami_coin"], side="buy", quantity=Decimal("2"))
     with pytest.raises(InsufficientHolding):
         execute_trade(account=account, asset=asset_catalog["emami_coin"], side="sell", quantity=Decimal("5"))
-    # The rejected sell wrote nothing: still one txn, holding unchanged.
-    assert Transaction.objects.filter(account=account).count() == 1
+    assert Transaction.objects.filter(account=account, kind="buy").count() == 1
     assert Holding.objects.get(account=account, asset=asset_catalog["emami_coin"]).quantity == Decimal("2")
 
 
@@ -112,7 +120,7 @@ def test_buy_without_price_is_rejected_atomically(account, asset_catalog):
             side="buy",
             quantity=Decimal("4"),
         )
-    assert not Transaction.objects.filter(account=account).exists()
+    assert not Transaction.objects.filter(account=account, kind="buy").exists()
     assert not Holding.objects.filter(account=account).exists()
 
 
@@ -126,11 +134,13 @@ def test_undo_latest_trade_reverses_holding_and_stamps_snapshots(
         side="buy",
         quantity=Decimal("3"),
     )
-    trade = Transaction.objects.get(account=account)
+    trade = Transaction.objects.filter(account=account, kind="buy").get()
 
     undo_trade(user=account.user, transaction_id=trade.id)
 
-    assert not Transaction.objects.filter(pk=trade.id).exists()
+    # Append-only: original row remains; a system reversal nets it out.
+    assert Transaction.objects.filter(pk=trade.id).exists()
+    assert Transaction.objects.filter(account=account, reversal_of=trade).exists()
     assert not Holding.objects.filter(
         account=account, asset=asset_catalog["emami_coin"]
     ).exists()
@@ -138,7 +148,7 @@ def test_undo_latest_trade_reverses_holding_and_stamps_snapshots(
     assert Snapshot.objects.filter(user=account.user, account=account).count() == 2
 
 
-def test_undo_rejects_older_trade_for_same_asset(
+def test_undo_rejects_when_reversal_would_go_negative(
     account, asset_catalog, write_prices
 ):
     write_prices({"emami_coin": Decimal("176000000")})
@@ -148,7 +158,7 @@ def test_undo_rejects_older_trade_for_same_asset(
         side="buy",
         quantity=Decimal("3"),
     )
-    first = Transaction.objects.get(account=account)
+    first = Transaction.objects.filter(account=account, kind="buy").get()
     execute_trade(
         account=account,
         asset=asset_catalog["emami_coin"],
@@ -159,7 +169,7 @@ def test_undo_rejects_older_trade_for_same_asset(
     with pytest.raises(TradeError):
         undo_trade(user=account.user, transaction_id=first.id)
 
-    assert Transaction.objects.filter(account=account).count() == 2
+    assert Transaction.objects.filter(account=account, kind__in=["buy", "sell"]).count() == 2
     assert Holding.objects.get(
         account=account, asset=asset_catalog["emami_coin"]
     ).quantity == Decimal("2")
@@ -185,6 +195,8 @@ class TestTradeEndpoint:
         )
         assert resp.status_code == 201
         assert Decimal(resp.data["holding_quantity"]) == Decimal("2")
+        account.refresh_from_db()
+        assert account.cash_balance_tomans == _FUND - (Decimal("176000000") * 2)
 
     def test_post_trade_preserves_historical_fields(self, account, asset_catalog):
         occurred_at = timezone.now() - datetime.timedelta(days=30)
@@ -204,10 +216,11 @@ class TestTradeEndpoint:
         )
 
         assert response.status_code == 201, response.data
-        entry = Transaction.objects.get(account=account)
+        entry = Transaction.objects.filter(account=account, kind="buy").get()
         assert entry.timestamp == occurred_at
         assert entry.price_tomans == Decimal("123456.7500")
-        assert entry.source == "imported"
+        # Compatibility map: imported → csv on the ledger.
+        assert entry.source == "csv"
 
     def test_oversell_returns_400(self, account, asset_catalog, write_prices):
         write_prices({"emami_coin": Decimal("176000000")})
@@ -228,7 +241,7 @@ class TestTradeEndpoint:
 
         assert response.status_code == 400
         assert response.data["detail"] == "No valid execution price is available."
-        assert not Transaction.objects.filter(account=account).exists()
+        assert not Transaction.objects.filter(account=account, kind="buy").exists()
 
     def test_cannot_trade_in_another_users_account(self, account, asset_catalog, make_user):
         other = make_user(email="intruder@test.test")
@@ -258,7 +271,7 @@ class TestTradeEndpoint:
             format="json",
         )
         assert resp.status_code == 400
-        assert not account.holdings.exists()
+        assert not account.holdings.filter(asset__key="emami_coin").exists()
 
     def test_holding_detail_rejects_wrong_parent_account(self, account, asset_catalog):
         other = Account.objects.create(user=account.user, name="Other")
@@ -284,7 +297,7 @@ class TestTradeEndpoint:
         )
 
         assert response.status_code == 400
-        assert not account.holdings.exists()
+        assert not account.holdings.filter(asset__key="house_asset").exists()
 
     def test_duplicate_house_holding_returns_400(self, account, asset_catalog):
         Holding.objects.create(
@@ -310,7 +323,7 @@ class TestTradeEndpoint:
             side="buy",
             quantity=Decimal("2"),
         )
-        trade = Transaction.objects.get(account=account)
+        trade = Transaction.objects.filter(account=account, kind="buy").get()
 
         response = self._client(make_user(email="other-trader@test.test")).delete(
             f"/api/transactions/{trade.id}/"
@@ -331,13 +344,13 @@ def test_execute_trade_with_custom_price(account, asset_catalog):
     )
     holding = Holding.objects.get(account=account, asset=asset_catalog["emami_coin"])
     assert holding.quantity == Decimal("5")
-    txn = Transaction.objects.get(account=account)
-    assert txn.side == "buy" and txn.quantity == Decimal("5")
-    assert txn.price_tomans == Decimal("123456.789")
+    txn = Transaction.objects.filter(account=account, kind="buy").get()
+    assert txn.quantity == Decimal("5")
+    assert txn.price_tomans == Decimal("123456.7890")
 
 
 def test_backfill_ledger_gap_command(account, asset_catalog, write_prices):
-    """Verify that the backfill_ledger_gap command backfills transactions correctly."""
+    """Orphan holdings become opening_position rows, not invented buys."""
     Holding.objects.create(
         account=account,
         asset=asset_catalog["emami_coin"],
@@ -345,22 +358,22 @@ def test_backfill_ledger_gap_command(account, asset_catalog, write_prices):
     )
     write_prices({"emami_coin": Decimal("20000000")})
 
-    assert not Transaction.objects.filter(account=account, asset=asset_catalog["emami_coin"]).exists()
+    assert not Transaction.objects.filter(
+        account=account, asset=asset_catalog["emami_coin"]
+    ).exists()
 
     from django.core.management import call_command
 
-    # Dry-run should not create transactions.
     call_command("backfill_ledger_gap", "--price-source=zero")
-    assert not Transaction.objects.filter(account=account, asset=asset_catalog["emami_coin"]).exists()
+    assert not Transaction.objects.filter(
+        account=account, asset=asset_catalog["emami_coin"]
+    ).exists()
 
-    # Commit with latest price.
     call_command("backfill_ledger_gap", "--price-source=latest", "--commit")
     txn = Transaction.objects.get(account=account, asset=asset_catalog["emami_coin"])
-    assert txn.side == "buy"
+    assert txn.kind == "opening_position"
     assert txn.quantity == Decimal("12.5")
-    assert txn.price_tomans == Decimal("20000000")
 
-    # Commit with manual price.
     Holding.objects.create(
         account=account,
         asset=asset_catalog["kama_stock"],
@@ -368,6 +381,5 @@ def test_backfill_ledger_gap_command(account, asset_catalog, write_prices):
     )
     call_command("backfill_ledger_gap", "--price-source=manual", "--price=55.5", "--commit")
     txn2 = Transaction.objects.get(account=account, asset=asset_catalog["kama_stock"])
-    assert txn2.side == "buy"
+    assert txn2.kind == "opening_position"
     assert txn2.quantity == Decimal("100")
-    assert txn2.price_tomans == Decimal("55.5")

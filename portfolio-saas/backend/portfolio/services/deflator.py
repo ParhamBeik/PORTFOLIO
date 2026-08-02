@@ -1,21 +1,40 @@
 import datetime as dt
 import pandas as pd
 import jdatetime
+from django.conf import settings
 
 _BASIS_ALIASES = {
+    None: "nominal_toman",
     "nominal": "nominal_toman",
     "nominal_toman": "nominal_toman",
     "usd_real": "usd_denominated",
     "usd_denominated": "usd_denominated",
+    "real_toman": "real_toman",
 }
 
 
-def normalize_basis(basis: str) -> str:
+def normalize_basis(basis: str | None) -> str:
     """Return the canonical valuation basis while accepting one-release aliases."""
     try:
         return _BASIS_ALIASES[basis]
     except KeyError as exc:
-        raise ValueError("basis must be nominal_toman or usd_denominated") from exc
+        raise ValueError(
+            "basis must be nominal_toman, usd_denominated, or real_toman"
+        ) from exc
+
+
+def cpi_for_date(value) -> float:
+    """Linearly interpolate the configured annual CPI index within a Jalali year."""
+    if isinstance(value, pd.Timestamp):
+        value = value.date()
+    if isinstance(value, dt.datetime):
+        value = value.date()
+    jdate = jdatetime.date.fromgregorian(date=value)
+    start = settings.CPI_FOR(jdate.year)
+    end = settings.CPI_FOR(jdate.year + 1)
+    days = 366 if jdatetime.date(jdate.year, 12, 29).isleap() else 365
+    elapsed = (jdate - jdatetime.date(jdate.year, 1, 1)).days
+    return start + (end - start) * elapsed / days
 
 def _jalali_to_gregorian_index(dates: pd.Series) -> pd.DatetimeIndex:
     """Jalali "1403-10-19" strings -> tz-aware Gregorian DatetimeIndex."""
@@ -44,6 +63,13 @@ def to_basis(
     basis = normalize_basis(basis)
     if basis == "nominal_toman":
         return series
+    if basis == "real_toman":
+        cpi = pd.Series(
+            [cpi_for_date(value) for value in series.index],
+            index=series.index,
+            dtype=float,
+        )
+        return series / cpi * 100.0
     if basis == "usd_denominated":
         if usd_series is None:
             from marketdata.models import GoldCurrencyHistory

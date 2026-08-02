@@ -88,6 +88,8 @@ class HoldingListCreateView(generics.ListCreateAPIView):
         )
 
     def perform_create(self, serializer):
+        from .services.ledger import create_ledger_entry
+
         account = self._account()
         if account is None:
             raise NotFound("Account not found")
@@ -95,7 +97,21 @@ class HoldingListCreateView(generics.ListCreateAPIView):
             raise ValidationError("Tradeable assets must be changed through the buy/sell endpoint.")
         if account.holdings.filter(asset=serializer.validated_data["asset"]).exists():
             raise ValidationError("This asset already exists in the account.")
-        serializer.save(account=account)
+        data = serializer.validated_data
+        create_ledger_entry(
+            account=account,
+            kind=LedgerEntry.Kind.OPENING_POSITION,
+            asset=data["asset"],
+            quantity=data["quantity"],
+            area_sqm=data.get("area_sqm"),
+            mortgage_deduction_tomans=data.get("mortgage_deduction_tomans"),
+            occurred_at=account.tracking_started_at or timezone.now(),
+            source="manual",
+            note="Real-estate opening position",
+        )
+        serializer.instance = Holding.objects.get(
+            account=account, asset=data["asset"]
+        )
 
 
 class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -108,16 +124,41 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
         )
 
     def perform_update(self, serializer):
+        from .services.ledger import house_ledger_entry, replace_ledger_entry
+
         if not serializer.instance.asset.is_house:
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Tradeable assets must be changed through the buy/sell endpoint.")
-        serializer.save()
+        entry = house_ledger_entry(serializer.instance)
+        data = serializer.validated_data
+        replace_ledger_entry(
+            user=self.request.user,
+            account_id=serializer.instance.account_id,
+            entry_id=entry.pk,
+            quantity=data.get("quantity", serializer.instance.quantity),
+            area_sqm=data.get("area_sqm", serializer.instance.area_sqm),
+            mortgage_deduction_tomans=data.get(
+                "mortgage_deduction_tomans",
+                serializer.instance.mortgage_deduction_tomans,
+            ),
+        )
+        serializer.instance = Holding.objects.get(
+            account_id=self.kwargs["account_id"],
+            asset_id=serializer.instance.asset_id,
+        )
 
     def perform_destroy(self, instance):
+        from .services.ledger import house_ledger_entry, reverse_ledger_entry
+
         if not instance.asset.is_house:
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Tradeable assets must be changed through the buy/sell endpoint.")
-        instance.delete()
+        entry = house_ledger_entry(instance)
+        reverse_ledger_entry(
+            user=self.request.user,
+            account_id=instance.account_id,
+            entry_id=entry.pk,
+        )
 
 
 class LedgerListCreateView(APIView):
@@ -152,6 +193,10 @@ class LedgerListCreateView(APIView):
                 quantity=data.get("quantity"),
                 unit_price_tomans=data.get("unit_price_tomans"),
                 amount_tomans=data.get("amount_tomans"),
+                area_sqm=data.get("area_sqm"),
+                mortgage_deduction_tomans=data.get(
+                    "mortgage_deduction_tomans"
+                ),
                 occurred_at=data["occurred_at"],
                 source=data["source"],
                 note=data.get("note", ""),
@@ -263,6 +308,20 @@ class AccountDataQualityView(APIView):
                 else "partial" if assessed
                 else "unavailable"
             ),
+            "known_limits": [
+                {
+                    "code": "no_iranian_holiday_calendar",
+                    "detail": "Clock-based market state can poll on unobserved holidays until provider state refreshes.",
+                },
+                {
+                    "code": "codal_page_cap",
+                    "detail": "Codal verification is complete only to the configured five-page archive cap.",
+                },
+                {
+                    "code": "market_state_cache_ttl",
+                    "detail": "Provider market state is cached for 3600 seconds and has no external fallback.",
+                },
+            ],
         })
 
 
@@ -586,7 +645,12 @@ class SnapshotListView(APIView):
             })
             curr += step
         trades = (
-            Transaction.objects.filter(account__user=request.user, timestamp__gte=since)
+            Transaction.objects.filter(
+                account__user=request.user,
+                timestamp__gte=since,
+                asset__isnull=False,
+                kind__in=[LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL],
+            )
             .select_related("asset")
             .order_by("timestamp")
         )
@@ -930,81 +994,69 @@ class DiscoveryView(APIView):
     permission_classes = [IsAuthenticated, IsPro]
 
     def get(self, request):
+        from marketdata.models import AssetMetricSnapshot, MarketInstrument
         from marketdata.universe import get_candidate_universe
-        from portfolio.services.returns import daily_returns_matrix
-        from marketdata.models import MarketInstrument
-        from portfolio.services.diagnostics import RISK_FREE_RATE_ANNUAL
-        import numpy as np
 
         candidates, excluded = get_candidate_universe()
-
-        # Fetch returns
-        ret_nom, _ = daily_returns_matrix(universe=candidates, basis="nominal")
-        ret_usd, _ = daily_returns_matrix(universe=candidates, basis="usd_real")
-
-        leaders = {
-            "nominal": {},
-            "usd_real": {}
-        }
-
-        # Resolve candidate classes
         instruments = {mi.symbol: mi for mi in MarketInstrument.objects.filter(symbol__in=candidates)}
-
-        def calc_risk_adj(df):
-            res = {}
-            for col in df.columns:
-                series = df[col]
-                if series.empty or series.std() == 0:
-                    continue
-                mean_ann = float(series.mean() * 252)
-                vol_ann = float(series.std() * np.sqrt(252))
-                sharpe = (mean_ann - RISK_FREE_RATE_ANNUAL) / vol_ann if vol_ann > 0 else 0.0
-
-                # Downside dev for Sortino
-                neg = series[series < 0]
-                downside_vol = float(neg.std() * np.sqrt(252)) if not neg.empty else 0.0
-                sortino = (mean_ann - RISK_FREE_RATE_ANNUAL) / downside_vol if downside_vol > 0 else 0.0
-
-                # Max drawdown for Calmar
-                cum = (1 + series).cumprod()
-                running_max = cum.cummax()
-                drawdowns = (cum - running_max) / running_max
-                max_dd = float(abs(drawdowns.min()))
-                calmar = mean_ann / max_dd if max_dd > 0 else 0.0
-
-                mi = instruments.get(col)
-                cat = "Other"
-                if mi:
-                    if mi.category == MarketInstrument.Category.STOCK:
-                        cat = "Stock"
-                    elif mi.category == MarketInstrument.Category.GOLD:
-                        cat = "Gold"
-                    else:
-                        cat = "Cash"
-
-                res.setdefault(cat, []).append({
-                    "symbol": col,
-                    "name": mi.name if mi else col,
-                    "sharpe": sharpe,
-                    "sortino": sortino,
-                    "calmar": calmar,
-                    "expected_return_annual": mean_ann,
-                    "volatility_annual": vol_ann,
-                })
-            for cat in res:
-                res[cat].sort(key=lambda x: x["sharpe"], reverse=True)
-            return res
-
-        if not ret_nom.empty:
-            leaders["nominal"] = calc_risk_adj(ret_nom)
-        if not ret_usd.empty:
-            leaders["usd_real"] = calc_risk_adj(ret_usd)
+        snapshots = AssetMetricSnapshot.objects.filter(
+            symbol__in=candidates, window_days=365
+        )
+        latest = snapshots.order_by("-as_of").values_list("as_of", flat=True).first()
+        leaders = {}
+        for row in snapshots.filter(as_of=latest).order_by("-sharpe"):
+            instrument = instruments.get(row.symbol)
+            category = instrument.get_category_display() if instrument else "Other"
+            leaders.setdefault(category, []).append({
+                "symbol": row.symbol,
+                "name": instrument.name if instrument else row.symbol,
+                "sharpe": row.sharpe,
+                "sortino": row.sortino,
+                "calmar": (
+                    row.total_return / abs(row.max_drawdown)
+                    if row.max_drawdown
+                    else 0.0
+                ),
+                "expected_return_annual": row.total_return,
+                "volatility_annual": row.annualized_volatility,
+            })
 
         return Response({
             "candidates": candidates,
             "excluded": excluded,
-            "leaders": leaders,
+            "leaders": {"nominal": leaders, "usd_real": {}},
         })
+
+
+class AssetRankingView(APIView):
+    permission_classes = [IsAuthenticated, IsPro]
+
+    def get(self, request):
+        from marketdata.models import AssetMetricSnapshot
+
+        account = _scope(request)
+        if account is None:
+            return Response({"detail": "account query param is required."}, status=400)
+        symbols = [
+            holding.asset.tse_symbol or holding.asset.brs_symbol
+            for holding in account.holdings.select_related("asset")
+            if holding.asset.tse_symbol or holding.asset.brs_symbol
+        ]
+        rows = AssetMetricSnapshot.objects.filter(
+            symbol__in=symbols, window_days=365
+        )
+        latest = rows.order_by("-as_of").values_list("as_of", flat=True).first()
+        return Response([
+            {
+                "symbol": row.symbol,
+                "sharpe": row.sharpe,
+                "sortino": row.sortino,
+                "total_return": row.total_return,
+                "annualized_volatility": row.annualized_volatility,
+                "max_drawdown": row.max_drawdown,
+            }
+            for row in rows.filter(as_of=latest).order_by("-sharpe")
+        ])
 
 
 class WatchlistView(APIView):

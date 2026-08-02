@@ -62,22 +62,34 @@ class Command(BaseCommand):
             for k, v in seed_prices.items() if k in asset_map
         ])
 
-        from portfolio.services.trades import execute_trade
-        from portfolio.models import Transaction
+        from django.utils import timezone
+        from portfolio.services.ledger import create_ledger_entry
+        from portfolio.models import LedgerEntry
 
+        opened_at = timezone.now()
+        # Opening baseline: positions without inventing a purchase cost basis.
+        create_ledger_entry(
+            account=account,
+            kind=LedgerEntry.Kind.OPENING_CASH,
+            amount_tomans="1000000000",
+            occurred_at=opened_at,
+            source="system",
+            note="Demo opening cash",
+        )
         for key, qty in holdings.items():
             if key in asset_map:
                 asset = asset_map[key]
                 if asset.is_house:
                     Holding.objects.create(account=account, asset=asset, quantity=qty)
                 else:
-                    execute_trade(
+                    create_ledger_entry(
                         account=account,
+                        kind=LedgerEntry.Kind.OPENING_POSITION,
                         asset=asset,
-                        side=Transaction.Side.BUY,
                         quantity=qty,
-                        price_tomans=Decimal(str(seed_prices.get(key, 0))),
-                        skip_snapshots=True,
+                        occurred_at=opened_at,
+                        source="system",
+                        note="Demo opening position",
                     )
 
         self.stdout.write(self.style.SUCCESS(

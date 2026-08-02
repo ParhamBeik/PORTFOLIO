@@ -61,7 +61,17 @@ def _occurred_at(row: dict, row_number: int):
 
 
 def _create_rows(account, rows: list[dict], *, batch=None) -> None:
-    for row_number, row in enumerate(rows, start=1):
+    # A historical export is not necessarily chronological, and the ledger
+    # rejects a sell before its buy. Sort by event time first (stable, so
+    # same-instant rows keep file order), but report the caller's original
+    # line numbers so an error points at the row they can actually see.
+    numbered = [
+        (index, row, _occurred_at(row, index))
+        for index, row in enumerate(rows, start=1)
+    ]
+    numbered.sort(key=lambda item: (item[2], item[0]))
+
+    for row_number, row, occurred_at in numbered:
         external_id = (row.get("external_id") or "").strip()
         if external_id and LedgerEntry.objects.filter(
             account=account, external_id=external_id
@@ -75,7 +85,7 @@ def _create_rows(account, rows: list[dict], *, batch=None) -> None:
                 quantity=(row.get("quantity") or "").strip() or None,
                 unit_price_tomans=(row.get("unit_price_tomans") or "").strip() or None,
                 amount_tomans=(row.get("amount_tomans") or "").strip() or None,
-                occurred_at=_occurred_at(row, row_number),
+                occurred_at=occurred_at,
                 source="csv",
                 note=(row.get("note") or "").strip(),
                 external_id=external_id,

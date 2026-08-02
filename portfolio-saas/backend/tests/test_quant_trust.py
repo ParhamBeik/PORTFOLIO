@@ -140,9 +140,15 @@ def test_walk_forward_uses_three_year_training_equal_weight_and_manifest(monkeyp
     run.refresh_from_db()
     years = BacktestYear.objects.filter(run=run)
     assert run.status == BacktestRun.Status.READY
-    assert years.count() == 25
+    expected_scenarios = {
+        *SCENARIOS,
+        "baseline:gold",
+        "baseline:usd",
+        "baseline:buy_and_hold",
+    }
+    assert years.count() == 5 * len(expected_scenarios)
     assert "equal_weight" in SCENARIOS
-    assert {year.scenario for year in years} == set(SCENARIOS)
+    assert {year.scenario for year in years} == expected_scenarios
     assert all(call["history_days"] >= 3 * 365 for call in optimize_calls)
     result = years.exclude(realized_metrics__has_key="error").first()
     assert result.realized_metrics["realized_return"] < result.realized_metrics["gross_return"]

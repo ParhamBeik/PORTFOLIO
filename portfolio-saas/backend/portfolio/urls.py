@@ -15,6 +15,7 @@ from .views import (
     AnalyticsView,
     AssetListView,
     AssetReturnsView,
+    AssetRankingView,
     FrontierView,
     HoldingDetailView,
     HoldingListCreateView,
@@ -83,6 +84,7 @@ urlpatterns = [
     # Pro analytics
     path("insights/", InsightsView.as_view(), name="insights"),
     path("analytics/", AnalyticsView.as_view(), name="analytics"),
+    path("analytics/asset-ranking/", AssetRankingView.as_view(), name="asset-ranking"),
     path("optimization/", OptimizationView.as_view(), name="optimization"),
     path("optimization/frontier/", FrontierView.as_view(), name="optimization-frontier"),
     path("assets/returns/", AssetReturnsView.as_view(), name="assets-returns"),

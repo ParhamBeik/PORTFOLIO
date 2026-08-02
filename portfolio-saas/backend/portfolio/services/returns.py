@@ -117,7 +117,11 @@ def to_jalali_str(greg_date: dt.date | dt.datetime) -> str:
     return f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}"
 
 
-def resolve_universe(universe: list[str] | None = None) -> list[dict]:
+def resolve_universe(
+    universe: list[str] | None = None,
+    *,
+    as_of=None,
+) -> list[dict]:
     """Resolve universe items to dicts with key, symbol, and source.
 
     Each item in resolved list has:
@@ -126,7 +130,7 @@ def resolve_universe(universe: list[str] | None = None) -> list[dict]:
       * 'source': 'tse' or 'brs'
       * 'asset': Asset object if exists
     """
-    from marketdata.models import MarketInstrument
+    from marketdata.models import InstrumentListingHistory, MarketInstrument
 
     resolved = []
     assets = {a.key: a for a in Asset.objects.filter(is_active=True).exclude(is_house=True)}
@@ -144,51 +148,74 @@ def resolve_universe(universe: list[str] | None = None) -> list[dict]:
                 "source": "tse" if a.tse_symbol else "brs",
                 "asset": a
             })
-        return resolved
-
-    for item in universe:
-        if item in assets:
-            a = assets[item]
-            resolved.append({
-                "key": a.key,
-                "symbol": a.tse_symbol or a.brs_symbol or "",
-                "source": "tse" if a.tse_symbol else "brs",
-                "asset": a
-            })
-        elif item in asset_by_symbol:
-            a = asset_by_symbol[item]
-            resolved.append({
-                "key": a.key,
-                "symbol": item,
-                "source": "tse" if a.tse_symbol else "brs",
-                "asset": a
-            })
-        else:
-            mi = MarketInstrument.objects.filter(symbol=item).first()
-            if mi:
+    else:
+        for item in universe:
+            if item in assets:
+                a = assets[item]
                 resolved.append({
-                    "key": item,
+                    "key": a.key,
+                    "symbol": a.tse_symbol or a.brs_symbol or "",
+                    "source": "tse" if a.tse_symbol else "brs",
+                    "asset": a
+                })
+            elif item in asset_by_symbol:
+                a = asset_by_symbol[item]
+                resolved.append({
+                    "key": a.key,
                     "symbol": item,
-                    "source": "tse" if mi.source == MarketInstrument.Source.TSETMC else "brs",
-                    "asset": None
+                    "source": "tse" if a.tse_symbol else "brs",
+                    "asset": a
                 })
             else:
-                mi = MarketInstrument.objects.filter(symbol__iexact=item).first()
+                mi = MarketInstrument.objects.filter(symbol=item).first()
                 if mi:
                     resolved.append({
                         "key": item,
-                        "symbol": mi.symbol,
+                        "symbol": item,
                         "source": "tse" if mi.source == MarketInstrument.Source.TSETMC else "brs",
                         "asset": None
                     })
                 else:
-                    resolved.append({
-                        "key": item,
-                        "symbol": item,
-                        "source": "brs",
-                        "asset": None
-                    })
-    return resolved
+                    mi = MarketInstrument.objects.filter(symbol__iexact=item).first()
+                    if mi:
+                        resolved.append({
+                            "key": item,
+                            "symbol": mi.symbol,
+                            "source": "tse" if mi.source == MarketInstrument.Source.TSETMC else "brs",
+                            "asset": None
+                        })
+                    else:
+                        resolved.append({
+                            "key": item,
+                            "symbol": item,
+                            "source": "brs",
+                            "asset": None
+                        })
+    resolved = list({item["key"]: item for item in reversed(resolved)}.values())[::-1]
+    if as_of is None:
+        return resolved
+    cutoff = to_jalali_str(normalize_as_of(as_of))
+    listing = {
+        row.symbol: row
+        for row in InstrumentListingHistory.objects.filter(
+            symbol__in=[item["symbol"] for item in resolved]
+        )
+    }
+    return [
+        item
+        for item in resolved
+        if (
+            item["symbol"] not in listing
+            or (
+                listing[item["symbol"]].eligible_from
+                and listing[item["symbol"]].eligible_from <= cutoff
+                and (
+                    not listing[item["symbol"]].eligible_to
+                    or listing[item["symbol"]].eligible_to > cutoff
+                )
+            )
+        )
+    ]
 
 
 def get_universe_by_mode(mode: str, user=None, account=None) -> list[str] | None:
@@ -286,16 +313,15 @@ def _warehouse_series(
     for gold/currency/crypto. Returns None unless the series has at least
     MIN_DAILY_RETURNS rows inside the window.
     """
-    from marketdata.models import GoldCurrencyHistory, MarketCandle
+    from marketdata.candles import candle_close_qs
+    from marketdata.models import GoldCurrencyHistory
 
     as_of_jalali = None
     if as_of is not None:
         as_of_jalali = to_jalali_str(as_of)
 
     if source == "tse":
-        qs = MarketCandle.objects.filter(symbol=symbol, timeframe="1d_adj", close_price__gt=0)
-        if as_of_jalali is not None:
-            qs = qs.filter(date_time__lte=as_of_jalali)
+        qs = candle_close_qs(symbol, as_of=as_of_jalali)
         rows = qs.order_by("date_time").values_list("date_time", "close_price")
     elif source == "brs":
         qs = GoldCurrencyHistory.objects.filter(symbol=symbol)
@@ -340,7 +366,8 @@ def _load_price_panel(
             days=history_days + _HISTORY_BUFFER_DAYS
         )
 
-    from marketdata.models import SymbolIntegrity, MarketCandle, GoldCurrencyHistory
+    from marketdata.candles import candle_close_qs
+    from marketdata.models import SymbolIntegrity, GoldCurrencyHistory
     # A current nightly assessment must not leak into a historical cutoff. Its
     # window may contain observations that did not exist at that cutoff; the
     # bounded panel checks below are the point-in-time integrity gate instead.
@@ -349,12 +376,12 @@ def _load_price_panel(
     }
 
     # Resolve universe items
-    resolved_univ = resolve_universe(universe)
+    resolved_univ = resolve_universe(universe, as_of=as_of_dt)
 
     # We must ensure usd_cash is loaded in the panel for currency conversion and basis conversion
     usd_cash_in_univ = any(x["key"] == "usd_cash" for x in resolved_univ)
     if not usd_cash_in_univ:
-        usd_cash_resolved = resolve_universe(["usd_cash"])[0]
+        usd_cash_resolved = resolve_universe(["usd_cash"], as_of=as_of_dt)[0]
         resolved_univ.append(usd_cash_resolved)
 
     # Separate by source for bulk querying
@@ -373,13 +400,7 @@ def _load_price_panel(
     # Bulk query MarketCandle (TSE)
     tse_rows = []
     if tse_symbols:
-        qs_tse = MarketCandle.objects.filter(
-            symbol__in=tse_symbols,
-            timeframe="1d_adj",
-            close_price__gt=0
-        )
-        if as_of_jalali is not None:
-            qs_tse = qs_tse.filter(date_time__lte=as_of_jalali)
+        qs_tse = candle_close_qs(tse_symbols, as_of=as_of_jalali)
         tse_rows = list(qs_tse.order_by("symbol", "date_time").values_list("symbol", "date_time", "close_price"))
 
     # Bulk query GoldCurrencyHistory (BRS)

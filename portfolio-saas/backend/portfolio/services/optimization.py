@@ -294,6 +294,8 @@ def _max_sharpe(
     max_weight_per_asset: float,
     max_weight_per_class: dict[str, float],
     class_map: dict[str, str],
+    risk_free_annual: float = RISK_FREE_RATE_ANNUAL,
+    degraded: list[str] | None = None,
 ) -> dict[str, float]:
     mu = returns.mean() * TRADING_DAYS_PER_YEAR
     S = cov_daily * TRADING_DAYS_PER_YEAR
@@ -312,17 +314,19 @@ def _max_sharpe(
                     ef.add_constraint(
                         lambda x, idx=idx, cap_f=cap_f: cp.sum(x[idx]) <= cap_f
                     )
-            raw = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+            raw = ef.max_sharpe(risk_free_rate=risk_free_annual)
             break
         except Exception as e:
             last_exc = e
             continue
 
     if raw is None:
+        if degraded is not None:
+            degraded.append("max_sharpe_class_constraints_relaxed")
         for solver in solvers:
             try:
                 ef2 = EfficientFrontier(mu, S, weight_bounds=(0.0, max_weight_per_asset), solver=solver)
-                raw = ef2.max_sharpe(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+                raw = ef2.max_sharpe(risk_free_rate=risk_free_annual)
                 break
             except Exception as e:
                 last_exc = e
@@ -348,6 +352,8 @@ def _min_volatility(
     max_weight_per_asset: float,
     max_weight_per_class: dict[str, float],
     class_map: dict[str, str],
+    degraded: list[str] | None = None,
+    **_options,
 ) -> dict[str, float]:
     mu = returns.mean() * TRADING_DAYS_PER_YEAR
     S = cov_daily * TRADING_DAYS_PER_YEAR
@@ -373,6 +379,8 @@ def _min_volatility(
             continue
 
     if raw is None:
+        if degraded is not None:
+            degraded.append("min_volatility_class_constraints_relaxed")
         for solver in solvers:
             try:
                 ef2 = EfficientFrontier(mu, S, weight_bounds=(0.0, max_weight_per_asset), solver=solver)
@@ -401,6 +409,8 @@ def _risk_parity(
     max_weight_per_asset: float,
     max_weight_per_class: dict[str, float],
     class_map: dict[str, str],
+    degraded: list[str] | None = None,
+    **_options,
 ) -> dict[str, float]:
     """Convex ERC (Spinu 2013): minimize `w' S w - (2/n) * sum(log(w_i))`.
 
@@ -440,6 +450,8 @@ def _risk_parity(
 
     if w_val is None or not np.all(np.isfinite(w_val)):
         # Equal-weight fallback if the solver fails.
+        if degraded is not None:
+            degraded.append("risk_parity_solver_failed_equal_weight_used")
         equal = {k: 1.0 / n for k in keys}
         return _enforce_caps(
             equal,
@@ -468,12 +480,16 @@ def _hrp(
     max_weight_per_asset: float,
     max_weight_per_class: dict[str, float],
     class_map: dict[str, str],
+    degraded: list[str] | None = None,
+    **_options,
 ) -> dict[str, float]:
     hrp = HRPOpt(returns=returns.dropna(how="any"))
     try:
         raw = hrp.optimize()
     except Exception:
         # Fall back to equal weights; will still be cap-enforced below.
+        if degraded is not None:
+            degraded.append("hrp_solver_failed_equal_weight_used")
         raw = {k: 1.0 / len(returns.columns) for k in returns.columns}
     weights = {k: float(v) for k, v in raw.items() if v > 1e-6}
     return _enforce_caps(
@@ -526,6 +542,12 @@ def optimize(
 
     from portfolio.services.returns import normalize_as_of, get_universe_by_mode
     as_of_dt = normalize_as_of(as_of)
+    import jdatetime
+    from django.utils import timezone
+
+    rate_date = as_of_dt or timezone.now()
+    jalali_year = jdatetime.date.fromgregorian(date=rate_date.date()).year
+    risk_free_annual = settings.RATE_FOR(jalali_year)
 
     if universe is None:
         account = user.accounts.first() if user is not None else None
@@ -591,26 +613,31 @@ def optimize(
     cov_annual = cov_daily * TRADING_DAYS_PER_YEAR
 
     if scenario == "max_sharpe":
-        if not (mu > RISK_FREE_RATE_ANNUAL).any():
+        if not (mu > risk_free_annual).any():
             raise NoAssetBeatsRiskFreeRate(
                 f"No asset in the eligible universe has an expected annualized return exceeding "
-                f"the risk-free rate of {int(RISK_FREE_RATE_ANNUAL * 100)}%."
+                f"the risk-free rate of {int(risk_free_annual * 100)}%."
             )
 
     solver = _SCENARIO_DISPATCH[scenario]
+    degraded = []
     target = solver(
         returns,
         cov_daily,
         max_weight_per_asset=float(resolved["max_weight_per_asset"]),
         max_weight_per_class=resolved["max_weight_per_class"],
         class_map=class_map,
+        risk_free_annual=risk_free_annual,
+        degraded=degraded,
     )
     total = sum(target.values())
     if abs(total - 1.0) > 1e-6:
         raise SolverError("Constraints are infeasible for a fully invested portfolio.")
     target = {k: float(v) for k, v in target.items() if v > 1e-6}
 
-    metrics = _portfolio_metrics(target, mu, cov_annual)
+    metrics = _portfolio_metrics(
+        target, mu, cov_annual, risk_free_annual=risk_free_annual
+    )
     trades = _rebalance_trades(current_weights, target, total_value_tomans)
 
     constraints_applied = resolved if scenario != "equal_weight" else {
@@ -634,7 +661,9 @@ def optimize(
         },
         "observations": len(returns.index),
         "coverage": {key: coverage[key] for key in returns.columns},
-        "risk_free_rate_annual": RISK_FREE_RATE_ANNUAL,
+        "risk_free_rate_annual": risk_free_annual,
+        "risk_free_rate_jalali_year": jalali_year,
+        "degraded": degraded,
         "expected_return_method": "historical_arithmetic_mean_annualized_252",
         "limitations": [
             "Decision-support scenario; no portfolio is objectively best.",
@@ -650,13 +679,15 @@ def optimize(
 # ---------- efficient frontier -----------------------------------------------
 
 
-def _solve_ef_min_vol(mu, S, cap):
+def _solve_ef_min_vol(mu, S, cap, risk_free_annual=RISK_FREE_RATE_ANNUAL):
     last_exc = None
     for solver in ["CLARABEL", "SCS", "OSQP"]:
         try:
             ef = EfficientFrontier(mu, S, weight_bounds=(0.0, cap), solver=solver)
             w = ef.min_volatility()
-            ret, vol, sharpe = ef.portfolio_performance(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+            ret, vol, sharpe = ef.portfolio_performance(
+                risk_free_rate=risk_free_annual
+            )
             return ef, w, ret, vol
         except Exception as e:
             last_exc = e
@@ -664,13 +695,15 @@ def _solve_ef_min_vol(mu, S, cap):
     raise SolverError(f"Failed to solve min volatility: {last_exc}")
 
 
-def _solve_ef_max_sharpe(mu, S, cap):
+def _solve_ef_max_sharpe(mu, S, cap, risk_free_annual=RISK_FREE_RATE_ANNUAL):
     last_exc = None
     for solver in ["CLARABEL", "SCS", "OSQP"]:
         try:
             ef = EfficientFrontier(mu, S, weight_bounds=(0.0, cap), solver=solver)
-            w = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE_ANNUAL)
-            ret, vol, sharpe = ef.portfolio_performance(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+            w = ef.max_sharpe(risk_free_rate=risk_free_annual)
+            ret, vol, sharpe = ef.portfolio_performance(
+                risk_free_rate=risk_free_annual
+            )
             return ef, w, ret
         except Exception as e:
             last_exc = e
@@ -695,6 +728,13 @@ def _efficient_frontier(
     """
     from portfolio.services.returns import normalize_as_of
     as_of_dt = normalize_as_of(as_of)
+    import jdatetime
+    from django.utils import timezone
+
+    rate_date = as_of_dt or timezone.now()
+    risk_free_annual = settings.RATE_FOR(
+        jdatetime.date.fromgregorian(date=rate_date.date()).year
+    )
 
     returns, _ = daily_returns_matrix(
         history_days=history_days,
@@ -715,11 +755,21 @@ def _efficient_frontier(
 
     cap = float(DEFAULT_CONSTRAINTS["max_weight_per_asset"])
     frontier: list[dict] = []
+    degraded = []
     try:
-        ef_min, w_min, ret_min, vol_min = _solve_ef_min_vol(mu, S, cap)
-        ef_max, w_max, ret_max_eff = _solve_ef_max_sharpe(mu, S, cap)
+        ef_min, w_min, ret_min, vol_min = _solve_ef_min_vol(
+            mu, S, cap, risk_free_annual
+        )
+        ef_max, w_max, ret_max_eff = _solve_ef_max_sharpe(
+            mu, S, cap, risk_free_annual
+        )
     except Exception:
-        return {"frontier": [], "max_sharpe": None, "min_volatility": None}
+        return {
+            "frontier": [],
+            "max_sharpe": None,
+            "min_volatility": None,
+            "degraded": ["efficient_frontier_reference_solver_failed"],
+        }
 
     target_returns = np.linspace(ret_min, ret_max_eff, n_points)
     seen: set[float] = set()
@@ -730,12 +780,15 @@ def _efficient_frontier(
                 try:
                     ef = EfficientFrontier(mu, S, weight_bounds=(0.0, cap), solver=solver)
                     ef.efficient_return(target_return=float(tr))
-                    _, vol, sharpe = ef.portfolio_performance(risk_free_rate=RISK_FREE_RATE_ANNUAL)
+                    _, vol, sharpe = ef.portfolio_performance(
+                        risk_free_rate=risk_free_annual
+                    )
                     solved = True
                     break
                 except Exception:
                     continue
             if not solved:
+                degraded.append("efficient_frontier_point_solver_failed")
                 continue
             key = round(vol, 8)
             if key in seen:
@@ -760,8 +813,12 @@ def _efficient_frontier(
             max_weight_per_asset=cap,
             max_weight_per_class=DEFAULT_CONSTRAINTS["max_weight_per_class"],
             class_map=class_map,
+            risk_free_annual=risk_free_annual,
+            degraded=degraded,
         )
-        ms_metrics = _portfolio_metrics(ms, mu, S)
+        ms_metrics = _portfolio_metrics(
+            ms, mu, S, risk_free_annual=risk_free_annual
+        )
     except Exception:
         ms_metrics = {"expected_return_annual": 0.0, "annualized_volatility": 0.0, "sharpe": 0.0}
         ms = {}
@@ -772,8 +829,11 @@ def _efficient_frontier(
             max_weight_per_asset=cap,
             max_weight_per_class=DEFAULT_CONSTRAINTS["max_weight_per_class"],
             class_map=class_map,
+            degraded=degraded,
         )
-        mv_metrics = _portfolio_metrics(mv, mu, S)
+        mv_metrics = _portfolio_metrics(
+            mv, mu, S, risk_free_annual=risk_free_annual
+        )
     except Exception:
         mv_metrics = {"expected_return_annual": 0.0, "annualized_volatility": 0.0, "sharpe": 0.0}
         mv = {}
@@ -782,4 +842,5 @@ def _efficient_frontier(
         "frontier": frontier,
         "max_sharpe": {"weights": ms, "metrics": ms_metrics},
         "min_volatility": {"weights": mv, "metrics": mv_metrics},
+        "degraded": sorted(set(degraded)),
     }

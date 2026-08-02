@@ -32,7 +32,8 @@ class HoldingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Holding
         fields = ("id", "asset_key", "asset_name", "asset_name_fa", "asset_class", "is_house",
-                  "quantity", "created_at", "updated_at")
+                  "quantity", "area_sqm", "mortgage_deduction_tomans",
+                  "created_at", "updated_at")
         read_only_fields = ("id", "created_at", "updated_at")
 
 
@@ -63,6 +64,12 @@ class LedgerEntryInputSerializer(serializers.Serializer):
     amount_tomans = serializers.DecimalField(
         max_digits=24, decimal_places=4, min_value=Decimal("0.0001"), required=False
     )
+    area_sqm = serializers.DecimalField(
+        max_digits=10, decimal_places=2, min_value=Decimal("0.01"), required=False
+    )
+    mortgage_deduction_tomans = serializers.DecimalField(
+        max_digits=20, decimal_places=4, min_value=Decimal("0.0001"), required=False
+    )
     occurred_at = serializers.DateTimeField(required=False, default=timezone.now)
     source = serializers.ChoiceField(choices=("manual", "csv"), default="manual")
     note = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
@@ -85,8 +92,9 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
         model = LedgerEntry
         fields = (
             "id", "kind", "asset_key", "quantity", "unit_price_tomans",
-            "amount_tomans", "occurred_at", "source", "note", "external_id",
-            "reversal_of", "created_at",
+            "amount_tomans", "area_sqm", "mortgage_deduction_tomans",
+            "occurred_at", "source", "note", "external_id", "reversal_of",
+            "created_at",
         )
         read_only_fields = fields
 
@@ -127,6 +135,9 @@ class TradeInputSerializer(serializers.Serializer):
         if not asset.is_manual and not asset.is_house:
             # Check earliest available price
             if asset.asset_class == Asset.AssetClass.STOCK and asset.tse_symbol:
+                # Trade backfill deliberately uses the unadjusted historical quote:
+                # that is the price the broker actually executed, not a later
+                # corporate-action-rescaled valuation series.
                 first_record = MarketCandle.objects.filter(symbol=asset.tse_symbol, timeframe="1d_unadj").order_by("date_time").first()
                 if first_record and j_date_str < first_record.date_time.split(" ")[0]:
                     raise serializers.ValidationError({"timestamp": f"Date is before the earliest available price date ({first_record.date_time})."})

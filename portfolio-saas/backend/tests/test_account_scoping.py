@@ -13,6 +13,7 @@ import pytest
 from rest_framework.test import APIClient
 
 from accounts.models import User
+from marketdata.models import AssetMetricSnapshot
 from portfolio.models import Account, Holding, Snapshot
 from portfolio.services.insights import net_worth_trend
 
@@ -87,3 +88,32 @@ def test_aggregate_trend_ignores_account_snapshots(make_user):
     Snapshot.objects.create(user=user, account=account, total_value_tomans=1000)
     Snapshot.objects.create(user=user, account=None, total_value_tomans=110)
     assert net_worth_trend(user)["delta_pct"] == 10
+
+
+def test_asset_ranking_is_scoped_to_owned_account(asset_catalog, make_user):
+    pro = make_user(tier=User.Tier.PRO, email="ranking@t.t")
+    account = Account.objects.create(user=pro, name="Mine")
+    other = Account.objects.create(user=pro, name="Other")
+    asset_catalog["emami_coin"].brs_symbol = "IR_COIN_EMAMI"
+    asset_catalog["emami_coin"].save(update_fields=["brs_symbol"])
+    asset_catalog["kama_stock"].tse_symbol = "KAMA"
+    asset_catalog["kama_stock"].save(update_fields=["tse_symbol"])
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=1
+    )
+    Holding.objects.create(
+        account=other, asset=asset_catalog["kama_stock"], quantity=1
+    )
+    AssetMetricSnapshot.objects.create(
+        symbol="IR_COIN_EMAMI", as_of="1405-05-10", sharpe=2
+    )
+    AssetMetricSnapshot.objects.create(
+        symbol="KAMA", as_of="1405-05-10", sharpe=9
+    )
+
+    response = _client(pro).get(
+        f"/api/analytics/asset-ranking/?account={account.id}"
+    )
+
+    assert response.status_code == 200
+    assert [row["symbol"] for row in response.json()] == ["IR_COIN_EMAMI"]

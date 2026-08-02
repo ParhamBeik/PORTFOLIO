@@ -91,7 +91,8 @@ def guard_price_map(prices: dict, *, fill_missing=True) -> dict:
 
 def _archive_replacements(prices: dict) -> dict:
     """Return archive-backed replacements for missing or obviously broken live prices."""
-    from marketdata.models import GoldCurrencyHistory, MarketCandle
+    from marketdata.candles import candle_close_qs
+    from marketdata.models import GoldCurrencyHistory
 
     assets = Asset.objects.filter(is_active=True).exclude(is_house=True)
     stock_symbols = {
@@ -106,14 +107,12 @@ def _archive_replacements(prices: dict) -> dict:
     }
 
     archive_prices = {}
-    # Adjusted closes live in MarketCandle "1d_adj". DailyStockHistory(is_adjusted=True)
+    # Adjusted closes live in MarketCandle.ADJUSTED. DailyStockHistory(is_adjusted=True)
     # was never adjusted prices at all -- History.php?type=1 is the Real/Legal
     # breakdown -- so every row there had pl=0 and this fallback silently matched
     # nothing.
     stock_rows = (
-        MarketCandle.objects.filter(
-            symbol__in=stock_symbols, timeframe="1d_adj", close_price__gt=0
-        )
+        candle_close_qs(stock_symbols)
         .order_by("symbol", "-date_time")
         .values("symbol", "close_price")
     )
@@ -298,7 +297,8 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     from datetime import timedelta
     import jdatetime
     from django.utils import timezone
-    from marketdata.models import GoldCurrencyHistory, MarketCandle
+    from marketdata.candles import candle_close_qs
+    from marketdata.models import GoldCurrencyHistory
     from portfolio.models import Holding, Transaction
     from portfolio.services.timeline import holdings_as_of
 
@@ -322,9 +322,9 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
 
     stock_closes = {}
     if stock_symbols:
-        s_rows = MarketCandle.objects.filter(
-            symbol__in=list(stock_symbols.keys()), timeframe="1d_adj", close_price__gt=0
-        ).values("symbol", "date_time", "close_price")
+        s_rows = candle_close_qs(list(stock_symbols)).values(
+            "symbol", "date_time", "close_price"
+        )
         for r in s_rows:
             key = stock_symbols[r["symbol"]]
             stock_closes.setdefault(r["date_time"], {})[key] = Decimal(str(r["close_price"]))
@@ -387,12 +387,37 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     return series
 
 
+MAX_FORWARD_FILL_SESSIONS = 5
+
+
+def _stale_sessions(queryset, date_field: str, last_date: str, as_of_jalali: str) -> int:
+    """Market sessions between a price's own date and `as_of`, exclusive of both.
+
+    These warehouse tables hold one row per symbol per session, so the distinct
+    dates across all symbols in the window *are* the market's session calendar.
+    A count above MAX_FORWARD_FILL_SESSIONS means the asset stopped printing
+    while the market kept trading — carrying its last close further would
+    invent a price rather than report one.
+    """
+    return (
+        queryset.filter(**{
+            f"{date_field}__gt": last_date,
+            f"{date_field}__lte": as_of_jalali,
+        })
+        .values_list(date_field, flat=True)
+        .distinct()
+        .count()
+    )
+
+
 def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     """Compute valuation of portfolio assets as of a specific date and basis."""
     from django.utils import timezone
+    from portfolio.services.deflator import cpi_for_date, normalize_basis
     from portfolio.services.returns import normalize_as_of, to_jalali_str
     from portfolio.services.timeline import cash_as_of, holdings_as_of
-    from marketdata.models import MarketCandle, GoldCurrencyHistory
+    from marketdata.candles import candle_close_qs
+    from marketdata.models import GoldCurrencyHistory
     from portfolio.models import Asset
 
     as_of_dt = normalize_as_of(as_of)
@@ -405,14 +430,7 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     items = []
     total = Decimal("0")
 
-    basis = {
-        "nominal": "nominal_toman",
-        "nominal_toman": "nominal_toman",
-        "usd_real": "usd_denominated",
-        "usd_denominated": "usd_denominated",
-    }.get(basis)
-    if basis is None:
-        raise ValueError("basis must be nominal_toman or usd_denominated")
+    basis = normalize_basis(basis)
 
     usd_rate = Decimal("1")
     if basis == "usd_denominated":
@@ -428,6 +446,7 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                 "quality_status": "unavailable",
                 "excluded": [{"reason": "missing_usd_rate"}],
             }
+    cpi = Decimal(str(cpi_for_date(as_of_dt))) if basis == "real_toman" else None
 
     excluded = []
 
@@ -455,17 +474,36 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                 )
                 price = val / qty if qty else Decimal("0")
             else:
+                stale_sessions = 0
                 if asset.tse_symbol:
-                    candle = MarketCandle.objects.filter(symbol=asset.tse_symbol, timeframe="1d_adj", date_time__lte=jalali_str).order_by("-date_time").first()
+                    candles = candle_close_qs(asset.tse_symbol, as_of=jalali_str)
+                    candle = candles.order_by("-date_time").first()
                     if candle:
                         price = Decimal(str(candle.close_price))
+                        stale_sessions = _stale_sessions(
+                            candles, "date_time", candle.date_time, jalali_str
+                        )
                 elif asset.brs_symbol:
-                    hist = GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol, date__lte=jalali_str).order_by("-date").first()
+                    history = GoldCurrencyHistory.objects.all()
+                    hist = history.filter(
+                        symbol=asset.brs_symbol, date__lte=jalali_str
+                    ).order_by("-date").first()
                     if hist:
                         price = Decimal(str(hist.close_price))
+                        stale_sessions = _stale_sessions(
+                            history, "date", hist.date, jalali_str
+                        )
 
                 if price <= 0:
                     excluded.append({"asset_key": key, "reason": "missing_price"})
+                    continue
+                if stale_sessions > MAX_FORWARD_FILL_SESSIONS:
+                    excluded.append({
+                        "asset_key": key,
+                        "reason": "price_gap_exceeded",
+                        "stale_sessions": stale_sessions,
+                        "max_forward_fill_sessions": MAX_FORWARD_FILL_SESSIONS,
+                    })
                     continue
 
             # Apply basis
@@ -474,6 +512,9 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
             if basis == "usd_denominated" and usd_rate > 0:
                 val = val / usd_rate
                 price = price / usd_rate
+            elif basis == "real_toman":
+                val = val / cpi * Decimal("100")
+                price = price / cpi * Decimal("100")
 
             total += val
             items.append({
@@ -488,6 +529,8 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
         cash = cash_as_of(user, acc, as_of_dt)
         if basis == "usd_denominated":
             cash /= usd_rate
+        elif basis == "real_toman":
+            cash = cash / cpi * Decimal("100")
         total += cash
 
     return {

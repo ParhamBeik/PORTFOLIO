@@ -67,23 +67,29 @@ def _annualized_volatility(port_series: pd.Series) -> float:
     return _finite(np.std(port_series, ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR))
 
 
-def _sharpe(port_series: pd.Series) -> float:
+def _sharpe(
+    port_series: pd.Series,
+    risk_free_annual: float = RISK_FREE_RATE_ANNUAL,
+) -> float:
     if port_series.empty:
         return 0.0
     ann_return = _finite(np.mean(port_series) * TRADING_DAYS_PER_YEAR)
     ann_vol = _annualized_volatility(port_series)
     if ann_vol == 0:
         return 0.0
-    rf_daily = RISK_FREE_RATE_ANNUAL / TRADING_DAYS_PER_YEAR
+    rf_daily = risk_free_annual / TRADING_DAYS_PER_YEAR
     excess = np.mean(port_series) - rf_daily
     return _finite(excess / np.std(port_series, ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR))
 
 
-def _sortino(port_series: pd.Series) -> float:
+def _sortino(
+    port_series: pd.Series,
+    risk_free_annual: float = RISK_FREE_RATE_ANNUAL,
+) -> float:
     """Sortino with downside deviation (returns < MAR=rf_daily)."""
     if port_series.empty:
         return 0.0
-    rf_daily = RISK_FREE_RATE_ANNUAL / TRADING_DAYS_PER_YEAR
+    rf_daily = risk_free_annual / TRADING_DAYS_PER_YEAR
     excess = port_series - rf_daily
     downside = excess.clip(upper=0.0)
     dd = np.sqrt(np.mean(downside ** 2))
@@ -107,6 +113,43 @@ def _max_drawdown(port_series: pd.Series) -> tuple[float, int]:
         current = current + 1 if flag else 0
         longest = max(longest, current)
     return mdd, int(longest)
+
+
+def _rolling_metrics(
+    port_series: pd.Series,
+    risk_free_annual: float,
+    window: int = 30,
+) -> list[dict]:
+    if len(port_series) < window:
+        return []
+    volatility = port_series.rolling(window).std(ddof=1) * np.sqrt(
+        TRADING_DAYS_PER_YEAR
+    )
+    excess = port_series - risk_free_annual / TRADING_DAYS_PER_YEAR
+    sharpe = (
+        excess.rolling(window).mean()
+        / port_series.rolling(window).std(ddof=1)
+        * np.sqrt(TRADING_DAYS_PER_YEAR)
+    )
+    drawdown = port_series.rolling(window).apply(
+        lambda values: (
+            (1 + pd.Series(values)).cumprod()
+            / (1 + pd.Series(values)).cumprod().cummax()
+            - 1
+        ).min(),
+        raw=False,
+    )
+    rows = []
+    for date in port_series.index:
+        if pd.isna(volatility.get(date)):
+            continue
+        rows.append({
+            "date": date.isoformat(),
+            "sharpe": _finite(sharpe.get(date)),
+            "volatility": _finite(volatility.get(date)),
+            "drawdown": _finite(drawdown.get(date)),
+        })
+    return rows
 
 
 def _calmar(port_series: pd.Series) -> float:
@@ -215,6 +258,12 @@ def portfolio_diagnostics(
     from portfolio.services.returns import normalize_as_of
     as_of_dt = normalize_as_of(as_of)
     basis = normalize_basis(basis)
+    import jdatetime
+    from django.utils import timezone
+
+    rate_date = as_of_dt or timezone.now()
+    rate_year = jdatetime.date.fromgregorian(date=rate_date.date()).year
+    risk_free_annual = settings.RATE_FOR(rate_year)
 
     returns, excluded = daily_returns_matrix(
         history_days=history_days,
@@ -225,8 +274,8 @@ def portfolio_diagnostics(
     port_series = _portfolio_returns(returns, current_weights) if not returns.empty else pd.Series(dtype=float)
 
     ann_vol = _annualized_volatility(port_series)
-    sharpe = _sharpe(port_series)
-    sortino = _sortino(port_series)
+    sharpe = _sharpe(port_series, risk_free_annual)
+    sortino = _sortino(port_series, risk_free_annual)
     mdd, days_under = _max_drawdown(port_series)
     calmar = _calmar(port_series)
     var95, cvar95 = _historical_var_cvar(port_series, alpha=0.95)
@@ -257,7 +306,10 @@ def portfolio_diagnostics(
             
             ann_port_return = np.mean(port_for_benchmark) * TRADING_DAYS_PER_YEAR
             ann_index_return = np.mean(index_returns) * TRADING_DAYS_PER_YEAR
-            alpha = ann_port_return - (RISK_FREE_RATE_ANNUAL + beta * (ann_index_return - RISK_FREE_RATE_ANNUAL))
+            alpha = ann_port_return - (
+                risk_free_annual
+                + beta * (ann_index_return - risk_free_annual)
+            )
             
             active_returns = port_for_benchmark - index_returns
             tracking_error = np.std(active_returns, ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR)
@@ -285,6 +337,8 @@ def portfolio_diagnostics(
 
     return {
         "basis": basis,
+        "risk_free_rate_annual": risk_free_annual,
+        "risk_free_rate_jalali_year": rate_year,
         "analysis_type": "hypothetical_fixed_weight_exposure",
         "current_weights": current_weights,
         "total_value_tomans": str(total_value_tomans),
@@ -307,5 +361,6 @@ def portfolio_diagnostics(
             "diversification_ratio": max(_finite(div_ratio), 1.0),
             **benchmark_metrics,
         },
+        "rolling": _rolling_metrics(port_series, risk_free_annual),
         "real_estate": real_estate,
     }

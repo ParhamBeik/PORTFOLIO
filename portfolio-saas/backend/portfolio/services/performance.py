@@ -2,24 +2,14 @@
 import datetime as dt
 from decimal import Decimal
 
+from django.core.cache import cache
+from django.db.models import Count, Max, Sum
 from django.utils import timezone
 
 from ..models import LedgerEntry
+from .deflator import cpi_for_date, normalize_basis
 from .timeline import xirr
 from .valuation import get_latest_prices, value_account, value_as_of
-
-
-def normalize_basis(value: str | None) -> str:
-    aliases = {
-        None: "nominal_toman",
-        "nominal": "nominal_toman",
-        "nominal_toman": "nominal_toman",
-        "usd_real": "usd_denominated",
-        "usd_denominated": "usd_denominated",
-    }
-    if value not in aliases:
-        raise ValueError("basis must be nominal_toman or usd_denominated")
-    return aliases[value]
 
 
 def _current_value(account, basis: str) -> Decimal | None:
@@ -27,6 +17,8 @@ def _current_value(account, basis: str) -> Decimal | None:
     if basis == "usd_denominated":
         rate = Decimal(str(get_latest_prices().get("usd_cash", 0) or 0))
         return total / rate if rate > 0 else None
+    if basis == "real_toman":
+        return total / Decimal(str(cpi_for_date(timezone.now()))) * Decimal("100")
     return total
 
 
@@ -34,6 +26,8 @@ def _flow_amount(entry, basis: str) -> Decimal | None:
     amount = Decimal(entry.amount_tomans or 0)
     if basis == "nominal_toman":
         return amount
+    if basis == "real_toman":
+        return amount / Decimal(str(cpi_for_date(entry.timestamp))) * Decimal("100")
     from marketdata.models import GoldCurrencyHistory
     from .returns import to_jalali_str
 
@@ -46,16 +40,37 @@ def _flow_amount(entry, basis: str) -> Decimal | None:
 
 
 def _position_metrics(account) -> dict:
+    version = account.transactions.aggregate(
+        count=Count("id"), max_id=Max("id"), id_sum=Sum("id")
+    )
+    cache_key = (
+        f"position-metrics:{account.id}:{version['count']}:"
+        f"{version['max_id'] or 0}:{version['id_sum'] or 0}"
+    )
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
     prices = get_latest_prices()
     result = {}
-    for asset in {e.asset for e in account.transactions.select_related("asset") if e.asset_id}:
+    entries_by_asset = {}
+    for entry in account.transactions.select_related("asset").order_by(
+        "timestamp", "pk"
+    ):
+        if entry.asset_id:
+            entries_by_asset.setdefault(entry.asset_id, []).append(entry)
+    for entries in entries_by_asset.values():
+        asset = entries[0].asset
         quantity = Decimal("0")
         average_cost = Decimal("0")
         realized = Decimal("0")
         unknown_basis = False
-        entries = account.transactions.filter(asset=asset).order_by("timestamp", "pk")
+        # A reversal pair nets to nothing: skip the reversal row AND the row it
+        # reverses, or the cost basis keeps an event the holdings no longer have.
+        reversed_ids = {
+            entry.reversal_of_id for entry in entries if entry.reversal_of_id
+        }
         for entry in entries:
-            if entry.reversal_of_id:
+            if entry.reversal_of_id or entry.pk in reversed_ids:
                 continue
             qty = Decimal(entry.quantity or 0)
             price = Decimal(entry.price_tomans or 0)
@@ -81,6 +96,7 @@ def _position_metrics(account) -> dict:
             "realized_pnl_tomans": str(realized) if not unknown_basis else None,
             "unrealized_pnl_tomans": str((current_price - average_cost) * quantity) if not unknown_basis else None,
         }
+    cache.set(cache_key, result, timeout=3600)
     return result
 
 
@@ -110,6 +126,7 @@ def account_performance(account, *, basis=None) -> dict:
             "detail": "USD rate is unavailable.",
         }
 
+    # Dividends are portfolio-generated return, not external investor capital.
     flows = list(account.transactions.filter(
         kind__in=[LedgerEntry.Kind.DEPOSIT, LedgerEntry.Kind.WITHDRAWAL],
         reversal_of__isnull=True,

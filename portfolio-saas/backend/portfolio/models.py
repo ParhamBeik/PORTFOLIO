@@ -242,6 +242,12 @@ class LedgerEntry(models.Model):
     amount_tomans = models.DecimalField(
         max_digits=24, decimal_places=4, null=True, blank=True
     )
+    area_sqm = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True
+    )
+    mortgage_deduction_tomans = models.DecimalField(
+        max_digits=20, decimal_places=4, null=True, blank=True
+    )
     note = models.CharField(max_length=200, blank=True, default="")
     timestamp = models.DateTimeField(db_index=True, default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -406,6 +412,7 @@ class BacktestRun(models.Model):
         choices=(
             ("nominal_toman", "nominal_toman"),
             ("usd_denominated", "usd_denominated"),
+            ("real_toman", "real_toman"),
             ("nominal", "nominal (deprecated)"),
             ("usd_real", "usd_real (deprecated)"),
         ),

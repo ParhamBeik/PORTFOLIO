@@ -29,7 +29,7 @@ def backtest_stability(run) -> dict:
                 if reason:
                     exclusion_reasons[reason] += 1
         ranked = sorted(
-            year_rows,
+            [row for row in year_rows if not row.scenario.startswith("baseline:")],
             key=lambda item: float(item.realized_metrics.get("net_return", float("-inf"))),
             reverse=True,
         )

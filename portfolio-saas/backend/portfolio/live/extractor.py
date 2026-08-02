@@ -7,6 +7,8 @@ import logging
 from decimal import Decimal
 
 from django.conf import settings
+from marketdata.currency import canonical_symbol, to_toman
+from marketdata.symbols import find_symbol_record
 
 logger = logging.getLogger(__name__)
 
@@ -46,38 +48,11 @@ def _lookup_price(lookup, symbols):
     return Decimal("0")
 
 
-def _convert_usd_quote_to_tomans(price, usd_rate):
-    """Convert USD-denominated stablecoin quotes to Tomans when needed."""
-    if not price:
-        return Decimal("0")
-    if price < 10 and usd_rate:
-        # Match the legacy engine's round(): Toman prices are whole numbers.
-        return (price * usd_rate).quantize(Decimal("1"))
-    return price
-
-
 def _find_tsetmc_symbol(tsetmc_payload, name):
-    """Find one stock row by Persian symbol name (l18/l30, exact then partial)."""
-    if not isinstance(tsetmc_payload, list) or not tsetmc_payload:
-        return None
-    for record in tsetmc_payload:
-        if isinstance(record, dict) and record.get("l18") == name:
-            return record
-    for record in tsetmc_payload:
-        if isinstance(record, dict) and record.get("l30") == name:
-            return record
-    name_lower = str(name).strip().casefold()
-    for record in tsetmc_payload:
-        if isinstance(record, dict):
-            l18 = str(record.get("l18", "")).strip().casefold()
-            if l18 and name_lower in l18:
-                return record
-    for record in tsetmc_payload:
-        if isinstance(record, dict):
-            l30 = str(record.get("l30", "")).strip().casefold()
-            if l30 and name_lower in l30:
-                return record
-    return None
+    record = find_symbol_record(tsetmc_payload, name)
+    if record is None:
+        logger.warning("No exact TSETMC match for %s; skipping.", name)
+    return record
 
 
 def _normalize_symbol_payload(symbol_payload):
@@ -108,17 +83,20 @@ def _price_from_tsetmc_record(record):
     return Decimal("0")
 
 
-def _normalize_toman_price(price: Decimal, symbol: str) -> Decimal:
-    """Normalize raw provider prices into Tomans (TMN).
-
-    BrsApi returns fiat currency quotes (USD, EUR, GBP, AED, etc.) in Rials (IRR).
-    Dividing raw quotes over 500,000 by 10 converts them accurately to Tomans.
-    """
-    if price <= 0:
-        return Decimal("0")
-    if symbol in ("USD", "EUR", "GBP", "AED", "CNY", "CAD", "AUD", "CHF") and price > 500000:
-        return (price / Decimal("10")).quantize(Decimal("1"))
-    return price
+def _lookup_toman(lookup, symbols, *, usd_rate=None):
+    for symbol in symbols:
+        item = lookup.get(str(symbol).strip().casefold())
+        if not isinstance(item, dict):
+            continue
+        value = to_toman(
+            canonical_symbol(item.get("symbol") or symbol),
+            item.get("price"),
+            item.get("unit", ""),
+            usd_rate=usd_rate,
+        )
+        if value > 0:
+            return value.quantize(Decimal("1"))
+    return Decimal("0")
 
 
 def extract_standard_prices(raw_data, last_prices=None):
@@ -136,17 +114,16 @@ def extract_standard_prices(raw_data, last_prices=None):
     prices["half_coin"] = _lookup_price(lookup, ["IR_COIN_HALF"])
     prices["quarter_coin"] = _lookup_price(lookup, ["IR_COIN_QUARTER"])
     prices["gold_18k_gram"] = _lookup_price(lookup, ["IR_GOLD_18K"])
-    prices["usd_cash"] = _normalize_toman_price(_lookup_price(lookup, ["USD"]), "USD")
+    prices["usd_cash"] = _lookup_toman(lookup, ["USD"])
     prices["bitcoin_usd"] = _lookup_price(
         lookup, ["BTC", "BTCUSDT", "BITCOIN", "Bitcoin", "بیتکوین", "بیت کوین"]
     )
-    tether_price = _lookup_price(
-        lookup, ["USDT_IRT", "USDTIRT", "USDT", "TETHER", "Tether", "تتر"]
+    prices["usdt_irt"] = _lookup_toman(
+        lookup,
+        ["USDT_IRT", "USDTIRT", "USDT", "TETHER", "Tether", "تتر"],
+        usd_rate=prices.get("usd_cash"),
     )
-    prices["usdt_irt"] = _convert_usd_quote_to_tomans(
-        tether_price, prices.get("usd_cash", Decimal("0"))
-    )
-    prices["euro_cash"] = _normalize_toman_price(_lookup_price(lookup, ["EUR", "EURO", "Euro", "یورو"]), "EUR")
+    prices["euro_cash"] = _lookup_toman(lookup, ["EUR", "EURO", "Euro", "یورو"])
     prices["gold_ounce_usd"] = _lookup_price(
         lookup, ["XAUUSD", "XAU", "GOLD_OUNCE", "Gold Ounce (Global)", "اونس طلا", "انس طلا"]
     )

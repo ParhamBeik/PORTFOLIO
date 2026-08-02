@@ -16,30 +16,58 @@ from marketdata.models import MarketCandle, GoldCurrencyHistory
 class TestTrackA:
     def test_reconcile_ledger_clean(self, django_user_model):
         """Unit test for reconcile_ledger command when ledger is clean."""
+        from portfolio.services.ledger import create_ledger_entry
+        from portfolio.models import LedgerEntry
+
         user = django_user_model.objects.create_user(email="test@example.com", password="password123")
         acc = Account.objects.create(user=user, name="Main")
         asset = Asset.objects.create(key="test_asset", name="Test", is_active=True)
-        
+        create_ledger_entry(
+            account=acc, kind=LedgerEntry.Kind.OPENING_CASH, amount_tomans="100000",
+        )
         execute_trade(account=acc, asset=asset, side="buy", quantity="10.0", price_tomans="1000")
-        
-        # Should exit 0
+
         call_command("reconcile_ledger")
-        
+
     def test_reconcile_ledger_drift(self, django_user_model):
         """Unit test for reconcile_ledger command when ledger drifts."""
+        from portfolio.services.ledger import create_ledger_entry
+        from portfolio.models import LedgerEntry
+
         user = django_user_model.objects.create_user(email="test2@example.com", password="password123")
         acc = Account.objects.create(user=user, name="Main")
         asset = Asset.objects.create(key="test_asset", name="Test", is_active=True)
-        
+        create_ledger_entry(
+            account=acc, kind=LedgerEntry.Kind.OPENING_CASH, amount_tomans="100000",
+        )
         execute_trade(account=acc, asset=asset, side="buy", quantity="10.0", price_tomans="1000")
-        
-        # Introduce drift
+
         h = Holding.objects.get(account=acc, asset=asset)
         h.quantity = Decimal("12.0")
         h.save()
-        
+
         with pytest.raises(SystemExit):
             call_command("reconcile_ledger")
+
+    def test_reconcile_ledger_fix_rebuilds_cash_and_holdings(self, django_user_model):
+        from portfolio.services.ledger import create_ledger_entry
+        from portfolio.models import LedgerEntry
+
+        user = django_user_model.objects.create_user(email="fix@example.com", password="password123")
+        acc = Account.objects.create(user=user, name="Main")
+        asset = Asset.objects.create(key="fix_asset", name="Fix", is_active=True)
+        create_ledger_entry(
+            account=acc, kind=LedgerEntry.Kind.OPENING_CASH, amount_tomans="50000",
+        )
+        execute_trade(account=acc, asset=asset, side="buy", quantity="5", price_tomans="1000")
+        acc.cash_balance_tomans = Decimal("1")
+        acc.save(update_fields=["cash_balance_tomans"])
+        Holding.objects.filter(account=acc).update(quantity=Decimal("99"))
+
+        call_command("reconcile_ledger", "--fix")
+        acc.refresh_from_db()
+        assert acc.cash_balance_tomans == Decimal("45000")
+        assert Holding.objects.get(account=acc, asset=asset).quantity == Decimal("5")
 
     def test_holdings_as_of(self, django_user_model):
         """Integration test for holdings_as_of backwards calculation."""

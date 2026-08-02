@@ -21,6 +21,10 @@ TRADING_DAYS_PER_YEAR = 252
 TRAINING_YEARS = 3
 MIN_TRAINING_OBSERVATIONS = 252
 INTEGRITY_VERSION = "windowed-v1:max-forward-fill-5"
+BASELINES = {
+    "baseline:gold": "IR_COIN_EMAMI",
+    "baseline:usd": "USD",
+}
 
 
 def _completed_jalali_cutoffs(now=None, count: int = 5) -> list[str]:
@@ -104,10 +108,14 @@ def _simulate_buy_and_hold(
     }
 
 
-def _realized_metrics(simulation: dict, turnover: float) -> dict:
+def _realized_metrics(
+    simulation: dict,
+    turnover: float,
+    risk_free_annual: float,
+) -> dict:
     daily = simulation["daily_returns"]
     volatility = float(daily.std(ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR)) if len(daily) > 1 else 0.0
-    excess = daily - RISK_FREE_RATE_ANNUAL / TRADING_DAYS_PER_YEAR
+    excess = daily - risk_free_annual / TRADING_DAYS_PER_YEAR
     sharpe = float(excess.mean() / daily.std(ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR)) if volatility > 0 else 0.0
     downside = excess.clip(upper=0.0)
     downside_deviation = float(np.sqrt(np.mean(downside ** 2)))
@@ -145,6 +153,11 @@ def _manifest(
 ) -> dict:
     year = int(cutoff[:4])
     exclusions = [*payload.get("excluded_assets", []), *evaluation_excluded]
+    from marketdata.models import InstrumentListingHistory
+
+    coverage_floor = InstrumentListingHistory.objects.order_by(
+        "first_seen"
+    ).values_list("first_seen", flat=True).first()
     return {
         "cutoff": cutoff,
         "training_window": {
@@ -157,14 +170,20 @@ def _manifest(
         "basis": basis,
         "scenario": scenario,
         "universe": universe,
-        "universe_provenance": "explicit" if universe else "current_active_price_presence_proxy",
+        "universe_provenance": "point_in_time_listing_history",
         "sources": source_map,
         "exclusions": exclusions,
         "constraints": payload.get("constraints_applied", {}),
         "expected_return_method": payload.get(
             "expected_return_method", "historical_arithmetic_mean_annualized_252"
         ),
-        "risk_free_rate_annual": RISK_FREE_RATE_ANNUAL,
+        "risk_free_rate_annual": payload.get(
+            "risk_free_rate_annual", settings.RATE_FOR(year)
+        ),
+        "risk_free_rate_source": settings.RISK_FREE_RATE_SOURCE,
+        "cpi_index": settings.CPI_FOR(year),
+        "cpi_source": settings.CPI_SOURCE,
+        "degraded": payload.get("degraded", []),
         "cost_assumptions": {
             "tse_buy": TSE_BUY_COST,
             "tse_sell": TSE_SELL_COST,
@@ -178,9 +197,32 @@ def _manifest(
         ),
         "limitations": [
             "Historical benchmark is unavailable unless governed benchmark history is enabled.",
-            "Market discovery is a price-presence proxy without listing and corporate-action provenance.",
+            (
+                "Listing history is complete only from warehouse coverage floor "
+                f"{coverage_floor or 'unknown'}; earlier delistings cannot be recovered."
+            ),
         ],
     }
+
+
+def _actual_portfolio_weights(run, cutoff_at) -> dict[str, float]:
+    if not run.user_id or not run.account_id:
+        return {}
+    from portfolio.services.valuation import value_as_of
+
+    payload = value_as_of(
+        run.user,
+        account=run.account,
+        as_of=cutoff_at,
+        basis="nominal_toman",
+    )
+    values = {
+        item["key"]: float(item["value"])
+        for item in payload.get("items", [])
+        if float(item["value"]) > 0
+    }
+    total = sum(values.values())
+    return {key: value / total for key, value in values.items()} if total else {}
 
 
 def run_backtest(run_id: int):
@@ -200,11 +242,8 @@ def run_backtest(run_id: int):
         basis = normalize_basis(run.basis)
         run.basis = basis
         run.save(update_fields=["basis"])
-        cutoffs = _completed_jalali_cutoffs()
+        cutoffs = _completed_jalali_cutoffs(count=run.completed_years)
         universe = run.universe or None
-        resolved = resolve_universe(universe)
-        frozen_universe = [item["key"] for item in resolved]
-        source_map = {item["key"]: item["source"] for item in resolved}
         previous_weights = {scenario: {} for scenario in SCENARIOS}
 
         for step, cutoff in enumerate(cutoffs):
@@ -212,15 +251,38 @@ def run_backtest(run_id: int):
             next_cutoff = f"{year + 1:04d}-01-01"
             cutoff_at = _jalali_start(year)
             next_cutoff_at = _jalali_start(year + 1)
+            resolved = resolve_universe(universe, as_of=cutoff_at)
+            frozen_universe = [item["key"] for item in resolved]
+            source_map = {item["key"]: item["source"] for item in resolved}
+            actual_weights = _actual_portfolio_weights(run, cutoff_at)
+            evaluation_universe = list(
+                dict.fromkeys(
+                    [
+                        *frozen_universe,
+                        *BASELINES.values(),
+                        *actual_weights,
+                    ]
+                )
+            )
             training_days = (cutoff_at - _jalali_start(year - TRAINING_YEARS)).days
             evaluation, evaluation_excluded = daily_returns_matrix(
                 history_days=370,
                 as_of=next_cutoff_at,
-                universe=universe,
+                universe=evaluation_universe,
                 basis=basis,
             )
             evaluation = evaluation[
                 (evaluation.index >= cutoff_at) & (evaluation.index < next_cutoff_at)
+            ]
+            real_evaluation, _ = daily_returns_matrix(
+                history_days=370,
+                as_of=next_cutoff_at,
+                universe=evaluation_universe,
+                basis="real_toman",
+            )
+            real_evaluation = real_evaluation[
+                (real_evaluation.index >= cutoff_at)
+                & (real_evaluation.index < next_cutoff_at)
             ]
 
             for scenario in SCENARIOS:
@@ -230,7 +292,7 @@ def run_backtest(run_id: int):
                         current_weights={},
                         total_value_tomans=Decimal("1000000000"),
                         as_of=cutoff_at,
-                        universe=universe,
+                        universe=frozen_universe,
                         basis=basis,
                         history_days=training_days,
                         min_observations=MIN_TRAINING_OBSERVATIONS,
@@ -276,8 +338,22 @@ def run_backtest(run_id: int):
                     )
                     continue
 
-                metrics = _realized_metrics(simulation, turnover)
+                metrics = _realized_metrics(
+                    simulation,
+                    turnover,
+                    payload.get("risk_free_rate_annual", settings.RATE_FOR(year)),
+                )
                 metrics["transaction_cost_rate"] = cost_rate
+                metrics["degraded"] = payload.get("degraded", [])
+                try:
+                    real_simulation = _simulate_buy_and_hold(
+                        real_evaluation, target, cost_drag=cost_rate
+                    )
+                    metrics["real_toman_return"] = float(
+                        real_simulation["net_return"]
+                    )
+                except ValueError:
+                    metrics["real_toman_return"] = None
                 metrics["manifest"] = manifest
                 benchmark_delta = None
                 benchmark = _load_index_returns(evaluation.index, as_of=next_cutoff_at)
@@ -304,6 +380,75 @@ def run_backtest(run_id: int):
                         simulation["columns"], simulation["final_values"]
                     )
                 } if final_total > 0 else {}
+
+            baseline_weights = {
+                scenario: {symbol: 1.0}
+                for scenario, symbol in BASELINES.items()
+            }
+            baseline_weights["baseline:buy_and_hold"] = actual_weights
+            for scenario, target in baseline_weights.items():
+                if not target:
+                    BacktestYear.objects.create(
+                        run=run,
+                        cutoff_date=cutoff,
+                        scenario=scenario,
+                        target_weights={},
+                        realized_metrics={"error": "baseline_weights_unavailable"},
+                        excluded_symbols=[],
+                    )
+                    continue
+                cost_rate = GOLD_FX_SPREAD if scenario != "baseline:buy_and_hold" else 0.0
+                turnover = 0.0 if scenario == "baseline:buy_and_hold" else 1.0
+                payload = {
+                    "excluded_assets": [],
+                    "observations": len(evaluation.index),
+                    "constraints_applied": {"weighting": "frozen_baseline"},
+                    "risk_free_rate_annual": settings.RATE_FOR(year),
+                    "degraded": [],
+                    "price_version": "",
+                }
+                manifest = _manifest(
+                    cutoff=cutoff,
+                    next_cutoff=next_cutoff,
+                    basis=basis,
+                    scenario=scenario,
+                    universe=list(target),
+                    source_map={
+                        item["key"]: item["source"]
+                        for item in resolve_universe(
+                            list(target), as_of=cutoff_at
+                        )
+                    },
+                    payload=payload,
+                    evaluation=evaluation,
+                    evaluation_excluded=evaluation_excluded,
+                )
+                try:
+                    simulation = _simulate_buy_and_hold(
+                        evaluation, target, cost_drag=cost_rate
+                    )
+                    metrics = _realized_metrics(
+                        simulation, turnover, settings.RATE_FOR(year)
+                    )
+                    real_simulation = _simulate_buy_and_hold(
+                        real_evaluation, target, cost_drag=cost_rate
+                    )
+                    metrics["real_toman_return"] = float(
+                        real_simulation["net_return"]
+                    )
+                    metrics["transaction_cost_rate"] = cost_rate
+                    metrics["degraded"] = []
+                    metrics["manifest"] = manifest
+                except ValueError as exc:
+                    metrics = {"error": str(exc), "manifest": manifest}
+                BacktestYear.objects.create(
+                    run=run,
+                    cutoff_date=cutoff,
+                    scenario=scenario,
+                    target_weights=target,
+                    realized_metrics=metrics,
+                    excluded_symbols=manifest["exclusions"],
+                )
 
             run.progress = int(5 + (step + 1) / len(cutoffs) * 90)
             run.save(update_fields=["progress"])

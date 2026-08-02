@@ -11,7 +11,7 @@ operates only on data entered through the website; this command just corrects
 the seeded starting state.
 
 One-time: once the sample family has accounts, re-running leaves all browser
-changes untouched. No Transaction rows are created (the real files record none).
+changes untouched. Imported holdings become opening-position ledger entries.
 
     manage.py import_real_portfolios
     manage.py import_real_portfolios --data-dir /path/to/data
@@ -119,30 +119,29 @@ class Command(BaseCommand):
 
         Returns {portfolio_name: Account}.
         """
-        from portfolio.services.trades import execute_trade
+        from django.utils import timezone
+        from portfolio.services.ledger import create_ledger_entry
+        from portfolio.models import LedgerEntry
 
         accounts = {}
         for name, holdings in state.items():
             account, _ = Account.objects.get_or_create(user=user, name=name)
             accounts[name] = account
+            opened_at = timezone.now()
             for raw_key, qty in holdings.items():
                 key = HOUSE_ASSET_KEY if raw_key == HOUSE_STATE_KEY else raw_key
                 asset = assets.get(key)
                 if asset is None:
                     continue
-                if asset.is_house:
-                    Holding.objects.create(
-                        account=account, asset=asset, quantity=Decimal(str(qty))
-                    )
-                else:
-                    execute_trade(
-                        account=account,
-                        asset=asset,
-                        side=Transaction.Side.BUY,
-                        quantity=Decimal(str(qty)),
-                        price_tomans=Decimal("0"),
-                        skip_snapshots=True,
-                    )
+                create_ledger_entry(
+                    account=account,
+                    kind=LedgerEntry.Kind.OPENING_POSITION,
+                    asset=asset,
+                    quantity=Decimal(str(qty)),
+                    occurred_at=opened_at,
+                    source="system",
+                    note="Imported opening position",
+                )
         return accounts
 
     def _load_history(self, user, accounts, history, assets) -> None:

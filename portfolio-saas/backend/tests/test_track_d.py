@@ -38,6 +38,16 @@ class TestTrackD(APITestCase):
         SymbolIntegrity.objects.create(symbol="USD", passes_gate=True)
         SymbolIntegrity.objects.create(symbol="Emami", passes_gate=True)
 
+    def backtest_payload(self):
+        """The account-scoped backtest request contract."""
+        return {
+            "account_id": self.pro_account.id,
+            "universe_mode": "portfolio",
+            "symbols": ["kama_stock", "usd_cash", "emami_coin"],
+            "basis": "nominal_toman",
+            "completed_years": 5,
+        }
+
     def test_backtest_quota_limits(self):
         # Testing Protocol: We choose an integration test for the backtest quota endpoint to verify that the HTTP API correctly gates and rejects requests exceeding the daily quota of walk-forward simulation runs.
         self.client.force_authenticate(user=self.pro_user)
@@ -47,15 +57,15 @@ class TestTrackD(APITestCase):
         settings.DAILY_BACKTEST_LIMIT = 2
         try:
             # 1. Run 1
-            res = self.client.post(reverse("backtest"), {"basis": "nominal", "universe": ["kama_stock", "usd_cash", "emami_coin"]})
+            res = self.client.post(reverse("backtest"), self.backtest_payload(), format="json")
             assert res.status_code == status.HTTP_201_CREATED
             
             # 2. Run 2
-            res = self.client.post(reverse("backtest"), {"basis": "nominal", "universe": ["kama_stock", "usd_cash", "emami_coin"]})
+            res = self.client.post(reverse("backtest"), self.backtest_payload(), format="json")
             assert res.status_code == status.HTTP_201_CREATED
             
             # 3. Run 3 -> Should fail with 429
-            res = self.client.post(reverse("backtest"), {"basis": "nominal", "universe": ["kama_stock", "usd_cash", "emami_coin"]})
+            res = self.client.post(reverse("backtest"), self.backtest_payload(), format="json")
             assert res.status_code == status.HTTP_429_TOO_MANY_REQUESTS
         finally:
             settings.DAILY_BACKTEST_LIMIT = old_limit
@@ -118,42 +128,9 @@ class TestTrackD(APITestCase):
         res = self.client.get(reverse("watchlist"))
         assert len(res.data["items"]) == 0
 
-    def test_performance_returns(self):
-        # Testing Protocol: We choose an integration test for TWR/XIRR returns to assert that our historical return calculations and weighted cost basis methods yield accurate portfolio analytics from ledger events and snapshots.
-        self.client.force_authenticate(user=self.pro_user)
-        
-        # Seed some trades for the pro user
-        # Day 1: BUY Kama at 100
-        t1 = Transaction.objects.create(
-            account=self.pro_account,
-            asset=self.kama,
-            side=Transaction.Side.BUY,
-            quantity=Decimal("10"),
-            price_tomans=Decimal("100"),
-            timestamp=timezone.now() - datetime.timedelta(days=5)
-        )
-        # Day 2: BUY Kama at 120
-        t2 = Transaction.objects.create(
-            account=self.pro_account,
-            asset=self.kama,
-            side=Transaction.Side.BUY,
-            quantity=Decimal("5"),
-            price_tomans=Decimal("120"),
-            timestamp=timezone.now() - datetime.timedelta(days=3)
-        )
-        
-        # Seed snapshot history
-        Snapshot.objects.create(user=self.pro_user, account=None, total_value_tomans=Decimal("1000"), timestamp=timezone.now() - datetime.timedelta(days=4))
-        Snapshot.objects.create(user=self.pro_user, account=None, total_value_tomans=Decimal("1600"), timestamp=timezone.now() - datetime.timedelta(days=2))
-
-        res = self.client.get(reverse("performance"))
-        assert res.status_code == status.HTTP_200_OK
-        assert "twr" in res.data
-        assert "xirr" in res.data
-        assert res.data["total_cost_basis"] > 0
-        assert "kama_stock" in res.data["assets_summary"]
-        # Cost basis is average of (10*100 + 5*120)/15 = 106.666
-        assert abs(res.data["assets_summary"]["kama_stock"]["cost_basis"] - 106.666) < 0.1
+    # `/api/performance/` is now account-scoped and ledger-derived; its contract
+    # lives in tests/test_ledger_api.py (opening baseline, external cash flows,
+    # account scoping). The old snapshot-delta assertions were removed with it.
 
     def test_data_integrity_endpoint(self):
         # Testing Protocol: We choose an integration test for the integrity API endpoint to verify that only authenticated staff users can access data quality reports.
