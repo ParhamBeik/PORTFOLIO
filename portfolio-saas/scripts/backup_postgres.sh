@@ -29,6 +29,25 @@ trap 'rm -f "${partial}"' EXIT
       -pass "file:${passphrase_file}" -out "${partial}"
 mv "${partial}" "${destination}"
 
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 310000 \
+  -pass "file:${passphrase_file}" -in "${destination}" \
+  | "${compose[@]}" exec -T db pg_restore --list >/dev/null
+checksum="$(sha256sum "${destination}" 2>/dev/null | awk '{print $1}' || shasum -a 256 "${destination}" | awk '{print $1}')"
+printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" > "${destination}.sha256"
+
+upload_verified=false
+if [[ -n "${RCLONE_REMOTE:-}" ]]; then
+  command -v rclone >/dev/null
+  remote_path="${RCLONE_REMOTE%/}/$(basename "${destination}")"
+  rclone copyto "${destination}" "${remote_path}" --immutable
+  [[ "$(rclone size "${remote_path}" --json | tr -d '\n' | sed -n 's/.*"count":\\([0-9][0-9]*\\).*/\\1/p')" == "1" ]]
+  upload_verified=true
+fi
+
+evidence="${backup_dir}/backup-evidence-${stamp}.json"
+printf '{"created_at":"%s","artifact":"%s","sha256":"%s","decrypt_verified":true,"off_host_verified":%s}\n' \
+  "$(date -u +%FT%TZ)" "$(basename "${destination}")" "${checksum}" "${upload_verified}" > "${evidence}"
+
 if [[ "$(TZ="${BACKUP_TIMEZONE:-Asia/Tehran}" date +%u)" == "7" ]]; then
   cp -p "${destination}" "${backup_dir}/weekly-$(TZ="${BACKUP_TIMEZONE:-Asia/Tehran}" date +%G-%V).dump.enc"
 fi

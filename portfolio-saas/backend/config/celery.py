@@ -7,13 +7,16 @@ than DB-backed; a single beat instance is plenty for v1 and the scheduler stays
 swappable if that changes.
 """
 import os
+from zoneinfo import ZoneInfo
 
 from celery import Celery
+from celery.signals import before_task_publish, task_prerun
 from celery.schedules import crontab
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 
 app = Celery("portfolio")
+TEHRAN = ZoneInfo("Asia/Tehran")
 # Read all CELERY_* settings from Django settings.
 app.config_from_object("django.conf:settings", namespace="CELERY")
 # Discover tasks.py in each installed app (portfolio.tasks, marketdata.tasks).
@@ -22,6 +25,7 @@ app.autodiscover_tasks()
 # Global reliability defaults. Per-task retry policy (autoretry_for) belongs in
 # the individual tasks (e.g. portfolio/tasks.py), not here.
 app.conf.update(
+    timezone=str(TEHRAN),
     task_acks_late=True,  # ack after the task runs, not on receipt: a killed worker redelivers the task
     worker_prefetch_multiplier=1,  # pair with acks_late so one worker doesn't hoard several long tasks
     result_expires=3600,  # results aren't polled here (fire-and-forget beat schedule); don't let them pile up in Redis
@@ -32,14 +36,13 @@ app.conf.update(
     # marketdata is warehouse work, everything in portfolio is customer-facing.
     task_routes={
         "marketdata.tasks.*": {"queue": "archive"},
+        "billing.tasks.*": {"queue": "archive"},
         "portfolio.tasks.*": {"queue": "live"},
     },
 )
 
-# All crontab times below are manually converted from Tehran time to UTC (see the
-# inline comments per entry). Iran currently observes no DST (abolished 2022) so
-# the offset is a flat +03:30 year-round; if that policy ever changes again, these
-# hours need to be re-derived by hand — this is a documented gap, not automated.
+# Crontab times are declared directly in Tehran local time. ZoneInfo owns any
+# future timezone-policy changes; no hand-converted UTC hours are duplicated.
 app.conf.beat_schedule = {
     # Beat ticks every minute; the task itself enforces the real cadence, which
     # depends on whether the TSE is open (see marketdata/market_state.py).
@@ -52,37 +55,85 @@ app.conf.beat_schedule = {
         "schedule": 60.0,
     },
 
-    # Warehouse sync after TSE close (~18:15 Tehran = 14:45 UTC): serial chain
+    # Warehouse sync after TSE close.
     # over tracked symbols, then gold/currency history and the index snapshot.
     "marketdata-daily-sync": {
         "task": "marketdata.tasks.daily_sync",
-        "schedule": crontab(hour=14, minute=45),
+        "schedule": crontab(hour=18, minute=15),
     },
     # Symbol fundamentals refresh weekly on Friday (TSE closed, API quiet).
     "marketdata-weekly-meta": {
         "task": "marketdata.tasks.weekly_metadata_sync",
-        "schedule": crontab(day_of_week=4, hour=6, minute=0),
+        "schedule": crontab(day_of_week=4, hour=9, minute=30),
     },
     "marketdata-daily-catalog": {
         "task": "marketdata.tasks.catalog_sync",
-        "schedule": crontab(hour=0, minute=10),
+        "schedule": crontab(hour=3, minute=40),
     },
-    # 24/7 Gold/Currency/Crypto 23:59 Tehran (20:29 UTC) midnight EOD aggregation
+    # 24/7 Gold/Currency/Crypto midnight EOD aggregation.
     "aggregate-gold-currency-daily-2359": {
         "task": "marketdata.tasks.aggregate_daily_gold_currency_history",
-        "schedule": crontab(hour=20, minute=29),
+        "schedule": crontab(hour=23, minute=59),
     },
-    # Stock session 17:00 Tehran (13:30 UTC) market close EOD aggregation
+    # Stock session market-close aggregation.
     "aggregate-stock-daily-market-close": {
         "task": "marketdata.tasks.aggregate_daily_stock_history",
-        "schedule": crontab(hour=13, minute=30),
+        "schedule": crontab(hour=17, minute=0),
     },
-    # Nightly data integrity gate checks at Tehran midnight (20:30 UTC)
+    # Nightly data integrity gate checks at Tehran midnight.
     "nightly-data-integrity": {
         "task": "marketdata.tasks.nightly_data_integrity",
-        "schedule": crontab(hour=20, minute=30),
+        "schedule": crontab(hour=0, minute=0),
+    },
+    "nightly-series-validation": {
+        "task": "marketdata.tasks.nightly_series_validation",
+        "schedule": crontab(hour=0, minute=30),
+    },
+    "nightly-asset-metrics": {
+        "task": "marketdata.tasks.nightly_asset_metrics",
+        "schedule": crontab(hour=1, minute=0),
+    },
+    # Reap backtest runs whose worker died before it could record the failure.
+    "recover-stuck-backtests": {
+        "task": "portfolio.tasks.recover_stuck_backtests",
+        "schedule": crontab(minute=17),
+    },
+    "reconcile-payments-hourly": {
+        "task": "billing.tasks.reconcile_pending_payments",
+        "schedule": crontab(minute=7),
+    },
+    "operational-health-every-15-minutes": {
+        "task": "marketdata.tasks.operational_health_check",
+        "schedule": crontab(minute="*/15"),
     },
 }
+
+
+@before_task_publish.connect
+def attach_request_id(headers=None, **kwargs):
+    from config.request_context import get_request_id
+
+    if headers is not None:
+        headers["x-request-id"] = get_request_id()
+
+
+@task_prerun.connect
+def restore_request_id(task=None, **kwargs):
+    from config.request_context import request_id_var
+
+    request_id = (
+        getattr(getattr(task, "request", None), "x-request-id", None)
+        or getattr(getattr(task, "request", None), "headers", {}).get(
+            "x-request-id", "-"
+        )
+    )
+    request_id_var.set(request_id)
+    from django.conf import settings
+
+    if settings.SENTRY_DSN:
+        import sentry_sdk
+
+        sentry_sdk.set_tag("request_id", request_id)
 
 
 @app.task(bind=True, ignore_result=True)

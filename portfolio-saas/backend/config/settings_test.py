@@ -8,8 +8,12 @@ Postgres-only DISTINCT ON clause and cannot be exercised under sqlite.
 """
 import os
 
+os.environ["DJANGO_DEBUG"] = "1"
+os.environ["ENVIRONMENT"] = "dev"
+
 from .settings import *  # noqa: F401,F403
 
+ENVIRONMENT = "test"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -32,8 +36,16 @@ CACHES = {
 }
 
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
+EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
 
 DEBUG = False
+
+# The Django test client speaks plain HTTP. Inheriting the production
+# SECURE_SSL_REDIRECT turns every request into a 301 before it reaches a view,
+# so the suite would assert against redirects instead of behaviour. Production
+# posture is unchanged: CI runs `manage.py check --deploy` against
+# config.settings, where this stays True.
+SECURE_SSL_REDIRECT = False
 
 # No Redis under test, so the shared 5-minute window limiter is unavailable.
 # Production refuses archive requests in that case (a per-process window would

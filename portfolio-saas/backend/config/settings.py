@@ -35,6 +35,7 @@ CORS_ALLOWED_ORIGINS = [
     o for o in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
     if o
 ]
+CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -55,6 +56,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "config.middleware.RequestIDMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -131,6 +133,25 @@ else:
     CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
 AUTH_USER_MODEL = "accounts.User"
+
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
+)
+EMAIL_FILE_PATH = os.getenv("EMAIL_FILE_PATH", str(BASE_DIR / "test-emails"))
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "0") == "1"
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "Lattice <no-reply@localhost>")
+FRONTEND_VERIFICATION_URL = os.getenv(
+    "FRONTEND_VERIFICATION_URL", "http://localhost:5173/verify-email"
+)
+FRONTEND_PASSWORD_RESET_URL = os.getenv(
+    "FRONTEND_PASSWORD_RESET_URL", "http://localhost:5173/reset-password"
+)
+EMAIL_VERIFICATION_TIMEOUT = 24 * 60 * 60
+PASSWORD_RESET_TIMEOUT = 60 * 60
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -285,6 +306,17 @@ ZARINPAL_CALLBACK_URL = os.getenv("ZARINPAL_CALLBACK_URL", "http://localhost:517
 ZARINPAL_FRONTEND_URL = os.getenv("ZARINPAL_FRONTEND_URL", "http://localhost:5173/billing")
 ZARINPAL_SANDBOX = os.getenv("ZARINPAL_SANDBOX", "0") == "1"
 PRO_PRICE_TOMAN = int(os.getenv("PRO_PRICE_TOMAN", "1000000"))
+SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
+QUEUE_BACKLOG_THRESHOLD = int(os.getenv("QUEUE_BACKLOG_THRESHOLD", "100"))
+APPLICATION_ERROR_THRESHOLD = int(os.getenv("APPLICATION_ERROR_THRESHOLD", "20"))
+PRICE_STALE_THRESHOLD_SECONDS = int(
+    os.getenv("PRICE_STALE_THRESHOLD_SECONDS", "900")
+)
+
+from config.observability import init_sentry
+
+init_sentry(SENTRY_DSN, environment=ENVIRONMENT)
 
 # Production-only security posture (M7, M8). Gated on ENVIRONMENT rather than
 # solely on DEBUG (belt and suspenders): flipping DEBUG=1 for a one-off debugging
@@ -314,11 +346,18 @@ LOGGING = {
     "disable_existing_loggers": False,
     "formatters": {
         "console": {
-            "format": "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+            "format": "%(asctime)s %(levelname)-8s [%(request_id)s] %(name)s: %(message)s",
         },
     },
+    "filters": {
+        "request_id": {"()": "config.logging.RequestIDFilter"},
+    },
     "handlers": {
-        "console": {"class": "logging.StreamHandler", "formatter": "console"},
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "console",
+            "filters": ["request_id"],
+        },
     },
     "root": {"handlers": ["console"], "level": "INFO"},
     "loggers": {
@@ -336,3 +375,45 @@ LOGGING = {
 
 # Risk-free rate for analytics
 RISK_FREE_RATE_ANNUAL = 0.30
+RISK_FREE_RATE_BY_JALALI_YEAR = {
+    1399: 0.18,
+    1400: 0.20,
+    1401: 0.23,
+    1402: 0.30,
+    1403: 0.30,
+    1404: 0.30,
+    1405: 0.30,
+}
+RISK_FREE_RATE_SOURCE = "CBI annual deposit/bond-rate assumptions; manually reviewed"
+
+# Cumulative annual CPI index derived from SCI annual CPI releases, base 1398=100.
+CPI_BY_JALALI_YEAR = {
+    1398: 100.0,
+    1399: 136.4,
+    1400: 191.2,
+    1401: 278.8,
+    1402: 392.3,
+    1403: 519.8,
+    1404: 680.9,
+}
+CPI_SOURCE = "Statistical Center of Iran annual CPI releases; manually reviewed"
+
+
+def rate_for(jalali_year):
+    return float(
+        RISK_FREE_RATE_BY_JALALI_YEAR.get(jalali_year, RISK_FREE_RATE_ANNUAL)
+    )
+
+
+def cpi_for(jalali_year):
+    years = sorted(CPI_BY_JALALI_YEAR)
+    if jalali_year <= years[0]:
+        return float(CPI_BY_JALALI_YEAR[years[0]])
+    if jalali_year >= years[-1]:
+        return float(CPI_BY_JALALI_YEAR[years[-1]])
+    return float(CPI_BY_JALALI_YEAR[jalali_year])
+
+
+# Django only exposes uppercase names through django.conf.settings.
+RATE_FOR = rate_for
+CPI_FOR = cpi_for
