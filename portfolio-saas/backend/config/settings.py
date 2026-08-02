@@ -217,6 +217,12 @@ TSETMC_URL = os.getenv("TSETMC_URL", "https://Api.BrsApi.ir/Tsetmc/AllSymbols.ph
 TSETMC_SYMBOL_URL = os.getenv(
     "TSETMC_SYMBOL_URL", "https://Api.BrsApi.ir/Tsetmc/Symbol.php"
 )
+# Per-tier portfolio ceilings, read by accounts.features.limit_for(). Unset
+# means "use the registry default" (Free 3, Pro unlimited); PRO_PORTFOLIO_LIMIT
+# exists so a deployment can cap Pro without a code change.
+FREE_PORTFOLIO_LIMIT = os.getenv("FREE_PORTFOLIO_LIMIT")
+PRO_PORTFOLIO_LIMIT = os.getenv("PRO_PORTFOLIO_LIMIT")
+
 # Seconds to sleep between BrsApi calls inside one sync task (paid API courtesy).
 MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "0.05"))
 MARKETDATA_DAILY_REQUEST_LIMIT = int(os.getenv("MARKETDATA_DAILY_REQUEST_LIMIT", "9800"))

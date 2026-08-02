@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
-from accounts.permissions import IsPro
+from accounts.permissions import RequiresFeature
 from portfolio.models import Account, Asset, Holding, Price, Snapshot, Transaction
 
 from .candles import candle_close_qs
@@ -345,7 +345,7 @@ class MarketAssetsView(APIView):
 class CompareView(APIView):
     """Ranked, filterable precomputed market metrics."""
 
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("market_compare")]
 
     def get(self, request):
         from .models import AssetMetricSnapshot
@@ -493,7 +493,7 @@ class PerformanceView(APIView):
 class AnnouncementsView(APIView):
     """Pro: Codal disclosures, newest first. ?symbol=کاما&limit=20"""
 
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("market_announcements")]
 
     def get(self, request):
         qs = CodalAnnouncement.objects.order_by("-date_publish", "-time_publish")
@@ -520,7 +520,7 @@ class AnnouncementsView(APIView):
 class ShareholdersView(APIView):
     """Pro: latest institutional shareholder roster for one symbol."""
 
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("market_shareholders")]
 
     def get(self, request):
         symbol = request.query_params.get("symbol")

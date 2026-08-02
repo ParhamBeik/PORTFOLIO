@@ -2,7 +2,8 @@
 
 Valuation is computed live on read (holdings x latest prices) and the heavy
 part (latest prices) is cached, so these endpoints stay cheap at scale.
-Pro endpoints (insights/analytics/optimization) are gated by IsPro.
+Pro endpoints (insights/analytics/optimization) are gated by
+RequiresFeature("<capability>"), resolved against the accounts.features registry.
 """
 from datetime import timedelta
 from decimal import Decimal
@@ -16,7 +17,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.permissions import IsPro
+from accounts.permissions import RequiresFeature
 
 from .models import Account, Asset, Holding, LedgerEntry, Price, Snapshot, Transaction
 from .serializers import (
@@ -708,7 +709,7 @@ class PriceHistoryView(APIView):
 class InsightsView(APIView):
     """Pro-tier financial insights. Free users get a 403 here."""
 
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("insights")]
 
     def get(self, request):
         return Response(build_insights(request.user, _scope(request)))
@@ -736,7 +737,7 @@ def _current_weights_and_total(user, account=None) -> tuple[dict[str, float], De
 class AnalyticsView(APIView):
     """Pro-tier portfolio diagnostics: vol, Sharpe, drawdown, VaR, etc."""
 
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("analytics")]
 
     def get(self, request):
         weights, total = _current_weights_and_total(request.user, _scope(request))
@@ -748,7 +749,7 @@ class AnalyticsView(APIView):
 class OptimizationView(APIView):
     """Pro-tier scenario optimizer: max_sharpe / min_volatility / risk_parity / hrp."""
 
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("optimization")]
 
     def post(self, request):
         scenario = request.data.get("scenario")
@@ -791,7 +792,7 @@ class OptimizationView(APIView):
 class FrontierView(APIView):
     """Pro-tier efficient frontier + max_sharpe / min_volatility reference points."""
 
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("frontier")]
 
     def get(self, request):
         weights, total = _current_weights_and_total(request.user, _scope(request))
@@ -826,7 +827,7 @@ class FrontierView(APIView):
 class AssetReturnsView(APIView):
     """Pro-tier daily-returns matrix + correlation, for heatmaps and scatter plots."""
 
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("asset_returns")]
 
     def get(self, request):
         try:
@@ -880,7 +881,7 @@ class TransactionDestroyView(APIView):
 class BacktestView(APIView):
     """Pro-tier: Create new walk-forward simulation runs and list runs."""
 
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("backtest")]
 
     def get(self, request):
         from portfolio.models import BacktestRun
@@ -962,7 +963,7 @@ class BacktestView(APIView):
 class BacktestDetailView(APIView):
     """Pro-tier: Retrieve a specific run status and results."""
 
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("backtest")]
 
     def get(self, request, pk):
         from portfolio.models import BacktestRun
@@ -976,7 +977,7 @@ class BacktestDetailView(APIView):
 
 
 class BacktestStabilityView(APIView):
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("backtest")]
 
     def get(self, request, pk):
         from portfolio.models import BacktestRun
@@ -991,7 +992,7 @@ class BacktestStabilityView(APIView):
 class DiscoveryView(APIView):
     """Pro-tier: Recommends candidates not currently held along with risk-adjusted leaders."""
 
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("discovery")]
 
     def get(self, request):
         from marketdata.models import AssetMetricSnapshot, MarketInstrument
@@ -1029,7 +1030,7 @@ class DiscoveryView(APIView):
 
 
 class AssetRankingView(APIView):
-    permission_classes = [IsAuthenticated, IsPro]
+    permission_classes = [IsAuthenticated, RequiresFeature("asset_ranking")]
 
     def get(self, request):
         from marketdata.models import AssetMetricSnapshot
