@@ -122,13 +122,41 @@ function extractError(detail) {
 }
 
 // Auth
-export const register = (email, password, firstName = "", lastName = "") =>
+export const register = (
+  email,
+  password,
+  firstName = "",
+  lastName = "",
+  inviteToken = "",
+) =>
   api("/api/auth/register/", {
     method: "POST",
-    body: { email, password, first_name: firstName, last_name: lastName },
+    body: {
+      email,
+      password,
+      first_name: firstName,
+      last_name: lastName,
+      invite_token: inviteToken,
+    },
   });
 export const login = (email, password) =>
   api("/api/auth/login/", { method: "POST", body: { email, password } });
+export const verifyEmail = (token) =>
+  api("/api/auth/verify-email/", { method: "POST", body: { token } });
+export const resendVerification = (email) =>
+  api("/api/auth/resend-verification/", { method: "POST", body: { email } });
+export const requestPasswordReset = (email) =>
+  api("/api/auth/password-reset/request/", { method: "POST", body: { email } });
+export const confirmPasswordReset = (uid, token, newPassword, confirmPassword) =>
+  api("/api/auth/password-reset/confirm/", {
+    method: "POST",
+    body: {
+      uid,
+      token,
+      new_password: newPassword,
+      confirm_password: confirmPassword,
+    },
+  });
 export const me = () => api("/api/auth/me/");
 export const updateProfile = (data) =>
   api("/api/auth/me/", { method: "PATCH", body: data });
@@ -141,6 +169,24 @@ export const changePassword = (oldPassword, newPassword, confirmPassword) =>
       confirm_password: confirmPassword,
     },
   });
+export const deleteMe = (password, confirmation) =>
+  api("/api/auth/me/", {
+    method: "DELETE",
+    body: { password, confirmation },
+  });
+export async function downloadExport() {
+  const response = await fetch(`${API_BASE}/api/auth/export/`, {
+    credentials: "include",
+    headers: auth.token ? { Authorization: `Bearer ${auth.token}` } : {},
+  });
+  if (!response.ok) throw apiError("Export failed.", response.status);
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "lattice-export.zip";
+  link.click();
+  URL.revokeObjectURL(url);
+}
 // NOTE: tier upgrades go through billing (Part 3-B), not a self-service endpoint.
 
 
@@ -188,6 +234,50 @@ export const getPerformance = (accountId, basis = "nominal_toman") =>
   api(`/api/accounts/${accountId}/performance/?basis=${basis}`);
 export const getIntegrity = () =>
   api(`/api/integrity/`);
+
+// The account ledger: the immutable event log behind holdings and cash.
+// Corrections append a reversal — nothing is ever edited or deleted.
+export const listLedger = (accountId) => api(`/api/accounts/${accountId}/ledger/`);
+export const createLedgerEntry = (accountId, entry) =>
+  api(`/api/accounts/${accountId}/ledger/`, { method: "POST", body: entry });
+export const reverseLedgerEntry = (accountId, entryId) =>
+  api(`/api/accounts/${accountId}/ledger/${entryId}/reverse/`, { method: "POST" });
+
+// CSV import is two calls by design: preview validates every row and writes
+// nothing, commit re-validates and writes one atomic batch. Both are multipart,
+// so they bypass `api()` (JSON-only) but reuse its auth and refresh behaviour.
+const upload = async (path, file, _retried = false) => {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    credentials: "include",
+    headers: auth.token ? { Authorization: `Bearer ${auth.token}` } : {},
+    body: form,
+  });
+  if (res.status === 401 && !_retried && auth.token) {
+    const fresh = await refreshAccessToken();
+    if (fresh) return upload(path, file, true);
+    expireSession();
+    throw apiError("Session expired", 401);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const error = apiError(extractError(data) || res.statusText, res.status);
+    // The backend reports the offending CSV line; the review screen shows it.
+    error.row = data.row ?? null;
+    throw error;
+  }
+  return data;
+};
+export const previewImport = (accountId, file) =>
+  upload(`/api/accounts/${accountId}/imports/preview/`, file);
+export const commitImport = (accountId, file) =>
+  upload(`/api/accounts/${accountId}/imports/commit/`, file);
+
+// Per-asset integrity for one account: coverage, freshness, and reason codes.
+export const accountDataQuality = (accountId) =>
+  api(`/api/accounts/${accountId}/data-quality/`);
 
 // Valuation & pricing
 //

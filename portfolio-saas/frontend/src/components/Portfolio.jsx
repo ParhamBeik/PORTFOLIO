@@ -12,10 +12,12 @@ import {
   updateHolding,
   valuation,
   getPerformance,
+  accountDataQuality,
 } from "../api.js";
 import { subscribePrices } from "../sse.js";
 import { fmtNum, fmtTehranTime, fmtToman } from "../format.js";
 import NetWorthChart from "./NetWorthChart.jsx";
+import { DataQualityPanel } from "./Onboarding.jsx";
 import { usePortfolio } from "./PortfolioContext.jsx";
 
 const RECONCILE_MS = 60000;
@@ -40,6 +42,8 @@ export default function Portfolio({ user }) {
   const [form, setForm] = useState({ assetKey: "", side: "buy", quantity: "", timestamp: "" });
   const [perf, setPerf] = useState(null);
   const [priceStatus, setPriceStatus] = useState("polling");
+  const [quality, setQuality] = useState(null);
+  const [qualityError, setQualityError] = useState("");
   const [busy, setBusy] = useState(false);
   const [tradeMsg, setTradeMsg] = useState("");
   const requestId = useRef(0);
@@ -65,6 +69,24 @@ export default function Portfolio({ user }) {
     setPerf(null);
     if (activeId) getPerformance(activeId, basis).then(setPerf).catch(() => setPerf(null));
   }, [activeId, basis]);
+
+  const loadQuality = useCallback(async () => {
+    if (!activeId) {
+      setQuality(null);
+      return;
+    }
+    setQualityError("");
+    try {
+      setQuality(await accountDataQuality(activeId));
+    } catch (err) {
+      setQuality(null);
+      setQualityError(err.message || "Could not load data quality.");
+    }
+  }, [activeId]);
+
+  useEffect(() => {
+    loadQuality();
+  }, [loadQuality]);
 
   useEffect(() => {
     loadVal();
@@ -366,6 +388,15 @@ export default function Portfolio({ user }) {
           {priceStatus} valuation · updated {lastUpdate ? lastUpdate.toLocaleTimeString() : "—"}
         </div>
       </section>
+
+      <TrustPanel
+        valuation={val}
+        performance={perf}
+        quality={quality}
+        qualityError={qualityError}
+        onRetryQuality={loadQuality}
+        accountId={activeId}
+      />
 
       {/* Upgraded Net Worth Chart Section with Separated Controls */}
       <section className="card">
@@ -791,4 +822,167 @@ export default function Portfolio({ user }) {
       )}
     </div>
   );
+}
+
+// Everything the plan requires a user to see before trusting a number:
+// how the portfolio is actually performing since its baseline, how fresh each
+// price is, and which assets were excluded and why. Kept in one panel so the
+// caveats sit next to the figure rather than a scroll away.
+function TrustPanel({ valuation, performance, quality, qualityError, onRetryQuality, accountId }) {
+  if (!valuation) return null;
+  const excluded = valuation.excluded || [];
+  const priced = valuation.priced_assets ?? 0;
+  const totalAssets = valuation.total_assets ?? 0;
+  const assets = performance?.assets || {};
+  const assetKeys = Object.keys(assets);
+
+  return (
+    <section className="card trust-panel" data-testid="trust-panel">
+      <h2 className="subhead">Valuation trust &amp; data quality</h2>
+
+      <div className="trust-grid">
+        <div>
+          <h3 className="subhead">Performance since baseline</h3>
+          {accountId == null ? (
+            <p className="muted">
+              Account performance is reported per portfolio. Choose one in the top bar.
+            </p>
+          ) : performance?.performance_available ? (
+            <dl className="trust-stats">
+              <div>
+                <dt>Time-weighted return</dt>
+                <dd data-testid="perf-twr">{(performance.twr * 100).toFixed(2)}%</dd>
+              </div>
+              <div>
+                <dt>Money-weighted return (XIRR)</dt>
+                <dd>{(performance.xirr * 100).toFixed(2)}%</dd>
+              </div>
+              <div>
+                <dt>Tracking since</dt>
+                <dd>{new Date(performance.tracking_started_at).toLocaleDateString()}</dd>
+              </div>
+              <div>
+                <dt>External cash flows</dt>
+                <dd>{performance.external_flow_count}</dd>
+              </div>
+            </dl>
+          ) : (
+            <p className="muted" data-testid="perf-unavailable">
+              Return is not reportable yet
+              {performance?.detail ? `: ${performance.detail}` : "."}{" "}
+              Trades and fees are internal events; only deposits and withdrawals
+              move the cash-flow boundaries.
+            </p>
+          )}
+          <p className="muted small">
+            {performance?.methodology || "Cash-flow-boundary TWR; investor XIRR; trades are internal."}
+          </p>
+        </div>
+
+        <div>
+          <h3 className="subhead">Price freshness</h3>
+          <p data-testid="coverage">
+            <span className={`badge ${coverageClass(valuation.quality_status)}`}>
+              {valuation.quality_status || "unknown"}
+            </span>{" "}
+            {priced} of {totalAssets} holdings priced
+          </p>
+          <ul className="freshness-list">
+            {(valuation.items || []).map((item) => (
+              <li key={item.key}>
+                <span className={`badge ${coverageClass(item.quality_status)}`}>
+                  {item.quality_status || "unknown"}
+                </span>{" "}
+                <strong>{item.key}</strong>
+                {item.source ? ` · ${item.source}` : ""}
+                {item.age_seconds != null ? ` · ${formatAge(item.age_seconds)} old` : ""}
+              </li>
+            ))}
+          </ul>
+          {excluded.length > 0 && (
+            <div className="excluded-assets">
+              <h4>Excluded from the total</h4>
+              <ul>
+                {excluded.map((item, index) => (
+                  <li key={`${item.asset_key}-${index}`}>
+                    <strong>{item.asset_key}</strong> — {item.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {assetKeys.length > 0 && (
+        <div className="asset-pnl">
+          <h3 className="subhead">Asset profit &amp; loss</h3>
+          <table>
+            <caption className="sr-only">Per-asset profit and loss</caption>
+            <thead>
+              <tr>
+                <th scope="col">Asset</th>
+                <th scope="col">Quantity</th>
+                <th scope="col">Average cost</th>
+                <th scope="col">Unrealized</th>
+                <th scope="col">Realized</th>
+              </tr>
+            </thead>
+            <tbody>
+              {assetKeys.map((key) => {
+                const row = assets[key];
+                return (
+                  <tr key={key}>
+                    <th scope="row">{key}</th>
+                    <td>{fmtNum(row.quantity)}</td>
+                    <td>
+                      {row.cost_basis_known ? (
+                        fmtToman(row.average_cost_tomans)
+                      ) : (
+                        <span className="badge muted-badge">cost basis unknown</span>
+                      )}
+                    </td>
+                    <td>{row.cost_basis_known ? fmtToman(row.unrealized_pnl_tomans) : "—"}</td>
+                    <td>{row.cost_basis_known ? fmtToman(row.realized_pnl_tomans) : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <p className="muted small">
+            Positions opened as a baseline have no purchase price on record, so no
+            profit is claimed for them.
+          </p>
+        </div>
+      )}
+
+      {qualityError ? (
+        <div className="error" role="alert">
+          Data quality unavailable: {qualityError}
+          <button type="button" className="link" onClick={onRetryQuality}>Retry</button>
+        </div>
+      ) : (
+        <DataQualityPanel quality={quality} />
+      )}
+
+      <p className="disclaimer">
+        Informational decision support only — not investment advice.
+      </p>
+    </section>
+  );
+}
+
+function coverageClass(status) {
+  // Closed-beta freshness vocabulary: live | polling | stale | fallback | unavailable
+  if (status === "live" || status === "complete") return "badge-success";
+  if (status === "polling") return "badge-info";
+  if (status === "stale" || status === "fallback" || status === "partial") return "badge-warn";
+  if (status === "unavailable") return "badge-error";
+  return "badge-warn";
+}
+
+function formatAge(seconds) {
+  if (seconds < 90) return `${seconds}s`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds / 3600)}h`;
 }

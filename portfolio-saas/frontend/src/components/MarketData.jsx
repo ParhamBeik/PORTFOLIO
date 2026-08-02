@@ -47,13 +47,17 @@ export default function MarketData({ user }) {
     loadAssets();
   }, []);
 
-  useEffect(() => {
-    if (!assetKey) return;
+  const loadPerformance = (key = assetKey) => {
+    if (!key) return;
     setPerformance(null);
     setErr("");
-    marketPerformance(assetKey)
+    marketPerformance(key)
       .then(setPerformance)
       .catch((error) => setErr(error.message));
+  };
+
+  useEffect(() => {
+    loadPerformance(assetKey);
   }, [assetKey]);
 
   const selected = assets?.find((asset) => asset.key === assetKey);
@@ -112,9 +116,9 @@ export default function MarketData({ user }) {
 
     const topReturn = [...withStats].sort((a, b) => b.return_1y - a.return_1y)[0];
     const lowestVol = [...withStats].filter(a => a.volatility_1y > 0).sort((a, b) => a.volatility_1y - b.volatility_1y)[0];
-    const bestSharpe = [...withStats].sort((a, b) => b.sharpe_1y - a.sharpe_1y)[0];
+    const highestSharpe = [...withStats].sort((a, b) => b.sharpe_1y - a.sharpe_1y)[0];
 
-    return { topReturn, lowestVol, bestSharpe };
+    return { topReturn, lowestVol, highestSharpe };
   }, [filteredAssets]);
 
   const series = useMemo(() => {
@@ -156,9 +160,13 @@ export default function MarketData({ user }) {
       {err && (
         <div className="error" role="alert">
           {err}
-          {assets === null && (
-            <button type="button" className="link" onClick={loadAssets}>Retry</button>
-          )}
+          <button
+            type="button"
+            className="link"
+            onClick={assets === null ? loadAssets : () => loadPerformance(assetKey)}
+          >
+            Retry
+          </button>
         </div>
       )}
 
@@ -166,13 +174,15 @@ export default function MarketData({ user }) {
         <div className="card-head">
           <div className="market-header-title">
             <h2>Market Explorer</h2>
-            <span className="muted small">Analyze performance across Iranian markets</span>
+            <span className="muted small">Compare available historical observations across Iranian markets</span>
           </div>
           <div className="seg tf-seg">
             {Object.keys(WINDOWS).map((name) => (
               <button
                 key={name}
+                type="button"
                 className={windowName === name ? "active" : ""}
+                aria-pressed={windowName === name}
                 onClick={() => setWindowName(name)}
               >
                 {name}
@@ -193,6 +203,7 @@ export default function MarketData({ user }) {
               type="button"
               disabled={assets === null}
               className={activeClass === name ? "active" : ""}
+              aria-pressed={activeClass === name}
               onClick={() => {
                 setActiveClass(name);
                 setSelectedSector("ALL");
@@ -282,6 +293,8 @@ export default function MarketData({ user }) {
                 <span className="badge muted-badge">
                   {selected.records} archived days ({selected.first_date || "N/A"} to {selected.last_date || "N/A"})
                 </span>
+                {selected.quality_status && <span className="badge">Quality: {selected.quality_status}</span>}
+                {selected.priced_at && <span className="badge muted-badge">Priced at: {selected.priced_at}</span>}
               </div>
             </div>
             {(selected.pe != null || selected.eps != null || selected.market_cap != null) && (
@@ -324,7 +337,7 @@ export default function MarketData({ user }) {
           <>
             <div className="metric-grid">
               <Metric label="Period return" value={fmtPct(totalReturn)} className={totalReturn >= 0 ? "pos" : "neg"} />
-              <Metric label="Expected return (Ann.)" value={fmtPct(expectedAnnual)} className={expectedAnnual >= 0 ? "pos" : "neg"} />
+              <Metric label="Historical mean (Ann.)" value={fmtPct(expectedAnnual)} className={expectedAnnual >= 0 ? "pos" : "neg"} />
               <Metric label="Volatility (Ann.)" value={fmtPct(volatilityAnnual)} />
               <Metric label="Latest close" value={fmtTomanCompact(last.close)} />
               <Metric label="Period high" value={fmtTomanCompact(Math.max(...closes))} />
@@ -336,7 +349,7 @@ export default function MarketData({ user }) {
             {/* Performance Chart */}
             <div className="market-chart-section">
               <div className="chart-head-info">
-                <h4>Price & Return Trend ({windowName})</h4>
+                <h4>Historical price and return ({windowName})</h4>
               </div>
               <div
                 className="chart-wrap market-chart"
@@ -397,7 +410,7 @@ export default function MarketData({ user }) {
         {filteredAssets.length > 1 && highlights && (
           <div className="market-comparison-section">
             <div className="comparison-header">
-              <h4>Comparative Performance Metrics (1-Year)</h4>
+              <h4>Historical comparison (1 year)</h4>
               <span className="muted small">Ranked relative to current tracked assets in {activeClass}</span>
             </div>
             
@@ -408,7 +421,7 @@ export default function MarketData({ user }) {
                   className={`highlight-card ${assetKey === highlights.topReturn.key ? "active" : ""}`}
                   onClick={() => setAssetKey(highlights.topReturn.key)}
                 >
-                  <div className="highlight-tag top-return-tag">Top Return</div>
+                  <div className="highlight-tag top-return-tag">Highest historical return</div>
                   <div className="highlight-symbol">{aliasOf(highlights.topReturn)}</div>
                   <div className="highlight-value text-success">{fmtPct(highlights.topReturn.return_1y)}</div>
                   <div className="highlight-name">{highlights.topReturn.name}</div>
@@ -420,22 +433,22 @@ export default function MarketData({ user }) {
                   className={`highlight-card ${assetKey === highlights.lowestVol.key ? "active" : ""}`}
                   onClick={() => setAssetKey(highlights.lowestVol.key)}
                 >
-                  <div className="highlight-tag stability-tag">Most Stable</div>
+                  <div className="highlight-tag stability-tag">Lowest historical volatility</div>
                   <div className="highlight-symbol">{aliasOf(highlights.lowestVol)}</div>
                   <div className="highlight-value text-warning">{fmtPct(highlights.lowestVol.volatility_1y)} <span className="small-label">vol</span></div>
                   <div className="highlight-name">{highlights.lowestVol.name}</div>
                 </button>
               )}
-              {highlights.bestSharpe && (
+              {highlights.highestSharpe && (
                 <button
                   type="button"
-                  className={`highlight-card ${assetKey === highlights.bestSharpe.key ? "active" : ""}`}
-                  onClick={() => setAssetKey(highlights.bestSharpe.key)}
+                  className={`highlight-card ${assetKey === highlights.highestSharpe.key ? "active" : ""}`}
+                  onClick={() => setAssetKey(highlights.highestSharpe.key)}
                 >
-                  <div className="highlight-tag sharpe-tag">Best Risk-Adjusted</div>
-                  <div className="highlight-symbol">{aliasOf(highlights.bestSharpe)}</div>
-                  <div className="highlight-value text-accent">{highlights.bestSharpe.sharpe_1y.toFixed(2)} <span className="small-label">SR</span></div>
-                  <div className="highlight-name">{highlights.bestSharpe.name}</div>
+                  <div className="highlight-tag sharpe-tag">Highest historical Sharpe</div>
+                  <div className="highlight-symbol">{aliasOf(highlights.highestSharpe)}</div>
+                  <div className="highlight-value text-accent">{highlights.highestSharpe.sharpe_1y.toFixed(2)} <span className="small-label">SR</span></div>
+                  <div className="highlight-name">{highlights.highestSharpe.name}</div>
                 </button>
               )}
             </div>
@@ -457,12 +470,19 @@ export default function MarketData({ user }) {
                     const isActive = asset.key === assetKey;
                     const hasStats = asset.return_1y !== undefined && asset.return_1y !== null;
                     return (
-                      <tr
-                        key={asset.key}
-                        className={`comparison-row ${isActive ? "active-row" : ""} ${hasStats ? "clickable-row" : "disabled-row"}`}
-                        onClick={() => hasStats && setAssetKey(asset.key)}
-                      >
-                        <td className="row-symbol">{aliasOf(asset)}</td>
+                      <tr key={asset.key} className={`comparison-row ${isActive ? "active-row" : ""} ${hasStats ? "clickable-row" : "disabled-row"}`}>
+                        <td className="row-symbol">
+                          {hasStats ? (
+                            <button
+                              type="button"
+                              className="table-row-button"
+                              onClick={() => setAssetKey(asset.key)}
+                              aria-label={`View historical data for ${asset.name}`}
+                            >
+                              {aliasOf(asset)}
+                            </button>
+                          ) : aliasOf(asset)}
+                        </td>
                         <td className="row-name">{asset.name}</td>
                         <td className={`row-metric text-right ${hasStats ? (asset.return_1y >= 0 ? "text-success" : "text-danger") : "muted"}`}>
                           {hasStats ? fmtPct(asset.return_1y) : "N/A"}
@@ -547,6 +567,7 @@ function ProSections({ symbol, isPro }) {
   const [holders, setHolders] = useState(null);
   const [announcementsError, setAnnouncementsError] = useState("");
   const [holdersError, setHoldersError] = useState("");
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     if (!isPro || !symbol) return;
@@ -560,7 +581,7 @@ function ProSections({ symbol, isPro }) {
     marketShareholders(symbol)
       .then(setHolders)
       .catch((error) => setHoldersError(error.message));
-  }, [isPro, symbol]);
+  }, [isPro, symbol, retryKey]);
 
   return (
     <div className="pro-sections-grid">
@@ -569,7 +590,12 @@ function ProSections({ symbol, isPro }) {
           <h3>Codal Announcements</h3>
           <span className="badge pro-badge">Pro</span>
         </div>
-        {announcementsError && <p className="error small" role="alert">{announcementsError}</p>}
+        {announcementsError && (
+          <div className="error inline small" role="alert">
+            <span>{announcementsError}</span>
+            <button type="button" className="link" onClick={() => setRetryKey((key) => key + 1)}>Retry</button>
+          </div>
+        )}
         {!announcements && !announcementsError && <p className="muted small">Loading announcements…</p>}
         {announcements?.length === 0 && <p className="muted small">No announcements found.</p>}
         {announcements?.length > 0 && (
@@ -617,7 +643,12 @@ function ProSections({ symbol, isPro }) {
           <h3>Major Shareholders</h3>
           <span className="badge pro-badge">Pro</span>
         </div>
-        {holdersError && <p className="error small" role="alert">{holdersError}</p>}
+        {holdersError && (
+          <div className="error inline small" role="alert">
+            <span>{holdersError}</span>
+            <button type="button" className="link" onClick={() => setRetryKey((key) => key + 1)}>Retry</button>
+          </div>
+        )}
         {!holders && !holdersError && <p className="muted small">Loading shareholders…</p>}
         {holders?.length === 0 && <p className="muted small">No shareholder data.</p>}
         {holders?.length > 0 && (

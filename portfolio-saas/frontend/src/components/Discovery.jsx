@@ -5,8 +5,10 @@ export default function Discovery() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [watchlistError, setWatchlistError] = useState("");
+  const [updateError, setUpdateError] = useState("");
   const [watchlist, setWatchlist] = useState({ items: [] });
-  const [basis, setBasis] = useState("nominal"); // nominal vs usd_real
+  const [basis, setBasis] = useState("nominal_toman");
   const [metric, setMetric] = useState("sharpe"); // sharpe, sortino, calmar
   const [newItem, setNewItem] = useState("");
   const [updating, setUpdating] = useState(false);
@@ -26,10 +28,11 @@ export default function Discovery() {
 
   const fetchWatchlist = async () => {
     try {
+      setWatchlistError("");
       const res = await api(`/api/watchlist/`);
       setWatchlist(res);
     } catch (err) {
-      console.error("Watchlist loading failed:", err);
+      setWatchlistError(err.message || "Failed to load the watchlist.");
     }
   };
 
@@ -41,6 +44,7 @@ export default function Discovery() {
   const handleUpdateWatchlist = async (symbol, action, value) => {
     try {
       setUpdating(true);
+      setUpdateError("");
       const payload = { symbol };
       if (action === "delete") {
         payload.delete = true;
@@ -53,7 +57,7 @@ export default function Discovery() {
       await api(`/api/watchlist/`, { method: "POST", body: payload });
       await fetchWatchlist();
     } catch (err) {
-      alert("Failed to update watchlist: " + err.message);
+      setUpdateError(err.message || "Failed to update the watchlist.");
     } finally {
       setUpdating(false);
     }
@@ -64,6 +68,7 @@ export default function Discovery() {
     if (!newItem.trim()) return;
     try {
       setUpdating(true);
+      setUpdateError("");
       await api(`/api/watchlist/`, {
         method: "POST",
         body: { symbol: newItem.trim().toUpperCase(), force_include: true },
@@ -71,7 +76,7 @@ export default function Discovery() {
       setNewItem("");
       await fetchWatchlist();
     } catch (err) {
-      alert("Failed to add to watchlist: " + err.message);
+      setUpdateError(err.message || "Failed to add the symbol.");
     } finally {
       setUpdating(false);
     }
@@ -87,7 +92,8 @@ export default function Discovery() {
     );
   }
 
-  const leaders = data?.leaders?.[basis] ?? {};
+  const legacyBasis = basis === "usd_denominated" ? "usd_real" : "nominal";
+  const leaders = data?.leaders?.[basis] ?? data?.leaders?.[legacyBasis] ?? {};
   const categories = Object.keys(leaders);
 
   return (
@@ -95,7 +101,7 @@ export default function Discovery() {
       <header className="discovery-header" style={{ marginBottom: "2rem", borderBottom: "1px solid var(--border)", paddingBottom: "1.5rem" }}>
         <h2 style={{ margin: 0, fontSize: "1.75rem", fontWeight: 700 }}>Market Discovery</h2>
         <p style={{ color: "var(--muted)", marginTop: "0.25rem" }}>
-          Uncover top risk-adjusted performance leaders and manage watchlist candidate exclusions.
+          Compare historical risk-adjusted results within the currently verified candidate set.
         </p>
 
         {/* Toggle Controls */}
@@ -105,19 +111,21 @@ export default function Discovery() {
             <div className="inline" style={{ background: "var(--panel-2)", padding: "2px", borderRadius: "8px" }}>
               <button
                 type="button"
-                className={basis === "nominal" ? "primary small" : "small"}
+                className={basis === "nominal_toman" ? "primary small" : "small"}
                 style={{ borderRadius: "6px", border: "none" }}
-                onClick={() => setBasis("nominal")}
+                aria-pressed={basis === "nominal_toman"}
+                onClick={() => setBasis("nominal_toman")}
               >
                 Nominal Toman
               </button>
               <button
                 type="button"
-                className={basis === "usd_real" ? "primary small" : "small"}
+                className={basis === "usd_denominated" ? "primary small" : "small"}
                 style={{ borderRadius: "6px", border: "none" }}
-                onClick={() => setBasis("usd_real")}
+                aria-pressed={basis === "usd_denominated"}
+                onClick={() => setBasis("usd_denominated")}
               >
-                Real USD
+                USD-denominated
               </button>
             </div>
           </div>
@@ -129,6 +137,7 @@ export default function Discovery() {
                 type="button"
                 className={metric === "sharpe" ? "primary small" : "small"}
                 style={{ borderRadius: "6px", border: "none" }}
+                aria-pressed={metric === "sharpe"}
                 onClick={() => setMetric("sharpe")}
               >
                 Sharpe Ratio
@@ -137,6 +146,7 @@ export default function Discovery() {
                 type="button"
                 className={metric === "sortino" ? "primary small" : "small"}
                 style={{ borderRadius: "6px", border: "none" }}
+                aria-pressed={metric === "sortino"}
                 onClick={() => setMetric("sortino")}
               >
                 Sortino Ratio
@@ -145,6 +155,7 @@ export default function Discovery() {
                 type="button"
                 className={metric === "calmar" ? "primary small" : "small"}
                 style={{ borderRadius: "6px", border: "none" }}
+                aria-pressed={metric === "calmar"}
                 onClick={() => setMetric("calmar")}
               >
                 Calmar Ratio
@@ -156,7 +167,10 @@ export default function Discovery() {
 
       {/* Leaderboard Cards */}
       <section style={{ marginBottom: "3rem" }}>
-        <h3 style={{ fontSize: "1.25rem", marginBottom: "1rem" }}>Class Leaderboards</h3>
+        <h3 style={{ fontSize: "1.25rem", marginBottom: "1rem" }}>Historical class rankings</h3>
+        <p className="muted small">
+          Ranked only within {data?.candidates?.length ?? 0} current candidates using the selected basis and historical estimates; rankings are not forecasts.
+        </p>
         {categories.length === 0 ? (
           <p style={{ color: "var(--muted)" }}>No risk-adjusted performance data available for current universe candidates.</p>
         ) : (
@@ -166,7 +180,7 @@ export default function Discovery() {
               return (
                 <div key={cat} className="card" style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: "12px", padding: "1.25rem" }}>
                   <h4 style={{ margin: "0 0 1rem 0", fontSize: "1.1rem", borderBottom: "1px solid var(--border)", paddingBottom: "0.5rem", color: "var(--accent)" }}>
-                    {cat} Leaders
+                    {cat} ranking
                   </h4>
                   <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
                     {list.slice(0, 5).map((item, index) => {
@@ -183,7 +197,7 @@ export default function Discovery() {
                               {score.toFixed(2)}
                             </span>
                             <span style={{ display: "block", fontSize: "0.75rem", color: "var(--muted)" }}>
-                              Ret: {(item.expected_return_annual * 100).toFixed(1)}%
+                              Historical annualized mean: {(item.expected_return_annual * 100).toFixed(1)}%
                             </span>
                           </div>
                         </div>
@@ -204,8 +218,18 @@ export default function Discovery() {
           Forcibly include or exclude specific assets from optimization algorithms. Exclusions override candidate selectors.
         </p>
 
-        <form onSubmit={handleAddWatchlistItem} style={{ display: "flex", gap: "0.75rem", marginBottom: "1.25rem" }}>
+        {watchlistError && (
+          <div className="error inline" role="alert">
+            <span>{watchlistError}</span>
+            <button type="button" className="link" onClick={fetchWatchlist}>Retry</button>
+          </div>
+        )}
+        {updateError && <p className="error small" role="alert">{updateError}</p>}
+
+        <form onSubmit={handleAddWatchlistItem} className="responsive-form-row">
+          <label className="sr-only" htmlFor="watchlist-symbol">Symbol to add</label>
           <input
+            id="watchlist-symbol"
             type="text"
             placeholder="Symbol (e.g. KAMA, USD)"
             value={newItem}
@@ -221,6 +245,7 @@ export default function Discovery() {
         {watchlist.items.length === 0 ? (
           <p style={{ color: "var(--muted)", fontSize: "0.9rem", textAlign: "center", padding: "1rem 0" }}>No watchlist overrides configured.</p>
         ) : (
+          <div className="table-scroll">
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border)", color: "var(--muted)", textAlign: "left" }}>
@@ -235,7 +260,9 @@ export default function Discovery() {
                 <tr key={item.id} style={{ borderBottom: "1px solid var(--chart-grid)" }}>
                   <td style={{ padding: "0.75rem 0", fontWeight: 600 }}>{item.symbol}</td>
                   <td style={{ padding: "0.75rem 0" }}>
+                    <label className="sr-only" htmlFor={`include-${item.id}`}>Force include {item.symbol}</label>
                     <input
+                      id={`include-${item.id}`}
                       type="checkbox"
                       checked={item.force_include}
                       disabled={updating}
@@ -243,7 +270,9 @@ export default function Discovery() {
                     />
                   </td>
                   <td style={{ padding: "0.75rem 0" }}>
+                    <label className="sr-only" htmlFor={`exclude-${item.id}`}>Force exclude {item.symbol}</label>
                     <input
+                      id={`exclude-${item.id}`}
                       type="checkbox"
                       checked={item.force_exclude}
                       disabled={updating}
@@ -264,6 +293,7 @@ export default function Discovery() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </section>
 
@@ -271,12 +301,13 @@ export default function Discovery() {
       <section style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: "12px", padding: "1.5rem" }}>
         <h3 style={{ fontSize: "1.25rem", margin: "0 0 0.5rem 0" }}>Explainable Filter Exclusions</h3>
         <p style={{ color: "var(--muted)", fontSize: "0.85rem", marginBottom: "1.25rem" }}>
-          These symbols are eligible in catalog but were dropped from optimization working pool due to liquidity or survivorship guards.
+          These symbols were not used. Reasons come from the data-quality and universe screening payload.
         </p>
 
         {(!data?.excluded || data.excluded.length === 0) ? (
           <p style={{ color: "var(--muted)", fontSize: "0.9rem", textAlign: "center", padding: "1rem 0" }}>No excluded symbols cataloged.</p>
         ) : (
+          <div className="table-scroll">
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border)", color: "var(--muted)", textAlign: "left" }}>
@@ -290,13 +321,14 @@ export default function Discovery() {
                 <tr key={item.key} style={{ borderBottom: "1px solid var(--chart-grid)" }}>
                   <td style={{ padding: "0.75rem 0", fontWeight: 600, color: "var(--red)" }}>{item.key}</td>
                   <td style={{ padding: "0.75rem 0", textTransform: "capitalize" }}>
-                    {item.reason.replace(/_/g, " ")}
+                    {(item.reason || "not reported").replace(/_/g, " ")}
                   </td>
                   <td style={{ padding: "0.75rem 0", color: "var(--muted)" }}>{item.detail}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </section>
     </div>

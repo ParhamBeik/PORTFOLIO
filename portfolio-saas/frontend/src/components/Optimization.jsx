@@ -19,8 +19,9 @@ import ProGate from "./ProGate.jsx";
 import { usePortfolio } from "./PortfolioContext.jsx";
 
 const SCENARIOS = [
-  { key: "max_sharpe", label: "Max Sharpe", hint: "Best risk-adjusted return" },
-  { key: "min_volatility", label: "Min Volatility", hint: "Lowest risk" },
+  { key: "equal_weight", label: "Equal Weight", hint: "Reference allocation with equal asset weights" },
+  { key: "max_sharpe", label: "Max Sharpe", hint: "Highest estimated Sharpe for this historical window" },
+  { key: "min_volatility", label: "Min Volatility", hint: "Lowest estimated volatility for this historical window" },
   { key: "risk_parity", label: "Risk Parity", hint: "Equal risk contribution (ERC)" },
   { key: "hrp", label: "HRP", hint: "Hierarchical risk parity" },
 ];
@@ -38,6 +39,8 @@ export default function Optimization({ user }) {
   const [catalog, setCatalog] = useState([]);
   const [err, setErr] = useState("");
   const [frontErr, setFrontErr] = useState("");
+  const [retryKey, setRetryKey] = useState(0);
+  const [frontRetryKey, setFrontRetryKey] = useState(0);
 
   useEffect(() => {
     listAssets().then(setCatalog).catch(() => {});
@@ -52,7 +55,7 @@ export default function Optimization({ user }) {
       .then((r) => { if (current) { setResult(r); setErr(""); } })
       .catch((e) => { if (current) { setResult(null); setErr(e.message); } });
     return () => { current = false; };
-  }, [scenario, user.is_pro, account]);
+  }, [scenario, user.is_pro, account, retryKey]);
 
   useEffect(() => {
     if (!user.is_pro) return;
@@ -63,7 +66,7 @@ export default function Optimization({ user }) {
       .then((value) => { if (current) setFront(value); })
       .catch((error) => { if (current) setFrontErr(error.message); });
     return () => { current = false; };
-  }, [user.is_pro, account]);
+  }, [user.is_pro, account, frontRetryKey]);
 
   const labelOf = useMemo(() => {
     const m = new Map(catalog.map((a) => [a.key, a.name_fa || a.name]));
@@ -101,12 +104,19 @@ export default function Optimization({ user }) {
       <div className="insights-head">
         <h2>Portfolio Optimization</h2>
       </div>
-      {err && <div className="error">{err}</div>}
+      {err && (
+        <div className="error inline" role="alert">
+          <span>Scenario unavailable: {err}</span>
+          <button type="button" className="link" onClick={() => setRetryKey((key) => key + 1)}>
+            Retry
+          </button>
+        </div>
+      )}
       {!result && !err && <p className="muted" role="status">Calculating allocation…</p>}
 
       <section className="card">
         <h3>Scenario</h3>
-        <div className="scenario-row">
+        <div className="scenario-row" role="group" aria-label="Allocation scenario">
           {SCENARIOS.map((s) => (
             <button
               key={s.key}
@@ -166,17 +176,42 @@ export default function Optimization({ user }) {
             </div>
             {result.target_metrics && (
               <p className="muted small">
-                Projected: return {fmtPct(result.target_metrics.expected_return_annual * 100)} ·
-                volatility {fmtPct(result.target_metrics.annualized_volatility * 100)} ·
+                Historical estimate: annualized return {fmtPct(result.target_metrics.expected_return_annual * 100)} ·
+                annualized volatility {fmtPct(result.target_metrics.annualized_volatility * 100)} ·
                 Sharpe {result.target_metrics.sharpe.toFixed(2)}
               </p>
             )}
+            <details className="assumptions-panel">
+              <summary>Data window, assumptions, and exclusions</summary>
+              <dl className="assumptions-grid">
+                <div><dt>Basis</dt><dd>{result.basis || "Not reported"}</dd></div>
+                <div><dt>Universe</dt><dd>{result.universe_mode || "Not reported"}</dd></div>
+                <div><dt>Window</dt><dd>{result.data_window ? `${result.data_window.start} to ${result.data_window.end}` : "Not reported"}</dd></div>
+                <div><dt>Observations</dt><dd>{result.observations ?? "Not reported"}</dd></div>
+                <div><dt>Risk-free rate</dt><dd>{result.risk_free_rate_annual != null ? fmtPct(result.risk_free_rate_annual * 100) : "Not reported"}</dd></div>
+                <div><dt>Return method</dt><dd>{result.expected_return_method?.replaceAll("_", " ") || "Not reported"}</dd></div>
+              </dl>
+              {result.constraints_applied && (
+                <p className="muted small">Constraints: {JSON.stringify(result.constraints_applied)}</p>
+              )}
+              {result.excluded_assets?.length > 0 && (
+                <ul className="compact-list">
+                  {result.excluded_assets.map((item) => (
+                    <li key={item.key || item.symbol}>
+                      {labelOf(item.key || item.symbol)} — {(item.reason || "excluded").replaceAll("_", " ")}
+                      {item.detail ? `: ${item.detail}` : ""}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {result.limitations?.map((limitation) => <p key={limitation} className="muted small">{limitation}</p>)}
+            </details>
           </section>
 
           <section className="card">
-            <h3>Rebalance trades</h3>
+            <h3>Rebalance trades (hypothetical)</h3>
             {result.rebalance_trades.length === 0 ? (
-              <p className="muted">Already at the target — no trades needed.</p>
+              <p className="muted">The current allocation already matches this scenario.</p>
             ) : (
               <table className="holdings">
                 <thead>
@@ -224,7 +259,7 @@ export default function Optimization({ user }) {
             className="chart-wrap"
             style={{ height: 320 }}
             role="img"
-            aria-label="Efficient frontier showing expected return versus volatility"
+            aria-label="Efficient frontier showing historical estimated return versus volatility"
           >
             <ResponsiveContainer width="100%" height="100%">
               <ScatterChart margin={{ top: 8, right: 16, left: 8, bottom: 24 }}>
@@ -265,13 +300,20 @@ export default function Optimization({ user }) {
             </ResponsiveContainer>
           </div>
           <p className="muted small">
-            Each dot is a min-volatility portfolio at a target return.{" "}
+            Each dot is a hypothetical minimum-volatility allocation at a historical target return.{" "}
             <span style={{ color: "#f85149" }}>●</span> your current portfolio ·{" "}
             <span style={{ color: "#3fb950" }}>●</span> max-Sharpe portfolio.
           </p>
         </section>
       )}
-      {frontErr && <p className="error small">Efficient frontier unavailable: {frontErr}</p>}
+      {frontErr && (
+        <div className="error inline small" role="alert">
+          <span>Efficient frontier unavailable: {frontErr}</span>
+          <button type="button" className="link" onClick={() => setFrontRetryKey((key) => key + 1)}>
+            Retry
+          </button>
+        </div>
+      )}
     </div>
     </ProGate>
   );

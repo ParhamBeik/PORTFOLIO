@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate, useLocation } from "react-router-dom";
+import { Link, useNavigate, useLocation } from "react-router-dom";
 import { auth, login, me, register } from "../api.js";
 import Logo from "./Logo.jsx";
 
@@ -61,6 +61,11 @@ export default function Auth({ initialMode = "login", onAuthed, currentUser = nu
   const [confirmPassword, setConfirmPassword] = useState("");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
+  const [inviteToken, setInviteToken] = useState(
+    () => new URLSearchParams(location.search).get("invite") || ""
+  );
+  const [consent, setConsent] = useState(false);
+  const [verificationEmail, setVerificationEmail] = useState("");
 
   const [showPw, setShowPw] = useState(false);
   const [showConfirmPw, setShowConfirmPw] = useState(false);
@@ -77,7 +82,8 @@ export default function Auth({ initialMode = "login", onAuthed, currentUser = nu
   const canSubmit =
     !busy &&
     (registering
-      ? emailValid && pwValid && firstName.trim().length > 0 && confirmPassword.length > 0
+      ? emailValid && pwValid && firstName.trim().length > 0
+        && confirmPassword.length > 0 && inviteToken.trim() && consent
       : emailValid && password.length > 0);
 
   const handleDemoFill = () => {
@@ -105,7 +111,17 @@ export default function Auth({ initialMode = "login", onAuthed, currentUser = nu
     try {
       let data;
       if (registering) {
-        data = await register(email.trim(), password, firstName.trim(), lastName.trim());
+        data = await register(
+          email.trim(),
+          password,
+          firstName.trim(),
+          lastName.trim(),
+          inviteToken.trim(),
+        );
+        if (data.verification_required) {
+          setVerificationEmail(email.trim());
+          return;
+        }
       } else {
         data = await login(email.trim(), password);
       }
@@ -147,7 +163,12 @@ export default function Auth({ initialMode = "login", onAuthed, currentUser = nu
             </p>
           </div>
 
-          {currentUser && (
+          {verificationEmail ? (
+            <div className="alert alert-success" role="status">
+              Registration complete. Check {verificationEmail} for the verification link,
+              then sign in.
+            </div>
+          ) : currentUser && (
             <div style={{ padding: "10px 14px", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "16px", fontSize: "13px" }}>
               ℹ️ Signed in as <strong>{currentUser.email}</strong>. You can sign in to another account below or{" "}
               <button
@@ -185,6 +206,19 @@ export default function Auth({ initialMode = "login", onAuthed, currentUser = nu
             <div className="error-banner" role="alert" aria-live="polite">
               <span className="error-icon">⚠️</span>
               <div className="error-text">{error}</div>
+            </div>
+          )}
+
+          {registering && (
+            <div className="form-group">
+              <label htmlFor="auth-invite-token">Invitation Token</label>
+              <input
+                id="auth-invite-token"
+                required
+                value={inviteToken}
+                onChange={(event) => setInviteToken(event.target.value)}
+                autoComplete="off"
+              />
             </div>
           )}
 
@@ -340,6 +374,20 @@ export default function Auth({ initialMode = "login", onAuthed, currentUser = nu
             </div>
           )}
 
+          {registering && (
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={consent}
+                onChange={(event) => setConsent(event.target.checked)}
+              />
+              <span>
+                I agree to the <Link to="/terms">Terms</Link> and{" "}
+                <Link to="/privacy">Privacy Notice</Link>.
+              </span>
+            </label>
+          )}
+
           {!registering && (
             <div className="auth-options">
               <label className="checkbox-label">
@@ -379,6 +427,11 @@ export default function Auth({ initialMode = "login", onAuthed, currentUser = nu
               </p>
             </div>
           )}
+          <div className="legal-links">
+            <Link to="/reset-password">Forgot password?</Link>
+            <Link to="/privacy">Privacy</Link>
+            <Link to="/terms">Terms</Link>
+          </div>
         </form>
       </div>
     </div>

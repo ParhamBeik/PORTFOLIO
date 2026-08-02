@@ -1,7 +1,18 @@
 import { useState } from "react";
-import { auth, changePassword, updateProfile } from "../api.js";
+import { useNavigate } from "react-router-dom";
+import {
+  auth,
+  changePassword,
+  deleteMe,
+  downloadExport,
+  logoutSession,
+  requestPasswordReset,
+  resendVerification,
+  updateProfile,
+} from "../api.js";
 
 export default function Profile({ user, setUser }) {
+  const navigate = useNavigate();
   const [firstName, setFirstName] = useState(user?.first_name || "");
   const [lastName, setLastName] = useState(user?.last_name || "");
   const [savingProfile, setSavingProfile] = useState(false);
@@ -15,6 +26,9 @@ export default function Profile({ user, setUser }) {
   const [showConfirmPw, setShowConfirmPw] = useState(false);
   const [savingPassword, setSavingPassword] = useState(false);
   const [passwordMsg, setPasswordMsg] = useState(null);
+  const [accountMsg, setAccountMsg] = useState(null);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
 
 
   const handleSaveProfile = async (e) => {
@@ -68,6 +82,29 @@ export default function Profile({ user, setUser }) {
 
   const isPasswordValid = newPassword.length >= 8 && !/^\d+$/.test(newPassword);
 
+  const runAccountAction = async (action, success) => {
+    setAccountMsg(null);
+    try {
+      await action();
+      setAccountMsg({ type: "success", text: success });
+    } catch (error) {
+      setAccountMsg({ type: "error", text: error.message });
+    }
+  };
+
+  const handleDelete = async (event) => {
+    event.preventDefault();
+    await runAccountAction(
+      async () => {
+        await deleteMe(deletePassword, deleteConfirmation);
+        auth.logout();
+        setUser(null);
+        navigate("/login");
+      },
+      "Account deleted.",
+    );
+  };
+
   return (
     <div className="profile-container">
       <div className="page-header">
@@ -101,6 +138,9 @@ export default function Profile({ user, setUser }) {
                   {user?.is_pro ? "PRO Tier" : "FREE Tier"}
                 </span>
                 {user?.is_staff && <span className="staff-badge">Staff / Admin</span>}
+                <span className={`card-badge ${user?.email_verified_at ? "" : "danger"}`}>
+                  {user?.email_verified_at ? "Email verified" : "Verification pending"}
+                </span>
               </div>
             </div>
           </div>
@@ -264,6 +304,55 @@ export default function Profile({ user, setUser }) {
                 {savingPassword ? "Updating Password…" : "Update Password"}
               </button>
             </div>
+          </form>
+        </div>
+
+        <div className="card profile-card">
+          <div className="card-header">
+            <h3>Data Rights & Sessions</h3>
+            <span className="card-badge">Privacy</span>
+          </div>
+          {accountMsg && (
+            <div role="status" className={`alert ${accountMsg.type === "success" ? "alert-success" : "alert-error"}`}>
+              {accountMsg.text}
+            </div>
+          )}
+          <div className="form-actions trust-actions">
+            {!user?.email_verified_at && (
+              <button type="button" onClick={() => runAccountAction(
+                () => resendVerification(user.email),
+                "Verification email sent.",
+              )}>Resend verification</button>
+            )}
+            <button type="button" onClick={() => runAccountAction(
+              () => requestPasswordReset(user.email),
+              "Password reset email sent.",
+            )}>Email password reset link</button>
+            <button type="button" onClick={() => runAccountAction(
+              downloadExport,
+              "Export downloaded.",
+            )}>Download data export</button>
+            <button type="button" onClick={async () => {
+              await logoutSession(true);
+              setUser(null);
+              navigate("/login");
+            }}>Log out all devices</button>
+          </div>
+
+          <form onSubmit={handleDelete} className="profile-form danger-zone">
+            <h4>Delete account</h4>
+            <p>This permanently deletes portfolio data. Payment audit rows are pseudonymized.</p>
+            <label htmlFor="delete-password">Confirm password</label>
+            <input id="delete-password" type="password" value={deletePassword}
+              onChange={(event) => setDeletePassword(event.target.value)} required />
+            <label htmlFor="delete-confirmation">Type DELETE</label>
+            <input id="delete-confirmation" value={deleteConfirmation}
+              onChange={(event) => setDeleteConfirmation(event.target.value)}
+              pattern="DELETE" required />
+            <button className="danger" type="submit"
+              disabled={!deletePassword || deleteConfirmation !== "DELETE"}>
+              Permanently delete account
+            </button>
           </form>
         </div>
       </div>

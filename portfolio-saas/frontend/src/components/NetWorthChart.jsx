@@ -21,6 +21,7 @@ export default function NetWorthChart({
   const [trades, setTrades] = useState([]);
   const [currency, setCurrency] = useState(initialCurrency);
   const [err, setErr] = useState("");
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     let current = true;
@@ -52,9 +53,18 @@ export default function NetWorthChart({
     return () => {
       current = false;
     };
-  }, [days, account]);
+  }, [days, account, retryKey]);
 
-  if (err) return <p className="muted small">{err}</p>;
+  if (err) {
+    return (
+      <div className="error inline" role="alert">
+        <span>History chart unavailable: {err}</span>
+        <button type="button" className="link" onClick={() => setRetryKey((key) => key + 1)}>
+          Retry
+        </button>
+      </div>
+    );
+  }
   if (data === null) return <p className="muted small">Loading history chart…</p>;
   if (!data.length)
     return (
@@ -65,17 +75,16 @@ export default function NetWorthChart({
 
   const isUsd = currency === "USD";
   const dataKey = isUsd ? "total_usd" : "total";
+  const displayData = data.filter((point) => Number.isFinite(point[dataKey]));
 
-  // Calculate period statistics (Change %, Start, End, Peak, Lowest)
-  const firstVal = data[0]?.[dataKey] ?? 0;
-  const lastVal = data[data.length - 1]?.[dataKey] ?? 0;
+  // Calculate period statistics only from values available in the selected basis.
+  const firstVal = displayData[0]?.[dataKey] ?? 0;
+  const lastVal = displayData[displayData.length - 1]?.[dataKey] ?? 0;
   const changeAmt = lastVal - firstVal;
   const pctChange = firstVal > 0 ? (changeAmt / firstVal) * 100 : 0;
   const isPositive = changeAmt >= 0;
 
-  const totals = data
-    .map((d) => (isUsd ? d.total_usd ?? d.total : d.total))
-    .filter((v) => v !== null && !isNaN(v));
+  const totals = displayData.map((point) => point[dataKey]);
   const min = totals.length ? Math.min(...totals) : 0;
   const max = totals.length ? Math.max(...totals) : 0;
   const range = max - min;
@@ -91,8 +100,8 @@ export default function NetWorthChart({
 
   // Snap trade markers to nearest snapshot line point
   const nearestTotal = (tradeTs) => {
-    let best = data[0];
-    for (const p of data) {
+    let best = displayData[0];
+    for (const p of displayData) {
       if (Math.abs(p.ts - tradeTs) < Math.abs(best.ts - tradeTs)) best = p;
     }
     return best;
@@ -104,7 +113,7 @@ export default function NetWorthChart({
       <div className="chart-header-panel">
         <div className="chart-title-box">
           <div className="chart-stats-row">
-            <span>Period performance:</span>
+            <span>Historical value change:</span>
             <span className={`stat-pill ${isPositive ? "pos" : "neg"}`}>
               {isPositive ? "▲ +" : "▼ "}
               {pctChange.toFixed(2)}% ({formatValue(Math.abs(changeAmt))})
@@ -116,8 +125,8 @@ export default function NetWorthChart({
         {/* Separated Toolbar Controls: Timeframes & Currency */}
         <div className="chart-controls-wrap">
           {/* Timeframe Control Group */}
-          <div className="control-group">
-            <label>Range</label>
+          <div className="control-group" role="group" aria-label="History range">
+            <span className="control-label">Range</span>
             {[
               { d: 7, label: "7D" },
               { d: 30, label: "30D" },
@@ -128,6 +137,7 @@ export default function NetWorthChart({
                 key={d}
                 type="button"
                 className={days === d ? "active" : ""}
+                aria-pressed={days === d}
                 onClick={() => onDaysChange && onDaysChange(d)}
               >
                 {label}
@@ -136,11 +146,12 @@ export default function NetWorthChart({
           </div>
 
           {/* Currency Control Group */}
-          <div className="control-group">
-            <label>Currency</label>
+          <div className="control-group" role="group" aria-label="Valuation basis">
+            <span className="control-label">Valuation basis</span>
             <button
               type="button"
               className={currency === "TMN" ? "active" : ""}
+              aria-pressed={currency === "TMN"}
               onClick={() => setCurrency("TMN")}
             >
               IRT (TMN)
@@ -148,23 +159,27 @@ export default function NetWorthChart({
             <button
               type="button"
               className={currency === "USD" ? "active" : ""}
+              aria-pressed={currency === "USD"}
               onClick={() => setCurrency("USD")}
             >
-              USD ($)
+              USD-denominated ($)
             </button>
           </div>
         </div>
       </div>
 
-      {/* Modern 10x Area Chart View */}
-      <div
+      {displayData.length === 0 ? (
+        <p className="muted small" role="status">
+          USD-denominated history is unavailable for this range; no Toman values were substituted.
+        </p>
+      ) : <div
         className="chart-wrap"
         style={{ height: 260 }}
         role="img"
-        aria-label={`Net worth history for the selected ${days}-day range in ${currency}`}
+        aria-label={`Historical net worth for the selected ${days}-day range in ${isUsd ? "USD-denominated" : "nominal Toman"} values`}
       >
         <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={200}>
-          <AreaChart data={data} margin={{ top: 12, right: 16, left: 4, bottom: 4 }}>
+          <AreaChart data={displayData} margin={{ top: 12, right: 16, left: 4, bottom: 4 }}>
             <defs>
               <linearGradient id="nw-fill-v2" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor={isPositive ? "var(--accent)" : "var(--amber)"} stopOpacity={0.4} />
@@ -220,7 +235,7 @@ export default function NetWorthChart({
               const point = nearestTotal(ts);
               if (!point) return null;
               const color = t.side === "buy" ? "var(--green)" : "var(--red)";
-              const yVal = isUsd ? point.total_usd ?? point.total : point.total;
+              const yVal = point[dataKey];
               return (
                 <ReferenceDot
                   key={i}
@@ -236,7 +251,7 @@ export default function NetWorthChart({
             })}
           </AreaChart>
         </ResponsiveContainer>
-      </div>
+      </div>}
     </div>
   );
 }

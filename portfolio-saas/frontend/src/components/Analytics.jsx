@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
+import { Cell, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { analytics, assetReturns, listAssets } from "../api.js";
 import { fmtPct, fmtToman } from "../format.js";
 import ProGate from "./ProGate.jsx";
@@ -26,6 +26,7 @@ export default function Analytics({ user }) {
   const [corr, setCorr] = useState(null);
   const [catalog, setCatalog] = useState([]);
   const [err, setErr] = useState("");
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     if (!user.is_pro) return;
@@ -43,7 +44,7 @@ export default function Analytics({ user }) {
       })
       .catch((e) => { if (current) setErr(e.message); });
     return () => { current = false; };
-  }, [user.is_pro, account]);
+  }, [user.is_pro, account, retryKey]);
 
   const labelOf = useMemo(() => {
     const m = new Map(catalog.map((a) => [a.key, a.name_fa || a.name]));
@@ -76,12 +77,22 @@ export default function Analytics({ user }) {
       <div className="insights-head">
         <h2>Portfolio Analytics</h2>
       </div>
-      {err && <div className="error">{err}</div>}
-      {!data && !err && <p className="muted">Crunching numbers…</p>}
+      {err && (
+        <div className="error inline" role="alert">
+          <span>Diagnostics unavailable: {err}</span>
+          <button type="button" className="link" onClick={() => setRetryKey((key) => key + 1)}>
+            Retry
+          </button>
+        </div>
+      )}
+      {!data && !err && <p className="muted" role="status">Calculating historical diagnostics…</p>}
       {data && (
         <>
           <section className="card">
             <h3>Risk &amp; return</h3>
+            <p className="muted small">
+              Hypothetical fixed-weight exposure using the current allocation; this is not actual account performance.
+            </p>
             <div className="metric-grid">
               {METRIC_DEFS.map((m) => (
                 <div key={m.key} className="metric">
@@ -92,10 +103,21 @@ export default function Analytics({ user }) {
             </div>
             {data.excluded_assets?.length > 0 && (
               <p className="muted small">
-                Excluded (insufficient history):{" "}
-                {data.excluded_assets.map((e) => labelOf(e.key)).join(", ")}
+                Excluded: {data.excluded_assets.map((item) => (
+                  `${labelOf(item.key || item.symbol)} (${(item.reason || "insufficient history").replaceAll("_", " ")})`
+                )).join(", ")}
               </p>
             )}
+            <details className="assumptions-panel">
+              <summary>Data window and assumptions</summary>
+              <dl className="assumptions-grid">
+                <div><dt>Basis</dt><dd>{data.basis || "Not reported"}</dd></div>
+                <div><dt>Window</dt><dd>{data.data_window ? `${data.data_window.start} to ${data.data_window.end}` : "Not reported"}</dd></div>
+                <div><dt>Observations</dt><dd>{data.observations ?? "Not reported"}</dd></div>
+                <div><dt>Risk-free rate</dt><dd>{data.risk_free_rate_annual != null ? fmtPct(data.risk_free_rate_annual * 100) : "Not reported"}</dd></div>
+              </dl>
+              {data.limitations?.map((limitation) => <p key={limitation} className="muted small">{limitation}</p>)}
+            </details>
           </section>
 
           <section className="card">
@@ -148,6 +170,24 @@ export default function Analytics({ user }) {
             )}
           </section>
 
+          {data.rolling?.length > 0 && (
+            <section className="card">
+              <h3>Rolling 30-session risk</h3>
+              <div style={{ height: 260 }} role="img" aria-label="Rolling Sharpe, volatility, and drawdown">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={data.rolling}>
+                    <XAxis dataKey="date" hide />
+                    <YAxis />
+                    <Tooltip />
+                    <Line type="monotone" dataKey="sharpe" stroke="var(--accent)" dot={false} />
+                    <Line type="monotone" dataKey="volatility" stroke="var(--green)" dot={false} />
+                    <Line type="monotone" dataKey="drawdown" stroke="var(--red)" dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </section>
+          )}
+
           {scopedCorr && scopedCorr.assets.length > 1 && (
             <section className="card">
               <h3>Correlation</h3>
@@ -177,14 +217,16 @@ function CorrHeatmap({ assets, matrix }) {
         <div key={a} className="hm-row">
           <span className="hm-row-label" title={a}>{a.slice(0, 8)}</span>
           {matrix[i].map((v, j) => {
-            const val = Number.isFinite(v) ? v : 0;
+            const val = Number.isFinite(v) ? v : null;
             const bg =
-              val >= 0
+              val === null
+                ? "var(--panel-2)"
+                : val >= 0
                 ? `rgba(248,81,73,${Math.min(Math.abs(val), 1) * 0.75})`
                 : `rgba(76,154,255,${Math.min(Math.abs(val), 1) * 0.75})`;
             return (
-              <span key={j} className="hm-cell" style={{ background: bg }} title={`${a} / ${assets[j]}: ${val.toFixed(2)}`}>
-                {val.toFixed(2)}
+              <span key={j} className="hm-cell" style={{ background: bg }} title={`${a} / ${assets[j]}: ${val === null ? "unavailable" : val.toFixed(2)}`}>
+                {val === null ? "N/A" : val.toFixed(2)}
               </span>
             );
           })}

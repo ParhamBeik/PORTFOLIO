@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, NavLink, Outlet, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { auth, logoutSession, me, restoreSession, SESSION_EXPIRED_EVENT } from "./api.js";
 import Logo from "./components/Logo.jsx";
+import { ResetPassword, VerifyEmail } from "./components/AccountActions.jsx";
 import { PortfolioProvider, usePortfolio } from "./components/PortfolioContext.jsx";
 
 const Auth = lazy(() => import("./components/Auth.jsx"));
@@ -16,6 +17,8 @@ const AdminPortal = lazy(() => import("./components/AdminPortal.jsx"));
 const Profile = lazy(() => import("./components/Profile.jsx"));
 const TimeMachine = lazy(() => import("./components/TimeMachine.jsx"));
 const Discovery = lazy(() => import("./components/Discovery.jsx"));
+const Onboarding = lazy(() => import("./components/Onboarding.jsx"));
+const Legal = lazy(() => import("./components/Legal.jsx"));
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -78,6 +81,10 @@ export default function App() {
               path="/login"
               element={<Auth initialMode="login" onAuthed={setUser} currentUser={user} />}
             />
+            <Route path="/verify-email" element={<VerifyEmail />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
+            <Route path="/privacy" element={<Legal kind="privacy" />} />
+            <Route path="/terms" element={<Legal kind="terms" />} />
             <Route
               path="/register"
               element={<Auth initialMode="register" onAuthed={setUser} currentUser={user} />}
@@ -87,7 +94,8 @@ export default function App() {
               element={<Auth initialMode="register" onAuthed={setUser} currentUser={user} />}
             />
             <Route element={user ? <Shell user={user} setUser={setUser} /> : <Navigate to="/login" replace />}>
-              <Route index element={<Portfolio user={user} />} />
+              <Route path="onboarding" element={<Onboarding />} />
+              <Route index element={<RequirePortfolio><Portfolio user={user} /></RequirePortfolio>} />
               <Route path="market" element={<MarketData user={user} />} />
               <Route path="billing" element={<Billing user={user} setUser={setUser} />} />
               <Route path="profile" element={<Profile user={user} setUser={setUser} />} />
@@ -113,6 +121,16 @@ export default function App() {
       </PortfolioProvider>
     </BrowserRouter>
   );
+}
+
+// A brand-new user has nothing to render a dashboard from, so send them to
+// onboarding instead of an empty page with a scattering of forms. Only once the
+// portfolio list has actually loaded — otherwise a slow request looks like
+// "no portfolios" and bounces an existing user out of their own dashboard.
+function RequirePortfolio({ children }) {
+  const { accounts, loading, error } = usePortfolio();
+  if (loading || error) return children;
+  return accounts.length ? children : <Navigate to="/onboarding" replace />;
 }
 
 // /accounts/:id → set that portfolio active and drop onto the consolidated page.
@@ -237,6 +255,11 @@ function Shell({ user, setUser }) {
         )}
         <Outlet />
       </main>
+      <footer className="app-footer">
+        <NavLink to="/privacy">Privacy</NavLink>
+        <NavLink to="/terms">Terms</NavLink>
+        <span>Informational use only.</span>
+      </footer>
     </div>
   );
 }
