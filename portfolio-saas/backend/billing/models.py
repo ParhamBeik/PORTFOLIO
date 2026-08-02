@@ -22,9 +22,12 @@ class Payment(models.Model):
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="payments",
     )
+    former_customer_id = models.UUIDField(null=True, blank=True, db_index=True)
     # Zarinpal's per-payment token; unique so a duplicate callback can't fork state.
     authority = models.CharField(max_length=64, unique=True)
     amount_rial = models.PositiveBigIntegerField()

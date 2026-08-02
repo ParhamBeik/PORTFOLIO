@@ -58,6 +58,24 @@ class ZarinpalRequestView(APIView):
         return Response({"redirect_url": start_pay_url(authority)})
 
 
+class PaymentHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        payments = Payment.objects.filter(user=request.user).values(
+            "id",
+            "authority",
+            "amount_rial",
+            "status",
+            "ref_id",
+            "created_at",
+            "verified_at",
+        )
+        return Response(
+            {"is_pro": request.user.is_pro(), "payments": list(payments)}
+        )
+
+
 @csrf_exempt
 def zarinpal_callback(request):
     """Browser redirect from Zarinpal after the user pays (or cancels).

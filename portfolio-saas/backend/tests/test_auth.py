@@ -14,21 +14,30 @@ def clear_auth_throttles():
     cache.clear()
 
 
-def test_register_returns_access_and_sets_http_only_refresh_cookie():
+def test_register_requires_invite_and_returns_verification_required():
+    from accounts.models import Invitation
+
+    invite, raw_token = Invitation.issue(email="new@test.test")
     client = APIClient()
     resp = client.post(
         "/api/auth/register/",
-        {"email": "new@test.test", "password": "Sup3rSecret!", "first_name": "New"},
+        {
+            "email": "new@test.test",
+            "password": "Sup3rSecret!",
+            "first_name": "New",
+            "invite_token": raw_token,
+        },
         format="json",
     )
     assert resp.status_code == 201
     data = resp.json()
     assert data["user"]["email"] == "new@test.test"
     assert data["user"]["tier"] == "FREE"
-    assert "access" in data and "refresh" not in data
-    cookie = resp.cookies["ps_refresh"]
-    assert cookie["httponly"] is True
-    assert cookie["samesite"] == "Strict"
+    assert data["verification_required"] is True
+    assert "access" not in data
+    assert "ps_refresh" not in resp.cookies
+    invite.refresh_from_db()
+    assert invite.used_at is not None
 
 
 def test_login_returns_access_and_sets_refresh_cookie():

@@ -28,11 +28,12 @@ def activate_pro(authority: str, ref_id: str) -> Payment:
     """
     payment = (
         Payment.objects.select_for_update()
-        .select_related("user")
         .get(authority=authority)
     )
     if payment.status == payment.Status.VERIFIED:
         return payment
+    if payment.user_id is None:
+        raise ValueError("Detached payments cannot activate a subscription.")
     user = User.objects.select_for_update().get(pk=payment.user_id)
     now = timezone.now()
     expires_at = max(now, user.pro_expires_at or now) + PRO_DURATION
@@ -41,4 +42,21 @@ def activate_pro(authority: str, ref_id: str) -> Payment:
     payment.ref_id = ref_id
     payment.verified_at = now
     payment.save(update_fields=["status", "ref_id", "verified_at"])
+    return payment
+
+
+@transaction.atomic
+def repair_verified_payment(payment: Payment) -> Payment:
+    payment = Payment.objects.select_for_update().get(pk=payment.pk)
+    if payment.status != Payment.Status.VERIFIED or payment.user_id is None:
+        return payment
+    user = User.objects.select_for_update().get(pk=payment.user_id)
+    if user.is_pro():
+        return payment
+    verified_at = payment.verified_at or payment.created_at
+    set_user_tier(
+        user,
+        User.Tier.PRO,
+        expires_at=max(timezone.now(), verified_at) + PRO_DURATION,
+    )
     return payment
