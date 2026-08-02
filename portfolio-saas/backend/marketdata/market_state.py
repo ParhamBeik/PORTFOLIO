@@ -17,6 +17,7 @@ Two signals, in priority order:
 """
 import logging
 from datetime import datetime, timedelta, timezone as dt_timezone
+from zoneinfo import ZoneInfo
 
 import jdatetime
 from django.conf import settings
@@ -29,8 +30,7 @@ OPEN = "open"
 CLOSED_DAYTIME = "closed_daytime"
 OVERNIGHT = "overnight"
 
-# Tehran local time, flat offset (no DST in Iran since 2022).
-TEHRAN = dt_timezone(timedelta(hours=3, minutes=30))
+TEHRAN = ZoneInfo("Asia/Tehran")
 
 # jdatetime weekday(): 0 = Saturday ... 5 = Thursday, 6 = Friday.
 TRADING_WEEKDAYS = frozenset({0, 1, 2, 3, 4})

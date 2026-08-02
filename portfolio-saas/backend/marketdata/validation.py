@@ -21,12 +21,13 @@ Every rule here encodes something observed in the live payloads, not a guess:
   anything still non-ASCII here means the folding was bypassed.
 """
 from dataclasses import dataclass
+import math
 
 from . import jalali
 
 # A Jalali day the provider could plausibly report. TSE data starts in the
 # 1340s (XAUUSD reaches 1348) and anything past the current year is a parse bug.
-MIN_YEAR, MAX_YEAR = 1340, 1500
+MIN_YEAR, MAX_YEAR = jalali.MIN_YEAR, jalali.MAX_YEAR
 
 # Tehran Stock Exchange price bands are wide but finite; a quote outside this is
 # a unit error (Rial/Toman confusion) rather than a real price.
@@ -37,6 +38,60 @@ MAX_PRICE = 10**12
 class Rejection:
     reason: str
     record: dict
+
+
+def detect_factor_ratio_actions(ordered_rows, tolerance=0.01):
+    """Return factor steps from ordered (date, unadjusted, adjusted) rows."""
+    actions = []
+    previous_factor = None
+    for date, unadjusted, adjusted in ordered_rows:
+        unadjusted = _num(unadjusted)
+        adjusted = _num(adjusted)
+        if not unadjusted or not adjusted:
+            continue
+        factor = adjusted / unadjusted
+        if previous_factor:
+            step = factor / previous_factor
+            if abs(step - 1) > tolerance:
+                actions.append({"date": date, "factor": step})
+        previous_factor = factor
+    return actions
+
+
+def screen_series(
+    symbol,
+    kind,
+    ordered_rows,
+    *,
+    corporate_action_dates=(),
+    max_log_return=math.log(1.5),
+):
+    """Return cross-day spike rejections for ordered (date, close) rows."""
+    action_dates = set(corporate_action_dates)
+    rejections = []
+    previous = None
+    for date, close in ordered_rows:
+        close = _num(close)
+        if not close or close <= 0:
+            continue
+        if previous is not None and date not in action_dates:
+            log_return = math.log(close / previous)
+            if abs(log_return) > max_log_return:
+                rejections.append(
+                    Rejection(
+                        "series_spike",
+                        {
+                            "symbol": symbol,
+                            "kind": kind,
+                            "date": date,
+                            "previous_close": previous,
+                            "close": close,
+                            "log_return": log_return,
+                        },
+                    )
+                )
+        previous = close
+    return rejections
 
 
 def _num(value):

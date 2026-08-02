@@ -6,7 +6,8 @@ from django.conf import settings
 from django.utils import timezone
 import jdatetime
 
-from marketdata.models import MarketInstrument, SymbolIntegrity, MarketCandle, GoldCurrencyHistory
+from marketdata.candles import candle_close_qs
+from marketdata.models import MarketInstrument, SymbolIntegrity, GoldCurrencyHistory
 from portfolio.services.returns import normalize_as_of, to_jalali_str
 
 # Tunable thresholds
@@ -46,12 +47,8 @@ def get_candidate_universe(
     tse_symbols = [sym for sym, mi in instruments.items() if mi.source == MarketInstrument.Source.TSETMC]
     
     # We query candles for active candidates
-    candles_qs = MarketCandle.objects.filter(
-        symbol__in=tse_symbols,
-        timeframe="1d_adj",
+    candles_qs = candle_close_qs(tse_symbols, as_of=as_of_jalali).filter(
         date_time__gte=cutoff_jalali,
-        date_time__lte=as_of_jalali,
-        close_price__gt=0
     ).order_by("symbol", "date_time")
 
     candles_data = {}

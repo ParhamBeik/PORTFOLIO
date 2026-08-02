@@ -94,7 +94,7 @@ class Command(BaseCommand):
                         ))
                     pause()
             if "candles" in kinds:
-                for candle_type in (6, 7):
+                for candle_type in (2, 3):
                     payload = fetch_candlesticks(tse_key, symbol, candle_type=candle_type)
                     if not dry:
                         record("candles", ingest.ingest_candles(symbol, candle_type, payload))

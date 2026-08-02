@@ -60,6 +60,17 @@ class MarketInstrument(models.Model):
         ]
 
 
+class InstrumentListingHistory(models.Model):
+    symbol = models.CharField(max_length=64, unique=True)
+    first_seen = models.CharField(max_length=10)
+    last_seen = models.CharField(max_length=10)
+    eligible_from = models.CharField(max_length=10, null=True, blank=True)
+    eligible_to = models.CharField(max_length=10, null=True, blank=True)
+
+    class Meta:
+        ordering = ["symbol"]
+
+
 class ArchiveFetchState(models.Model):
     """DB-verified archive progress for one provider endpoint and symbol."""
 
@@ -178,6 +189,12 @@ class DailyStockHistory(models.Model):
                 name="uniq_stock_history_symbol_date_adj",
             )
         ]
+        indexes = [
+            models.Index(
+                fields=["symbol", "date"],
+                name="marketdata__symbol_7ee44e_idx",
+            )
+        ]
 
 
 class RealLegalHistory(models.Model):
@@ -209,10 +226,28 @@ class RealLegalHistory(models.Model):
 
 
 class MarketCandle(models.Model):
-    """OHLCV candlestick time series data."""
+    """OHLCV candlestick time series data.
+
+    Daily timeframes, in descending order of authority:
+
+    * `ADJUSTED` / `UNADJUSTED` come from the provider (Candlestick.php type 3
+      and 2) and are written append-only with `bulk_create(ignore_conflicts=True)`.
+    * `AGGREGATE` is derived from intraday ticks by the nightly aggregators so
+      the current session has a close before the provider publishes one.
+
+    `AGGREGATE` must never be written into the `ADJUSTED` slot. The archive
+    ingest path cannot overwrite an existing row, so a tick-derived
+    approximation parked on `(symbol, ADJUSTED, date)` would permanently
+    displace the provider's real close for that day -- in the exact series
+    every valuation, returns and integrity path reads.
+    """
+
+    UNADJUSTED = "1d_unadj"
+    ADJUSTED = "1d_adj"
+    AGGREGATE = "1d_agg"
 
     symbol = models.CharField(max_length=64, db_index=True)
-    timeframe = models.CharField(max_length=16, db_index=True)  # e.g., 1m, 5m, 15m, 30m, 60m, 1d_adj, 1d_unadj
+    timeframe = models.CharField(max_length=16, db_index=True)  # e.g., 1m, 5m, 15m, 30m, 60m, 1d_adj, 1d_unadj, 1d_agg
     date_time = models.CharField(max_length=32, db_index=True)
     open_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     high_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
@@ -323,6 +358,37 @@ class CodalAnnouncement(models.Model):
         ]
 
 
+class CorporateAction(models.Model):
+    class Kind(models.TextChoices):
+        SPLIT = "split", "Split"
+        CAPITAL_INCREASE = "capital_increase", "Capital increase"
+        DIVIDEND = "dividend", "Dividend"
+        UNKNOWN = "unknown", "Unknown"
+
+    class Source(models.TextChoices):
+        FACTOR_RATIO = "derived_from_factor_ratio", "Derived from factor ratio"
+        CODAL = "codal", "Codal"
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    date = models.CharField(max_length=10, db_index=True)
+    factor = models.DecimalField(max_digits=20, decimal_places=10)
+    kind = models.CharField(
+        max_length=24, choices=Kind.choices, default=Kind.UNKNOWN
+    )
+    source = models.CharField(
+        max_length=32, choices=Source.choices, default=Source.FACTOR_RATIO
+    )
+
+    class Meta:
+        ordering = ["symbol", "-date"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "date"],
+                name="uniq_corporate_action_symbol_date",
+            )
+        ]
+
+
 class GoldCurrencyHistory(models.Model):
     """Gold, Fiat Currency, and Crypto daily and 24h price history."""
 
@@ -342,9 +408,6 @@ class GoldCurrencyHistory(models.Model):
                 fields=["symbol", "date"],
                 name="uniq_gold_currency_history_symbol_date",
             )
-        ]
-        indexes = [
-            models.Index(fields=["symbol", "date"]),
         ]
 
 
@@ -512,3 +575,26 @@ class SymbolIntegrity(models.Model):
 
     class Meta:
         ordering = ["symbol"]
+
+
+class AssetMetricSnapshot(models.Model):
+    symbol = models.CharField(max_length=64, db_index=True)
+    asset_class = models.CharField(max_length=16, blank=True, default="")
+    as_of = models.CharField(max_length=10, db_index=True)
+    window_days = models.PositiveSmallIntegerField(default=365)
+    total_return = models.FloatField(default=0.0)
+    annualized_volatility = models.FloatField(default=0.0)
+    sharpe = models.FloatField(default=0.0)
+    sortino = models.FloatField(default=0.0)
+    max_drawdown = models.FloatField(default=0.0)
+    beta = models.FloatField(null=True, blank=True)
+    correlation = models.FloatField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-as_of", "-sharpe"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "as_of", "window_days"],
+                name="uniq_asset_metric_symbol_asof_window",
+            )
+        ]

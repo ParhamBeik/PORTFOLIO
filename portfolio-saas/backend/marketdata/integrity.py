@@ -6,6 +6,7 @@ from typing import Any
 import jdatetime
 from django.utils import timezone
 
+from .candles import candle_close_qs
 from .models import (
     GoldCurrencyHistory,
     MarketCandle,
@@ -80,8 +81,10 @@ def compute_symbol_integrity(
     expected = set(sessions)
 
     if instrument.source == MarketInstrument.Source.TSETMC:
-        raw_dates = MarketCandle.objects.filter(
-            symbol=symbol, timeframe=timeframe
+        raw_dates = (
+            candle_close_qs(symbol)
+            if timeframe == MarketCandle.ADJUSTED
+            else MarketCandle.objects.filter(symbol=symbol, timeframe=timeframe)
         ).values_list("date_time", flat=True)
     else:
         raw_dates = GoldCurrencyHistory.objects.filter(symbol=symbol).values_list(

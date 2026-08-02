@@ -11,6 +11,7 @@ urlpatterns = [
     path("symbols/", views.SymbolListView.as_view(), name="market-symbols"),
     path("assets/", views.MarketAssetsView.as_view(), name="market-assets"),
     path("performance/", views.PerformanceView.as_view(), name="market-performance"),
+    path("compare/", views.CompareView.as_view(), name="market-compare"),
     path("announcements/", views.AnnouncementsView.as_view(), name="market-announcements"),
     path("shareholders/", views.ShareholdersView.as_view(), name="market-shareholders"),
     path("admin/status/", views.AdminStatusView.as_view(), name="admin-status"),

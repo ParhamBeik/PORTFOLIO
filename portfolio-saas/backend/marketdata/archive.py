@@ -224,10 +224,21 @@ def _fetch_and_ingest(state):
     elif endpoint == ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS:
         pending = _tick_dates_needed(symbol)
         if not pending:
-            raise MarketDataFetchError(
-                "No trading days known for this symbol yet; daily candles must be "
-                "backfilled first to know which dates have ticks."
-            )
+            # Nothing pending means one of two opposite things. With no daily
+            # candles there is nothing to fetch against and the candle pass must
+            # run first. With candles, every trading day is already stored and
+            # reconciled -- that is completion. Treating both as an error flipped
+            # finished symbols back to incomplete on every tick, so they never
+            # converged and burned a retry slot forever.
+            if not _tick_trading_days(symbol):
+                raise MarketDataFetchError(
+                    "No trading days known for this symbol yet; daily candles must be "
+                    "backfilled first to know which dates have ticks."
+                )
+            # No request was made, so no quota was spent. Return early: the
+            # payload guards below have nothing to check.
+            covered = _tick_dates_stored(symbol)
+            return (0, 0), covered, covered
         day = pending[0]
         payload = fetch_transactions(settings.TSETMC_API_KEY, symbol=symbol, date=day)
         # A day only reaches here twice if its stored ticks failed to reconcile.
@@ -276,6 +287,17 @@ def _fetch_and_ingest(state):
             "Provider returned zero records where records were expected."
         )
     if not expected:
+        if isinstance(payload, dict) and payload.get("status") == "no_data":
+            # Explicitly returned 'no_data', meaning the symbol is valid but has no records.
+            # We return empty sets so it marks complete with 0 rows instead of failing.
+            return result, set(), set()
+        if isinstance(payload, list) and len(payload) == 0:
+            # Clean empty list returned for full history endpoints (e.g. inactive block trade symbols)
+            if endpoint in (
+                ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
+                ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
+            ):
+                return result, set(), set()
         # `verified_complete = not (expected - stored)` is vacuously true for an
         # empty expected set, so a payload our parser could not read verified
         # against an empty table and deferred 20h. Commodity sat in that state
@@ -426,6 +448,20 @@ def _tick_days_unreconciled(symbol, days):
     }
 
 
+def _tick_trading_days(symbol):
+    """Trading days this symbol actually has a daily candle for.
+
+    Empty means the candle pass has not reached this symbol yet. That is a
+    different condition from "every tick day is already stored", and callers
+    must not conflate the two.
+    """
+    return market_trading_days() & set(
+        MarketCandle.objects.filter(
+            symbol=symbol, timeframe=MarketCandle.UNADJUSTED
+        ).values_list("date_time", flat=True)
+    )
+
+
 def _tick_dates_needed(symbol):
     """Trading days in the trailing window still owing a correct set of ticks.
 
@@ -433,11 +469,7 @@ def _tick_dates_needed(symbol):
     add up to the candle. The second kind is the self-repair path -- the check
     that finds them is the same one that proves a fresh fetch is right.
     """
-    trading = market_trading_days() & set(
-        MarketCandle.objects.filter(symbol=symbol, timeframe="1d_unadj").values_list(
-            "date_time", flat=True
-        )
-    )
+    trading = _tick_trading_days(symbol)
     stored = _tick_dates_stored(symbol)
     missing = trading - stored
     broken = _tick_days_unreconciled(symbol, trading & stored)

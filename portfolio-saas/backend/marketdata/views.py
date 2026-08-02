@@ -14,6 +14,7 @@ from accounts.models import User
 from accounts.permissions import IsPro
 from portfolio.models import Account, Asset, Holding, Price, Snapshot, Transaction
 
+from .candles import candle_close_qs
 from .models import (
     CodalAnnouncement,
     DailyStockHistory,
@@ -56,10 +57,12 @@ class CandlesView(APIView):
         if not symbol:
             return Response({"detail": "symbol query param required."}, status=400)
         timeframe = request.query_params.get("timeframe", "1d_adj")
-        rows = (
-            MarketCandle.objects.filter(symbol=symbol, timeframe=timeframe)
-            .order_by("-date_time")[: _limit(request, 200, 500)]
+        queryset = (
+            candle_close_qs(symbol)
+            if timeframe == MarketCandle.ADJUSTED
+            else MarketCandle.objects.filter(symbol=symbol, timeframe=timeframe)
         )
+        rows = queryset.order_by("-date_time")[: _limit(request, 200, 500)]
         return Response([
             {
                 "date_time": r.date_time,
@@ -68,6 +71,7 @@ class CandlesView(APIView):
                 "low": float(r.low_price),
                 "close": float(r.close_price),
                 "volume": r.volume,
+                "source": getattr(r, "candle_source", r.timeframe),
             }
             for r in reversed(list(rows))
         ])
@@ -85,7 +89,7 @@ class DailyHistoryView(APIView):
         adjusted = request.query_params.get("adjusted", "1") == "1"
         if adjusted:
             rows = (
-                MarketCandle.objects.filter(symbol=symbol, timeframe="1d_adj", close_price__gt=0)
+                candle_close_qs(symbol)
                 .order_by("-date_time")[: _limit(request, 365, 730)]
             )
             return Response([
@@ -97,6 +101,7 @@ class DailyHistoryView(APIView):
                     "max": float(r.high_price),
                     "volume": r.volume,
                     "change_pct": 0.0,
+                    "source": r.candle_source,
                 }
                 for r in reversed(list(rows))
             ])
@@ -202,10 +207,20 @@ class MarketAssetsView(APIView):
 
         # Bulk fetch metadata, stock stats, and gold stats in 3 fast queries
         all_metadata = {row.l18: row for row in StockSymbolMetadata.objects.all()}
+        stock_symbols = set(
+            MarketInstrument.objects.filter(
+                source=MarketInstrument.Source.TSETMC
+            ).values_list("symbol", flat=True)
+        )
+        stock_symbols.update(
+            Asset.objects.filter(is_active=True)
+            .exclude(tse_symbol="")
+            .values_list("tse_symbol", flat=True)
+        )
 
         stock_stats = {
             r["symbol"]: r
-            for r in MarketCandle.objects.filter(timeframe="1d_adj", close_price__gt=0)
+            for r in candle_close_qs(stock_symbols)
             .values("symbol")
             .annotate(first_date=Min("date_time"), last_date=Max("date_time"), records=Count("id"))
         }
@@ -327,6 +342,62 @@ class MarketAssetsView(APIView):
         return Response(rows)
 
 
+class CompareView(APIView):
+    """Ranked, filterable precomputed market metrics."""
+
+    permission_classes = [IsAuthenticated, IsPro]
+
+    def get(self, request):
+        from .models import AssetMetricSnapshot
+
+        allowed = {
+            "total_return",
+            "annualized_volatility",
+            "sharpe",
+            "sortino",
+            "max_drawdown",
+            "beta",
+            "correlation",
+        }
+        sort = request.query_params.get("sort", "sharpe")
+        if sort not in allowed:
+            return Response(
+                {"detail": f"sort must be one of {sorted(allowed)}."},
+                status=400,
+            )
+        try:
+            window = int(request.query_params.get("window", "365"))
+        except ValueError:
+            return Response({"detail": "window must be an integer."}, status=400)
+        queryset = AssetMetricSnapshot.objects.filter(window_days=window)
+        asset_class = request.query_params.get("asset_class")
+        if asset_class:
+            queryset = queryset.filter(asset_class=asset_class)
+        latest = queryset.order_by("-as_of").values_list("as_of", flat=True).first()
+        if latest:
+            queryset = queryset.filter(as_of=latest)
+        direction = "" if request.query_params.get("order") == "asc" else "-"
+        rows = queryset.order_by(f"{direction}{sort}", "symbol")[
+            : _limit(request, 100, 500)
+        ]
+        return Response([
+            {
+                "symbol": row.symbol,
+                "asset_class": row.asset_class,
+                "as_of": row.as_of,
+                "window_days": row.window_days,
+                "total_return": row.total_return,
+                "annualized_volatility": row.annualized_volatility,
+                "sharpe": row.sharpe,
+                "sortino": row.sortino,
+                "max_drawdown": row.max_drawdown,
+                "beta": row.beta,
+                "correlation": row.correlation,
+            }
+            for row in rows
+        ])
+
+
 class PerformanceView(APIView):
     """Unified full-history OHLC performance for any supported asset or symbol."""
 
@@ -369,9 +440,9 @@ class PerformanceView(APIView):
                 name = raw_sym
                 source = "stock"
 
-        if source == "stock" or MarketCandle.objects.filter(symbol=symbol, timeframe="1d_adj", close_price__gt=0).exists():
+        if source == "stock" or candle_close_qs(symbol).exists():
             rows = list(
-                MarketCandle.objects.filter(symbol=symbol, timeframe="1d_adj", close_price__gt=0).order_by("-date_time")[:limit]
+                candle_close_qs(symbol).order_by("-date_time")[:limit]
             )
             series = []
             for row in reversed(rows):
@@ -382,6 +453,7 @@ class PerformanceView(APIView):
                     "low": float(row.low_price),
                     "close": float(row.close_price),
                     "volume": row.volume,
+                    "source": row.candle_source,
                 })
             source = "stock"
         else:

@@ -19,6 +19,7 @@ Conventions:
 import logging
 
 from . import jalali, validation
+from .currency import canonical_symbol, to_toman
 from .models import (
     CodalAnnouncement,
     CommodityHistory,
@@ -391,24 +392,19 @@ def ingest_real_legal(symbol: str, payload) -> tuple[int, int]:
     for rec in accepted:
         date_val = normalize_jalali(rec["date"])
         fields_to_update = {field: rec.get(key) for field, key in _REAL_LEGAL_FIELDS.items()}
-        
+
         updated_rows = DailyStockHistory.objects.filter(
             symbol=symbol, date=date_val, is_adjusted=False
         ).update(**fields_to_update)
-        
-        if updated_rows > 0:
-            updated_daily += 1
-        else:
-            skipped_daily += 1
-            
+        updated_daily += int(updated_rows > 0)
+        skipped_daily += int(updated_rows == 0)
+
         rows.append(RealLegalHistory(
             symbol=symbol,
             date=date_val,
             **fields_to_update,
         ))
     _bulk(RealLegalHistory, rows, scope={"symbol": symbol})
-    if symbol == "کاما":
-        return len(accepted), bad
     return updated_daily, skipped_daily + bad
 
 
@@ -570,12 +566,9 @@ def ingest_codal(payload) -> tuple[int, int]:
 # (Tether quoted in Rial). Callers that verify a fetch must read back on the
 # symbol the ingest wrote, not the one they asked for, or the state can never
 # converge and re-fetches forever.
-_GOLD_SYMBOL_ALIASES = {"USDT": "USDT_IRT"}
-
-
 def canonical_gold_symbol(payload, fallback: str = "") -> str:
     raw = (payload.get("symbol") if isinstance(payload, dict) else "") or fallback or ""
-    return _GOLD_SYMBOL_ALIASES.get(raw, raw)
+    return canonical_symbol(raw)
 
 
 def ingest_gold_currency_history(payload) -> tuple[int, int]:
@@ -590,10 +583,7 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
     name = payload.get("name", "") or ""
     raw_unit = payload.get("unit", "") or ""
 
-    is_rial = (
-        raw_unit == "ریال"
-        or symbol in ("USD", "EUR", "GBP", "AED", "CNY", "CAD", "AUD", "CHF", "USDT_IRT")
-    )
+    is_rial = raw_unit.strip().casefold() in {"ریال".casefold(), "rial", "irr"}
     unit = "تومان" if is_rial else raw_unit
 
     # This screen is what stops the 54 high-below-low rows found in the audit
@@ -607,21 +597,20 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
             h = float(rec.get("high")) if rec.get("high") is not None else c
             l = float(rec.get("low")) if rec.get("low") is not None else c
 
-            if is_rial:
-                c /= 10.0
-                o /= 10.0
-                h /= 10.0
-                l /= 10.0
+            c = to_toman(symbol, c, raw_unit)
+            o = to_toman(symbol, o, raw_unit)
+            h = to_toman(symbol, h, raw_unit)
+            l = to_toman(symbol, l, raw_unit)
 
             rows.append(GoldCurrencyHistory(
                 symbol=symbol,
                 name=name,
                 unit=unit,
                 date=normalize_jalali(rec["date"]),
-                open_price=round(o, 4),
-                high_price=round(h, 4),
-                low_price=round(l, 4),
-                close_price=round(c, 4),
+                open_price=o,
+                high_price=h,
+                low_price=l,
+                close_price=c,
             ))
         except (KeyError, TypeError, ValueError):
             bad += 1
