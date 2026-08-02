@@ -20,8 +20,8 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
 }
 
-DEFAULT_TSETMC_SYMBOL_URL = "https://BrsApi.ir/Api/Tsetmc/Symbol.php"
-DEFAULT_TSETMC_HISTORY_URL = "https://BrsApi.ir/Api/Tsetmc/History.php"
+DEFAULT_TSETMC_SYMBOL_URL = "https://Api.BrsApi.ir/Tsetmc/Symbol.php"
+DEFAULT_TSETMC_HISTORY_URL = "https://Api.BrsApi.ir/Tsetmc/History.php"
 KAMA_SYMBOL = "کاما"
 
 

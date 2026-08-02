@@ -29,6 +29,20 @@ x-backend-env: &backend-env
   ZARINPAL_CALLBACK_URL: ${ZARINPAL_CALLBACK_URL:?set ZARINPAL_CALLBACK_URL}
   ZARINPAL_FRONTEND_URL: ${ZARINPAL_FRONTEND_URL:?set ZARINPAL_FRONTEND_URL}
   PRO_PRICE_TOMAN: ${PRO_PRICE_TOMAN:-1000000}
+  EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
+  EMAIL_HOST: ${EMAIL_HOST:?set EMAIL_HOST}
+  EMAIL_PORT: ${EMAIL_PORT:-587}
+  EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+  EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD:-}
+  EMAIL_USE_TLS: ${EMAIL_USE_TLS:-1}
+  DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:?set DEFAULT_FROM_EMAIL}
+  FRONTEND_VERIFICATION_URL: ${FRONTEND_VERIFICATION_URL:?set FRONTEND_VERIFICATION_URL}
+  FRONTEND_PASSWORD_RESET_URL: ${FRONTEND_PASSWORD_RESET_URL:?set FRONTEND_PASSWORD_RESET_URL}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+  QUEUE_BACKLOG_THRESHOLD: ${QUEUE_BACKLOG_THRESHOLD:-100}
+  APPLICATION_ERROR_THRESHOLD: ${APPLICATION_ERROR_THRESHOLD:-20}
+  PRICE_STALE_THRESHOLD_SECONDS: ${PRICE_STALE_THRESHOLD_SECONDS:-900}
 
 services:
   db:
@@ -68,6 +82,18 @@ services:
           cpus: "0.5"
           memory: 256m
 
+  migrate:
+    build: ./backend
+    restart: "no"
+    entrypoint: []
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: *backend-env
+    command: sh -c "python manage.py migrate --noinput && python manage.py seed_assets && python manage.py collectstatic --noinput"
+
   backend:
     build: ./backend
     restart: unless-stopped
@@ -76,6 +102,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment: *backend-env
     expose: ["8000"]          # internal only; Caddy fronts it
     healthcheck:
@@ -163,6 +191,8 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile.prod
+      args:
+        VITE_SENTRY_DSN: ${VITE_SENTRY_DSN:-}
     restart: unless-stopped
     expose: ["80"]
 

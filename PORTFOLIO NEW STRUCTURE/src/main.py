@@ -35,13 +35,13 @@ DEFAULT_CURRENT_STATE = {}
 
 DEFAULT_SETTINGS = {
     "api_settings": {
-        "brs_url": "https://BrsApi.ir/Api/Market/Gold_Currency.php",
+        "brs_url": "https://Api.BrsApi.ir/Market/Gold_Currency.php",
         # Keys are read from env vars (BRS_API_KEY / TSETMC_API_KEY) first, then
         # from data/settings.json. Never committed in source; see .gitignore.
         "brs_api_key": "",
-        "tsetmc_url": "https://BrsApi.ir/Api/Tsetmc/AllSymbols.php",
-        "tsetmc_symbol_url": "https://BrsApi.ir/Api/Tsetmc/Symbol.php",
-        "tsetmc_history_url": "https://BrsApi.ir/Api/Tsetmc/History.php",
+        "tsetmc_url": "https://Api.BrsApi.ir/Tsetmc/AllSymbols.php",
+        "tsetmc_symbol_url": "https://Api.BrsApi.ir/Tsetmc/Symbol.php",
+        "tsetmc_history_url": "https://Api.BrsApi.ir/Tsetmc/History.php",
         "tsetmc_api_key": "",
     },
     "api_urls": {

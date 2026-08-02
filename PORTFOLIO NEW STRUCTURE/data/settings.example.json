@@ -8,12 +8,12 @@
     "swiss_gold_bar_2_5g_price": 61610000
   },
   "api_settings": {
-    "brs_url": "https://BrsApi.ir/Api/Market/Gold_Currency.php",
-    "brs_api_key": "PUT_YOUR_BRS_API_KEY_HERE",
-    "tsetmc_url": "https://BrsApi.ir/Api/Tsetmc/AllSymbols.php",
-    "tsetmc_symbol_url": "https://BrsApi.ir/Api/Tsetmc/Symbol.php",
-    "tsetmc_history_url": "https://BrsApi.ir/Api/Tsetmc/History.php",
-    "tsetmc_api_key": "PUT_YOUR_TSETMC_API_KEY_HERE"
+    "brs_url": "https://Api.BrsApi.ir/Market/Gold_Currency.php",
+    "brs_api_key": "BqltswkZ4cJgsiDpmM7e17TAS7JM5JJT",
+    "tsetmc_url": "https://Api.BrsApi.ir/Tsetmc/AllSymbols.php",
+    "tsetmc_symbol_url": "https://Api.BrsApi.ir/Tsetmc/Symbol.php",
+    "tsetmc_history_url": "https://Api.BrsApi.ir/Tsetmc/History.php",
+    "tsetmc_api_key": "BqltswkZ4cJgsiDpmM7e17TAS7JM5JJT"
   },
   "api_urls": {
     "brsapi": "https://brsapi.ir/FreeTsetmcBourseApi/Api_Free_Gold_Currency_v2.json",
