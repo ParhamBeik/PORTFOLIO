@@ -73,7 +73,7 @@ def get_candidate_universe(
     # Helper to convert Jalali to Gregorian date
     def to_greg(val):
         try:
-            y, m, d = (int(part) for part in str(val).split("-"))
+            y, m, d = (int(part) for part in str(val).split(" ")[0].split("-"))
             return jdatetime.date(y, m, d).togregorian()
         except:
             return None

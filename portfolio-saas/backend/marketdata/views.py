@@ -202,10 +202,16 @@ class MarketAssetsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from django.db.models import Count, Max, Min, Q
-        from .models import MarketInstrument
+        from django.core.cache import cache
+        from django.db.models import Count, Max, Min
+        from .models import MarketCandle, MarketInstrument
         import numpy as np
         from portfolio.services.returns import daily_returns_matrix
+
+        cache_key = "market:assets:catalog:v2"
+        cached_rows = cache.get(cache_key)
+        if cached_rows is not None:
+            return Response(cached_rows)
 
         # Bulk fetch metadata, stock stats, and gold stats in 3 fast queries
         all_metadata = {row.l18: row for row in StockSymbolMetadata.objects.all()}
@@ -220,9 +226,15 @@ class MarketAssetsView(APIView):
             .values_list("tse_symbol", flat=True)
         )
 
+        # Coverage stats only — avoid candle_close_qs Exists() which scans millions
+        # of rows. Index (timeframe, symbol, date_time) keeps this aggregation fast.
         stock_stats = {
             r["symbol"]: r
-            for r in candle_close_qs(stock_symbols)
+            for r in MarketCandle.objects.filter(
+                symbol__in=stock_symbols,
+                timeframe__in=(MarketCandle.ADJUSTED, MarketCandle.AGGREGATE),
+                close_price__gt=0,
+            )
             .values("symbol")
             .annotate(first_date=Min("date_time"), last_date=Max("date_time"), records=Count("id"))
         }
@@ -341,6 +353,7 @@ class MarketAssetsView(APIView):
                 "sharpe_1y": None,
             })
 
+        cache.set(cache_key, rows, timeout=300)
         return Response(rows)
 
 

@@ -602,7 +602,7 @@ export default function Portfolio({ user }) {
           </div>
 
           <h3 className="subhead">Holdings</h3>
-          <table className="holdings">
+          <table id="holdings-table" className="holdings">
             <thead>
               <tr>
                 <th>Asset</th>
@@ -781,7 +781,7 @@ export default function Portfolio({ user }) {
           {txns.length === 0 ? (
             <p className="muted">No trades recorded for this portfolio yet.</p>
           ) : (
-            <table className="holdings">
+            <table id="recent-activity-table" className="holdings">
               <thead>
                 <tr>
                   <th>When</th>

@@ -44,8 +44,8 @@ test.describe("Chart Suite, Dark Mode, & Portfolio Insights", () => {
     }
 
     // Currency buttons (IRT / USD)
-    await page.getByRole("button", { name: "USD ($)" }).click();
-    await page.getByRole("button", { name: "IRT (TMN)" }).click();
+    await page.getByRole("button", { name: /USD/ }).click();
+    await page.getByRole("button", { name: /IRT/ }).click();
   });
 
   test("Portfolio Breakdown & Asset Allocation section displays below chart", async ({ page }) => {
@@ -62,6 +62,7 @@ test.describe("Chart Suite, Dark Mode, & Portfolio Insights", () => {
 
     await page.getByRole("link", { name: "Market" }).click();
     await expect(page.getByRole("heading", { name: "Market Explorer" })).toBeVisible();
+    await expect(page.getByText("Loading market data")).toHaveCount(0, { timeout: 60000 });
 
     // Select Gold category
     await page.getByRole("button", { name: "🥇 Gold" }).click();

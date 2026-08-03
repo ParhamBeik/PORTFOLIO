@@ -498,12 +498,14 @@ export default function AdminPortal() {
                 type="text"
                 placeholder="Filter logs by search term…"
                 className="input-text flex-grow"
+                aria-label="Search log console"
                 value={logSearch}
                 onChange={(e) => setLogSearch(e.target.value)}
               />
 
               <select
                 className="portfolio-select"
+                aria-label="Filter log level"
                 value={logLevelFilter}
                 onChange={(e) => setLogLevelFilter(e.target.value)}
               >
@@ -528,6 +530,7 @@ export default function AdminPortal() {
 
               <select
                 className="portfolio-select"
+                aria-label="Filter log category"
                 value={logCategoryFilter}
                 onChange={(e) => setLogCategoryFilter(e.target.value)}
               >
@@ -537,6 +540,7 @@ export default function AdminPortal() {
                 <option value="marketdata.archive">marketdata.archive</option>
                 <option value="portfolio.valuation">portfolio.valuation</option>
                 <option value="portfolio.live">portfolio.live</option>
+                <option value="FETCH_ERROR">FETCH_ERROR</option>
               </select>
             </div>
 

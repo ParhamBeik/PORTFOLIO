@@ -160,6 +160,16 @@ def execute_trade(
         raise TradeError("Invalid transaction source.")
     ledger_source = _SOURCE_MAP[source]
 
+    if side == Transaction.Side.SELL:
+        holding = Holding.objects.filter(account=account, asset=asset).first()
+        held_qty = holding.quantity if holding else Decimal("0")
+        import logging
+        logging.getLogger("django").warning(f"DEBUG TRADES: qty={qty} ({type(qty)}), held_qty={held_qty} ({type(held_qty)}), qty > held_qty={qty > held_qty}")
+        if qty > held_qty:
+            raise InsufficientHolding(
+                f"Cannot sell {format(qty.normalize(), 'f')}; only {format(held_qty.normalize(), 'f')} is held"
+            )
+
     if price_tomans is not None:
         price = _q(price_tomans)
         if price <= 0:

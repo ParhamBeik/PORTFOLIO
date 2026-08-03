@@ -282,7 +282,7 @@ class LedgerEntry(models.Model):
     external_id = models.CharField(max_length=120, blank=True, default="")
     reversal_of = models.OneToOneField(
         "self",
-        on_delete=models.PROTECT,
+        on_delete=models.CASCADE,
         related_name="reversed_by",
         null=True,
         blank=True,

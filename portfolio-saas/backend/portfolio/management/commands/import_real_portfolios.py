@@ -96,10 +96,13 @@ class Command(BaseCommand):
     # --- steps -------------------------------------------------------------
 
     def _get_or_create_user(self) -> User:
+        from django.utils import timezone as tz
         user, created = User.objects.get_or_create(
             email=SAMPLE_EMAIL,
             defaults={"first_name": "Sample", "last_name": "Family",
-                      "tier": User.Tier.PRO},
+                      "tier": User.Tier.PRO,
+                      "email_verified_at": tz.now(),
+                      "is_active": True},
         )
         if created:
             user.set_password(SAMPLE_PASSWORD)
@@ -133,11 +136,14 @@ class Command(BaseCommand):
                 asset = assets.get(key)
                 if asset is None:
                     continue
+                dec_qty = Decimal(str(qty))
+                if dec_qty <= 0:
+                    continue
                 create_ledger_entry(
                     account=account,
                     kind=LedgerEntry.Kind.OPENING_POSITION,
                     asset=asset,
-                    quantity=Decimal(str(qty)),
+                    quantity=dec_qty,
                     occurred_at=opened_at,
                     source="system",
                     note="Imported opening position",

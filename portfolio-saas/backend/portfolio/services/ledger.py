@@ -11,7 +11,7 @@ class LedgerError(Exception):
     pass
 
 
-def _decimal(value, field: str, *, required: bool = False) -> Decimal | None:
+def _decimal(value, field: str, *, required: bool = False, allow_zero: bool = False) -> Decimal | None:
     if value in (None, ""):
         if required:
             raise LedgerError(f"{field} is required.")
@@ -20,8 +20,12 @@ def _decimal(value, field: str, *, required: bool = False) -> Decimal | None:
         result = Decimal(str(value))
     except (TypeError, ValueError, ArithmeticError):
         raise LedgerError(f"{field} must be a number.") from None
-    if result <= 0:
-        raise LedgerError(f"{field} must be positive.")
+    if allow_zero:
+        if result < 0:
+            raise LedgerError(f"{field} must be positive or zero.")
+    else:
+        if result <= 0:
+            raise LedgerError(f"{field} must be positive.")
     return result
 
 
@@ -163,7 +167,7 @@ def create_ledger_entry(
     )
     area = _decimal(area_sqm, "area_sqm")
     mortgage = _decimal(
-        mortgage_deduction_tomans, "mortgage_deduction_tomans"
+        mortgage_deduction_tomans, "mortgage_deduction_tomans", allow_zero=True
     )
     if kind in {LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL}:
         amount = (quantity * unit_price).quantize(Decimal("0.0001"))

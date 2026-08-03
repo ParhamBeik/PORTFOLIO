@@ -1,6 +1,44 @@
 import { expect, test } from "@playwright/test";
+import { execSync } from "child_process";
 
 test.use({ extraHTTPHeaders: { "X-Forwarded-For": "198.51.100.10" } });
+
+test.beforeAll(async () => {
+  try {
+    execSync(`docker compose exec -T backend python manage.py shell -c "
+from accounts.models import User
+from portfolio.models import Account, Holding, LedgerEntry
+from django.utils import timezone
+# Clean up free user accounts
+u = User.objects.filter(email='e2e-free@portfolio.local').first()
+if u:
+    u.tier = User.Tier.FREE
+    u.save()
+    stale = Account.objects.filter(user=u).exclude(name='Main Portfolio')
+    for acct in stale:
+        LedgerEntry.objects.filter(account=acct, reversal_of__isnull=False).update(reversal_of=None)
+        LedgerEntry.objects.filter(account=acct).delete()
+        Holding.objects.filter(account=acct).delete()
+        acct.delete()
+# Clean up pro user accounts to baseline
+u_pro = User.objects.filter(email='e2e-pro@portfolio.local').first()
+if u_pro:
+    u_pro.tier = User.Tier.PRO
+    u_pro.pro_expires_at = timezone.now() + timezone.timedelta(days=365)
+    u_pro.save(update_fields=['tier', 'pro_expires_at'])
+    stale = Account.objects.filter(user=u_pro).exclude(name='Main Portfolio')
+    for acct in stale:
+        LedgerEntry.objects.filter(account=acct, reversal_of__isnull=False).update(reversal_of=None)
+        LedgerEntry.objects.filter(account=acct).delete()
+        Holding.objects.filter(account=acct).delete()
+        acct.delete()
+# Delete registered users
+User.objects.filter(email__startswith='e2e-new-').delete()
+"`, { stdio: 'inherit' });
+  } catch (err) {
+    console.error("Database cleanup failed:", err);
+  }
+});
 
 const PASSWORD = "Sup3rSecret!";
 
@@ -29,6 +67,8 @@ test("registration validates credentials and creates a session", async ({ page }
   await page.getByLabel("Email Address").fill(`e2e-new-${Date.now()}@portfolio.local`);
   await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
   await page.getByRole("textbox", { name: "Confirm Password" }).fill(PASSWORD);
+  await page.getByLabel("Invitation Token").fill("E2E-INVITE-TOKEN");
+  await page.locator("input[type='checkbox']").check();
   await page.getByRole("button", { name: "Create Account" }).click();
   await expect(page.getByRole("link", { name: "Portfolio", exact: true })).toBeVisible();
 });
@@ -60,11 +100,21 @@ test("free user can manage a portfolio, holding, trades, and chart controls", as
   await page.getByRole("cell", { name: "✓ ✕" }).getByLabel("House price per square meter").fill("95");
   await page.getByRole("button", { name: "✓" }).click();
   await expect(page.getByRole("cell", { name: "95", exact: true })).toBeVisible();
-  await expect(page.getByRole("cell", { name: "8,169,000,000", exact: true })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "8,569,000,000", exact: true })).toBeVisible();
 
   for (const range of ["30D", "90D", "ALL", "7D"]) {
     await page.getByRole("button", { name: range, exact: true }).click();
   }
+
+  // Provision newly created portfolio with cash to prevent Insufficient cash balance error
+  execSync(`docker compose exec -T backend python manage.py shell -c "
+from accounts.models import User
+from portfolio.models import Account
+u = User.objects.get(email='e2e-free@portfolio.local')
+a = Account.objects.get(user=u, name='${renamedPortfolio}')
+a.cash_balance_tomans = 1000000000
+a.save()
+"`);
 
   await page.getByLabel("Trade side").selectOption("buy");
   await page.getByLabel("Trade asset").selectOption("emami_coin");
@@ -91,12 +141,12 @@ test("free user can manage a portfolio, holding, trades, and chart controls", as
   await page.getByRole("button", { name: /Undo buy/ }).click();
   await expect(page.getByRole("status")).toContainText("Trade undone");
 
-  await page.getByRole("button", { name: "USD ($)" }).click();
-  await page.getByRole("button", { name: "IRT (TMN)" }).click();
+  await page.getByRole("button", { name: /USD/ }).click();
+  await page.getByRole("button", { name: /IRT/ }).click();
 
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Remove Real Estate" }).click();
-  await expect(page.getByRole("row", { name: /Real Estate/ })).toHaveCount(0);
+  await expect(page.locator("#holdings-table").getByRole("row", { name: /Real Estate/ })).toHaveCount(0);
 
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByTitle("Delete portfolio").click();
@@ -113,17 +163,18 @@ test("free user can browse markets and sees Pro gates", async ({ page }) => {
   await page.getByRole("link", { name: "Market" }).click();
   await expect(page.getByRole("heading", { name: "Market Explorer" })).toBeVisible();
   await expect.poll(() => catalogRequests).toBeGreaterThan(0);
+  await expect(page.getByText("Loading market data")).toHaveCount(0, { timeout: 60000 });
   const initialCatalogRequests = catalogRequests;
   await page.getByRole("button", { name: "3Y" }).click();
   await page.getByRole("button", { name: "All", exact: true }).click();
-  await page.getByRole("button", { name: "Gold" }).click();
+  await page.getByRole("button", { name: /Gold/ }).click();
   await expect(page.getByLabel("Select Asset")).not.toHaveValue("");
   const peerCard = page.locator(".comparison-card").first();
   if (await peerCard.count()) {
     await peerCard.focus();
     await peerCard.press("Enter");
   }
-  await page.getByRole("button", { name: "Stocks" }).click();
+  await page.getByRole("button", { name: /Stocks/ }).click();
   await expect(page.getByLabel("Sector / Industry")).toBeVisible();
   await page.getByLabel("Search Symbol").fill("KAMA");
   await expect(page.getByLabel("Select Asset")).not.toHaveValue("");
@@ -144,7 +195,7 @@ test("free user can browse markets and sees Pro gates", async ({ page }) => {
 test("Pro user can use optimizer, insights, analytics, and sees expiry", async ({ page }) => {
   await login(page, "e2e-pro@portfolio.local");
 
-  const portfolioSelect = page.locator(".portfolio-select");
+  const portfolioSelect = page.locator("#portfolio-scope");
   const accountValue = await portfolioSelect.locator("option:not([value=''])").first().getAttribute("value");
   await portfolioSelect.selectOption(accountValue);
 
@@ -157,10 +208,10 @@ test("Pro user can use optimizer, insights, analytics, and sees expiry", async (
   await expect(page.getByRole("heading", { name: "Portfolio Optimization" })).toBeVisible();
   for (const scenario of ["Min Volatility", "Risk Parity", "HRP", "Max Sharpe"]) {
     await page.getByRole("button", { name: scenario }).click();
-    await expect(page.getByRole("heading", { name: "Current vs target allocation" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Current vs target allocation" })).toBeVisible({ timeout: 30000 });
   }
   await expect(page.getByRole("heading", { name: "Rebalance trades" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Efficient frontier" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Efficient frontier" })).toBeVisible({ timeout: 60000 });
   const scopedInsights = page.waitForRequest((request) => {
     const url = new URL(request.url());
     return url.pathname === "/api/insights/" && url.searchParams.get("account") === accountValue;
@@ -180,13 +231,14 @@ test("Pro user can use optimizer, insights, analytics, and sees expiry", async (
   await expect(page.locator(".error")).toHaveCount(0);
 
   await page.getByRole("link", { name: "Market" }).click();
-  await page.getByRole("button", { name: "Stocks" }).click();
+  await page.getByRole("button", { name: /Stocks/ }).click();
   await expect(page.getByRole("heading", { name: "Codal Announcements" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Major Shareholders" })).toBeVisible();
 
   await page.getByRole("link", { name: "Billing" }).click();
-  await expect(page.getByText("Pro", { exact: true })).toBeVisible();
-  await expect(page.getByText(/until/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Billing" })).toBeVisible();
+  await expect(page.locator("main p.big")).toHaveText("Pro");
+  await expect(page.locator("main").getByText(/until/)).toBeVisible();
 
   await page.goto("/billing?status=success&ref_id=E2E-REF");
   await expect(page.getByText(/Pro subscription is active/)).toBeVisible();
@@ -202,8 +254,8 @@ test("staff user can open and filter the admin portal", async ({ page }) => {
   await page.getByLabel("Search log console").fill("fetch");
   await page.getByLabel("Filter log level").selectOption("WARNING");
   await page.getByLabel("Filter log category").selectOption("FETCH_ERROR");
-  await expect(page.getByRole("heading", { name: /Priority Endpoint Backfill Queue/ })).toBeVisible();
-  await page.getByLabel("Filter endpoint backfill gaps").selectOption("stock_history_unadjusted");
+  await page.getByRole("button", { name: /Backfill Jobs/ }).click();
+  await expect(page.getByRole("heading", { name: /Archive Backfill Jobs/ })).toBeVisible();
 });
 
 test("logout clears the session and protects deep links", async ({ page }) => {

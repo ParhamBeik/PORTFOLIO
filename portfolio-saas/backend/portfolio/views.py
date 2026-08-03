@@ -339,6 +339,8 @@ class TradeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, account_id):
+        import logging
+        logging.getLogger("django").warning(f"DEBUG VIEWS: TradeView request data: {request.data}")
         account = request.user.accounts.filter(pk=account_id).first()
         if account is None:
             return Response({"detail": "Account not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -433,7 +435,8 @@ class TransactionListView(APIView):
         days = max(1, min(days, 3650))
         since = timezone.now() - timedelta(days=days)
         rows = Transaction.objects.filter(
-            account__user=request.user, timestamp__gte=since
+            account__user=request.user, timestamp__gte=since,
+            reversal_of__isnull=True, reversed_by__isnull=True
         ).select_related("asset")
         account_id = request.query_params.get("account")
         if account_id:

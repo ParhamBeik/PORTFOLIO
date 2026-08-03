@@ -78,7 +78,7 @@ def _jalali_to_gregorian_index(dates: pd.Series) -> pd.DatetimeIndex:
     """
     def convert(value):
         try:
-            y, m, d = (int(part) for part in str(value).split("-"))
+            y, m, d = (int(part) for part in str(value).split(" ")[0].split("-"))
             g = jdatetime.date(y, m, d).togregorian()
             return dt.datetime(g.year, g.month, g.day, tzinfo=dt.timezone.utc)
         except (ValueError, TypeError):

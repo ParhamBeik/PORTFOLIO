@@ -71,6 +71,10 @@ test.describe("Redesigned Auth & Registration Flow", () => {
     await expect(page.getByText("Passwords do not match.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Create Account" })).toBeDisabled();
 
+    // Fill Invitation Token and check consent checkbox
+    await page.getByLabel("Invitation Token").fill("E2E-INVITE-TOKEN");
+    await page.locator("input[type='checkbox']").check();
+
     // Match confirm password
     await page.getByRole("textbox", { name: "Confirm Password" }).fill(PASSWORD);
     await expect(page.getByText("✓ Match")).toBeVisible();
@@ -100,6 +104,8 @@ test.describe("Redesigned Auth & Registration Flow", () => {
     await page.getByLabel("Email Address").fill(testEmail);
     await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
     await page.getByRole("textbox", { name: "Confirm Password" }).fill(PASSWORD);
+    await page.getByLabel("Invitation Token").fill("E2E-INVITE-TOKEN");
+    await page.locator("input[type='checkbox']").check();
 
     await page.getByRole("button", { name: "Create Account" }).click();
     await expect(page.getByRole("link", { name: "Portfolio", exact: true })).toBeVisible();

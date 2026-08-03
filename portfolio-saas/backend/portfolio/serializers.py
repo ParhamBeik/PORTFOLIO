@@ -174,16 +174,28 @@ class TradeInputSerializer(serializers.Serializer):
             if not price_tomans:
                 if asset.asset_class == Asset.AssetClass.STOCK and asset.tse_symbol:
                     candle = MarketCandle.objects.filter(symbol=asset.tse_symbol, timeframe="1d_unadj", date_time__startswith=j_date_str).first()
+                    if not candle:
+                        candle = MarketCandle.objects.filter(symbol=asset.tse_symbol, timeframe="1d_unadj", date_time__lte=j_date_str + " 23:59:59").order_by("-date_time").first()
                     if candle:
                         attrs['price_tomans'] = candle.close_price
                     else:
-                        raise serializers.ValidationError({"price_tomans": "Price omitted and no historical price found for this date."})
+                        latest_price = Price.objects.filter(asset=asset).order_by("-fetched_at").first()
+                        if latest_price:
+                            attrs['price_tomans'] = latest_price.price
+                        else:
+                            raise serializers.ValidationError({"price_tomans": "Price omitted and no historical price found for this date."})
                 elif asset.asset_class in (Asset.AssetClass.GOLD, Asset.AssetClass.CASH, Asset.AssetClass.CRYPTO) and asset.brs_symbol:
                     history = GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol, date=j_date_str).first()
+                    if not history:
+                        history = GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol, date__lte=j_date_str).order_by("-date").first()
                     if history:
                         attrs['price_tomans'] = history.close_price
                     else:
-                        raise serializers.ValidationError({"price_tomans": "Price omitted and no historical price found for this date."})
+                        latest_price = Price.objects.filter(asset=asset).order_by("-fetched_at").first()
+                        if latest_price:
+                            attrs['price_tomans'] = latest_price.price
+                        else:
+                            raise serializers.ValidationError({"price_tomans": "Price omitted and no historical price found for this date."})
 
         # Make sure timestamp is in attrs
         attrs['timestamp'] = timestamp
@@ -205,7 +217,10 @@ class TransactionSerializer(serializers.ModelSerializer):
 
     def get_is_latest_for_asset(self, obj) -> bool:
         latest_id = (
-            Transaction.objects.filter(account=obj.account, asset=obj.asset)
+            Transaction.objects.filter(
+                account=obj.account, asset=obj.asset,
+                reversal_of__isnull=True, reversed_by__isnull=True
+            )
             .order_by("-timestamp", "-pk")
             .values_list("pk", flat=True)
             .first()

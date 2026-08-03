@@ -223,7 +223,7 @@ export const removeHolding = (accountId, id) =>
 export const trade = (accountId, { assetKey, side, quantity, note = "", timestamp = null }) =>
   api(`/api/accounts/${accountId}/trades/`, {
     method: "POST",
-    body: { asset_key: assetKey, side, quantity: Number(quantity), note, timestamp },
+    body: { asset_key: assetKey, side, quantity: Number(quantity), note, ...(timestamp ? { timestamp } : {}) },
   });
 // Trade history (all accounts, or one via ?account=). Newest first.
 export const transactions = (days = 90, accountId = null) =>

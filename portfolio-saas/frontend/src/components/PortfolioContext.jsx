@@ -13,7 +13,7 @@ const ACTIVE_KEY = "lattice_active_account";
 
 export function PortfolioProvider({ children, enabled }) {
   const [accounts, setAccounts] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState("");
   const [activeId, setActiveId] = useState(() => {
     const stored = localStorage.getItem(ACTIVE_KEY);

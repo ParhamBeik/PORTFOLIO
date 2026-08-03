@@ -7,6 +7,7 @@ x-backend-env: &backend-env
   DJANGO_SETTINGS_MODULE: config.settings
   DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-insecure-change-me-must-be-at-least-32-bytes-long-for-jwt-hs256}
   DJANGO_DEBUG: ${DJANGO_DEBUG:-1}
+  DB_CONN_MAX_AGE: "0"
   ENVIRONMENT: ${ENVIRONMENT:-dev}
   ALLOWED_HOSTS: ${ALLOWED_HOSTS:-backend,localhost,127.0.0.1}
   POSTGRES_DB: ${POSTGRES_DB:-portfolio}
