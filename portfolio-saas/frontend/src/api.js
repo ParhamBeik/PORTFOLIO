@@ -363,3 +363,16 @@ export const adminStatusStreamUrl = () => {
 export const adminCleanPricesScan = () => api("/api/admin/clean-prices/scan/");
 export const adminCleanPricesExecute = (confirm) =>
   api("/api/admin/clean-prices/execute/", { method: "POST", body: { confirm } });
+
+export const listAdminUsers = (search = "") =>
+  api(`/api/auth/admin/users/${search ? `?search=${encodeURIComponent(search)}` : ""}`);
+
+export const retryArchiveJob = (jobId) =>
+  api(`/api/market/admin/jobs/${jobId}/retry/`, { method: "POST" });
+
+export const getWatchlist = (accountId) => api(`/api/portfolio/watchlist/?account=${accountId}`);
+export const toggleWatchlistItem = (accountId, symbol, action) =>
+  api(`/api/portfolio/watchlist/?account=${accountId}`, {
+    method: "POST",
+    body: { symbol, action },
+  });

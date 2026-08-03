@@ -171,8 +171,11 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
     Returns: {'total': Decimal, 'items': [{'asset','key','class','quantity',
     'unit_price','value'}]}
     """
+    from portfolio.models import Liability
     prices = prices if prices is not None else get_latest_prices()
     items, excluded, total = [], [], Decimal("0")
+    liabilities_qs = account.liabilities.all() if account.pk else Liability.objects.none()
+    total_liabilities = sum(l.amount_tomans for l in liabilities_qs)
     holdings = (
         account.holdings.select_related("asset")
         if account.pk
@@ -241,6 +244,7 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
         quality_status = "partial"
     else:
         quality_status = "complete"
+    total -= total_liabilities
     return {
         "total": total,
         "items": items,
@@ -248,6 +252,16 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
         "total_assets": total_assets,
         "quality_status": quality_status,
         "excluded": excluded,
+        "liabilities": [
+            {
+                "id": l.id,
+                "label": l.label,
+                "amount_tomans": float(l.amount_tomans),
+                "asset_key": l.asset.key if l.asset else None,
+            }
+            for l in liabilities_qs
+        ],
+        "total_liabilities": float(total_liabilities),
     }
 
 
@@ -257,6 +271,8 @@ def value_user(user) -> dict:
     accounts, total = [], Decimal("0")
     priced_assets = total_assets = 0
     excluded = []
+    total_liabilities = Decimal("0")
+    all_liabilities = []
     for account in user.accounts.all():
         valuation = value_account(account, prices)
         total += valuation["total"]
@@ -271,7 +287,14 @@ def value_user(user) -> dict:
             "broker": account.broker,
             "total": valuation["total"],
             "items": valuation["items"],
+            "liabilities": valuation.get("liabilities", []),
+            "total_liabilities": valuation.get("total_liabilities", 0.0),
         })
+        total_liabilities += Decimal(str(valuation.get("total_liabilities", 0.0)))
+        all_liabilities.extend([
+            {"account_id": account.id, "account_name": account.name, **l}
+            for l in valuation.get("liabilities", [])
+        ])
     return {
         "total": total,
         "accounts": accounts,
@@ -284,6 +307,8 @@ def value_user(user) -> dict:
             else "complete"
         ),
         "excluded": excluded,
+        "liabilities": all_liabilities,
+        "total_liabilities": float(total_liabilities),
     }
 
 
@@ -346,6 +371,9 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
 
     # Get all accounts to iterate over
     accounts = [account] if account else user.accounts.all()
+    from portfolio.models import Liability
+    liabilities = Liability.objects.filter(account__in=accounts)
+    total_liabilities = sum(l.amount_tomans for l in liabilities)
     
     series = []
     for i in range(days - 1, -1, -1):
@@ -365,7 +393,9 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
         for key, asset in assets.items():
             qty = day_holdings.get(key, Decimal("0"))
             if asset.is_house:
-                total += _house_value(qty)
+                holding = next((h for h in holdings if h.asset_id == asset.id), None)
+                area = holding.area_sqm if holding else Decimal("90.2")
+                total += _house_value(qty, area_sqm=area, mortgage_deduction=Decimal("0"))
             else:
                 p = stock_closes.get(jalali_str, {}).get(key)
                 if p is None:
@@ -376,6 +406,7 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
                     p = last_known_prices.get(key, _q(latest_prices.get(key, 0)))
                 total += qty * p
 
+        total -= total_liabilities
         val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
         series.append({
             "timestamp": target_date.isoformat(),
@@ -433,18 +464,31 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     basis = normalize_basis(basis)
 
     usd_rate = Decimal("1")
-    if basis == "usd_denominated":
-        usd_hist = GoldCurrencyHistory.objects.filter(symbol="USD", date__lte=jalali_str).order_by("-date").first()
-        if usd_hist and usd_hist.close_price > 0:
-            usd_rate = Decimal(str(usd_hist.close_price))
-        else:
+    conversion_source = None
+    if basis in ("usd_denominated", "usdt_denominated"):
+        rate_found = False
+        if basis == "usdt_denominated":
+            usdt_hist = GoldCurrencyHistory.objects.filter(symbol="USDT_IRT", date__lte=jalali_str).order_by("-date").first()
+            if usdt_hist and usdt_hist.close_price > 0:
+                usd_rate = Decimal(str(usdt_hist.close_price))
+                conversion_source = "USDT"
+                rate_found = True
+        
+        if not rate_found:
+            usd_hist = GoldCurrencyHistory.objects.filter(symbol="USD", date__lte=jalali_str).order_by("-date").first()
+            if usd_hist and usd_hist.close_price > 0:
+                usd_rate = Decimal(str(usd_hist.close_price))
+                conversion_source = "USD"
+                rate_found = True
+                
+        if not rate_found:
             return {
                 "total": 0.0,
                 "items": [],
                 "as_of": as_of_dt.isoformat(),
                 "basis": basis,
                 "quality_status": "unavailable",
-                "excluded": [{"reason": "missing_usd_rate"}],
+                "excluded": [{"reason": "missing_conversion_rate"}],
             }
     cpi = Decimal(str(cpi_for_date(as_of_dt))) if basis == "real_toman" else None
 
@@ -509,7 +553,7 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
             # Apply basis
             if not asset.is_house:
                 val = qty * price
-            if basis == "usd_denominated" and usd_rate > 0:
+            if basis in ("usd_denominated", "usdt_denominated") and usd_rate > 0:
                 val = val / usd_rate
                 price = price / usd_rate
             elif basis == "real_toman":
@@ -527,11 +571,23 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
             })
 
         cash = cash_as_of(user, acc, as_of_dt)
-        if basis == "usd_denominated":
+        if basis in ("usd_denominated", "usdt_denominated"):
             cash /= usd_rate
         elif basis == "real_toman":
             cash = cash / cpi * Decimal("100")
         total += cash
+
+    from portfolio.models import Liability
+    liabilities = Liability.objects.filter(account__in=accounts)
+    total_liabilities = sum(l.amount_tomans for l in liabilities)
+    
+    scaled_liabilities = total_liabilities
+    if basis in ("usd_denominated", "usdt_denominated") and usd_rate > 0:
+        scaled_liabilities /= usd_rate
+    elif basis == "real_toman":
+        scaled_liabilities = scaled_liabilities / cpi * Decimal("100")
+        
+    total -= scaled_liabilities
 
     return {
         "total": float(total),
@@ -540,4 +596,15 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
         "basis": basis,
         "quality_status": "partial" if excluded else "complete",
         "excluded": excluded,
+        "total_liabilities": float(scaled_liabilities),
+        "conversion_source": conversion_source,
+        "liabilities": [
+            {
+                "id": l.id,
+                "label": l.label,
+                "amount_tomans": float(l.amount_tomans),
+                "asset_key": l.asset.key if l.asset else None,
+            }
+            for l in liabilities
+        ],
     }

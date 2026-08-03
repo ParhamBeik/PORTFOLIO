@@ -627,6 +627,13 @@ def daily_returns_matrix(
         usd_series = panel["usd_cash"]
         for col in panel.columns:
             panel[col] = to_basis(panel[col], basis, usd_series=usd_series)
+    elif basis == "usdt_denominated":
+        usdt_series = panel.get("usdt_irt")
+        usd_series = panel.get("usd_cash")
+        series_to_use = usdt_series if (usdt_series is not None and not usdt_series.isna().all()) else usd_series
+        if series_to_use is not None:
+            for col in panel.columns:
+                panel[col] = to_basis(panel[col], basis, usd_series=series_to_use)
 
     returns, excluded = _build_returns_matrix(panel)
     excluded.extend(gate_excluded)

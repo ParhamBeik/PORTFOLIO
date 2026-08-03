@@ -98,3 +98,14 @@ def make_user(db):
         return user
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def clear_redis_locks():
+    """Bust pricing locks before each test so they don't block concurrent suites."""
+    try:
+        from portfolio.live.pubsub import get_redis
+        r = get_redis()
+        r.delete("lock:price_fetch")
+    except Exception:
+        pass

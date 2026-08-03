@@ -6,6 +6,8 @@ request handler (the sync/backfill tasks own fetching). Public market charts
 shareholder moves) is a Pro differentiator alongside the analytics endpoints.
 """
 from django.views import View
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -570,6 +572,28 @@ class AdminStatusView(APIView):
         users = User.objects.order_by("-date_joined")[:20]
         recent_snapshots = Snapshot.objects.order_by("-timestamp")[:10]
 
+        from config.celery import app as celery_app
+        workers = {}
+        try:
+            inspect = celery_app.control.inspect(timeout=1.0)
+            ping = inspect.ping()
+            active = inspect.active()
+            reserved = inspect.reserved()
+            stats = inspect.stats()
+            
+            if ping:
+                for worker_name in ping:
+                    workers[worker_name] = {
+                        "status": "online",
+                        "active_tasks": len(active.get(worker_name, []) or []) if active else 0,
+                        "reserved_tasks": len(reserved.get(worker_name, []) or []) if reserved else 0,
+                        "stats": stats.get(worker_name, {}) if stats else {},
+                    }
+            else:
+                workers = {"detail": "No active workers detected."}
+        except Exception as e:
+            workers = {"error": str(e)}
+
         category_summary = {}
         for ep_choice, ep_label in ArchiveFetchState.Endpoint.choices:
             states = ArchiveFetchState.objects.filter(endpoint=ep_choice)
@@ -625,6 +649,7 @@ class AdminStatusView(APIView):
                 "category_summary": category_summary,
                 "worst_gaps": [
                     {
+                        "id": row.id,
                         "endpoint": row.endpoint,
                         "symbol": row.symbol,
                         "stored_rows": row.stored_rows,
@@ -639,6 +664,7 @@ class AdminStatusView(APIView):
             "quota": get_quota_status(),
             "latest_quota_day": str(latest_quota.day) if latest_quota else None,
             "recent_logs": get_recent_logs(100),
+            "workers": workers,
             "recent_snapshots": [
                 {
                     "id": row.id,
@@ -757,6 +783,7 @@ class AdminStatusStreamView(View):
 
                     worst_gaps = [
                         {
+                            "id": row.id,
                             "endpoint": row.endpoint,
                             "symbol": row.symbol,
                             "stored_rows": row.stored_rows,
@@ -825,3 +852,32 @@ class AdminStatusStreamView(View):
         response["Cache-Control"] = "no-cache"
         response["X-Accel-Buffering"] = "no"
         return response
+
+
+class RetryArchiveJobView(APIView):
+    """Staff-only endpoint to retry a failed backfill job."""
+
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, job_id):
+        from .models import ArchiveFetchState
+        from .tasks import retry_archive_job_task
+        
+        state = get_object_or_404(ArchiveFetchState, pk=job_id)
+        state.consecutive_failures = 0
+        state.last_error = "Manually triggered retry."
+        state.next_attempt_at = timezone.now()
+        state.save(update_fields=["consecutive_failures", "last_error", "next_attempt_at"])
+        
+        retry_archive_job_task.delay(state.id)
+        
+        return Response({
+            "detail": f"Backfill job for {state.symbol} ({state.endpoint}) has been queued for retry.",
+            "status": "queued",
+            "job": {
+                "id": state.id,
+                "symbol": state.symbol,
+                "endpoint": state.endpoint,
+                "verified_complete": state.verified_complete,
+            }
+        })

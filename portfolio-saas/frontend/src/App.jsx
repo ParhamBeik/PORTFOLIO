@@ -19,6 +19,10 @@ const TimeMachine = lazy(() => import("./components/TimeMachine.jsx"));
 const Discovery = lazy(() => import("./components/Discovery.jsx"));
 const Onboarding = lazy(() => import("./components/Onboarding.jsx"));
 const Legal = lazy(() => import("./components/Legal.jsx"));
+const Landing = lazy(() => import("./components/Landing.jsx"));
+const Pricing = lazy(() => import("./components/Pricing.jsx"));
+const Watchlist = lazy(() => import("./components/Watchlist.jsx"));
+const Settings = lazy(() => import("./components/Settings.jsx"));
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -93,27 +97,30 @@ export default function App() {
               path="/signup"
               element={<Auth initialMode="register" onAuthed={setUser} currentUser={user} />}
             />
-            <Route element={user ? <Shell user={user} setUser={setUser} /> : <Navigate to="/login" replace />}>
-              <Route path="onboarding" element={<Onboarding />} />
-              <Route index element={<RequirePortfolio><Portfolio user={user} /></RequirePortfolio>} />
-              <Route path="market" element={<MarketData user={user} />} />
-              <Route path="billing" element={<Billing user={user} setUser={setUser} />} />
-              <Route path="profile" element={<Profile user={user} setUser={setUser} />} />
+            <Route element={user ? <Shell user={user} setUser={setUser} /> : <Outlet />}>
+              <Route path="/" element={user ? <RequirePortfolio><Portfolio user={user} /></RequirePortfolio> : <Landing />} />
+              <Route path="/pricing" element={<Pricing />} />
+              <Route path="/onboarding" element={user ? <Onboarding /> : <Navigate to="/login" replace />} />
+              <Route path="/market" element={user ? <MarketData user={user} /> : <Navigate to="/login" replace />} />
+              <Route path="/watchlist" element={user ? <Watchlist user={user} /> : <Navigate to="/login" replace />} />
+              <Route path="/billing" element={user ? <Billing user={user} setUser={setUser} /> : <Navigate to="/login" replace />} />
+              <Route path="/profile" element={user ? <Profile user={user} setUser={setUser} /> : <Navigate to="/login" replace />} />
+              <Route path="/settings" element={user ? <Settings user={user} setUser={setUser} /> : <Navigate to="/login" replace />} />
               <Route
-                path="admin"
+                path="/admin"
                 element={user?.is_staff ? <AdminPortal /> : <Navigate to="/" replace />}
               />
-              <Route path="accounts/:id" element={<AccountRedirect />} />
-              <Route path="dashboard" element={<Navigate to="/" replace />} />
-              <Route path="optimization" element={<OptimizationLayout user={user} />}>
+              <Route path="/accounts/:id" element={user ? <AccountRedirect /> : <Navigate to="/login" replace />} />
+              <Route path="/dashboard" element={<Navigate to="/" replace />} />
+              <Route path="/optimization" element={user ? <OptimizationLayout user={user} /> : <Navigate to="/login" replace />}>
                 <Route index element={<Optimization user={user} />} />
                 <Route path="timemachine" element={<TimeMachine user={user} />} />
                 <Route path="discovery" element={<Discovery user={user} />} />
                 <Route path="insights" element={<Insights user={user} />} />
                 <Route path="analytics" element={<Analytics user={user} />} />
               </Route>
-              <Route path="insights" element={<Navigate to="/optimization/insights" replace />} />
-              <Route path="analytics" element={<Navigate to="/optimization/analytics" replace />} />
+              <Route path="/insights" element={<Navigate to="/optimization/insights" replace />} />
+              <Route path="/analytics" element={<Navigate to="/optimization/analytics" replace />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
           </Routes>
@@ -193,6 +200,7 @@ function Shell({ user, setUser }) {
         >
           <option value="nominal_toman">Nominal Toman</option>
           <option value="usd_denominated">USD-denominated</option>
+          <option value="usdt_denominated">USDT-denominated</option>
         </select>
         <nav className="tabs" aria-label="Primary navigation">
           <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>
@@ -200,6 +208,9 @@ function Shell({ user, setUser }) {
           </NavLink>
           <NavLink to="/market" className={({ isActive }) => (isActive ? "active" : "")}>
             Market
+          </NavLink>
+          <NavLink to="/watchlist" className={({ isActive }) => (isActive ? "active" : "")}>
+            Watchlist
           </NavLink>
           <NavLink to="/optimization" className={({ isActive }) => (isActive ? "active" : "")}>
             Optimization
@@ -209,6 +220,9 @@ function Shell({ user, setUser }) {
           </NavLink>
           <NavLink to="/profile" className={({ isActive }) => (isActive ? "active" : "")}>
             Profile
+          </NavLink>
+          <NavLink to="/settings" className={({ isActive }) => (isActive ? "active" : "")}>
+            Settings
           </NavLink>
           {user.is_staff && (
             <NavLink to="/admin" className={({ isActive }) => (isActive ? "active" : "")}>

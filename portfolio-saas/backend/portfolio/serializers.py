@@ -3,7 +3,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.features import limit_for
-from .models import Account, Asset, Holding, LedgerEntry, Transaction, BacktestRun, BacktestYear, Watchlist, WatchlistItem
+from .models import Account, Asset, Holding, LedgerEntry, Transaction, BacktestRun, BacktestYear, Watchlist, WatchlistItem, Liability
 from marketdata.models import MarketCandle, GoldCurrencyHistory
 from marketdata.jalali import normalize_jalali
 import jdatetime
@@ -269,3 +269,28 @@ class WatchlistSerializer(serializers.ModelSerializer):
     class Meta:
         model = Watchlist
         fields = ("id", "account", "items", "created_at")
+
+
+class LiabilitySerializer(serializers.ModelSerializer):
+    asset_key = serializers.SlugRelatedField(
+        source="asset",
+        slug_field="key",
+        queryset=Asset.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    asset_name = serializers.CharField(source="asset.name", read_only=True)
+
+    class Meta:
+        model = Liability
+        fields = (
+            "id",
+            "account",
+            "label",
+            "amount_tomans",
+            "asset_key",
+            "asset_name",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "account", "created_at", "updated_at")

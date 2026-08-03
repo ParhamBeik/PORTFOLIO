@@ -10,6 +10,7 @@ _BASIS_ALIASES = {
     "usd_real": "usd_denominated",
     "usd_denominated": "usd_denominated",
     "real_toman": "real_toman",
+    "usdt_denominated": "usdt_denominated",
 }
 
 
@@ -19,7 +20,7 @@ def normalize_basis(basis: str | None) -> str:
         return _BASIS_ALIASES[basis]
     except KeyError as exc:
         raise ValueError(
-            "basis must be nominal_toman, usd_denominated, or real_toman"
+            "basis must be nominal_toman, usd_denominated, usdt_denominated, or real_toman"
         ) from exc
 
 
@@ -70,27 +71,51 @@ def to_basis(
             dtype=float,
         )
         return series / cpi * 100.0
-    if basis == "usd_denominated":
+    if basis in ("usd_denominated", "usdt_denominated"):
         if usd_series is None:
             from marketdata.models import GoldCurrencyHistory
 
-            if not series.index.empty:
-                max_gregorian_date = series.index.max()
-                jdate = jdatetime.date.fromgregorian(date=max_gregorian_date.date())
-                max_jalali_str = f"{jdate.year:04d}-{jdate.month:02d}-{jdate.day:02d}"
-                rows = (
-                    GoldCurrencyHistory.objects
-                    .filter(symbol="USD", date__lte=max_jalali_str)
-                    .order_by("date")
-                    .values_list("date", "close_price")
-                )
-            else:
-                rows = (
-                    GoldCurrencyHistory.objects
-                    .filter(symbol="USD")
-                    .order_by("date")
-                    .values_list("date", "close_price")
-                )
+            symbol = "USDT_IRT" if basis == "usdt_denominated" else "USD"
+            rows = []
+            if symbol == "USDT_IRT":
+                if not series.index.empty:
+                    max_gregorian_date = series.index.max()
+                    jdate = jdatetime.date.fromgregorian(date=max_gregorian_date.date())
+                    max_jalali_str = f"{jdate.year:04d}-{jdate.month:02d}-{jdate.day:02d}"
+                    rows = list(
+                        GoldCurrencyHistory.objects
+                        .filter(symbol="USDT_IRT", date__lte=max_jalali_str)
+                        .order_by("date")
+                        .values_list("date", "close_price")
+                    )
+                else:
+                    rows = list(
+                        GoldCurrencyHistory.objects
+                        .filter(symbol="USDT_IRT")
+                        .order_by("date")
+                        .values_list("date", "close_price")
+                    )
+                if not rows:
+                    symbol = "USD"
+
+            if not rows and symbol == "USD":
+                if not series.index.empty:
+                    max_gregorian_date = series.index.max()
+                    jdate = jdatetime.date.fromgregorian(date=max_gregorian_date.date())
+                    max_jalali_str = f"{jdate.year:04d}-{jdate.month:02d}-{jdate.day:02d}"
+                    rows = list(
+                        GoldCurrencyHistory.objects
+                        .filter(symbol="USD", date__lte=max_jalali_str)
+                        .order_by("date")
+                        .values_list("date", "close_price")
+                    )
+                else:
+                    rows = list(
+                        GoldCurrencyHistory.objects
+                        .filter(symbol="USD")
+                        .order_by("date")
+                        .values_list("date", "close_price")
+                    )
 
             if not rows:
                 return series * float("nan")

@@ -38,8 +38,8 @@ from .serializers import (
     ChangePasswordSerializer,
     PasswordAwareTokenRefreshSerializer,
     RegisterSerializer,
-    UserSerializer,
     VerifiedTokenObtainPairSerializer,
+    UserSerializer,
 )
 from .services import (
     send_password_reset_email,
@@ -401,3 +401,17 @@ class ProCheckView(APIView):
 
     def get(self, request):
         return Response({"message": "You are seeing Pro-only content."})
+
+
+class AdminUserListView(generics.ListAPIView):
+    """Staff-only search/list view of registered users."""
+
+    permission_classes = [IsAdminUser]
+    serializer_class = UserSerializer
+
+    def get_queryset(self):
+        queryset = User.objects.all().order_by("-date_joined")
+        search = self.request.query_params.get("search")
+        if search:
+            queryset = queryset.filter(email__icontains=search)
+        return queryset

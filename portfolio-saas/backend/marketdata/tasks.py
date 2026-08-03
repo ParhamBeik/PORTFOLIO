@@ -71,6 +71,12 @@ def operational_health_check():
     for event, details in alerts:
         notify(event, details, dedupe_seconds=900)
     return {"alerts": [event for event, _details in alerts]}
+
+
+@shared_task(queue="archive")
+def retry_archive_job_task(state_id):
+    from .archive import run_archive_state
+    run_archive_state(state_id)
 from .fetchers.base import TransientMarketDataError
 from .quota import QuotaExhausted
 from portfolio.live.pubsub import get_redis

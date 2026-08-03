@@ -57,6 +57,7 @@ def _apply_projection(
     amount: Decimal | None, area_sqm: Decimal | None = None,
     mortgage_deduction_tomans: Decimal | None = None, reverse: bool = False
 ) -> None:
+    from portfolio.models import Liability
     cash_delta = _cash_delta(kind, amount or Decimal("0"), reverse)
     new_cash = account.cash_balance_tomans + cash_delta
     if new_cash < 0:
@@ -74,6 +75,8 @@ def _apply_projection(
             raise LedgerError("Insufficient holding quantity.")
         if new_quantity == 0 and holding:
             holding.delete()
+            if asset.is_house:
+                Liability.objects.filter(account=account, asset=asset).delete()
         elif holding:
             holding.quantity = new_quantity
             fields = ["quantity", "updated_at"]
@@ -84,16 +87,40 @@ def _apply_projection(
                 )
                 fields += ["area_sqm", "mortgage_deduction_tomans"]
             holding.save(update_fields=fields)
+            if asset.is_house:
+                mortgage_val = holding.mortgage_deduction_tomans
+                if mortgage_val > 0:
+                    Liability.objects.update_or_create(
+                        account=account,
+                        asset=asset,
+                        defaults={
+                            "label": f"Mortgage ({asset.name})",
+                            "amount_tomans": mortgage_val,
+                        }
+                    )
+                else:
+                    Liability.objects.filter(account=account, asset=asset).delete()
         elif new_quantity > 0:
             values = {"account": account, "asset": asset, "quantity": new_quantity}
             if asset.is_house:
                 values.update(
                     area_sqm=area_sqm or Decimal("90.2"),
                     mortgage_deduction_tomans=(
-                        mortgage_deduction_tomans or Decimal("400000000")
+                        mortgage_deduction_tomans or Decimal("0")
                     ),
                 )
-            Holding.objects.create(**values)
+            new_holding = Holding.objects.create(**values)
+            if asset.is_house:
+                mortgage_val = new_holding.mortgage_deduction_tomans
+                if mortgage_val > 0:
+                    Liability.objects.update_or_create(
+                        account=account,
+                        asset=asset,
+                        defaults={
+                            "label": f"Mortgage ({asset.name})",
+                            "amount_tomans": mortgage_val,
+                        }
+                    )
 
     account.cash_balance_tomans = new_cash
     account.save(update_fields=["cash_balance_tomans", "updated_at"])
@@ -318,6 +345,18 @@ def rebuild_projections(account: Account) -> dict:
     account.save(
         update_fields=["cash_balance_tomans", "ledger_complete", "updated_at"]
     )
+    from portfolio.models import Liability
+    Liability.objects.filter(account=account, asset__isnull=False).delete()
+    for asset_id, data in state["real_estate"].items():
+        mortgage_val = data.get("mortgage_deduction_tomans", Decimal("0"))
+        if mortgage_val > 0:
+            a_obj = Asset.objects.get(pk=asset_id)
+            Liability.objects.create(
+                account=account,
+                asset=a_obj,
+                label=f"Mortgage ({a_obj.name})",
+                amount_tomans=mortgage_val,
+            )
     return {
         "account_id": account.id,
         "cash_balance_tomans": str(expected_cash),

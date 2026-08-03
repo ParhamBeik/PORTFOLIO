@@ -11,6 +11,7 @@ from decimal import Decimal
 import numpy as np
 import pandas as pd
 from django.utils import timezone
+from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAuthenticated
@@ -19,7 +20,7 @@ from rest_framework.views import APIView
 
 from accounts.permissions import RequiresFeature
 
-from .models import Account, Asset, Holding, LedgerEntry, Price, Snapshot, Transaction
+from .models import Account, Asset, Holding, LedgerEntry, Price, Snapshot, Transaction, Liability
 from .serializers import (
     AccountSerializer,
     AssetSerializer,
@@ -28,6 +29,7 @@ from .serializers import (
     LedgerEntrySerializer,
     TradeInputSerializer,
     TransactionSerializer,
+    LiabilitySerializer,
 )
 from .services import execute_trade, get_latest_prices, undo_trade, value_account, value_user
 from .services.trades import TradeError
@@ -469,8 +471,8 @@ class ValuationView(APIView):
         else:
             valuation = value_user(request.user)
         valuation = _with_usd(valuation)
-        if basis in {"usd_real", "usd_denominated"}:
-            valuation = _express_usd_real(valuation)
+        if basis in {"usd_real", "usd_denominated", "usdt_denominated"}:
+            valuation = _express_usd_real(valuation, basis)
         return Response(valuation)
 
 
@@ -496,8 +498,8 @@ class AccountValuationView(APIView):
         result = value_account(account)
         result["prices"] = get_latest_prices()
         result = _with_usd(result)
-        if basis in {"usd_real", "usd_denominated"}:
-            result = _express_usd_real(result)
+        if basis in {"usd_real", "usd_denominated", "usdt_denominated"}:
+            result = _express_usd_real(result, basis)
         return Response({
             "id": account.id,
             "name": account.name,
@@ -537,30 +539,43 @@ def _with_usd(valuation: dict) -> dict:
     return valuation
 
 
-def _express_usd_real(valuation: dict) -> dict:
-    """Re-express a live toman valuation in USD using the live USD cash rate."""
+def _express_usd_real(valuation: dict, basis: str = "usd_denominated") -> dict:
+    """Re-express a live toman valuation in USD or USDT using the live rate."""
     prices = valuation.get("prices", {})
-    usd_rate = Decimal(prices.get("usd_cash", 0) or 0)
-    if usd_rate <= 0:
-        valuation["basis"] = "usd_denominated"
+    from portfolio.services.deflator import normalize_basis
+    basis = normalize_basis(basis)
+    
+    rate_key = "usdt_irt" if basis == "usdt_denominated" else "usd_cash"
+    rate = Decimal(prices.get(rate_key, 0) or 0)
+    conversion_source = "USDT" if basis == "usdt_denominated" else "USD"
+    
+    if basis == "usdt_denominated" and rate <= 0:
+        # Fallback to USD
+        rate = Decimal(prices.get("usd_cash", 0) or 0)
+        conversion_source = "USD"
+        
+    if rate <= 0:
+        valuation["basis"] = basis
+        valuation["conversion_source"] = conversion_source
         return valuation
 
     def _scale_items(items):
         for item in items or []:
             if item.get("value") is not None:
-                item["value"] = float(Decimal(str(item["value"])) / usd_rate)
+                item["value"] = float(Decimal(str(item["value"])) / rate)
             if item.get("unit_price") is not None:
-                item["unit_price"] = float(Decimal(str(item["unit_price"])) / usd_rate)
+                item["unit_price"] = float(Decimal(str(item["unit_price"])) / rate)
 
-    total = Decimal(str(valuation.get("total", 0) or 0)) / usd_rate
+    total = Decimal(str(valuation.get("total", 0) or 0)) / rate
     valuation["total"] = total
     valuation["total_usd"] = total
     _scale_items(valuation.get("items"))
     for account in valuation.get("accounts", []) or []:
         if account.get("total") is not None:
-            account["total"] = Decimal(str(account["total"])) / usd_rate
+            account["total"] = Decimal(str(account["total"])) / rate
         _scale_items(account.get("items"))
-    valuation["basis"] = "usd_denominated"
+    valuation["basis"] = basis
+    valuation["conversion_source"] = conversion_source
     return valuation
 
 
@@ -1165,3 +1180,31 @@ class IntegrityView(APIView):
             "integrity": integrity_data,
             "rejected": rejected_data
         })
+
+
+class LiabilityListCreateView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = LiabilitySerializer
+
+    def get_queryset(self):
+        return Liability.objects.filter(
+            account__user=self.request.user,
+            account_id=self.kwargs["account_id"],
+        )
+
+    def perform_create(self, serializer):
+        account = get_object_or_404(
+            self.request.user.accounts, pk=self.kwargs["account_id"]
+        )
+        serializer.save(account=account)
+
+
+class LiabilityDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = LiabilitySerializer
+
+    def get_queryset(self):
+        return Liability.objects.filter(
+            account__user=self.request.user,
+            account_id=self.kwargs["account_id"],
+        )

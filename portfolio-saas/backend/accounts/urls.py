@@ -14,6 +14,7 @@ from .views import (
     RegisterView,
     ResendVerificationView,
     VerifyEmailView,
+    AdminUserListView,
 )
 
 urlpatterns = [
@@ -43,4 +44,5 @@ urlpatterns = [
     path("me/", MeView.as_view(), name="me"),
     path("change-password/", ChangePasswordView.as_view(), name="change-password"),
     path("pro-check/", ProCheckView.as_view(), name="pro-check"),
+    path("admin/users/", AdminUserListView.as_view(), name="admin-users"),
 ]

@@ -17,6 +17,13 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 
+# House valuation baseline. These were duplicated as bare literals across the
+# model default, the ledger rebuild and the valuation engine; three copies of a
+# number that must agree is a defect waiting to happen, so they live here and
+# every call site imports them.
+HOUSE_AREA_SQM = Decimal("90.2")
+HOUSE_MORTGAGE_DEDUCTION = Decimal("400000000")
+
 
 
 class Asset(models.Model):
@@ -137,8 +144,10 @@ class Holding(models.Model):
     asset = models.ForeignKey(Asset, on_delete=models.PROTECT, related_name="holdings")
     quantity = models.DecimalField(max_digits=20, decimal_places=6, default=0)
     # For houses, quantity stores price-per-sqm-million (the formula input).
-    area_sqm = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("90.2"))
-    mortgage_deduction_tomans = models.DecimalField(max_digits=20, decimal_places=4, default=Decimal("400000000"))
+    area_sqm = models.DecimalField(max_digits=10, decimal_places=2, default=HOUSE_AREA_SQM)
+    mortgage_deduction_tomans = models.DecimalField(
+        max_digits=20, decimal_places=4, default=Decimal("0")
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -504,3 +513,21 @@ class BacktestUserQuota(models.Model):
                 name="uniq_backtest_quota_user_day",
             )
         ]
+
+
+class Liability(models.Model):
+    """Subtractions from the net worth (e.g. loans, mortgages)."""
+
+    account = models.ForeignKey(
+        Account, on_delete=models.CASCADE, related_name="liabilities"
+    )
+    label = models.CharField(max_length=200)
+    amount_tomans = models.DecimalField(max_digits=20, decimal_places=4)
+    asset = models.ForeignKey(
+        Asset, on_delete=models.PROTECT, related_name="liabilities", null=True, blank=True
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]

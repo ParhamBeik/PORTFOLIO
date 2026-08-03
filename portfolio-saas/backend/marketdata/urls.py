@@ -16,4 +16,5 @@ urlpatterns = [
     path("shareholders/", views.ShareholdersView.as_view(), name="market-shareholders"),
     path("admin/status/", views.AdminStatusView.as_view(), name="admin-status"),
     path("admin/stream/", views.AdminStatusStreamView.as_view(), name="admin-status-stream"),
+    path("admin/jobs/<int:job_id>/retry/", views.RetryArchiveJobView.as_view(), name="admin-retry-job"),
 ]

@@ -25,7 +25,7 @@ def test_house_formula_zero_price_is_negative_deduction():
 
 def test_asset_value_uses_house_formula_for_real_estate(asset_catalog):
     house = asset_catalog["house_asset"]
-    holding = Holding(asset=house, quantity=Decimal("50"))
+    holding = Holding(asset=house, quantity=Decimal("50"), mortgage_deduction_tomans=Decimal("400000000"))
     assert asset_value(holding, Decimal("0")) == _house_value(Decimal("50"))
 
 
@@ -76,10 +76,15 @@ def test_value_account_marks_missing_quote_unavailable(asset_catalog, make_user)
 
 
 def test_value_account_applies_house_formula(asset_catalog, write_prices, make_user):
-    write_prices({"usd_cash": Decimal("63200")})
+    write_prices({})
     user = make_user(email="house@test.test")
     account = Account.objects.create(user=user, name="Property")
-    Holding.objects.create(account=account, asset=asset_catalog["house_asset"], quantity=Decimal("50"))
+    Holding.objects.create(
+        account=account,
+        asset=asset_catalog["house_asset"],
+        quantity=Decimal("50"),
+        mortgage_deduction_tomans=Decimal("400000000")
+    )
 
     result = value_account(account)
     assert result["total"] == _house_value(Decimal("50"))
