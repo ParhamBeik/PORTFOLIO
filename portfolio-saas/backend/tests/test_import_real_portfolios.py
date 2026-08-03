@@ -66,9 +66,13 @@ def test_house_maps_to_house_asset_and_values_via_formula(imported):
     mother = imported.accounts.get(name="Mother")
     house = mother.holdings.get(asset__key="house_asset")
     assert house.quantity == 90
-    # 90 * 1e6 * 90.2 - 4e8 = 7,718,000,000.
-    val = {i["key"]: i["value"] for i in value_account(mother)["items"]}
-    assert val["house_asset"] == 7_718_000_000
+    # Gross: 90 * 1e6 * 90.2 = 8,118,000,000. A mortgage would be a Liability
+    # netted off the account total, never subtracted from the asset itself.
+    result = value_account(mother)
+    val = {i["key"]: i["value"] for i in result["items"]}
+    assert val["house_asset"] == 8_118_000_000
+    # The import declares no mortgage, so none may be invented.
+    assert result["total_liabilities"] == 0
 
 
 def test_collapses_to_one_snapshot_per_day(imported):

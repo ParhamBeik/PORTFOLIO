@@ -49,6 +49,57 @@ def test_liability_netting_in_valuation(db, make_user):
     assert val["total_liabilities"] == 300000.0
 
 
+def test_house_mortgage_is_deducted_exactly_once(db, make_user):
+    """A mortgage lives in Liability now, so the house must be valued gross."""
+    user = make_user(email="house@test.test")
+    account = Account.objects.create(name="Home", user=user)
+    house = Asset.objects.create(
+        key="house_main", name="House", asset_class="Real Estate",
+        currency="IRT", is_house=True,
+    )
+    Holding.objects.create(
+        account=account, asset=house, quantity=Decimal("10"),
+        area_sqm=Decimal("90.2"), mortgage_deduction_tomans=Decimal("0"),
+    )
+    Liability.objects.create(
+        account=account, asset=house, label="Mortgage (House)",
+        amount_tomans=Decimal("400000000"),
+    )
+
+    from portfolio.services.valuation import value_account
+    val = value_account(account, {"house_main": Decimal("10")})
+
+    gross = Decimal("902000000")  # 10 million/sqm * 90.2 sqm
+    assert val["items"][0]["value"] == gross, "house must be valued gross of mortgage"
+    assert val["total"] == gross - Decimal("400000000")
+
+
+def test_house_opening_position_without_mortgage_invents_none(db, make_user):
+    """No mortgage supplied must mean no mortgage — not a 400M phantom."""
+    from django.utils import timezone
+    from portfolio.models import LedgerEntry
+    from portfolio.services.ledger import create_ledger_entry
+
+    user = make_user(email="house2@test.test")
+    account = Account.objects.create(name="Home", user=user)
+    house = Asset.objects.create(
+        key="house_two", name="House Two", asset_class="Real Estate",
+        currency="IRT", is_house=True,
+    )
+    create_ledger_entry(
+        account=account, asset=house, kind=LedgerEntry.Kind.OPENING_POSITION,
+        quantity=Decimal("10"), occurred_at=timezone.now(),
+        area_sqm=Decimal("90.2"),
+    )
+
+    holding = Holding.objects.get(account=account, asset=house)
+    assert holding.mortgage_deduction_tomans == Decimal("0")
+    assert not Liability.objects.filter(account=account, asset=house).exists()
+
+    from portfolio.services.valuation import value_account
+    assert value_account(account, {"house_two": Decimal("10")})["total"] == Decimal("902000000")
+
+
 def test_usdt_basis_conversion_fallback(db):
     from portfolio.services.deflator import to_basis
     

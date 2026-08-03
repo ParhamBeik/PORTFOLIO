@@ -17,12 +17,13 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 
-# House valuation baseline. These were duplicated as bare literals across the
-# model default, the ledger rebuild and the valuation engine; three copies of a
-# number that must agree is a defect waiting to happen, so they live here and
-# every call site imports them.
+# House valuation baseline, shared by the model default, the ledger rebuild and
+# the valuation engine — three copies of a number that must agree is a defect
+# waiting to happen, so it lives here and every call site imports it.
+#
+# There is deliberately no default mortgage constant: since migration 0017 a
+# mortgage is a `Liability` row, and a house with no declared mortgage has none.
 HOUSE_AREA_SQM = Decimal("90.2")
-HOUSE_MORTGAGE_DEDUCTION = Decimal("400000000")
 
 
 

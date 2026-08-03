@@ -11,15 +11,13 @@ from decimal import Decimal
 from django.core.cache import cache
 from django.utils import timezone
 
-from ..models import Account, Asset, Holding, Price
+from ..models import HOUSE_AREA_SQM, Account, Asset, Holding, Price
 
 logger = logging.getLogger(__name__)
 
 _LATEST_PRICES_CACHE_KEY = "prices:latest"
 _ARCHIVE_DROP_FLOOR = Decimal("0.50")
 _ARCHIVE_SPIKE_CEILING = Decimal("2.00")
-_HOUSE_AREA_SQM = Decimal("90.2")
-_HOUSE_MORTGAGE_DEDUCTION = Decimal("400000000")
 
 
 def _q(value) -> Decimal:
@@ -147,20 +145,22 @@ def invalidate_prices_cache() -> None:
     cache.delete(_LATEST_PRICES_CACHE_KEY)
 
 
-def _house_value(price_per_sqm_million: Decimal, area_sqm: Decimal = _HOUSE_AREA_SQM, mortgage_deduction: Decimal = _HOUSE_MORTGAGE_DEDUCTION) -> Decimal:
-    """Port of engine.calculate_house_value: area * price/sqm - mortgage."""
+def _house_value(price_per_sqm_million: Decimal, area_sqm: Decimal = HOUSE_AREA_SQM) -> Decimal:
+    """Gross real-estate value: area * price/sqm.
+
+    The mortgage is deliberately NOT subtracted here. Since migration 0017 a
+    mortgage is a `Liability` row, and every caller already nets liabilities off
+    the account total — deducting it again here would double-count the debt.
+    """
     sqm_price = _q(price_per_sqm_million) * Decimal("1000000")
-    area = _q(area_sqm) if area_sqm is not None else _HOUSE_AREA_SQM
-    mortgage = _q(mortgage_deduction) if mortgage_deduction is not None else _HOUSE_MORTGAGE_DEDUCTION
-    return sqm_price * area - mortgage
+    area = _q(area_sqm) if area_sqm is not None else HOUSE_AREA_SQM
+    return sqm_price * area
 
 
 def asset_value(holding: Holding, price: Decimal) -> Decimal:
     """Quantity x unit price, or the house formula for real estate."""
     if holding.asset.is_house:
-        area = getattr(holding, "area_sqm", _HOUSE_AREA_SQM)
-        mortgage = getattr(holding, "mortgage_deduction_tomans", _HOUSE_MORTGAGE_DEDUCTION)
-        return _house_value(holding.quantity, area_sqm=area, mortgage_deduction=mortgage)
+        return _house_value(holding.quantity, area_sqm=getattr(holding, "area_sqm", HOUSE_AREA_SQM))
     return _q(holding.quantity) * _q(price)
 
 
@@ -394,8 +394,8 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
             qty = day_holdings.get(key, Decimal("0"))
             if asset.is_house:
                 holding = next((h for h in holdings if h.asset_id == asset.id), None)
-                area = holding.area_sqm if holding else Decimal("90.2")
-                total += _house_value(qty, area_sqm=area, mortgage_deduction=Decimal("0"))
+                area = holding.area_sqm if holding else HOUSE_AREA_SQM
+                total += _house_value(qty, area_sqm=area)
             else:
                 p = stock_closes.get(jalali_str, {}).get(key)
                 if p is None:
@@ -511,11 +511,7 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                 if holding is None:
                     excluded.append({"asset_key": key, "reason": "missing_house_terms"})
                     continue
-                val = _house_value(
-                    qty,
-                    area_sqm=holding.area_sqm,
-                    mortgage_deduction=holding.mortgage_deduction_tomans,
-                )
+                val = _house_value(qty, area_sqm=holding.area_sqm)
                 price = val / qty if qty else Decimal("0")
             else:
                 stale_sessions = 0

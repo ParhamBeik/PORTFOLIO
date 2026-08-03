@@ -4,7 +4,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from ..models import Account, Asset, Holding, LedgerEntry
+from ..models import HOUSE_AREA_SQM, Account, Asset, Holding, LedgerEntry
 
 
 class LedgerError(Exception):
@@ -104,7 +104,7 @@ def _apply_projection(
             values = {"account": account, "asset": asset, "quantity": new_quantity}
             if asset.is_house:
                 values.update(
-                    area_sqm=area_sqm or Decimal("90.2"),
+                    area_sqm=area_sqm or HOUSE_AREA_SQM,
                     mortgage_deduction_tomans=(
                         mortgage_deduction_tomans or Decimal("0")
                     ),
@@ -180,8 +180,11 @@ def create_ledger_entry(
                 "Real-estate baseline fields require a house opening position."
             )
     if asset and asset.is_house and kind == LedgerEntry.Kind.OPENING_POSITION:
-        area = area or Decimal("90.2")
-        mortgage = mortgage or Decimal("400000000")
+        area = area or HOUSE_AREA_SQM
+        # No mortgage supplied means no mortgage. Defaulting to a hard-coded
+        # figure here used to invent debt the user never entered (and, since
+        # 0017, a phantom Liability row on top of it).
+        mortgage = mortgage or Decimal("0")
 
     account = Account.objects.select_for_update().get(pk=account.pk)
     if kind in {LedgerEntry.Kind.OPENING_CASH, LedgerEntry.Kind.OPENING_POSITION}:
@@ -291,9 +294,9 @@ def _projection_state(account: Account) -> dict:
             )
         if entry.asset and entry.asset.is_house and entry.kind == LedgerEntry.Kind.OPENING_POSITION:
             real_estate[entry.asset_id] = {
-                "area_sqm": entry.area_sqm or Decimal("90.2"),
+                "area_sqm": entry.area_sqm or HOUSE_AREA_SQM,
                 "mortgage_deduction_tomans": (
-                    entry.mortgage_deduction_tomans or Decimal("400000000")
+                    entry.mortgage_deduction_tomans or Decimal("0")
                 ),
             }
     return {

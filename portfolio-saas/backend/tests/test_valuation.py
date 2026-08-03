@@ -14,18 +14,22 @@ from portfolio.services.valuation import _house_value
 pytestmark = pytest.mark.django_db
 
 
-def test_house_formula_uses_area_and_mortgage():
-    # 50M toman/sqm * 90.2 sqm - 400M mortgage = 4,110,000,000.
-    assert _house_value(Decimal("50")) == Decimal("4110000000")
+def test_house_formula_is_gross_of_mortgage():
+    """Since 0017 the mortgage is a Liability, netted off the account total.
+
+    Subtracting it here too would double-count it: 50M/sqm * 90.2 sqm.
+    """
+    assert _house_value(Decimal("50")) == Decimal("4510000000")
 
 
-def test_house_formula_zero_price_is_negative_deduction():
-    assert _house_value(Decimal("0")) == Decimal("-400000000")
+def test_house_formula_zero_price_is_zero():
+    assert _house_value(Decimal("0")) == Decimal("0")
 
 
 def test_asset_value_uses_house_formula_for_real_estate(asset_catalog):
     house = asset_catalog["house_asset"]
     holding = Holding(asset=house, quantity=Decimal("50"), mortgage_deduction_tomans=Decimal("400000000"))
+    # The legacy holding column is deliberately ignored — Liability owns the debt.
     assert asset_value(holding, Decimal("0")) == _house_value(Decimal("50"))
 
 
