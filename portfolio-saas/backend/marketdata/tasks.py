@@ -425,100 +425,217 @@ def nightly_data_integrity():
 
 
 @shared_task(ignore_result=True)
-def nightly_series_validation():
+def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
     """Derive corporate actions, then persist unexplained cross-day spikes."""
     from decimal import Decimal
-
-    from django.db.models import F
+    import math
 
     from .models import (
         CodalAnnouncement,
         CorporateAction,
         MarketCandle,
         RejectedRecord,
+        GoldCurrencyHistory,
     )
     from .validation import detect_factor_ratio_actions, screen_series
 
-    symbols = MarketCandle.objects.filter(
-        timeframe=MarketCandle.ADJUSTED
-    ).values_list("symbol", flat=True).distinct()
-    rejected = 0
-    actions_created = 0
-    for symbol in symbols.iterator():
-        unadjusted = dict(
-            MarketCandle.objects.filter(
-                symbol=symbol, timeframe=MarketCandle.UNADJUSTED
-            ).values_list("date_time", "close_price")
+    # Helper functions for gold/currency validation
+    def get_gold_currency_asset_class(symbol):
+        if symbol in {"BTC", "USDT_IRT"}:
+            return "crypto"
+        if symbol in {"XAUUSD"}:
+            return "commodity"
+        if symbol.startswith("IR_GOLD_") or symbol.startswith("IR_COIN_"):
+            return "gold"
+        return "currency"
+
+    ASSET_CLASS_ENDPOINTS = {
+        "crypto": "crypto_daily",
+        "commodity": "commodity_daily",
+        "gold": "gold_daily",
+        "currency": "gold_daily",
+    }
+
+    GOLD_CURRENCY_THRESHOLDS = {
+        "crypto": math.log(2.0),
+        "commodity": math.log(1.2),
+        "currency": math.log(1.15),
+        "gold": math.log(1.2),
+    }
+
+    # 1. TSE Equities validation (F2 & F4 & F5)
+    if symbols is None:
+        symbols = list(
+            MarketCandle.objects.filter(timeframe=MarketCandle.ADJUSTED)
+            .order_by()
+            .values_list("symbol", flat=True)
+            .distinct()
         )
-        adjusted = dict(
-            MarketCandle.objects.filter(
-                symbol=symbol, timeframe=MarketCandle.ADJUSTED
-            ).values_list("date_time", "close_price")
-        )
+    else:
+        symbols = list(symbols)
+
+    rejected_count = 0
+    actions_created_count = 0
+    
+    # Reports list for dry-run
+    corporate_action_candidates = []
+    proposed_rejections = []
+
+    for symbol in symbols:
+        unadjusted = {}
+        for dt, close in MarketCandle.objects.filter(symbol=symbol, timeframe=MarketCandle.UNADJUSTED).values_list("date_time", "close_price"):
+            unadjusted[dt.split()[0]] = close
+
+        adjusted = {}
+        for dt, close in MarketCandle.objects.filter(symbol=symbol, timeframe=MarketCandle.ADJUSTED).values_list("date_time", "close_price"):
+            adjusted[dt.split()[0]] = close
+
         paired = [
             (date, unadjusted[date], adjusted[date])
             for date in sorted(unadjusted.keys() & adjusted.keys())
         ]
+
         for action in detect_factor_ratio_actions(paired):
             codal = CodalAnnouncement.objects.filter(
                 symbol=symbol,
                 date_publish=action["date"],
                 category=CodalAnnouncement.Category.CAPITAL_INCREASE,
             ).exists()
-            _, created = CorporateAction.objects.update_or_create(
-                symbol=symbol,
-                date=action["date"],
-                defaults={
-                    "factor": Decimal(str(action["factor"])),
-                    "kind": (
-                        CorporateAction.Kind.CAPITAL_INCREASE
-                        if codal
-                        else CorporateAction.Kind.UNKNOWN
-                    ),
-                    "source": (
-                        CorporateAction.Source.CODAL
-                        if codal
-                        else CorporateAction.Source.FACTOR_RATIO
-                    ),
-                },
-            )
-            actions_created += int(created)
+            
+            status = "confirmed" if codal else "unconfirmed"
+            corporate_action_candidates.append({
+                "symbol": symbol,
+                "date": action["date"],
+                "factor": action["factor"],
+                "status": status,
+                "reason": "Matching Codal announcement found" if codal else "Factor step > 1% without Codal announcement"
+            })
 
-        action_dates = CorporateAction.objects.filter(symbol=symbol).values_list(
-            "date", flat=True
-        )
+            if not dry_run:
+                _, created = CorporateAction.objects.update_or_create(
+                    symbol=symbol,
+                    date=action["date"],
+                    defaults={
+                        "factor": Decimal(str(action["factor"])),
+                        "kind": (
+                            CorporateAction.Kind.CAPITAL_INCREASE
+                            if codal
+                            else CorporateAction.Kind.UNKNOWN
+                        ),
+                        "source": (
+                            CorporateAction.Source.CODAL
+                            if codal
+                            else CorporateAction.Source.FACTOR_RATIO
+                        ),
+                    },
+                )
+                actions_created_count += int(created)
+
+        action_dates = set(CorporateAction.objects.filter(symbol=symbol).values_list("date", flat=True))
+        
         for timeframe in (MarketCandle.UNADJUSTED, MarketCandle.ADJUSTED):
-            rows = MarketCandle.objects.filter(
+            raw_rows = MarketCandle.objects.filter(
                 symbol=symbol,
                 timeframe=timeframe,
                 close_price__gt=0,
             ).order_by("date_time").values_list("date_time", "close_price")
+            
+            normalized_rows = []
+            for dt, close in raw_rows:
+                normalized_rows.append((dt.split()[0], close))
+
             for rejection in screen_series(
                 symbol,
                 timeframe,
-                rows,
+                normalized_rows,
                 corporate_action_dates=action_dates,
             ):
+                proposed_rejections.append({
+                    "symbol": symbol,
+                    "date": rejection.record["date"],
+                    "endpoint": f"series:{timeframe}",
+                    "reason": rejection.reason,
+                    "payload": rejection.record,
+                })
+                if not dry_run:
+                    row, created = RejectedRecord.objects.get_or_create(
+                        endpoint=f"series:{timeframe}",
+                        symbol=symbol,
+                        date=rejection.record["date"],
+                        reason=rejection.reason,
+                        defaults={"payload": rejection.record, "occurrences": 1},
+                    )
+                    if created:
+                        rejected_count += 1
+                else:
+                    rejected_count += 1
+
+    # 2. Gold / Currency screening (F3)
+    if gold_symbols is None:
+        gold_symbols = list(
+            GoldCurrencyHistory.objects.order_by()
+            .values_list("symbol", flat=True)
+            .distinct()
+        )
+    else:
+        gold_symbols = list(gold_symbols)
+
+    for symbol in gold_symbols:
+        raw_rows = list(
+            GoldCurrencyHistory.objects.filter(
+                symbol=symbol,
+                close_price__gt=0,
+            ).order_by("date").values_list("date", "close_price")
+        )
+        
+        normalized_rows = []
+        for dt, close in raw_rows:
+            normalized_rows.append((dt.split()[0], close))
+
+        asset_class = get_gold_currency_asset_class(symbol)
+        endpoint = ASSET_CLASS_ENDPOINTS[asset_class]
+        threshold = GOLD_CURRENCY_THRESHOLDS[asset_class]
+
+        for rejection in screen_series(
+            symbol,
+            endpoint,
+            normalized_rows,
+            max_log_return=threshold,
+        ):
+            proposed_rejections.append({
+                "symbol": symbol,
+                "date": rejection.record["date"],
+                "endpoint": endpoint,
+                "reason": rejection.reason,
+                "payload": rejection.record,
+            })
+            if not dry_run:
                 row, created = RejectedRecord.objects.get_or_create(
-                    endpoint=f"series:{timeframe}",
+                    endpoint=endpoint,
                     symbol=symbol,
                     date=rejection.record["date"],
                     reason=rejection.reason,
-                    defaults={"payload": rejection.record},
+                    defaults={"payload": rejection.record, "occurrences": 1},
                 )
-                if not created:
-                    RejectedRecord.objects.filter(pk=row.pk).update(
-                        occurrences=F("occurrences") + 1,
-                        payload=rejection.record,
-                    )
-                rejected += 1
+                if created:
+                    rejected_count += 1
+            else:
+                rejected_count += 1
+
     logger.info(
         "nightly_series_validation: %d actions created, %d spikes rejected",
-        actions_created,
-        rejected,
+        actions_created_count,
+        rejected_count,
     )
-
-
+    
+    return {
+        "tse_symbols_examined": len(symbols),
+        "corporate_action_candidates": corporate_action_candidates,
+        "actions_created": actions_created_count,
+        "gold_currency_symbols_examined": len(gold_symbols),
+        "proposed_rejections": proposed_rejections,
+        "spikes_rejected": rejected_count,
+    }
 @shared_task(ignore_result=True)
 def nightly_asset_metrics(window_days=365):
     import numpy as np
