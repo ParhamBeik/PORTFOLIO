@@ -385,7 +385,7 @@ def ingest_real_legal(symbol: str, payload) -> tuple[int, int]:
     """History.php?type=1 payload -> independent real/legal daily rows."""
     if not isinstance(payload, list):
         return 0, 0 if payload is None else 1
-    accepted, bad = screen("real_legal", payload, "stock_history_adjusted", symbol)
+    accepted, bad = screen("real_legal", payload, "real_legal_history", symbol)
     rows = []
     updated_daily = 0
     skipped_daily = 0

@@ -780,3 +780,200 @@ def test_as_of_returns_and_universe_ignore_everything_published_later(asset_cata
         item["key"] for item in resolve_universe([asset.key], as_of=cutoff_at)
     ], "a symbol listed after the cutoff leaked into the cutoff's universe"
     assert asset.key in [item["key"] for item in resolve_universe([asset.key])]
+
+
+def test_ingest_real_legal_rejection_uses_distinct_endpoint():
+    """F4: real/legal rejections must not suppress daily prices."""
+    from marketdata.ingest import ingest_real_legal
+    from marketdata.models import RejectedRecord, DailyStockHistory
+
+    symbol = "فملی"
+    # Payload with buy/sell volume mismatch to trigger rejection
+    payload = [
+        {
+            "date": "1403-01-01",
+            "Buy_CountI": 100,
+            "Buy_CountN": 50,
+            "Sell_CountI": 80,
+            "Sell_CountN": 40,
+            "Buy_I_Volume": 1000,
+            "Buy_N_Volume": 500,
+            "Sell_I_Volume": 800,
+            "Sell_N_Volume": 300,  # mismatch: 1500 != 1100
+            "Buy_I_Value": 100000,
+            "Buy_N_Value": 50000,
+            "Sell_I_Value": 80000,
+            "Sell_N_Value": 30000,
+        }
+    ]
+
+    # Ensure a clean DailyStockHistory row exists for the same symbol/date
+    DailyStockHistory.objects.update_or_create(
+        symbol=symbol,
+        date="1403-01-01",
+        is_adjusted=False,
+        defaults={"pc": 1000, "pl": 1000, "pmin": 990, "pmax": 1010, "tvol": 100000, "tval": 100000000},
+    )
+
+    created, bad = ingest_real_legal(symbol, payload)
+
+    # Rejection should be recorded under "real_legal_history", not "stock_history_adjusted"
+    rejection = RejectedRecord.objects.get(endpoint="real_legal_history", symbol=symbol, date="1403-01-01")
+    assert rejection.reason == "buy_sell_volume_mismatch"
+
+    # The daily price must NOT be excluded by the real/legal rejection
+    stock_rejections = RejectedRecord.objects.filter(
+        endpoint__in=["stock_history_adjusted", "stock_history_unadjusted"],
+        symbol=symbol,
+        date="1403-01-01",
+    )
+    assert not stock_rejections.exists(), "real/legal rejection must not be recorded as a price rejection"
+
+    # The price row should still exist and be accessible
+    price = DailyStockHistory.objects.get(symbol=symbol, date="1403-01-01", is_adjusted=False)
+    assert price.pc == 1000
+
+
+def test_candle_close_qs_includes_both_date_formats(asset_catalog):
+    """F5: candle_close_qs must include rows with and without time suffix for as_of."""
+    from marketdata.candles import candle_close_qs
+    from marketdata.models import MarketCandle
+    from decimal import Decimal
+
+    symbol = "کاما"
+
+    # Create adjusted candle with plain date format
+    MarketCandle.objects.create(
+        symbol=symbol,
+        timeframe=MarketCandle.ADJUSTED,
+        date_time="1405-05-09",
+        close_price=Decimal("1000"),
+        open_price=Decimal("1000"),
+        high_price=Decimal("1000"),
+        low_price=Decimal("1000"),
+        volume=100,
+    )
+
+    # Create adjusted candle with time suffix for the same day (should not happen in practice,
+    # but the fix must handle legacy rows that have both formats)
+    MarketCandle.objects.create(
+        symbol=symbol,
+        timeframe=MarketCandle.ADJUSTED,
+        date_time="1405-05-09 00:00:00",
+        close_price=Decimal("2000"),
+        open_price=Decimal("2000"),
+        high_price=Decimal("2000"),
+        low_price=Decimal("2000"),
+        volume=100,
+    )
+
+    # as_of="1405-05-09" should include BOTH rows (they represent the same day)
+    # The adjusted preference logic will pick one, but both should be in the queryset
+    qs = candle_close_qs(symbol, as_of="1405-05-09")
+    dates = list(qs.values_list("date_time", flat=True))
+
+    # Both formats should be present
+    assert "1405-05-09" in dates
+    assert "1405-05-09 00:00:00" in dates
+
+
+def test_candle_close_qs_excludes_following_day(asset_catalog):
+    """F5: as_of must not include the following day's rows."""
+    from marketdata.candles import candle_close_qs
+    from marketdata.models import MarketCandle
+    from decimal import Decimal
+
+    symbol = "کاما"
+
+    # Create candle for 1405-05-09
+    MarketCandle.objects.create(
+        symbol=symbol,
+        timeframe=MarketCandle.ADJUSTED,
+        date_time="1405-05-09",
+        close_price=Decimal("1000"),
+        open_price=Decimal("1000"),
+        high_price=Decimal("1000"),
+        low_price=Decimal("1000"),
+        volume=100,
+    )
+
+    # Create candle for 1405-05-10 (next day)
+    MarketCandle.objects.create(
+        symbol=symbol,
+        timeframe=MarketCandle.ADJUSTED,
+        date_time="1405-05-10",
+        close_price=Decimal("2000"),
+        open_price=Decimal("2000"),
+        high_price=Decimal("2000"),
+        low_price=Decimal("2000"),
+        volume=100,
+    )
+
+    # as_of="1405-05-09" should only include 1405-05-09
+    qs = candle_close_qs(symbol, as_of="1405-05-09")
+    dates = list(qs.values_list("date_time", flat=True))
+
+    assert "1405-05-09" in dates
+    assert "1405-05-10" not in dates, "following day must be excluded"
+
+
+def test_candle_close_qs_adjusted_preference_preserved(asset_catalog):
+    """F5: adjusted-price preference must still work with the fix."""
+    from marketdata.candles import candle_close_qs
+    from marketdata.models import MarketCandle
+    from decimal import Decimal
+
+    symbol = "کاما"
+
+    # Create both adjusted and aggregate for the same day
+    MarketCandle.objects.create(
+        symbol=symbol,
+        timeframe=MarketCandle.AGGREGATE,
+        date_time="1405-05-09",
+        close_price=Decimal("500"),  # aggregate price
+        open_price=Decimal("500"),
+        high_price=Decimal("500"),
+        low_price=Decimal("500"),
+        volume=100,
+    )
+    MarketCandle.objects.create(
+        symbol=symbol,
+        timeframe=MarketCandle.ADJUSTED,
+        date_time="1405-05-09",
+        close_price=Decimal("1000"),  # adjusted price (preferred)
+        open_price=Decimal("1000"),
+        high_price=Decimal("1000"),
+        low_price=Decimal("1000"),
+        volume=100,
+    )
+
+    # Should pick the adjusted row (provider-adjusted preferred)
+    picked = candle_close_qs(symbol, as_of="1405-05-09").order_by("-date_time").first()
+    assert picked.close_price == Decimal("1000.0000")
+    assert picked.timeframe == MarketCandle.ADJUSTED
+
+
+def test_candle_close_qs_unadjusted_fallback_preserved(asset_catalog):
+    """F5: unadjusted fallback must still work when no adjusted row exists."""
+    from marketdata.candles import candle_close_qs
+    from marketdata.models import MarketCandle
+    from decimal import Decimal
+
+    symbol = "کاما"
+
+    # Create only aggregate (no adjusted row for this day)
+    MarketCandle.objects.create(
+        symbol=symbol,
+        timeframe=MarketCandle.AGGREGATE,
+        date_time="1405-05-09",
+        close_price=Decimal("500"),
+        open_price=Decimal("500"),
+        high_price=Decimal("500"),
+        low_price=Decimal("500"),
+        volume=100,
+    )
+
+    # Should fall back to aggregate
+    picked = candle_close_qs(symbol, as_of="1405-05-09").order_by("-date_time").first()
+    assert picked.close_price == Decimal("500.0000")
+    assert picked.timeframe == MarketCandle.AGGREGATE

@@ -25,5 +25,8 @@ def candle_close_qs(symbol, *, as_of=None):
     else:
         queryset = queryset.filter(symbol__in=symbol)
     if as_of is not None:
-        queryset = queryset.filter(date_time__lte=as_of)
+        # Include both "1405-05-09" and "1405-05-09 00:00:00" formats for the same day.
+        # String comparison: "1405-05-09 00:00:00" > "1405-05-09" lexicographically,
+        # so we extend the bound to end-of-day to capture both formats.
+        queryset = queryset.filter(date_time__lte=as_of + " 23:59:59")
     return queryset
