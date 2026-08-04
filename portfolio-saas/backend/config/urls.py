@@ -4,6 +4,24 @@ from django.urls import include, path
 from accounts.views import CookieTokenRefreshView
 from .health import HealthView, PriceFeedView, ReadyView
 
+# Monkeypatch django admin index page to inject operational telemetry
+from django.contrib import admin
+from marketdata.admin_telemetry import get_admin_telemetry_context
+
+original_admin_index = admin.site.index
+
+def custom_admin_index(request, extra_context=None):
+    if extra_context is None:
+        extra_context = {}
+    try:
+        extra_context.update(get_admin_telemetry_context())
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("Failed to fetch admin telemetry context: %s", e)
+    return original_admin_index(request, extra_context=extra_context)
+
+admin.site.index = custom_admin_index
+
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/health/", HealthView.as_view(), name="health"),

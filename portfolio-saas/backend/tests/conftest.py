@@ -101,8 +101,18 @@ def make_user(db):
 
 
 @pytest.fixture(autouse=True)
-def clear_redis_locks():
-    """Bust pricing locks before each test so they don't block concurrent suites."""
+def clear_caches():
+    """Bust all caches before each test.
+
+    LocMemCache persists across the entire pytest process. Views like
+    MarketAssetsView cache their full response (``market:assets:catalog:v2``),
+    so a test that creates new assets and then hits the endpoint sees stale
+    data from a prior test.  ``cache.clear()`` prevents this.
+
+    Also clears pricing locks so concurrent test suites don't block each other.
+    """
+    from django.core.cache import cache
+    cache.clear()
     try:
         from portfolio.live.pubsub import get_redis
         r = get_redis()

@@ -38,6 +38,7 @@ CORS_ALLOWED_ORIGINS = [
 CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
 
 INSTALLED_APPS = [
+    "marketdata",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -49,7 +50,6 @@ INSTALLED_APPS = [
     "corsheaders",
     "accounts",
     "portfolio",
-    "marketdata",
     "billing",
 ]
 

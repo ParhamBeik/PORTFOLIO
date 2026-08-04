@@ -126,7 +126,11 @@ def test_admin_endpoints(auth_client, db):
     assert response.status_code == status.HTTP_200_OK
     assert len(response.data) >= 1
     
-    # Test RetryArchiveJobView
+    # Test ArchiveFetchStateAdmin custom retry action
+    from marketdata.admin import ArchiveFetchStateAdmin
+    from django.contrib.admin.sites import AdminSite
+    from django.test import RequestFactory
+    
     state = ArchiveFetchState.objects.create(
         symbol="FOO",
         endpoint="announcements",
@@ -136,10 +140,14 @@ def test_admin_endpoints(auth_client, db):
         last_error="Temporary network issue."
     )
     
-    retry_url = reverse("admin-retry-job", kwargs={"job_id": state.id})
-    response = client.post(retry_url)
-    assert response.status_code == status.HTTP_200_OK
-    assert response.data["status"] == "queued"
+    admin_instance = ArchiveFetchStateAdmin(ArchiveFetchState, AdminSite())
+    req = RequestFactory().post("/admin/")
+    req.user = user
+    
+    from unittest.mock import patch
+    with patch("django.contrib.messages.add_message") as mock_add:
+        admin_instance.retry_selected_jobs(req, ArchiveFetchState.objects.filter(id=state.id))
+        mock_add.assert_called_once()
     
     # Check that failures were reset
     state.refresh_from_db()

@@ -52,3 +52,10 @@ SECURE_SSL_REDIRECT = False
 # multiply the provider's allowance by the worker count); the suite is one
 # process, so let it fall back to the local window and exercise the counters.
 MARKETDATA_REQUIRE_SHARED_WINDOW = False
+
+# Run Celery tasks synchronously in-process. This removes the hard dependency on
+# a running Redis broker during tests — views that call `.delay()` (e.g.
+# RetryArchiveJobView) execute the task inline instead of failing with
+# ConnectionRefusedError after 20 retries.
+CELERY_TASK_ALWAYS_EAGER = True
+CELERY_TASK_EAGER_PROPAGATES = True

@@ -13,7 +13,6 @@ const OptimizationLayout = lazy(() => import("./components/OptimizationLayout.js
 const Optimization = lazy(() => import("./components/Optimization.jsx"));
 const Insights = lazy(() => import("./components/Insights.jsx"));
 const Analytics = lazy(() => import("./components/Analytics.jsx"));
-const AdminPortal = lazy(() => import("./components/AdminPortal.jsx"));
 const Profile = lazy(() => import("./components/Profile.jsx"));
 const TimeMachine = lazy(() => import("./components/TimeMachine.jsx"));
 const Discovery = lazy(() => import("./components/Discovery.jsx"));
@@ -106,10 +105,6 @@ export default function App() {
               <Route path="/billing" element={user ? <Billing user={user} setUser={setUser} /> : <Navigate to="/login" replace />} />
               <Route path="/profile" element={user ? <Profile user={user} setUser={setUser} /> : <Navigate to="/login" replace />} />
               <Route path="/settings" element={user ? <Settings user={user} setUser={setUser} /> : <Navigate to="/login" replace />} />
-              <Route
-                path="/admin"
-                element={user?.is_staff ? <AdminPortal /> : <Navigate to="/" replace />}
-              />
               <Route path="/accounts/:id" element={user ? <AccountRedirect /> : <Navigate to="/login" replace />} />
               <Route path="/dashboard" element={<Navigate to="/" replace />} />
               <Route path="/optimization" element={user ? <OptimizationLayout user={user} /> : <Navigate to="/login" replace />}>
@@ -225,9 +220,9 @@ function Shell({ user, setUser }) {
             Settings
           </NavLink>
           {user.is_staff && (
-            <NavLink to="/admin" className={({ isActive }) => (isActive ? "active" : "")}>
+            <a href="/admin/">
               Admin
-            </NavLink>
+            </a>
           )}
 
         </nav>

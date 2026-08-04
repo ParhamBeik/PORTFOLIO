@@ -320,14 +320,41 @@ def _warehouse_series(
     if as_of is not None:
         as_of_jalali = to_jalali_str(as_of)
 
+    from marketdata.models import RejectedRecord
+    if source == "tse":
+        rejections = set(
+            RejectedRecord.objects.filter(
+                symbol=symbol,
+                endpoint__in=[
+                    "stock_candle_adjusted", "stock_candle_unadjusted",
+                    "stock_history_adjusted", "stock_history_unadjusted",
+                    "series:1d_adj", "series:1d_unadj"
+                ]
+            ).values_list("date", flat=True)
+        )
+    elif source == "brs":
+        rejections = set(
+            RejectedRecord.objects.filter(
+                symbol=symbol,
+                endpoint__in=[
+                    "gold_daily", "crypto_daily", "commodity_daily",
+                    "market_index_daily", "etf_nav_daily", "option_contract_daily"
+                ]
+            ).values_list("date", flat=True)
+        )
+    else:
+        rejections = set()
+
     if source == "tse":
         qs = candle_close_qs(symbol, as_of=as_of_jalali)
         rows = qs.order_by("date_time").values_list("date_time", "close_price")
+        rows = [r for r in rows if r[0].split()[0] not in rejections]
     elif source == "brs":
-        qs = GoldCurrencyHistory.objects.filter(symbol=symbol)
+        qs = GoldCurrencyHistory.objects.filter(symbol=symbol, close_price__gt=0)
         if as_of_jalali is not None:
             qs = qs.filter(date__lte=as_of_jalali)
         rows = qs.order_by("date").values_list("date", "close_price")
+        rows = [r for r in rows if r[0] not in rejections]
     else:
         return None
 
@@ -397,6 +424,8 @@ def _load_price_panel(
     if as_of_dt is not None:
         as_of_jalali = to_jalali_str(as_of_dt)
 
+    from marketdata.models import RejectedRecord
+
     # Bulk query MarketCandle (TSE)
     tse_rows = []
     if tse_symbols:
@@ -407,11 +436,30 @@ def _load_price_panel(
     brs_rows = []
     if brs_symbols:
         qs_brs = GoldCurrencyHistory.objects.filter(
-            symbol__in=brs_symbols
+            symbol__in=brs_symbols,
+            close_price__gt=0,
         )
         if as_of_jalali is not None:
             qs_brs = qs_brs.filter(date__lte=as_of_jalali)
         brs_rows = list(qs_brs.order_by("symbol", "date").values_list("symbol", "date", "close_price"))
+
+    cutoff_jalali = to_jalali_str(cutoff)
+    rejections = set(
+        RejectedRecord.objects.filter(
+            symbol__in=tse_symbols + brs_symbols,
+            date__gte=cutoff_jalali,
+            endpoint__in=[
+                "stock_candle_adjusted", "stock_candle_unadjusted",
+                "stock_history_adjusted", "stock_history_unadjusted",
+                "series:1d_adj", "series:1d_unadj",
+                "gold_daily", "crypto_daily", "commodity_daily",
+                "market_index_daily", "etf_nav_daily", "option_contract_daily"
+            ]
+        ).values_list("symbol", "date")
+    )
+    if rejections:
+        tse_rows = [r for r in tse_rows if (r[0], r[1].split()[0]) not in rejections]
+        brs_rows = [r for r in brs_rows if (r[0], r[1]) not in rejections]
 
     # Group data by symbol
     tse_data = {}
@@ -497,7 +545,7 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
         return pd.DataFrame()
     
     qs = Price.objects.filter(
-        asset__is_active=True, asset__key__in=keys, fetched_at__gte=cutoff
+        asset__is_active=True, asset__key__in=keys, fetched_at__gte=cutoff, price__gt=0
     ).exclude(asset__is_house=True)
 
     if as_of is not None:
@@ -511,11 +559,71 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
     if not rows:
         return pd.DataFrame()
 
+    rows = list(rows)
+
+    # Exclude RejectedRecord matches
+    from django.utils import timezone
+    from portfolio.models import Asset
+    from marketdata.models import RejectedRecord
+    from django.conf import settings
+    from datetime import timedelta
+
+    assets = {a.key: (a.tse_symbol or a.brs_symbol or "") for a in Asset.objects.filter(key__in=keys)}
+    symbols = [s for s in assets.values() if s]
+
+    rejections = set(
+        RejectedRecord.objects.filter(
+            symbol__in=symbols,
+            date__gte=to_jalali_str(cutoff),
+            endpoint__in=[
+                "stock_candle_adjusted", "stock_candle_unadjusted",
+                "stock_history_adjusted", "stock_history_unadjusted",
+                "series:1d_adj", "series:1d_unadj",
+                "gold_daily", "crypto_daily", "commodity_daily",
+                "market_index_daily", "etf_nav_daily", "option_contract_daily"
+            ]
+        ).values_list("symbol", "date")
+    )
+
+    now_tz = timezone.now() if timezone.is_aware(timezone.now()) else timezone.now().replace(tzinfo=dt.timezone.utc)
+    ref_time = as_of if as_of is not None else now_tz
+    stale_limit = ref_time - timedelta(seconds=getattr(settings, "PRICE_STALE_THRESHOLD_SECONDS", 900))
+
+    # Identify latest fetched_at per asset to check staleness
+    latest_ticks = {}
+    for r in rows:
+        k = r["asset__key"]
+        f = r["fetched_at"]
+        if k not in latest_ticks or f > latest_ticks[k]:
+            latest_ticks[k] = f
+
+    is_live_query = (as_of is None) or ((now_tz - as_of).total_seconds() < 3600)
+
+    valid_rows = []
+    for r in rows:
+        k = r["asset__key"]
+        f = r["fetched_at"]
+        sym = assets.get(k)
+        jalali_date = to_jalali_str(f)
+
+        # 1. Exclude stale live prices
+        if is_live_query and latest_ticks[k] < stale_limit:
+            continue
+
+        # 2. Exclude RejectedRecord matches
+        if (sym, jalali_date) in rejections:
+            continue
+
+        valid_rows.append(r)
+    rows = valid_rows
+
+    if not rows:
+        return pd.DataFrame()
+
     df = pd.DataFrame.from_records(rows)
     df["fetched_at"] = pd.to_datetime(df["fetched_at"], utc=True)
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
     df = df.dropna(subset=["price"])
-    df = df[df["price"] > 0]
 
     panel = (
         df.pivot_table(

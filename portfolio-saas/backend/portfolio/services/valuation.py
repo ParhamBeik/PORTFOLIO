@@ -40,7 +40,7 @@ def get_latest_prices() -> dict:
 
     latest = (
         Price.objects.select_related("asset")
-        .filter(asset__is_active=True)
+        .filter(asset__is_active=True, price__gt=0)
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     )
@@ -90,7 +90,7 @@ def guard_price_map(prices: dict, *, fill_missing=True) -> dict:
 def _archive_replacements(prices: dict) -> dict:
     """Return archive-backed replacements for missing or obviously broken live prices."""
     from marketdata.candles import candle_close_qs
-    from marketdata.models import GoldCurrencyHistory
+    from marketdata.models import GoldCurrencyHistory, RejectedRecord
 
     assets = Asset.objects.filter(is_active=True).exclude(is_house=True)
     stock_symbols = {
@@ -104,6 +104,20 @@ def _archive_replacements(prices: dict) -> dict:
         if asset.brs_symbol
     }
 
+    all_symbols = list(stock_symbols.keys()) + list(brs_symbols.keys())
+    rejections = set(
+        RejectedRecord.objects.filter(
+            symbol__in=all_symbols,
+            endpoint__in=[
+                "stock_candle_adjusted", "stock_candle_unadjusted",
+                "stock_history_adjusted", "stock_history_unadjusted",
+                "series:1d_adj", "series:1d_unadj",
+                "gold_daily", "crypto_daily", "commodity_daily",
+                "market_index_daily", "etf_nav_daily", "option_contract_daily"
+            ]
+        ).values_list("symbol", "date")
+    )
+
     archive_prices = {}
     # Adjusted closes live in MarketCandle.ADJUSTED. DailyStockHistory(is_adjusted=True)
     # was never adjusted prices at all -- History.php?type=1 is the Real/Legal
@@ -112,18 +126,21 @@ def _archive_replacements(prices: dict) -> dict:
     stock_rows = (
         candle_close_qs(stock_symbols)
         .order_by("symbol", "-date_time")
-        .values("symbol", "close_price")
+        .values("symbol", "date_time", "close_price")
     )
     for row in stock_rows:
-        archive_prices.setdefault(stock_symbols[row["symbol"]], _q(row["close_price"]))
+        dt_str = row["date_time"].split()[0]
+        if (row["symbol"], dt_str) not in rejections:
+            archive_prices.setdefault(stock_symbols[row["symbol"]], _q(row["close_price"]))
 
     brs_rows = (
         GoldCurrencyHistory.objects.filter(symbol__in=brs_symbols, close_price__gt=0)
         .order_by("symbol", "-date")
-        .values("symbol", "close_price")
+        .values("symbol", "date", "close_price")
     )
     for row in brs_rows:
-        archive_prices.setdefault(brs_symbols[row["symbol"]], _q(row["close_price"]))
+        if (row["symbol"], row["date"]) not in rejections:
+            archive_prices.setdefault(brs_symbols[row["symbol"]], _q(row["close_price"]))
 
     replacements = {}
     for key, archive_price in archive_prices.items():
@@ -516,7 +533,16 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
             else:
                 stale_sessions = 0
                 if asset.tse_symbol:
-                    candles = candle_close_qs(asset.tse_symbol, as_of=jalali_str)
+                    from marketdata.models import RejectedRecord
+                    rejections = RejectedRecord.objects.filter(
+                        symbol=asset.tse_symbol,
+                        endpoint__in=[
+                            "stock_candle_adjusted", "stock_candle_unadjusted",
+                            "stock_history_adjusted", "stock_history_unadjusted",
+                            "series:1d_adj", "series:1d_unadj"
+                        ]
+                    ).values_list("date", flat=True)
+                    candles = candle_close_qs(asset.tse_symbol, as_of=jalali_str).exclude(date_time__in=rejections)
                     candle = candles.order_by("-date_time").first()
                     if candle:
                         price = Decimal(str(candle.close_price))
@@ -524,10 +550,18 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                             candles, "date_time", candle.date_time, jalali_str
                         )
                 elif asset.brs_symbol:
+                    from marketdata.models import RejectedRecord
+                    rejections = RejectedRecord.objects.filter(
+                        symbol=asset.brs_symbol,
+                        endpoint__in=[
+                            "gold_daily", "crypto_daily", "commodity_daily",
+                            "market_index_daily", "etf_nav_daily", "option_contract_daily"
+                        ]
+                    ).values_list("date", flat=True)
                     history = GoldCurrencyHistory.objects.all()
                     hist = history.filter(
-                        symbol=asset.brs_symbol, date__lte=jalali_str
-                    ).order_by("-date").first()
+                        symbol=asset.brs_symbol, date__lte=jalali_str, close_price__gt=0
+                    ).exclude(date__in=rejections).order_by("-date").first()
                     if hist:
                         price = Decimal(str(hist.close_price))
                         stale_sessions = _stale_sessions(

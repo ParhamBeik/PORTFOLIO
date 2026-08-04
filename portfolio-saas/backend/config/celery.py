@@ -123,7 +123,7 @@ def restore_request_id(task=None, **kwargs):
 
     request_id = (
         getattr(getattr(task, "request", None), "x-request-id", None)
-        or getattr(getattr(task, "request", None), "headers", {}).get(
+        or (getattr(getattr(task, "request", None), "headers", None) or {}).get(
             "x-request-id", "-"
         )
     )

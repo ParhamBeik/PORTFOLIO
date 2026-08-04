@@ -83,20 +83,31 @@ def test_anonymous_rejected():
 
 
 def test_admin_status_rejects_non_staff_user(make_user):
-    response = _auth(make_user()).get("/api/market/admin/status/")
-    assert response.status_code == 403
+    from django.test import Client
+    client = Client()
+    # Anonymous or non-staff user gets redirected to admin login page (302)
+    response = client.get("/admin/")
+    assert response.status_code in (302, 403)
+    
+    user = make_user()
+    client.force_login(user)
+    response = client.get("/admin/")
+    assert response.status_code in (302, 403)
 
 
 def test_admin_status_allows_staff_user(make_user):
     user = make_user()
     user.is_staff = True
     user.save(update_fields=["is_staff"])
-    response = _auth(user).get("/api/market/admin/status/")
+    
+    from django.test import Client
+    client = Client()
+    client.force_login(user)
+    response = client.get("/admin/")
     assert response.status_code == 200
-    res_data = response.json()
-    assert {"users", "database", "archive", "quota"} <= set(res_data)
-    assert "stock_transaction_ticks" in res_data["database"]
-    assert "category_summary" in res_data["archive"]
+    assert b"API Quota Status" in response.content
+    assert b"Archive Backfill Progress" in response.content
+    assert b"Database Table Freshness" in response.content
 
 
 

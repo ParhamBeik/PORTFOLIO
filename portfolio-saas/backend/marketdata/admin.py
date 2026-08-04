@@ -4,6 +4,8 @@ Dates here are source-native Jalali strings (CharFields), so no date_hierarchy;
 plain ordering + search covers the browse cases.
 """
 from django.contrib import admin
+from django.db.models import F, Sum
+from django.utils import timezone
 
 from .models import (
     ApiRequestQuota,
@@ -17,13 +19,107 @@ from .models import (
     ShareholderRecord,
     StockSymbolMetadata,
     StockTransactionTick,
+    SystemLogEvent,
 )
 
 
-admin.site.register(ApiRequestQuota)
-admin.site.register(ArchiveFetchState)
-admin.site.register(MarketInstrument)
+# ---------------------------------------------------------------------------
+# ArchiveFetchState — the core telemetry admin replaces AdminStatusView
+# ---------------------------------------------------------------------------
 
+@admin.register(ArchiveFetchState)
+class ArchiveFetchStateAdmin(admin.ModelAdmin):
+    list_display = (
+        "symbol",
+        "endpoint",
+        "progress_display",
+        "stored_rows",
+        "expected_rows",
+        "missing_rows",
+        "consecutive_failures",
+        "verified_complete",
+        "last_attempt_at",
+    )
+    list_filter = ("endpoint", "verified_complete", "consecutive_failures")
+    search_fields = ("symbol",)
+    ordering = ("verified_complete", "-missing_rows", "-consecutive_failures")
+    readonly_fields = (
+        "symbol", "endpoint", "stored_rows", "expected_rows", "missing_rows",
+        "first_date", "last_date", "verified_complete", "consecutive_failures",
+        "last_error", "last_attempt_at", "last_success_at", "next_attempt_at",
+    )
+    list_per_page = 50
+    actions = ["retry_selected_jobs"]
+
+    @admin.display(description="Progress")
+    def progress_display(self, obj):
+        if obj.expected_rows == 0:
+            return "—"
+        pct = round(obj.stored_rows / obj.expected_rows * 100, 1)
+        return f"{pct}%"
+
+    @admin.action(description="Retry selected backfill jobs")
+    def retry_selected_jobs(self, request, queryset):
+        now = timezone.now()
+        count = 0
+        for state in queryset:
+            state.consecutive_failures = 0
+            state.last_error = "Manually triggered retry (admin action)."
+            state.next_attempt_at = now
+            state.save(update_fields=["consecutive_failures", "last_error", "next_attempt_at"])
+            count += 1
+        self.message_user(request, f"Queued {count} job(s) for retry.")
+
+
+# ---------------------------------------------------------------------------
+# ApiRequestQuota — read-only quota browsing
+# ---------------------------------------------------------------------------
+
+@admin.register(ApiRequestQuota)
+class ApiRequestQuotaAdmin(admin.ModelAdmin):
+    list_display = ("day", "used", "limit", "remaining_display", "archive_used", "live_used", "other_used", "updated_at")
+    ordering = ("-day",)
+    readonly_fields = ("day", "used", "limit", "archive_used", "live_used", "other_used", "updated_at")
+    list_per_page = 30
+
+    @admin.display(description="Remaining")
+    def remaining_display(self, obj):
+        return max(0, obj.limit - obj.used)
+
+
+# ---------------------------------------------------------------------------
+# MarketInstrument — enhanced from bare register
+# ---------------------------------------------------------------------------
+
+@admin.register(MarketInstrument)
+class MarketInstrumentAdmin(admin.ModelAdmin):
+    list_display = ("symbol", "source", "eligible", "updated_at")
+    list_filter = ("source", "eligible")
+    search_fields = ("symbol",)
+    ordering = ("symbol",)
+
+
+# ---------------------------------------------------------------------------
+# SystemLogEvent — replaces get_recent_logs() in AdminStatusView
+# ---------------------------------------------------------------------------
+
+@admin.register(SystemLogEvent)
+class SystemLogEventAdmin(admin.ModelAdmin):
+    list_display = ("timestamp", "level", "category", "service", "message_truncated")
+    list_filter = ("level", "category", "service")
+    search_fields = ("message", "category")
+    ordering = ("-timestamp",)
+    readonly_fields = ("timestamp", "level", "category", "logger_name", "message", "service")
+    list_per_page = 100
+
+    @admin.display(description="Message")
+    def message_truncated(self, obj):
+        return obj.message[:120] + "…" if len(obj.message) > 120 else obj.message
+
+
+# ---------------------------------------------------------------------------
+# Existing model admins (unchanged)
+# ---------------------------------------------------------------------------
 
 @admin.register(StockSymbolMetadata)
 class StockSymbolMetadataAdmin(admin.ModelAdmin):

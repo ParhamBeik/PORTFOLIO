@@ -355,20 +355,12 @@ export const marketAnnouncements = (symbol, limit = 20) =>
   api(`/api/market/announcements/?symbol=${encodeURIComponent(symbol)}&limit=${limit}`);
 export const marketShareholders = (symbol) =>
   api(`/api/market/shareholders/?symbol=${encodeURIComponent(symbol)}`);
-export const adminStatus = () => api("/api/market/admin/status/");
-export const adminStatusStreamUrl = () => {
-  const token = auth.token;
-  return `${API_BASE}/api/market/admin/stream/${token ? `?token=${encodeURIComponent(token)}` : ""}`;
-};
 export const adminCleanPricesScan = () => api("/api/admin/clean-prices/scan/");
 export const adminCleanPricesExecute = (confirm) =>
   api("/api/admin/clean-prices/execute/", { method: "POST", body: { confirm } });
 
 export const listAdminUsers = (search = "") =>
   api(`/api/auth/admin/users/${search ? `?search=${encodeURIComponent(search)}` : ""}`);
-
-export const retryArchiveJob = (jobId) =>
-  api(`/api/market/admin/jobs/${jobId}/retry/`, { method: "POST" });
 
 export const getWatchlist = (accountId) => api(`/api/portfolio/watchlist/?account=${accountId}`);
 export const toggleWatchlistItem = (accountId, symbol, action) =>

@@ -281,8 +281,8 @@ def archive_tick(max_seconds: float = 50.0):
 
 
 @shared_task(ignore_result=True)
-def catalog_sync():
-    result = sync_provider_catalog()
+def catalog_sync(limit: int = None):
+    result = sync_provider_catalog(limit=limit)
     logger.info("catalog_sync: %d seen, %d eligible", result["seen"], result["eligible"])
 
 
