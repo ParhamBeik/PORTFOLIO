@@ -9,6 +9,30 @@ UNIT_OVERRIDES = {
     "USDT_IRT": "USD",
 }
 
+# F1: flip to "rial" or "toman" only with documented exchange evidence.
+# See docs/data-verification/F1_POLICY.md — do not infer from magnitude.
+TSE_PRICE_UNIT = "unverified"
+
+
+def tse_unit_verified() -> bool:
+    return TSE_PRICE_UNIT in {"rial", "toman"}
+
+
+def partition_tse_asset_keys(keys) -> tuple[list[str], list[str]]:
+    """Split asset keys into (tse_keys, other_keys) using Asset.tse_symbol."""
+    from portfolio.models import Asset
+
+    key_list = [k for k in keys if k]
+    if not key_list:
+        return [], []
+    tse = set(
+        Asset.objects.filter(key__in=key_list)
+        .exclude(tse_symbol="")
+        .values_list("key", flat=True)
+    )
+    others = [k for k in key_list if k not in tse]
+    return sorted(tse), sorted(others)
+
 
 def canonical_symbol(symbol):
     value = str(symbol or "").strip()

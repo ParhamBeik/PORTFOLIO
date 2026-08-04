@@ -79,6 +79,28 @@ class NoAssetBeatsRiskFreeRate(Exception):
     pass
 
 
+class MixedUnitUniverseBlocked(Exception):
+    """TSE unit unverified — refuse silent mix with Toman gold/FX series (F1)."""
+
+    def __init__(self, tse_keys: list[str], other_keys: list[str]):
+        super().__init__(
+            "TSE price unit is unverified; cannot mix TSE equities with "
+            "non-TSE assets in optimization until F1 is resolved."
+        )
+        self.tse_keys = list(tse_keys)
+        self.other_keys = list(other_keys)
+
+
+def _guard_mixed_tse_units(keys) -> None:
+    from marketdata.currency import partition_tse_asset_keys, tse_unit_verified
+
+    if tse_unit_verified():
+        return
+    tse_keys, other_keys = partition_tse_asset_keys(keys)
+    if tse_keys and other_keys:
+        raise MixedUnitUniverseBlocked(tse_keys, other_keys)
+
+
 # ---------- helpers ----------------------------------------------------------
 
 
@@ -553,6 +575,8 @@ def optimize(
         account = user.accounts.first() if user is not None else None
         universe = get_universe_by_mode(universe_mode, user=user, account=account)
 
+    _guard_mixed_tse_units(universe or list(current_weights))
+
     version = _price_version_fingerprint()
     user_id = user.id if user is not None else 0
     portfolio_hash = _constraints_hash({
@@ -744,6 +768,7 @@ def _efficient_frontier(
     )
     if returns.empty or len(returns.columns) < 2:
         return {"frontier": [], "max_sharpe": None, "min_volatility": None}
+    _guard_mixed_tse_units(list(returns.columns))
     eligible = [k for k in returns.columns if returns[k].std(ddof=0) > 0]
     if len(eligible) < 2:
         return {"frontier": [], "max_sharpe": None, "min_volatility": None}

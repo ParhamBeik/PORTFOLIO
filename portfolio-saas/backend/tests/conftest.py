@@ -1,8 +1,8 @@
 """Shared pytest fixtures.
 
-Puts the legacy PORTFOLIO NEW STRUCTURE/src on sys.path so portfolio.live.extractor can
-be parity-checked against the original engine (the codebase of record). The DB
-fixtures mirror seed_assets so tests do not depend on a seeded database.
+Puts vendored legacy oracle modules on sys.path so portfolio.live.extractor can
+be parity-checked against the frozen engine copy under tests/legacy_oracle/.
+The DB fixtures mirror seed_assets so tests do not depend on a seeded database.
 """
 import json
 import sys
@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent  # .../portfolio-saas/backend
-LEGACY_SRC = BACKEND_DIR.parent.parent / "PORTFOLIO NEW STRUCTURE" / "src"
+LEGACY_SRC = Path(__file__).resolve().parent / "legacy_oracle"
 if str(LEGACY_SRC) not in sys.path:
     sys.path.insert(0, str(LEGACY_SRC))
 

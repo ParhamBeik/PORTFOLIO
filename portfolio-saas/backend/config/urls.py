@@ -30,7 +30,6 @@ urlpatterns = [
     path("api/auth/", include("accounts.urls")),
     path("api/", include("portfolio.urls")),
     path("api/market/", include("marketdata.urls")),
-    path("api/billing/", include("billing.urls")),
     path(
         "api/token/refresh/",
         CookieTokenRefreshView.as_view(),

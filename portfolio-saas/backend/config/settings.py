@@ -50,7 +50,6 @@ INSTALLED_APPS = [
     "corsheaders",
     "accounts",
     "portfolio",
-    "billing",
 ]
 
 MIDDLEWARE = [
@@ -302,16 +301,6 @@ CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE  # defined above; Celery needs its own copy
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True  # survive a broker restart
 
-# Zarinpal billing (Iranian gateway — Stripe is unusable: Iranian cards can't
-# pay USD). MERCHANT_ID from the Zarinpal dashboard. Pro is annual-prepay in
-# Toman (no native recurring billing). SANDBOX=1 routes to the Zarinpal sandbox
-# (callback may be http://localhost). FRONTEND_URL is where the callback
-# redirects the browser after pay/cancel. See billing/.
-ZARINPAL_MERCHANT_ID = os.getenv("ZARINPAL_MERCHANT_ID", "")
-ZARINPAL_CALLBACK_URL = os.getenv("ZARINPAL_CALLBACK_URL", "http://localhost:5173/api/billing/zarinpal/callback/")
-ZARINPAL_FRONTEND_URL = os.getenv("ZARINPAL_FRONTEND_URL", "http://localhost:5173/billing")
-ZARINPAL_SANDBOX = os.getenv("ZARINPAL_SANDBOX", "0") == "1"
-PRO_PRICE_TOMAN = int(os.getenv("PRO_PRICE_TOMAN", "1000000"))
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 QUEUE_BACKLOG_THRESHOLD = int(os.getenv("QUEUE_BACKLOG_THRESHOLD", "100"))
@@ -372,7 +361,6 @@ LOGGING = {
         "django.server": {"handlers": ["console"], "level": "INFO", "propagate": False},
         "portfolio": {"handlers": ["console"], "level": "INFO", "propagate": False},
         "marketdata": {"handlers": ["console"], "level": "INFO", "propagate": False},
-        "billing": {"handlers": ["console"], "level": "INFO", "propagate": False},
         # Suspicious-request signals (disallowed host, bad CSRF/session cookie,
         # etc.) that Django's SecurityMiddleware/CommonMiddleware/CSRF raise.
         "django.security": {"handlers": ["console"], "level": "INFO", "propagate": False},

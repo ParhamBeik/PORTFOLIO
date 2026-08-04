@@ -450,3 +450,43 @@ def test_rejected_record_does_not_exclude_other_endpoints(asset_catalog):
     candles = candle_close_qs(symbol).exclude(date_time__in=rejections)
     assert candles.filter(date_time=date_str).exists()
 
+
+def test_f1_tse_valuation_marked_unverified(asset_catalog, make_user):
+    user = make_user()
+    account = Account.objects.create(user=user, name="F1 Val")
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    Holding.objects.create(account=account, asset=stock, quantity=Decimal("10"))
+    Price.objects.create(asset=stock, price=Decimal("3320"), source="API")
+    result = value_account(account)
+    assert result["tse_unit_policy"] == "unverified"
+    item = next(i for i in result["items"] if i["key"] == "kama_stock")
+    assert item["price_unit_status"] == "unverified"
+
+
+def test_f1_mixed_optimize_blocked(asset_catalog):
+    from portfolio.services.optimization import MixedUnitUniverseBlocked, _guard_mixed_tse_units
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    with pytest.raises(MixedUnitUniverseBlocked) as exc:
+        _guard_mixed_tse_units(["kama_stock", "emami_coin", "usd_cash"])
+    assert "kama_stock" in exc.value.tse_keys
+    assert "emami_coin" in exc.value.other_keys or "usd_cash" in exc.value.other_keys
+
+
+def test_f1_tse_only_guard_allows_partition(asset_catalog):
+    from marketdata.currency import partition_tse_asset_keys, tse_unit_verified
+    from portfolio.services.optimization import _guard_mixed_tse_units
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    assert tse_unit_verified() is False
+    tse, other = partition_tse_asset_keys(["kama_stock"])
+    assert tse == ["kama_stock"]
+    assert other == []
+    _guard_mixed_tse_units(["kama_stock"])  # TSE-only must not raise
+

@@ -1,6 +1,6 @@
 """Standard price extraction from raw market payloads.
 
-Ported from PORTFOLIO NEW STRUCTURE/src/engine.py `extract_standard_prices`.
+Ported from the legacy tracker engine `extract_standard_prices`.
 Returns the canonical price map keyed by asset.key (emami_coin, kama_stock...).
 """
 import logging

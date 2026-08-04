@@ -1,14 +1,13 @@
 """One-time correct load of the real Father/Mother portfolios.
 
-This replaces the fabricated `seed_samples` random-walk data. It reads the
-canonical files produced by the tracker engine:
+This replaces the fabricated `seed_samples` random-walk data. It reads:
 
-    PORTFOLIO NEW STRUCTURE/data/current_state.json      -> exact holdings
-    PORTFOLIO NEW STRUCTURE/data/history_snapshots.jsonl -> real daily history
+    import-data/current_state.json      -> exact holdings
+    import-data/history_snapshots.jsonl -> real daily history
 
-and loads them under the sample family login (PRO). After this load the app
-operates only on data entered through the website; this command just corrects
-the seeded starting state.
+(mounted in Docker as /portfolio-data). After this load the app operates only
+on data entered through the website; this command just corrects the seeded
+starting state.
 
 One-time: once the sample family has accounts, re-running leaves all browser
 changes untouched. Imported holdings become opening-position ledger entries.
@@ -39,16 +38,11 @@ HOUSE_STATE_KEY = "house_price_per_sqm_million"
 HOUSE_ASSET_KEY = "house_asset"
 
 def _default_data_dir() -> Path:
-    """Best-effort default: the tracker data dir two levels above the backend.
-
-    On the host, BASE_DIR is ``.../portfolio-saas/backend`` so two levels up is
-    the repo root that holds ``PORTFOLIO NEW STRUCTURE``. In a container BASE_DIR
-    is ``/app`` (no such parent), so fall back to a path under BASE_DIR instead
-    of indexing past the filesystem root -- callers there pass ``--data-dir``.
-    """
-    base = Path(settings.BASE_DIR).resolve()
-    root = base.parents[1] if len(base.parents) >= 2 else base
-    return root / "PORTFOLIO NEW STRUCTURE" / "data"
+    """Prefer the Docker import mount, then repo import-data/."""
+    for candidate in (Path("/portfolio-data"), Path(settings.BASE_DIR).parent / "import-data"):
+        if candidate.is_dir():
+            return candidate
+    return Path(settings.BASE_DIR) / "import-data"
 
 
 class Command(BaseCommand):

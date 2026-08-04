@@ -1,6 +1,6 @@
 """Valuation engine: holdings x latest prices -> portfolio value.
 
-This is the SaaS port of PORTFOLIO NEW STRUCTURE/src/engine.py `build_snapshot`.
+SaaS port of the tracker engine build_snapshot pricing rules.
 Two scale levers live here:
   1. latest prices are read once (DISTINCT ON) and cached, not per-asset;
   2. valuation is pure arithmetic over a preloaded holding set.
@@ -207,6 +207,7 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
     }
     now = timezone.now()
     priced_assets = 0
+    from marketdata.currency import TSE_PRICE_UNIT, tse_unit_verified
     for holding in holdings:
         # None when the asset has no price yet — distinguishable from a real 0 (M2).
         unit_price = prices.get(holding.asset.key)
@@ -242,6 +243,9 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
         if value is not None:
             total += value
             priced_assets += 1
+        price_unit_status = "ok"
+        if holding.asset.tse_symbol and not tse_unit_verified():
+            price_unit_status = "unverified"
         items.append({
             "asset": holding.asset.name,
             "key": holding.asset.key,
@@ -253,6 +257,7 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
             "priced_at": priced_at.isoformat() if priced_at else None,
             "age_seconds": age_seconds,
             "quality_status": quality_status,
+            "price_unit_status": price_unit_status,
         })
     total_assets = len(holdings)
     if total_assets and priced_assets == 0:
@@ -268,6 +273,7 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
         "priced_assets": priced_assets,
         "total_assets": total_assets,
         "quality_status": quality_status,
+        "tse_unit_policy": TSE_PRICE_UNIT,
         "excluded": excluded,
         "liabilities": [
             {

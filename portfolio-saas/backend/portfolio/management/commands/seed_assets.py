@@ -1,7 +1,7 @@
 """Seed the asset catalog from the canonical price-map keys.
 
 Idempotent: safe to run on every boot. Mirrors the asset keys produced by
-portfolio.live.extractor and the classes in PORTFOLIO NEW STRUCTURE/src/asset_classes.py.
+portfolio.live.extractor.
 """
 from django.core.management.base import BaseCommand
 from portfolio.models import Asset

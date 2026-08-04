@@ -5,7 +5,8 @@ gold/currency/crypto + TSETMC stocks). Multi-user from day one, built to scale:
 prices are fetched once globally and shared across every user.
 
 **Stack:** React (JS) + Django REST + PostgreSQL + Redis + Celery, orchestrated
-by Docker Compose. Pricing logic is ported from `PORTFOLIO NEW STRUCTURE/src/`.
+by Docker Compose. Pricing lives in `backend/portfolio/live/extractor.py`
+(parity-checked against a frozen oracle under `backend/tests/legacy_oracle/`).
 
 ## Quick start (dev)
 
