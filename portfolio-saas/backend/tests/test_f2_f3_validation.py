@@ -65,6 +65,13 @@ def test_duplicate_actions_prevented(db):
     MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.UNADJUSTED, date_time="1405-01-02", close_price=Decimal("100"))
     MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.ADJUSTED, date_time="1405-01-02", close_price=Decimal("100"))
 
+    CodalAnnouncement.objects.create(
+        symbol=symbol,
+        date_publish="1405-01-02",
+        category=CodalAnnouncement.Category.CAPITAL_INCREASE,
+        title="Capital increase for TEST_DUP",
+    )
+
     # First run in write mode
     res1 = nightly_series_validation(dry_run=False, symbols=[symbol], gold_symbols=[])
     assert res1["actions_created"] == 1
@@ -230,3 +237,75 @@ def test_dry_run_safety():
 
     assert CorporateAction.objects.count() == action_count_before
     assert RejectedRecord.objects.count() == rejection_count_before
+
+
+def test_codal_window_and_title_matching():
+    """Verify that Codal announcement matching supports window offsets and title-based mapping."""
+    symbol = "TEST_MATCH"
+    
+    # 1. Setup price candidate on 1405-01-05
+    MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.UNADJUSTED, date_time="1405-01-04", close_price=Decimal("200"))
+    MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.ADJUSTED, date_time="1405-01-04", close_price=Decimal("100"))
+    MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.UNADJUSTED, date_time="1405-01-05", close_price=Decimal("100"))
+    MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.ADJUSTED, date_time="1405-01-05", close_price=Decimal("100"))
+
+    # 2. Create Codal announcement on 1405-01-04 (1 day before, matches window)
+    CodalAnnouncement.objects.create(
+        symbol=symbol,
+        date_publish="1405-01-04",
+        category=None,  # Null category
+        title="تصمیمات مجمع عمومی عادی سالیانه",
+    )
+
+    # Run in dry-run mode
+    res = nightly_series_validation(dry_run=True, symbols=[symbol], gold_symbols=[])
+    candidates = res["corporate_action_candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["status"] == "confirmed"
+    assert "assembly_decision" in candidates[0]["reason"]
+
+    # Run in write-mode (should save as DIVIDEND)
+    nightly_series_validation(dry_run=False, symbols=[symbol], gold_symbols=[])
+    action = CorporateAction.objects.get(symbol=symbol, date="1405-01-05")
+    assert action.kind == CorporateAction.Kind.DIVIDEND
+    assert action.source == CorporateAction.Source.CODAL
+
+
+def test_backfill_validation_dry_run_command_safety():
+    """Verify that backfill_validation dry-run command writes nothing and produces a valid manifest."""
+    from django.core.management import call_command
+    import tempfile
+    import os
+
+    symbol = "TEST_BF_DRY"
+    MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.UNADJUSTED, date_time="1405-01-01", close_price=Decimal("200"))
+    MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.ADJUSTED, date_time="1405-01-01", close_price=Decimal("100"))
+    MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.UNADJUSTED, date_time="1405-01-02", close_price=Decimal("100"))
+    MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.ADJUSTED, date_time="1405-01-02", close_price=Decimal("100"))
+
+    # Confirmed Codal to make sure there is a confirmed candidate
+    CodalAnnouncement.objects.create(
+        symbol=symbol,
+        date_publish="1405-01-02",
+        category=CodalAnnouncement.Category.CAPITAL_INCREASE,
+        title="Capital increase",
+    )
+
+    # Initial counts
+    action_count_before = CorporateAction.objects.count()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manifest_path = os.path.join(tmpdir, "manifest.csv")
+        # Call command
+        call_command("backfill_validation", symbols=symbol, gold_symbols="", manifest_path=manifest_path)
+
+        # Verify no database rows changed
+        assert CorporateAction.objects.count() == action_count_before
+        
+        # Verify manifest exists and has headers
+        assert os.path.exists(manifest_path)
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            assert len(lines) >= 2
+            assert "confirmed_corporate_action" in lines[1]
+

@@ -429,6 +429,7 @@ def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
     """Derive corporate actions, then persist unexplained cross-day spikes."""
     from decimal import Decimal
     import math
+    from django.conf import settings
 
     from .models import (
         CodalAnnouncement,
@@ -449,6 +450,14 @@ def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
             return "gold"
         return "currency"
 
+    # Named configurable settings for validation thresholds (provisional)
+    GOLD_CURRENCY_THRESHOLDS = {
+        "crypto": getattr(settings, "SERIES_VALIDATION_THRESHOLD_CRYPTO", math.log(2.0)),
+        "commodity": getattr(settings, "SERIES_VALIDATION_THRESHOLD_COMMODITY", math.log(1.2)),
+        "currency": getattr(settings, "SERIES_VALIDATION_THRESHOLD_CURRENCY", math.log(1.15)),
+        "gold": getattr(settings, "SERIES_VALIDATION_THRESHOLD_GOLD", math.log(1.2)),
+    }
+
     ASSET_CLASS_ENDPOINTS = {
         "crypto": "crypto_daily",
         "commodity": "commodity_daily",
@@ -456,12 +465,45 @@ def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
         "currency": "gold_daily",
     }
 
-    GOLD_CURRENCY_THRESHOLDS = {
-        "crypto": math.log(2.0),
-        "commodity": math.log(1.2),
-        "currency": math.log(1.15),
-        "gold": math.log(1.2),
-    }
+    # Helper to check Codal confirmation (F2 mapping fix)
+    def check_codal_confirmation(symbol, action_date):
+        import jdatetime
+        from datetime import timedelta
+        
+        try:
+            jy, jm, jd = map(int, action_date.split("-"))
+            action_gdt = jdatetime.date(jy, jm, jd).togregorian()
+        except Exception:
+            return False, "unknown", None
+
+        announcements = CodalAnnouncement.objects.filter(symbol=symbol)
+        for ann in announcements:
+            try:
+                ay, am, ad = map(int, ann.date_publish.split("-"))
+                ann_gdt = jdatetime.date(ay, am, ad).togregorian()
+            except Exception:
+                continue
+            
+            # Match window: [action_date - 14 days, action_date + 3 days]
+            if action_gdt - timedelta(days=14) <= ann_gdt <= action_gdt + timedelta(days=3):
+                title = ann.title
+                category = ann.category
+                
+                is_capital_increase = (
+                    category == CodalAnnouncement.Category.CAPITAL_INCREASE or
+                    "افزایش سرمایه" in title
+                )
+                is_assembly_decision = (
+                    category == CodalAnnouncement.Category.ASSEMBLY_DECISION or
+                    "تصمیمات مجمع" in title or "تقسیم سود" in title or "مجمع عمومی" in title
+                )
+                
+                if is_capital_increase:
+                    return True, "capital_increase", ann
+                if is_assembly_decision:
+                    return True, "assembly_decision", ann
+                    
+        return False, "unknown", None
 
     # 1. TSE Equities validation (F2 & F4 & F5)
     if symbols is None:
@@ -496,37 +538,31 @@ def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
         ]
 
         for action in detect_factor_ratio_actions(paired):
-            codal = CodalAnnouncement.objects.filter(
-                symbol=symbol,
-                date_publish=action["date"],
-                category=CodalAnnouncement.Category.CAPITAL_INCREASE,
-            ).exists()
+            confirmed, action_kind, ann = check_codal_confirmation(symbol, action["date"])
             
-            status = "confirmed" if codal else "unconfirmed"
+            status = "confirmed" if confirmed else "unconfirmed"
+            ann_title = f" (Codal: {ann.title} on {ann.date_publish})" if ann else ""
             corporate_action_candidates.append({
                 "symbol": symbol,
                 "date": action["date"],
                 "factor": action["factor"],
                 "status": status,
-                "reason": "Matching Codal announcement found" if codal else "Factor step > 1% without Codal announcement"
+                "reason": f"Confirmed {action_kind}{ann_title}" if confirmed else "Factor step > 1% without matching Codal announcement"
             })
 
-            if not dry_run:
+            # ONLY write to database if confirmed!
+            if confirmed and not dry_run:
+                kind_map = {
+                    "capital_increase": CorporateAction.Kind.CAPITAL_INCREASE,
+                    "assembly_decision": CorporateAction.Kind.DIVIDEND,
+                }
                 _, created = CorporateAction.objects.update_or_create(
                     symbol=symbol,
                     date=action["date"],
                     defaults={
                         "factor": Decimal(str(action["factor"])),
-                        "kind": (
-                            CorporateAction.Kind.CAPITAL_INCREASE
-                            if codal
-                            else CorporateAction.Kind.UNKNOWN
-                        ),
-                        "source": (
-                            CorporateAction.Source.CODAL
-                            if codal
-                            else CorporateAction.Source.FACTOR_RATIO
-                        ),
+                        "kind": kind_map.get(action_kind, CorporateAction.Kind.UNKNOWN),
+                        "source": CorporateAction.Source.CODAL,
                     },
                 )
                 actions_created_count += int(created)
@@ -544,11 +580,13 @@ def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
             for dt, close in raw_rows:
                 normalized_rows.append((dt.split()[0], close))
 
+            stock_threshold = getattr(settings, "SERIES_VALIDATION_THRESHOLD_STOCK", math.log(1.5))
             for rejection in screen_series(
                 symbol,
                 timeframe,
                 normalized_rows,
                 corporate_action_dates=action_dates,
+                max_log_return=stock_threshold,
             ):
                 proposed_rejections.append({
                     "symbol": symbol,
