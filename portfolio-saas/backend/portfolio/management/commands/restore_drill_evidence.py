@@ -5,8 +5,7 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from accounts.models import User
-from billing.models import Payment
-from portfolio.models import Account, Asset, BacktestRun, Holding, LedgerEntry
+from portfolio.models import Account, Asset, Holding, LedgerEntry
 from portfolio.services.ledger import create_ledger_entry
 
 
@@ -29,12 +28,6 @@ class Command(BaseCommand):
             ),
             "holdings": Holding.objects.order_by("id").values_list(
                 "account__name", "asset__key", "quantity"
-            ),
-            "payments": Payment.objects.order_by("id").values_list(
-                "authority", "amount_rial", "status"
-            ),
-            "backtests": BacktestRun.objects.order_by("id").values_list(
-                "user__email", "status", "params_hash", "universe_hash"
             ),
         }
         normalized = {
@@ -79,13 +72,3 @@ class Command(BaseCommand):
                 occurred_at=opened_at,
                 source="system",
             )
-        Payment.objects.get_or_create(
-            authority="RESTORE-DRILL",
-            defaults={"user": user, "amount_rial": 1000},
-        )
-        BacktestRun.objects.get_or_create(
-            user=user,
-            params_hash="restore",
-            universe_hash="restore",
-            defaults={"manifest": {"restore_drill": True}},
-        )

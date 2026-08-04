@@ -11,8 +11,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import Invitation, User
-from billing.models import Payment
-from portfolio.models import Account, Asset, BacktestRun, Holding, LedgerEntry
+from portfolio.models import Account, Asset, Holding, LedgerEntry
 
 
 pytestmark = pytest.mark.django_db
@@ -167,9 +166,6 @@ def test_export_is_scoped_zip_without_password_or_tokens(make_user):
         kind=LedgerEntry.Kind.OPENING_POSITION,
         quantity=2,
     )
-    BacktestRun.objects.create(
-        user=user, params_hash="p", universe_hash="u", manifest={"safe": True}
-    )
     client = APIClient()
     client.force_authenticate(user=user)
 
@@ -185,8 +181,6 @@ def test_export_is_scoped_zip_without_password_or_tokens(make_user):
             "ledger.csv",
             "holdings.csv",
             "imports.csv",
-            "payments.csv",
-            "backtests.csv",
         } <= names
         payload = b"".join(archive.read(name) for name in names).decode()
     assert user.email in payload
@@ -195,12 +189,9 @@ def test_export_is_scoped_zip_without_password_or_tokens(make_user):
     assert "refresh" not in payload.lower()
 
 
-def test_deletion_requires_password_and_pseudonymizes_payments(make_user):
+def test_deletion_requires_password(make_user):
     user = make_user(email="delete@test.test")
     account = Account.objects.create(user=user, name="Main")
-    Payment.objects.create(
-        user=user, authority="DELETE-AUTH", amount_rial=1000
-    )
     client = APIClient()
     client.force_authenticate(user=user)
 
@@ -220,6 +211,3 @@ def test_deletion_requires_password_and_pseudonymizes_payments(make_user):
     assert deleted.cookies["ps_refresh"]["max-age"] == 0
     assert not User.objects.filter(pk=user.pk).exists()
     assert not Account.objects.filter(pk=account.pk).exists()
-    payment = Payment.objects.get(authority="DELETE-AUTH")
-    assert payment.user_id is None
-    assert payment.former_customer_id is not None

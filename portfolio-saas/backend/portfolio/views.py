@@ -47,6 +47,7 @@ from .services.optimization import (
     UniverseTooSmall,
     SolverError,
     NoAssetBeatsRiskFreeRate,
+    MixedUnitUniverseBlocked,
     _efficient_frontier,
     _finite,
     optimize,
@@ -794,6 +795,16 @@ class OptimizationView(APIView):
                 },
                 status=503,
             )
+        except MixedUnitUniverseBlocked as exc:
+            return Response(
+                {
+                    "detail": str(exc),
+                    "tse_keys": exc.tse_keys,
+                    "other_keys": exc.other_keys,
+                    "policy": "docs/data-verification/F1_POLICY.md",
+                },
+                status=409,
+            )
         except NoAssetBeatsRiskFreeRate as exc:
             return Response(
                 {"detail": str(exc)},
@@ -814,7 +825,18 @@ class FrontierView(APIView):
 
     def get(self, request):
         weights, total = _current_weights_and_total(request.user, _scope(request))
-        frontier = _efficient_frontier(n_points=30)
+        try:
+            frontier = _efficient_frontier(n_points=30)
+        except MixedUnitUniverseBlocked as exc:
+            return Response(
+                {
+                    "detail": str(exc),
+                    "tse_keys": exc.tse_keys,
+                    "other_keys": exc.other_keys,
+                    "policy": "docs/data-verification/F1_POLICY.md",
+                },
+                status=409,
+            )
         # Inject the current portfolio point.
         returns, _ = daily_returns_matrix()
         current_point = None
@@ -896,117 +918,6 @@ class TransactionDestroyView(APIView):
         return Response({"detail": "Transaction undone successfully."})
 
 
-class BacktestView(APIView):
-    """Pro-tier: Create new walk-forward simulation runs and list runs."""
-
-    permission_classes = [IsAuthenticated, RequiresFeature("backtest")]
-
-    def get(self, request):
-        from portfolio.models import BacktestRun
-        from portfolio.serializers import BacktestRunSerializer
-
-        runs = BacktestRun.objects.filter(user=request.user)
-        serializer = BacktestRunSerializer(runs, many=True)
-        return Response(serializer.data)
-
-    def post(self, request):
-        import hashlib
-        import json
-
-        from django.conf import settings
-        from django.db import transaction
-        from portfolio.models import BacktestRun, BacktestUserQuota
-        from portfolio.serializers import BacktestRequestSerializer, BacktestRunSerializer
-        from portfolio.tasks import run_backtest_task
-        serializer = BacktestRequestSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        account = request.user.accounts.filter(pk=data["account_id"]).first()
-        if account is None:
-            raise NotFound("Account not found.")
-
-        basis = {
-            "nominal": "nominal_toman",
-            "usd_real": "usd_denominated",
-        }.get(data["basis"], data["basis"])
-        universe = data["symbols"] or None
-        if data["universe_mode"] == "portfolio" and universe is None:
-            universe = list(
-                account.holdings.order_by("asset__key").values_list(
-                    "asset__key", flat=True
-                )
-            )
-        request_contract = {
-            "account_id": account.id,
-            "universe_mode": data["universe_mode"],
-            "symbols": universe or [],
-            "basis": basis,
-            "completed_years": data["completed_years"],
-        }
-        encoded = json.dumps(request_contract, sort_keys=True).encode("utf-8")
-
-        today = timezone.now().date()
-        limit = getattr(settings, "DAILY_BACKTEST_LIMIT", 10)
-        with transaction.atomic():
-            request.user.__class__.objects.select_for_update().get(pk=request.user.pk)
-            quota, _ = BacktestUserQuota.objects.get_or_create(
-                user=request.user, day=today
-            )
-            if quota.count >= limit:
-                return Response(
-                    {"detail": f"Daily backtest limit of {limit} runs exceeded."},
-                    status=status.HTTP_429_TOO_MANY_REQUESTS,
-                )
-            quota.count += 1
-            quota.save(update_fields=["count"])
-            run = BacktestRun.objects.create(
-                user=request.user,
-                account=account,
-                basis=basis,
-                universe_mode=data["universe_mode"],
-                universe=universe,
-                completed_years=data["completed_years"],
-                universe_hash=hashlib.sha256(
-                    json.dumps(universe or [], sort_keys=True).encode("utf-8")
-                ).hexdigest(),
-                params_hash=hashlib.sha256(encoded).hexdigest(),
-                manifest={"request": request_contract},
-                status=BacktestRun.Status.QUEUED,
-            )
-            transaction.on_commit(lambda: run_backtest_task.delay(run.id))
-
-        return Response(BacktestRunSerializer(run).data, status=status.HTTP_201_CREATED)
-
-
-class BacktestDetailView(APIView):
-    """Pro-tier: Retrieve a specific run status and results."""
-
-    permission_classes = [IsAuthenticated, RequiresFeature("backtest")]
-
-    def get(self, request, pk):
-        from portfolio.models import BacktestRun
-        from portfolio.serializers import BacktestRunSerializer
-
-        run = BacktestRun.objects.filter(user=request.user, pk=pk).first()
-        if not run:
-            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-        serializer = BacktestRunSerializer(run)
-        return Response(serializer.data)
-
-
-class BacktestStabilityView(APIView):
-    permission_classes = [IsAuthenticated, RequiresFeature("backtest")]
-
-    def get(self, request, pk):
-        from portfolio.models import BacktestRun
-        from portfolio.services.stability import backtest_stability
-
-        run = BacktestRun.objects.filter(user=request.user, pk=pk).first()
-        if run is None:
-            raise NotFound("Backtest not found.")
-        return Response(backtest_stability(run))
-
-
 class DiscoveryView(APIView):
     """Pro-tier: Recommends candidates not currently held along with risk-adjusted leaders."""
 
@@ -1076,50 +987,6 @@ class AssetRankingView(APIView):
             }
             for row in rows.filter(as_of=latest).order_by("-sharpe")
         ])
-
-
-class WatchlistView(APIView):
-    """Manage watchlist items with force-include and force-exclude flags."""
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        from portfolio.models import Watchlist
-        from portfolio.serializers import WatchlistSerializer
-
-        account = _scope(request) or request.user.accounts.first()
-        if not account:
-            return Response({"detail": "User has no accounts."}, status=status.HTTP_400_BAD_REQUEST)
-        watchlist, _ = Watchlist.objects.get_or_create(account=account)
-        serializer = WatchlistSerializer(watchlist)
-        return Response(serializer.data)
-
-    def post(self, request):
-        from portfolio.models import Watchlist, WatchlistItem
-        from portfolio.serializers import WatchlistItemSerializer
-
-        account = _scope(request) or request.user.accounts.first()
-        if not account:
-            return Response({"detail": "User has no accounts."}, status=status.HTTP_400_BAD_REQUEST)
-        watchlist, _ = Watchlist.objects.get_or_create(account=account)
-
-        symbol = request.data.get("symbol")
-        if not symbol:
-            return Response({"detail": "symbol is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        if request.data.get("delete", False):
-            WatchlistItem.objects.filter(watchlist=watchlist, symbol=symbol).delete()
-            return Response({"detail": "Watchlist item deleted."})
-
-        force_include = request.data.get("force_include", False)
-        force_exclude = request.data.get("force_exclude", False)
-
-        item, _ = WatchlistItem.objects.get_or_create(watchlist=watchlist, symbol=symbol)
-        item.force_include = force_include
-        item.force_exclude = force_exclude
-        item.save()
-
-        return Response(WatchlistItemSerializer(item).data)
 
 
 class PerformanceView(APIView):

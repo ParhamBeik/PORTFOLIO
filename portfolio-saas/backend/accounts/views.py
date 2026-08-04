@@ -3,7 +3,6 @@ import csv
 import hashlib
 import io
 import json
-import uuid
 import zipfile
 
 from django.conf import settings
@@ -29,8 +28,7 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, Ou
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from billing.models import Payment
-from portfolio.models import Account, BacktestRun, Holding, ImportBatch, LedgerEntry
+from portfolio.models import Account, Holding, ImportBatch, LedgerEntry
 
 from .models import Invitation, User
 from .permissions import IsPro
@@ -193,9 +191,6 @@ class MeView(APIView):
         if not user.check_password(request.data.get("password", "")):
             return Response({"password": ["Password is incorrect."]}, status=400)
         _revoke_all(user)
-        Payment.objects.filter(user=user).update(
-            user=None, former_customer_id=uuid.uuid4()
-        )
         user.delete()
         return _clear_refresh_cookie(Response(status=204))
 
@@ -373,26 +368,6 @@ class ExportView(APIView):
                 ImportBatch.objects.filter(account_id__in=account_ids).values_list(
                     "id", "account_id", "file_hash", "row_count", "created_at"
                 ),
-            ),
-            "payments.csv": _csv_bytes(
-                ["id", "amount_rial", "status", "ref_id", "created_at", "verified_at"],
-                Payment.objects.filter(user=user).values_list(
-                    "id", "amount_rial", "status", "ref_id", "created_at", "verified_at"
-                ),
-            ),
-            "backtests.csv": _csv_bytes(
-                ["id", "account_id", "status", "created_at", "completed_at", "manifest"],
-                [
-                    [
-                        run.id,
-                        run.account_id,
-                        run.status,
-                        run.created_at,
-                        run.completed_at,
-                        json.dumps(run.manifest, ensure_ascii=False),
-                    ]
-                    for run in BacktestRun.objects.filter(user=user)
-                ],
             ),
         }
         manifest = {

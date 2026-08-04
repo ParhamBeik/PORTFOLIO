@@ -36,7 +36,6 @@ app.conf.update(
     # marketdata is warehouse work, everything in portfolio is customer-facing.
     task_routes={
         "marketdata.tasks.*": {"queue": "archive"},
-        "billing.tasks.*": {"queue": "archive"},
         "portfolio.tasks.*": {"queue": "live"},
     },
 )
@@ -92,15 +91,6 @@ app.conf.beat_schedule = {
     "nightly-asset-metrics": {
         "task": "marketdata.tasks.nightly_asset_metrics",
         "schedule": crontab(hour=1, minute=0),
-    },
-    # Reap backtest runs whose worker died before it could record the failure.
-    "recover-stuck-backtests": {
-        "task": "portfolio.tasks.recover_stuck_backtests",
-        "schedule": crontab(minute=17),
-    },
-    "reconcile-payments-hourly": {
-        "task": "billing.tasks.reconcile_pending_payments",
-        "schedule": crontab(minute=7),
     },
     "operational-health-every-15-minutes": {
         "task": "marketdata.tasks.operational_health_check",

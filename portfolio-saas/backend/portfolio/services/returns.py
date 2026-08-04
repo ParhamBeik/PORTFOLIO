@@ -220,46 +220,20 @@ def resolve_universe(
 
 def get_universe_by_mode(mode: str, user=None, account=None) -> list[str] | None:
     """Resolve the list of symbol keys based on the universe mode."""
-    from portfolio.models import Holding, WatchlistItem, Asset
-    
+    from portfolio.models import Holding, Asset
+
     active_assets = list(Asset.objects.filter(is_active=True).exclude(is_house=True).values_list("key", flat=True))
 
-    if mode == "held":
+    if mode in ("held", "watchlist"):
         res = []
         if account is not None:
             res = list(account.holdings.values_list("asset__key", flat=True))
         elif user is not None:
             res = list(Holding.objects.filter(account__user=user).values_list("asset__key", flat=True))
-        
+
         if not res:
             return active_assets
         return res
-
-    elif mode == "watchlist":
-        held_keys = []
-        if account is not None:
-            held_keys = list(account.holdings.values_list("asset__key", flat=True))
-            items = WatchlistItem.objects.filter(watchlist__account=account)
-            forced_in = set(items.filter(force_include=True).values_list("symbol", flat=True))
-            forced_ex = set(items.filter(force_exclude=True).values_list("symbol", flat=True))
-            watchlist_keys = set(items.values_list("symbol", flat=True))
-            
-            res = (set(held_keys) | watchlist_keys | forced_in) - forced_ex
-            res_list = list(res)
-            return res_list if res_list else active_assets
-        elif user is not None:
-            account = user.accounts.first()
-            if account:
-                held_keys = list(account.holdings.values_list("asset__key", flat=True))
-                items = WatchlistItem.objects.filter(watchlist__account=account)
-                forced_in = set(items.filter(force_include=True).values_list("symbol", flat=True))
-                forced_ex = set(items.filter(force_exclude=True).values_list("symbol", flat=True))
-                watchlist_keys = set(items.values_list("symbol", flat=True))
-                
-                res = (set(held_keys) | watchlist_keys | forced_in) - forced_ex
-                res_list = list(res)
-                return res_list if res_list else active_assets
-        return active_assets
 
     elif mode == "market":
         from marketdata.models import MarketInstrument
@@ -268,20 +242,6 @@ def get_universe_by_mode(mode: str, user=None, account=None) -> list[str] | None
 
         from marketdata.universe import get_candidate_universe
         candidates, _ = get_candidate_universe()
-        if account is not None:
-            items = WatchlistItem.objects.filter(watchlist__account=account)
-            forced_in = set(items.filter(force_include=True).values_list("symbol", flat=True))
-            forced_ex = set(items.filter(force_exclude=True).values_list("symbol", flat=True))
-            res = (set(candidates) | forced_in) - forced_ex
-            return list(res)
-        elif user is not None:
-            account = user.accounts.first()
-            if account:
-                items = WatchlistItem.objects.filter(watchlist__account=account)
-                forced_in = set(items.filter(force_include=True).values_list("symbol", flat=True))
-                forced_ex = set(items.filter(force_exclude=True).values_list("symbol", flat=True))
-                res = (set(candidates) | forced_in) - forced_ex
-                return list(res)
         return candidates
 
     return None

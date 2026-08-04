@@ -3,7 +3,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.features import limit_for
-from .models import Account, Asset, Holding, LedgerEntry, Transaction, BacktestRun, BacktestYear, Watchlist, WatchlistItem, Liability
+from .models import Account, Asset, Holding, LedgerEntry, Transaction, Liability
 from marketdata.models import MarketCandle, GoldCurrencyHistory
 from marketdata.jalali import normalize_jalali
 import jdatetime
@@ -226,64 +226,6 @@ class TransactionSerializer(serializers.ModelSerializer):
             .first()
         )
         return latest_id == obj.pk
-
-
-class BacktestYearSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = BacktestYear
-        fields = (
-            "id", "cutoff_date", "scenario", "target_weights",
-            "realized_metrics", "benchmark_delta", "excluded_symbols",
-        )
-
-
-class BacktestRunSerializer(serializers.ModelSerializer):
-    years = BacktestYearSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = BacktestRun
-        fields = (
-            "id", "account", "basis", "universe_mode", "universe",
-            "completed_years", "status", "progress", "error", "manifest",
-            "integrity_version", "created_at", "completed_at", "years",
-        )
-
-
-class BacktestRequestSerializer(serializers.Serializer):
-    account_id = serializers.IntegerField(min_value=1)
-    universe_mode = serializers.ChoiceField(
-        choices=("portfolio", "verified_market")
-    )
-    symbols = serializers.ListField(
-        child=serializers.CharField(max_length=120),
-        required=False,
-        default=list,
-        max_length=100,
-    )
-    basis = serializers.ChoiceField(
-        choices=("nominal_toman", "usd_denominated", "nominal", "usd_real")
-    )
-    completed_years = serializers.IntegerField(min_value=1, max_value=5, default=5)
-
-    def validate_symbols(self, value):
-        symbols = list(dict.fromkeys(item.strip() for item in value if item.strip()))
-        if len(symbols) != len(value):
-            raise serializers.ValidationError("symbols must be unique and non-empty.")
-        return symbols
-
-
-class WatchlistItemSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = WatchlistItem
-        fields = ("id", "symbol", "force_include", "force_exclude", "created_at")
-
-
-class WatchlistSerializer(serializers.ModelSerializer):
-    items = WatchlistItemSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = Watchlist
-        fields = ("id", "account", "items", "created_at")
 
 
 class LiabilitySerializer(serializers.ModelSerializer):

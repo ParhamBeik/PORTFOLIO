@@ -14,7 +14,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from portfolio.models import Account, Asset, BacktestRun, Holding, LedgerEntry
+from portfolio.models import Account, Asset, Holding, LedgerEntry
 
 
 pytestmark = pytest.mark.django_db
@@ -149,65 +149,6 @@ def test_as_of_valuation_refuses_a_price_stale_beyond_five_sessions(
     )
 
 
-def test_run_backtest_evaluates_the_requested_number_of_completed_years(
-    make_user, monkeypatch
-):
-    """The API accepts and hashes completed_years, so the runner must honour it."""
-    from portfolio.services import backtest as backtest_service
-
-    run = BacktestRun.objects.create(
-        user=make_user(email="years@test.test"),
-        universe_hash="h", params_hash="h", universe=["emami_coin"],
-        completed_years=2,
-    )
-    seen = []
-    real_cutoffs = backtest_service._completed_jalali_cutoffs
-
-    def _record(now=None, count=5):
-        seen.append(count)
-        return real_cutoffs(now=now, count=count)
-
-    monkeypatch.setattr(backtest_service, "_completed_jalali_cutoffs", _record)
-
-    backtest_service.run_backtest(run.id)
-
-    assert seen == [2]
-    run.refresh_from_db()
-    assert run.status == BacktestRun.Status.READY
-    assert (
-        run.years.values("cutoff_date").distinct().count() == 2
-    ), "one cutoff per requested completed year"
-
-
-def test_recover_stuck_backtests_fails_only_abandoned_runs(make_user):
-    """A worker that dies mid-run cannot mark its own row failed."""
-    from portfolio.tasks import BACKTEST_STUCK_AFTER_SECONDS, recover_stuck_backtests
-
-    user = make_user(email="stuck@test.test")
-    abandoned = BacktestRun.objects.create(
-        user=user, universe_hash="h", params_hash="h",
-        status=BacktestRun.Status.RUNNING,
-    )
-    fresh = BacktestRun.objects.create(
-        user=user, universe_hash="h", params_hash="h",
-        status=BacktestRun.Status.QUEUED,
-    )
-    # auto_now_add ignores an assigned value, so age the row with an update().
-    BacktestRun.objects.filter(pk=abandoned.pk).update(
-        created_at=timezone.now()
-        - datetime.timedelta(seconds=BACKTEST_STUCK_AFTER_SECONDS + 60)
-    )
-
-    result = recover_stuck_backtests()
-
-    abandoned.refresh_from_db()
-    fresh.refresh_from_db()
-    assert result["failed"] == 1
-    assert abandoned.status == BacktestRun.Status.FAILED
-    assert "worker was lost" in abandoned.error
-    assert fresh.status == BacktestRun.Status.QUEUED
-
-
 def test_same_day_as_of_respects_exact_event_timestamps(ledger_account, asset_catalog):
     """Two events on one calendar day still order by clock time, not date alone."""
     from portfolio.models import Asset
@@ -268,45 +209,6 @@ def test_sold_out_position_is_visible_before_its_sale(ledger_account, asset_cata
     assert holdings_as_of(ledger_account.user, ledger_account, before_sale) == {
         asset.key: Decimal("3")
     }
-
-
-def test_stored_backtest_result_is_immutable_to_later_warehouse_rows(make_user):
-    """Adding post-cutoff candles must not rewrite a completed BacktestYear row."""
-    from marketdata.models import MarketCandle
-    from portfolio.models import BacktestYear
-    from portfolio.services import backtest as backtest_service
-
-    run = BacktestRun.objects.create(
-        user=make_user(email="immutable@test.test"),
-        universe_hash="h", params_hash="h", universe=["emami_coin"],
-        completed_years=1,
-        status=BacktestRun.Status.READY,
-    )
-    year = BacktestYear.objects.create(
-        run=run,
-        cutoff_date="1402-01-01",
-        scenario="equal_weight",
-        target_weights={"emami_coin": 1.0},
-        realized_metrics={
-            "net_return": 0.12,
-            "manifest": {
-                "cutoff": "1402-01-01",
-                "maximum_source_data_timestamp": "1402-12-29",
-            },
-        },
-    )
-    frozen = year.realized_metrics.copy()
-
-    MarketCandle.objects.create(
-        symbol="EMAMI",
-        timeframe="1d_adj",
-        date_time="1403-06-01",
-        open_price=1, high_price=1, low_price=1, close_price=999, volume=1,
-    )
-    year.refresh_from_db()
-    assert year.realized_metrics == frozen
-    assert BacktestYear.objects.get(pk=year.pk).realized_metrics["net_return"] == 0.12
-    assert backtest_service.INTEGRITY_VERSION
 
 
 def test_celery_routes_archive_and_live_queues_separately():
@@ -639,26 +541,6 @@ def test_universe_membership_is_point_in_time_not_current_catalog_state():
     assert resolve_universe(["PAST"], as_of=later) == []
 
 
-def test_baseline_simulator_matches_hand_computed_buy_and_hold():
-    import pandas as pd
-
-    from portfolio.services.backtest import _simulate_buy_and_hold
-
-    returns = pd.DataFrame(
-        {"gold": [0.10, -0.05]},
-        index=pd.date_range("2025-01-01", periods=2, tz="UTC"),
-    )
-
-    simulation = _simulate_buy_and_hold(
-        returns,
-        {"gold": 1.0},
-        cost_drag=0.01,
-    )
-
-    assert simulation["gross_return"] == pytest.approx(1.10 * 0.95 - 1)
-    assert simulation["net_return"] == pytest.approx(0.99 * 1.10 * 0.95 - 1)
-
-
 def test_dividend_does_not_create_a_twr_boundary(
     ledger_account, asset_catalog, monkeypatch
 ):
@@ -704,12 +586,9 @@ def test_dividend_does_not_create_a_twr_boundary(
 def test_as_of_returns_and_universe_ignore_everything_published_later(asset_catalog):
     """The leakage gate: the past must not move when the future arrives.
 
-    `test_stored_backtest_result_is_immutable_to_later_warehouse_rows` only
-    proves a persisted row is not rewritten, which nothing rewrites anyway.
-    The claim that actually makes a backtest honest is this one: recomputing
-    an as-of window after later data lands must return the identical frame,
-    and a symbol first listed after the cutoff must not appear in that
-    cutoff's universe.
+    Recomputing an as-of window after later data lands must return the
+    identical frame, and a symbol first listed after the cutoff must not
+    appear in that cutoff's universe.
 
     `_price_version_fingerprint()` keys the returns cache on max row ids, so
     inserting later candles invalidates it -- this genuinely recomputes rather

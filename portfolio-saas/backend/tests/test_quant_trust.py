@@ -15,11 +15,8 @@ from marketdata.models import (
     MarketInstrument,
     RejectedRecord,
 )
-from portfolio.models import BacktestRun, BacktestYear
-from portfolio.services import backtest
 from portfolio.services.deflator import normalize_basis, to_basis
 from portfolio.services.diagnostics import _load_index_returns
-from portfolio.services.optimization import SCENARIOS
 from portfolio.services.returns import _build_returns_matrix, _returns_cache_key
 
 
@@ -58,105 +55,6 @@ def test_returns_exclude_prices_with_a_gap_longer_than_five_sessions():
     assert "complete" in returns.columns
     assert "long_gap" not in returns.columns
     assert {item["key"]: item["reason"] for item in excluded}["long_gap"] == "price_gap_exceeded"
-
-
-def test_completed_cutoffs_roll_forward_with_the_jalali_calendar():
-    first = backtest._completed_jalali_cutoffs(
-        dt.datetime(2026, 8, 1, tzinfo=dt.timezone.utc)
-    )
-    second = backtest._completed_jalali_cutoffs(
-        dt.datetime(2027, 8, 1, tzinfo=dt.timezone.utc)
-    )
-
-    assert first == [
-        "1400-01-01",
-        "1401-01-01",
-        "1402-01-01",
-        "1403-01-01",
-        "1404-01-01",
-    ]
-    assert second == [
-        "1401-01-01",
-        "1402-01-01",
-        "1403-01-01",
-        "1404-01-01",
-        "1405-01-01",
-    ]
-
-
-def test_buy_and_hold_deducts_costs_and_rejects_missing_evaluation_returns():
-    index = pd.date_range("2026-01-01", periods=2, tz="UTC")
-    returns = pd.DataFrame({"asset": [0.10, 0.0]}, index=index)
-
-    simulation = backtest._simulate_buy_and_hold(
-        returns, {"asset": 1.0}, cost_drag=0.01
-    )
-
-    assert simulation["gross_return"] == pytest.approx(0.10)
-    assert simulation["net_return"] == pytest.approx(0.089)
-    assert simulation["net_return"] < simulation["gross_return"]
-
-    returns.iloc[1, 0] = np.nan
-    with pytest.raises(ValueError, match="evaluation_missing_prices"):
-        backtest._simulate_buy_and_hold(returns, {"asset": 1.0}, cost_drag=0.01)
-
-
-@pytest.mark.django_db
-def test_walk_forward_uses_three_year_training_equal_weight_and_manifest(monkeypatch):
-    run = BacktestRun.objects.create(
-        params_hash="quant-trust",
-        basis="nominal",
-        universe=["asset_a", "asset_b", "asset_c"],
-        universe_hash="abc",
-    )
-    optimize_calls = []
-
-    def fake_optimize(**kwargs):
-        optimize_calls.append(kwargs)
-        return {
-            "target_weights": {
-                "asset_a": 1 / 3,
-                "asset_b": 1 / 3,
-                "asset_c": 1 / 3,
-            },
-            "excluded_assets": [],
-            "constraints_applied": {"long_only": True},
-            "price_version": "fixture-v1",
-        }
-
-    def fake_returns(*, as_of, **kwargs):
-        end = pd.Timestamp(as_of).normalize()
-        index = pd.date_range(end=end - pd.Timedelta(days=1), periods=3, tz="UTC")
-        return pd.DataFrame(
-            {"asset_a": 0.01, "asset_b": 0.01, "asset_c": 0.01},
-            index=index,
-        ), []
-
-    monkeypatch.setattr(backtest, "optimize", fake_optimize)
-    monkeypatch.setattr(backtest, "daily_returns_matrix", fake_returns)
-
-    backtest.run_backtest(run.id)
-
-    run.refresh_from_db()
-    years = BacktestYear.objects.filter(run=run)
-    assert run.status == BacktestRun.Status.READY
-    expected_scenarios = {
-        *SCENARIOS,
-        "baseline:gold",
-        "baseline:usd",
-        "baseline:buy_and_hold",
-    }
-    assert years.count() == 5 * len(expected_scenarios)
-    assert "equal_weight" in SCENARIOS
-    assert {year.scenario for year in years} == expected_scenarios
-    assert all(call["history_days"] >= 3 * 365 for call in optimize_calls)
-    result = years.exclude(realized_metrics__has_key="error").first()
-    assert result.realized_metrics["realized_return"] < result.realized_metrics["gross_return"]
-    manifest = result.realized_metrics["manifest"]
-    assert manifest["basis"] == "nominal_toman"
-    assert manifest["training_window"]["years"] == 3
-    assert manifest["evaluation_window"]["start"] == result.cutoff_date
-    assert manifest["price_version"] == "fixture-v1"
 
 
 @pytest.mark.django_db
