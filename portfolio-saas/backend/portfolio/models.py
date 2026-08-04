@@ -167,12 +167,35 @@ class Price(models.Model):
 
     Written by `pricing` after each fetch. Read pattern: latest price per asset
     via DISTINCT ON (asset) ORDER BY fetched_at DESC, backed by the index below.
+
+    New fields `price_unit` and `price_unit_verified` annotate the unit provided
+    by the source (e.g. 'IRT' for Tomans, 'IRR' for Rials) and whether the unit
+    has been authoritativey verified. Default is 'UNKNOWN' and False to enforce
+    conservative handling until the provider is confirmed.
     """
+
+    class Unit(models.TextChoices):
+        IRT = "IRT", "Tomans"
+        IRR = "IRR", "Rials"
+        UNKNOWN = "UNKNOWN", "Unknown"
 
     asset = models.ForeignKey(Asset, on_delete=models.CASCADE, related_name="prices")
     price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     fetched_at = models.DateTimeField(auto_now_add=True, db_index=True)
     source = models.CharField(max_length=16, default="API")
+
+    # New metadata: provider-declared unit and whether it has been verified by
+    # an operator or automated evidence check. Null/blank allowed for older rows.
+    price_unit = models.CharField(
+        max_length=16,
+        choices=Unit.choices,
+        default=Unit.UNKNOWN,
+        help_text="Declared unit for this price value (IRT=Tomans, IRR=Rials, UNKNOWN)",
+    )
+    price_unit_verified = models.BooleanField(
+        default=False,
+        help_text="True when a human or automated check has verified the unit for this provider/asset",
+    )
 
     class Meta:
         ordering = ["-fetched_at"]

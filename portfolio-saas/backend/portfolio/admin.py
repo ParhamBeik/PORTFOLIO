@@ -25,9 +25,10 @@ class AccountAdmin(admin.ModelAdmin):
 
 @admin.register(Price)
 class PriceAdmin(admin.ModelAdmin):
-    list_display = ("asset", "price", "source", "fetched_at")
-    list_filter = ("source",)
+    list_display = ("asset", "price", "price_unit", "price_unit_verified", "source", "fetched_at")
+    list_filter = ("source", "price_unit", "price_unit_verified")
     search_fields = ("asset__key",)
+    readonly_fields = ("fetched_at",)
 
 
 admin.site.register(Holding)

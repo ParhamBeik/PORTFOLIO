@@ -88,11 +88,36 @@ def _write_prices(priced: dict) -> None:
         a.key: a
         for a in Asset.objects.filter(key__in=priced.keys(), is_active=True)
     }
-    rows = [
-        Price(asset=assets[key], price=value, source="API")
-        for key, value in priced.items()
-        if key in assets
-    ]
+    rows = []
+    for key, value in priced.items():
+        if key not in assets:
+            continue
+        asset = assets[key]
+        # Conservative defaults: TSETMC-derived assets remain unverified until
+        # operator or automated evidence confirms the provider unit. BRS/API
+        # gold and currency values are converted to Tomans at ingestion and can
+        # be marked as IRT verified.
+        if asset.tse_symbol:
+            unit = Price.Unit.UNKNOWN
+            verified = False
+        elif asset.brs_symbol:
+            unit = Price.Unit.IRT
+            verified = True
+        elif asset.is_manual:
+            unit = Price.Unit.IRT
+            verified = True
+        else:
+            unit = Price.Unit.UNKNOWN
+            verified = False
+        rows.append(
+            Price(
+                asset=asset,
+                price=value,
+                source="API",
+                price_unit=unit,
+                price_unit_verified=verified,
+            )
+        )
     if rows:
         Price.objects.bulk_create(rows, batch_size=500)
         logger.info("Wrote %d price rows.", len(rows))
