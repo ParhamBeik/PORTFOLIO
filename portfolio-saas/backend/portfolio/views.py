@@ -1078,3 +1078,96 @@ class LiabilityDetailView(generics.RetrieveUpdateDestroyAPIView):
             account__user=self.request.user,
             account_id=self.kwargs["account_id"],
         )
+
+
+class BrsApiWebhookView(APIView):
+    """Simple authenticated webhook endpoint for brsapi.ir to notify of new prices.
+
+    Expected usage: the brsapi system POSTs a small JSON body (e.g. {"symbols": [..]})
+    and a header `X-BRS-WEBHOOK-SECRET` containing the shared secret defined in
+    Django settings as `BRS_WEBHOOK_SECRET`. The endpoint enqueues a Celery task
+    to compute and persist optimization snapshots.
+    """
+
+    # For the MVP we keep this permissive but require the configured secret.
+    def post(self, request):
+        from django.conf import settings
+        secret = getattr(settings, "BRS_WEBHOOK_SECRET", None)
+        if not secret:
+            return Response({"detail": "Webhook secret not configured."}, status=400)
+        header = request.headers.get("X-BRS-WEBHOOK-SECRET") or request.META.get("HTTP_X_BRS_WEBHOOK_SECRET")
+        if not header or header != secret:
+            return Response({"detail": "Unauthorized."}, status=401)
+
+        # Optionally the payload can contain symbols or metadata; keep it for the task
+        payload = request.data if request.data else {"trigger": "brs_webhook"}
+        # Enqueue the optimization snapshot task
+        try:
+            from .tasks import run_global_optimization_snapshot
+            run_global_optimization_snapshot.delay(payload)
+        except Exception as exc:
+            return Response({"detail": f"Failed to enqueue task: {exc}"}, status=500)
+
+        return Response({"ok": True}, status=202)
+
+
+class OptimizationSnapshotListView(APIView):
+    """List optimization snapshots for an account or global snapshots.
+
+    Query params:
+      - account_id (optional): integer. If provided, must belong to the requesting user.
+      - limit (optional): integer, default 20
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .optimization_models import OptimizationSnapshot
+        from .serializers import OptimizationSnapshotSerializer
+        from django.shortcuts import get_object_or_404
+
+        account_id = request.query_params.get("account_id")
+        limit = min(int(request.query_params.get("limit", 20)), 200)
+
+        qs = OptimizationSnapshot.objects.all().order_by("-created_at")
+        if account_id:
+            # Verify ownership
+            account = get_object_or_404(Account, pk=account_id, user=request.user)
+            qs = qs.filter(account=account)
+        else:
+            # Only return global snapshots (account is null) or any snapshots if user is staff
+            if not request.user.is_staff:
+                qs = qs.filter(account__isnull=True)
+
+        snaps = qs[:limit]
+        serializer = OptimizationSnapshotSerializer(snaps, many=True)
+        return Response(serializer.data)
+
+
+class OptimizationSnapshotLatestView(APIView):
+    """Return the latest snapshot for a given account (or global).
+
+    Query params: account_id (optional)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .optimization_models import OptimizationSnapshot
+        from .serializers import OptimizationSnapshotSerializer
+        from django.shortcuts import get_object_or_404
+        from django.db.models import Q
+
+        account_id = request.query_params.get("account_id")
+        if account_id:
+            account = get_object_or_404(Account, pk=account_id, user=request.user)
+            snap = OptimizationSnapshot.objects.filter(account=account).order_by("-created_at").first()
+        else:
+            # latest global snapshot
+            if not request.user.is_staff:
+                return Response({"detail": "Not found."}, status=404)
+            snap = OptimizationSnapshot.objects.filter(account__isnull=True).order_by("-created_at").first()
+
+        if not snap:
+            return Response({"detail": "Not found."}, status=404)
+        serializer = OptimizationSnapshotSerializer(snap)
+        return Response(serializer.data)

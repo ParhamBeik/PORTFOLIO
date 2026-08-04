@@ -451,7 +451,9 @@ def test_rejected_record_does_not_exclude_other_endpoints(asset_catalog):
     assert candles.filter(date_time=date_str).exists()
 
 
-def test_f1_tse_valuation_marked_unverified(asset_catalog, make_user):
+def test_f1_tse_valuation_marked_unverified(asset_catalog, make_user, monkeypatch):
+    import marketdata.currency
+    monkeypatch.setattr(marketdata.currency, "TSE_PRICE_UNIT", "unverified")
     user = make_user()
     account = Account.objects.create(user=user, name="F1 Val")
     stock = asset_catalog["kama_stock"]
@@ -465,7 +467,9 @@ def test_f1_tse_valuation_marked_unverified(asset_catalog, make_user):
     assert item["price_unit_status"] == "unverified"
 
 
-def test_f1_mixed_optimize_blocked(asset_catalog):
+def test_f1_mixed_optimize_blocked(asset_catalog, monkeypatch):
+    import marketdata.currency
+    monkeypatch.setattr(marketdata.currency, "TSE_PRICE_UNIT", "unverified")
     from portfolio.services.optimization import MixedUnitUniverseBlocked, _guard_mixed_tse_units
 
     stock = asset_catalog["kama_stock"]
@@ -477,7 +481,9 @@ def test_f1_mixed_optimize_blocked(asset_catalog):
     assert "emami_coin" in exc.value.other_keys or "usd_cash" in exc.value.other_keys
 
 
-def test_f1_tse_only_guard_allows_partition(asset_catalog):
+def test_f1_tse_only_guard_allows_partition(asset_catalog, monkeypatch):
+    import marketdata.currency
+    monkeypatch.setattr(marketdata.currency, "TSE_PRICE_UNIT", "unverified")
     from marketdata.currency import partition_tse_asset_keys, tse_unit_verified
     from portfolio.services.optimization import _guard_mixed_tse_units
 

@@ -18,11 +18,12 @@ class Migration(migrations.Migration):
             FROM portfolio_asset a
             WHERE p.asset_id = a.id AND a.tse_symbol IS NOT NULL;
 
-            -- Mark BRS-linked prices as IRT/verified
+            -- Mark BRS-linked prices as IRT/verified, but only when the asset
+            -- does NOT also have a TSE symbol. Python logic used 'if tse_symbol: ... elif brs_symbol: ...'
             UPDATE portfolio_price p
             SET price_unit = 'IRT', price_unit_verified = true
             FROM portfolio_asset a
-            WHERE p.asset_id = a.id AND a.brs_symbol IS NOT NULL;
+            WHERE p.asset_id = a.id AND a.brs_symbol IS NOT NULL AND (a.tse_symbol IS NULL OR a.tse_symbol = '');
             """,
             reverse_sql="""
             -- Revert to conservative default for all rows

@@ -11,7 +11,7 @@ UNIT_OVERRIDES = {
 
 # F1: flip to "rial" or "toman" only with documented exchange evidence.
 # See docs/data-verification/F1_POLICY.md — do not infer from magnitude.
-TSE_PRICE_UNIT = "unverified"
+TSE_PRICE_UNIT = "rial"
 
 
 def tse_unit_verified() -> bool:

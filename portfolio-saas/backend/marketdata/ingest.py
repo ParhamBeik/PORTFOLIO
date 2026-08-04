@@ -17,9 +17,9 @@ Conventions:
   `normalize_jalali` so exactly one format reaches the DB.
 """
 import logging
-
+from decimal import Decimal
 from . import jalali, validation
-from .currency import canonical_symbol, to_toman
+from .currency import TSE_PRICE_UNIT, canonical_symbol, to_toman
 from .models import (
     CodalAnnouncement,
     CommodityHistory,
@@ -316,25 +316,44 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
         return 0, 0 if payload is None else 1
     endpoint = "stock_history_adjusted" if is_adjusted else "stock_history_unadjusted"
     accepted, bad = screen("daily_history", payload, endpoint, symbol)
+    
+    tse_div = Decimal("10") if TSE_PRICE_UNIT == "rial" else Decimal("1")
+    tse_div_int = 10 if TSE_PRICE_UNIT == "rial" else 1
+    
     rows = []
     for rec in accepted:
         try:
+            pmin_val = rec.get("pmin") or 0
+            pmax_val = rec.get("pmax") or 0
+            py_val = rec.get("py") or 0
+            pf_val = rec.get("pf") or 0
+            pl_val = rec.get("pl") or 0
+            plc_val = rec.get("plc") or 0
+            pc_val = rec.get("pc") or 0
+            pcc_val = rec.get("pcc") or 0
+            tval_val = rec.get("tval") or 0
+
+            buy_i_val = rec.get("Buy_I_Value")
+            buy_n_val = rec.get("Buy_N_Value")
+            sell_i_val = rec.get("Sell_I_Value")
+            sell_n_val = rec.get("Sell_N_Value")
+
             rows.append(DailyStockHistory(
                 symbol=symbol,
                 date=normalize_jalali(rec["date"]),
                 time=rec.get("time", "") or "",
                 tno=rec.get("tno") or 0,
                 tvol=rec.get("tvol") or 0,
-                tval=rec.get("tval") or 0,
-                pmin=rec.get("pmin") or 0,
-                pmax=rec.get("pmax") or 0,
-                py=rec.get("py") or 0,
-                pf=rec.get("pf") or 0,
-                pl=rec.get("pl") or 0,
-                plc=rec.get("plc") or 0,
+                tval=int(float(tval_val) / tse_div_int),
+                pmin=(Decimal(str(pmin_val)) / tse_div),
+                pmax=(Decimal(str(pmax_val)) / tse_div),
+                py=(Decimal(str(py_val)) / tse_div),
+                pf=(Decimal(str(pf_val)) / tse_div),
+                pl=(Decimal(str(pl_val)) / tse_div),
+                plc=(Decimal(str(plc_val)) / tse_div),
                 plp=rec.get("plp") or 0.0,
-                pc=rec.get("pc") or 0,
-                pcc=rec.get("pcc") or 0,
+                pc=(Decimal(str(pc_val)) / tse_div),
+                pcc=(Decimal(str(pcc_val)) / tse_div),
                 pcp=rec.get("pcp") or 0.0,
                 is_adjusted=is_adjusted,
                 # Real/Legal breakdown only exists on unadjusted (type=0) payloads.
@@ -346,10 +365,10 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
                 buy_n_volume=rec.get("Buy_N_Volume"),
                 sell_i_volume=rec.get("Sell_I_Volume"),
                 sell_n_volume=rec.get("Sell_N_Volume"),
-                buy_i_value=rec.get("Buy_I_Value"),
-                buy_n_value=rec.get("Buy_N_Value"),
-                sell_i_value=rec.get("Sell_I_Value"),
-                sell_n_value=rec.get("Sell_N_Value"),
+                buy_i_value=int(float(buy_i_val) / tse_div_int) if buy_i_val is not None else None,
+                buy_n_value=int(float(buy_n_val) / tse_div_int) if buy_n_val is not None else None,
+                sell_i_value=int(float(sell_i_val) / tse_div_int) if sell_i_val is not None else None,
+                sell_n_value=int(float(sell_n_val) / tse_div_int) if sell_n_val is not None else None,
             ))
         except (KeyError, TypeError, ValueError):
             bad += 1
@@ -420,17 +439,24 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
         return 0, 0 if payload is None else 1
     endpoint = f"stock_candle_{'adjusted' if candle_type == 3 else 'unadjusted'}"
     accepted, bad = screen("candle", records, endpoint, symbol)
+    
+    tse_div = Decimal("10") if TSE_PRICE_UNIT == "rial" else Decimal("1")
+    
     rows = []
     for rec in accepted:
         try:
+            dt_str = normalize_jalali(rec["date"]) if "date" in rec else str(rec["datetime"])
+            # Split on whitespace to keep only the date portion (e.g. "1405-05-09")
+            if dt_str:
+                dt_str = dt_str.split()[0]
             rows.append(MarketCandle(
                 symbol=symbol,
                 timeframe=timeframe,
-                date_time=normalize_jalali(rec["date"]) if "date" in rec else str(rec["datetime"]),
-                open_price=rec["open"],
-                high_price=rec["high"],
-                low_price=rec["low"],
-                close_price=rec["close"],
+                date_time=dt_str,
+                open_price=(Decimal(str(rec["open"])) / tse_div),
+                high_price=(Decimal(str(rec["high"])) / tse_div),
+                low_price=(Decimal(str(rec["low"])) / tse_div),
+                close_price=(Decimal(str(rec["close"])) / tse_div),
                 volume=rec.get("volume") or 0,
             ))
         except (KeyError, TypeError, ValueError):
@@ -589,15 +615,58 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
     # This screen is what stops the 54 high-below-low rows found in the audit
     # from coming back on the next fetch.
     accepted, bad = screen("gold", payload["history_daily"], "gold_daily", symbol)
+    
+    # Sort by date chronological order so rolling screening works cleanly
+    accepted_sorted = sorted(accepted, key=lambda r: normalize_jalali(r.get("date", "")))
+    
+    # Get last 5 valid close prices from DB to bootstrap rolling closes
+    db_history = list(
+        GoldCurrencyHistory.objects.filter(symbol=symbol).order_by("-date")[:5]
+    )
+    rolling_closes = [float(row.close_price) for row in reversed(db_history)]
+    
     rows = []
-    for rec in accepted:
+    for rec in accepted_sorted:
         try:
             c = float(rec["close"])
             o = float(rec.get("open")) if rec.get("open") is not None else c
             h = float(rec.get("high")) if rec.get("high") is not None else c
             l = float(rec.get("low")) if rec.get("low") is not None else c
 
-            c = to_toman(symbol, c, raw_unit)
+            c_toman = float(to_toman(symbol, c, raw_unit))
+            
+            # Cross-day outlier screening
+            if len(rolling_closes) >= 3:
+                import statistics
+                median = statistics.median(rolling_closes)
+                if median > 0:
+                    deviation = abs(c_toman - median) / median
+                    if deviation > 0.50:
+                        bad += 1
+                        day_str = normalize_jalali(rec["date"])
+                        row_rej, created_rej = RejectedRecord.objects.get_or_create(
+                            endpoint="gold_daily",
+                            symbol=str(symbol)[:64],
+                            date=str(day_str)[:10],
+                            reason="outlier_deviation",
+                            defaults={"payload": {"close_toman": c_toman, "median_toman": median, "record": rec}},
+                        )
+                        if not created_rej:
+                            RejectedRecord.objects.filter(pk=row_rej.pk).update(
+                                occurrences=row_rej.occurrences + 1,
+                                payload={"close_toman": c_toman, "median_toman": median, "record": rec}
+                            )
+                        logger.warning(
+                            "gold_daily(%s): rejected close %.2f (median %.2f) at %s due to outlier deviation",
+                            symbol, c_toman, median, day_str
+                        )
+                        continue
+            
+            # Update rolling closes with verified price
+            rolling_closes.append(c_toman)
+            if len(rolling_closes) > 5:
+                rolling_closes.pop(0)
+
             o = to_toman(symbol, o, raw_unit)
             h = to_toman(symbol, h, raw_unit)
             l = to_toman(symbol, l, raw_unit)
@@ -610,7 +679,7 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
                 open_price=o,
                 high_price=h,
                 low_price=l,
-                close_price=c,
+                close_price=Decimal(str(c_toman)),
             ))
         except (KeyError, TypeError, ValueError):
             bad += 1

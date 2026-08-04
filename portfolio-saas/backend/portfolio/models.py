@@ -17,6 +17,9 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 
+# Import optimization models to register OptimizationSnapshot with Django's app registry
+from . import optimization_models  # noqa: F401
+
 # House valuation baseline, shared by the model default, the ledger rebuild and
 # the valuation engine — three copies of a number that must agree is a defect
 # waiting to happen, so it lives here and every call site imports it.

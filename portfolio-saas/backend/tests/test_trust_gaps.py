@@ -370,7 +370,7 @@ def test_daily_aggregate_never_shadows_the_authoritative_adjusted_candle(asset_c
     authoritative = MarketCandle.objects.get(
         symbol=symbol, timeframe=MarketCandle.ADJUSTED, date_time=day
     )
-    assert authoritative.close_price == Decimal("920.0000")
+    assert authoritative.close_price == Decimal("92.0000")
     assert MarketCandle.objects.filter(
         symbol=symbol, timeframe=MarketCandle.AGGREGATE, date_time=day
     ).exists(), "the aggregate must still be recorded, just not in the ADJUSTED slot"

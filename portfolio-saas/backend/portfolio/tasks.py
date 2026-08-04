@@ -253,3 +253,120 @@ def fetch_and_publish():
         market_state(), len(result["priced"]), result["written"],
     )
     return result
+
+
+# -----------------------------------------------------------------------------
+# Optimization snapshot task
+# -----------------------------------------------------------------------------
+@shared_task(ignore_result=True)
+def run_global_optimization_snapshot(payload: dict | None = None):
+    """Run optimizations and persist snapshots.
+
+    Behavior (MVP):
+      - Run one global optimization (account=None) for market reference.
+      - Run one optimization per Account that has holdings (account-scoped), using
+        its current holdings to compute current_weights and total_value_tomans.
+      - Persist each result into OptimizationSnapshot with account set for per-
+        account runs.
+
+    The task is intended to be triggered by the brsapi webhook after new prices
+    arrive. Uses lazy imports to avoid circular load issues.
+    """
+    try:
+        from decimal import Decimal
+        from django.utils import timezone
+        from portfolio.services.optimization import optimize
+        from .optimization_models import OptimizationSnapshot
+        from .services.valuation import get_latest_prices, value_account
+        from .models import Account
+
+        now = timezone.now()
+        prices = get_latest_prices()
+
+        results = []
+
+        # 1) Global market snapshot (account=None)
+        try:
+            global_result = optimize(
+                scenario="max_sharpe",
+                current_weights={},
+                total_value_tomans=1,
+                constraints=None,
+                user=None,
+                history_days=180,
+            )
+            snap = OptimizationSnapshot(
+                account=None,
+                scenario="max_sharpe",
+                payload=global_result,
+                price_version=global_result.get("price_version", ""),
+                as_of=None,
+            )
+            snap.save()
+            logger.info("Saved global OptimizationSnapshot id=%s", snap.id)
+            results.append({"account": None, "snapshot_id": snap.id})
+        except Exception as exc:
+            logger.exception("Global optimization failed: %s", exc)
+
+        # 2) Per-account snapshots
+        # Only iterate accounts that actually have holdings to avoid waste.
+        accounts_qs = Account.objects.filter(holdings__isnull=False).distinct().prefetch_related("holdings__asset")
+        for account in accounts_qs.iterator():
+            try:
+                valuation = value_account(account, prices=prices)
+                total = valuation.get("total") or Decimal("0")
+                if total <= 0:
+                    logger.debug("Skipping optimization for account %s: total value = %s", account.id, str(total))
+                    continue
+
+                # Build current_weights: {asset_key: weight_fraction}
+                items = valuation.get("items", [])
+                current_weights = {}
+                for item in items:
+                    key = item.get("key") or item.get("asset") or item.get("asset_key")
+                    value = item.get("value")
+                    if key and value is not None:
+                        try:
+                            frac = float(Decimal(str(value)) / Decimal(str(total)))
+                        except Exception:
+                            frac = 0.0
+                        if frac > 0:
+                            current_weights[key] = frac
+
+                if not current_weights:
+                    logger.debug("No priced holdings for account %s, skipping optimization.", account.id)
+                    continue
+
+                # Run optimize for this account (user passed so universe/account scoping works)
+                try:
+                    result = optimize(
+                        scenario="max_sharpe",
+                        current_weights=current_weights,
+                        total_value_tomans=total,
+                        constraints=None,
+                        user=account.user,
+                        history_days=180,
+                    )
+                except Exception as exc:
+                    logger.exception("Optimization failed for account %s: %s", account.id, exc)
+                    continue
+
+                snap = OptimizationSnapshot(
+                    account=account,
+                    scenario=result.get("scenario", "max_sharpe"),
+                    payload=result,
+                    price_version=result.get("price_version", ""),
+                    as_of=None,
+                    created_by=None,
+                )
+                snap.save()
+                logger.info("Saved OptimizationSnapshot id=%s for account %s", snap.id, account.id)
+                results.append({"account": account.id, "snapshot_id": snap.id})
+            except Exception as exc:
+                logger.exception("Unexpected error while processing account %s: %s", getattr(account, "id", None), exc)
+                continue
+
+        return {"ok": True, "results": results}
+    except Exception as exc:
+        logger.exception("run_global_optimization_snapshot unexpected error: %s", exc)
+        return {"ok": False, "error": str(exc)}

@@ -65,7 +65,7 @@ def test_ingest_daily_history_maps_fields_and_normalizes_dates():
     created, skipped = ingest.ingest_daily_history("فملی", HISTORY_PAYLOAD, is_adjusted=False)
     assert created == 2 and skipped == 0
     row = DailyStockHistory.objects.get(symbol="فملی", date="1403-10-19")
-    assert row.pl == 8500 and row.buy_count_i == 2416 and row.is_adjusted is False
+    assert row.pl == 850 and row.buy_count_i == 2416 and row.is_adjusted is False
     # Slash-separated input date stored dash-normalized.
     assert DailyStockHistory.objects.filter(date="1403-10-20").exists()
     assert not DailyStockHistory.objects.filter(date__contains="/").exists()

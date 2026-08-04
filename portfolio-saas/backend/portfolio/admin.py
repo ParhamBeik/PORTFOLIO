@@ -1,6 +1,7 @@
 from django.contrib import admin
 
 from .models import Account, Asset, Holding, LedgerEntry, Price, Snapshot
+from .optimization_models import OptimizationSnapshot  # persisted optimization payloads
 
 
 class HoldingInline(admin.TabularInline):
@@ -34,6 +35,13 @@ class PriceAdmin(admin.ModelAdmin):
 admin.site.register(Holding)
 admin.site.register(Snapshot)
 
+
+@admin.register(OptimizationSnapshot)
+class OptimizationSnapshotAdmin(admin.ModelAdmin):
+    list_display = ("id", "scenario", "account", "created_at")
+    list_filter = ("scenario",)
+    readonly_fields = ("payload", "created_at")
+    search_fields = ("account__user__email",)
 
 @admin.register(LedgerEntry)
 class LedgerEntryAdmin(admin.ModelAdmin):

@@ -3,6 +3,7 @@
 Grouped top-down the way a request would find them: catalog & CRUD, valuation,
 prices (including the SSE stream), then the Pro analytics endpoints.
 """
+import importlib
 from django.urls import path
 
 from .live.sse import PriceStreamView
@@ -93,4 +94,11 @@ urlpatterns = [
     path("discovery/", DiscoveryView.as_view(), name="discovery"),
     path("performance/", PerformanceView.as_view(), name="performance"),
     path("integrity/", IntegrityView.as_view(), name="integrity"),
+
+    # Webhook for brsapi to notify of new prices (triggers optimization run)
+    path("marketdata/webhook/brsapi/", importlib.import_module(".views", package=__package__).BrsApiWebhookView.as_view(), name="brs-webhook"),
+
+    # Optimization snapshots API (MVP)
+    path("optimization/snapshots/", importlib.import_module(".views", package=__package__).OptimizationSnapshotListView.as_view(), name="optimization-snapshots"),
+    path("optimization/snapshots/latest/", importlib.import_module(".views", package=__package__).OptimizationSnapshotLatestView.as_view(), name="optimization-snapshots-latest"),
 ]

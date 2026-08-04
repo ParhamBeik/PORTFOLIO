@@ -251,3 +251,14 @@ class LiabilitySerializer(serializers.ModelSerializer):
             "updated_at",
         )
         read_only_fields = ("id", "account", "created_at", "updated_at")
+
+
+# Serializer for OptimizationSnapshot persisted records
+class OptimizationSnapshotSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    account = serializers.IntegerField(allow_null=True, read_only=True)
+    scenario = serializers.CharField(read_only=True)
+    payload = serializers.JSONField(read_only=True)
+    price_version = serializers.CharField(read_only=True)
+    as_of = serializers.DateTimeField(allow_null=True, read_only=True)
+    created_at = serializers.DateTimeField(read_only=True)
