@@ -1,0 +1,215 @@
+{
+  "_note": "SHA-256 of each raw provider response backing this audit. Raw bodies are NOT stored (size + API-key context). The api key is redacted to '***'.",
+  "retrieved_gregorian": "2026-08-04",
+  "retrieved_jalali": "1405-05-13",
+  "provider": "BrsApi.ir",
+  "request_count": 16,
+  "requests": [
+    {
+      "endpoint_key": "stock_candles",
+      "url": "https://Api.BrsApi.ir/Tsetmc/Candlestick.php",
+      "params_redacted": {
+        "key": "***",
+        "type": "2",
+        "l18": "کاما"
+      },
+      "response_sha256": "236bf41b8da24d0f561431002a7fa89c2e8f7a8c128c5a304fcc97b6bbdb3f11",
+      "response_bytes": 450233,
+      "top_level_type": "dict",
+      "record_count": null
+    },
+    {
+      "endpoint_key": "stock_candles",
+      "url": "https://Api.BrsApi.ir/Tsetmc/Candlestick.php",
+      "params_redacted": {
+        "key": "***",
+        "type": "3",
+        "l18": "کاما"
+      },
+      "response_sha256": "805fc93b7ceadee3a5998727c69700224ace8de7ec4a5b6f2e6a6c9590627e06",
+      "response_bytes": 418007,
+      "top_level_type": "dict",
+      "record_count": null
+    },
+    {
+      "endpoint_key": "stock_history",
+      "url": "https://Api.BrsApi.ir/Tsetmc/History.php",
+      "params_redacted": {
+        "key": "***",
+        "type": "0",
+        "l18": "کاما"
+      },
+      "response_sha256": "7f081cab7024290d0dcc09c933c0b1aa32b0311ad5ed2992d9d4c353e6929154",
+      "response_bytes": 1074711,
+      "top_level_type": "list",
+      "record_count": 4934
+    },
+    {
+      "endpoint_key": "stock_candles",
+      "url": "https://Api.BrsApi.ir/Tsetmc/Candlestick.php",
+      "params_redacted": {
+        "key": "***",
+        "type": "2",
+        "l18": "دجابر"
+      },
+      "response_sha256": "62799e29d5177e3872f53f1622d6f602a1d69dd78921636975b5fe1b58745994",
+      "response_bytes": 82,
+      "top_level_type": "dict",
+      "record_count": null
+    },
+    {
+      "endpoint_key": "stock_candles",
+      "url": "https://Api.BrsApi.ir/Tsetmc/Candlestick.php",
+      "params_redacted": {
+        "key": "***",
+        "type": "3",
+        "l18": "دجابر"
+      },
+      "response_sha256": "2bf2d1e8cc4847bb438bd4bceee25db4fcd881ee3d939c086de85524ed974fe2",
+      "response_bytes": 517115,
+      "top_level_type": "dict",
+      "record_count": null
+    },
+    {
+      "endpoint_key": "stock_history",
+      "url": "https://Api.BrsApi.ir/Tsetmc/History.php",
+      "params_redacted": {
+        "key": "***",
+        "type": "0",
+        "l18": "دجابر"
+      },
+      "response_sha256": "d2b726af8aa0680d66a5b16da36865e594b741d89d1ed93d620ddb668ff721b5",
+      "response_bytes": 1246920,
+      "top_level_type": "list",
+      "record_count": 5760
+    },
+    {
+      "endpoint_key": "stock_candles",
+      "url": "https://Api.BrsApi.ir/Tsetmc/Candlestick.php",
+      "params_redacted": {
+        "key": "***",
+        "type": "2",
+        "l18": "وغدیر"
+      },
+      "response_sha256": "0bb6b4775cff9356d828e17e39d89ab95bc5b1a92f571f8c8d2029bc630b7f4e",
+      "response_bytes": 531306,
+      "top_level_type": "dict",
+      "record_count": null
+    },
+    {
+      "endpoint_key": "stock_candles",
+      "url": "https://Api.BrsApi.ir/Tsetmc/Candlestick.php",
+      "params_redacted": {
+        "key": "***",
+        "type": "3",
+        "l18": "وغدیر"
+      },
+      "response_sha256": "ebbaa8667354437801d8b229ae2e85ee369f7639b301739847d96ec7a3c6c834",
+      "response_bytes": 502054,
+      "top_level_type": "dict",
+      "record_count": null
+    },
+    {
+      "endpoint_key": "stock_history",
+      "url": "https://Api.BrsApi.ir/Tsetmc/History.php",
+      "params_redacted": {
+        "key": "***",
+        "type": "0",
+        "l18": "وغدیر"
+      },
+      "response_sha256": "627f0a9f493ea7e25325ee1d57eb87a878e880dc5f10676a33b4f6908a46ef6d",
+      "response_bytes": 1228283,
+      "top_level_type": "list",
+      "record_count": 5619
+    },
+    {
+      "endpoint_key": "gold_currency_history",
+      "url": "https://Api.BrsApi.ir/Market/Gold_Currency_Pro.php",
+      "params_redacted": {
+        "key": "***",
+        "history": "2",
+        "symbol": "IR_COIN_EMAMI"
+      },
+      "response_sha256": "2e1a967a17ecfe761908c7bd6040ff1895a07008d584b6a722d4e467ed95b77d",
+      "response_bytes": 447581,
+      "top_level_type": "dict",
+      "record_count": 4838
+    },
+    {
+      "endpoint_key": "gold_currency_history",
+      "url": "https://Api.BrsApi.ir/Market/Gold_Currency_Pro.php",
+      "params_redacted": {
+        "key": "***",
+        "history": "2",
+        "symbol": "IR_GOLD_18K"
+      },
+      "response_sha256": "a63505aea51921e77ff0f02300fc0e277b9c1cc68dd4c828b814873b1465b0a4",
+      "response_bytes": 357419,
+      "top_level_type": "dict",
+      "record_count": 3998
+    },
+    {
+      "endpoint_key": "gold_currency_history",
+      "url": "https://Api.BrsApi.ir/Market/Gold_Currency_Pro.php",
+      "params_redacted": {
+        "key": "***",
+        "history": "2",
+        "symbol": "USD"
+      },
+      "response_sha256": "3f33ae2e892c4937a9fa8358e760851a0710b06bed38f0665080e234d3c622f3",
+      "response_bytes": 415481,
+      "top_level_type": "dict",
+      "record_count": 4800
+    },
+    {
+      "endpoint_key": "gold_currency_history",
+      "url": "https://Api.BrsApi.ir/Market/Gold_Currency_Pro.php",
+      "params_redacted": {
+        "key": "***",
+        "history": "2",
+        "symbol": "USDT"
+      },
+      "response_sha256": "976dfba7952b492463c76578408e09019da4b986f2a177c36057866662db59d7",
+      "response_bytes": 116642,
+      "top_level_type": "dict",
+      "record_count": 1041
+    },
+    {
+      "endpoint_key": "gold_currency_history",
+      "url": "https://Api.BrsApi.ir/Market/Gold_Currency_Pro.php",
+      "params_redacted": {
+        "key": "***",
+        "history": "2",
+        "symbol": "XAUUSD"
+      },
+      "response_sha256": "2fd15929d64e27153f0b06658cf56f75e83de6f0de535fddb18315fc680aeb48",
+      "response_bytes": 1324247,
+      "top_level_type": "dict",
+      "record_count": 14194
+    },
+    {
+      "endpoint_key": "gold_currency_history",
+      "url": "https://Api.BrsApi.ir/Market/Gold_Currency_Pro.php",
+      "params_redacted": {
+        "key": "***",
+        "history": "2",
+        "symbol": "SEK"
+      },
+      "response_sha256": "b880c309bd8a2958a56d1622e5f48f7c37c20489fab797e089364a02103bfbae",
+      "response_bytes": 276940,
+      "top_level_type": "dict",
+      "record_count": 3333
+    },
+    {
+      "endpoint_key": "gold_currency_free",
+      "url": "https://Api.BrsApi.ir/Market/Gold_Currency.php",
+      "params_redacted": {
+        "key": "***"
+      },
+      "response_sha256": "17a17a062ea887304bad07d1163e08c722f8839e2e3059973dfc14001a693ec1",
+      "response_bytes": 15824,
+      "top_level_type": "dict",
+      "record_count": null
+    }
+  ]
+}
