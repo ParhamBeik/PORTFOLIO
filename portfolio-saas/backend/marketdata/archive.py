@@ -38,7 +38,7 @@ from .models import (
     ShareholderRecord,
     StockTransactionTick,
 )
-from .quota import ARCHIVE, QuotaExhausted, remaining_requests
+from .quota import ARCHIVE, QuotaExhausted, remaining_requests, increment_historical_full_used
 
 
 STOCK_ENDPOINTS = (
@@ -68,8 +68,6 @@ _FULL_HISTORY = (
     ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
     ArchiveFetchState.Endpoint.GOLD_DAILY,
-    ArchiveFetchState.Endpoint.COMMODITY_DAILY,
-    ArchiveFetchState.Endpoint.CRYPTO_DAILY,
     ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY,
 )
 _RANGE_HISTORY = (ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,)
@@ -100,8 +98,13 @@ EMPTY_IS_FAILURE = frozenset({
     ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
     ArchiveFetchState.Endpoint.GOLD_DAILY,
+})
+
+# Covered by live organic ingest (portfolio.tasks); archive rows are retired.
+_RETIRED_ARCHIVE_ENDPOINTS = frozenset({
     ArchiveFetchState.Endpoint.COMMODITY_DAILY,
     ArchiveFetchState.Endpoint.CRYPTO_DAILY,
+    ArchiveFetchState.Endpoint.OPTION_CONTRACT_DAILY,
 })
 
 
@@ -143,8 +146,6 @@ def ensure_archive_states(stock_symbols=None, gold_symbols=None):
         for symbol in gold_symbols
     ]
     rows += [
-        ArchiveFetchState(endpoint=ArchiveFetchState.Endpoint.COMMODITY_DAILY, symbol="COMMODITIES"),
-        ArchiveFetchState(endpoint=ArchiveFetchState.Endpoint.CRYPTO_DAILY, symbol="CRYPTO"),
         ArchiveFetchState(endpoint=ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY, symbol="TEDPIX"),
     ]
     if rows:
@@ -154,6 +155,11 @@ def ensure_archive_states(stock_symbols=None, gold_symbols=None):
 def _fetch_and_ingest(state):
     endpoint = state.endpoint
     symbol = state.symbol
+    if endpoint in _RETIRED_ARCHIVE_ENDPOINTS:
+        # No request; empty expected/stored marks verified_complete and stops retries.
+        return (0, 0), set(), set()
+    if endpoint in _FULL_HISTORY:
+        increment_historical_full_used()
     if endpoint == ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED:
         payload = fetch_daily_history(settings.TSETMC_API_KEY, symbol, history_type=0)
         result = ingest.ingest_daily_history(symbol, payload, is_adjusted=False)
@@ -190,24 +196,6 @@ def _fetch_and_ingest(state):
         stored = set(MarketCandle.objects.filter(
             symbol=symbol, timeframe="1d_adj", date_time__in=expected
         ).values_list("date_time", flat=True))
-    elif endpoint == ArchiveFetchState.Endpoint.OPTION_CONTRACT_DAILY:
-        payload = fetch_option_contracts(symbol)
-        result = ingest.ingest_option_contracts(symbol, payload)
-        expected = _generic_dates(payload)
-        stored = set(OptionContractHistory.objects.filter(symbol=symbol, date__in=expected).values_list("date", flat=True))
-    elif endpoint == ArchiveFetchState.Endpoint.COMMODITY_DAILY:
-        # One request returns every commodity for one day, so the unit of
-        # verification is symbol+date -- keying on date alone would pass with a
-        # single row stored out of fourteen.
-        payload = fetch_commodity_prices()
-        result = ingest.ingest_commodity_history(symbol, payload)
-        expected = _snapshot_keys(payload)
-        stored = _stored_snapshot_keys(CommodityHistory, expected)
-    elif endpoint == ArchiveFetchState.Endpoint.CRYPTO_DAILY:
-        payload = fetch_crypto_prices()
-        result = ingest.ingest_crypto_history(symbol, payload)
-        expected = _snapshot_keys(payload, name_keys=("name_en", "symbol"))
-        stored = _stored_snapshot_keys(CryptoHistory, expected)
     elif endpoint == ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS:
         payload, result, expected, stored = _fetch_codal_pages(symbol)
     elif endpoint == ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS:
@@ -465,15 +453,15 @@ def _tick_trading_days(symbol):
 def _tick_dates_needed(symbol):
     """Trading days in the trailing window still owing a correct set of ticks.
 
-    Two kinds of work: days never fetched, and days whose stored ticks do not
-    add up to the candle. The second kind is the self-repair path -- the check
-    that finds them is the same one that proves a fresh fetch is right.
+    Two kinds of work: days never fetched (missing), and days whose stored ticks
+    do not add up to the candle (broken). Missing days are prioritized first
+    to establish a complete timeline before spending quota on self-repair.
     """
     trading = _tick_trading_days(symbol)
     stored = _tick_dates_stored(symbol)
     missing = trading - stored
     broken = _tick_days_unreconciled(symbol, trading & stored)
-    return sorted(missing | broken, reverse=True)
+    return sorted(missing, reverse=True) + sorted(broken, reverse=True)
 
 
 def _record_dates(payload):
@@ -671,8 +659,6 @@ _ENDPOINT_PRIORITY = (
     ArchiveFetchState.Endpoint.GOLD_DAILY,
     ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
-    ArchiveFetchState.Endpoint.COMMODITY_DAILY,
-    ArchiveFetchState.Endpoint.CRYPTO_DAILY,
     ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
     ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS,
 )

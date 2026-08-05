@@ -127,7 +127,6 @@ export const register = (
   password,
   firstName = "",
   lastName = "",
-  inviteToken = "",
 ) =>
   api("/api/auth/register/", {
     method: "POST",
@@ -136,7 +135,6 @@ export const register = (
       password,
       first_name: firstName,
       last_name: lastName,
-      invite_token: inviteToken,
     },
   });
 export const login = (email, password) =>
@@ -325,12 +323,6 @@ export const frontier = (account = null) =>
     `/api/optimization/frontier/${accountParam(account) ? "?" + accountParam(account) : ""}`
   );
 export const assetReturns = (days = 180) => api(`/api/assets/returns/?days=${days}`);
-
-// Billing — Zarinpal. Returns { redirect_url }; the browser redirects there.
-// After paying, Zarinpal calls our callback, which verifies and bounces the
-// browser back to /billing?status=success&ref_id=.. (or cancel/error).
-export const createZarinpalPayment = () =>
-  api("/api/billing/zarinpal/request/", { method: "POST" });
 
 // Market data (TSE). Symbols/candles/history/index are FREE;
 // announcements & shareholders are Pro (403 for free users).

@@ -30,7 +30,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from portfolio.models import Account, Holding, ImportBatch, LedgerEntry
 
-from .models import Invitation, User
+from .models import User
 from .permissions import IsPro
 from .serializers import (
     ChangePasswordSerializer,
@@ -144,23 +144,6 @@ class RegisterView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
-        
-        invite_token = request.data.get("invite_token")
-        if settings.DEBUG and invite_token == "E2E-INVITE-TOKEN":
-            user.is_active = True
-            user.email_verified_at = timezone.now()
-            user.save()
-            access, refresh = _tokens(user)
-            response = Response(
-                {
-                    "user": UserSerializer(user).data,
-                    "access": access,
-                    "verification_required": False,
-                },
-                status=status.HTTP_201_CREATED,
-            )
-            return _set_refresh_cookie(response, request, refresh)
-
         send_verification_email(user)
         return Response(
             {
@@ -207,28 +190,6 @@ class ChangePasswordView(APIView):
         return _set_refresh_cookie(Response({
             "detail": "Password updated successfully.", "access": access,
         }), request, refresh)
-
-
-class InvitationCreateView(APIView):
-    permission_classes = [IsAdminUser]
-
-    def post(self, request):
-        field = serializers.EmailField(required=False, allow_blank=True)
-        try:
-            email = field.run_validation(request.data.get("email", ""))
-        except serializers.ValidationError as exc:
-            return Response({"email": exc.detail}, status=400)
-        invitation, raw_token = Invitation.issue(
-            email=email, created_by=request.user
-        )
-        return Response(
-            {
-                "invite_token": raw_token,
-                "email": invitation.email,
-                "expires_at": invitation.expires_at,
-            },
-            status=201,
-        )
 
 
 class VerifyEmailView(APIView):

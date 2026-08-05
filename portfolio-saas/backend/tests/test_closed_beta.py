@@ -2,15 +2,13 @@ import csv
 import io
 import json
 import zipfile
-from datetime import timedelta
-
 import pytest
 from django.core import mail
 from django.core.cache import cache
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from accounts.models import Invitation, User
+from accounts.models import User
 from portfolio.models import Account, Asset, Holding, LedgerEntry
 
 
@@ -22,59 +20,22 @@ def clear_cache():
     cache.clear()
 
 
-def _register_payload(token, email="beta@test.test"):
+def _register_payload(email="beta@test.test"):
     return {
         "email": email,
         "password": "Sup3rSecret!",
         "first_name": "Beta",
-        "invite_token": token,
+        "last_name": "User",
     }
-
-
-def test_invite_is_email_bound_expiring_and_single_use():
-    invite, token = Invitation.issue(email="bound@test.test")
-    client = APIClient()
-
-    mismatch = client.post(
-        "/api/auth/register/",
-        _register_payload(token, email="other@test.test"),
-        format="json",
-    )
-    assert mismatch.status_code == 400
-
-    ok = client.post(
-        "/api/auth/register/",
-        _register_payload(token, email="bound@test.test"),
-        format="json",
-    )
-    replay = client.post(
-        "/api/auth/register/",
-        _register_payload(token, email="bound2@test.test"),
-        format="json",
-    )
-    assert ok.status_code == 201
-    assert replay.status_code == 400
-
-    expired, expired_token = Invitation.issue(email="expired@test.test")
-    Invitation.objects.filter(pk=expired.pk).update(
-        expires_at=timezone.now() - timedelta(seconds=1)
-    )
-    response = client.post(
-        "/api/auth/register/",
-        _register_payload(expired_token, email="expired@test.test"),
-        format="json",
-    )
-    assert response.status_code == 400
 
 
 def test_verification_activates_account_and_login():
     from accounts.services import make_email_verification_token
 
-    _invite, raw = Invitation.issue(email="verify@test.test")
     client = APIClient()
     registered = client.post(
         "/api/auth/register/",
-        _register_payload(raw, email="verify@test.test"),
+        _register_payload(email="verify@test.test"),
         format="json",
     )
     user = User.objects.get(email="verify@test.test")

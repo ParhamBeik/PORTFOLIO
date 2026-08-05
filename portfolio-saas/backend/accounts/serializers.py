@@ -3,7 +3,6 @@ from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import TokenError
@@ -12,12 +11,11 @@ from rest_framework_simplejwt.serializers import (
     TokenRefreshSerializer,
 )
 
-from .models import Invitation, User
+from .models import User
 
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=True)
-    invite_token = serializers.CharField(write_only=True, required=True)
 
     class Meta:
         model = User
@@ -27,7 +25,6 @@ class RegisterSerializer(serializers.ModelSerializer):
             "password",
             "first_name",
             "last_name",
-            "invite_token",
         )
         read_only_fields = ("id",)
 
@@ -47,39 +44,7 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        raw_token = validated_data.pop("invite_token")
-        
-        from django.conf import settings
-        if settings.DEBUG and raw_token == "E2E-INVITE-TOKEN":
-            email = User.objects.normalize_email(validated_data["email"])
-            user = User.objects.create_user(
-                email=email,
-                password=validated_data["password"],
-                first_name=validated_data.get("first_name", ""),
-                last_name=validated_data.get("last_name", ""),
-                is_active=False,
-                email_verified_at=None,
-            )
-            return user
-
-        invitation = (
-            Invitation.objects.select_for_update()
-            .filter(token_hash=Invitation.hash_token(raw_token))
-            .first()
-        )
         email = User.objects.normalize_email(validated_data["email"])
-        if (
-            invitation is None
-            or invitation.used_at is not None
-            or invitation.expires_at <= timezone.now()
-            or (
-                invitation.email
-                and invitation.email.lower() != email.lower()
-            )
-        ):
-            raise serializers.ValidationError(
-                {"invite_token": ["Invitation is invalid or expired."]}
-            )
         user = User.objects.create_user(
             email=email,
             password=validated_data["password"],
@@ -88,9 +53,6 @@ class RegisterSerializer(serializers.ModelSerializer):
             is_active=False,
             email_verified_at=None,
         )
-        invitation.used_at = timezone.now()
-        invitation.used_by = user
-        invitation.save(update_fields=["used_at", "used_by"])
         return user
 
 

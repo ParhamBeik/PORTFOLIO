@@ -27,8 +27,8 @@ from django.db import transaction
 from accounts.models import User
 from portfolio.models import Account, Asset, Holding, Price, Snapshot, Transaction
 
-SAMPLE_EMAIL = "family@portfolio.local"
-SAMPLE_PASSWORD = "family12345"
+SAMPLE_EMAIL = "admin@portfolio.local"
+SAMPLE_PASSWORD = "admin12345"
 REAL_SOURCE = "REAL"
 
 # current_state.json stores the house under "house_price_per_sqm_million" but it
@@ -93,8 +93,10 @@ class Command(BaseCommand):
         from django.utils import timezone as tz
         user, created = User.objects.get_or_create(
             email=SAMPLE_EMAIL,
-            defaults={"first_name": "Sample", "last_name": "Family",
+            defaults={"first_name": "Admin", "last_name": "User",
                       "tier": User.Tier.PRO,
+                      "is_staff": True,
+                      "is_superuser": True,
                       "email_verified_at": tz.now(),
                       "is_active": True},
         )

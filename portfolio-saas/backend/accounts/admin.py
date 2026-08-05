@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Invitation, User
+from .models import User
 
 
 @admin.register(User)
@@ -10,10 +10,3 @@ class UserAdmin(admin.ModelAdmin):
     search_fields = ("email",)
     ordering = ("-date_joined",)
 
-
-@admin.register(Invitation)
-class InvitationAdmin(admin.ModelAdmin):
-    list_display = ("email", "expires_at", "used_at", "created_by", "created_at")
-    list_filter = ("used_at",)
-    search_fields = ("email", "token_hash")
-    readonly_fields = ("token_hash", "used_at", "used_by", "created_at")

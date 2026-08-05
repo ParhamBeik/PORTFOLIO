@@ -127,6 +127,10 @@ class TestLiveReserve:
 
     def test_a_full_day_ahead_reserves_every_cycle_it_will_need(self, settings):
         """288 five-minute cycles x 2 calls = 576, the figure the cadence implies."""
+        settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE = 2
+        settings.MARKETDATA_LIVE_INTERVAL_OPEN = 300
+        settings.MARKETDATA_LIVE_INTERVAL_DAYTIME = 300
+        settings.MARKETDATA_LIVE_INTERVAL_OVERNIGHT = 300
         settings.MARKETDATA_LIVE_REQUEST_FLOOR = 600
         settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 200
         settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
@@ -135,6 +139,10 @@ class TestLiveReserve:
         assert quota.live_reserve_remaining(self._row(), now=midnight_tehran) == 576
 
     def test_the_reserve_shrinks_as_the_day_closes(self, settings):
+        settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE = 2
+        settings.MARKETDATA_LIVE_INTERVAL_OPEN = 300
+        settings.MARKETDATA_LIVE_INTERVAL_DAYTIME = 300
+        settings.MARKETDATA_LIVE_INTERVAL_OVERNIGHT = 300
         settings.MARKETDATA_LIVE_REQUEST_FLOOR = 600
         settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 200
         settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
@@ -144,6 +152,7 @@ class TestLiveReserve:
 
     def test_the_reserve_never_exceeds_what_live_could_still_spend(self, settings):
         """Live cannot borrow, so holding more than its bucket protects nothing."""
+        settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE = 2
         settings.MARKETDATA_LIVE_REQUEST_FLOOR = 100
         settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
         settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
@@ -152,6 +161,7 @@ class TestLiveReserve:
         assert quota.live_reserve_remaining(row, now=midnight_tehran) == 30
 
     def test_a_faster_cadence_reserves_more(self, settings):
+        settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE = 2
         settings.MARKETDATA_LIVE_REQUEST_FLOOR = 6000
         settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
         settings.MARKETDATA_LIVE_INTERVAL_OPEN = 120  # the old 2-minute loop

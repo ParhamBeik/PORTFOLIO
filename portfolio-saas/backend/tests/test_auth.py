@@ -14,10 +14,7 @@ def clear_auth_throttles():
     cache.clear()
 
 
-def test_register_requires_invite_and_returns_verification_required():
-    from accounts.models import Invitation
-
-    invite, raw_token = Invitation.issue(email="new@test.test")
+def test_register_creates_inactive_user_and_returns_verification_required():
     client = APIClient()
     resp = client.post(
         "/api/auth/register/",
@@ -25,7 +22,7 @@ def test_register_requires_invite_and_returns_verification_required():
             "email": "new@test.test",
             "password": "Sup3rSecret!",
             "first_name": "New",
-            "invite_token": raw_token,
+            "last_name": "User",
         },
         format="json",
     )
@@ -36,8 +33,6 @@ def test_register_requires_invite_and_returns_verification_required():
     assert data["verification_required"] is True
     assert "access" not in data
     assert "ps_refresh" not in resp.cookies
-    invite.refresh_from_db()
-    assert invite.used_at is not None
 
 
 def test_login_returns_access_and_sets_refresh_cookie():

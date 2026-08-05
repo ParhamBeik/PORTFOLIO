@@ -233,9 +233,9 @@ MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
 # customer-facing path, so it is reserved first and archive takes the remainder.
 # Replaces the legacy MARKETDATA_ARCHIVE_REQUEST_RESERVE=8820, which reserved for
 # archive and left live to fight for what was left -- backwards.
-MARKETDATA_LIVE_REQUEST_FLOOR = int(os.getenv("MARKETDATA_LIVE_REQUEST_FLOOR", "600"))
-MARKETDATA_LIVE_REQUEST_HEADROOM = int(os.getenv("MARKETDATA_LIVE_REQUEST_HEADROOM", "200"))
-MARKETDATA_ARCHIVE_REQUEST_BUDGET = int(os.getenv("MARKETDATA_ARCHIVE_REQUEST_BUDGET", "8800"))
+MARKETDATA_LIVE_REQUEST_FLOOR = int(os.getenv("MARKETDATA_LIVE_REQUEST_FLOOR", "4320"))
+MARKETDATA_LIVE_REQUEST_HEADROOM = int(os.getenv("MARKETDATA_LIVE_REQUEST_HEADROOM", "500"))
+MARKETDATA_ARCHIVE_REQUEST_BUDGET = int(os.getenv("MARKETDATA_ARCHIVE_REQUEST_BUDGET", "4980"))
 MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET", "200"))
 # Kept as a backwards-compatible alias so older management commands and tests that
 # still read it keep working; the archive budget above is the authoritative value.
@@ -257,19 +257,19 @@ MARKETDATA_CODAL_MAX_PAGES = int(os.getenv("MARKETDATA_CODAL_MAX_PAGES", "5"))
 # Live poll cadence by market state (seconds). Beat still ticks every minute; the
 # task itself decides whether enough time has passed, so the cadence can change
 # without a beat restart. See marketdata/market_state.py for the arithmetic.
-# A flat 5 minutes across all three states: 288 cycles a day, every hour covered.
-MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "300"))
-MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "300"))
-MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "300"))
+# A flat 2 minutes across all three states: 720 cycles a day, every hour covered.
+MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "120"))
+MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "120"))
+MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "120"))
 
-# Provider calls one live cycle makes: one all-gold quote and one all-stock quote
-# (portfolio/live/fetcher.py). Per-symbol lookups only fire on a cache miss, so
-# this is the steady-state figure the archive reserve is sized against.
+# Provider calls one live cycle makes: BRS Gold, BRS Crypto, BRS Commodity,
+# TSETMC AllSymbols, TSETMC Options, TSETMC ETF NAV.
 MARKETDATA_LIVE_REQUESTS_PER_CYCLE = int(
-    os.getenv("MARKETDATA_LIVE_REQUESTS_PER_CYCLE", "2")
+    os.getenv("MARKETDATA_LIVE_REQUESTS_PER_CYCLE", "6")
 )
 
 MARKETDATA_QUOTA_TIMEZONE = os.getenv("MARKETDATA_QUOTA_TIMEZONE", "Asia/Tehran")
+MARKETDATA_IGNORE_MARKET_HOURS = os.getenv("MARKETDATA_IGNORE_MARKET_HOURS", "False").lower() in ("true", "1")
 # Extra TSE symbols to sync beyond assets with a tse_symbol (comma-separated).
 MARKETDATA_EXTRA_SYMBOLS = [
     s.strip() for s in os.getenv("MARKETDATA_EXTRA_SYMBOLS", "").split(",") if s.strip()

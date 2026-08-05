@@ -9,10 +9,6 @@ Login is by email (no username field), so the model ships an email-based
 manager; the default UserManager requires a username positional arg and would
 crash `create_user(email=..., password=...)`.
 """
-import hashlib
-import secrets
-from datetime import timedelta
-
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
 from django.utils import timezone
@@ -79,38 +75,4 @@ class User(AbstractUser):
         return timezone.now() < self.pro_expires_at
 
 
-class Invitation(models.Model):
-    token_hash = models.CharField(max_length=64, unique=True)
-    email = models.EmailField(blank=True, default="")
-    expires_at = models.DateTimeField(db_index=True)
-    created_by = models.ForeignKey(
-        User,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="created_invitations",
-    )
-    used_at = models.DateTimeField(null=True, blank=True)
-    used_by = models.ForeignKey(
-        User,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="used_invitations",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
 
-    @staticmethod
-    def hash_token(raw_token: str) -> str:
-        return hashlib.sha256(raw_token.encode()).hexdigest()
-
-    @classmethod
-    def issue(cls, *, email="", created_by=None):
-        raw_token = secrets.token_urlsafe(32)
-        invitation = cls.objects.create(
-            token_hash=cls.hash_token(raw_token),
-            email=User.objects.normalize_email(email) if email else "",
-            expires_at=timezone.now() + timedelta(days=7),
-            created_by=created_by,
-        )
-        return invitation, raw_token

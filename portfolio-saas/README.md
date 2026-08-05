@@ -19,7 +19,7 @@ docker compose up --build
 - API: http://localhost:8000/api/
 - SSE stream: http://localhost:8000/api/prices/stream/
 
-A demo Pro user is seeded on first boot (DEBUG only): **demo@portfolio.local / demo12345**.
+Demo users seeded on first boot (DEBUG only): **demopro@portfolio.local / demopro12345**, **demofree@portfolio.local / demofree12345**, **admin@portfolio.local / admin12345**.
 
 ## Production
 

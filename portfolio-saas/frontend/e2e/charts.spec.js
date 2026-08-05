@@ -2,20 +2,9 @@ import { expect, test } from "@playwright/test";
 
 test.use({ extraHTTPHeaders: { "X-Forwarded-For": "198.51.100.30" } });
 
-const PASSWORD = "Sup3rSecret!";
-const FAMILY_PASSWORD = "family12345";
-
-async function login(page, email, password = PASSWORD) {
-  await page.goto("/login");
-  await page.getByLabel("Email Address").fill(email);
-  await page.getByLabel("Password", { exact: true }).fill(password);
-  await page.getByRole("button", { name: "Sign In" }).click();
-  await expect(page.getByRole("link", { name: "Portfolio", exact: true })).toBeVisible();
-}
-
 test.describe("Chart Suite, Dark Mode, & Portfolio Insights", () => {
   test("Theme toggle switches between dark and light mode seamlessly", async ({ page }) => {
-    await login(page, "family@portfolio.local", FAMILY_PASSWORD);
+    await page.goto("/");
 
     const toggleBtn = page.getByRole("button", { name: "Toggle theme mode" });
     await expect(toggleBtn).toBeVisible();
@@ -32,7 +21,7 @@ test.describe("Chart Suite, Dark Mode, & Portfolio Insights", () => {
   });
 
   test("NetWorthChart renders cleanly and handles timeframe + currency toggles", async ({ page }) => {
-    await login(page, "family@portfolio.local", FAMILY_PASSWORD);
+    await page.goto("/");
 
     await expect(page.locator(".chart-container")).toBeVisible();
     await expect(page.locator(".recharts-responsive-container")).toBeVisible();
@@ -49,7 +38,7 @@ test.describe("Chart Suite, Dark Mode, & Portfolio Insights", () => {
   });
 
   test("Portfolio Breakdown & Asset Allocation section displays below chart", async ({ page }) => {
-    await login(page, "family@portfolio.local", FAMILY_PASSWORD);
+    await page.goto("/");
 
     // Verify Asset Allocation & Portfolio Insights section exists below chart
     await expect(page.locator(".allocation-insights-container")).toBeVisible();
@@ -58,7 +47,7 @@ test.describe("Chart Suite, Dark Mode, & Portfolio Insights", () => {
   });
 
   test("Market Explorer performance chart renders SVG elements", async ({ page }) => {
-    await login(page, "family@portfolio.local", FAMILY_PASSWORD);
+    await page.goto("/");
 
     await page.getByRole("link", { name: "Market" }).click();
     await expect(page.getByRole("heading", { name: "Market Explorer" })).toBeVisible();

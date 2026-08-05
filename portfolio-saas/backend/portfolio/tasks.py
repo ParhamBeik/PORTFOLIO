@@ -63,6 +63,23 @@ def run_price_fetch(*, dry_run=False, publish=True):
                 _write_prices(priced)
                 _write_snapshots(snapshot_prices)
             invalidate_prices_cache()
+
+            # Continuous organic history: save live bulk payloads to historical tables
+            from marketdata import ingest
+            try:
+                if raw.get("brsapi"):
+                    ingest.ingest_gold_currency_history(raw["brsapi"])
+                if raw.get("crypto"):
+                    ingest.ingest_crypto_history("CRYPTO", raw["crypto"])
+                if raw.get("commodity"):
+                    ingest.ingest_commodity_history("COMMODITIES", raw["commodity"])
+                if raw.get("option_contracts"):
+                    ingest.ingest_option_contracts("", raw["option_contracts"])
+                if raw.get("etf_nav"):
+                    ingest.ingest_etf_nav("", raw["etf_nav"])
+            except Exception as exc:
+                logger.error("[LIVE_INGEST_HISTORICAL_ERROR] Error ingesting bulk live data: %s", exc)
+
             # LAZY import: avoids a circular `portfolio.tasks -> portfolio.services.returns ->
             # portfolio.models` chain at module load. Outside the transaction on
             # purpose — cache deletes are not transactional.

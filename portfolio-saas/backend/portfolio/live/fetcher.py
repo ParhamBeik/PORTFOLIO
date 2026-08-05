@@ -118,6 +118,42 @@ def _brs_job(brs_url, brs_key):
     return {"brsapi": fetch_brsapi(brs_url, brs_key)}
 
 
+def _crypto_job():
+    from marketdata.fetchers.expanded import fetch_crypto_prices
+    try:
+        return {"crypto": fetch_crypto_prices()}
+    except Exception as exc:
+        logger.error("[FETCH_CRYPTO_ERROR] Failed fetching cryptocurrency: %s", exc)
+        return {}
+
+
+def _commodity_job():
+    from marketdata.fetchers.expanded import fetch_commodity_prices
+    try:
+        return {"commodity": fetch_commodity_prices()}
+    except Exception as exc:
+        logger.error("[FETCH_COMMODITY_ERROR] Failed fetching commodity: %s", exc)
+        return {}
+
+
+def _option_job():
+    from marketdata.fetchers.expanded import fetch_option_contracts
+    try:
+        return {"option_contracts": fetch_option_contracts()}
+    except Exception as exc:
+        logger.error("[FETCH_OPTION_ERROR] Failed fetching options: %s", exc)
+        return {}
+
+
+def _etf_nav_job():
+    from marketdata.fetchers.expanded import fetch_etf_navs
+    try:
+        return {"etf_nav": fetch_etf_navs()}
+    except Exception as exc:
+        logger.error("[FETCH_ETF_NAV_ERROR] Failed fetching ETF NAVs: %s", exc)
+        return {}
+
+
 def _tsetmc_job(tsetmc_url, tsetmc_key, tsetmc_symbol_url):
     from django.core.cache import cache
     result = {"tsetmc": fetch_tsetmc(tsetmc_url, tsetmc_key)}
@@ -150,11 +186,26 @@ def _tsetmc_job(tsetmc_url, tsetmc_key, tsetmc_symbol_url):
     return result
 
 
+def is_commodity_market_open(now_tehran):
+    # Commodities close on global weekends: Saturday 01:30 Tehran time to Monday 02:30 Tehran time.
+    # weekday(): 0 = Monday, ..., 5 = Saturday, 6 = Sunday.
+    day = now_tehran.weekday()
+    hour = now_tehran.hour
+    minute = now_tehran.minute
+    if day == 5:  # Saturday
+        return (hour, minute) < (1, 30)
+    if day == 6:  # Sunday
+        return False
+    if day == 0:  # Monday
+        return (hour, minute) >= (2, 30)
+    return True
+
+
 def fetch_all_markets(api_settings):
     """Return all raw market payloads needed by extractor.extract_standard_prices.
 
-    BRS and TSETMC are fetched in parallel (ThreadPoolExecutor) since they are
-    independent HTTP calls; a slow/failing provider must not block the other.
+    All 6 endpoints are fetched in parallel (ThreadPoolExecutor) since they are
+    independent HTTP calls; a slow/failing provider must not block the others.
     """
     raw_data = {}
     jobs = []
@@ -164,31 +215,61 @@ def fetch_all_markets(api_settings):
     tsetmc_url = api_settings.get("tsetmc_url")
     tsetmc_key = api_settings.get("tsetmc_api_key")
 
-    # ponytail: executor is not used as a context manager on purpose — `with`
-    # blocks shutdown() on thread completion, which would defeat the combined
-    # timeout below if one job hangs. Threads that miss the deadline keep
-    # running in the background and are simply discarded (fetch_json already
-    # bounds each HTTP call, so they can't run forever).
-    executor = ThreadPoolExecutor(max_workers=2)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from marketdata.market_state import market_state, OPEN, CLOSED_DAYTIME
+
+    ignore_hours = getattr(settings, "MARKETDATA_IGNORE_MARKET_HOURS", False)
+
+    if ignore_hours:
+        is_tse_open = True
+        is_gold_currency_open = True
+        is_commodity_open = True
+    else:
+        current_state = market_state()
+        is_tse_open = (current_state == OPEN)
+        is_gold_currency_open = (current_state in (OPEN, CLOSED_DAYTIME))
+
+        tehran_now = datetime.now(ZoneInfo("Asia/Tehran"))
+        is_commodity_open = is_commodity_market_open(tehran_now)
+
+    executor = ThreadPoolExecutor(max_workers=6)
     if brs_url and brs_key:
-        jobs.append(executor.submit(_brs_job, brs_url, brs_key))
+        if is_gold_currency_open:
+            jobs.append(executor.submit(_brs_job, brs_url, brs_key))
+        else:
+            logger.info("[FETCH_SKIP] Domestic gold & currency market closed overnight. Skipping.")
+
+        # Cryptocurrencies are open 24/7/365
+        jobs.append(executor.submit(_crypto_job))
+
+        if is_commodity_open:
+            jobs.append(executor.submit(_commodity_job))
+        else:
+            logger.info("[FETCH_SKIP] Global commodity market closed on global weekend. Skipping.")
     else:
         logger.warning("[FETCH_SKIP] BRS API URL or Key missing in Django settings.")
 
     if tsetmc_url and tsetmc_key:
-        tsetmc_symbol_url = api_settings.get("tsetmc_symbol_url", settings.TSETMC_SYMBOL_URL)
-        jobs.append(executor.submit(_tsetmc_job, tsetmc_url, tsetmc_key, tsetmc_symbol_url))
+        if is_tse_open:
+            tsetmc_symbol_url = api_settings.get("tsetmc_symbol_url", settings.TSETMC_SYMBOL_URL)
+            jobs.append(executor.submit(_tsetmc_job, tsetmc_url, tsetmc_key, tsetmc_symbol_url))
+            jobs.append(executor.submit(_option_job))
+            jobs.append(executor.submit(_etf_nav_job))
+        else:
+            logger.info("[FETCH_SKIP] Tehran Stock Exchange (TSE) is closed. Skipping stocks, options, and ETFs.")
     else:
         logger.warning("[FETCH_SKIP] TSETMC URL or Key missing in Django settings.")
 
-    done, not_done = wait(jobs, timeout=FETCH_TIMEOUT)
-    for job in not_done:
-        logger.error("[FETCH_ALL_MARKETS_JOB_TIMEOUT] Provider job did not finish within %ss.", FETCH_TIMEOUT)
-    for job in done:
-        try:
-            raw_data.update(job.result())
-        except Exception as exc:
-            logger.error("[FETCH_ALL_MARKETS_JOB_ERROR] Provider job raised: %s", exc)
+    if jobs:
+        done, not_done = wait(jobs, timeout=FETCH_TIMEOUT)
+        for job in not_done:
+            logger.error("[FETCH_ALL_MARKETS_JOB_TIMEOUT] Provider job did not finish within %ss.", FETCH_TIMEOUT)
+        for job in done:
+            try:
+                raw_data.update(job.result())
+            except Exception as exc:
+                logger.error("[FETCH_ALL_MARKETS_JOB_ERROR] Provider job raised: %s", exc)
     executor.shutdown(wait=False)
 
     return raw_data

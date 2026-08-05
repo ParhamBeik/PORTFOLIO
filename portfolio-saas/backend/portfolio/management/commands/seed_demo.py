@@ -15,13 +15,18 @@ from portfolio.models import Account, Asset, Holding, Price
 from portfolio.services.ledger import create_ledger_entry
 from portfolio.models import LedgerEntry
 
-DEMO_EMAIL = "demo@portfolio.local"
-DEMO_PASSWORD = "demo12345"
-E2E_PASSWORD = "Sup3rSecret!"
+DEMOFREE_EMAIL = "demofree@portfolio.local"
+DEMOFREE_PASSWORD = "demofree12345"
+
+DEMOPRO_EMAIL = "demopro@portfolio.local"
+DEMOPRO_PASSWORD = "demopro12345"
+
+ADMIN_EMAIL = "admin@portfolio.local"
+ADMIN_PASSWORD = "admin12345"
 
 
 class Command(BaseCommand):
-    help = "Create a demo user and E2E users with sample holdings and prices."
+    help = "Create demofree, demopro, and admin users with sample holdings and prices."
 
     def handle(self, *args, **options):
         if not settings.DEBUG:
@@ -57,28 +62,11 @@ class Command(BaseCommand):
                     defaults={"source": "SEED"}
                 )
 
-        # 1. Demo User
-        demo_user, created = User.objects.get_or_create(
-            email=DEMO_EMAIL,
+        # 1. Demo Free User
+        demofree_user, created = User.objects.get_or_create(
+            email=DEMOFREE_EMAIL,
             defaults={
                 "first_name": "Demo",
-                "last_name": "User",
-                "tier": User.Tier.PRO,
-                "email_verified_at": timezone.now(),
-                "is_active": True,
-            },
-        )
-        if created:
-            demo_user.set_password(DEMO_PASSWORD)
-            demo_user.save()
-            self._seed_holdings(demo_user, holdings, asset_map)
-            self.stdout.write(self.style.SUCCESS(f"Demo ready -> {DEMO_EMAIL}"))
-
-        # 2. E2E Free User
-        free_user, created = User.objects.get_or_create(
-            email="e2e-free@portfolio.local",
-            defaults={
-                "first_name": "E2E",
                 "last_name": "Free",
                 "tier": User.Tier.FREE,
                 "email_verified_at": timezone.now(),
@@ -86,42 +74,35 @@ class Command(BaseCommand):
             },
         )
         if created:
-            free_user.set_password(E2E_PASSWORD)
-            free_user.save()
-            Account.objects.create(user=free_user, name="Main Portfolio")
-            self.stdout.write(self.style.SUCCESS("E2E Free user ready"))
+            demofree_user.set_password(DEMOFREE_PASSWORD)
+            demofree_user.save()
+            # Seed a single gold position for the free user
+            self._seed_holdings(demofree_user, {"gold_18k_gram": 10}, asset_map)
+            self.stdout.write(self.style.SUCCESS(f"Demo Free ready -> {DEMOFREE_EMAIL}"))
 
-        # 3. E2E Pro User — stamp an expiry so Billing shows "until <date>"
-        # (None expiry is a valid grant, but the e2e suite asserts the dated copy).
-        pro_expires = timezone.now() + timezone.timedelta(days=365)
-        pro_user, created = User.objects.get_or_create(
-            email="e2e-pro@portfolio.local",
+        # 2. Demo Pro User
+        demopro_user, created = User.objects.get_or_create(
+            email=DEMOPRO_EMAIL,
             defaults={
-                "first_name": "E2E",
+                "first_name": "Demo",
                 "last_name": "Pro",
                 "tier": User.Tier.PRO,
-                "pro_expires_at": pro_expires,
                 "email_verified_at": timezone.now(),
                 "is_active": True,
             },
         )
         if created:
-            pro_user.set_password(E2E_PASSWORD)
-            pro_user.save()
-            self._seed_holdings(pro_user, holdings, asset_map)
-            self.stdout.write(self.style.SUCCESS("E2E Pro user ready"))
-        elif pro_user.tier != User.Tier.PRO or pro_user.pro_expires_at is None:
-            pro_user.tier = User.Tier.PRO
-            pro_user.pro_expires_at = pro_expires
-            pro_user.save(update_fields=["tier", "pro_expires_at"])
-            self.stdout.write(self.style.SUCCESS("E2E Pro user expiry refreshed"))
+            demopro_user.set_password(DEMOPRO_PASSWORD)
+            demopro_user.save()
+            self._seed_holdings(demopro_user, holdings, asset_map)
+            self.stdout.write(self.style.SUCCESS(f"Demo Pro ready -> {DEMOPRO_EMAIL}"))
 
-        # 4. E2E Admin User
+        # 3. Admin User
         admin_user, created = User.objects.get_or_create(
-            email="e2e-admin@portfolio.local",
+            email=ADMIN_EMAIL,
             defaults={
-                "first_name": "E2E",
-                "last_name": "Admin",
+                "first_name": "Admin",
+                "last_name": "User",
                 "tier": User.Tier.PRO,
                 "is_staff": True,
                 "is_superuser": True,
@@ -130,9 +111,12 @@ class Command(BaseCommand):
             },
         )
         if created:
-            admin_user.set_password(E2E_PASSWORD)
+            admin_user.set_password(ADMIN_PASSWORD)
             admin_user.save()
-            self.stdout.write(self.style.SUCCESS("E2E Admin user ready"))
+            Account.objects.get_or_create(user=admin_user, name="Main Portfolio")
+            self.stdout.write(self.style.SUCCESS(f"Admin ready -> {ADMIN_EMAIL}"))
+
+
 
     def _seed_holdings(self, user, holdings, asset_map):
         account = Account.objects.create(user=user, name="Main Portfolio")

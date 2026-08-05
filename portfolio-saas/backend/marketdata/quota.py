@@ -33,6 +33,29 @@ _LOCAL_WINDOWS = collections.defaultdict(collections.deque)
 _DEGRADED_PROCESS_DIVISOR = 10
 
 
+def get_historical_full_used_today():
+    client = get_redis()
+    if client is not None:
+        try:
+            key = f"quota:historical_full:used:{quota_day()}"
+            val = client.get(key)
+            return int(val) if val else 0
+        except Exception:
+            return 0
+    return 0
+
+
+def increment_historical_full_used():
+    client = get_redis()
+    if client is not None:
+        try:
+            key = f"quota:historical_full:used:{quota_day()}"
+            client.incr(key)
+            client.expire(key, 172800)  # 2 days TTL
+        except Exception:
+            pass
+
+
 class QuotaExhausted(RuntimeError):
     pass
 
@@ -294,6 +317,8 @@ def get_quota_status():
         "archive_used": row.archive_used if row else 0,
         "live_used": row.live_used if row else 0,
         "other_used": row.other_used if row else 0,
+        "historical_full_used": get_historical_full_used_today(),
+        "dynamic_archive_used": max(0, (row.archive_used if row else 0) - get_historical_full_used_today()),
         "archive_budget": bucket_budget(ARCHIVE),
         "live_budget": bucket_budget(LIVE),
         "live_floor": settings.MARKETDATA_LIVE_REQUEST_FLOOR,

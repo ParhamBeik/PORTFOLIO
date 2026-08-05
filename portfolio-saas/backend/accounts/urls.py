@@ -4,7 +4,6 @@ from .views import (
     CookieTokenObtainPairView,
     CsrfView,
     ExportView,
-    InvitationCreateView,
     LogoutAllView,
     LogoutView,
     MeView,
@@ -19,7 +18,6 @@ from .views import (
 
 urlpatterns = [
     path("register/", RegisterView.as_view(), name="register"),
-    path("invitations/", InvitationCreateView.as_view(), name="invitations"),
     path("verify-email/", VerifyEmailView.as_view(), name="verify-email"),
     path(
         "resend-verification/",

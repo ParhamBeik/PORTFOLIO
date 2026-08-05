@@ -115,7 +115,7 @@ class Command(BaseCommand):
             cursor.execute("SELECT current_database(), inet_server_addr(), pg_size_pretty(pg_database_size(current_database()))")
             db_name, addr, size = cursor.fetchone()
             self.stdout.write(f"Database: {db_name} at {addr} ({size})")
-            if db_name not in ("portfolio", "test_portfolio"):
+            if db_name not in ("portfolio", "test_portfolio", "portfolio_test"):
                 raise CommandError(f"Expected database 'portfolio', got '{db_name}'")
 
     def _generate_manifest(self):

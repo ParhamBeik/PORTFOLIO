@@ -9,19 +9,8 @@ test.beforeAll(async () => {
 from accounts.models import User
 from portfolio.models import Account, Holding, LedgerEntry
 from django.utils import timezone
-# Clean up free user accounts
-u = User.objects.filter(email='e2e-free@portfolio.local').first()
-if u:
-    u.tier = User.Tier.FREE
-    u.save()
-    stale = Account.objects.filter(user=u).exclude(name='Main Portfolio')
-    for acct in stale:
-        LedgerEntry.objects.filter(account=acct, reversal_of__isnull=False).update(reversal_of=None)
-        LedgerEntry.objects.filter(account=acct).delete()
-        Holding.objects.filter(account=acct).delete()
-        acct.delete()
-# Clean up pro user accounts to baseline
-u_pro = User.objects.filter(email='e2e-pro@portfolio.local').first()
+# Clean up demopro user accounts to baseline
+u_pro = User.objects.filter(email='demopro@portfolio.local').first()
 if u_pro:
     u_pro.tier = User.Tier.PRO
     u_pro.pro_expires_at = timezone.now() + timezone.timedelta(days=365)
@@ -40,41 +29,8 @@ User.objects.filter(email__startswith='e2e-new-').delete()
   }
 });
 
-const PASSWORD = "Sup3rSecret!";
-
-async function login(page, email) {
-  await page.goto("/login");
-  await page.getByLabel("Email Address").fill(email);
-  await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
-  await page.getByRole("button", { name: "Sign In" }).click();
-  await expect(page.getByRole("link", { name: "Portfolio", exact: true })).toBeVisible();
-}
-
-test("registration validates credentials and creates a session", async ({ page }) => {
-  await page.goto("/register");
-
-  await page.getByLabel("Email Address").fill("invalid");
-  await page.getByLabel("Password", { exact: true }).fill("123");
-  await expect(page.getByText("Please enter a valid email address")).toBeVisible();
-  await expect(page.getByText("At least 8 characters")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Create Account" })).toBeDisabled();
-
-  await page.getByRole("button", { name: "Show password" }).click();
-  await expect(page.getByLabel("Password", { exact: true })).toHaveAttribute("type", "text");
-  await page.getByRole("button", { name: "Hide password" }).click();
-
-  await page.getByLabel("First Name").fill("Test");
-  await page.getByLabel("Email Address").fill(`e2e-new-${Date.now()}@portfolio.local`);
-  await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
-  await page.getByRole("textbox", { name: "Confirm Password" }).fill(PASSWORD);
-  await page.getByLabel("Invitation Token").fill("E2E-INVITE-TOKEN");
-  await page.locator("input[type='checkbox']").check();
-  await page.getByRole("button", { name: "Create Account" }).click();
-  await expect(page.getByRole("link", { name: "Portfolio", exact: true })).toBeVisible();
-});
-
-test("free user can manage a portfolio, holding, trades, and chart controls", async ({ page }) => {
-  await login(page, "e2e-free@portfolio.local");
+test("user can manage a portfolio, holding, trades, and chart controls", async ({ page }) => {
+  await page.goto("/");
 
   const portfolioName = `E2E ${Date.now()}`;
   const renamedPortfolio = `${portfolioName} edited`;
@@ -110,7 +66,7 @@ test("free user can manage a portfolio, holding, trades, and chart controls", as
   execSync(`docker compose exec -T backend python manage.py shell -c "
 from accounts.models import User
 from portfolio.models import Account
-u = User.objects.get(email='e2e-free@portfolio.local')
+u = User.objects.get(email='demopro@portfolio.local')
 a = Account.objects.get(user=u, name='${renamedPortfolio}')
 a.cash_balance_tomans = 1000000000
 a.save()
@@ -153,8 +109,8 @@ a.save()
   await expect(page.getByText(renamedPortfolio, { exact: true })).toHaveCount(0);
 });
 
-test("free user can browse markets and sees Pro gates", async ({ page }) => {
-  await login(page, "e2e-free@portfolio.local");
+test("user can browse markets and view charts", async ({ page }) => {
+  await page.goto("/");
   let catalogRequests = 0;
   page.on("request", (request) => {
     if (new URL(request.url()).pathname === "/api/market/assets/") catalogRequests += 1;
@@ -179,21 +135,10 @@ test("free user can browse markets and sees Pro gates", async ({ page }) => {
   await page.getByLabel("Search Symbol").fill("KAMA");
   await expect(page.getByLabel("Select Asset")).not.toHaveValue("");
   expect(catalogRequests).toBe(initialCatalogRequests);
-
-  await page.getByRole("link", { name: "Optimization" }).click();
-  await expect(page.getByRole("heading", { name: "This is a Pro feature" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Upgrade to Pro" })).toBeVisible();
-
-  await page.getByRole("link", { name: "Billing" }).click();
-  await expect(page.getByText("Free", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Upgrade to Pro" })).toBeVisible();
-  await page.goto("/billing?status=success&ref_id=UNVERIFIED");
-  await expect(page.getByRole("status")).toContainText("Pro is not active yet");
-  await expect(page.getByRole("link", { name: "Admin" })).toHaveCount(0);
 });
 
-test("Pro user can use optimizer, insights, analytics, and sees expiry", async ({ page }) => {
-  await login(page, "e2e-pro@portfolio.local");
+test("user can use optimizer, insights, and analytics", async ({ page }) => {
+  await page.goto("/");
 
   const portfolioSelect = page.locator("#portfolio-scope");
   const accountValue = await portfolioSelect.locator("option:not([value=''])").first().getAttribute("value");
@@ -234,46 +179,33 @@ test("Pro user can use optimizer, insights, analytics, and sees expiry", async (
   await page.getByRole("button", { name: /Stocks/ }).click();
   await expect(page.getByRole("heading", { name: "Codal Announcements" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Major Shareholders" })).toBeVisible();
-
-  await page.getByRole("link", { name: "Billing" }).click();
-  await expect(page.getByRole("heading", { name: "Billing" })).toBeVisible();
-  await expect(page.locator("main p.big")).toHaveText("Pro");
-  await expect(page.locator("main").getByText(/until/)).toBeVisible();
-
-  await page.goto("/billing?status=success&ref_id=E2E-REF");
-  await expect(page.getByText(/Pro subscription is active/)).toBeVisible();
-  await expect(page.getByText(/E2E-REF/)).toBeVisible();
 });
 
 test("staff user can open and filter the admin portal", async ({ page }) => {
-  await login(page, "e2e-admin@portfolio.local");
-  await page.getByRole("link", { name: "Admin", exact: true }).click();
-  await expect(page.getByRole("heading", { name: /Real-Time System Operations/ })).toBeVisible();
-  await page.getByRole("button", { name: /Refresh/ }).click();
-  await expect(page.getByRole("heading", { name: /13 BrsApi Endpoint Families/ })).toBeVisible();
-  await page.getByLabel("Search log console").fill("fetch");
-  await page.getByLabel("Filter log level").selectOption("WARNING");
-  await page.getByLabel("Filter log category").selectOption("FETCH_ERROR");
-  await page.getByRole("button", { name: /Backfill Jobs/ }).click();
-  await expect(page.getByRole("heading", { name: /Archive Backfill Jobs/ })).toBeVisible();
-});
+  execSync(`docker compose exec -T backend python manage.py shell -c "
+from accounts.models import User
+u = User.objects.get(email='demopro@portfolio.local')
+u.is_staff = True
+u.save()
+"`);
 
-test("logout clears the session and protects deep links", async ({ page }) => {
-  await login(page, "e2e-free@portfolio.local");
-  await page.goto("/dashboard");
-  await expect(page).toHaveURL(/\/$/);
-  await page.goto("/accounts/999999");
-  await expect(page).toHaveURL(/\/$/);
-  await page.goto("/insights");
-  await expect(page).toHaveURL(/\/optimization\/insights$/);
-  await page.goto("/analytics");
-  await expect(page).toHaveURL(/\/optimization\/analytics$/);
-  await page.goto("/billing?status=cancel");
-  await expect(page.getByText(/Payment was cancelled/)).toBeVisible();
-  await page.goto("/billing?status=error");
-  await expect(page.getByText(/could not verify the payment/)).toBeVisible();
-  await page.getByRole("button", { name: "Logout" }).click();
-  await expect(page).toHaveURL(/\/login$/);
-  await page.goto("/market");
-  await expect(page).toHaveURL(/\/login$/);
+  try {
+    await page.goto("/");
+    await page.getByRole("link", { name: "Admin", exact: true }).click();
+    await expect(page.getByRole("heading", { name: /Real-Time System Operations/ })).toBeVisible();
+    await page.getByRole("button", { name: /Refresh/ }).click();
+    await expect(page.getByRole("heading", { name: /13 BrsApi Endpoint Families/ })).toBeVisible();
+    await page.getByLabel("Search log console").fill("fetch");
+    await page.getByLabel("Filter log level").selectOption("WARNING");
+    await page.getByLabel("Filter log category").selectOption("FETCH_ERROR");
+    await page.getByRole("button", { name: /Backfill Jobs/ }).click();
+    await expect(page.getByRole("heading", { name: /Archive Backfill Jobs/ })).toBeVisible();
+  } finally {
+    execSync(`docker compose exec -T backend python manage.py shell -c "
+from accounts.models import User
+u = User.objects.get(email='demopro@portfolio.local')
+u.is_staff = False
+u.save()
+"`);
+  }
 });

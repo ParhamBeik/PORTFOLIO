@@ -17,10 +17,10 @@ class PublicDemoUserAuthentication(BaseAuthentication):
 
         # Fetch or create the demo user
         user, created = User.objects.get_or_create(
-            email="demo@portfolio.local",
+            email="demopro@portfolio.local",
             defaults={
                 "first_name": "Demo",
-                "last_name": "User",
+                "last_name": "Pro",
                 "tier": User.Tier.PRO,
                 "is_active": True,
             }
