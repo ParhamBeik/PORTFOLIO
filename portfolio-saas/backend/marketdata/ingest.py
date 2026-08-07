@@ -19,7 +19,7 @@ Conventions:
 import logging
 from decimal import Decimal
 from . import jalali, validation
-from .currency import TSE_PRICE_UNIT, canonical_symbol, to_toman
+from .currency import canonical_symbol, to_toman
 from .models import (
     CodalAnnouncement,
     CommodityHistory,
@@ -316,10 +316,7 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
         return 0, 0 if payload is None else 1
     endpoint = "stock_history_adjusted" if is_adjusted else "stock_history_unadjusted"
     accepted, bad = screen("daily_history", payload, endpoint, symbol)
-    
-    tse_div = Decimal("10") if TSE_PRICE_UNIT == "rial" else Decimal("1")
-    tse_div_int = 10 if TSE_PRICE_UNIT == "rial" else 1
-    
+
     rows = []
     for rec in accepted:
         try:
@@ -344,16 +341,16 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
                 time=rec.get("time", "") or "",
                 tno=rec.get("tno") or 0,
                 tvol=rec.get("tvol") or 0,
-                tval=int(float(tval_val) / tse_div_int),
-                pmin=(Decimal(str(pmin_val)) / tse_div),
-                pmax=(Decimal(str(pmax_val)) / tse_div),
-                py=(Decimal(str(py_val)) / tse_div),
-                pf=(Decimal(str(pf_val)) / tse_div),
-                pl=(Decimal(str(pl_val)) / tse_div),
-                plc=(Decimal(str(plc_val)) / tse_div),
+                tval=int(float(tval_val)),
+                pmin=Decimal(str(pmin_val)),
+                pmax=Decimal(str(pmax_val)),
+                py=Decimal(str(py_val)),
+                pf=Decimal(str(pf_val)),
+                pl=Decimal(str(pl_val)),
+                plc=Decimal(str(plc_val)),
                 plp=rec.get("plp") or 0.0,
-                pc=(Decimal(str(pc_val)) / tse_div),
-                pcc=(Decimal(str(pcc_val)) / tse_div),
+                pc=Decimal(str(pc_val)),
+                pcc=Decimal(str(pcc_val)),
                 pcp=rec.get("pcp") or 0.0,
                 is_adjusted=is_adjusted,
                 # Real/Legal breakdown only exists on unadjusted (type=0) payloads.
@@ -365,10 +362,10 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
                 buy_n_volume=rec.get("Buy_N_Volume"),
                 sell_i_volume=rec.get("Sell_I_Volume"),
                 sell_n_volume=rec.get("Sell_N_Volume"),
-                buy_i_value=int(float(buy_i_val) / tse_div_int) if buy_i_val is not None else None,
-                buy_n_value=int(float(buy_n_val) / tse_div_int) if buy_n_val is not None else None,
-                sell_i_value=int(float(sell_i_val) / tse_div_int) if sell_i_val is not None else None,
-                sell_n_value=int(float(sell_n_val) / tse_div_int) if sell_n_val is not None else None,
+                buy_i_value=int(float(buy_i_val)) if buy_i_val is not None else None,
+                buy_n_value=int(float(buy_n_val)) if buy_n_val is not None else None,
+                sell_i_value=int(float(sell_i_val)) if sell_i_val is not None else None,
+                sell_n_value=int(float(sell_n_val)) if sell_n_val is not None else None,
             ))
         except (KeyError, TypeError, ValueError):
             bad += 1
@@ -401,7 +398,14 @@ _REAL_LEGAL_FIELDS = {
 
 
 def ingest_real_legal(symbol: str, payload) -> tuple[int, int]:
-    """History.php?type=1 payload -> independent real/legal daily rows."""
+    """History.php?type=1 payload -> independent real/legal daily rows.
+
+    The `.update()` below writes real/legal value columns onto the matching
+    `DailyStockHistory` row. Both this function's values and
+    `ingest_daily_history`'s are now stored undivided (Rial), so this no
+    longer overwrites a divided (Toman) column with an undivided one -- keep
+    it that way if either write path's conversion ever changes.
+    """
     if not isinstance(payload, list):
         return 0, 0 if payload is None else 1
     accepted, bad = screen("real_legal", payload, "real_legal_history", symbol)
@@ -439,9 +443,7 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
         return 0, 0 if payload is None else 1
     endpoint = f"stock_candle_{'adjusted' if candle_type == 3 else 'unadjusted'}"
     accepted, bad = screen("candle", records, endpoint, symbol)
-    
-    tse_div = Decimal("10") if TSE_PRICE_UNIT == "rial" else Decimal("1")
-    
+
     rows = []
     for rec in accepted:
         try:
@@ -453,10 +455,10 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
                 symbol=symbol,
                 timeframe=timeframe,
                 date_time=dt_str,
-                open_price=(Decimal(str(rec["open"])) / tse_div),
-                high_price=(Decimal(str(rec["high"])) / tse_div),
-                low_price=(Decimal(str(rec["low"])) / tse_div),
-                close_price=(Decimal(str(rec["close"])) / tse_div),
+                open_price=rec.get("open") or 0,
+                high_price=rec.get("high") or 0,
+                low_price=rec.get("low") or 0,
+                close_price=rec.get("close") or 0,
                 volume=rec.get("volume") or 0,
             ))
         except (KeyError, TypeError, ValueError):
@@ -584,7 +586,11 @@ def ingest_codal(payload) -> tuple[int, int]:
         except (KeyError, TypeError, ValueError):
             bad += 1
             logger.warning("skipping malformed codal record: %r", rec)
-    created, conflicts = _bulk(CodalAnnouncement, rows)
+    # One payload spans several issuers, so the count is scoped to the symbols
+    # this batch actually touches rather than the whole (growing) table.
+    created, conflicts = _bulk(
+        CodalAnnouncement, rows, scope={"symbol__in": sorted({r.symbol for r in rows})}
+    )
     return created, conflicts + bad
 
 
@@ -601,7 +607,15 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
     """Gold_Currency_Pro.php history=2 payload -> GoldCurrencyHistory rows.
 
     The payload carries symbol/name/unit at the top level and the day records
-    under `history_daily`. Converts raw provider Rial quotes into Tomans.
+    under `history_daily`.
+
+    Unit policy: this table is Toman-denominated for the IRR-quoted symbols and
+    provider-native for the rest (`XAUUSD` in دلار, `BTC` in تتر). The provider
+    answers Rial for fiat pairs and Toman for gold/coins, so `to_toman()`
+    normalises the Rial ones and everything lands on one scale. This is the one
+    deliberate exception to storing verbatim: `portfolio/services/valuation.py`
+    reads `close_price` straight as Toman, so a Rial row here would value a
+    holding 10x high.
     """
     if not isinstance(payload, dict) or not isinstance(payload.get("history_daily"), list):
         return 0, 0 if payload is None else 1
@@ -609,38 +623,47 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
     name = payload.get("name", "") or ""
     raw_unit = payload.get("unit", "") or ""
 
-    is_rial = raw_unit.strip().casefold() in {"ریال".casefold(), "rial", "irr"}
-    unit = "تومان" if is_rial else raw_unit
+    # Rial- and Toman-quoted input both end up Toman, so both get the Toman
+    # label; a USD/Tether-quoted payload is never converted and keeps its own.
+    is_irr_quoted = raw_unit.strip().casefold() in {
+        "ریال".casefold(), "rial", "irr", "تومان".casefold(), "toman",
+    }
+    unit = "تومان" if is_irr_quoted else raw_unit
+
+    def to_storage(value):
+        return float(to_toman(symbol, value, raw_unit)) if is_irr_quoted else float(value)
 
     # This screen is what stops the 54 high-below-low rows found in the audit
     # from coming back on the next fetch.
     accepted, bad = screen("gold", payload["history_daily"], "gold_daily", symbol)
-    
+
     # Sort by date chronological order so rolling screening works cleanly
     accepted_sorted = sorted(accepted, key=lambda r: normalize_jalali(r.get("date", "")))
-    
-    # Get last 5 valid close prices from DB to bootstrap rolling closes
-    db_history = list(
-        GoldCurrencyHistory.objects.filter(symbol=symbol).order_by("-date")[:5]
-    )
-    rolling_closes = [float(row.close_price) for row in reversed(db_history)]
-    
+
+    # Outlier screening compares each close against the median of its
+    # *neighbours in this batch*, never against the current price level. The
+    # previous version seeded this from the 5 newest stored rows and then
+    # walked the payload oldest-first, so a full-history fetch measured
+    # 1348-era prices against today's -- every early record read as a >50%
+    # deviation and was blacklisted, 105k rows across all 38 symbols, while
+    # `archive.py` subtracted those dates from `missing` and called the symbol
+    # complete. Seeded from the batch, the median tracks the era being ingested.
+    rolling_closes = []
+
     rows = []
     for rec in accepted_sorted:
         try:
-            c = float(rec["close"])
-            o = float(rec.get("open")) if rec.get("open") is not None else c
-            h = float(rec.get("high")) if rec.get("high") is not None else c
-            l = float(rec.get("low")) if rec.get("low") is not None else c
+            c = to_storage(float(rec["close"]))
+            o = to_storage(float(rec.get("open"))) if rec.get("open") is not None else c
+            h = to_storage(float(rec.get("high"))) if rec.get("high") is not None else c
+            l = to_storage(float(rec.get("low"))) if rec.get("low") is not None else c
 
-            c_toman = float(to_toman(symbol, c, raw_unit))
-            
-            # Cross-day outlier screening
+            # Cross-day outlier screening (both sides are on the storage scale).
             if len(rolling_closes) >= 3:
                 import statistics
                 median = statistics.median(rolling_closes)
                 if median > 0:
-                    deviation = abs(c_toman - median) / median
+                    deviation = abs(c - median) / median
                     if deviation > 0.50:
                         bad += 1
                         day_str = normalize_jalali(rec["date"])
@@ -649,42 +672,38 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
                             symbol=str(symbol)[:64],
                             date=str(day_str)[:10],
                             reason="outlier_deviation",
-                            defaults={"payload": {"close_toman": c_toman, "median_toman": median, "record": rec}},
+                            defaults={"payload": {"close": c, "median": median, "record": rec}},
                         )
                         if not created_rej:
                             RejectedRecord.objects.filter(pk=row_rej.pk).update(
                                 occurrences=row_rej.occurrences + 1,
-                                payload={"close_toman": c_toman, "median_toman": median, "record": rec}
+                                payload={"close": c, "median": median, "record": rec}
                             )
                         logger.warning(
                             "gold_daily(%s): rejected close %.2f (median %.2f) at %s due to outlier deviation",
-                            symbol, c_toman, median, day_str
+                            symbol, c, median, day_str
                         )
                         continue
-            
+
             # Update rolling closes with verified price
-            rolling_closes.append(c_toman)
+            rolling_closes.append(c)
             if len(rolling_closes) > 5:
                 rolling_closes.pop(0)
-
-            o = to_toman(symbol, o, raw_unit)
-            h = to_toman(symbol, h, raw_unit)
-            l = to_toman(symbol, l, raw_unit)
 
             rows.append(GoldCurrencyHistory(
                 symbol=symbol,
                 name=name,
                 unit=unit,
                 date=normalize_jalali(rec["date"]),
-                open_price=o,
-                high_price=h,
-                low_price=l,
-                close_price=Decimal(str(c_toman)),
+                open_price=Decimal(str(o)),
+                high_price=Decimal(str(h)),
+                low_price=Decimal(str(l)),
+                close_price=Decimal(str(c)),
             ))
         except (KeyError, TypeError, ValueError):
             bad += 1
             logger.warning("skipping malformed gold/currency record for %s: %r", symbol, rec)
-    created, conflicts = _bulk(GoldCurrencyHistory, rows)
+    created, conflicts = _bulk(GoldCurrencyHistory, rows, scope={"symbol": symbol})
     return created, conflicts + bad
 
 

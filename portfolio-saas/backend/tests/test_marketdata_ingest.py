@@ -65,7 +65,8 @@ def test_ingest_daily_history_maps_fields_and_normalizes_dates():
     created, skipped = ingest.ingest_daily_history("فملی", HISTORY_PAYLOAD, is_adjusted=False)
     assert created == 2 and skipped == 0
     row = DailyStockHistory.objects.get(symbol="فملی", date="1403-10-19")
-    assert row.pl == 850 and row.buy_count_i == 2416 and row.is_adjusted is False
+    # Storage unit is Rial; provider values are stored undivided.
+    assert row.pl == 8500 and row.buy_count_i == 2416 and row.is_adjusted is False
     # Slash-separated input date stored dash-normalized.
     assert DailyStockHistory.objects.filter(date="1403-10-20").exists()
     assert not DailyStockHistory.objects.filter(date__contains="/").exists()
@@ -111,6 +112,7 @@ def test_ingest_gold_currency_history_idempotent():
     created, _ = ingest.ingest_gold_currency_history(GOLD_PAYLOAD)
     assert created == 2
     row = GoldCurrencyHistory.objects.get(symbol="IR_COIN_EMAMI", date="1404-03-21")
+    # Raw-storage policy: the provider's declared-Toman value is stored verbatim.
     assert row.close_price == 73385000
     created, skipped = ingest.ingest_gold_currency_history(GOLD_PAYLOAD)
     assert created == 0 and skipped == 2

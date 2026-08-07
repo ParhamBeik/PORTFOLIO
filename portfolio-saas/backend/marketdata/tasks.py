@@ -1,9 +1,8 @@
 """Celery tasks for the market-data warehouse sync.
 
 Schedule (config/celery.py): `daily_sync` runs after TSE close and dispatches one
-independent `sync_symbol` task per tracked symbol as a Celery group. The archive
-worker queue has concurrency one, so provider calls remain serialized without a
-chain that would cancel all remaining symbols after one failure.
+independent `sync_symbol` task per tracked symbol as a Celery group.
+`archive_tick` claims a batch and fans out the same way via `run_archive_state`.
 `weekly_metadata_sync` refreshes symbol fundamentals on Friday (market closed).
 
 The tracked-symbol universe comes from user-land (`Asset.tse_symbol` /
@@ -22,7 +21,11 @@ from django.conf import settings
 from django.utils import timezone
 
 from . import ingest
-from .archive import claim_archive_batch, ensure_archive_states, release_archive_claims, run_archive_state
+from .archive import (
+    claim_archive_batch,
+    ensure_archive_states,
+    run_archive_state as process_archive_state,
+)
 from .catalog import sync_provider_catalog
 from .fetchers import (
     fetch_codal_announcements,
@@ -187,8 +190,7 @@ def daily_sync():
 
     Fired in a group, not a chain: a chain aborts every remaining link when one
     raises, so a single symbol timing out used to cancel the rest of that day's
-    sync. The tasks are independent, and the archive worker's concurrency of 1
-    already serializes them.
+    sync. Tasks are independent; archive-worker concurrency fans them out.
     """
     from .quota import remaining_requests, ARCHIVE
     import re
@@ -219,56 +221,43 @@ def weekly_metadata_sync():
     logger.info("weekly_metadata_sync: done")
 
 
-# Retry only what a retry can fix. A permanent 4xx means the request itself is
-# wrong, and QuotaExhausted is not transient within the day -- retrying either one
-# just burns worker slots and, for quota, real requests.
 @shared_task(
     ignore_result=True,
     autoretry_for=(TransientMarketDataError,),
     retry_backoff=True,
     max_retries=3,
+    time_limit=90,
+    soft_time_limit=85,
 )
-def archive_tick(max_seconds: float = 50.0):
-    """Claim quota-safe batches and continuously backfill PostgreSQL as long as quota remains."""
+def run_archive_state(state_id):
+    """Process one claimed ArchiveFetchState (HTTP + ingest)."""
+    try:
+        state = process_archive_state(state_id)
+    except QuotaExhausted as err:
+        logger.info("run_archive_state(%s): quota exhausted: %s", state_id, err)
+        return
+    if state.verified_complete:
+        _invalidate_returns()
+
+
+@shared_task(ignore_result=True, time_limit=55, soft_time_limit=50)
+def archive_tick():
+    """Claim a quota-safe batch and fan out one task per archive state."""
     redis_client = get_redis()
     lock_key = "lock:archive_tick"
     lock_token = uuid.uuid4().hex
-    if redis_client and not redis_client.set(lock_key, lock_token, ex=600, nx=True):
+    # Short lock around claim+dispatch only. Per-state leases use
+    # select_for_update(skip_locked=True); quota serializes with its own lock.
+    if redis_client and not redis_client.set(lock_key, lock_token, ex=30, nx=True):
         logger.info("archive_tick skipped: another archive tick is still running")
         return
     try:
         ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
-        completed = 0
-        start_time = time.monotonic()
-
-        # The batch is deliberately small: a state can include a provider call,
-        # so claiming 120 work items for a 50-second lease trapped the worker for
-        # eight minutes and starved every queued beat tick.
-        while time.monotonic() - start_time < max_seconds:
-            batch = claim_archive_batch(limit=12)
-            if not batch:
-                break
-            processed_in_batch = False
-            for offset, state_id in enumerate(batch):
-                if time.monotonic() - start_time >= max_seconds:
-                    release_archive_claims(batch[offset:])
-                    break
-                try:
-                    state = run_archive_state(state_id)
-                    completed += int(state.verified_complete)
-                    processed_in_batch = True
-                except QuotaExhausted as err:
-                    logger.info("archive_tick paused: %s", err)
-                    if completed:
-                        _invalidate_returns()
-                    logger.info("archive_tick finished: %d states verified complete", completed)
-                    return
-            if not processed_in_batch:
-                break
-
-        if completed:
-            _invalidate_returns()
-        logger.info("archive_tick: %d states verified complete", completed)
+        batch = claim_archive_batch(limit=12)
+        if not batch:
+            return
+        group(*(run_archive_state.si(state_id) for state_id in batch)).apply_async()
+        logger.info("archive_tick: enqueued %d archive states", len(batch))
     finally:
         if redis_client:
             redis_client.eval(
@@ -317,12 +306,15 @@ def aggregate_daily_gold_currency_history(date_str: str = None):
         high_p = stats["high"] or close_p
         low_p = stats["low"] or close_p
 
+        # Price is Toman-denominated for BRS gold/currency assets
+        # (extract_standard_prices routes every source through to_toman());
+        # match the unit label the rest of this table uses for these rows.
         GoldCurrencyHistory.objects.update_or_create(
             symbol=symbol,
             date=today_jalali,
             defaults={
                 "name": asset.name,
-                "unit": asset.currency,
+                "unit": "تومان",
                 "open_price": open_p,
                 "high_price": high_p,
                 "low_price": low_p,

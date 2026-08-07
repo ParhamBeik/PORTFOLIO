@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
 
 from . import ingest, jalali, market_state, validation
@@ -657,11 +657,19 @@ _ENDPOINT_PRIORITY = (
     ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
     ArchiveFetchState.Endpoint.GOLD_DAILY,
+    # Without a reserved slot TEDPIX competes in the generic pool against
+    # ~4,600 stock states and never surfaces: it was fetched exactly once.
+    ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY,
     ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
     ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
     ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS,
 )
+
+# Postgres sorts NULLs last on ASC, so a never-attempted state (last_attempt_at
+# IS NULL) sorted *behind* every state that had ever run -- the never-fetched
+# work was permanently last in line. Oldest-first must mean never-run-first.
+_LAST_ATTEMPT_FIRST = F("last_attempt_at").asc(nulls_first=True)
 
 
 def release_archive_claims(state_ids):
@@ -686,7 +694,7 @@ def claim_archive_batch(limit=None):
         states = []
         for endpoint in _ENDPOINT_PRIORITY:
             state = _cost_rank_qs(base.filter(endpoint=endpoint)).order_by(
-                "last_attempt_at", "verified_complete", "-missing_rows"
+                _LAST_ATTEMPT_FIRST, "verified_complete", "-missing_rows"
             ).first()
             if state:
                 states.append(state)
@@ -696,7 +704,7 @@ def claim_archive_batch(limit=None):
         if remaining_slots > 0:
             states += list(
                 _cost_rank_qs(base.exclude(pk__in=[state.pk for state in states]))
-                .order_by("verified_complete", *_COST_ORDER, "-missing_rows", "last_attempt_at")[:remaining_slots]
+                .order_by("verified_complete", *_COST_ORDER, "-missing_rows", _LAST_ATTEMPT_FIRST)[:remaining_slots]
             )
         claim_until = now + timedelta(minutes=10)
         ArchiveFetchState.objects.filter(pk__in=[state.pk for state in states]).update(

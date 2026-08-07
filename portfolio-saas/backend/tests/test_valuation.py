@@ -17,7 +17,7 @@ pytestmark = pytest.mark.django_db
 def test_house_formula_is_gross_of_mortgage():
     """Since 0017 the mortgage is a Liability, netted off the account total.
 
-    Subtracting it here too would double-count it: 50M/sqm * 90.2 sqm.
+    Subtracting it here too would double-count it: 50M Toman/sqm * 90.2 sqm.
     """
     assert _house_value(Decimal("50")) == Decimal("4510000000")
 

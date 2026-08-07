@@ -165,9 +165,9 @@ def test_fresh_live_price_remains_usable(asset_catalog):
 
 
 def test_rial_to_toman_conversion():
-    """Protects Rial to Toman unit conversion logic."""
-    assert to_toman("کاما", 10000, "Rial") == Decimal("1000")
+    """Protects Rial-to-Toman unit conversion logic (Price storage unit is Toman)."""
     assert to_toman("کاما", 10000, "Toman") == Decimal("10000")
+    assert to_toman("کاما", 10000, "Rial") == Decimal("1000")
 
 
 def test_unadjusted_price_selection_fallback(asset_catalog):

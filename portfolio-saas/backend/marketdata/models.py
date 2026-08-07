@@ -503,6 +503,7 @@ class CryptoHistory(models.Model):
     symbol = models.CharField(max_length=64, db_index=True)
     date = models.CharField(max_length=10, db_index=True)
     close_price_usd = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    # Provider's `price_toman` field, stored verbatim (raw-storage policy).
     close_price_toman = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     volume_24h = models.BigIntegerField(default=0)
     market_cap = models.BigIntegerField(default=0)
