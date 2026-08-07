@@ -8,9 +8,62 @@ import {
   register,
   requestPasswordReset,
   sessionExpiry,
+  verifyEmail,
 } from "../api.js";
 import Logo from "./Logo.jsx";
-import { Button, Input } from "./ui.jsx";
+import { Button, Card, ErrorState, Input, Loading } from "./ui.jsx";
+
+/** Email-link landing: POST token, show ok/error. No session change. */
+export function VerifyEmail() {
+  const token = new URLSearchParams(window.location.search).get("token");
+  const [error, setError] = useState(token ? null : new Error("Missing verification token."));
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    verifyEmail(token)
+      .then(() => {
+        if (!cancelled) setDone(true);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err : new Error(String(err)));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  return (
+    <div className="flex min-h-screen items-center justify-center px-4">
+      <Card testId="verify-email-panel" className="w-full max-w-md">
+        <h1 className="mb-4 flex items-center gap-2 text-xl font-semibold text-text">
+          <Logo size={36} />
+          <span>Lattice</span>
+        </h1>
+        {error ? (
+          <ErrorState error={error} testId="verify-email-error" />
+        ) : !done ? (
+          <Loading testId="verify-email-loading">Verifying email…</Loading>
+        ) : (
+          <p role="status" data-testid="verify-email-success" className="text-sm text-[var(--c-good)]">
+            Email verified. You can sign in.
+          </p>
+        )}
+        <Button
+          type="button"
+          variant="link"
+          className="mt-4"
+          onClick={() => {
+            window.location.assign("/");
+          }}
+        >
+          Back to sign in
+        </Button>
+      </Card>
+    </div>
+  );
+}
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const GOOGLE_SCRIPT_SRC = "https://accounts.google.com/gsi/client";
