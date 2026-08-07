@@ -87,7 +87,11 @@ class Command(BaseCommand):
             self.stdout.write(f"[{name}] {len(found)} finding(s)")
 
         path = opts["manifest_path"]
-        cols = ["check", "table", "symbol", "date", "value", "verdict", "evidence"]
+        # `corrected` is what a repair would write. Emitting it here, rather than
+        # letting a repair step re-derive it, is what makes the manifest hash a
+        # real lock: the reviewed number is the applied number.
+        cols = ["check", "table", "symbol", "date", "value", "corrected",
+                "verdict", "evidence"]
         with open(path, "w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=cols)
             w.writeheader()
@@ -205,7 +209,8 @@ class Command(BaseCommand):
                         "check": "units",
                         "table": f"marketdata_marketcandle[1d_{'adj' if col == 'adj' else 'unadj'}]",
                         "symbol": symbol, "date": series[i]["d"],
-                        "value": vals[i], "verdict": "unit_error",
+                        "value": vals[i], "corrected": f"{corrected:g}",
+                        "verdict": "unit_error",
                         "evidence": (
                             f"factor {factors[i]:g} vs local median {med:g} "
                             f"(exactly {target:g}x); {col}={vals[i]:g} vs its own "
@@ -238,7 +243,8 @@ class Command(BaseCommand):
         """MarketCandle and DailyStockHistory must agree for the same symbol+day."""
         rows = _rows(
             """
-            SELECT c.symbol, c.date_time AS d, c.close_price AS candle, h.pl AS hist,
+            SELECT c.symbol, left(c.date_time,10) AS d,
+                   c.close_price AS candle, h.pl AS hist,
                    (c.close_price/NULLIF(h.pl,0))::float AS ratio
             FROM marketdata_marketcandle c
             JOIN marketdata_dailystockhistory h
