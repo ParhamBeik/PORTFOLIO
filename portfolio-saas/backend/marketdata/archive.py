@@ -86,6 +86,26 @@ def _cost_rank_qs(qs):
     )
 
 
+def _coverage_rank_qs(qs):
+    """Rank by how much of the symbol exists at all, not by the size of its gap.
+
+    Sorting on `-missing_rows` looked like "worst first" but was the opposite: a
+    never-attempted state has missing_rows=0 because nothing has ever run to
+    populate it, so it sorted behind every symbol that already had years of data
+    and was short a couple of rows. Coverage has to outrank gap size, or the
+    first fetch for a symbol never happens.
+    """
+    from django.db.models import Case, IntegerField, Value, When
+    return qs.annotate(
+        _coverage_rank=Case(
+            When(last_success_at__isnull=True, then=Value(0)),  # never fetched
+            When(stored_rows=0, then=Value(1)),                 # fetched, holds nothing
+            default=Value(2),                                   # has data, closing a gap
+            output_field=IntegerField(),
+        )
+    )
+
+
 # Tuple consumed by the existing `.order_by(*_COST_ORDER)` call sites.
 _COST_ORDER = ("_cost_rank",)
 
@@ -100,6 +120,34 @@ EMPTY_IS_FAILURE = frozenset({
     ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
     ArchiveFetchState.Endpoint.GOLD_DAILY,
 })
+
+# RejectedRecord rows are labelled by the *writer*, which does not use the
+# ArchiveFetchState endpoint name. Verifying `stock_history_adjusted` against the
+# label "stock_history_adjusted" matched nothing, so permanently-rejected rows
+# were never forgiven and ~726 states re-fetched forever over 1-2 missing rows.
+# STOCK_HISTORY_ADJUSTED needs both labels because its `stored` set is the
+# intersection of real/legal rows and the unadjusted price rows.
+_REJECTION_LABELS = {
+    ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED: ("stock_history_unadjusted",),
+    ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED: (
+        "real_legal_history", "stock_history_unadjusted",
+    ),
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED: (
+        "stock_candle_adjusted", "series:1d_adj",
+    ),
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED: (
+        "stock_candle_unadjusted", "series:1d_unadj",
+    ),
+}
+
+# Extra wait before a *completed* state re-verifies, on top of the next
+# post-close. Disclosure filings and shareholder rosters do not change daily, so
+# re-checking all 1,508 of them every day spent ~1,290 requests/day (13% of the
+# quota) to learn nothing. Everything else stays on the daily post-close refresh.
+_REVERIFY_INTERVAL = {
+    ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS: timedelta(days=7),
+    ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS: timedelta(days=7),
+}
 
 # Covered by live organic ingest (portfolio.tasks); archive rows are retired.
 _RETIRED_ARCHIVE_ENDPOINTS = frozenset({
@@ -586,11 +634,19 @@ def run_archive_state(state_id):
         is_transient = isinstance(exc, TransientMarketDataError) or getattr(exc, "status_code", None) == 429
 
         if is_transient:
+            # A flat 2m retry never escalated, so a symbol that always times out
+            # consumed a batch slot every 2 minutes indefinitely. Escalate like
+            # any other failure; a genuine blip still retries fast.
+            failures = state.consecutive_failures + 1
+            delay = min(2 ** failures, 60)
+            state.consecutive_failures = failures
             state.last_attempt_at = now
-            state.next_attempt_at = now + timedelta(minutes=2)
+            state.next_attempt_at = now + timedelta(minutes=delay)
             state.last_error = f"Transient rate limit or network error: {exc}"[:500]
-            state.save(update_fields=["last_attempt_at", "next_attempt_at", "last_error"])
-            logger.warning("[TRANSIENT_ERROR] Temporary rate-limit or network error on %s (%s): %s. Rescheduling in 2m.", state.symbol, state.endpoint, exc)
+            state.save(update_fields=[
+                "consecutive_failures", "last_attempt_at", "next_attempt_at", "last_error",
+            ])
+            logger.warning("[TRANSIENT_ERROR] Temporary rate-limit or network error on %s (%s): %s. Rescheduling in %dm.", state.symbol, state.endpoint, exc, delay)
             return state
 
         failures = state.consecutive_failures + 1
@@ -606,6 +662,7 @@ def run_archive_state(state_id):
         logger.error("[ARCHIVE_FETCH_ERROR] Failed backfill fetch for %s (%s): %s", state.symbol, state.endpoint, exc)
         return state
 
+    previous_missing = state.missing_rows
     missing = expected - stored
     # Records the validator permanently rejects (bad OHLC, volume mismatch)
     # will never land in stored. Without this, the state re-fetches forever.
@@ -613,7 +670,8 @@ def run_archive_state(state_id):
     if missing:
         rejected_dates = set(
             RejectedRecord.objects.filter(
-                endpoint=state.endpoint, symbol=state.symbol,
+                endpoint__in=_REJECTION_LABELS.get(state.endpoint, (state.endpoint,)),
+                symbol=state.symbol,
             ).values_list("date", flat=True)
         )
         # Handles both date keys ("1405-05-03") and composite snapshot
@@ -633,22 +691,30 @@ def run_archive_state(state_id):
     state.last_attempt_at = now
     state.last_success_at = now
     state.last_error = ""
-    state.consecutive_failures = 0
-    
+
     if state.verified_complete:
+        state.consecutive_failures = 0
         logger.info("[INGEST] Successfully backfilled %s (%s): verified complete (stored %d rows).", state.symbol, state.endpoint, state.stored_rows)
         # Not a flat +20h: that drifts across the clock, so a state that verified
         # at midday re-verified the same stale history the next midday and never
         # picked up the day it had just missed.
-        state.next_attempt_at = market_state.next_post_close(now)
-    elif created:
-        logger.info("[INGEST] Backfilled %s (%s): incomplete (stored %d/%d, %d missing).", state.symbol, state.endpoint, state.stored_rows, state.expected_rows, state.missing_rows)
-        state.next_attempt_at = now + timedelta(minutes=1)
-    else:
-        logger.info("[INGEST] Backfilled %s (%s): incomplete (stored %d/%d, %d missing).", state.symbol, state.endpoint, state.stored_rows, state.expected_rows, state.missing_rows)
-        state.next_attempt_at = now + timedelta(
-            hours=min(2 ** max(state.consecutive_failures - 1, 0), 24)
+        state.next_attempt_at = market_state.next_post_close(
+            now + _REVERIFY_INTERVAL.get(state.endpoint, timedelta(0))
         )
+    else:
+        # `created` was truthy on every pass because ingest_real_legal re-updates
+        # rows it has already written, so the old fast-retry branch rescheduled
+        # non-converging states every 60s forever (one symbol ran 126x in 5h).
+        # Only real progress -- a gap that actually shrank -- earns the fast path.
+        if len(missing) < previous_missing:
+            state.consecutive_failures = 0
+            state.next_attempt_at = now + timedelta(minutes=1)
+        else:
+            state.consecutive_failures += 1
+            state.next_attempt_at = now + timedelta(
+                hours=min(2 ** max(state.consecutive_failures - 1, 0), 24)
+            )
+        logger.info("[INGEST] Backfilled %s (%s): incomplete (stored %d/%d, %d missing).", state.symbol, state.endpoint, state.stored_rows, state.expected_rows, state.missing_rows)
     state.save()
     return state
 
@@ -694,8 +760,8 @@ def claim_archive_batch(limit=None):
         # remaining slots keep the user-facing historical-data priority.
         states = []
         for endpoint in _ENDPOINT_PRIORITY:
-            state = _cost_rank_qs(base.filter(endpoint=endpoint)).order_by(
-                _LAST_ATTEMPT_FIRST, "verified_complete", "-missing_rows"
+            state = _coverage_rank_qs(base.filter(endpoint=endpoint)).order_by(
+                "_coverage_rank", _LAST_ATTEMPT_FIRST, "verified_complete"
             ).first()
             if state:
                 states.append(state)
@@ -704,8 +770,10 @@ def claim_archive_batch(limit=None):
         remaining_slots = batch_size - len(states)
         if remaining_slots > 0:
             states += list(
-                _cost_rank_qs(base.exclude(pk__in=[state.pk for state in states]))
-                .order_by("verified_complete", *_COST_ORDER, "-missing_rows", _LAST_ATTEMPT_FIRST)[:remaining_slots]
+                _coverage_rank_qs(
+                    _cost_rank_qs(base.exclude(pk__in=[state.pk for state in states]))
+                )
+                .order_by("verified_complete", "_coverage_rank", *_COST_ORDER, _LAST_ATTEMPT_FIRST)[:remaining_slots]
             )
         claim_until = now + timedelta(minutes=10)
         ArchiveFetchState.objects.filter(pk__in=[state.pk for state in states]).update(

@@ -343,7 +343,12 @@ def test_archive_state_for_codal_shareholder_and_ticks(settings):
     assert StockTransactionTick.objects.filter(symbol="KAMA", row=1).exists()
 
 
-def test_archive_state_transient_error_reschedules_quickly_without_failure_increment(settings):
+def test_archive_state_transient_error_reschedules_quickly_then_escalates(settings):
+    """First blip still retries in 2 minutes; a persistent one stops hammering.
+
+    The delay used to be a flat 2 minutes with no failure count, so a symbol that
+    always timed out consumed a batch slot every 2 minutes indefinitely.
+    """
     from marketdata.fetchers.base import TransientMarketDataError
     state = ArchiveFetchState.objects.create(
         endpoint=ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
@@ -351,12 +356,20 @@ def test_archive_state_transient_error_reschedules_quickly_without_failure_incre
     )
     with patch("marketdata.archive._fetch_and_ingest", side_effect=TransientMarketDataError("Rate limited", status_code=429)):
         updated_state = run_archive_state(state.pk)
-    
-    assert updated_state.consecutive_failures == 0
+
+    assert updated_state.consecutive_failures == 1
     assert "Transient rate limit or network error" in updated_state.last_error
-    # Should reschedule in 2 minutes
+    # Unchanged for the first attempt: 2 ** 1 == 2 minutes.
     diff = updated_state.next_attempt_at - updated_state.last_attempt_at
     assert 119 <= diff.total_seconds() <= 121
+
+    with patch("marketdata.archive._fetch_and_ingest", side_effect=TransientMarketDataError("Rate limited", status_code=429)):
+        for _ in range(4):
+            updated_state = run_archive_state(state.pk)
+
+    assert updated_state.consecutive_failures == 5
+    diff = updated_state.next_attempt_at - updated_state.last_attempt_at
+    assert diff.total_seconds() == 32 * 60  # 2 ** 5, capped at 60m
 
 
 def test_archive_borrows_quota_the_live_bucket_never_spent(settings):

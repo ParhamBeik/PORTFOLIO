@@ -161,10 +161,40 @@ class TestLiveReserve:
         assert quota.live_reserve_remaining(row, now=midnight_tehran) == 30
 
     def test_a_faster_cadence_reserves_more(self, settings):
+        """But only for the hours the fast cadence actually runs.
+
+        The open-market interval applies 08:30-13:00 on a trading day, not all
+        24 hours. Costing the whole day at it reserved ~4,300/day against an
+        observed live spend of 24-719/day and locked the archive out of the tail
+        of every day, so the reserve is now priced per market state.
+        """
         settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE = 2
         settings.MARKETDATA_LIVE_REQUEST_FLOOR = 6000
         settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
-        settings.MARKETDATA_LIVE_INTERVAL_OPEN = 120  # the old 2-minute loop
         settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
+        # 1405-05-05, a Monday: the session runs, so the open interval bites.
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(self._row(), now=midnight_tehran) == 1440
+
+        settings.MARKETDATA_LIVE_INTERVAL_OPEN = 300
+        baseline = quota.live_reserve_remaining(self._row(), now=midnight_tehran)
+        settings.MARKETDATA_LIVE_INTERVAL_OPEN = 120  # the old 2-minute loop
+        faster = quota.live_reserve_remaining(self._row(), now=midnight_tehran)
+
+        assert faster > baseline
+        # 4.5h of session at 120s + 19.5h off-session at 300s, x2 calls.
+        assert faster == 2 * (135 + 234)
+        # The whole day at the open cadence would have been 1,440.
+        assert faster < 1440
+
+    def test_the_session_cadence_is_not_charged_on_a_closed_day(self, settings):
+        """Thursday/Friday is the Iranian weekend; no session runs to pay for."""
+        settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE = 2
+        settings.MARKETDATA_LIVE_REQUEST_FLOOR = 6000
+        settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
+        settings.MARKETDATA_LIVE_INTERVAL_OPEN = 120
+        settings.MARKETDATA_LIVE_INTERVAL_DAYTIME = 300
+        settings.MARKETDATA_LIVE_INTERVAL_OVERNIGHT = 300
+        settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
+        # 1405-05-09 is a Friday (jdatetime weekday 6).
+        friday_midnight = datetime(2026, 7, 30, 20, 30, tzinfo=dt_timezone.utc)
+        assert quota.live_reserve_remaining(self._row(), now=friday_midnight) == 576

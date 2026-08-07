@@ -236,9 +236,15 @@ MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
 # customer-facing path, so it is reserved first and archive takes the remainder.
 # Replaces the legacy MARKETDATA_ARCHIVE_REQUEST_RESERVE=8820, which reserved for
 # archive and left live to fight for what was left -- backwards.
-MARKETDATA_LIVE_REQUEST_FLOOR = int(os.getenv("MARKETDATA_LIVE_REQUEST_FLOOR", "4320"))
+#
+# The four budgets must sum to <= MARKETDATA_DAILY_REQUEST_LIMIT. They summed to
+# 10,000 against a 9,800 limit, and the live floor of 4,320 was sized for a
+# 2-minute poll running all day -- observed live usage is 24-719/day (12-day
+# sample), so ~3,600/day was reserved for requests live never makes. The floor
+# below still leaves ~2.4x headroom over the worst day ever recorded.
+MARKETDATA_LIVE_REQUEST_FLOOR = int(os.getenv("MARKETDATA_LIVE_REQUEST_FLOOR", "1200"))
 MARKETDATA_LIVE_REQUEST_HEADROOM = int(os.getenv("MARKETDATA_LIVE_REQUEST_HEADROOM", "500"))
-MARKETDATA_ARCHIVE_REQUEST_BUDGET = int(os.getenv("MARKETDATA_ARCHIVE_REQUEST_BUDGET", "4980"))
+MARKETDATA_ARCHIVE_REQUEST_BUDGET = int(os.getenv("MARKETDATA_ARCHIVE_REQUEST_BUDGET", "7900"))
 MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET", "200"))
 # Kept as a backwards-compatible alias so older management commands and tests that
 # still read it keep working; the archive budget above is the authoritative value.

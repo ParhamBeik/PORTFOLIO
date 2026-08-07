@@ -157,15 +157,41 @@ def live_reserve_remaining(row, now=None):
     rollover = (local + timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    # The fastest configured cadence is the worst case: whichever market state
-    # the day passes through, live can never need more cycles than this.
-    interval = max(1, min(
-        settings.MARKETDATA_LIVE_INTERVAL_OPEN,
-        settings.MARKETDATA_LIVE_INTERVAL_DAYTIME,
-        settings.MARKETDATA_LIVE_INTERVAL_OVERNIGHT,
-    ))
-    cycles = math.ceil((rollover - local).total_seconds() / interval)
-    needed = cycles * settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE
+    # Costing every remaining hour at the open-market cadence reserved for a
+    # session that is not running: the TSE trades 08:30-13:00 five days a week,
+    # so most of any given evening is overnight cadence. The old flat `min()`
+    # over all three intervals reserved ~4,300/day against an observed live spend
+    # of 24-719/day, and blocked the archive from ~19:00 with quota unspent.
+    from . import market_state as _market_state
+
+    open_start = timedelta(hours=_market_state.SESSION_START[0], minutes=_market_state.SESSION_START[1])
+    open_end = timedelta(hours=_market_state.SESSION_END[0], minutes=_market_state.SESSION_END[1])
+    elapsed = timedelta(hours=local.hour, minutes=local.minute, seconds=local.second)
+    day_end = timedelta(days=1)
+
+    # Only tomorrow's session can still fall before rollover if today's has ended,
+    # and it cannot -- rollover is midnight tonight. So open time left is whatever
+    # remains of today's window, and none at all on the Thursday/Friday weekend.
+    import jdatetime
+
+    trading_today = (
+        jdatetime.date.fromgregorian(date=local.date()).weekday()
+        in _market_state.TRADING_WEEKDAYS
+    )
+    open_left = (
+        max(timedelta(0), min(open_end, day_end) - max(open_start, elapsed))
+        if trading_today else timedelta(0)
+    )
+    other_left = max(timedelta(0), (day_end - elapsed) - open_left)
+
+    per_cycle = settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE
+    needed = per_cycle * (
+        math.ceil(open_left.total_seconds() / max(1, settings.MARKETDATA_LIVE_INTERVAL_OPEN))
+        + math.ceil(other_left.total_seconds() / max(1, min(
+            settings.MARKETDATA_LIVE_INTERVAL_DAYTIME,
+            settings.MARKETDATA_LIVE_INTERVAL_OVERNIGHT,
+        )))
+    )
     return max(0, min(needed, bucket_budget(LIVE) - row.live_used))
 
 
