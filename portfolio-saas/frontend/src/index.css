@@ -1,0 +1,123 @@
+@import "tailwindcss";
+
+/* Design tokens.
+ *
+ * Dark is the default; light swaps in from the OS preference. There is no
+ * toggle, so every value lives in exactly one place and `@theme inline` below
+ * republishes them as Tailwind utilities (bg-panel, text-muted, ...).
+ *
+ * The eight series colors are the validated categorical palette from the
+ * dataviz reference — fixed order, never cycled, never reassigned by rank.
+ * Both modes clear the lightness band, chroma floor, adjacent-pair CVD
+ * separation (worst ΔE 8.4 dark / 9.1 light) and normal-vision floor.
+ * Three light-mode slots sit under 3:1 against white, so any chart using them
+ * ships direct labels or a table view alongside — see the donut legend.
+ */
+:root {
+  color-scheme: dark;
+
+  --c-bg: #0b0e14;
+  --c-panel: #12161f;
+  --c-panel-2: #1a1f2b;
+  --c-border: #232936;
+  --c-text: #e6edf3;
+  --c-muted: #8b96a8;
+  --c-accent: #3987e5;
+
+  /* Status. Reserved — never reused as a series color, always paired with a
+   * label or icon so state is not carried by hue alone. */
+  --c-good: #0ca30c;
+  --c-warn: #fab219;
+  --c-serious: #ec835a;
+  --c-critical: #d03b3b;
+
+  --c-grid: #2c313c;
+  --c-axis: #3a4150;
+
+  --c-s1: #3987e5;
+  --c-s2: #d95926;
+  --c-s3: #199e70;
+  --c-s4: #c98500;
+  --c-s5: #d55181;
+  --c-s6: #008300;
+  --c-s7: #9085e9;
+  --c-s8: #e66767;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    --c-bg: #f6f8fa;
+    --c-panel: #ffffff;
+    --c-panel-2: #f0f3f6;
+    --c-border: #d8dee4;
+    --c-text: #1f2328;
+    --c-muted: #59636e;
+    --c-accent: #2a78d6;
+
+    --c-good: #0ca30c;
+    --c-warn: #fab219;
+    --c-serious: #ec835a;
+    --c-critical: #d03b3b;
+
+    --c-grid: #e6eaef;
+    --c-axis: #c3cad3;
+
+    --c-s1: #2a78d6;
+    --c-s2: #eb6834;
+    --c-s3: #1baf7a;
+    --c-s4: #eda100;
+    --c-s5: #e87ba4;
+    --c-s6: #008300;
+    --c-s7: #4a3aa7;
+    --c-s8: #e34948;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--c-bg);
+  --color-panel: var(--c-panel);
+  --color-panel-2: var(--c-panel-2);
+  --color-border: var(--c-border);
+  --color-text: var(--c-text);
+  --color-muted: var(--c-muted);
+  --color-accent: var(--c-accent);
+  --color-good: var(--c-good);
+  --color-warn: var(--c-warn);
+  --color-serious: var(--c-serious);
+  --color-critical: var(--c-critical);
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Columns of figures must align vertically; standalone hero numbers keep the
+ * default proportional figures. */
+table,
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/* Recharts injects its own focus ring on every surface; ours is enough. */
+.recharts-wrapper:focus,
+.recharts-surface:focus {
+  outline: none;
+}

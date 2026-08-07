@@ -10,6 +10,7 @@ import {
   sessionExpiry,
 } from "../api.js";
 import Logo from "./Logo.jsx";
+import { Button, Input } from "./ui.jsx";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const GOOGLE_SCRIPT_SRC = "https://accounts.google.com/gsi/client";
@@ -34,9 +35,9 @@ function getPasswordChecks(pw, confirmPw = "", registering = false) {
 function calculateStrength(pw, checks) {
   if (!pw) return { score: 0, label: "", color: "transparent" };
   const passed = checks.filter((c) => c.id !== "match" && c.ok).length;
-  if (passed <= 1) return { score: 25, label: "Weak", color: "var(--red)" };
-  if (passed === 2 || passed === 3) return { score: 65, label: "Medium", color: "var(--amber)" };
-  return { score: 100, label: "Strong", color: "var(--green)" };
+  if (passed <= 1) return { score: 25, label: "Weak", color: "var(--c-critical)" };
+  if (passed === 2 || passed === 3) return { score: 65, label: "Medium", color: "var(--c-warn)" };
+  return { score: 100, label: "Strong", color: "var(--c-good)" };
 }
 
 function friendlyError(msg) {
@@ -204,223 +205,311 @@ export default function Auth({ onAuthed }) {
 
   if (mode === "reset-confirm") {
     return (
-      <div className="auth-wrap">
-        <div className="auth-card-wrapper">
-          <form className="auth-card" onSubmit={submitResetConfirm} noValidate>
-            <div className="auth-header">
-              <h1 className="brand-heading"><Logo size={36} /><span>Lattice</span></h1>
-              <p className="subtitle">Choose a new password.</p>
+      <div className="flex min-h-screen items-center justify-center px-4">
+        <form
+          data-testid="auth-card"
+          className="w-full max-w-md rounded-xl border border-border bg-panel p-5"
+          onSubmit={submitResetConfirm}
+          noValidate
+        >
+          <div className="mb-6">
+            <h1 className="flex items-center gap-2 text-xl font-semibold text-text">
+              <Logo size={36} />
+              <span>Lattice</span>
+            </h1>
+            <p className="mt-1 text-sm text-muted">Choose a new password.</p>
+          </div>
+          {error && (
+            <div
+              data-testid="auth-error-banner"
+              role="alert"
+              className="mb-4 rounded-lg border border-[var(--c-critical)]/40 bg-[var(--c-critical)]/10 px-4 py-3 text-sm text-[var(--c-critical)]"
+            >
+              {error}
             </div>
-            {error && <div className="error-banner" role="alert"><div className="error-text">{error}</div></div>}
-            <div className="form-group">
-              <label htmlFor="reset-new-password">New password</label>
-              <input
-                id="reset-new-password"
-                type="password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-            <div className="form-group">
-              <label htmlFor="reset-confirm-password">Confirm password</label>
-              <input
-                id="reset-confirm-password"
-                type="password"
-                required
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-              />
-            </div>
-            <button type="submit" className="primary big submit-btn" disabled={busy}>
-              {busy ? "Saving…" : "Reset password"}
-            </button>
-          </form>
-        </div>
+          )}
+          <div className="mb-4">
+            <label htmlFor="reset-new-password" className="mb-1 block text-sm font-medium text-text">
+              New password
+            </label>
+            <Input
+              id="reset-new-password"
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full"
+            />
+          </div>
+          <div className="mb-4">
+            <label htmlFor="reset-confirm-password" className="mb-1 block text-sm font-medium text-text">
+              Confirm password
+            </label>
+            <Input
+              id="reset-confirm-password"
+              type="password"
+              required
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              className="w-full"
+            />
+          </div>
+          <Button type="submit" variant="primary" disabled={busy} className="w-full py-1.5">
+            {busy ? "Saving…" : "Reset password"}
+          </Button>
+        </form>
       </div>
     );
   }
 
   return (
-    <div className="auth-wrap">
-      <div className="auth-card-wrapper">
-        <form className="auth-card" onSubmit={mode === "reset" ? submitResetRequest : submit} noValidate>
-          <div className="auth-header">
-            <h1 className="brand-heading">
-              <Logo size={36} />
-              <span>Lattice</span>
-            </h1>
-            <p className="subtitle">
-              {mode === "reset"
-                ? "Enter your email and we'll send you a reset link."
-                : registering
-                ? "Create your account to start tracking multi-asset portfolios live."
-                : "Welcome back! Sign in to access your portfolios and analytics."}
-            </p>
+    <div className="flex min-h-screen items-center justify-center px-4">
+      <form
+        data-testid="auth-card"
+        className="w-full max-w-md rounded-xl border border-border bg-panel p-5"
+        onSubmit={mode === "reset" ? submitResetRequest : submit}
+        noValidate
+      >
+        <div className="mb-6">
+          <h1 className="flex items-center gap-2 text-xl font-semibold text-text">
+            <Logo size={36} />
+            <span>Lattice</span>
+          </h1>
+          <p className="mt-1 text-sm text-muted">
+            {mode === "reset"
+              ? "Enter your email and we'll send you a reset link."
+              : registering
+              ? "Create your account to start tracking multi-asset portfolios live."
+              : "Welcome back! Sign in to access your portfolios and analytics."}
+          </p>
+        </div>
+
+        {mode !== "reset" && (
+          <div
+            role="tablist"
+            aria-label="Authentication mode"
+            className="mb-4 inline-flex gap-1 rounded-lg border border-border bg-panel-2 p-1"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "login"}
+              data-testid="auth-toggle-login"
+              onClick={() => switchMode("login")}
+              className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+                mode === "login" ? "bg-accent text-white" : "text-muted hover:text-text"
+              }`}
+            >
+              Sign in
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "signup"}
+              data-testid="auth-toggle-register"
+              onClick={() => switchMode("signup")}
+              className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+                mode === "signup" ? "bg-accent text-white" : "text-muted hover:text-text"
+              }`}
+            >
+              Create account
+            </button>
           </div>
+        )}
 
-          {mode !== "reset" && (
-            <div className="seg" role="tablist" aria-label="Authentication mode">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={mode === "login"}
-                className={mode === "login" ? "active" : ""}
-                onClick={() => switchMode("login")}
+        {error && (
+          <div
+            data-testid="auth-error-banner"
+            role="alert"
+            aria-live="polite"
+            className="mb-4 rounded-lg border border-[var(--c-critical)]/40 bg-[var(--c-critical)]/10 px-4 py-3 text-sm text-[var(--c-critical)]"
+          >
+            {error}
+          </div>
+        )}
+        {notice && (
+          <div
+            role="status"
+            className="mb-4 rounded-lg border border-[var(--c-good)]/40 bg-[var(--c-good)]/10 px-4 py-3 text-sm text-[var(--c-good)]"
+          >
+            {notice}
+          </div>
+        )}
+
+        <div className="mb-4">
+          <div className="mb-1 flex items-center justify-between">
+            <label htmlFor="auth-email" className="text-sm font-medium text-text">
+              Email address
+            </label>
+            {email && (
+              <span
+                className={`text-xs font-medium ${
+                  emailValid ? "text-[var(--c-good)]" : "text-[var(--c-critical)]"
+                }`}
               >
-                Sign in
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={mode === "signup"}
-                className={mode === "signup" ? "active" : ""}
-                onClick={() => switchMode("signup")}
-              >
-                Create account
-              </button>
-            </div>
+                {emailValid ? "✓ Valid" : "Invalid"}
+              </span>
+            )}
+          </div>
+          <Input
+            id="auth-email"
+            type="email"
+            required
+            autoComplete="username"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="you@example.com"
+            aria-invalid={Boolean(fieldError.email)}
+            data-testid="auth-email-input"
+            className="w-full"
+          />
+          {fieldError.email && (
+            <p className="mt-1 text-xs text-[var(--c-critical)]">{fieldError.email}</p>
           )}
+        </div>
 
-          {error && (
-            <div className="error-banner" role="alert" aria-live="polite">
-              <div className="error-text">{error}</div>
-            </div>
-          )}
-          {notice && <div className="alert-success" role="status">{notice}</div>}
-
-          <div className="form-group">
-            <div className="label-row">
-              <label htmlFor="auth-email">Email address</label>
-              {email && (
-                <span className={`field-status ${emailValid ? "valid" : "invalid"}`}>
-                  {emailValid ? "✓ Valid" : "Invalid"}
+        {mode !== "reset" && (
+          <div className="mb-4">
+            <div className="mb-1 flex items-center justify-between">
+              <label htmlFor="auth-password" className="text-sm font-medium text-text">
+                Password
+              </label>
+              {registering && strength.label && (
+                <span className="text-xs font-medium" style={{ color: strength.color }}>
+                  Strength: {strength.label}
                 </span>
               )}
             </div>
-            <input
-              id="auth-email"
-              type="email"
-              required
-              autoComplete="username"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              aria-invalid={Boolean(fieldError.email)}
-            />
-            {fieldError.email && <p className="field-hint error-hint">{fieldError.email}</p>}
-          </div>
-
-          {mode !== "reset" && (
-            <div className="form-group">
-              <div className="label-row">
-                <label htmlFor="auth-password">Password</label>
-                {registering && strength.label && (
-                  <span className="strength-label" style={{ color: strength.color }}>
-                    Strength: {strength.label}
-                  </span>
-                )}
-              </div>
-              <div className="pw-field">
-                <input
-                  id="auth-password"
-                  type={showPw ? "text" : "password"}
-                  required
-                  autoComplete={registering ? "new-password" : "current-password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder={registering ? "Create a password" : "Enter password"}
-                  aria-invalid={Boolean(fieldError.password)}
-                  className={fieldError.password ? "input-error" : ""}
+            <div className="flex items-center gap-2">
+              <Input
+                id="auth-password"
+                type={showPw ? "text" : "password"}
+                required
+                autoComplete={registering ? "new-password" : "current-password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={registering ? "Create a password" : "Enter password"}
+                aria-invalid={Boolean(fieldError.password)}
+                data-testid="auth-password-input"
+                className={`w-full ${fieldError.password ? "border-[var(--c-critical)]" : ""}`}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setShowPw((v) => !v)}
+                data-testid="auth-password-toggle"
+                className="shrink-0 px-2.5 py-1.5 text-xs"
+              >
+                {showPw ? "Hide" : "Show"}
+              </Button>
+            </div>
+            {fieldError.password && (
+              <p className="mt-1 text-xs text-[var(--c-critical)]">{fieldError.password}</p>
+            )}
+            {registering && password && (
+              <div data-testid="auth-strength-meter" className="mt-2 h-1 overflow-hidden rounded-full bg-panel-2">
+                <div
+                  className="h-full rounded-full transition-all"
+                  style={{ width: `${strength.score}%`, backgroundColor: strength.color }}
                 />
-                <button type="button" className="pw-toggle" onClick={() => setShowPw((v) => !v)}>
-                  {showPw ? "Hide" : "Show"}
-                </button>
               </div>
-              {fieldError.password && <p className="field-hint error-hint">{fieldError.password}</p>}
-              {registering && password && (
-                <div className="strength-bar-wrap">
-                  <div className="strength-bar-fill" style={{ width: `${strength.score}%`, backgroundColor: strength.color }} />
-                </div>
-              )}
-            </div>
-          )}
-
-          {registering && (
-            <div className="form-group">
-              <div className="label-row">
-                <label htmlFor="auth-confirm-password">Confirm password</label>
-                {confirmPassword && (
-                  <span className={`field-status ${password === confirmPassword ? "valid" : "invalid"}`}>
-                    {password === confirmPassword ? "✓ Match" : "Mismatch"}
-                  </span>
-                )}
-              </div>
-              <div className="pw-field">
-                <input
-                  id="auth-confirm-password"
-                  type={showConfirmPw ? "text" : "password"}
-                  required
-                  autoComplete="new-password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="Re-enter password"
-                />
-                <button type="button" className="pw-toggle" onClick={() => setShowConfirmPw((v) => !v)}>
-                  {showConfirmPw ? "Hide" : "Show"}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {registering && (
-            <div className="pw-rules-card">
-              <span className="rules-title">Password requirements:</span>
-              <ul className="pw-rules">
-                {checks.map((c) => (
-                  <li key={c.id} className={c.ok ? "ok" : "muted"}>
-                    <span className="rule-icon">{c.ok ? "✓" : "○"}</span>
-                    <span>{c.label}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          <button
-            type="submit"
-            className="primary big submit-btn"
-            disabled={busy || (mode === "reset" ? !emailValid : registering ? !(emailValid && pwValid) : !(emailValid && password))}
-          >
-            {busy
-              ? "Working…"
-              : mode === "reset"
-              ? "Send reset link"
-              : registering
-              ? "Create account"
-              : "Sign in"}
-          </button>
-
-          {googleReady && (
-            <div className="oauth-divider">
-              <span>or</span>
-            </div>
-          )}
-          <div ref={googleBoxRef} className="google-btn-box" />
-
-          <div className="legal-links">
-            {mode !== "reset" ? (
-              <button type="button" className="link" onClick={() => switchMode("reset")}>
-                Forgot password?
-              </button>
-            ) : (
-              <button type="button" className="link" onClick={() => switchMode("login")}>
-                Back to sign in
-              </button>
             )}
           </div>
-        </form>
-      </div>
+        )}
+
+        {registering && (
+          <div className="mb-4">
+            <div className="mb-1 flex items-center justify-between">
+              <label htmlFor="auth-confirm-password" className="text-sm font-medium text-text">
+                Confirm password
+              </label>
+              {confirmPassword && (
+                <span
+                  className={`text-xs font-medium ${
+                    password === confirmPassword ? "text-[var(--c-good)]" : "text-[var(--c-critical)]"
+                  }`}
+                >
+                  {password === confirmPassword ? "✓ Match" : "Mismatch"}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <Input
+                id="auth-confirm-password"
+                type={showConfirmPw ? "text" : "password"}
+                required
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Re-enter password"
+                className="w-full"
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setShowConfirmPw((v) => !v)}
+                className="shrink-0 px-2.5 py-1.5 text-xs"
+              >
+                {showConfirmPw ? "Hide" : "Show"}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {registering && (
+          <div className="mb-4 rounded-lg border border-border bg-panel-2 px-4 py-3">
+            <span className="text-sm font-medium text-text">Password requirements:</span>
+            <ul className="mt-2 space-y-1 text-sm">
+              {checks.map((c) => (
+                <li
+                  key={c.id}
+                  className={`flex items-center gap-2 ${c.ok ? "text-[var(--c-good)]" : "text-muted"}`}
+                >
+                  <span>{c.ok ? "✓" : "○"}</span>
+                  <span>{c.label}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <Button
+          type="submit"
+          variant="primary"
+          data-testid="auth-submit"
+          disabled={busy || (mode === "reset" ? !emailValid : registering ? !(emailValid && pwValid) : !(emailValid && password))}
+          className="w-full py-1.5"
+        >
+          {busy
+            ? "Working…"
+            : mode === "reset"
+            ? "Send reset link"
+            : registering
+            ? "Create account"
+            : "Sign in"}
+        </Button>
+
+        {googleReady && (
+          <div className="my-4 flex items-center gap-3 text-xs text-muted">
+            <span className="h-px flex-1 bg-border" />
+            <span>or</span>
+            <span className="h-px flex-1 bg-border" />
+          </div>
+        )}
+        <div ref={googleBoxRef} className="flex justify-center" />
+
+        <div className="mt-4 flex justify-center text-sm">
+          {mode !== "reset" ? (
+            <Button type="button" variant="link" onClick={() => switchMode("reset")}>
+              Forgot password?
+            </Button>
+          ) : (
+            <Button type="button" variant="link" onClick={() => switchMode("login")}>
+              Back to sign in
+            </Button>
+          )}
+        </div>
+      </form>
     </div>
   );
 }
