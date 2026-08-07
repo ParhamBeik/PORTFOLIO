@@ -184,8 +184,12 @@ def test_gold_usdt_is_canonicalised_on_read_and_write():
     created, _ = ingest.ingest_gold_currency_history(payload)
     assert created == 1
     assert GoldCurrencyHistory.objects.filter(symbol="USDT_IRT").exists()
-    # Storage unit is Rial; Rial-declared quotes pass through unchanged.
-    assert float(GoldCurrencyHistory.objects.get().close_price) == 1005000.0
+    # GoldCurrencyHistory is Toman-denominated for IRR-quoted symbols (the one
+    # deliberate non-verbatim write path), so a Rial-declared quote is divided
+    # by 10 and relabelled — valuation reads close_price straight as Toman.
+    row = GoldCurrencyHistory.objects.get()
+    assert float(row.close_price) == 100500.0
+    assert row.unit == "تومان"
 
 
 def test_flatten_records_handles_all_three_payload_shapes():

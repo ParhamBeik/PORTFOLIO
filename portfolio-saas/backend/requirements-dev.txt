@@ -1,4 +1,6 @@
 pytest>=8.0,<9
-pytest-django>=4.8,<5
+# <4.13: 4.13.0's django_db fixture crashes with
+# "PytestDjangoTestCase has no attribute _pre_setup_ran_eagerly".
+pytest-django>=4.8,<4.13
 responses>=0.25
 rich>=13.7
