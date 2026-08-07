@@ -625,9 +625,30 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
 
     # Rial- and Toman-quoted input both end up Toman, so both get the Toman
     # label; a USD/Tether-quoted payload is never converted and keeps its own.
-    is_irr_quoted = raw_unit.strip().casefold() in {
+    folded_unit = raw_unit.strip().casefold()
+    is_irr_quoted = folded_unit in {
         "ریال".casefold(), "rial", "irr", "تومان".casefold(), "toman",
     }
+    # Fail closed on anything else. valuation.py reads close_price straight as
+    # Toman, so storing a quote whose scale we cannot name is a silent 10x
+    # waiting to happen -- refusing the batch is the safe default.
+    is_foreign_quoted = folded_unit in {
+        "دلار".casefold(), "dollar", "usd", "تتر".casefold(), "tether", "usdt",
+    }
+    if not (is_irr_quoted or is_foreign_quoted):
+        RejectedRecord.objects.get_or_create(
+            endpoint="gold_daily",
+            symbol=symbol,
+            date="",
+            reason="unit_unrecognised",
+            defaults={"payload": {"unit": raw_unit, "name": name}},
+        )
+        logger.warning(
+            "ingest_gold_currency_history: refusing %s -- unrecognised unit %r",
+            symbol, raw_unit,
+        )
+        return 0, len(payload["history_daily"])
+
     unit = "تومان" if is_irr_quoted else raw_unit
 
     def to_storage(value):

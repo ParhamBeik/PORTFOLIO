@@ -283,7 +283,7 @@ def aggregate_daily_gold_currency_history(date_str: str = None):
     from django.db.models import Max, Min
     from django.utils import timezone
     from portfolio.models import Asset, Price
-    from .models import GoldCurrencyHistory, MarketCandle
+    from .models import GoldCurrencyHistory
 
     today_jalali = date_str or jdatetime.date.today().strftime("%Y-%m-%d")
     now = timezone.now()
@@ -321,21 +321,11 @@ def aggregate_daily_gold_currency_history(date_str: str = None):
                 "close_price": close_p,
             },
         )
-        # AGGREGATE, never ADJUSTED: the archive writes ADJUSTED with
-        # bulk_create(ignore_conflicts=True) and so can never replace a row
-        # parked here. See MarketCandle's docstring.
-        MarketCandle.objects.update_or_create(
-            symbol=symbol,
-            timeframe=MarketCandle.AGGREGATE,
-            date_time=today_jalali,
-            defaults={
-                "open_price": open_p,
-                "high_price": high_p,
-                "low_price": low_p,
-                "close_price": close_p,
-                "volume": 0,
-            },
-        )
+        # No MarketCandle row: that table is Rial-denominated TSE data, and these
+        # are Toman BRS quotes. Writing them here made candle_close_qs(symbol)
+        # match for gold/FX, which sent PerformanceView down the stock branch and
+        # exposed every tse_close_to_toman() reader to a 10x error. The row was
+        # redundant anyway -- GoldCurrencyHistory above is the series of record.
         created_count += 1
 
     if created_count:
@@ -351,6 +341,7 @@ def aggregate_daily_stock_history(date_str: str = None):
     from django.db.models import Max, Min, Sum
     from django.utils import timezone
     from portfolio.models import Asset, Price
+    from .currency import toman_to_tse_close
     from .models import MarketCandle, StockTransactionTick
 
     today_jalali = date_str or jdatetime.date.today().strftime("%Y-%m-%d")
@@ -376,11 +367,15 @@ def aggregate_daily_stock_history(date_str: str = None):
             p_ticks = Price.objects.filter(asset=asset, fetched_at__gte=since).order_by("fetched_at")
             if not p_ticks.exists():
                 continue
-            open_p = p_ticks.first().price
-            close_p = p_ticks.last().price
+            # `Price` is Toman (extractor.py routes TSE quotes through
+            # tse_close_to_toman); MarketCandle is Rial. Convert on the way in,
+            # or candle_close_qs serves this row and the read side divides by 10
+            # a second time -- a 10x understatement of the current session.
+            open_p = toman_to_tse_close(p_ticks.first().price)
+            close_p = toman_to_tse_close(p_ticks.last().price)
             stats = p_ticks.aggregate(high=Max("price"), low=Min("price"))
-            high_p = stats["high"] or close_p
-            low_p = stats["low"] or close_p
+            high_p = toman_to_tse_close(stats["high"]) or close_p
+            low_p = toman_to_tse_close(stats["low"]) or close_p
             vol = 0
 
         # No DailyStockHistory write: this aggregate is tick-derived and would

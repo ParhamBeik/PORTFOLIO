@@ -100,3 +100,80 @@ def test_ingest_crypto_history_stores_price_toman_verbatim():
     assert created == 1
     row = CryptoHistory.objects.get(symbol="TestCoin", date="1404-03-21")
     assert row.close_price_toman == Decimal("632000")
+
+
+def test_toman_to_tse_close_round_trips_the_read_boundary():
+    """The write-side inverse must undo tse_close_to_toman exactly.
+
+    aggregate_daily_stock_history's tickless fallback relies on this: a Toman
+    `Price` goes back to Rial before landing in MarketCandle, so the read side's
+    divide-by-ten returns the original number instead of a tenth of it.
+    """
+    from marketdata.currency import toman_to_tse_close, tse_close_to_toman
+
+    for rial in ("3610", "70.5", "192880", "0.1"):
+        assert toman_to_tse_close(tse_close_to_toman(rial)) == Decimal(rial)
+    assert toman_to_tse_close(None) is None
+    assert toman_to_tse_close("") is None
+
+
+def test_gold_ingest_refuses_a_quote_whose_unit_it_cannot_name():
+    """Fail closed: an unnameable scale is a silent 10x, so store nothing.
+
+    valuation.py reads GoldCurrencyHistory.close_price straight as Toman. A
+    payload whose `unit` is blank or unknown could be Rial, so the batch is
+    rejected rather than guessed at.
+    """
+    from marketdata import ingest
+    from marketdata.models import GoldCurrencyHistory, RejectedRecord
+
+    payload = {
+        "symbol": "IR_COIN_MYSTERY", "name": "mystery", "unit": "quatloos",
+        "history_daily": [{"date": "1404-03-21", "close": 1050}],
+    }
+    created, rejected = ingest.ingest_gold_currency_history(payload)
+    assert created == 0 and rejected == 1
+    assert not GoldCurrencyHistory.objects.filter(symbol="IR_COIN_MYSTERY").exists()
+    assert RejectedRecord.objects.filter(
+        symbol="IR_COIN_MYSTERY", reason="unit_unrecognised"
+    ).exists()
+
+
+def test_gold_ingest_still_accepts_declared_foreign_units():
+    """دلار/تتر are legitimate non-IRR units and must pass through verbatim."""
+    from marketdata import ingest
+    from marketdata.models import GoldCurrencyHistory
+
+    payload = {
+        "symbol": "XAUUSD_TEST", "name": "gold ounce", "unit": "دلار",
+        "history_daily": [{"date": "1404-03-21", "close": 4310}],
+    }
+    created, _ = ingest.ingest_gold_currency_history(payload)
+    assert created == 1
+    row = GoldCurrencyHistory.objects.get(symbol="XAUUSD_TEST", date="1404-03-21")
+    assert row.close_price == Decimal("4310") and row.unit == "دلار"
+
+
+def test_no_brs_symbol_is_ever_written_into_the_rial_candle_table():
+    """MarketCandle is Rial TSE data; BRS gold/FX quotes are Toman.
+
+    A Toman row here makes candle_close_qs(symbol) match for a gold asset, which
+    routes readers down the TSE path and exposes them to tse_close_to_toman()'s
+    divide-by-ten. Guards the aggregate_daily_gold_currency_history regression.
+    """
+    from marketdata.models import GoldCurrencyHistory, MarketCandle
+    from marketdata.tasks import aggregate_daily_gold_currency_history
+    from portfolio.models import Asset, Price
+
+    asset = Asset.objects.create(
+        key="guard_coin", name="Guard Coin", asset_class=Asset.AssetClass.GOLD,
+        brs_symbol="IR_COIN_GUARD",
+    )
+    Price.objects.create(asset=asset, price=Decimal("182500000"))
+
+    aggregate_daily_gold_currency_history("1404-03-21")
+
+    # The Toman series of record is written...
+    assert GoldCurrencyHistory.objects.filter(symbol="IR_COIN_GUARD").exists()
+    # ...but nothing lands in the Rial candle table.
+    assert not MarketCandle.objects.filter(symbol="IR_COIN_GUARD").exists()

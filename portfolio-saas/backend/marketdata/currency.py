@@ -81,6 +81,20 @@ def tse_close_to_toman(value):
     return Decimal(str(value)) / Decimal("10")
 
 
+def toman_to_tse_close(value):
+    """Toman -> raw Rial, the inverse of `tse_close_to_toman()`.
+
+    THE write-side boundary. Anything derived from `portfolio_price` (already
+    Toman) that lands in a Rial table -- `marketdata_marketcandle` and friends --
+    must route through here, or the read side divides by 10 a second time and the
+    value shows up at a tenth of the truth. `aggregate_daily_stock_history`'s
+    tickless fallback is the one live caller.
+    """
+    if value in (None, ""):
+        return None
+    return Decimal(str(value)) * Decimal("10")
+
+
 def to_toman(symbol, price, unit="", *, usd_rate=None):
     """Convert a provider quote to Tomans using declared units, never magnitude."""
     value = Decimal(str(price or 0))
