@@ -32,6 +32,7 @@ from .models import (
     DailyStockHistory,
     GoldCurrencyHistory,
     MarketCandle,
+    MarketIndexData,
     OptionContractHistory,
     RealLegalHistory,
     RejectedRecord,

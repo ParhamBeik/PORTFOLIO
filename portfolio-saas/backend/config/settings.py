@@ -257,10 +257,10 @@ MARKETDATA_CODAL_MAX_PAGES = int(os.getenv("MARKETDATA_CODAL_MAX_PAGES", "5"))
 # Live poll cadence by market state (seconds). Beat still ticks every minute; the
 # task itself decides whether enough time has passed, so the cadence can change
 # without a beat restart. See marketdata/market_state.py for the arithmetic.
-# A flat 2 minutes across all three states: 720 cycles a day, every hour covered.
+# Open: 2 min; daytime/overnight: 5 min (frees quota for archive).
 MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "120"))
-MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "120"))
-MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "120"))
+MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "300"))
+MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "300"))
 
 # Provider calls one live cycle makes: BRS Gold, BRS Crypto, BRS Commodity,
 # TSETMC AllSymbols, TSETMC Options, TSETMC ETF NAV.

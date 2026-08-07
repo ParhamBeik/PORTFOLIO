@@ -166,15 +166,15 @@ class Holding(models.Model):
 
 
 class Price(models.Model):
-    """Global, append-only price time-series in Tomans.
+    """Global, append-only live price series in Toman (`price_unit=IRT`).
 
-    Written by `pricing` after each fetch. Read pattern: latest price per asset
-    via DISTINCT ON (asset) ORDER BY fetched_at DESC, backed by the index below.
+    Written by the live fetch loop after each cycle. Read pattern: latest price
+    per asset via DISTINCT ON (asset) ORDER BY fetched_at DESC.
 
-    New fields `price_unit` and `price_unit_verified` annotate the unit provided
-    by the source (e.g. 'IRT' for Tomans, 'IRR' for Rials) and whether the unit
-    has been authoritativey verified. Default is 'UNKNOWN' and False to enforce
-    conservative handling until the provider is confirmed.
+    `price_unit` / `price_unit_verified` mark provider unit confidence.
+    TSE warehouse rows stay Rial; they become Toman only via `tse_close_to_toman()`
+    at the read/blend boundary before landing here. Default for unsure sources is
+    UNKNOWN/unverified until confirmed.
     """
 
     class Unit(models.TextChoices):
