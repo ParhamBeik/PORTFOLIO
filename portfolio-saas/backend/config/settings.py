@@ -4,6 +4,7 @@ Configuration is environment-driven so the same image runs in dev, CI, and prod.
 Prices are fetched centrally and shared across every user (see pricing/), which
 is the key reason this design scales: one fetch updates everyone's valuation.
 """
+import math
 import os
 from datetime import timedelta
 from decimal import Decimal
@@ -310,6 +311,28 @@ QUEUE_BACKLOG_THRESHOLD = int(os.getenv("QUEUE_BACKLOG_THRESHOLD", "100"))
 APPLICATION_ERROR_THRESHOLD = int(os.getenv("APPLICATION_ERROR_THRESHOLD", "20"))
 PRICE_STALE_THRESHOLD_SECONDS = int(
     os.getenv("PRICE_STALE_THRESHOLD_SECONDS", "900")
+)
+
+# nightly_series_validation spike gates, as absolute daily log-returns. These
+# were previously reachable only as `getattr(settings, ..., math.log(x))`
+# fallbacks inside marketdata/tasks.py, so the numbers actually in force were
+# invisible here and untunable without a code change. Same values, now declared.
+# A day moving more than this is quarantined as `series_spike` unless a
+# CorporateAction covers the date.
+SERIES_VALIDATION_THRESHOLD_STOCK = float(
+    os.getenv("SERIES_VALIDATION_THRESHOLD_STOCK", str(math.log(1.5)))  # +-50%
+)
+SERIES_VALIDATION_THRESHOLD_CRYPTO = float(
+    os.getenv("SERIES_VALIDATION_THRESHOLD_CRYPTO", str(math.log(2.0)))  # +-100%
+)
+SERIES_VALIDATION_THRESHOLD_COMMODITY = float(
+    os.getenv("SERIES_VALIDATION_THRESHOLD_COMMODITY", str(math.log(1.2)))  # +-20%
+)
+SERIES_VALIDATION_THRESHOLD_CURRENCY = float(
+    os.getenv("SERIES_VALIDATION_THRESHOLD_CURRENCY", str(math.log(1.15)))  # +-15%
+)
+SERIES_VALIDATION_THRESHOLD_GOLD = float(
+    os.getenv("SERIES_VALIDATION_THRESHOLD_GOLD", str(math.log(1.2)))  # +-20%
 )
 
 from config.observability import init_sentry

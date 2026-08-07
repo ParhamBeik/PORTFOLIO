@@ -8,6 +8,25 @@ Authoritative storage units:
 | marketdata_goldcurrencyhistory | Toman for IRR-denominated; provider-native for USD/Tether (XAUUSD=دلار, BTC=تتر) |
 | marketdata_cryptohistory | close_price_usd USD, close_price_toman Toman |
 | portfolio_price, Snapshot, LedgerEntry, Liability | Toman (price_unit=IRT) |
+| marketdata_reallegalhistory (buy_*/sell_*_value) | Rial, provider-verbatim (same TSE feed) |
+| marketdata_marketindexdata (market_value, trade_value) | Rial; index_* are points, not money |
+| marketdata_stocksymbolmetadata (market_cap, eps) | Rial; pe/ps/g_pe are dimensionless |
+| marketdata_etfnavhistory (nav_*, market_price) | Rial (TSE feed); table currently empty |
+| marketdata_optioncontracthistory (strike, settlement, notional) | Rial (TSE feed); table currently empty |
+| marketdata_commodityhistory (close_price) | provider-native; the sibling `unit` string is the only label |
+
+Non-monetary conventions that bite just as hard:
+  * Warehouse dates are Jalali STRINGS ("1403-10-19"); user-land time
+    (LedgerEntry/Snapshot/Price) is tz-aware Gregorian. There is no single
+    conversion helper -- `marketdata.jalali.normalize_jalali` is the closest.
+  * `MarketCandle.date_time` is stored BOTH bare ("1405-05-09") and suffixed
+    ("1405-05-09 00:00:00"). String-compared bounds must allow for both;
+    `candle_close_qs` does, ad-hoc readers often do not.
+  * `1d_agg` rows are tick-derived, NOT provider-verbatim, so "provider-verbatim"
+    above holds only for `1d_adj`/`1d_unadj`.
+  * A BRS symbol must never appear in marketdata_marketcandle: that table is
+    Rial TSE data and BRS quotes are Toman. Guarded by a test in
+    tests/test_raw_storage.py.
 
 `tse_close_to_toman()` is THE single Rial→Toman read boundary for TSE warehouse
 rows. Read paths that combine those closes with app Toman must route through it.

@@ -5,7 +5,7 @@ from rest_framework import serializers
 from accounts.features import limit_for
 from .models import Account, Asset, Holding, LedgerEntry, Transaction, Liability
 from marketdata.models import MarketCandle, GoldCurrencyHistory
-from marketdata.currency import tse_close_to_toman
+from marketdata.currency import to_toman, tse_close_to_toman
 from marketdata.jalali import normalize_jalali
 import jdatetime
 
@@ -191,7 +191,18 @@ class TradeInputSerializer(serializers.Serializer):
                     if not history:
                         history = GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol, date__lte=j_date_str).order_by("-date").first()
                     if history:
-                        attrs['price_tomans'] = history.close_price
+                        # GoldCurrencyHistory is Toman only for IRR-quoted
+                        # symbols; BTC is stored in تتر and XAUUSD in دلار. The
+                        # ledger column is Toman, so route the row through the
+                        # declared-unit rule rather than assuming, using that
+                        # date's USD rate for the foreign-quoted ones.
+                        usd_row = GoldCurrencyHistory.objects.filter(
+                            symbol="USD", date__lte=history.date, close_price__gt=0
+                        ).order_by("-date").first()
+                        attrs['price_tomans'] = to_toman(
+                            asset.brs_symbol, history.close_price, history.unit,
+                            usd_rate=usd_row.close_price if usd_row else None,
+                        )
                     else:
                         latest_price = Price.objects.filter(asset=asset).order_by("-fetched_at").first()
                         if latest_price:

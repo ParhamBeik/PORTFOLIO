@@ -177,3 +177,36 @@ def test_no_brs_symbol_is_ever_written_into_the_rial_candle_table():
     assert GoldCurrencyHistory.objects.filter(symbol="IR_COIN_GUARD").exists()
     # ...but nothing lands in the Rial candle table.
     assert not MarketCandle.objects.filter(symbol="IR_COIN_GUARD").exists()
+
+
+def test_usd_quoted_keys_are_never_stamped_as_verified_toman():
+    """A USD-magnitude price must not be labelled IRT/verified.
+
+    extractor.py stores bitcoin_usd / gold_ounce_usd at their provider-native
+    USD magnitude. Stamping them Toman-verified would licence value_account to
+    add dollars straight into a Toman total; returns.py already special-cases
+    them via USD_QUOTED_KEYS, and valuation must not disagree.
+    """
+    from portfolio.models import Asset, Price
+    from portfolio.services.returns import USD_QUOTED_KEYS
+    from portfolio.tasks import _write_prices
+
+    usd_key = USD_QUOTED_KEYS[0]
+    Asset.objects.create(
+        key=usd_key, name="Bitcoin USD", asset_class=Asset.AssetClass.CRYPTO,
+        brs_symbol="BTC",
+    )
+    Asset.objects.create(
+        key="toman_coin", name="Toman Coin", asset_class=Asset.AssetClass.GOLD,
+        brs_symbol="IR_COIN_EMAMI",
+    )
+    _write_prices({usd_key: Decimal("65000"), "toman_coin": Decimal("182500000")})
+
+    usd_row = Price.objects.filter(asset__key=usd_key).latest("fetched_at")
+    assert usd_row.price_unit == Price.Unit.UNKNOWN
+    assert usd_row.price_unit_verified is False
+
+    # A genuinely Toman BRS asset is still stamped verified.
+    irt_row = Price.objects.filter(asset__key="toman_coin").latest("fetched_at")
+    assert irt_row.price_unit == Price.Unit.IRT
+    assert irt_row.price_unit_verified is True
