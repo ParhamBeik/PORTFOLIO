@@ -244,6 +244,7 @@ def test_min_history_exclusion(kama_short_history):
     assert "emami_coin" in df.columns
 
 
+
 # ---------- 3. house excluded ------------------------------------------------
 
 
@@ -591,3 +592,52 @@ def test_optimization_universe_too_small_503(make_user, asset_catalog):
     )
     assert resp.status_code == 503
     assert "eligible_assets" in resp.json()
+
+
+# ---------- 17. frontier endpoint includes the random-weight cloud ----------
+
+
+def test_my_optimal_returns_one_entry_per_window(synthetic_history, make_user):
+    pro = make_user(tier="PRO", email="my_optimal@t.t")
+    acct = _make_portfolio(
+        pro,
+        synthetic_history,
+        {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3},
+    )
+    acct.tracking_started_at = timezone.now() - timedelta(days=40)
+    acct.save(update_fields=["tracking_started_at"])
+
+    resp = _client(pro).get(f"/api/optimization/my-optimal/?account={acct.id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    labels = [w["label"] for w in body["windows"]]
+    assert labels == ["1Y", "3Y", "5Y", "Lifetime"]
+    for window in body["windows"]:
+        assert window["status"] in ("ok", "insufficient_history")
+        if window["status"] == "ok":
+            assert "max_sharpe" in window
+            assert "actual" in window
+
+
+def test_my_optimal_pro_gated(synthetic_history, make_user):
+    free = make_user(tier="FREE", email="my_optimal_free@t.t")
+    _make_portfolio(free, synthetic_history, {"emami_coin": 1.0})
+    resp = _client(free).get("/api/optimization/my-optimal/")
+    assert resp.status_code == 403
+
+
+def test_frontier_endpoint_includes_cloud(synthetic_history, make_user):
+    pro = make_user(tier="PRO", email="frontier_cloud@t.t")
+    _make_portfolio(
+        pro,
+        synthetic_history,
+        {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3},
+    )
+    resp = _client(pro).get("/api/optimization/frontier/")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "cloud" in body
+    assert len(body["cloud"]) > 0
+    for point in body["cloud"]:
+        assert "return" in point and "volatility" in point
+        assert point["volatility"] >= 0

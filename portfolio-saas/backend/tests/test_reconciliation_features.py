@@ -58,7 +58,7 @@ def test_house_mortgage_is_deducted_exactly_once(db, make_user):
         currency="IRT", is_house=True,
     )
     Holding.objects.create(
-        account=account, asset=house, quantity=Decimal("10"),
+        account=account, asset=house, quantity=Decimal("100"),
         area_sqm=Decimal("90.2"), mortgage_deduction_tomans=Decimal("0"),
     )
     Liability.objects.create(
@@ -67,11 +67,11 @@ def test_house_mortgage_is_deducted_exactly_once(db, make_user):
     )
 
     from portfolio.services.valuation import value_account
-    val = value_account(account, {"house_main": Decimal("10")})
+    val = value_account(account, {"house_main": Decimal("100")})
 
-    gross = Decimal("902000000")  # 10 million/sqm * 90.2 sqm
+    gross = Decimal("9020000000")  # 100 million Toman/sqm * 90.2 sqm
     assert val["items"][0]["value"] == gross, "house must be valued gross of mortgage"
-    assert val["total"] == gross - Decimal("400000000")
+    assert val["total"] == gross - Decimal("400000000")  # 8,620,000,000
 
 
 def test_house_opening_position_without_mortgage_invents_none(db, make_user):

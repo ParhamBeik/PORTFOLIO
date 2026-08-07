@@ -11,9 +11,14 @@ by Docker Compose. Pricing lives in `backend/portfolio/live/extractor.py`
 ## Quick start (dev)
 
 ```bash
-cp .env.example .env          # set BRS/TSETMC keys + Zarinpal merchant id
+# from portfolio-saas/
+# optional local Python (3.11): python3.11 -m venv .venv && source .venv/bin/activate
+#   pip install -r backend/requirements.txt
+# create .env with your BRS + TSETMC API keys (gitignored)
 docker compose up --build
 ```
+
+Unit/price policy: see [`docs/F1_POLICY.md`](docs/F1_POLICY.md).
 
 - Frontend: http://localhost:5173
 - API: http://localhost:8000/api/
@@ -23,7 +28,7 @@ Demo users seeded on first boot (DEBUG only): **demopro@portfolio.local / demopr
 
 ## Production
 
-See `docker-compose.prod.yml` + `.env.production.example` + `DEPLOY.md`. Caddy
+See `docker-compose.prod.yml` + `.env.production` (gitignored) + `scripts/deploy.sh`. Caddy
 terminates TLS (auto Let's Encrypt), serves the built frontend, and
 reverse-proxies `/api`. Target host: a Parspack VPS4 in an Iranian datacenter —
 users and server share domestic routing, so no CDN layer is needed and
@@ -32,9 +37,11 @@ BrsApi.ir is directly reachable. Commands are at the bottom of this file.
 ## Why it scales
 
 The single most important design choice: **prices are global, not per-user.**
-Gold, USD, KAMA, etc. have one price for everyone. The fetcher makes one BRS +
-one TSETMC call, writes one `Price` row per asset, and *every* user's valuation
-reflects the update on their next read. Fetch cost is **O(sources)**, not O(users).
+Gold, USD, KAMA, etc. have one price for everyone. The fetcher makes a bounded
+set of provider calls (BRS gold/crypto/commodity + TSETMC symbols/options/ETF
+NAV, in parallel), writes one `Price` row per asset, and *every* user's
+valuation reflects the update on their next read. Fetch cost is **O(sources)**,
+not O(users).
 
 - **Latest prices** are read via a Postgres `DISTINCT ON` over an
   `(asset, fetched_at)` index, then **cached in Redis** (`prices:latest`) —
@@ -58,7 +65,7 @@ The `fetch_prices` management command calls the same body for manual runs.
 Staleness is watched at `/api/health/prices/` (503 when the freshest price is
 older than 15 min): an on-VPS cron restarts Celery on failure, and the hourly
 GitHub Actions probe (`.github/workflows/fetch-prices.yml`) catches the site
-being dark from outside. See DEPLOY.md.
+being dark from outside. See `scripts/deploy.sh`.
 
 ## Accounts & subscriptions
 
@@ -70,11 +77,15 @@ being dark from outside. See DEPLOY.md.
   rebalancing trades, and the efficient frontier. Plus the original rule-based
   insights.
 
-`User.tier` (`FREE`/`PRO`) + `User.pro_expires_at` are the source of truth.
-**Payments go through Zarinpal** (Iranian cards can't pay USD, so Stripe is not
-used): `/api/billing/zarinpal/request/` → Zarinpal hosted page →
-`/api/billing/zarinpal/callback/` verifies and activates an annual Pro
-subscription. Pro is annual-prepay (Zarinpal has no native recurring billing).
+`User.tier` (`FREE`/`PRO`) + `User.pro_expires_at` are the source of truth; Pro
+endpoints are gated by `RequiresFeature`/`IsPro`. Tiers are set administratively
+(the `set_tier` command / Django admin) — the former Zarinpal payment
+integration has been removed, so there is no in-app checkout.
+
+**Authentication required:** every API request needs a JWT (email/password or
+Google sign-in). Tokenless requests get 401. The seeded `demopro@portfolio.local`
+account is still available for manual login in dev/staging, but there is no
+silent fallback — sign in normally to use it.
 
 ### "Account" = a named portfolio group
 
@@ -86,7 +97,7 @@ equivalent, so v1 uses named groups with manual or imported holdings.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/api/auth/register/` | – | returns user + JWT |
+| POST | `/api/auth/register/` | – | creates account; email verification required |
 | POST | `/api/auth/login/` | – | JWT pair |
 | POST | `/api/token/refresh/` | refresh | new access token |
 | GET | `/api/auth/me/` | JWT | current user + tier |
@@ -111,8 +122,6 @@ equivalent, so v1 uses named groups with manual or imported holdings.
 | GET | `/api/market/index/` · `/api/market/symbols/` | JWT | TSE index series / symbol metadata |
 | GET | `/api/market/announcements/?symbol=` | JWT + **Pro** | Codal disclosures |
 | GET | `/api/market/shareholders/?symbol=` | JWT + **Pro** | latest shareholder roster |
-| POST | `/api/billing/zarinpal/request/` | JWT | create payment → `{redirect_url}` |
-| GET | `/api/billing/zarinpal/callback/` | – | Zarinpal redirect target (verify) |
 | GET | `/api/health/` · `/api/health/ready/` · `/api/health/prices/` | – | liveness / readiness / feed staleness |
 
 ## Layout
@@ -130,14 +139,14 @@ portfolio-saas/
 │   │   ├── services/             #   valuation + Pro analytics (returns, diagnostics, optimization, insights)
 │   │   ├── live/                 #   2-min price loop (fetcher, extractor, pubsub, SSE)
 │   │   └── tasks.py              #   Celery heartbeat fetch_and_publish
-│   ├── marketdata/               # the market-history warehouse (separate bounded context):
-│   │   ├── models.py             #   8 TSE/gold history tables, symbol-keyed, no user FKs
-│   │   ├── fetchers/             #   BrsApi endpoint clients (history, candles, codal, ...)
-│   │   ├── ingest.py + tasks.py  #   payload->rows + daily/weekly sync schedule
-│   │   └── views.py              #   read-only /api/market/* endpoints
-│   └── billing/                  # Zarinpal request/callback/verify
+│   └── marketdata/               # the market-history warehouse (separate bounded context):
+│       ├── models.py             #   market-history tables (stocks, gold/FX, crypto,
+│       │                         #   commodities, options, ETF NAV, index), symbol-keyed, no user FKs
+│       ├── fetchers/             #   BrsApi endpoint clients (history, candles, codal, ...)
+│       ├── ingest.py + tasks.py  #   payload->rows + daily/weekly sync schedule
+│       └── views.py              #   read-only /api/market/* endpoints
 └── frontend/
-    └── src/                      # React (auth, dashboard, analytics, optimization, billing)
+    └── src/                      # React (auth, dashboard, analytics, optimization, market)
 ```
 
 ## Dev without Docker
@@ -161,9 +170,8 @@ cd frontend && npm install && npm run dev
 ## Production commands
 
 ```bash
-cp .env.production.example .env.production   # DOMAIN, SECRET_KEY, Zarinpal, DB password
-docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
-docker compose -f docker-compose.prod.yml exec backend python manage.py migrate
+# create .env.production with DOMAIN, SECRET_KEY, BRS/TSETMC keys, DB password
+DOMAIN=your.domain ./scripts/deploy.sh       # backup, build, migrate, up, health-check
 docker compose -f docker-compose.prod.yml exec backend python manage.py seed_assets
 curl https://$DOMAIN/api/health/            # -> ok
 ```

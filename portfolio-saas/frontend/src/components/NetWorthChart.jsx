@@ -131,7 +131,7 @@ export default function NetWorthChart({
               { d: 7, label: "7D" },
               { d: 30, label: "30D" },
               { d: 90, label: "90D" },
-              { d: 365, label: "ALL" },
+              { d: "all", label: "ALL" },
             ].map(({ d, label }) => (
               <button
                 key={d}
@@ -227,6 +227,7 @@ export default function NetWorthChart({
               stroke={isPositive ? "var(--accent)" : "var(--amber)"}
               strokeWidth={2.5}
               fill="url(#nw-fill-v2)"
+              dot={{ r: 3, strokeWidth: 1, fill: isPositive ? "var(--accent)" : "var(--amber)", stroke: "var(--panel)" }}
               activeDot={{ r: 6, fill: "var(--accent)", stroke: "var(--panel)", strokeWidth: 2 }}
             />
             {trades.map((t, i) => {

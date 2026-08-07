@@ -1,17 +1,19 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, NavLink, Outlet, Route, Routes, useParams } from "react-router-dom";
-import { me } from "./api.js";
+import { logoutSession, me, restoreSession, SESSION_EXPIRED_EVENT, sessionExpiry } from "./api.js";
 import Logo from "./components/Logo.jsx";
+import Auth from "./components/Auth.jsx";
 import { PortfolioProvider, usePortfolio } from "./components/PortfolioContext.jsx";
 
+const Onboarding = lazy(() => import("./components/Onboarding.jsx"));
 const Portfolio = lazy(() => import("./components/Portfolio.jsx"));
 const MarketData = lazy(() => import("./components/MarketData.jsx"));
 const OptimizationLayout = lazy(() => import("./components/OptimizationLayout.jsx"));
 const Optimization = lazy(() => import("./components/Optimization.jsx"));
+const BestOverall = lazy(() => import("./components/BestOverall.jsx"));
 const Insights = lazy(() => import("./components/Insights.jsx"));
 const Analytics = lazy(() => import("./components/Analytics.jsx"));
 const TimeMachine = lazy(() => import("./components/TimeMachine.jsx"));
-const Discovery = lazy(() => import("./components/Discovery.jsx"));
 const Legal = lazy(() => import("./components/Legal.jsx"));
 const Watchlist = lazy(() => import("./components/Watchlist.jsx"));
 
@@ -19,15 +21,18 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [ready, setReady] = useState(false);
   const [startupError, setStartupError] = useState("");
+  const [sessionNotice, setSessionNotice] = useState("");
 
   const loadUser = async () => {
     setReady(false);
     setStartupError("");
     try {
+      await restoreSession();
       const profile = await me();
       setUser(profile);
-    } catch (error) {
-      setStartupError(error.message || "Could not load the portfolio configuration.");
+    } catch {
+      // No valid session — anonymous is a normal state here, not an error.
+      setUser(null);
     } finally {
       setReady(true);
     }
@@ -35,6 +40,15 @@ export default function App() {
 
   useEffect(() => {
     loadUser();
+  }, []);
+
+  useEffect(() => {
+    const onExpired = () => {
+      setUser(null);
+      setSessionNotice("Your session expired. Please sign in again.");
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
   }, []);
 
   if (!ready) return <div className="loading">Loading…</div>;
@@ -48,23 +62,42 @@ export default function App() {
     );
   }
 
+  if (!user) {
+    return (
+      <>
+        {sessionNotice && (
+          <div className="error" role="alert" style={{ textAlign: "center" }}>
+            {sessionNotice}
+          </div>
+        )}
+        <Auth
+          onAuthed={(profile) => {
+            setSessionNotice("");
+            setUser(profile);
+          }}
+        />
+      </>
+    );
+  }
+
   return (
     <BrowserRouter>
-      <PortfolioProvider key={user?.id ?? "anonymous"} enabled={Boolean(user)}>
+      <PortfolioProvider key={user.id} enabled>
         <Suspense fallback={<div className="route-loading" role="status">Loading page…</div>}>
           <Routes>
             <Route path="/privacy" element={<Legal kind="privacy" />} />
             <Route path="/terms" element={<Legal kind="terms" />} />
-            <Route element={<Shell user={user} />}>
-              <Route path="/" element={<Portfolio user={user} />} />
+            <Route element={<Shell user={user} onLogout={() => setUser(null)} />}>
+              <Route path="/" element={<RequireOnboarding><Portfolio user={user} /></RequireOnboarding>} />
+              <Route path="/onboarding" element={<Onboarding />} />
               <Route path="/market" element={<MarketData user={user} />} />
               <Route path="/watchlist" element={<Watchlist user={user} />} />
               <Route path="/accounts/:id" element={<AccountRedirect />} />
               <Route path="/dashboard" element={<Navigate to="/" replace />} />
               <Route path="/optimization" element={<OptimizationLayout user={user} />}>
                 <Route index element={<Optimization user={user} />} />
+                <Route path="best-overall" element={<BestOverall user={user} />} />
                 <Route path="timemachine" element={<TimeMachine user={user} />} />
-                <Route path="discovery" element={<Discovery user={user} />} />
                 <Route path="insights" element={<Insights user={user} />} />
                 <Route path="analytics" element={<Analytics user={user} />} />
               </Route>
@@ -79,6 +112,17 @@ export default function App() {
   );
 }
 
+// A brand-new user has nothing to render a dashboard from until they enter at
+// least one holding. Only gate once the account list has actually loaded —
+// otherwise a slow request looks like "no holdings" and bounces an existing
+// user off their own dashboard.
+function RequireOnboarding({ children }) {
+  const { accounts, loading, error } = usePortfolio();
+  if (loading || error) return children;
+  const hasHoldings = accounts.some((a) => (a.holdings || []).length > 0);
+  return hasHoldings ? children : <Navigate to="/onboarding" replace />;
+}
+
 // /accounts/:id → set that portfolio active and drop onto the consolidated page.
 function AccountRedirect() {
   const { id } = useParams();
@@ -90,9 +134,20 @@ function AccountRedirect() {
   return <Navigate to="/" replace />;
 }
 
-function Shell({ user }) {
+function Shell({ user, onLogout }) {
   const { accounts, activeId, setActive, reload, loading, error, basis, setBasis } = usePortfolio();
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
+
+  const doLogout = async () => {
+    await logoutSession();
+    onLogout();
+  };
+
+  const daysLeft = (() => {
+    if (!sessionExpiry.value) return null;
+    const ms = new Date(sessionExpiry.value).getTime() - Date.now();
+    return ms > 0 ? Math.ceil(ms / 86400000) : 0;
+  })();
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -167,7 +222,11 @@ function Shell({ user }) {
           >
             {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
           </button>
-          <span className="tier-badge">PRO</span>
+          <span className="tier-badge">{user.is_pro ? "PRO" : "FREE"}</span>
+          <span className="email" title={daysLeft != null ? `Session ends in ${daysLeft} day${daysLeft === 1 ? "" : "s"}` : undefined}>
+            {user.email}
+          </span>
+          <button type="button" onClick={doLogout}>Logout</button>
         </div>
       </header>
       <main id="main-content" tabIndex="-1">

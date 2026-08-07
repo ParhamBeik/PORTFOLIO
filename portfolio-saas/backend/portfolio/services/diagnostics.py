@@ -152,6 +152,52 @@ def _rolling_metrics(
     return rows
 
 
+def _period_returns(port_series: pd.Series) -> dict:
+    """Cumulative simple return over trailing 7d/30d/90d/1y, plus Jalali YTD."""
+    if port_series.empty:
+        return {}
+    import jdatetime
+
+    wealth = (1.0 + port_series).cumprod()
+    last_date = port_series.index[-1]
+    result = {}
+    for label, days in (("7d", 7), ("30d", 30), ("90d", 90), ("1y", 365)):
+        window = wealth[wealth.index >= last_date - pd.Timedelta(days=days)]
+        if len(window) >= 2:
+            result[label] = _finite(window.iloc[-1] / window.iloc[0] - 1.0)
+
+    jalali_last = jdatetime.date.fromgregorian(date=last_date.date())
+    greg_new_year = jdatetime.date(jalali_last.year, 1, 1).togregorian()
+    ytd_window = wealth[wealth.index.date >= greg_new_year]
+    if len(ytd_window) >= 2:
+        result["ytd"] = _finite(ytd_window.iloc[-1] / ytd_window.iloc[0] - 1.0)
+    return result
+
+
+def _current_drawdown(port_series: pd.Series) -> float:
+    """Drawdown as of the most recent observation (not the historical max)."""
+    if port_series.empty:
+        return 0.0
+    wealth = (1.0 + port_series).cumprod()
+    running_max = wealth.cummax()
+    drawdown = (wealth - running_max) / running_max.replace(0, np.nan)
+    return _finite(drawdown.iloc[-1])
+
+
+def _concentration_hhi(weights: dict[str, float]) -> float:
+    """Herfindahl-Hirschman Index of the weights: sum(w_i^2), normalized to sum=1."""
+    total = sum(weights.values()) if weights else 0.0
+    if total <= 0:
+        return 0.0
+    return _finite(sum((w / total) ** 2 for w in weights.values()))
+
+
+def _best_worst_day(port_series: pd.Series) -> tuple[float, float]:
+    if port_series.empty:
+        return 0.0, 0.0
+    return _finite(port_series.max()), _finite(port_series.min())
+
+
 def _calmar(port_series: pd.Series) -> float:
     if port_series.empty:
         return 0.0
@@ -280,6 +326,10 @@ def portfolio_diagnostics(
     calmar = _calmar(port_series)
     var95, cvar95 = _historical_var_cvar(port_series, alpha=0.95)
     div_ratio = _diversification_ratio(returns, current_weights) if not returns.empty else 1.0
+    period_returns = _period_returns(port_series)
+    current_dd = _current_drawdown(port_series)
+    hhi = _concentration_hhi(current_weights)
+    best_day, worst_day = _best_worst_day(port_series)
 
     eligible_assets = list(returns.columns) if not returns.empty else []
 
@@ -359,8 +409,13 @@ def portfolio_diagnostics(
             "historical_var_95": _finite(var95),
             "historical_cvar_95": _finite(cvar95),
             "diversification_ratio": max(_finite(div_ratio), 1.0),
+            "current_drawdown": _finite(current_dd),
+            "concentration_hhi": _finite(hhi),
+            "best_day": _finite(best_day),
+            "worst_day": _finite(worst_day),
             **benchmark_metrics,
         },
+        "period_returns": period_returns,
         "rolling": _rolling_metrics(port_series, risk_free_annual),
         "real_estate": real_estate,
     }

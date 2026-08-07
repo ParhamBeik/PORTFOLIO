@@ -66,8 +66,9 @@ def test_house_maps_to_house_asset_and_values_via_formula(imported):
     mother = imported.accounts.get(name="Mother")
     house = mother.holdings.get(asset__key="house_asset")
     assert house.quantity == 90
-    # Gross: 90 * 1e6 * 90.2 = 8,118,000,000. A mortgage would be a Liability
-    # netted off the account total, never subtracted from the asset itself.
+    # Gross: 90 * 1e6 * 90.2 = 8,118,000,000 Toman. A mortgage would be a
+    # Liability netted off the account total, never subtracted from the
+    # asset itself.
     result = value_account(mother)
     val = {i["key"]: i["value"] for i in result["items"]}
     assert val["house_asset"] == 8_118_000_000
@@ -78,13 +79,15 @@ def test_house_maps_to_house_asset_and_values_via_formula(imported):
 def test_collapses_to_one_snapshot_per_day(imported):
     user_snaps = Snapshot.objects.filter(user=imported, account__isnull=True)
     assert user_snaps.count() == 2  # two calendar days, intraday dupes collapsed
-    # Latest-of-day wins: 2026-07-20 user total = 150 + 250 = 400 (not 300).
+    # Latest-of-day wins: 2026-07-20 user total = 150 + 250 = 400 Tomans
+    # (not 100 + 200 = 300 from the earlier intraday row).
     day20 = user_snaps.order_by("timestamp").first()
     assert day20.total_value_tomans == 400
 
 
 def test_prices_use_latest_of_day(imported):
-    # emami_coin on 2026-07-20 should be 222 (the 18:00 row), not 111.
+    # emami_coin on 2026-07-20 should be 222 Tomans (the 18:00 row), stored
+    # verbatim -- not the 111 row from 09:00.
     prices = Price.objects.filter(source="REAL", asset__key="emami_coin").order_by("fetched_at")
     assert prices.count() == 2
     assert prices.first().price == 222

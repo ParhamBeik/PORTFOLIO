@@ -80,7 +80,12 @@ class NoAssetBeatsRiskFreeRate(Exception):
 
 
 class MixedUnitUniverseBlocked(Exception):
-    """TSE unit unverified — refuse silent mix with Toman gold/FX series (F1)."""
+    """F1 is resolved (TSE_PRICE_UNIT = "rial", storage-wide), so this never
+    raises in current operation. Kept as a fail-safe: if TSE_PRICE_UNIT is ever
+    reverted to "unverified" (see docs/F1_POLICY.md), mixed
+    TSE/non-TSE universes fail closed again instead of silently optimizing
+    across a possible 10x unit mismatch.
+    """
 
     def __init__(self, tse_keys: list[str], other_keys: list[str]):
         super().__init__(

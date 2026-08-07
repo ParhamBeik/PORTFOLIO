@@ -10,6 +10,9 @@ from decimal import Decimal
 
 import numpy as np
 import pandas as pd
+from django.contrib.postgres.aggregates import BoolOr
+from django.db.models import Avg
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
@@ -586,10 +589,11 @@ def _express_usd_real(valuation: dict, basis: str = "usd_denominated") -> dict:
 class SnapshotListView(APIView):
     """Per-user net-worth history for the FREE trend chart, plus trade markers.
 
-    The cron stamps one `account=None` row per user per fetch (the whole-portfolio
-    total), and every trade stamps one too; this endpoint returns that series
-    oldest-first, capped at `days`. `trades` carries the buy/sell events in the
-    same window so the chart can annotate the exact points where holdings changed.
+    One point per calendar day: the average of every fetch snapshotted that day
+    (fetches run every 2 minutes, so "today" is the running average of today's
+    fetches so far). `?days=all` returns the full history. `trades` carries the
+    buy/sell events in the same window so the chart can annotate the exact
+    points where holdings changed.
 
     `?account=<id>` scopes both the snapshot series and the trade markers to one
     portfolio (reads that account's per-account snapshot rows); absent = aggregate.
@@ -598,82 +602,68 @@ class SnapshotListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        try:
-            days = int(request.query_params.get("days", "30"))
-        except (TypeError, ValueError):
-            days = 30
-        days = max(1, min(days, 365))
-        since = timezone.now() - timedelta(days=days)
+        raw_days = request.query_params.get("days", "30")
+        show_all = raw_days == "all"
+        if show_all:
+            days = None
+        else:
+            try:
+                days = int(raw_days)
+            except (TypeError, ValueError):
+                days = 30
+            days = max(1, min(days, 3650))
+        now = timezone.now()
         account = _scope(request)
         snapshots = Snapshot.objects.filter(
-            user=request.user, timestamp__gte=since, total_value_tomans__gt=0
+            user=request.user, total_value_tomans__gt=0
         )
+        if not show_all:
+            snapshots = snapshots.filter(timestamp__gte=now - timedelta(days=days))
         if account is not None:
             snapshots = snapshots.filter(account=account)
         else:
             snapshots = snapshots.filter(account=None)
         prices = get_latest_prices()
         usd_rate = Decimal(prices.get("usd_cash", 0) or 0)
-        now = timezone.now()
-        since = now - timedelta(days=days)
 
-        # Choose grid step size based on days requested
-        if days <= 7:
-            step_minutes = 2
-        elif days <= 30:
-            step_minutes = 30
-        else:
-            step_minutes = 1440  # 1 day
+        daily = list(
+            snapshots
+            .annotate(day=TruncDate("timestamp"))
+            .values("day")
+            .annotate(avg_total=Avg("total_value_tomans"), any_estimated=BoolOr("is_estimated"))
+            .order_by("day")
+        )
 
-        rows = list(snapshots.order_by("timestamp").values("timestamp", "total_value_tomans", "is_estimated"))
-        
-        valid_rows = []
-        for r in rows:
-            val_toman = Decimal(r["total_value_tomans"])
-            if val_toman <= 0:
-                continue
-            valid_rows.append((r["timestamp"], val_toman, r.get("is_estimated", False)))
-
-        # If no snapshot rows exist, fallback to live calculation total
-        if not valid_rows:
+        # No snapshot rows yet (brand-new user) -> fall back to today's live total.
+        if not daily:
             fallback_val = value_account(account)["total"] if account else value_user(request.user)["total"]
             if fallback_val > 0:
-                valid_rows = [(since, fallback_val, False)]
+                daily = [{"day": now.date(), "avg_total": fallback_val, "any_estimated": False}]
 
-        # Generate regular time grid slots from the first known value to now.
         series = []
-        curr = valid_rows[0][0] if valid_rows else since
-        step = timedelta(minutes=step_minutes)
-        row_idx = 0
-        last_val = Decimal("0")
-        last_estimated = False
-
-        while curr <= now + timedelta(seconds=10):
-            while row_idx < len(valid_rows) and valid_rows[row_idx][0] <= curr:
-                last_val = valid_rows[row_idx][1]
-                last_estimated = valid_rows[row_idx][2]
-                row_idx += 1
-            
-            val_usd = str(round(last_val / usd_rate, 2)) if usd_rate > 0 else None
+        for row in daily:
+            total = Decimal(row["avg_total"] or 0)
+            val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
+            day_str = row["day"].strftime("%Y-%m-%d")
             series.append({
-                "timestamp": curr.isoformat(),
-                "date": curr.strftime("%Y-%m-%d"),
-                "time": curr.strftime("%H:%M"),
-                "total": str(last_val),
+                "timestamp": day_str,
+                "date": day_str,
+                "total": str(total),
                 "total_usd": val_usd,
-                "is_estimated": last_estimated,
+                "is_estimated": bool(row["any_estimated"]),
             })
-            curr += step
+
         trades = (
             Transaction.objects.filter(
                 account__user=request.user,
-                timestamp__gte=since,
                 asset__isnull=False,
                 kind__in=[LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL],
             )
             .select_related("asset")
             .order_by("timestamp")
         )
+        if not show_all:
+            trades = trades.filter(timestamp__gte=now - timedelta(days=days))
         if account is not None:
             trades = trades.filter(account=account)
         markers = [
@@ -801,7 +791,7 @@ class OptimizationView(APIView):
                     "detail": str(exc),
                     "tse_keys": exc.tse_keys,
                     "other_keys": exc.other_keys,
-                    "policy": "docs/data-verification/F1_POLICY.md",
+                    "policy": "docs/F1_POLICY.md",
                 },
                 status=409,
             )
@@ -833,20 +823,21 @@ class FrontierView(APIView):
                     "detail": str(exc),
                     "tse_keys": exc.tse_keys,
                     "other_keys": exc.other_keys,
-                    "policy": "docs/data-verification/F1_POLICY.md",
+                    "policy": "docs/F1_POLICY.md",
                 },
                 status=409,
             )
         # Inject the current portfolio point.
         returns, _ = daily_returns_matrix()
         current_point = None
+        cloud = []
         if weights and not returns.empty:
             cols = [k for k in weights if k in returns.columns]
             if cols:
+                sub = returns[cols].fillna(0.0).to_numpy()
                 w = np.array([weights[k] for k in cols], dtype=float)
                 if w.sum() > 0:
                     w = w / w.sum()
-                    sub = returns[cols].fillna(0.0).to_numpy()
                     port = pd.Series(sub @ w, index=returns.index)
                     if port.std(ddof=1) > 0:
                         ann_ret = float(port.mean() * 252)
@@ -856,12 +847,109 @@ class FrontierView(APIView):
                             "volatility": _finite(ann_vol),
                             "weights": weights,
                         }
+                # Random-weight cloud over the SAME held assets, so the chart shows
+                # what varying the user's own mix (not the whole market) could do.
+                # Pure numpy, no solver: 400 Dirichlet draws mapped through the
+                # same covariance the frontier line already used.
+                if len(cols) >= 2:
+                    rng = np.random.default_rng()
+                    draws = rng.dirichlet(np.ones(len(cols)), size=400)
+                    port_returns = sub @ draws.T
+                    means = port_returns.mean(axis=0) * 252
+                    stds = port_returns.std(axis=0, ddof=1) * np.sqrt(252)
+                    cloud = [
+                        {"return": _finite(float(r)), "volatility": _finite(float(v))}
+                        for r, v in zip(means, stds)
+                        if v > 0
+                    ]
         return Response({
             "frontier": frontier["frontier"],
             "max_sharpe": frontier["max_sharpe"],
             "min_volatility": frontier["min_volatility"],
             "current": current_point,
+            "cloud": cloud,
         })
+
+
+def _lifetime_days(user, account=None) -> int:
+    """Days since tracking started -- the same inception source
+    `account_performance()` uses, so "lifetime" agrees across pages."""
+    if account is not None:
+        start = account.tracking_started_at or (
+            account.transactions.order_by("timestamp").values_list("timestamp", flat=True).first()
+        )
+    else:
+        starts = [a.tracking_started_at for a in user.accounts.all() if a.tracking_started_at]
+        start = min(starts) if starts else (
+            LedgerEntry.objects.filter(account__user=user)
+            .order_by("timestamp").values_list("timestamp", flat=True).first()
+        )
+    if start is None:
+        return 365
+    return max((timezone.now() - start).days, 30)
+
+
+class MyOptimalView(APIView):
+    """Pro-tier: "if a quant had optimized MY existing assets, what would it
+    look like?" -- per lookback window, max-Sharpe and min-volatility weights
+    over the user's OWN held assets, next to how the portfolio actually did.
+
+    The math is exactly `optimize()` / `portfolio_diagnostics()`; this view is
+    the window loop plus per-window error containment so a short-history user
+    still sees their 1Y result even when 5Y/lifetime can't solve.
+    """
+
+    permission_classes = [IsAuthenticated, RequiresFeature("optimization")]
+
+    WINDOWS = (("1Y", 365), ("3Y", 1095), ("5Y", 1825), ("Lifetime", None))
+
+    def get(self, request):
+        from .services.returns import get_universe_by_mode
+
+        account = _scope(request)
+        weights, total = _current_weights_and_total(request.user, account)
+        if not weights:
+            return Response({"detail": "No priced holdings to optimize yet."}, status=400)
+        universe = get_universe_by_mode("held", user=request.user, account=account)
+        lifetime_days = _lifetime_days(request.user, account)
+
+        windows = []
+        for label, fixed_days in self.WINDOWS:
+            window_days = fixed_days or lifetime_days
+            entry = {"label": label, "window_days": window_days}
+            try:
+                entry["max_sharpe"] = optimize(
+                    scenario="max_sharpe", current_weights=weights, total_value_tomans=total,
+                    user=request.user, history_days=window_days, universe=universe,
+                )
+            except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate, MixedUnitUniverseBlocked) as exc:
+                entry["status"] = "insufficient_history"
+                entry["detail"] = str(exc)
+                windows.append(entry)
+                continue
+            try:
+                entry["min_volatility"] = optimize(
+                    scenario="min_volatility", current_weights=weights, total_value_tomans=total,
+                    user=request.user, history_days=window_days, universe=universe,
+                )
+            except (UniverseTooSmall, SolverError, MixedUnitUniverseBlocked):
+                entry["min_volatility"] = None
+            entry["actual"] = portfolio_diagnostics(
+                weights, total, user=request.user, history_days=window_days, universe=universe,
+            )
+            # Historical drawdown for the hypothetical scenarios: "if you had
+            # held these target weights fixed for the whole window" -- the same
+            # portfolio_diagnostics() computation, just fed the target weights.
+            for scenario_key in ("max_sharpe", "min_volatility"):
+                scenario_payload = entry.get(scenario_key)
+                if scenario_payload:
+                    scenario_payload["diagnostics"] = portfolio_diagnostics(
+                        scenario_payload["target_weights"], total,
+                        user=request.user, history_days=window_days, universe=universe,
+                    )
+            entry["status"] = "ok"
+            windows.append(entry)
+        return Response({"windows": windows})
 
 
 class AssetReturnsView(APIView):
@@ -918,43 +1006,76 @@ class TransactionDestroyView(APIView):
         return Response({"detail": "Transaction undone successfully."})
 
 
-class DiscoveryView(APIView):
-    """Pro-tier: Recommends candidates not currently held along with risk-adjusted leaders."""
+def _asset_class_leaders():
+    """Top performers per asset class from the nightly AssetMetricSnapshot run.
+
+    Only the 1-year window is populated today (nightly_asset_metrics' default),
+    so this is independent of the window the user has selected on the page.
+    """
+    from marketdata.models import AssetMetricSnapshot, MarketInstrument
+    from marketdata.universe import get_candidate_universe
+
+    candidates, _ = get_candidate_universe()
+    instruments = {mi.symbol: mi for mi in MarketInstrument.objects.filter(symbol__in=candidates)}
+    snapshots = AssetMetricSnapshot.objects.filter(symbol__in=candidates, window_days=365)
+    latest = snapshots.order_by("-as_of").values_list("as_of", flat=True).first()
+    leaders = {}
+    for row in snapshots.filter(as_of=latest).order_by("-sharpe"):
+        instrument = instruments.get(row.symbol)
+        category = instrument.get_category_display() if instrument else "Other"
+        leaders.setdefault(category, []).append({
+            "symbol": row.symbol,
+            "name": instrument.name if instrument else row.symbol,
+            "sharpe": row.sharpe,
+            "sortino": row.sortino,
+            "calmar": row.total_return / abs(row.max_drawdown) if row.max_drawdown else 0.0,
+            "expected_return_annual": row.total_return,
+            "volatility_annual": row.annualized_volatility,
+        })
+    return leaders, latest
+
+
+class BestOverallView(APIView):
+    """Pro-tier: "what is the best portfolio available across ALL tracked
+    assets?" -- a pure read of the nightly `run_best_overall_snapshots`
+    precompute (see `portfolio/services/best_overall.py`). No solver call in
+    the request path; a window with no snapshot yet reports its own status
+    rather than leaving the whole response empty.
+    """
 
     permission_classes = [IsAuthenticated, RequiresFeature("discovery")]
 
     def get(self, request):
-        from marketdata.models import AssetMetricSnapshot, MarketInstrument
-        from marketdata.universe import get_candidate_universe
+        from .optimization_models import OptimizationSnapshot
+        from .services.best_overall import SCENARIOS, WINDOWS_DAYS
 
-        candidates, excluded = get_candidate_universe()
-        instruments = {mi.symbol: mi for mi in MarketInstrument.objects.filter(symbol__in=candidates)}
-        snapshots = AssetMetricSnapshot.objects.filter(
-            symbol__in=candidates, window_days=365
-        )
-        latest = snapshots.order_by("-as_of").values_list("as_of", flat=True).first()
-        leaders = {}
-        for row in snapshots.filter(as_of=latest).order_by("-sharpe"):
-            instrument = instruments.get(row.symbol)
-            category = instrument.get_category_display() if instrument else "Other"
-            leaders.setdefault(category, []).append({
-                "symbol": row.symbol,
-                "name": instrument.name if instrument else row.symbol,
-                "sharpe": row.sharpe,
-                "sortino": row.sortino,
-                "calmar": (
-                    row.total_return / abs(row.max_drawdown)
-                    if row.max_drawdown
-                    else 0.0
-                ),
-                "expected_return_annual": row.total_return,
-                "volatility_annual": row.annualized_volatility,
-            })
+        window_labels = {365: "1Y", 1095: "3Y", 1825: "5Y", 3650: "10Y"}
+        windows = []
+        latest_created = None
+        for window_days in WINDOWS_DAYS:
+            entry = {"window_days": window_days, "label": window_labels.get(window_days, f"{window_days}d")}
+            for scenario in SCENARIOS:
+                snap = (
+                    OptimizationSnapshot.objects
+                    .filter(account=None, window_days=window_days, scenario=scenario)
+                    .order_by("-created_at")
+                    .first()
+                )
+                if snap is None:
+                    entry[scenario] = None
+                else:
+                    entry[scenario] = snap.payload
+                    if latest_created is None or snap.created_at > latest_created:
+                        latest_created = snap.created_at
+            entry["status"] = "ok" if (entry["max_sharpe"] or entry["min_volatility"]) else "insufficient_history"
+            windows.append(entry)
 
+        leaders, leaders_as_of = _asset_class_leaders()
         return Response({
-            "candidates": candidates,
-            "excluded": excluded,
-            "leaders": {"nominal": leaders, "usd_real": {}},
+            "windows": windows,
+            "leaders": leaders,
+            "leaders_as_of": leaders_as_of,
+            "as_of": latest_created.isoformat() if latest_created else None,
         })
 
 

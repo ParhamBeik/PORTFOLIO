@@ -20,6 +20,8 @@ Two conventions matter here:
     USD. Their Toman return is the USD return times the USD/Toman return, so we
     convert the *price* series by the daily-last `usd_cash` price BEFORE taking
     `pct_change()`. `usd_cash`, `usdt_irt` and `euro_cash` are already Tomans.
+    TSE warehouse closes are raw Rial and are divided through by
+    `tse_close_to_toman()` on load, so the whole panel is Toman.
   * Real estate (`is_house=True`) is excluded — it has no daily price series.
 """
 from __future__ import annotations
@@ -31,6 +33,7 @@ import numpy as np
 import pandas as pd
 from django.core.cache import cache
 
+from marketdata.currency import tse_close_to_toman
 from portfolio.models import Asset, Price
 from .deflator import normalize_basis, to_basis
 
@@ -308,7 +311,12 @@ def _warehouse_series(
     if source == "tse":
         qs = candle_close_qs(symbol, as_of=as_of_jalali)
         rows = qs.order_by("date_time").values_list("date_time", "close_price")
-        rows = [r for r in rows if r[0].split()[0] not in rejections]
+        # Raw Rial -> Toman so a TSE column is comparable with a BRS one.
+        rows = [
+            (r[0], tse_close_to_toman(r[1]))
+            for r in rows
+            if r[0].split()[0] not in rejections
+        ]
     elif source == "brs":
         qs = GoldCurrencyHistory.objects.filter(symbol=symbol, close_price__gt=0)
         if as_of_jalali is not None:
@@ -390,7 +398,14 @@ def _load_price_panel(
     tse_rows = []
     if tse_symbols:
         qs_tse = candle_close_qs(tse_symbols, as_of=as_of_jalali)
-        tse_rows = list(qs_tse.order_by("symbol", "date_time").values_list("symbol", "date_time", "close_price"))
+        # Raw Rial -> Toman: the panel mixes TSE and BRS columns and is later
+        # multiplied by a Toman FX rate, so units must agree before that.
+        tse_rows = [
+            (sym, dt, tse_close_to_toman(close))
+            for sym, dt, close in qs_tse.order_by("symbol", "date_time").values_list(
+                "symbol", "date_time", "close_price"
+            )
+        ]
 
     # Bulk query GoldCurrencyHistory (BRS)
     brs_rows = []
@@ -601,6 +616,10 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
 
 def _convert_usd_to_toman(panel: pd.DataFrame) -> pd.DataFrame:
     """Multiply USD-quoted columns by the daily-last usd_cash price (in place).
+
+    `usd_cash` is Toman-denominated (`extract_standard_prices` resolves it via
+    `to_toman()`), so the result is a Toman-denominated column for each
+    USD-quoted asset — matching the rest of the panel.
 
     Operates on the price panel BEFORE returns are taken, so the resulting
     daily return correctly reflects both the USD move and the FX move. Forward-

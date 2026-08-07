@@ -11,13 +11,13 @@ export default function OptimizationLayout({ user }) {
         <div className="pro-container">
           <nav className="tabs sub-tabs">
             <NavLink to="/optimization" end className={({ isActive }) => (isActive ? "active" : "")}>
-              Optimizer
+              My Optimal
+            </NavLink>
+            <NavLink to="/optimization/best-overall" className={({ isActive }) => (isActive ? "active" : "")}>
+              Best Overall
             </NavLink>
             <NavLink to="/optimization/timemachine" className={({ isActive }) => (isActive ? "active" : "")}>
               Time Machine
-            </NavLink>
-            <NavLink to="/optimization/discovery" className={({ isActive }) => (isActive ? "active" : "")}>
-              Discovery
             </NavLink>
             <NavLink to="/optimization/insights" className={({ isActive }) => (isActive ? "active" : "")}>
               Advanced Insights

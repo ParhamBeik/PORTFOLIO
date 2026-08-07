@@ -154,8 +154,16 @@ class Command(BaseCommand):
             ts = entry["ts"]
             snap = entry["snapshot"]
 
+            # Source snapshot JSON is Toman-denominated (`total_values_tomans`),
+            # matching Price's storage unit -- no conversion needed.
             rows = [
-                Price(asset=assets[key], price=Decimal(str(val)), source=REAL_SOURCE)
+                Price(
+                    asset=assets[key],
+                    price=Decimal(str(val)),
+                    source=REAL_SOURCE,
+                    price_unit=Price.Unit.IRT,
+                    price_unit_verified=True,
+                )
                 for key, val in snap.get("prices", {}).items()
                 if key in assets
             ]

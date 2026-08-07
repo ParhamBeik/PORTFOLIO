@@ -17,7 +17,7 @@ from exporter import export_daily_xlsx
 from backfill_kama_history import backfill as backfill_kama_history
 
 # --- Paths -------------------------------------------------------------------
-# All runtime data lives beside this src/ folder inside the portfolio-new-structure package.
+# All runtime data lives beside this src/ folder inside the archived portfolio-new-structure package.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 

@@ -36,6 +36,11 @@ class OptimizationSnapshot(models.Model):
         blank=True,
     )
     scenario = models.CharField(max_length=32, choices=SCENARIO_CHOICES, default="max_sharpe")
+    # Lookback window this snapshot was optimized over (365/1095/1825/3650 for
+    # the "Best Possible Portfolio Overall" page). Queryable so the view can
+    # fetch "the latest snapshot per (window_days, scenario)" without parsing
+    # the payload JSON.
+    window_days = models.PositiveIntegerField(default=180, db_index=True)
     payload = JSONField()
     price_version = models.CharField(max_length=64, blank=True, default="")
     as_of = models.DateTimeField(null=True, blank=True)

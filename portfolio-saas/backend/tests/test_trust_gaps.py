@@ -370,7 +370,8 @@ def test_daily_aggregate_never_shadows_the_authoritative_adjusted_candle(asset_c
     authoritative = MarketCandle.objects.get(
         symbol=symbol, timeframe=MarketCandle.ADJUSTED, date_time=day
     )
-    assert authoritative.close_price == Decimal("92.0000")
+    # Storage unit is Rial; the candle ingest stores the provider close undivided.
+    assert authoritative.close_price == Decimal("920.0000")
     assert MarketCandle.objects.filter(
         symbol=symbol, timeframe=MarketCandle.AGGREGATE, date_time=day
     ).exists(), "the aggregate must still be recorded, just not in the ADJUSTED slot"
@@ -445,10 +446,10 @@ def test_series_spike_is_suppressed_by_corporate_action():
 @pytest.mark.parametrize(
     ("symbol", "price", "unit", "usd_rate", "expected"),
     [
-        ("USD", 63200, "", None, Decimal("63200")),
-        ("USD", 632000, "IRR", None, Decimal("63200")),
-        ("USDT", 632000, "ریال", None, Decimal("63200")),
-        ("USDT", 1, "", 63200, Decimal("63200")),
+        ("USD", 63200, "", None, Decimal("63200")),  # undeclared unit passes through
+        ("USD", 632000, "IRR", None, Decimal("63200")),  # Rial-declared: divide by 10 to Toman
+        ("USDT", 632000, "ریال", None, Decimal("63200")),  # Rial-declared: divide by 10 to Toman
+        ("USDT", 1, "", 63200, Decimal("63200")),  # USD-declared (via UNIT_OVERRIDES) x usd_rate
     ],
 )
 def test_currency_conversion_has_one_unit_driven_rule(

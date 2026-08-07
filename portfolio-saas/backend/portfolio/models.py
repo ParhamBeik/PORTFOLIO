@@ -272,6 +272,8 @@ class LedgerEntry(models.Model):
         max_digits=20, decimal_places=6, null=True, blank=True
     )
     # Unit price in Tomans at execution; 0 when the asset had no price yet.
+    # (Warehouse TSE closes are Rial and pass through `tse_close_to_toman()`
+    # in TradeInputSerializer before landing here.)
     price_tomans = models.DecimalField(
         max_digits=20, decimal_places=4, null=True, blank=True
     )
@@ -416,6 +418,9 @@ class Snapshot(models.Model):
         ordering = ["-timestamp"]
         indexes = [
             models.Index(fields=["user", "-timestamp"], name="idx_snapshot_user_time"),
+            # Backs the daily-average GROUP BY in SnapshotListView, which always
+            # filters on user + account together before grouping by day.
+            models.Index(fields=["user", "account", "timestamp"], name="idx_snapshot_user_acct_time"),
         ]
 
 

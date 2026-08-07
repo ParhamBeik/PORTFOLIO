@@ -1,25 +1,32 @@
 // Shared number/time formatters. Pulled out of Dashboard so every page formats
 // Tomans, quantities and Tehran-time stamps identically.
+//
+// Every "_tomans"-suffixed API field arrives already in Tomans: the backend
+// converts raw Rial TSE warehouse closes via `tse_close_to_toman()` at the read
+// boundary, and gold/FX/ledger values are Toman at rest. Do NOT divide by 10
+// here — that would understate every displayed amount by 10x.
 
 export function fmtNum(n) {
-  if (n === null || n === undefined || n === "" || isNaN(n)) return "0";
+  if (n === null || n === undefined || n === "" || isNaN(n)) return "—";
   return Number(n).toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
 export function fmtToman(n) {
-  if (n === null || n === undefined || n === "" || isNaN(n)) return "0";
+  if (n === null || n === undefined || n === "" || isNaN(n)) return "—";
   return Number(n).toLocaleString("en-US", { maximumFractionDigits: 0 }) + " T";
 }
 
-// Percent for ratios already in 0..1 scale (weights, vol). "—" for missing.
-export function fmtPct(frac, digits = 1) {
-  if (frac === null || frac === undefined || frac === "" || isNaN(frac)) return "—";
-  return Number(frac).toLocaleString("en-US", { maximumFractionDigits: digits }) + "%";
+// Percent formatter. Callers pass an already percentage-scale number (0-100),
+// e.g. fmtPct(v * 100) for a 0..1 fraction — not the raw 0..1 fraction itself.
+// "—" for missing.
+export function fmtPct(pct, digits = 1) {
+  if (pct === null || pct === undefined || pct === "" || isNaN(pct)) return "—";
+  return Number(pct).toLocaleString("en-US", { maximumFractionDigits: digits }) + "%";
 }
 
 // Compact Toman for chart axes (12.3M / 4.5B) so ticks stay readable.
 export function fmtTomanCompact(n) {
-  if (n === null || n === undefined || n === "" || isNaN(n)) return "0";
+  if (n === null || n === undefined || n === "" || isNaN(n)) return "—";
   const v = Number(n);
   const abs = Math.abs(v);
   if (abs >= 1e9) return (v / 1e9).toFixed(1) + "B";

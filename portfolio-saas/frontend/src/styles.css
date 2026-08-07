@@ -396,6 +396,22 @@ input.input-valid {
   to { transform: rotate(360deg); }
 }
 
+.oauth-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 1rem 0 0.75rem;
+}
+.oauth-divider::before, .oauth-divider::after {
+  content: "";
+  flex: 1;
+  border-bottom: 1px solid var(--border);
+}
+.oauth-divider span { padding: 0 0.75rem; }
+.google-btn-box { display: flex; justify-content: center; }
+
 .demo-box {
   margin-top: 1.5rem;
   padding-top: 1rem;

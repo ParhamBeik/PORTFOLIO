@@ -157,6 +157,9 @@ class TestTrackC:
         SymbolIntegrity.objects.create(symbol="ILIZ", passes_gate=True)
 
         # Seed candles for SHAFN to satisfy liquidity (MIN_MEDIAN_DAILY_VOLUME = 1000, MIN_MEDIAN_DAILY_TURNOVER_TOMANS = 50000000)
+        # close_price is a warehouse value, i.e. raw Rial: 100_000 Rial =
+        # 10_000 Toman, so turnover is 10_000 x 10_000 = 100M Toman, clearing
+        # the 50M threshold the resolver screens against.
         # Seed 40 days to exceed MIN_DAILY_RETURNS = 30
         today_j = jdatetime.date.today()
         dates = [(today_j - datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(40, 0, -1)]
@@ -164,7 +167,7 @@ class TestTrackC:
         for dt_str in dates:
             MarketCandle.objects.create(
                 symbol="SHAFN", timeframe="1d_adj", date_time=dt_str,
-                close_price=10000.0, open_price=10000.0, volume=10000
+                close_price=100000.0, open_price=100000.0, volume=10000
             )
 
         candidates, excluded = get_candidate_universe()

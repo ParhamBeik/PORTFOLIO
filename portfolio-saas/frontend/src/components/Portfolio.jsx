@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import {
   addHolding,
+  analytics,
   createAccount,
   deleteAccount,
+  frontier,
   listAssets,
   removeHolding,
   trade,
@@ -15,9 +19,8 @@ import {
   accountDataQuality,
 } from "../api.js";
 import { subscribePrices } from "../sse.js";
-import { fmtNum, fmtTehranTime, fmtToman } from "../format.js";
+import { fmtNum, fmtPct, fmtTehranTime, fmtToman } from "../format.js";
 import NetWorthChart from "./NetWorthChart.jsx";
-import { DataQualityPanel } from "./Onboarding.jsx";
 import { usePortfolio } from "./PortfolioContext.jsx";
 
 const RECONCILE_MS = 60000;
@@ -46,6 +49,7 @@ export default function Portfolio({ user }) {
   const [qualityError, setQualityError] = useState("");
   const [busy, setBusy] = useState(false);
   const [tradeMsg, setTradeMsg] = useState("");
+  const [sharpeCompare, setSharpeCompare] = useState(null);
   const requestId = useRef(0);
 
   const activeAcct = activeId != null ? accounts.find((a) => a.id === activeId) : null;
@@ -87,6 +91,24 @@ export default function Portfolio({ user }) {
   useEffect(() => {
     loadQuality();
   }, [loadQuality]);
+
+  useEffect(() => {
+    if (!user.is_pro) {
+      setSharpeCompare(null);
+      return;
+    }
+    let current = true;
+    Promise.all([analytics(activeId), frontier(activeId)])
+      .then(([a, f]) => {
+        if (current) setSharpeCompare({ yours: a?.metrics?.sharpe, best: f?.max_sharpe?.metrics?.sharpe });
+      })
+      .catch(() => {
+        if (current) setSharpeCompare(null);
+      });
+    return () => {
+      current = false;
+    };
+  }, [activeId, user.is_pro]);
 
   useEffect(() => {
     loadVal();
@@ -407,6 +429,34 @@ export default function Portfolio({ user }) {
         />
       </section>
 
+      {sharpeCompare && (
+        <section className="card">
+          <h3 className="subhead">Sharpe ratio vs. the efficient frontier</h3>
+          <div className="insight-metric-grid">
+            <div className="insight-metric-box">
+              <div className="insight-metric-label">Your Sharpe</div>
+              <div className="insight-metric-val">{fmtNum(sharpeCompare.yours)}</div>
+            </div>
+            <div className="insight-metric-box">
+              <div className="insight-metric-label">Best attainable (max-Sharpe)</div>
+              <div className="insight-metric-val">{fmtNum(sharpeCompare.best)}</div>
+            </div>
+            <div className="insight-metric-box">
+              <div className="insight-metric-label">Gap</div>
+              <div className="insight-metric-val">
+                {sharpeCompare.best != null && sharpeCompare.yours != null
+                  ? fmtNum(sharpeCompare.best - sharpeCompare.yours)
+                  : "—"}
+              </div>
+            </div>
+          </div>
+          <p className="muted small">
+            Historical estimate over the current returns window. See{" "}
+            <Link to="/optimization">Optimization</Link> for the full frontier chart.
+          </p>
+        </section>
+      )}
+
       {/* Insights & Asset Allocation Section below the chart */}
       {activeId === null ? (
         <section className="allocation-insights-container">
@@ -481,25 +531,7 @@ export default function Portfolio({ user }) {
                 <span className="tag">Combined</span>
               </div>
 
-              <div className="asset-allocation-bar">
-                {segments.map((s) => (
-                  <div
-                    key={s.key}
-                    className="asset-seg-fill"
-                    style={{ width: `${s.pct}%`, background: s.color }}
-                    title={`${s.label}: ${s.pct.toFixed(1)}%`}
-                  />
-                ))}
-              </div>
-
-              <div className="asset-legend">
-                {segments.map((s) => (
-                  <div key={s.key} className="legend-item">
-                    <span className="legend-dot" style={{ background: s.color }} />
-                    <span>{s.label}: <strong>{s.pct.toFixed(1)}%</strong></span>
-                  </div>
-                ))}
-              </div>
+              <AllocationPie segments={segments} />
 
               <div className="insight-metric-grid">
                 <div className="insight-metric-box">
@@ -578,27 +610,10 @@ export default function Portfolio({ user }) {
             )}
           </div>
 
-          {/* Asset Class Allocation Progress Bar for Single Portfolio */}
+          {/* Asset Class Allocation for Single Portfolio */}
           <div style={{ marginBottom: "1.5rem" }}>
             <h3 className="subhead">Asset Allocation</h3>
-            <div className="asset-allocation-bar">
-              {segments.map((s) => (
-                <div
-                  key={s.key}
-                  className="asset-seg-fill"
-                  style={{ width: `${s.pct}%`, background: s.color }}
-                  title={`${s.label}: ${s.pct.toFixed(1)}%`}
-                />
-              ))}
-            </div>
-            <div className="asset-legend">
-              {segments.map((s) => (
-                <div key={s.key} className="legend-item">
-                  <span className="legend-dot" style={{ background: s.color }} />
-                  <span>{s.label}: <strong>{s.pct.toFixed(1)}%</strong></span>
-                </div>
-              ))}
-            </div>
+            <AllocationPie segments={segments} />
           </div>
 
           <h3 className="subhead">Holdings</h3>
@@ -771,6 +786,11 @@ export default function Portfolio({ user }) {
               {busy ? "…" : "Execute"}
             </button>
           </form>
+          {Number(form.quantity) > 0 && (
+            <p className="muted small">
+              ≈ {fmtToman(Number(val?.prices?.[form.assetKey] ?? 0) * Number(form.quantity))} at the latest price
+            </p>
+          )}
           {tradeMsg && (
             <p className="muted small" role="status">
               {tradeMsg}
@@ -799,7 +819,7 @@ export default function Portfolio({ user }) {
                     <td className={t.side === "buy" ? "pos" : "neg"}>{t.side}</td>
                     <td>{t.asset_name || t.asset_key}</td>
                     <td>{fmtNum(t.quantity)}</td>
-                    <td>{fmtNum(t.price_tomans)}</td>
+                    <td>{fmtToman(t.price_tomans)}</td>
                     <td>
                       {(t.is_latest_for_asset ?? (txns.findIndex((row) => row.asset_key === t.asset_key) === index)) && (
                         <button
@@ -820,6 +840,46 @@ export default function Portfolio({ user }) {
           )}
         </section>
       )}
+    </div>
+  );
+}
+
+// Asset-class allocation, shared by the "all portfolios" and single-portfolio
+// views (previously two near-identical stacked-bar blocks).
+function AllocationPie({ segments }) {
+  if (!segments.length) return <p className="muted small">No priced holdings yet.</p>;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "1.5rem", flexWrap: "wrap" }}>
+      <div className="chart-wrap" style={{ width: 160, height: 160, flexShrink: 0 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie
+              data={segments}
+              dataKey="val"
+              nameKey="label"
+              innerRadius={40}
+              outerRadius={76}
+              paddingAngle={2}
+            >
+              {segments.map((s) => (
+                <Cell key={s.key} fill={s.color} />
+              ))}
+            </Pie>
+            <Tooltip
+              formatter={(value, name) => [`${(segments.find((s) => s.label === name)?.pct || 0).toFixed(1)}%`, name]}
+              contentStyle={{ background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 8 }}
+            />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="asset-legend">
+        {segments.map((s) => (
+          <div key={s.key} className="legend-item">
+            <span className="legend-dot" style={{ background: s.color }} />
+            <span>{s.label}: <strong>{s.pct.toFixed(1)}%</strong></span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -970,6 +1030,38 @@ function TrustPanel({ valuation, performance, quality, qualityError, onRetryQual
       </p>
     </section>
   );
+}
+
+function DataQualityPanel({ quality }) {
+  if (!quality) return null;
+  if (!quality.assets?.length) {
+    return <p className="muted">No priced assets to assess yet.</p>;
+  }
+  return (
+    <div className="data-quality">
+      <h3>Price data quality</h3>
+      <p className="muted">
+        {quality.passing_assets} of {quality.assessed_assets} assessed assets have
+        trustworthy history ({quality.quality_status}).
+      </p>
+      <ul className="quality-list">
+        {quality.assets.map((asset) => (
+          <li key={asset.asset_key}>
+            <span className={`badge ${qualityClass(asset)}`}>
+              {asset.quality_status || (asset.passes_gate ? "ok" : "failing")}
+            </span>{" "}
+            <strong>{asset.asset_key}</strong>
+            {asset.reason_codes?.length ? ` — ${asset.reason_codes.join(", ")}` : ""}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function qualityClass(asset) {
+  if (asset.passes_gate === null) return "muted-badge";
+  return asset.passes_gate ? "badge-success" : "badge-warn";
 }
 
 function coverageClass(status) {
