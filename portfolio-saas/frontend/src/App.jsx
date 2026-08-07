@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { me, restoreSession, SESSION_EXPIRED_EVENT } from "./api.js";
-import Auth from "./components/Auth.jsx";
+import Auth, { VerifyEmail } from "./components/Auth.jsx";
 import Legal from "./components/Legal.jsx";
 import { PortfolioProvider, usePortfolio } from "./components/PortfolioContext.jsx";
 import Shell from "./components/Shell.jsx";
@@ -43,19 +43,27 @@ export default function App() {
 
   if (!user) {
     return (
-      <>
+      <BrowserRouter>
         {notice && (
           <p role="alert" className="p-3 text-center text-sm text-[var(--c-warn)]">
             {notice}
           </p>
         )}
-        <Auth
-          onAuthed={(profile) => {
-            setNotice("");
-            setUser(profile);
-          }}
-        />
-      </>
+        <Routes>
+          <Route path="/verify-email" element={<VerifyEmail />} />
+          <Route
+            path="*"
+            element={
+              <Auth
+                onAuthed={(profile) => {
+                  setNotice("");
+                  setUser(profile);
+                }}
+              />
+            }
+          />
+        </Routes>
+      </BrowserRouter>
     );
   }
 
@@ -66,6 +74,7 @@ export default function App() {
           <Routes>
             <Route path="/privacy" element={<Legal kind="privacy" />} />
             <Route path="/terms" element={<Legal kind="terms" />} />
+            <Route path="/verify-email" element={<VerifyEmail />} />
             <Route element={<Shell user={user} onLogout={() => setUser(null)} />}>
               <Route index element={<RequireHoldings><Dashboard /></RequireHoldings>} />
               <Route path="/optimal" element={<MyOptimal />} />
