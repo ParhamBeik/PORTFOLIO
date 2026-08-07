@@ -7,6 +7,7 @@ from django.utils import timezone
 import jdatetime
 
 from marketdata.candles import candle_close_qs
+from marketdata.currency import tse_close_to_toman
 from marketdata.models import MarketInstrument, SymbolIntegrity, GoldCurrencyHistory
 from portfolio.services.returns import normalize_as_of, to_jalali_str
 
@@ -53,7 +54,11 @@ def get_candidate_universe(
 
     candles_data = {}
     for sym, dt_str, close, vol in candles_qs.values_list("symbol", "date_time", "close_price", "volume"):
-        candles_data.setdefault(sym, []).append((dt_str, float(close), float(vol)))
+        # Raw Rial -> Toman: turnover below is screened against
+        # MIN_MEDIAN_DAILY_TURNOVER_TOMANS, an absolute Toman threshold.
+        candles_data.setdefault(sym, []).append(
+            (dt_str, float(tse_close_to_toman(close)), float(vol))
+        )
 
     # Query all gold/currency histories in bulk for BRS
     brs_symbols = [sym for sym, mi in instruments.items() if mi.source == MarketInstrument.Source.BRS]

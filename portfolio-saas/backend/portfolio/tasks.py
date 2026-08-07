@@ -36,7 +36,7 @@ def run_price_fetch(*, dry_run=False, publish=True):
     lock_token = None
     if redis_client and not dry_run:
         lock_token = uuid.uuid4().hex
-        if not redis_client.set(lock_key, lock_token, ex=300, nx=True):
+        if not redis_client.set(lock_key, lock_token, ex=150, nx=True):
             logger.warning("Another price fetch is already running (failed to acquire Redis lock). Skipping.")
             return {"priced": {}, "written": False}
 
@@ -110,17 +110,11 @@ def _write_prices(priced: dict) -> None:
         if key not in assets:
             continue
         asset = assets[key]
-        # Conservative defaults: TSETMC-derived assets remain unverified until
-        # operator or automated evidence confirms the provider unit. BRS/API
-        # gold and currency values are converted to Tomans at ingestion and can
-        # be marked as IRT verified.
-        if asset.tse_symbol:
-            unit = Price.Unit.UNKNOWN
-            verified = False
-        elif asset.brs_symbol:
-            unit = Price.Unit.IRT
-            verified = True
-        elif asset.is_manual:
+        # Every value here is Toman: extract_standard_prices() routes TSE
+        # quotes through tse_close_to_toman() and BRS gold/currency through
+        # to_toman(). portfolio_price is single-unit by construction, which
+        # is what valuation's cross-asset sums depend on.
+        if asset.tse_symbol or asset.brs_symbol or asset.is_manual:
             unit = Price.Unit.IRT
             verified = True
         else:
@@ -244,6 +238,8 @@ def publish_prices(priced: dict) -> None:
     autoretry_for=(Exception,),
     retry_backoff=True,
     max_retries=3,
+    time_limit=90,
+    soft_time_limit=75,
 )
 def fetch_and_publish():
     """Celery entry point; beat ticks every minute, this decides whether to fetch.

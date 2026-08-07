@@ -17,11 +17,16 @@ LEGACY_CONSTANTS = {
     "quarter_to_1g_ratio": 0.493733384,
 }
 
+# `kama_stock` is deliberately absent: the legacy engine read the TSE `pl`
+# field straight through as Tomans, which was right while the provider quoted
+# TSE in Tomans. It now quotes Rial (verified 2026-08-06 against
+# Candlestick.php and AllSymbols.php), so the port divides by 10 to keep
+# `portfolio_price` single-unit. Parity on every non-TSE key still holds.
 PARITY_KEYS = [
     "emami_coin", "half_coin", "quarter_coin", "quarter_coin_pre86",
     "one_gram_coin", "swiss_gold_bar_1g", "swiss_gold_bar_2_5g",
     "gold_18k_gram", "usd_cash", "usdt_irt", "euro_cash",
-    "gold_ounce_usd", "bitcoin_usd", "kama_stock",
+    "gold_ounce_usd", "bitcoin_usd",
 ]
 
 
@@ -55,9 +60,10 @@ def test_btc_high_quote_is_left_in_usd(raw_market_sample):
     assert prices["bitcoin_usd"] == Decimal("64500")
 
 
-def test_kama_extracted_from_tsetmc(raw_market_sample):
+def test_kama_extracted_from_tsetmc_and_converted_to_tomans(raw_market_sample):
+    """TSE quotes Rial; portfolio_price is Toman, so `pl` is divided by 10."""
     prices = extract_standard_prices(raw_market_sample)
-    assert prices["kama_stock"] == Decimal("5230")
+    assert prices["kama_stock"] == Decimal("523")
 
 
 def test_kama_falls_back_to_last_price_when_missing():

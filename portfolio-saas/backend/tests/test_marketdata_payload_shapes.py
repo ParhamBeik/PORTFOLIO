@@ -184,8 +184,8 @@ def test_gold_usdt_is_canonicalised_on_read_and_write():
     created, _ = ingest.ingest_gold_currency_history(payload)
     assert created == 1
     assert GoldCurrencyHistory.objects.filter(symbol="USDT_IRT").exists()
-    # Rial quotes are stored as Tomans.
-    assert float(GoldCurrencyHistory.objects.get().close_price) == 100500.0
+    # Storage unit is Rial; Rial-declared quotes pass through unchanged.
+    assert float(GoldCurrencyHistory.objects.get().close_price) == 1005000.0
 
 
 def test_flatten_records_handles_all_three_payload_shapes():

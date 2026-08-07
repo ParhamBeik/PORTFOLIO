@@ -67,7 +67,7 @@ def test_a_sane_candle_passes():
         ({"low": -1}, "price_negative"),
         ({"open": 0, "high": 0, "low": 0, "close": 0}, "price_all_zero"),
         ({"low": 0}, "price_partially_zero"),
-        ({"high": 10**13}, "price_absurd"),
+        ({"high": 10**14}, "price_absurd"),  # MAX_PRICE is 10**13 (Rial storage unit)
         ({"close": "not a number"}, "price_not_numeric"),
     ],
 )

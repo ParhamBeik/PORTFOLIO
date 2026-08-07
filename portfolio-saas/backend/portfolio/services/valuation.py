@@ -11,6 +11,8 @@ from decimal import Decimal
 from django.core.cache import cache
 from django.utils import timezone
 
+from marketdata.currency import tse_close_to_toman
+
 from ..models import HOUSE_AREA_SQM, Account, Asset, Holding, Price
 
 logger = logging.getLogger(__name__)
@@ -29,7 +31,7 @@ def _q(value) -> Decimal:
 
 
 def get_latest_prices() -> dict:
-    """Return {asset_key: Decimal price in Tomans}, cached ~10s.
+    """Return {asset_key: Decimal price in Rials}, cached ~10s.
 
     Uses Postgres DISTINCT ON to fetch the newest price for every asset in a
     single query, so this is O(1) regardless of how many assets or users exist.
@@ -131,7 +133,10 @@ def _archive_replacements(prices: dict) -> dict:
     for row in stock_rows:
         dt_str = row["date_time"].split()[0]
         if (row["symbol"], dt_str) not in rejections:
-            archive_prices.setdefault(stock_symbols[row["symbol"]], _q(row["close_price"]))
+            # Warehouse TSE closes are raw Rial; live prices are Toman.
+            archive_prices.setdefault(
+                stock_symbols[row["symbol"]], tse_close_to_toman(row["close_price"])
+            )
 
     brs_rows = (
         GoldCurrencyHistory.objects.filter(symbol__in=brs_symbols, close_price__gt=0)
@@ -164,6 +169,10 @@ def invalidate_prices_cache() -> None:
 
 def _house_value(price_per_sqm_million: Decimal, area_sqm: Decimal = HOUSE_AREA_SQM) -> Decimal:
     """Gross real-estate value: area * price/sqm.
+
+    `price_per_sqm_million` is user-entered as "million Tomans per sqm", matching
+    the Toman scale every other asset_value() branch produces (Price is
+    Toman-denominated).
 
     The mortgage is deliberately NOT subtracted here. Since migration 0017 a
     mortgage is a `Liability` row, and every caller already nets liabilities off
@@ -375,7 +384,8 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
         )
         for r in s_rows:
             key = stock_symbols[r["symbol"]]
-            stock_closes.setdefault(r["date_time"], {})[key] = Decimal(str(r["close_price"]))
+            # Raw Rial in the warehouse -> Toman for portfolio arithmetic.
+            stock_closes.setdefault(r["date_time"], {})[key] = tse_close_to_toman(r["close_price"])
 
     gold_closes = {}
     if brs_symbols:
@@ -551,7 +561,9 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                     candles = candle_close_qs(asset.tse_symbol, as_of=jalali_str).exclude(date_time__in=rejections)
                     candle = candles.order_by("-date_time").first()
                     if candle:
-                        price = Decimal(str(candle.close_price))
+                        # Raw Rial in the warehouse -> Toman, matching the
+                        # ledger's own unit for cash and cost basis below.
+                        price = tse_close_to_toman(candle.close_price)
                         stale_sessions = _stale_sessions(
                             candles, "date_time", candle.date_time, jalali_str
                         )

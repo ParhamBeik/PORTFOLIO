@@ -21,14 +21,22 @@ TEHRAN = ZoneInfo("Asia/Tehran")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 # Discover tasks.py in each installed app (portfolio.tasks, marketdata.tasks).
 app.autodiscover_tasks()
+# portfolio/services/maintenance.py and best_overall.py aren't under a
+# `tasks.py` module, so each needs its own discovery pass (still lazy --
+# resolved after Django apps are ready, same as the call above, not at this
+# import time).
+app.autodiscover_tasks(["portfolio"], related_name="services.maintenance")
+app.autodiscover_tasks(["portfolio"], related_name="services.best_overall")
 
 # Global reliability defaults. Per-task retry policy (autoretry_for) belongs in
 # the individual tasks (e.g. portfolio/tasks.py), not here.
 app.conf.update(
     timezone=str(TEHRAN),
     task_acks_late=True,  # ack after the task runs, not on receipt: a killed worker redelivers the task
+    task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,  # pair with acks_late so one worker doesn't hoard several long tasks
     result_expires=3600,  # results aren't polled here (fire-and-forget beat schedule); don't let them pile up in Redis
+    broker_transport_options={"visibility_timeout": 300},
     task_default_queue="live",
     # Two queues, two workers. Archive ticks run for up to 50s each and used to
     # sit in the same queue as the price loop, so a customer-facing price fetch
@@ -95,6 +103,19 @@ app.conf.beat_schedule = {
     "operational-health-every-15-minutes": {
         "task": "marketdata.tasks.operational_health_check",
         "schedule": crontab(minute="*/15"),
+    },
+    # Snapshot retention. No-op unless SNAPSHOT_PRUNE_ENABLED=1 (see
+    # portfolio/services/maintenance.py) -- deleting rows needs explicit sign-off.
+    "prune-snapshots-nightly": {
+        "task": "portfolio.services.maintenance.prune_snapshots",
+        "schedule": crontab(hour=2, minute=0),
+    },
+    # "Best Possible Portfolio Overall" precompute: 4 windows x 2 scenarios,
+    # market-wide. Runs after nightly-asset-metrics (01:00) so AssetMetricSnapshot
+    # (top performers by class) is fresh when this reads the same warehouse data.
+    "best-overall-snapshots-nightly": {
+        "task": "portfolio.services.best_overall.run_best_overall_snapshots",
+        "schedule": crontab(hour=2, minute=30),
     },
 }
 

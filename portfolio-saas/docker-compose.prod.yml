@@ -155,7 +155,7 @@ services:
       redis:
         condition: service_healthy
     environment: *backend-env
-    command: celery -A config worker -l info --concurrency=1 -Q archive -n archive@%h --max-memory-per-child=400000
+    command: celery -A config worker -l info --concurrency=4 -Q archive -n archive@%h --max-memory-per-child=400000
     healthcheck:
       test: ["CMD-SHELL", "celery -A config inspect ping -d archive@$$HOSTNAME"]
       interval: 60s

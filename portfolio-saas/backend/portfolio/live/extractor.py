@@ -7,7 +7,7 @@ import logging
 from decimal import Decimal
 
 from django.conf import settings
-from marketdata.currency import canonical_symbol, to_toman
+from marketdata.currency import canonical_symbol, to_toman, tse_close_to_toman
 from marketdata.symbols import find_symbol_record
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,12 @@ def _normalize_symbol_payload(symbol_payload):
 
 
 def _price_from_tsetmc_record(record):
+    """Live TSE quote (`pl`/`pc`, Rial) -> Toman, the unit `portfolio_price` uses.
+
+    The TSE feed answers in Rial (verified against the provider), while every
+    other source reaching this module is Toman-denominated. Converting here
+    keeps `portfolio_price` single-unit, which valuation depends on.
+    """
     if not isinstance(record, dict):
         return Decimal("0")
     for field_name in ("pl", "pc"):
@@ -79,7 +85,7 @@ def _price_from_tsetmc_record(record):
         except (ArithmeticError, ValueError):
             continue
         if price > 0:
-            return price
+            return tse_close_to_toman(price)
     return Decimal("0")
 
 
