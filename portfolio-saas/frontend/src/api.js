@@ -18,6 +18,16 @@ export const auth = {
   },
 };
 
+let sessionExpiresAt = null;
+export const sessionExpiry = {
+  get value() {
+    return sessionExpiresAt;
+  },
+  set(iso) {
+    sessionExpiresAt = iso || null;
+  },
+};
+
 const cookie = (name) => document.cookie
   .split("; ")
   .find((part) => part.startsWith(`${name}=`))
@@ -43,6 +53,7 @@ async function refreshAccessToken() {
       if (!res.ok) return null;
       const data = await res.json();
       auth.tokens = data;
+      sessionExpiry.set(data.session_expires_at);
       return data.access;
     })
     .finally(() => {
@@ -68,11 +79,13 @@ export async function logoutSession(allDevices = false) {
     });
   } finally {
     auth.logout();
+    sessionExpiry.set(null);
   }
 }
 
 function expireSession() {
   auth.logout();
+  sessionExpiry.set(null);
   window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
 }
 
@@ -122,23 +135,12 @@ function extractError(detail) {
 }
 
 // Auth
-export const register = (
-  email,
-  password,
-  firstName = "",
-  lastName = "",
-) =>
-  api("/api/auth/register/", {
-    method: "POST",
-    body: {
-      email,
-      password,
-      first_name: firstName,
-      last_name: lastName,
-    },
-  });
+export const register = (email, password) =>
+  api("/api/auth/register/", { method: "POST", body: { email, password } });
 export const login = (email, password) =>
   api("/api/auth/login/", { method: "POST", body: { email, password } });
+export const googleLogin = (credential) =>
+  api("/api/auth/google/", { method: "POST", body: { credential } });
 export const verifyEmail = (token) =>
   api("/api/auth/verify-email/", { method: "POST", body: { token } });
 export const resendVerification = (email) =>
@@ -322,6 +324,11 @@ export const frontier = (account = null) =>
   api(
     `/api/optimization/frontier/${accountParam(account) ? "?" + accountParam(account) : ""}`
   );
+export const myOptimal = (account = null) =>
+  api(
+    `/api/optimization/my-optimal/${accountParam(account) ? "?" + accountParam(account) : ""}`
+  );
+export const bestOverall = () => api("/api/optimization/best-overall/");
 export const assetReturns = (days = 180) => api(`/api/assets/returns/?days=${days}`);
 
 // Market data (TSE). Symbols/candles/history/index are FREE;

@@ -1,105 +1,79 @@
-// Shared number/time formatters. Pulled out of Dashboard so every page formats
-// Tomans, quantities and Tehran-time stamps identically.
+// Formatters. One convention, enforced by signature:
+//
+//   PERCENTAGES TRAVEL AS FRACTIONS. `pct(0.12)` → "12.0%".
+//
+// The old `fmtPct` took 0–100, so every call site wrote `fmtPct(v * 100)` and a
+// payload that was already percent-scale looked identical to one that wasn't.
+// The API is fractions almost everywhere (weights, sharpe, twr, xirr, metrics);
+// the lone exception is `rebalance_trades[].delta_weight_pct`, converted at its
+// single point of use.
+//
+// Money is Toman. The backend serializes Decimals as strings — Number() them.
 
-export function fmtNum(n) {
-  if (n === null || n === undefined || n === "" || isNaN(n)) return "0";
-  return Number(n).toLocaleString("en-US", { maximumFractionDigits: 2 });
-}
+const nf = (max) => ({ maximumFractionDigits: max });
+const bad = (n) => n === null || n === undefined || n === "" || isNaN(Number(n));
 
-export function fmtToman(n) {
-  if (n === null || n === undefined || n === "" || isNaN(n)) return "0";
-  return Number(n).toLocaleString("en-US", { maximumFractionDigits: 0 }) + " T";
-}
+export const num = (n, d = 2) =>
+  bad(n) ? "—" : Number(n).toLocaleString("en-US", nf(d));
 
-// Percent for ratios already in 0..1 scale (weights, vol). "—" for missing.
-export function fmtPct(frac, digits = 1) {
-  if (frac === null || frac === undefined || frac === "" || isNaN(frac)) return "—";
-  return Number(frac).toLocaleString("en-US", { maximumFractionDigits: digits }) + "%";
-}
+export const toman = (n) =>
+  bad(n) ? "—" : Number(n).toLocaleString("en-US", nf(0)) + " T";
 
-// Compact Toman for chart axes (12.3M / 4.5B) so ticks stay readable.
-export function fmtTomanCompact(n) {
-  if (n === null || n === undefined || n === "" || isNaN(n)) return "0";
+/** @param {number} f fraction, e.g. 0.12 → "12.0%" */
+export const pct = (f, d = 1) =>
+  bad(f) ? "—" : (Number(f) * 100).toLocaleString("en-US", nf(d)) + "%";
+
+const signed = (fn) => (v) =>
+  bad(v) ? "—" : (Number(v) > 0 ? "+" : "") + fn(v);
+
+export const signedPct = signed(pct);
+export const signedToman = signed(toman);
+
+/** Compact Toman for chart axes so ticks stay readable. */
+export function tomanCompact(n) {
+  if (bad(n)) return "—";
   const v = Number(n);
-  const abs = Math.abs(v);
-  if (abs >= 1e9) return (v / 1e9).toFixed(1) + "B";
-  if (abs >= 1e6) return (v / 1e6).toFixed(1) + "M";
-  if (abs >= 1e3) return (v / 1e3).toFixed(0) + "K";
-  return String(v);
+  const a = Math.abs(v);
+  if (a >= 1e9) return (v / 1e9).toFixed(1) + "B";
+  if (a >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (a >= 1e3) return (v / 1e3).toFixed(0) + "K";
+  return String(Math.round(v));
 }
 
-// Tehran wall-clock time for a fetched-at ISO stamp. The backend stores UTC; show
-// the Iranian user their local market time.
-export function fmtTehranTime(iso) {
-  if (!iso) return "—";
+// Gregorian, Tehran wall clock — the backend stores UTC, the reader is in Iran.
+const dtf = (opts) => new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Tehran", ...opts });
+
+export function date(iso) {
   const d = new Date(iso);
-  if (isNaN(d.getTime())) return "—";
-  return new Intl.DateTimeFormat("fa-IR", {
-    timeZone: "Asia/Tehran",
+  if (!iso || isNaN(d)) return "—";
+  return dtf({ year: "numeric", month: "short", day: "2-digit" }).format(d);
+}
+
+export function dateTime(iso) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return "—";
+  return dtf({
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-    day: "2-digit",
-    month: "2-digit",
+    hour12: false,
   }).format(d);
 }
 
-// Timeframe-aware date formatter for chart X-axis ticks.
-// Handles timestamps (ms), ISO strings, and Jalali date strings (YYYY-MM-DD / YYYY/MM/DD).
-export function fmtDateTick(val, timeframe = 7) {
-  if (val === null || val === undefined || val === "") return "";
+/** Short axis tick: "04 Mar" for near ranges, "2026-03" for long ones. */
+export const dateTick = (iso, long = false) => {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return "";
+  return long
+    ? dtf({ year: "numeric", month: "2-digit" }).format(d).replace("/", "-")
+    : dtf({ month: "short", day: "2-digit" }).format(d);
+};
 
-  if (typeof val === "number" || (!isNaN(Number(val)) && !String(val).includes("-") && !String(val).includes("/"))) {
-    const ts = Number(val);
-    if (isNaN(ts)) return "";
-    const d = new Date(ts);
-    if (isNaN(d.getTime())) return "";
+/** Reason codes and enum values arrive snake_case; render them readably. */
+export const humanize = (code) =>
+  !code ? "" : String(code).replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
 
-    const days = typeof timeframe === "number" ? timeframe : (timeframe === "1Y" ? 365 : timeframe === "3Y" ? 1095 : 365);
-
-    if (days <= 1) {
-      return d.toLocaleTimeString("en-US", { timeZone: "Asia/Tehran", hour: "2-digit", minute: "2-digit", hour12: false });
-    }
-    if (days <= 30) {
-      const month = String(d.getMonth() + 1).padStart(2, "0");
-      const day = String(d.getDate()).padStart(2, "0");
-      return `${month}/${day}`;
-    }
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, "0");
-    return `${year}/${month}`;
-  }
-
-  const str = String(val).trim();
-  if (/^\d{4}[-/]\d{2}[-/]\d{2}/.test(str)) {
-    const parts = str.split(/[-T /]/);
-    const yr = parts[0];
-    const mo = parts[1];
-    const dy = parts[2];
-    if (timeframe === "All" || timeframe === "3Y" || timeframe === 3650) {
-      return `${yr}/${mo}`;
-    }
-    return `${mo}/${dy}`;
-  }
-
-  return str;
-}
-
-// Clean date/time string for chart tooltips
-export function fmtChartTooltipDate(val) {
-  if (val === null || val === undefined || val === "") return "—";
-  if (typeof val === "number" || (!isNaN(Number(val)) && !String(val).includes("-") && !String(val).includes("/"))) {
-    const d = new Date(Number(val));
-    if (isNaN(d.getTime())) return "—";
-    return new Intl.DateTimeFormat("en-US", {
-      timeZone: "Asia/Tehran",
-      year: "numeric",
-      month: "short",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    }).format(d);
-  }
-  return String(val);
-}
-
+/** Prefer the Persian name — that is how TSE symbols are recognized. */
+export const assetLabel = (a) => a?.name_fa || a?.name || a?.key || "—";
