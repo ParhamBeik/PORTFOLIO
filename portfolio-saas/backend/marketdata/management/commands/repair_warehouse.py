@@ -41,6 +41,10 @@ class Command(BaseCommand):
         parser.add_argument("--manifest-hash")
         parser.add_argument("--batch", required=True, choices=BATCHES)
         parser.add_argument("--symbol", action="append")
+        parser.add_argument(
+            "--exclude-symbol", action="append",
+            help="Skip these symbols (e.g. one awaiting provider verification).",
+        )
         parser.add_argument("--date-from")
         parser.add_argument("--date-to")
         parser.add_argument("--apply", action="store_true")
@@ -65,9 +69,13 @@ class Command(BaseCommand):
         if batch == "candletable":
             rows = [r for r in rows if r["check"] == "candletable"]
         elif batch == "units":
-            rows = [r for r in rows if r["check"] == "units" and r.get("corrected")]
+            # Any finding that carries a `corrected` value is repairable, whoever
+            # produced it -- the units check or the cross-table arbiter.
+            rows = [r for r in rows if r.get("corrected")]
         if o["symbol"]:
             rows = [r for r in rows if r["symbol"] in set(o["symbol"])]
+        if o["exclude_symbol"]:
+            rows = [r for r in rows if r["symbol"] not in set(o["exclude_symbol"])]
         if o["date_from"]:
             rows = [r for r in rows if r["date"] >= o["date_from"]]
         if o["date_to"]:

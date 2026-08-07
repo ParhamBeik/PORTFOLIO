@@ -495,6 +495,11 @@ class PerformanceView(APIView):
                 "name": name,
                 "symbol": symbol,
                 "source": source,
+                # series[].close is Rial on the TSE branch and Toman (or the
+                # provider's own unit for XAUUSD/BTC) on the gold branch. Same
+                # key, different scales, so the unit has to travel with it --
+                # a client that assumes one of them is 10x wrong on the other.
+                "unit": "IRR" if source == "stock" else self._gold_unit(symbol),
             },
             "coverage": {
                 "records": len(series),
@@ -503,6 +508,17 @@ class PerformanceView(APIView):
             },
             "series": series,
         })
+
+    @staticmethod
+    def _gold_unit(symbol):
+        """The provider's declared unit for a BRS symbol, defaulting to Toman."""
+        from .models import GoldCurrencyHistory
+
+        return (
+            GoldCurrencyHistory.objects.filter(symbol=symbol)
+            .values_list("unit", flat=True)
+            .first()
+        ) or "تومان"
 
 
 class AnnouncementsView(APIView):

@@ -39,9 +39,12 @@ MAX_EXCURSION_ROWS = 60
 # 0.8 against a raw 7303). Ratios between such values are numerical noise, not
 # evidence, so both sides must be a usable price before we judge them.
 MIN_COMPARABLE_PRICE = 1.0
-# Centred window for the local median a row is judged against. Wide enough to
-# outvote a multi-day mis-scaled run, short enough to track a genuine rebase.
-LOCAL_WINDOW = 21
+# Centred window for the local median a row is judged against. It must stay
+# wide enough that a mis-scaled RUN cannot outvote the healthy rows around it:
+# ثجوان was wrong for 10 consecutive sessions, which at window=21 made the bad
+# level the median and inverted the verdict, flagging the one correct row. At 41
+# a run has to exceed 20 sessions before it can do that.
+LOCAL_WINDOW = 41
 # A mis-scaled row is its true value over exactly ten. Real market moves of
 # "roughly ten times" are 9.7x or 10.4x and must not be touched, so the ratio has
 # to land within 1% of the power of ten.
@@ -240,27 +243,56 @@ class Command(BaseCommand):
         return out
 
     def check_cross_table(self):
-        """MarketCandle and DailyStockHistory must agree for the same symbol+day."""
+        """MarketCandle and DailyStockHistory must agree for the same symbol+day.
+
+        The adjusted candle is pulled in as an arbiter. A `corrected` value is
+        only proposed when the OTHER two sources agree against the unadjusted
+        candle -- two votes to one. Where they disagree three ways the row is
+        reported but left unrepairable, because there is nothing to prefer.
+        """
         rows = _rows(
             """
             SELECT c.symbol, left(c.date_time,10) AS d,
-                   c.close_price AS candle, h.pl AS hist,
+                   c.close_price::float AS candle, h.pl::float AS hist,
+                   a.close_price::float AS adj,
                    (c.close_price/NULLIF(h.pl,0))::float AS ratio
             FROM marketdata_marketcandle c
             JOIN marketdata_dailystockhistory h
               ON h.symbol=c.symbol AND h.date=left(c.date_time,10)
+            LEFT JOIN marketdata_marketcandle a
+              ON a.symbol=c.symbol AND a.date_time=c.date_time
+             AND a.timeframe='1d_adj' AND a.close_price>0
             WHERE c.timeframe='1d_unadj' AND c.close_price>0 AND h.pl>0
               AND (c.close_price/h.pl > 1.01 OR c.close_price/h.pl < 0.99)
             ORDER BY abs(ln(c.close_price/h.pl)) DESC
             LIMIT 500
             """
         )
-        return [{
-            "check": "crosstable", "table": "marketcandle_vs_dailystockhistory",
-            "symbol": r["symbol"], "date": r["d"], "value": r["candle"],
-            "verdict": "unit_error" if 9 <= (r["ratio"] or 0) <= 11 or 0.09 <= (r["ratio"] or 1) <= 0.11 else "suspect",
-            "evidence": f"candle={r['candle']} history_pl={r['hist']} ratio={r['ratio']:.3f}",
-        } for r in rows]
+        out = []
+        for r in rows:
+            ratio = r["ratio"] or 0
+            is_unit = 9 <= ratio <= 11 or 0.09 <= ratio <= 0.11
+            corrected, table = "", "marketcandle_vs_dailystockhistory"
+            adj = r["adj"]
+            # Arbiter: does the adjusted candle side with DailyStockHistory?
+            if is_unit and adj and abs(adj / r["hist"] - 1.0) <= 0.01:
+                corrected = f"{r['candle'] * 10:g}" if ratio < 1 else f"{r['candle'] / 10:g}"
+                table = "marketdata_marketcandle[1d_unadj]"
+            out.append({
+                "check": "crosstable", "table": table,
+                "symbol": r["symbol"], "date": r["d"], "value": r["candle"],
+                "corrected": corrected,
+                "verdict": "unit_error" if is_unit else "suspect",
+                "evidence": (
+                    f"unadj_candle={r['candle']:g} history_pl={r['hist']:g} "
+                    f"ratio={ratio:.3f}"
+                    + (f"; adjusted={adj:g} agrees with history -> candle is the "
+                       f"odd one out" if corrected else
+                       f"; adjusted={adj:g} does not arbitrate, left unrepaired"
+                       if adj else "; no adjusted row to arbitrate")
+                ),
+            })
+        return out
 
     def check_gold_units(self):
         """Declared unit label vs actual magnitude, per gold/FX symbol."""

@@ -404,11 +404,44 @@ def aggregate_daily_stock_history(date_str: str = None):
 
 @shared_task(ignore_result=True)
 def nightly_data_integrity():
-    """Run data integrity checks for all symbols nightly."""
+    """Run data integrity checks for all symbols nightly.
+
+    Also runs the warehouse unit audit in report-only mode. It never writes: the
+    point is that a fresh unit regression shows up in the log the night it
+    appears, instead of surfacing months later inside somebody's valuation.
+    """
     from marketdata.integrity import update_all_symbols_integrity
     logger.info("Starting nightly data integrity checks...")
     results = update_all_symbols_integrity()
     logger.info("Nightly data integrity checks completed for %d symbols.", len(results))
+
+    try:
+        from marketdata.management.commands.audit_warehouse import Command as Audit
+        from marketdata.models import RejectedRecord
+
+        audit = Audit()
+        findings = audit.check_candle_table_purity() + audit.check_unit_steps()
+        # Rows already quarantined are known and reported; alerting on them every
+        # night would bury the thing this check exists to catch -- a NEW one.
+        known = set(
+            RejectedRecord.objects.filter(reason="unit_error")
+            .values_list("symbol", "date")
+        )
+        errors = [
+            f for f in findings
+            if f["verdict"] == "unit_error"
+            and (f["symbol"], f["date"][:10]) not in known
+        ]
+        if errors:
+            logger.error(
+                "[UNIT_AUDIT] %d mis-scaled row(s) across %d symbol(s). "
+                "Run `manage.py audit_warehouse` for the manifest. First: %s",
+                len(errors), len({f["symbol"] for f in errors}), errors[0]["evidence"],
+            )
+        else:
+            logger.info("[UNIT_AUDIT] No mis-scaled rows found.")
+    except Exception:  # never let a report-only check break the integrity run
+        logger.exception("[UNIT_AUDIT] Audit failed; integrity results still stand.")
 
 
 @shared_task(ignore_result=True)
