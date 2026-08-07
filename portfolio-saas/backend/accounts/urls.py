@@ -4,6 +4,7 @@ from .views import (
     CookieTokenObtainPairView,
     CsrfView,
     ExportView,
+    GoogleAuthView,
     LogoutAllView,
     LogoutView,
     MeView,
@@ -18,6 +19,7 @@ from .views import (
 
 urlpatterns = [
     path("register/", RegisterView.as_view(), name="register"),
+    path("google/", GoogleAuthView.as_view(), name="google-auth"),
     path("verify-email/", VerifyEmailView.as_view(), name="verify-email"),
     path(
         "resend-verification/",

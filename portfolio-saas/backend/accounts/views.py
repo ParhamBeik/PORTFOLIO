@@ -31,12 +31,11 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from portfolio.models import Account, Holding, ImportBatch, LedgerEntry
 
 from .models import User
-from .permissions import IsPro
+from .permissions import IsEmailVerified, IsPro
 from .serializers import (
     ChangePasswordSerializer,
     PasswordAwareTokenRefreshSerializer,
     RegisterSerializer,
-    VerifiedTokenObtainPairSerializer,
     UserSerializer,
 )
 from .services import (
@@ -52,6 +51,10 @@ REFRESH_COOKIE = "ps_refresh"
 def _tokens(user: User) -> tuple[str, str]:
     refresh = RefreshToken.for_user(user)
     return str(refresh.access_token), str(refresh)
+
+
+def _session_expires_at() -> str:
+    return (timezone.now() + settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"]).isoformat()
 
 
 def _revoke_all(user: User) -> None:
@@ -74,11 +77,10 @@ def _set_refresh_cookie(response, request, refresh: str):
 
 
 class CookieTokenObtainPairView(TokenObtainPairView):
-    serializer_class = VerifiedTokenObtainPairSerializer
-
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
         refresh = response.data.pop("refresh")
+        response.data["session_expires_at"] = _session_expires_at()
         return _set_refresh_cookie(response, request, refresh)
 
 
@@ -95,6 +97,7 @@ class CookieTokenRefreshView(APIView):
         serializer.is_valid(raise_exception=True)
         payload = dict(serializer.validated_data)
         rotated = payload.pop("refresh", refresh)
+        payload["session_expires_at"] = _session_expires_at()
         return _set_refresh_cookie(Response(payload), request, rotated)
 
 
@@ -145,13 +148,82 @@ class RegisterView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
         send_verification_email(user)
-        return Response(
+        access, refresh = _tokens(user)
+        response = Response(
             {
                 "user": UserSerializer(user).data,
-                "verification_required": True,
+                "access": access,
+                "session_expires_at": _session_expires_at(),
             },
             status=status.HTTP_201_CREATED,
         )
+        return _set_refresh_cookie(response, request, refresh)
+
+
+class GoogleAuthView(APIView):
+    """Google Identity Services sign-in: verify the ID token, mint our own JWTs.
+
+    Matching order: `google_sub` (stable across email changes) first, then
+    `email` (only for the first link — email_verified must be true on Google's
+    side, otherwise an attacker-controlled unverified Google account could
+    take over an existing Lattice account by email alone).
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        if not settings.GOOGLE_OAUTH_CLIENT_ID:
+            return Response({"detail": "Google sign-in is not configured."}, status=503)
+
+        credential = request.data.get("credential")
+        if not credential:
+            return Response({"credential": ["This field is required."]}, status=400)
+
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token as google_id_token
+
+        try:
+            claims = google_id_token.verify_oauth2_token(
+                credential, google_requests.Request(), settings.GOOGLE_OAUTH_CLIENT_ID
+            )
+        except ValueError:
+            return Response({"detail": "Invalid Google credential."}, status=400)
+
+        if not claims.get("email_verified"):
+            return Response({"detail": "Google account email is not verified."}, status=400)
+
+        sub = claims["sub"]
+        email = User.objects.normalize_email(claims["email"])
+
+        with transaction.atomic():
+            user = User.objects.select_for_update().filter(google_sub=sub).first()
+            if user is None:
+                user = User.objects.select_for_update().filter(email__iexact=email).first()
+                if user is not None:
+                    user.google_sub = sub
+                    if user.email_verified_at is None:
+                        user.email_verified_at = timezone.now()
+                    user.save(update_fields=["google_sub", "email_verified_at"])
+                else:
+                    # set_password(None) below leaves the account with an
+                    # unusable password — Google is the only way in.
+                    user = User.objects.create_user(
+                        email=email,
+                        password=None,
+                        first_name=claims.get("given_name", ""),
+                        last_name=claims.get("family_name", ""),
+                        google_sub=sub,
+                        email_verified_at=timezone.now(),
+                    )
+
+        access, refresh = _tokens(user)
+        response = Response({
+            "user": UserSerializer(user).data,
+            "access": access,
+            "session_expires_at": _session_expires_at(),
+        })
+        return _set_refresh_cookie(response, request, refresh)
 
 
 class MeView(APIView):
@@ -179,6 +251,8 @@ class MeView(APIView):
 
 
 class ChangePasswordView(APIView):
+    permission_classes = [IsAuthenticated, IsEmailVerified]
+
     def post(self, request):
         serializer = ChangePasswordSerializer(
             data=request.data, context={"request": request}
@@ -287,6 +361,8 @@ def _csv_bytes(headers, rows) -> bytes:
 
 
 class ExportView(APIView):
+    permission_classes = [IsAuthenticated, IsEmailVerified]
+
     def get(self, request):
         user = request.user
         accounts = Account.objects.filter(user=user)

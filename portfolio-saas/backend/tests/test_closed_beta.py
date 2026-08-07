@@ -29,7 +29,7 @@ def _register_payload(email="beta@test.test"):
     }
 
 
-def test_verification_activates_account_and_login():
+def test_verification_activates_email_verified_flag_without_blocking_login():
     from accounts.services import make_email_verification_token
 
     client = APIClient()
@@ -40,30 +40,25 @@ def test_verification_activates_account_and_login():
     )
     user = User.objects.get(email="verify@test.test")
     assert registered.status_code == 201
-    assert user.is_active is False
+    assert user.is_active is True
     assert user.email_verified_at is None
     assert len(mail.outbox) == 1
 
-    denied = client.post(
+    # Login already works before verification (minimal-friction onboarding).
+    login_before = client.post(
         "/api/auth/login/",
         {"email": user.email, "password": "Sup3rSecret!"},
         format="json",
     )
+    assert login_before.status_code == 200
+
     verified = client.post(
         "/api/auth/verify-email/",
         {"token": make_email_verification_token(user)},
         format="json",
     )
-    login = client.post(
-        "/api/auth/login/",
-        {"email": user.email, "password": "Sup3rSecret!"},
-        format="json",
-    )
-    assert denied.status_code == 401
     assert verified.status_code == 200
-    assert login.status_code == 200
     user.refresh_from_db()
-    assert user.is_active is True
     assert user.email_verified_at is not None
 
 

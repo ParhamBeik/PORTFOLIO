@@ -14,25 +14,34 @@ def clear_auth_throttles():
     cache.clear()
 
 
-def test_register_creates_inactive_user_and_returns_verification_required():
+def test_register_logs_in_immediately_and_sends_verification_email():
+    """Signup is minimal-friction: no first/last name, and no wait for the
+    verification email before the user can use the app."""
+    from django.core import mail
+
     client = APIClient()
     resp = client.post(
         "/api/auth/register/",
-        {
-            "email": "new@test.test",
-            "password": "Sup3rSecret!",
-            "first_name": "New",
-            "last_name": "User",
-        },
+        {"email": "new@test.test", "password": "Sup3rSecret!"},
         format="json",
     )
     assert resp.status_code == 201
     data = resp.json()
     assert data["user"]["email"] == "new@test.test"
     assert data["user"]["tier"] == "FREE"
-    assert data["verification_required"] is True
-    assert "access" not in data
-    assert "ps_refresh" not in resp.cookies
+    assert "access" in data
+    assert "session_expires_at" in data
+    assert resp.cookies["ps_refresh"]["httponly"] is True
+
+    from accounts.models import User
+    user = User.objects.get(email="new@test.test")
+    assert user.is_active is True
+    assert user.email_verified_at is None
+    assert len(mail.outbox) == 1
+
+    # /me/ works right away with the token from registration.
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {data['access']}")
+    assert client.get("/api/auth/me/").status_code == 200
 
 
 def test_login_returns_access_and_sets_refresh_cookie():
@@ -45,8 +54,10 @@ def test_login_returns_access_and_sets_refresh_cookie():
         format="json",
     )
     assert resp.status_code == 200
-    assert "access" in resp.json()
-    assert "refresh" not in resp.json()
+    data = resp.json()
+    assert "access" in data
+    assert "refresh" not in data
+    assert "session_expires_at" in data
     assert resp.cookies["ps_refresh"]["httponly"] is True
 
 
@@ -302,3 +313,27 @@ def test_change_password_mismatched_or_weak(make_user):
     )
     assert resp.status_code == 400
     assert "new_password" in resp.json()
+
+
+def test_change_password_and_export_require_verified_email():
+    """Signup no longer blocks login on verification, but sensitive actions
+    (password change, data export) still require a verified email."""
+    from accounts.models import User
+
+    user = User.objects.create_user(
+        email="unverified@test.test", password="Sup3rSecret!", email_verified_at=None
+    )
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    resp = client.post(
+        "/api/auth/change-password/",
+        {
+            "old_password": "Sup3rSecret!",
+            "new_password": "N3wSecretPass123!",
+            "confirm_password": "N3wSecretPass123!",
+        },
+        format="json",
+    )
+    assert resp.status_code == 403
+    assert client.get("/api/auth/export/").status_code == 403

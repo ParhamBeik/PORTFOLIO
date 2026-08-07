@@ -21,3 +21,17 @@ class IsPro(BasePermission):
 
     def has_permission(self, request, view):
         return tier_of(request.user) == PRO
+
+
+class IsEmailVerified(BasePermission):
+    """Gates sensitive actions (password change, data export) on a verified email.
+
+    Signup no longer blocks login on verification (minimal-friction onboarding),
+    so this is the one place that still requires it.
+    """
+
+    message = "Verify your email before using this feature."
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(user and user.is_authenticated and user.email_verified_at is not None)

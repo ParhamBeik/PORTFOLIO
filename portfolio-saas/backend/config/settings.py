@@ -172,7 +172,6 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
-        "config.authentication.PublicDemoUserAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     # H5: throttle anonymous endpoints (login/register) by IP. Authenticated
@@ -192,7 +191,7 @@ REST_FRAMEWORK = {
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=int(os.getenv("REFRESH_TOKEN_LIFETIME_DAYS", "30"))),
     "USER_ID_FIELD": "id",
     "USER_ID_CLAIM": "user_id",
     # Rotate refresh tokens on use and blacklist the old one, so a stolen refresh
@@ -202,6 +201,9 @@ SIMPLE_JWT = {
     "CHECK_REVOKE_TOKEN": True,
 }
 JWT_COOKIE_SECURE = not DEBUG
+GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+SNAPSHOT_RETENTION_DAYS = int(os.getenv("SNAPSHOT_RETENTION_DAYS", "30"))
+SNAPSHOT_PRUNE_ENABLED = os.getenv("SNAPSHOT_PRUNE_ENABLED", "0") == "1"
 # token_blacklist (INSTALLED_APPS above) is now available for a "log out all
 # devices" endpoint (blacklist a user's OutstandingToken set) — add it in
 # accounts/views.py, not here.

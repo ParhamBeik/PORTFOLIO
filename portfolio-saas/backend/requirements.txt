@@ -10,6 +10,7 @@ gunicorn==22.0.0
 uvicorn[standard]==0.30.6
 celery==5.4.0
 sentry-sdk==2.66.1
+google-auth==2.35.0
 # Pro optimization engine (pricing/optimization.py, pricing/returns.py).
 # PyPortfolioOpt is the single top-level dep; the rest are pinned for
 # reproducible Docker builds (all ship linux/amd64 py3.11 wheels, no compile).

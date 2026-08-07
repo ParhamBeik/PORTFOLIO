@@ -6,10 +6,7 @@ from django.db import transaction
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import TokenError
-from rest_framework_simplejwt.serializers import (
-    TokenObtainPairSerializer,
-    TokenRefreshSerializer,
-)
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 
 from .models import User
 
@@ -50,7 +47,7 @@ class RegisterSerializer(serializers.ModelSerializer):
             password=validated_data["password"],
             first_name=validated_data.get("first_name", ""),
             last_name=validated_data.get("last_name", ""),
-            is_active=False,
+            is_active=True,
             email_verified_at=None,
         )
         return user
@@ -119,12 +116,4 @@ class PasswordAwareTokenRefreshSerializer(TokenRefreshSerializer):
             JWTAuthentication().get_user(self.token_class(attrs["refresh"]))
         except TokenError as exc:
             raise AuthenticationFailed("Refresh session is invalid.") from exc
-        return super().validate(attrs)
-
-
-class VerifiedTokenObtainPairSerializer(TokenObtainPairSerializer):
-    def validate(self, attrs):
-        user = User.objects.filter(email__iexact=attrs.get("email", "")).first()
-        if user and user.email_verified_at is None:
-            raise AuthenticationFailed("Email verification is required.")
         return super().validate(attrs)

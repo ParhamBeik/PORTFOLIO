@@ -57,6 +57,9 @@ class User(AbstractUser):
     )
     # Gateway customer reference (kept for audit; Zarinpal keys on Payment.authority).
     customer_id = models.CharField(max_length=64, blank=True, default="")
+    # Google's stable per-account identifier ("sub" claim). Bound on first Google
+    # sign-in so a later email change on the Google side can't orphan the login.
+    google_sub = models.CharField(max_length=64, blank=True, default="", db_index=True)
     # Annual Pro expiry. None means "PRO with no expiry" (manual/grant tier).
     pro_expires_at = models.DateTimeField(null=True, blank=True)
     email_verified_at = models.DateTimeField(null=True, blank=True)
