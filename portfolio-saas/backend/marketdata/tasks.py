@@ -11,6 +11,7 @@ the Asset lookups are lazy imports kept inside functions and treated as
 configuration reads, not domain coupling.
 """
 import logging
+import re
 import time
 import uuid
 from datetime import timedelta
@@ -60,9 +61,19 @@ def operational_health_check():
     except Exception:
         logger.exception("Could not inspect Celery queue backlog.")
 
+    # A gate failure is the warehouse's normal resting state while the archive is
+    # still filling -- 1,072 of 1,346 symbols fail it today. Alerting on "any
+    # failure" therefore fired every 15 minutes forever and buried the five alerts
+    # that do mean something. Alert on the share failing, not on the fact that any
+    # does, so the signal is "this got worse" rather than "backfill is unfinished".
+    assessed = SymbolIntegrity.objects.count()
     failed_integrity = SymbolIntegrity.objects.filter(passes_gate=False).count()
-    if failed_integrity:
-        alerts.append(("failed-integrity-assessments", {"count": failed_integrity}))
+    if assessed and failed_integrity / assessed > settings.INTEGRITY_FAILURE_RATE_THRESHOLD:
+        alerts.append(("failed-integrity-assessments", {
+            "failed": failed_integrity,
+            "assessed": assessed,
+            "rate": round(failed_integrity / assessed, 4),
+        }))
 
     since = timezone.now() - timedelta(hours=1)
     recent_runs = WorkflowRun.objects.filter(created_at__gte=since)
@@ -184,6 +195,25 @@ def weekly_metadata_sync():
     logger.info("weekly_metadata_sync: done")
 
 
+_RETRY_CLASS_RE = re.compile(r"\((\w+), status=")
+
+
+def _retry_code(last_error):
+    """A groupable reason for why a state asked to be retried.
+
+    A constant `archive_fetch_retry` covered 773 of 1,752 ledger rows: the ledger
+    recorded *that* something retried but never *what*, so answering "why is the
+    archive retrying" meant reading `last_error` off the states table by hand.
+    The full message still goes to metadata; this is only the grouping key.
+    """
+    match = _RETRY_CLASS_RE.search(last_error)
+    if match:
+        return match.group(1)  # ReadTimeout, SSLError, ConnectionError
+    if "tick_volume_mismatch" in last_error:
+        return "tick_volume_mismatch"
+    return last_error.split(":")[0][:80] or "archive_fetch_retry"
+
+
 @shared_task(ignore_result=True)
 def run_archive_state(state_id):
     """Process one claimed ArchiveFetchState (HTTP + ingest)."""
@@ -229,10 +259,11 @@ def run_archive_state(state_id):
         rows_received=state.expected_rows,
         rows_accepted=state.stored_rows,
         rows_rejected=state.known_gap_rows,
-        error_code="archive_fetch_retry" if state.last_error else "",
+        error_code=_retry_code(state.last_error) if state.last_error else "",
         metadata={
             "missing_rows": state.missing_rows,
             "target_window_days": state.target_window_days,
+            **({"reason": state.last_error[:300]} if state.last_error else {}),
         },
     )
     if state.verified_complete:
@@ -298,12 +329,29 @@ def recent_history_refresh():
 
 
 @shared_task(ignore_result=True)
+def prune_workflow_runs():
+    """Enforce the ledger's own retention window.
+
+    The ledger replaced 241,000 unbounded legacy log rows, and was itself
+    unbounded: `workflow_retention` existed but was never scheduled. Legacy
+    SystemLogEvent rows stay untouched -- they are a frozen historical archive
+    and nothing writes to them any more.
+    """
+    from .models import WorkflowRun
+
+    cutoff = timezone.now() - timedelta(days=settings.WORKFLOW_RETENTION_DAYS)
+    deleted, _ = WorkflowRun.objects.filter(created_at__lt=cutoff).delete()
+    logger.info("prune_workflow_runs: deleted %d rows older than %s", deleted, cutoff.date())
+    return deleted
+
+
+@shared_task(ignore_result=True)
 def archive_maintenance():
     """Reverify completed low-volatility endpoints outside normal batches."""
     state_ids = claim_archive_maintenance(limit=2)
     if state_ids:
         group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
-    logger.debug("archive_maintenance enqueued %d states", len(state_ids))
+    logger.info("archive_maintenance: enqueued %d archive states", len(state_ids))
 
 
 @shared_task(ignore_result=True, rate_limit="1/s")

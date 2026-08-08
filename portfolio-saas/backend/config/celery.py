@@ -112,6 +112,12 @@ app.conf.beat_schedule = {
         "task": "marketdata.tasks.operational_health_check",
         "schedule": crontab(minute="*/15"),
     },
+    # The workflow ledger enforces its own 30-day window. Without this it grows
+    # forever, which is the exact failure it was built to replace.
+    "prune-workflow-runs-nightly": {
+        "task": "marketdata.tasks.prune_workflow_runs",
+        "schedule": crontab(hour=3, minute=10),
+    },
     # Snapshot retention. No-op unless SNAPSHOT_PRUNE_ENABLED=1 (see
     # portfolio/services/maintenance.py) -- deleting rows needs explicit sign-off.
     "prune-snapshots-nightly": {

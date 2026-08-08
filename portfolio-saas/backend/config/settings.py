@@ -332,6 +332,10 @@ ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 QUEUE_BACKLOG_THRESHOLD = int(os.getenv("QUEUE_BACKLOG_THRESHOLD", "100"))
 APPLICATION_ERROR_THRESHOLD = int(os.getenv("APPLICATION_ERROR_THRESHOLD", "20"))
 WORKFLOW_FAILURE_RATE_THRESHOLD = float(os.getenv("WORKFLOW_FAILURE_RATE_THRESHOLD", "0.10"))
+# Today 1,072 of 1,346 symbols (0.80) fail the integrity gate purely because the
+# tick backfill is unfinished. Start just above that so the alert means "coverage
+# regressed", and lower it as the archive fills.
+INTEGRITY_FAILURE_RATE_THRESHOLD = float(os.getenv("INTEGRITY_FAILURE_RATE_THRESHOLD", "0.85"))
 ARCHIVE_PROGRESS_STALE_SECONDS = int(os.getenv("ARCHIVE_PROGRESS_STALE_SECONDS", "1800"))
 PRICE_STALE_THRESHOLD_SECONDS = int(
     os.getenv("PRICE_STALE_THRESHOLD_SECONDS", "900")

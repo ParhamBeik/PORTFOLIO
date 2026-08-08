@@ -260,20 +260,49 @@ def fetch_and_publish():
     archive backfill needed.
     """
     from marketdata.market_state import live_interval_seconds, market_state
+    from marketdata.models import WorkflowRun
+    from marketdata.workflows import WorkflowOutcome
 
+    # The live lane was the one pipeline stage with no structured record at all:
+    # a plain-text line that could not be grouped, counted or queried, and whose
+    # provider HTTP attempts were counted into a ContextVar with no owner and then
+    # discarded. It is the lane that spends quota every minute, so it is the one
+    # that most needs to be answerable in the ledger alongside the archive.
+    state = market_state()
+    outcome = WorkflowOutcome(
+        "live_prices",
+        endpoint="live_tick",
+        source="brsapi.ir",
+        destination_table="Price",
+    )
     interval = live_interval_seconds()
     redis_client = get_redis()
     if redis_client is not None:
         # NX+EX is the whole gate: the key expires exactly one interval after the
         # last accepted run, so a failed SET means "too soon".
         if not redis_client.set("marketdata:live_tick", "1", ex=interval, nx=True):
-            logger.debug("fetch_and_publish skipped: %ss cadence not elapsed", interval)
+            outcome.finish(
+                WorkflowRun.Outcome.SKIPPED,
+                metadata={"reason": "cadence_not_elapsed", "market_state": state,
+                          "interval_seconds": interval},
+            )
             return {"priced": {}, "written": False, "skipped": True}
 
-    result = run_price_fetch(publish=True)
-    logger.info(
-        "fetch_and_publish[%s]: %d prices, written=%s",
-        market_state(), len(result["priced"]), result["written"],
+    try:
+        result = run_price_fetch(publish=True)
+    except Exception as err:
+        outcome.finish(
+            WorkflowRun.Outcome.FAILED,
+            error_code=type(err).__name__,
+            metadata={"reason": str(err), "market_state": state},
+        )
+        raise
+    priced = len(result["priced"])
+    outcome.finish(
+        WorkflowRun.Outcome.SUCCESS if result["written"] else WorkflowRun.Outcome.PARTIAL,
+        rows_received=priced,
+        rows_accepted=priced if result["written"] else 0,
+        metadata={"market_state": state, "written": result["written"]},
     )
     return result
 

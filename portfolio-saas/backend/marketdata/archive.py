@@ -149,6 +149,8 @@ _REJECTION_LABELS = {
     ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED: (
         "stock_candle_unadjusted", "series:1d_unadj",
     ),
+    # Ticks need no entry: the writer label and the endpoint name are identical,
+    # so the `(state.endpoint,)` default below already finds their rejections.
 }
 
 # Extra wait before a *completed* state re-verifies, on top of the next
@@ -312,18 +314,25 @@ def _fetch_and_ingest(state):
                 f"{day}: provider returned {rejected_ticks} invalid tick record(s); "
                 "existing ticks were retained."
             )
-        candle_volume = (
-            MarketCandle.objects.filter(
-                symbol=symbol, timeframe="1d_unadj", date_time=day
-            ).values_list("volume", flat=True).first()
-        )
+        candle_volume = _symbol_candle_volumes(symbol, [day]).get(day)
         mismatch = validation.reconcile_tick_volume(
             accepted_ticks, candle_volume
         )
         if mismatch:
             # The provider's own daily bar disagrees with its own trade list, so
-            # the day is not usable. Keep it out of `stored` and let it retry
-            # rather than silently banking a wrong total.
+            # the day is not usable. Keep it out of `stored` rather than silently
+            # banking a wrong total -- but record it, because a day the provider
+            # will never serve consistently is a permanent gap, not a retry. Left
+            # unrecorded it re-fetched forever (24 states, none able to complete)
+            # and, because promotion to the 365-day window demands that *every*
+            # tick state be complete, a single such day blocked the whole phase.
+            RejectedRecord.objects.update_or_create(
+                endpoint="stock_transaction_ticks",
+                symbol=symbol[:64],
+                date=day[:10],
+                reason=mismatch.split(":")[0][:64],
+                defaults={"payload": {"day": day, "detail": mismatch}},
+            )
             raise MarketDataFetchError(f"{day}: {mismatch}")
 
         # Validate before replacing, then swap atomically. A malformed payload
@@ -479,6 +488,35 @@ def market_trading_days(window_days=None):
     return actual_trading_days(window_days=window_days or TICK_WINDOW_DAYS)
 
 
+def _symbol_candle_volumes(symbol, days=None):
+    """Traded volume per day for one symbol, from whichever candle pass has it.
+
+    Volume is adjustment-invariant -- a split rescales price, not shares traded --
+    so an adjusted bar answers this exactly as well as an unadjusted one, and the
+    unadjusted row still wins where both exist.
+
+    Reading only `1d_unadj` silently stranded 35 symbols. The provider serves them
+    no unadjusted candles at all (اتکای has 2,570 adjusted bars and zero unadjusted),
+    so their trading calendar came back empty, their tick state raised "no trading
+    days known" on every pass, and it never converged -- 4-7 consecutive failures
+    each, burning a request per cycle forever. The candle pass had not "not reached
+    them yet"; it was never going to.
+    """
+    queryset = MarketCandle.objects.filter(
+        symbol=symbol,
+        timeframe__in=(MarketCandle.UNADJUSTED, MarketCandle.ADJUSTED),
+    )
+    if days is not None:
+        queryset = queryset.filter(date_time__in=days)
+    volumes = {}
+    for timeframe, day, volume in queryset.values_list(
+        "timeframe", "date_time", "volume"
+    ):
+        if timeframe == MarketCandle.UNADJUSTED or day not in volumes:
+            volumes[day] = volume
+    return volumes
+
+
 def _tick_days_unreconciled(symbol, days):
     """Stored tick days whose traded volume disagrees with the daily candle.
 
@@ -495,11 +533,7 @@ def _tick_days_unreconciled(symbol, days):
         .values_list("date")
         .annotate(total=Sum("volume"))
     )
-    candle_totals = dict(
-        MarketCandle.objects.filter(
-            symbol=symbol, timeframe="1d_unadj", date_time__in=days
-        ).values_list("date_time", "volume")
-    )
+    candle_totals = _symbol_candle_volumes(symbol, days)
     return {
         day
         for day, candle_volume in candle_totals.items()
@@ -510,15 +544,11 @@ def _tick_days_unreconciled(symbol, days):
 def _tick_trading_days(symbol, window_days=TICK_WINDOW_DAYS):
     """Trading days this symbol actually has a daily candle for.
 
-    Empty means the candle pass has not reached this symbol yet. That is a
-    different condition from "every tick day is already stored", and callers
-    must not conflate the two.
+    Empty means no candle pass has produced a bar for this symbol on any timeframe.
+    That is a different condition from "every tick day is already stored", and
+    callers must not conflate the two.
     """
-    return market_trading_days(window_days) & set(
-        MarketCandle.objects.filter(
-            symbol=symbol, timeframe=MarketCandle.UNADJUSTED
-        ).values_list("date_time", flat=True)
-    )
+    return market_trading_days(window_days) & set(_symbol_candle_volumes(symbol))
 
 
 def _tick_dates_needed(symbol, window_days=TICK_WINDOW_DAYS):

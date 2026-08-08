@@ -232,8 +232,10 @@ services:
         condition: service_healthy
       celery_worker_archive:
         condition: service_healthy
+      # Codal ships disabled and is optional. Waiting on its health would let a
+      # dead optional feature stop beat, and with it live prices and archive.
       celery_worker_codal:
-        condition: service_healthy
+        condition: service_started
     environment:
       <<: *backend-env
       SERVICE_NAME: celery_beat
