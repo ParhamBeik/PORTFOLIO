@@ -111,6 +111,47 @@ def test_volume_mismatch_is_recorded_so_the_day_can_be_forgiven():
     assert "5!=99" in record.payload["detail"]
 
 
+def test_banking_a_day_counts_as_progress_even_when_the_gap_does_not_shrink():
+    """The tick window moves, so `missing` can stay flat while data lands.
+
+    Measuring progress only by a shrinking gap punished symbols for succeeding:
+    they banked a day, the window gained a day, `missing` held, and the backoff
+    doubled to the 24h cap while they were steadily storing data.
+    """
+    from marketdata.archive import _reschedule
+
+    state = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+        symbol="moving-window",
+        stored_rows=4,
+        missing_rows=44,
+        consecutive_failures=3,
+    )
+
+    # One more day banked; the window also gained one, so the gap is unchanged.
+    _reschedule(state, stored_count=5, missing_count=44, previous_stored=4,
+                previous_missing=44)
+
+    assert state.consecutive_failures == 0
+
+
+def test_no_progress_at_all_still_backs_off():
+    from marketdata.archive import _reschedule
+
+    state = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+        symbol="wedged",
+        stored_rows=4,
+        missing_rows=44,
+        consecutive_failures=3,
+    )
+
+    _reschedule(state, stored_count=4, missing_count=44, previous_stored=4,
+                previous_missing=44)
+
+    assert state.consecutive_failures == 4
+
+
 def test_archive_fetch_has_one_physical_attempt_by_default():
     with patch("marketdata.fetchers.base.reserve_request") as reserve, patch(
         "marketdata.fetchers.base.requests.get", side_effect=requests.Timeout("timeout")

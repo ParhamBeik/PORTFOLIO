@@ -14,6 +14,7 @@ import logging
 import re
 import time
 import uuid
+from collections import Counter
 from datetime import timedelta
 
 from celery import group, shared_task
@@ -83,6 +84,31 @@ def operational_health_check():
     if run_count and failure_rate > settings.WORKFLOW_FAILURE_RATE_THRESHOLD:
         alerts.append(("elevated-workflow-failure-rate", {
             "failed": failed_count, "total": run_count, "rate": round(failure_rate, 4)
+        }))
+
+    # Individually wedged states were invisible: `stale-archive-progress` below
+    # only fires when the *whole* archive goes quiet, so 59 symbols that could
+    # never converge sat failing for days inside a busy, healthy-looking archive.
+    # `consecutive_failures` is exactly the right signal because it resets only on
+    # genuine progress (len(missing) shrinking), never on a mere successful call.
+    # Past ~5 the backoff has capped at 24h, so a state here retries once a day
+    # and gets nowhere. Report the causes, not just the count.
+    wedged = ArchiveFetchState.objects.filter(
+        consecutive_failures__gte=settings.ARCHIVE_WEDGED_FAILURE_THRESHOLD
+    )
+    wedged_count = wedged.count()
+    if wedged_count:
+        causes = Counter(
+            _retry_code(error)
+            for error in wedged.values_list("last_error", flat=True)
+        )
+        alerts.append(("wedged-archive-states", {
+            "count": wedged_count,
+            "threshold": settings.ARCHIVE_WEDGED_FAILURE_THRESHOLD,
+            "causes": dict(causes.most_common(5)),
+            "sample": list(
+                wedged.values_list("endpoint", "symbol")[:5]
+            ),
         }))
 
     stale_before = timezone.now() - timedelta(seconds=settings.ARCHIVE_PROGRESS_STALE_SECONDS)

@@ -38,7 +38,9 @@ def run_price_fetch(*, dry_run=False, publish=True):
         lock_token = uuid.uuid4().hex
         if not redis_client.set(lock_key, lock_token, ex=150, nx=True):
             logger.warning("Another price fetch is already running (failed to acquire Redis lock). Skipping.")
-            return {"priced": {}, "written": False}
+            # Flagged so the caller can report a skip rather than a failed fetch:
+            # an empty price map alone cannot tell the two apart.
+            return {"priced": {}, "written": False, "skipped": "lock_held"}
 
     try:
         raw = fetch_all_markets(api_settings_from_django())
@@ -298,6 +300,16 @@ def fetch_and_publish():
         )
         raise
     priced = len(result["priced"])
+    if not priced:
+        # No prices is not a partial success. Overnight only crypto quotes, and a
+        # contended lock returns the same empty shape -- neither is a degraded
+        # fetch, and calling them "partial" would make the failure rate lie.
+        outcome.finish(
+            WorkflowRun.Outcome.SKIPPED,
+            metadata={"reason": result.get("skipped") or "no_prices_available",
+                      "market_state": state},
+        )
+        return result
     outcome.finish(
         WorkflowRun.Outcome.SUCCESS if result["written"] else WorkflowRun.Outcome.PARTIAL,
         rows_received=priced,

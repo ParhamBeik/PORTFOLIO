@@ -70,7 +70,10 @@ def test_rejected_rows_under_the_writer_label_are_forgiven():
 
 
 def test_no_progress_backs_off_instead_of_retrying_every_minute():
-    state = _state("قصفها", missing_rows=2)
+    # stored_rows starts at 1 to match the row the stub reports as already held.
+    # Otherwise the first pass is genuine progress (0 -> 1 stored) and correctly
+    # earns the fast path, which is a different case from "converges never".
+    state = _state("قصفها", missing_rows=2, stored_rows=1)
     stuck = ((1, 0), {"a", "b", "c"}, {"c"})  # 2 missing, unchanged, every pass
 
     with patch("marketdata.archive._fetch_and_ingest", return_value=stuck):

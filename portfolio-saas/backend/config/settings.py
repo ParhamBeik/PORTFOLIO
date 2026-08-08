@@ -337,6 +337,10 @@ WORKFLOW_FAILURE_RATE_THRESHOLD = float(os.getenv("WORKFLOW_FAILURE_RATE_THRESHO
 # regressed", and lower it as the archive fills.
 INTEGRITY_FAILURE_RATE_THRESHOLD = float(os.getenv("INTEGRITY_FAILURE_RATE_THRESHOLD", "0.85"))
 ARCHIVE_PROGRESS_STALE_SECONDS = int(os.getenv("ARCHIVE_PROGRESS_STALE_SECONDS", "1800"))
+# consecutive_failures resets only on real progress, so it is the wedged counter.
+# Observed split: 482 states sit at 1-2 (ordinary provider timeouts), then a gap.
+# By 6 the backoff has capped at 24h -- retrying daily, converging never.
+ARCHIVE_WEDGED_FAILURE_THRESHOLD = int(os.getenv("ARCHIVE_WEDGED_FAILURE_THRESHOLD", "6"))
 PRICE_STALE_THRESHOLD_SECONDS = int(
     os.getenv("PRICE_STALE_THRESHOLD_SECONDS", "900")
 )

@@ -715,6 +715,7 @@ def run_archive_state(state_id):
         return state
 
     previous_missing = state.missing_rows
+    previous_stored = state.stored_rows
     missing = expected - stored
     known_gaps = set()
     # Records the validator permanently rejects (bad OHLC, volume mismatch)
@@ -759,21 +760,44 @@ def run_archive_state(state_id):
             now + _REVERIFY_INTERVAL.get(state.endpoint, timedelta(0))
         )
     else:
-        # `created` was truthy on every pass because ingest_real_legal re-updates
-        # rows it has already written, so the old fast-retry branch rescheduled
-        # non-converging states every 60s forever (one symbol ran 126x in 5h).
-        # Only real progress -- a gap that actually shrank -- earns the fast path.
-        if len(missing) < previous_missing:
-            state.consecutive_failures = 0
-            state.next_attempt_at = now + timedelta(minutes=1)
-        else:
-            state.consecutive_failures += 1
-            state.next_attempt_at = now + timedelta(
-                hours=min(2 ** max(state.consecutive_failures - 1, 0), 24)
-            )
+        _reschedule(
+            state,
+            stored_count=len(stored),
+            missing_count=len(missing),
+            previous_stored=previous_stored,
+            previous_missing=previous_missing,
+            now=now,
+        )
         logger.debug("Archive state incomplete for %s (%s): stored=%d expected=%d missing=%d.", state.symbol, state.endpoint, state.stored_rows, state.expected_rows, state.missing_rows)
     state.save()
     return state
+
+
+def _reschedule(state, *, stored_count, missing_count, previous_stored,
+                previous_missing, now=None):
+    """Decide when an incomplete state tries again, from whether it advanced.
+
+    `created` was truthy on every pass because ingest_real_legal re-updates rows
+    it has already written, so an older fast-retry branch rescheduled
+    non-converging states every 60s forever (one symbol ran 126x in 5h). Only
+    real progress earns the fast path.
+
+    Progress is measured on `stored`, not only on `missing`. For ticks `expected`
+    is a *moving* 90-day window: as each new trading day opens it gains a day, so
+    banking one day leaves `missing` flat -- and the symbol was punished for
+    succeeding, backing off 1h, 2h, 4h ... to the 24h cap while steadily storing
+    data. That throttled the largest remaining backlog in the warehouse. A gap
+    that shrank still counts; so does a row that landed.
+    """
+    now = now or timezone.now()
+    if stored_count > previous_stored or missing_count < previous_missing:
+        state.consecutive_failures = 0
+        state.next_attempt_at = now + timedelta(minutes=1)
+    else:
+        state.consecutive_failures += 1
+        state.next_attempt_at = now + timedelta(
+            hours=min(2 ** max(state.consecutive_failures - 1, 0), 24)
+        )
 
 
 _ENDPOINT_PRIORITY = (
