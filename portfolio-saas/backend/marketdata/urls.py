@@ -15,6 +15,7 @@ urlpatterns = [
     path("announcements/", views.AnnouncementsView.as_view(), name="market-announcements"),
     path("reports/<int:report_id>/", views.ReportDetailView.as_view(), name="market-report-detail"),
     path("reports/<int:report_id>/facts/", views.ReportFactsView.as_view(), name="market-report-facts"),
+    path("artifacts/<int:artifact_id>/download/", views.ArtifactDownloadView.as_view(), name="codal-artifact-download"),
     path("facts/", views.FactsView.as_view(), name="market-facts"),
     path("shareholders/", views.ShareholdersView.as_view(), name="market-shareholders"),
 ]

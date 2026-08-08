@@ -3,12 +3,15 @@
 import hashlib
 import io
 import mimetypes
+import os
+import tempfile
 import zipfile
 from urllib.parse import urljoin, urlsplit
 
 import requests
 from django.conf import settings
 from django.db import transaction
+from django.urls import reverse
 from django.utils import timezone
 
 from .codal_classification import classify_announcement
@@ -51,16 +54,36 @@ class CodalArtifactRejected(RuntimeError):
     pass
 
 
+def storage_error():
+    """Why local storage is unusable, or None. Checked by writing, not guessing."""
+    root = settings.CODAL_STORAGE_DIR
+    if not root:
+        return "CODAL_STORAGE_DIR"
+    try:
+        os.makedirs(root, exist_ok=True)
+        handle, probe = tempfile.mkstemp(dir=root)
+        os.close(handle)
+        os.unlink(probe)
+    except OSError as exc:
+        return f"CODAL_STORAGE_DIR:{exc.__class__.__name__}"
+    return None
+
+
 def configuration_error():
-    required = {
-        "CODAL_HTTP_PROXY": settings.CODAL_HTTP_PROXY,
-        "CODAL_S3_ENDPOINT": settings.CODAL_S3_ENDPOINT,
-        "CODAL_S3_BUCKET": settings.CODAL_S3_BUCKET,
-        "CODAL_S3_REGION": settings.CODAL_S3_REGION,
-        "CODAL_S3_ACCESS_KEY_ID": settings.CODAL_S3_ACCESS_KEY_ID,
-        "CODAL_S3_SECRET_ACCESS_KEY": settings.CODAL_S3_SECRET_ACCESS_KEY,
-    }
-    return [name for name, value in required.items() if not value]
+    """Missing configuration, network requirement first.
+
+    Storage used to need five S3 values; on local disk it needs one writable
+    directory, so the proxy is the only thing a deployment must supply. Order
+    matters: the caller maps a leading proxy entry to BLOCKED_NETWORK and a
+    storage entry to BLOCKED_STORAGE.
+    """
+    missing = []
+    if not settings.CODAL_HTTP_PROXY:
+        missing.append("CODAL_HTTP_PROXY")
+    storage = storage_error()
+    if storage:
+        missing.append(storage)
+    return missing
 
 
 def _absolute_url(value):
@@ -149,55 +172,63 @@ def download_artifact(url, kind):
         session.close()
 
 
-def s3_client():
-    import boto3
-    from botocore.config import Config
+def artifact_path(key):
+    """Absolute path of a stored artifact, refusing to escape the storage root.
 
-    return boto3.client(
-        "s3",
-        endpoint_url=settings.CODAL_S3_ENDPOINT,
-        region_name=settings.CODAL_S3_REGION,
-        aws_access_key_id=settings.CODAL_S3_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.CODAL_S3_SECRET_ACCESS_KEY,
-        config=Config(signature_version="s3v4", retries={"max_attempts": 1, "mode": "standard"}),
-    )
+    `key` reaches this from the database, so it is treated as untrusted: a stored
+    value of `../../etc/passwd` must not resolve outside the root.
+    """
+    root = os.path.realpath(settings.CODAL_STORAGE_DIR)
+    path = os.path.realpath(os.path.join(root, key))
+    if path != root and not path.startswith(root + os.sep):
+        raise CodalBlockedStorage("path_escapes_storage_root")
+    return path
 
 
 def store_artifact(content, content_type, kind):
-    from botocore.exceptions import ClientError
+    """Write one immutable, content-addressed artifact to local disk.
 
+    The layout is unchanged from the S3 version (`codal/sha256/aa/<hash>.<ext>`),
+    so the key stays a pure function of the bytes and re-storing the same
+    document is a no-op. Writing via a temp file and os.replace keeps that
+    promise under a crash: a reader either sees the whole artifact or no file at
+    all, never a truncated one sitting at a name that claims a checksum.
+    """
     checksum = hashlib.sha256(content).hexdigest()
     extension = {"excel": "xlsx", "html": "html", "pdf": "pdf"}.get(kind)
     extension = extension or (mimetypes.guess_extension(content_type) or ".bin").lstrip(".")
     key = f"codal/sha256/{checksum[:2]}/{checksum}.{extension}"
-    client = s3_client()
     try:
-        try:
-            client.head_object(Bucket=settings.CODAL_S3_BUCKET, Key=key)
-        except ClientError as exc:
-            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-            if status != 404:
+        path = artifact_path(key)
+        if not os.path.exists(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            handle, temporary = tempfile.mkstemp(dir=os.path.dirname(path))
+            try:
+                with os.fdopen(handle, "wb") as stream:
+                    stream.write(content)
+                os.replace(temporary, path)
+            except BaseException:
+                # A partial file under a checksum-named path would be a lie.
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
                 raise
-            client.put_object(
-                Bucket=settings.CODAL_S3_BUCKET,
-                Key=key,
-                Body=content,
-                ContentType=content_type,
-                Metadata={"sha256": checksum},
-            )
+    except CodalBlockedStorage:
+        raise
     except Exception as exc:
         raise CodalBlockedStorage(type(exc).__name__) from exc
     return key, checksum
 
 
-def presigned_artifact_url(artifact, expires=300):
+def artifact_download_url(artifact):
+    """URL of the authenticated view that serves this artifact.
+
+    There is no signing service on a local disk, so authorization is enforced by
+    the view itself rather than by a short-lived URL. The storage directory is
+    never served statically.
+    """
     if artifact.fetch_status != CodalArtifact.FetchStatus.STORED or not artifact.s3_key:
         return None
-    return s3_client().generate_presigned_url(
-        "get_object",
-        Params={"Bucket": settings.CODAL_S3_BUCKET, "Key": artifact.s3_key},
-        ExpiresIn=expires,
-    )
+    return reverse("codal-artifact-download", args=[artifact.pk])
 
 
 def _artifact_sources(announcement):
@@ -270,7 +301,13 @@ def _persist_parsed(report, artifact, parsed):
 def extract_report(report):
     missing = configuration_error()
     if missing:
-        report.status = CodalReport.Status.BLOCKED_STORAGE if all(name.startswith("CODAL_S3") for name in missing) else CodalReport.Status.BLOCKED_NETWORK
+        # Network is the harder blocker and is reported first when both apply:
+        # a proxy needs a human, an unwritable directory needs a restart.
+        report.status = (
+            CodalReport.Status.BLOCKED_NETWORK
+            if "CODAL_HTTP_PROXY" in missing
+            else CodalReport.Status.BLOCKED_STORAGE
+        )
         report.error_code = "missing_configuration"
         report.save(update_fields=["status", "error_code", "updated_at"])
         return report, {"error_code": "missing_configuration", "missing": missing}

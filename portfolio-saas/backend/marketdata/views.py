@@ -5,7 +5,10 @@ request handler (the sync/backfill tasks own fetching). Public market charts
 (candles, history, index, symbols) are FREE; "smart-money" data (Codal filings,
 shareholder moves) is a Pro differentiator alongside the analytics endpoints.
 """
+import os
+
 from django.views import View
+from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db.models import Exists, OuterRef, Q
@@ -20,6 +23,7 @@ from portfolio.models import Account, Asset, Holding, Price, Snapshot, Transacti
 from .candles import candle_close_qs
 from .models import (
     CodalAnnouncement,
+    CodalArtifact,
     CodalFact,
     CodalReport,
     DailyStockHistory,
@@ -594,12 +598,12 @@ class ReportDetailView(APIView):
         report = get_object_or_404(
             CodalReport.objects.select_related("announcement", "revision_of"), pk=report_id
         )
-        from .codal_pipeline import presigned_artifact_url
+        from .codal_pipeline import artifact_download_url
 
         artifacts = []
         for artifact in report.artifacts.all():
             try:
-                download_url = presigned_artifact_url(artifact)
+                download_url = artifact_download_url(artifact)
             except Exception:
                 download_url = None
             artifacts.append({
@@ -646,6 +650,35 @@ class ReportDetailView(APIView):
                 "id", "announcement__date_publish", "status", "quality", "parser_version"
             )),
         })
+
+
+class ArtifactDownloadView(APIView):
+    """Serve one stored Codal document.
+
+    Local disk has no presigned URLs, so authorization lives here instead of in a
+    short-lived signature -- the same Pro feature check the rest of this module
+    uses. The storage directory is never exposed statically.
+    """
+
+    permission_classes = [IsAuthenticated, RequiresFeature("market_announcements")]
+
+    def get(self, request, artifact_id):
+        from django.http import FileResponse
+
+        from .codal_pipeline import artifact_path
+
+        artifact = get_object_or_404(CodalArtifact, pk=artifact_id)
+        if artifact.fetch_status != CodalArtifact.FetchStatus.STORED or not artifact.s3_key:
+            raise Http404("artifact not stored")
+        path = artifact_path(artifact.s3_key)
+        if not os.path.exists(path):
+            raise Http404("artifact missing from storage")
+        return FileResponse(
+            open(path, "rb"),
+            content_type=artifact.content_type or "application/octet-stream",
+            as_attachment=True,
+            filename=os.path.basename(path),
+        )
 
 
 class ReportFactsView(APIView):

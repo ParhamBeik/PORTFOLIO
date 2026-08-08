@@ -1,8 +1,8 @@
+import hashlib
 import io
 from unittest.mock import Mock, patch
 
 import pytest
-from botocore.exceptions import ClientError
 from openpyxl import Workbook
 from rest_framework.test import APIClient
 
@@ -14,7 +14,13 @@ from marketdata.codal_parsers import (
     parse_excel,
     parse_number,
 )
-from marketdata.codal_pipeline import download_artifact, store_artifact
+from marketdata.codal_pipeline import (
+    CodalBlockedStorage,
+    artifact_path,
+    configuration_error,
+    download_artifact,
+    store_artifact,
+)
 from marketdata.models import (
     CodalAnnouncement,
     CodalFact,
@@ -92,32 +98,61 @@ def test_workflow_run_persists_one_terminal_summary():
     assert row.rows_accepted == 1
 
 
-def test_proxy_download_to_checksum_addressed_s3(settings):
-    settings.CODAL_HTTP_PROXY = "https://proxy.example"
-    settings.CODAL_MAX_ARTIFACT_BYTES = 1024
-    settings.CODAL_S3_BUCKET = "warehouse"
-
+def _pdf_response():
     response = Mock()
     response.is_redirect = response.is_permanent_redirect = False
     response.status_code = 200
     response.headers = {"Content-Type": "application/pdf", "Content-Length": "12"}
     response.raise_for_status.return_value = None
     response.iter_content.return_value = [b"%PDF-fixture"]
-    client = Mock()
-    client.head_object.side_effect = ClientError(
-        {"Error": {"Code": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
-        "HeadObject",
-    )
+    return response
 
-    with patch("marketdata.codal_pipeline.requests.Session.get", return_value=response) as get, patch(
-        "marketdata.codal_pipeline.s3_client", return_value=client
-    ):
+
+def test_proxy_download_to_checksum_addressed_storage(settings, tmp_path):
+    settings.CODAL_HTTP_PROXY = "https://proxy.example"
+    settings.CODAL_MAX_ARTIFACT_BYTES = 1024
+    settings.CODAL_STORAGE_DIR = str(tmp_path)
+
+    with patch(
+        "marketdata.codal_pipeline.requests.Session.get", return_value=_pdf_response()
+    ) as get:
         _url, content_type, content = download_artifact("https://codal.ir/a.pdf", "pdf")
         key, checksum = store_artifact(content, content_type, "pdf")
 
     assert get.call_args.kwargs["proxies"]["https"] == settings.CODAL_HTTP_PROXY
     assert checksum in key
-    client.put_object.assert_called_once()
+    stored = tmp_path / key
+    assert stored.read_bytes() == b"%PDF-fixture"
+    assert hashlib.sha256(stored.read_bytes()).hexdigest() == checksum
+
+
+def test_storing_identical_bytes_twice_writes_one_file(settings, tmp_path):
+    """Content addressing is the dedupe: the same document must not store twice."""
+    settings.CODAL_STORAGE_DIR = str(tmp_path)
+
+    first, checksum = store_artifact(b"%PDF-same", "application/pdf", "pdf")
+    second, again = store_artifact(b"%PDF-same", "application/pdf", "pdf")
+
+    assert (first, checksum) == (second, again)
+    assert len(list(tmp_path.rglob("*.pdf"))) == 1
+
+
+def test_storage_key_cannot_escape_the_storage_root(settings, tmp_path):
+    """`s3_key` comes back from the database, so it is treated as untrusted."""
+    settings.CODAL_STORAGE_DIR = str(tmp_path)
+
+    with pytest.raises(CodalBlockedStorage):
+        artifact_path("../../etc/passwd")
+
+
+def test_only_the_proxy_is_required_once_storage_is_writable(settings, tmp_path):
+    """Storage needed five S3 values; on disk it needs one writable directory."""
+    settings.CODAL_STORAGE_DIR = str(tmp_path)
+    settings.CODAL_HTTP_PROXY = ""
+    assert configuration_error() == ["CODAL_HTTP_PROXY"]
+
+    settings.CODAL_HTTP_PROXY = "https://proxy.example"
+    assert configuration_error() == []
 
 
 def test_report_apis_expose_metadata_and_default_to_latest_revision(make_user):

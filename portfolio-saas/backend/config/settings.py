@@ -271,11 +271,11 @@ MARKETDATA_CODAL_MAX_PAGES = int(os.getenv("MARKETDATA_CODAL_MAX_PAGES", "5"))
 # of retrying incomplete infrastructure.
 CODAL_EXTRACTION_ENABLED = os.getenv("CODAL_EXTRACTION_ENABLED", "0") == "1"
 CODAL_HTTP_PROXY = os.getenv("CODAL_HTTP_PROXY", "")
-CODAL_S3_ENDPOINT = os.getenv("CODAL_S3_ENDPOINT", "")
-CODAL_S3_BUCKET = os.getenv("CODAL_S3_BUCKET", "")
-CODAL_S3_REGION = os.getenv("CODAL_S3_REGION", "")
-CODAL_S3_ACCESS_KEY_ID = os.getenv("CODAL_S3_ACCESS_KEY_ID", "")
-CODAL_S3_SECRET_ACCESS_KEY = os.getenv("CODAL_S3_SECRET_ACCESS_KEY", "")
+# Documents live on a mounted volume, content-addressed by SHA-256. Local disk
+# replaced S3 so the pipeline needs no credentials at all and the proxy is the
+# only thing a deployment must supply. Served exclusively through the
+# authenticated download view -- never as static files.
+CODAL_STORAGE_DIR = os.getenv("CODAL_STORAGE_DIR", "/var/lib/codal")
 CODAL_MAX_ARTIFACT_BYTES = int(os.getenv("CODAL_MAX_ARTIFACT_BYTES", str(50 * 1024 * 1024)))
 CODAL_OCR_CONFIDENCE_THRESHOLD = float(os.getenv("CODAL_OCR_CONFIDENCE_THRESHOLD", "0.90"))
 CODAL_PARSER_VERSION = os.getenv("CODAL_PARSER_VERSION", "1")
