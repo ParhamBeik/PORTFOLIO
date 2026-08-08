@@ -118,6 +118,12 @@ app.conf.beat_schedule = {
         "task": "marketdata.tasks.prune_workflow_runs",
         "schedule": crontab(hour=3, minute=10),
     },
+    # Only 2 of the audit's 9 checks ran on a schedule; the full sweep ran only
+    # when a human remembered. Read-only -- it writes a manifest, never data.
+    "weekly-warehouse-audit": {
+        "task": "marketdata.tasks.weekly_warehouse_audit",
+        "schedule": crontab(day_of_week=5, hour=5, minute=0),
+    },
     # Snapshot retention. No-op unless SNAPSHOT_PRUNE_ENABLED=1 (see
     # portfolio/services/maintenance.py) -- deleting rows needs explicit sign-off.
     "prune-snapshots-nightly": {

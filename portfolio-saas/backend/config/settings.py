@@ -341,6 +341,9 @@ ARCHIVE_PROGRESS_STALE_SECONDS = int(os.getenv("ARCHIVE_PROGRESS_STALE_SECONDS",
 # Observed split: 482 states sit at 1-2 (ordinary provider timeouts), then a gap.
 # By 6 the backoff has capped at 24h -- retrying daily, converging never.
 ARCHIVE_WEDGED_FAILURE_THRESHOLD = int(os.getenv("ARCHIVE_WEDGED_FAILURE_THRESHOLD", "6"))
+WAREHOUSE_AUDIT_DIR = os.getenv(
+    "WAREHOUSE_AUDIT_DIR", str(BASE_DIR / "recovery-manifests")
+)
 PRICE_STALE_THRESHOLD_SECONDS = int(
     os.getenv("PRICE_STALE_THRESHOLD_SECONDS", "900")
 )

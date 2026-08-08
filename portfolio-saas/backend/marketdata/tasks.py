@@ -11,6 +11,7 @@ the Asset lookups are lazy imports kept inside functions and treated as
 configuration reads, not domain coupling.
 """
 import logging
+import os
 import re
 import time
 import uuid
@@ -352,6 +353,28 @@ def recent_history_refresh():
     if state_ids:
         group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
     logger.info("recent_history_refresh: enqueued %d archive states", len(state_ids))
+
+
+@shared_task(ignore_result=True)
+def weekly_warehouse_audit():
+    """Run the full read-only audit and leave a timestamped manifest behind.
+
+    Only two of the nine checks ran on a schedule (inside nightly_data_integrity);
+    the full sweep had none, so drift was found only when someone thought to look.
+    Read-only by construction -- `audit_warehouse` has no --apply. Repairs still
+    go through `repair_warehouse`, which refuses to act without the manifest's
+    exact SHA-256.
+    """
+    from django.core.management import call_command
+
+    path = os.path.join(
+        settings.WAREHOUSE_AUDIT_DIR,
+        f"warehouse_audit_{timezone.now():%Y%m%d}.csv",
+    )
+    os.makedirs(settings.WAREHOUSE_AUDIT_DIR, exist_ok=True)
+    call_command("audit_warehouse", manifest_path=path)
+    logger.info("weekly_warehouse_audit: manifest written to %s", path)
+    return path
 
 
 @shared_task(ignore_result=True)

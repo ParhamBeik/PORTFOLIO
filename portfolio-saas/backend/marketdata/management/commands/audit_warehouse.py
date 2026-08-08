@@ -20,7 +20,7 @@ import csv
 import hashlib
 import itertools
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 
 from django.core.management.base import BaseCommand
 from django.db import connection, transaction
@@ -52,6 +52,15 @@ LOCAL_WINDOW = 41
 # "roughly ten times" are 9.7x or 10.4x and must not be touched, so the ratio has
 # to land within 1% of the power of ten.
 EXACTNESS_TOLERANCE = 0.01
+# How far a row must jump from its own previous session to join a collision
+# cluster. Deliberately low: the coincidence requirement below supplies the
+# specificity, so this only has to be above ordinary FX movement. SEK's bad row
+# was a 5x step, well inside a band that no real currency crosses in a day.
+COLLISION_JUMP = 3.0
+# How close two symbols' values must be to count as "the same number". The gold
+# day sat inside 2% (94,460 to 96,355); 5% catches it without pulling in
+# currencies that merely trade at a similar level.
+COLLISION_BAND = 0.05
 JALALI_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -82,7 +91,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--check", action="append",
             help="Run only named checks (repeatable): units, crosstable, gold, "
-                 "candletable, salvage, crypto, dates, ledger, census",
+                 "collision, candletable, salvage, crypto, dates, ledger, census",
         )
 
     def handle(self, *args, **opts):
@@ -92,6 +101,7 @@ class Command(BaseCommand):
             ("units", self.check_unit_steps),
             ("crosstable", self.check_cross_table),
             ("gold", self.check_gold_units),
+            ("collision", self.check_same_day_collisions),
             ("crypto", self.check_crypto_precision),
             ("candletable", self.check_candle_table_purity),
             ("salvage", self.check_salvageable_rejections),
@@ -372,6 +382,72 @@ class Command(BaseCommand):
                     "symbol": r["symbol"], "date": "", "value": r["med"],
                     "verdict": "unit_error" if "blank" in p else "suspect",
                     "evidence": f"unit={r['unit']!r} n={r['n']} min={r['mn']:.2f} max={r['mx']:.2f}; {p}",
+                })
+        return out
+
+    def check_same_day_collisions(self):
+        """Unrelated symbols landing on the same value on one date.
+
+        Every other unit check compares a symbol against *its own* history, which
+        misses a bad provider day wholesale. On 1405-04-31 eight currencies were
+        all written at roughly 96,000 Toman; only four were reported, and only
+        because those four have low medians so the per-symbol ratio test tripped.
+        SEK, SAR, MYR and QAR are equally wrong and were invisible.
+
+        Currencies do not converge. Several unrelated ones pricing within a few
+        percent of each other on a single day, each far from its own norm, is one
+        contaminated payload -- not eight coincident market moves.
+        """
+        # Judged against the symbol's own previous session, never a lifetime
+        # median: sixteen years of Toman inflation puts every old row far below
+        # its global median, which flagged 326 perfectly good 1394 rows where
+        # SAR, QAR and MYR legitimately all traded near 900.
+        rows = _rows(
+            """
+            WITH stepped AS (
+                SELECT date, symbol, close_price::float v,
+                       lag(close_price::float) OVER (
+                           PARTITION BY symbol ORDER BY date
+                       ) prev
+                FROM marketdata_goldcurrencyhistory
+                WHERE close_price > 0
+            )
+            SELECT date, symbol, v, prev
+            FROM stepped
+            WHERE prev > 0
+              AND (v / prev > %s OR prev / v > %s)
+            ORDER BY date
+            """,
+            [COLLISION_JUMP, COLLISION_JUMP],
+        )
+        by_date = defaultdict(list)
+        for r in rows:
+            by_date[r["date"]].append(r)
+
+        out = []
+        for date, candidates in by_date.items():
+            if len(candidates) < COINCIDENCE_MIN_SYMBOLS:
+                continue
+            # Cluster the day's outliers by value; a shared wrong number is the tell.
+            for row in sorted(candidates, key=lambda r: r["v"]):
+                peers = [
+                    other for other in candidates
+                    if other is not row
+                    and abs(other["v"] - row["v"]) / max(row["v"], 1e-9) <= COLLISION_BAND
+                ]
+                if len(peers) + 1 < COINCIDENCE_MIN_SYMBOLS:
+                    continue
+                names = ", ".join(sorted(p["symbol"] for p in peers)[:6])
+                out.append({
+                    "check": "collision",
+                    "table": "marketdata_goldcurrencyhistory",
+                    "symbol": row["symbol"], "date": date, "value": row["v"],
+                    "verdict": "suspect",
+                    "evidence": (
+                        f"{row['v']:.0f} jumped {row['v'] / row['prev']:.1f}x from the previous "
+                        f"session's {row['prev']:.0f}, and {len(peers)} unrelated symbols "
+                        f"landed on the same value on {date}: {names}"
+                    ),
                 })
         return out
 

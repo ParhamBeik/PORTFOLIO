@@ -54,20 +54,31 @@ class Command(BaseCommand):
 
         # 2. Endpoint Completeness Stats
         self.stdout.write("\n[1] Endpoint Symbols Status Overview:")
-        self.stdout.write(f"{'Endpoint':<30} | {'Total':<6} | {'Complete':<8} | {'Pct %':<6} | {'Zero Data':<9} | {'Unattempted':<11} | {'Failed':<6}")
-        self.stdout.write("-" * 90)
+        self.stdout.write(f"{'Endpoint':<30} | {'Total':<6} | {'Complete':<8} | {'State%':<6} | {'Row%':<6} | {'Zero Data':<9} | {'Unattempted':<11} | {'Failed':<6} | {'EmptyDone':<11}")
+        self.stdout.write("-" * 120)
 
         endpoints = ArchiveFetchState.objects.values('endpoint').annotate(
             total=Count('id'),
             complete=Count('id', filter=Q(verified_complete=True)),
             zero_data=Count('id', filter=Q(stored_rows=0)),
             unattempted=Count('id', filter=Q(last_attempt_at__isnull=True)),
-            failed=Count('id', filter=Q(consecutive_failures__gt=0))
+            failed=Count('id', filter=Q(consecutive_failures__gt=0)),
+            # "Complete holding nothing" is legitimate -- the provider really does
+            # return no_data for some symbol/endpoint pairs. It is surfaced because
+            # a *consumer* that assumes such a table is never empty is exactly how
+            # 35 symbols were left unable to fetch a single tick. Watch it move.
+            empty_complete=Count('id', filter=Q(verified_complete=True, stored_rows=0)),
+            expected=Sum('expected_rows'),
+            stored=Sum('stored_rows'),
         ).order_by('endpoint')
 
         for ep in endpoints:
             pct = (ep['complete'] / ep['total'] * 100) if ep['total'] > 0 else 0
-            self.stdout.write(f"{ep['endpoint']:<30} | {ep['total']:<6} | {ep['complete']:<8} | {pct:>5.1f}% | {ep['zero_data']:<9} | {ep['unattempted']:<11} | {ep['failed']:<6}")
+            # State-level completion counts symbols; row-level counts data. With
+            # ticks yielding ~17 rows a request against 3,000 for full history,
+            # the two tell very different stories and only one was ever reported.
+            row_pct = ((ep['stored'] or 0) / ep['expected'] * 100) if ep['expected'] else 0
+            self.stdout.write(f"{ep['endpoint']:<30} | {ep['total']:<6} | {ep['complete']:<8} | {pct:>5.1f}% | {row_pct:>5.1f}% | {ep['zero_data']:<9} | {ep['unattempted']:<11} | {ep['failed']:<6} | {ep['empty_complete']:<11}")
 
         # 3. Analyze symbols with no price/candle data
         self.stdout.write("\n[2] Symbols with 0 price rows in main price history endpoints:")
