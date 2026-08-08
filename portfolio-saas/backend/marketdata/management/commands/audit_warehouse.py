@@ -36,9 +36,11 @@ COINCIDENCE_MIN_SYMBOLS = 3
 # real regime (cascading capital increases), so it is left alone.
 MAX_EXCURSION_ROWS = 60
 # Back-adjustment drives decades-old closes toward zero (کاما's adjusted close is
-# 0.8 against a raw 7303). Ratios between such values are numerical noise, not
-# evidence, so both sides must be a usable price before we judge them.
-MIN_COMPARABLE_PRICE = 1.0
+# 0.8 against a raw 7303) and onto a coarse grid, where 0.8 -> 8.0 is a genuine
+# provider value, not a mis-scale. A provider re-fetch confirmed 142 of 142 such
+# کاما rows as correct -- every one a false positive at the old 1.0 floor. Below
+# this the "exactly 10x" test carries no information, so the row is not judged.
+MIN_COMPARABLE_PRICE = 100.0
 # Centred window for the local median a row is judged against. It must stay
 # wide enough that a mis-scaled RUN cannot outvote the healthy rows around it:
 # ثجوان was wrong for 10 consecutive sessions, which at window=21 made the bad
@@ -147,12 +149,31 @@ class Command(BaseCommand):
         for symbol, series in by_symbol.items():
             out.extend(self._classify_spikes(symbol, series))
 
-        # A date shared by many symbols confirms a feed-wide event rather than a
-        # coincidence of per-symbol corporate actions.
+        # CORROBORATION GATE. A single symbol deviating on its own is not enough
+        # to rewrite a price: a provider re-fetch of کاما returned 153 such rows
+        # and confirmed the STORED value every single time -- 153 false
+        # positives, zero real defects. Its 20 years of compounding capital
+        # increases make adj/unadj unstable, so the local median is a poor
+        # baseline and "exactly 10x" fires on legitimate values.
+        #
+        # A genuine mis-scale is a feed event: it hits many unrelated symbols on
+        # one date (23, 27 and 87 symbols on 1405-05-10/11/12). So only a shared
+        # date is repairable. A lone deviation is still reported, as `suspect`,
+        # with no `corrected` value -- visible, but never rewritten on a hunch.
         per_date = Counter(f["date"] for f in out if f["verdict"] == "unit_error")
         for f in out:
-            if f["verdict"] == "unit_error":
-                f["evidence"] += f"; {per_date[f['date']]} symbol(s) that day"
+            if f["verdict"] != "unit_error":
+                continue
+            peers = per_date[f["date"]]
+            if peers >= COINCIDENCE_MIN_SYMBOLS:
+                f["evidence"] += f"; {peers} symbols that day (feed-wide event)"
+            else:
+                f["verdict"] = "suspect"
+                f["corrected"] = ""
+                f["evidence"] += (
+                    f"; only {peers} symbol(s) that day -- uncorroborated, "
+                    "needs a provider re-fetch before any repair"
+                )
         return out
 
     @staticmethod
@@ -205,6 +226,12 @@ class Command(BaseCommand):
                         continue
                     crel = vals[i] / cmed
                     if not (0.05 <= crel <= 0.2 or 5.0 <= crel <= 20.0):
+                        continue
+                    # Deep back-adjusted history sits on a grid where a 10x step
+                    # between neighbouring legitimate values is ordinary. Judge
+                    # only where the prices are large enough for the ratio to
+                    # mean something.
+                    if max(vals[i], cmed) < MIN_COMPARABLE_PRICE:
                         continue
                     corrected = vals[i] * 10 if crel < 1 else vals[i] / 10
                     label = "10x LOW" if crel < 1 else "10x HIGH"
