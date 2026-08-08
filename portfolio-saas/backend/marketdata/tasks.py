@@ -1,8 +1,7 @@
 """Celery tasks for the market-data warehouse sync.
 
-Schedule (config/celery.py): `daily_sync` runs after TSE close and dispatches one
-independent `sync_symbol` task per tracked symbol as a Celery group.
-`archive_tick` claims a batch and fans out the same way via `run_archive_state`.
+Schedule (config/celery.py): `archive_tick` claims a batch and fans it out via
+`run_archive_state`.
 `weekly_metadata_sync` refreshes symbol fundamentals on Friday (market closed).
 
 The tracked-symbol universe comes from user-land (`Asset.tse_symbol` /
@@ -23,13 +22,14 @@ from django.utils import timezone
 from . import ingest
 from .archive import (
     claim_archive_batch,
+    claim_archive_maintenance,
+    claim_recent_refresh,
     ensure_archive_states,
     run_archive_state as process_archive_state,
+    promote_priority_tick_windows,
 )
 from .catalog import sync_provider_catalog
 from .fetchers import (
-    fetch_codal_announcements,
-    fetch_shareholders,
     fetch_symbol_data,
 )
 
@@ -40,7 +40,7 @@ def operational_health_check():
 
     from config.alerts import notify
     from portfolio.models import Price
-    from .models import SymbolIntegrity, SystemLogEvent
+    from .models import ApiRequestQuota, ArchiveFetchState, SymbolIntegrity, WorkflowRun
 
     alerts = []
     latest = Price.objects.order_by("-fetched_at").values_list(
@@ -53,7 +53,7 @@ def operational_health_check():
     try:
         broker = Redis.from_url(settings.CELERY_BROKER_URL)
         backlog = {
-            queue: broker.llen(queue) for queue in ("live", "archive")
+            queue: broker.llen(queue) for queue in ("live", "archive", "codal")
         }
         if max(backlog.values(), default=0) > settings.QUEUE_BACKLOG_THRESHOLD:
             alerts.append(("queue-backlog", backlog))
@@ -64,12 +64,32 @@ def operational_health_check():
     if failed_integrity:
         alerts.append(("failed-integrity-assessments", {"count": failed_integrity}))
 
-    recent_errors = SystemLogEvent.objects.filter(
-        level__iexact="ERROR",
-        timestamp__gte=timezone.now() - timedelta(hours=1),
-    ).count()
-    if recent_errors > settings.APPLICATION_ERROR_THRESHOLD:
-        alerts.append(("elevated-application-errors", {"count": recent_errors}))
+    since = timezone.now() - timedelta(hours=1)
+    recent_runs = WorkflowRun.objects.filter(created_at__gte=since)
+    run_count = recent_runs.count()
+    failed_count = recent_runs.filter(outcome=WorkflowRun.Outcome.FAILED).count()
+    failure_rate = failed_count / run_count if run_count else 0
+    if run_count and failure_rate > settings.WORKFLOW_FAILURE_RATE_THRESHOLD:
+        alerts.append(("elevated-workflow-failure-rate", {
+            "failed": failed_count, "total": run_count, "rate": round(failure_rate, 4)
+        }))
+
+    stale_before = timezone.now() - timedelta(seconds=settings.ARCHIVE_PROGRESS_STALE_SECONDS)
+    if (
+        ArchiveFetchState.objects.filter(verified_complete=False).exists()
+        and not WorkflowRun.objects.filter(
+            workflow="archive_state",
+            outcome__in=(WorkflowRun.Outcome.SUCCESS, WorkflowRun.Outcome.PARTIAL),
+            created_at__gte=stale_before,
+        ).exists()
+    ):
+        alerts.append(("stale-archive-progress", {"stale_seconds": settings.ARCHIVE_PROGRESS_STALE_SECONDS}))
+
+    quota = ApiRequestQuota.objects.order_by("-day").first()
+    if quota:
+        bucket_total = quota.archive_used + quota.live_used + quota.other_used
+        if bucket_total != quota.used:
+            alerts.append(("quota-ledger-drift", {"used": quota.used, "bucket_total": bucket_total}))
 
     for event, details in alerts:
         notify(event, details, dedupe_seconds=900)
@@ -80,7 +100,6 @@ def operational_health_check():
 def retry_archive_job_task(state_id):
     from .archive import run_archive_state
     run_archive_state(state_id)
-from .fetchers.base import TransientMarketDataError
 from .quota import QuotaExhausted
 from portfolio.live.pubsub import get_redis
 
@@ -149,62 +168,6 @@ def _invalidate_returns():
     invalidate_returns_cache()
 
 
-@shared_task(
-    ignore_result=True,
-    autoretry_for=(TransientMarketDataError,),
-    retry_backoff=True,
-    max_retries=3,
-)
-def sync_symbol(symbol: str):
-    """Sync lower-priority disclosures and shareholder data for one stock."""
-    import re
-    if re.search(r"\d$", symbol):
-        logger.debug("sync_symbol(%s) skipped: derivative tickers do not file disclosures or shareholder records", symbol)
-        return
-
-    key = settings.TSETMC_API_KEY
-    if not key:
-        logger.warning("sync_symbol(%s): no TSETMC_API_KEY, skipping", symbol)
-        return
-    try:
-        wrote = 0
-        payload = fetch_codal_announcements(key, symbol=symbol)
-        wrote += ingest.ingest_codal(payload)[0]
-        _pause()
-        payload = fetch_shareholders(key, symbol)
-        wrote += ingest.ingest_shareholders(symbol, payload)[0]
-    except QuotaExhausted:
-        # ponytail: return cleanly instead of 1,155 traceback-printing failures
-        # when the daily budget runs out mid-batch. Retrying same-day is pointless.
-        logger.info("sync_symbol(%s): quota exhausted, skipping", symbol)
-        return
-
-    if wrote:
-        _invalidate_returns()
-    logger.info("sync_symbol(%s): %d new rows", symbol, wrote)
-
-
-@shared_task(ignore_result=True)
-def daily_sync():
-    """Lower-priority daily sync; archive work runs independently every minute.
-
-    Fired in a group, not a chain: a chain aborts every remaining link when one
-    raises, so a single symbol timing out used to cancel the rest of that day's
-    sync. Tasks are independent; archive-worker concurrency fans them out.
-    """
-    from .quota import remaining_requests, ARCHIVE
-    import re
-    if remaining_requests(ARCHIVE) <= 0:
-        logger.info("daily_sync: quota exhausted, skipping dispatch")
-        return
-    # Exclude derivative symbols ending in digits to avoid wasted API requests
-    symbols = [s for s in tracked_tse_symbols() if not re.search(r"\d$", s)]
-    tasks = [sync_symbol.si(s) for s in symbols]
-    if tasks:
-        group(*tasks).apply_async()
-    logger.info("daily_sync: enqueued %d independent symbol syncs", len(symbols))
-
-
 @shared_task(ignore_result=True)
 def weekly_metadata_sync():
     """Refresh StockSymbolMetadata fundamentals for every tracked symbol."""
@@ -221,43 +184,99 @@ def weekly_metadata_sync():
     logger.info("weekly_metadata_sync: done")
 
 
-@shared_task(
-    ignore_result=True,
-    autoretry_for=(TransientMarketDataError,),
-    retry_backoff=True,
-    max_retries=3,
-    time_limit=90,
-    soft_time_limit=85,
-)
+@shared_task(ignore_result=True)
 def run_archive_state(state_id):
     """Process one claimed ArchiveFetchState (HTTP + ingest)."""
+    from .models import ArchiveFetchState, WorkflowRun
+    from .workflows import WorkflowOutcome
+
+    initial = ArchiveFetchState.objects.get(pk=state_id)
+    outcome = WorkflowOutcome(
+        "archive_state",
+        endpoint=initial.endpoint,
+        symbol=initial.symbol,
+        source="brsapi.ir",
+        destination_table="ArchiveFetchState",
+    )
     try:
         state = process_archive_state(state_id)
     except QuotaExhausted as err:
-        logger.info("run_archive_state(%s): quota exhausted: %s", state_id, err)
+        outcome.finish(
+            WorkflowRun.Outcome.RETRY,
+            error_code="quota_exhausted",
+            metadata={"reason": str(err)},
+        )
         return
+    except Exception as err:
+        outcome.finish(
+            WorkflowRun.Outcome.FAILED,
+            error_code=type(err).__name__,
+            metadata={"reason": str(err)},
+        )
+        logger.exception(
+            "Unhandled archive failure correlation_id=%s", outcome.correlation_id
+        )
+        raise
+    terminal = (
+        WorkflowRun.Outcome.RETRY
+        if state.last_error
+        else WorkflowRun.Outcome.SUCCESS
+        if state.verified_complete
+        else WorkflowRun.Outcome.PARTIAL
+    )
+    outcome.finish(
+        terminal,
+        rows_received=state.expected_rows,
+        rows_accepted=state.stored_rows,
+        rows_rejected=state.known_gap_rows,
+        error_code="archive_fetch_retry" if state.last_error else "",
+        metadata={
+            "missing_rows": state.missing_rows,
+            "target_window_days": state.target_window_days,
+        },
+    )
     if state.verified_complete:
         _invalidate_returns()
 
 
-@shared_task(ignore_result=True, time_limit=55, soft_time_limit=50)
+@shared_task(ignore_result=True)
 def archive_tick():
     """Claim a quota-safe batch and fan out one task per archive state."""
+    from .models import WorkflowRun
+    from .workflows import WorkflowOutcome
+
+    outcome = WorkflowOutcome("archive_tick", endpoint="archive_scheduler")
     redis_client = get_redis()
     lock_key = "lock:archive_tick"
     lock_token = uuid.uuid4().hex
     # Short lock around claim+dispatch only. Per-state leases use
     # select_for_update(skip_locked=True); quota serializes with its own lock.
     if redis_client and not redis_client.set(lock_key, lock_token, ex=30, nx=True):
-        logger.info("archive_tick skipped: another archive tick is still running")
+        outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "lock_held"})
         return
     try:
-        ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
+        from .models import ArchiveFetchState
+        if not ArchiveFetchState.objects.exists():
+            ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
+        promote_priority_tick_windows()
         batch = claim_archive_batch(limit=12)
         if not batch:
+            outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "no_due_states"})
             return
         group(*(run_archive_state.si(state_id) for state_id in batch)).apply_async()
-        logger.info("archive_tick: enqueued %d archive states", len(batch))
+        outcome.finish(
+            WorkflowRun.Outcome.SUCCESS,
+            rows_received=len(batch),
+            rows_accepted=len(batch),
+        )
+    except Exception as err:
+        outcome.finish(
+            WorkflowRun.Outcome.FAILED,
+            error_code=type(err).__name__,
+            metadata={"reason": str(err)},
+        )
+        logger.exception("Unhandled archive tick failure correlation_id=%s", outcome.correlation_id)
+        raise
     finally:
         if redis_client:
             redis_client.eval(
@@ -270,8 +289,117 @@ def archive_tick():
 
 
 @shared_task(ignore_result=True)
+def recent_history_refresh():
+    """Refresh authoritative recent stock series after the TSE close."""
+    state_ids = claim_recent_refresh()
+    if state_ids:
+        group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
+    logger.info("recent_history_refresh: enqueued %d archive states", len(state_ids))
+
+
+@shared_task(ignore_result=True)
+def archive_maintenance():
+    """Reverify completed low-volatility endpoints outside normal batches."""
+    state_ids = claim_archive_maintenance(limit=2)
+    if state_ids:
+        group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
+    logger.debug("archive_maintenance enqueued %d states", len(state_ids))
+
+
+@shared_task(ignore_result=True, rate_limit="1/s")
+def process_codal_report(report_id):
+    """Download and extract one report; infrastructure blocks are terminal."""
+    from .codal_pipeline import extract_report
+    from .models import CodalReport, WorkflowRun
+    from .workflows import WorkflowOutcome
+
+    report = CodalReport.objects.select_related("announcement").get(pk=report_id)
+    outcome = WorkflowOutcome(
+        "codal_extract",
+        endpoint="codal_document",
+        symbol=report.announcement.symbol,
+        source="codal.ir",
+        destination_table="CodalReport",
+    )
+    try:
+        report, metadata = extract_report(report)
+    except Exception as err:
+        report.status = CodalReport.Status.FAILED
+        report.error_code = type(err).__name__[:64]
+        report.save(update_fields=["status", "error_code", "updated_at"])
+        outcome.finish(
+            WorkflowRun.Outcome.FAILED,
+            error_code=type(err).__name__,
+            metadata={"report_id": report_id, "reason": str(err)},
+        )
+        logger.exception("Unhandled Codal failure correlation_id=%s", outcome.correlation_id)
+        raise
+
+    terminal = {
+        CodalReport.Status.PARSED: WorkflowRun.Outcome.SUCCESS,
+        CodalReport.Status.NEEDS_REVIEW: WorkflowRun.Outcome.PARTIAL,
+        CodalReport.Status.UNSUPPORTED: WorkflowRun.Outcome.PARTIAL,
+        CodalReport.Status.BLOCKED_NETWORK: WorkflowRun.Outcome.BLOCKED_NETWORK,
+        CodalReport.Status.BLOCKED_STORAGE: WorkflowRun.Outcome.BLOCKED_STORAGE,
+    }.get(report.status, WorkflowRun.Outcome.FAILED)
+    outcome.finish(
+        terminal,
+        rows_received=metadata.get("table_count", 0) + metadata.get("section_count", 0),
+        rows_accepted=metadata.get("fact_count", 0),
+        error_code=metadata.get("error_code", ""),
+        metadata={"report_id": report_id, **metadata},
+    )
+
+
+@shared_task(ignore_result=True)
+def enqueue_codal_reports():
+    """Stage a bounded newest-first slice of the existing Codal corpus."""
+    from datetime import timedelta
+
+    from django.db.models import Q
+
+    from .codal_classification import classify_announcement
+    from .models import CodalAnnouncement, CodalReport, WorkflowRun
+    from .workflows import WorkflowOutcome
+
+    outcome = WorkflowOutcome("codal_enqueue", endpoint="codal_document")
+    if not settings.CODAL_EXTRACTION_ENABLED:
+        outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "disabled"})
+        return
+    stale = timezone.now() - timedelta(hours=1)
+    announcements = list(
+        CodalAnnouncement.objects.filter(
+            Q(report__isnull=True)
+            | Q(report__status=CodalReport.Status.PENDING)
+            | Q(report__status=CodalReport.Status.FETCHING, report__updated_at__lt=stale)
+        )
+        .order_by("-date_publish", "-time_publish")
+        [: settings.CODAL_ENQUEUE_BATCH_SIZE]
+    )
+    report_ids = []
+    for announcement in announcements:
+        defaults = classify_announcement(announcement)
+        report, _created = CodalReport.objects.get_or_create(
+            announcement=announcement,
+            defaults={**defaults, "parser_version": settings.CODAL_PARSER_VERSION},
+        )
+        report.status = CodalReport.Status.FETCHING
+        report.error_code = ""
+        report.save(update_fields=["status", "error_code", "updated_at"])
+        report_ids.append(report.pk)
+    for report_id in report_ids:
+        process_codal_report.delay(report_id)
+    outcome.finish(
+        WorkflowRun.Outcome.SUCCESS,
+        rows_received=len(announcements),
+        rows_accepted=len(report_ids),
+    )
+
+
+@shared_task(ignore_result=True)
 def catalog_sync(limit: int = None):
     result = sync_provider_catalog(limit=limit)
+    ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
     logger.info("catalog_sync: %d seen, %d eligible", result["seen"], result["eligible"])
 
 
@@ -309,7 +437,7 @@ def aggregate_daily_gold_currency_history(date_str: str = None):
         # Price is Toman-denominated for BRS gold/currency assets
         # (extract_standard_prices routes every source through to_toman());
         # match the unit label the rest of this table uses for these rows.
-        GoldCurrencyHistory.objects.update_or_create(
+        row, created = GoldCurrencyHistory.objects.get_or_create(
             symbol=symbol,
             date=today_jalali,
             defaults={
@@ -319,8 +447,20 @@ def aggregate_daily_gold_currency_history(date_str: str = None):
                 "high_price": high_p,
                 "low_price": low_p,
                 "close_price": close_p,
+                "source": GoldCurrencyHistory.Source.AGGREGATE,
             },
         )
+        if not created and row.source == GoldCurrencyHistory.Source.AGGREGATE:
+            row.name = asset.name
+            row.unit = "تومان"
+            row.open_price = open_p
+            row.high_price = high_p
+            row.low_price = low_p
+            row.close_price = close_p
+            row.save(update_fields=[
+                "name", "unit", "open_price", "high_price", "low_price",
+                "close_price",
+            ])
         # No MarketCandle row: that table is Rial-denominated TSE data, and these
         # are Toman BRS quotes. Writing them here made candle_close_qs(symbol)
         # match for gold/FX, which sent PerformanceView down the stock branch and

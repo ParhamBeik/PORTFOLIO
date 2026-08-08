@@ -80,6 +80,26 @@ def test_integrity_uses_an_explicit_window_and_real_expected_sessions():
             close_price=100,
             volume=1,
         )
+    # The market-wide calendar must know the two sessions WINDOWED missed.
+    for day in (start + dt.timedelta(days=2), start + dt.timedelta(days=3)):
+        jday = jdatetime.date.fromgregorian(date=day)
+        MarketCandle.objects.create(
+            symbol="REFERENCE",
+            timeframe="1d_unadj",
+            date_time=f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}",
+            close_price=100,
+            volume=1,
+        )
+    # And seed unadjusted reference rows for WINDOWED's observed sessions.
+    for day in (start, start + dt.timedelta(days=1), end):
+        jday = jdatetime.date.fromgregorian(date=day)
+        MarketCandle.objects.create(
+            symbol="REFERENCE",
+            timeframe="1d_unadj",
+            date_time=f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}",
+            close_price=100,
+            volume=1,
+        )
 
     result = compute_symbol_integrity("WINDOWED", start=start, end=end)
 

@@ -47,7 +47,8 @@ DAYTIME_END = (23, 0)
 PROVIDER_CLOSED = "بسته"
 
 _STATE_KEY = "marketdata:tse_state"
-_STATE_TTL = 3600
+_STATE_TTL_OPEN = 1800
+_PROBE_KEY = "marketdata:tse_state_probe"
 
 
 def _now_tehran():
@@ -58,7 +59,20 @@ def _within(now, start, end):
     return start <= (now.hour, now.minute) < end
 
 
-def remember_provider_state(payload):
+def is_commodity_market_open(now):
+    """Whether the global commodity feed is inside its Tehran-time weekend."""
+    day = now.weekday()  # Monday=0 ... Sunday=6
+    clock = (now.hour, now.minute)
+    if day == 5:
+        return clock < (1, 30)
+    if day == 6:
+        return False
+    if day == 0:
+        return clock >= (2, 30)
+    return True
+
+
+def remember_provider_state(payload, *, now=None):
     """Cache the `state` string off any Index.php response we already paid for."""
     state = None
     if isinstance(payload, dict):
@@ -70,13 +84,46 @@ def remember_provider_state(payload):
                 break
     if not state:
         return None
+    now = now or _now_tehran()
+    if str(state).strip() == PROVIDER_CLOSED:
+        session_end = now.replace(
+            hour=SESSION_END[0], minute=SESSION_END[1], second=0, microsecond=0
+        )
+        ttl = max(60, int((session_end - now).total_seconds()))
+    else:
+        ttl = _STATE_TTL_OPEN
     client = get_redis()
     if client is not None:
         try:
-            client.set(_STATE_KEY, state, ex=_STATE_TTL)
+            client.set(_STATE_KEY, state, ex=ttl)
         except Exception:
             logger.warning("Could not cache market state", exc_info=True)
     return state
+
+
+def claim_provider_state_probe(now=None):
+    """Claim the single half-hourly Index.php probe for the live workers."""
+    now = now or _now_tehran()
+    if market_state_at(now) != OPEN or _provider_says_closed():
+        return False
+    client = get_redis()
+    if client is None:
+        return True
+    try:
+        return bool(client.set(_PROBE_KEY, "1", ex=_STATE_TTL_OPEN, nx=True))
+    except Exception:
+        logger.warning("Could not claim market-state probe", exc_info=True)
+        return True
+
+
+def release_provider_state_probe():
+    """Allow the next live cycle to retry a failed provider-state probe."""
+    client = get_redis()
+    if client is not None:
+        try:
+            client.delete(_PROBE_KEY)
+        except Exception:
+            logger.warning("Could not release market-state probe", exc_info=True)
 
 
 def _provider_says_closed():
@@ -94,16 +141,39 @@ def _provider_says_closed():
     return cached.strip() == PROVIDER_CLOSED
 
 
-def market_state():
-    """Return OPEN, CLOSED_DAYTIME, or OVERNIGHT."""
-    now = _now_tehran()
+def market_state_at(now, *, provider_closed=False):
+    """Return the market state for one Tehran-local timestamp."""
     jalali_weekday = jdatetime.date.fromgregorian(date=now.date()).weekday()
     trading_day = jalali_weekday in TRADING_WEEKDAYS
-    if trading_day and _within(now, SESSION_START, SESSION_END) and not _provider_says_closed():
+    if trading_day and _within(now, SESSION_START, SESSION_END) and not provider_closed:
         return OPEN
     if _within(now, DAYTIME_START, DAYTIME_END):
         return CLOSED_DAYTIME
     return OVERNIGHT
+
+
+def market_state():
+    """Return OPEN, CLOSED_DAYTIME, or OVERNIGHT right now."""
+    return market_state_at(_now_tehran(), provider_closed=_provider_says_closed())
+
+
+def live_job_keys(
+    *, state, now, has_brs, has_tsetmc, ignore_hours=False,
+    include_state_probe=False,
+):
+    """The exact provider jobs one live cycle is allowed to execute."""
+    jobs = []
+    if has_brs:
+        if ignore_hours or state in (OPEN, CLOSED_DAYTIME):
+            jobs.append("gold_currency")
+        jobs.append("crypto")
+        if ignore_hours or is_commodity_market_open(now):
+            jobs.append("commodity")
+    if has_tsetmc and (ignore_hours or state == OPEN):
+        if include_state_probe:
+            jobs.append("market_index")
+        jobs.extend(("tsetmc", "option_contracts", "etf_nav"))
+    return tuple(jobs)
 
 
 def is_market_open():

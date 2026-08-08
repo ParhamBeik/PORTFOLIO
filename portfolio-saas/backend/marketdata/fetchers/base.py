@@ -59,23 +59,30 @@ def fetch_json(
     params: Optional[Dict[str, Any]] = None,
     headers: Optional[Dict[str, str]] = None,
     timeout: int = 20,
-    retries: int = 2,
+    retries: Optional[int] = None,
     backoff_factor: float = 1.0,
     quota_bucket: str = OTHER,
 ) -> Optional[Any]:
     """Execute an HTTP GET request to fetch JSON payload with backoff retries.
 
-    Quota is reserved **once per logical fetch**, before the retry loop: a single
-    fetch that retries on a transient error must not burn one quota unit per
-    attempt. The provider's `account` block (when present on a response) is
+    Quota is reserved immediately before every HTTP attempt. A timeout does not
+    prove that the provider failed to receive or bill the request, so counting
+    only the logical fetch can under-report usage by the full retry multiplier.
+    The provider's `account` block (when present on a response) is
     reconciled to `ApiRequestQuota.used` so the local counter self-heals drift
     from worker restarts, dropped responses, and manual probing; `request_block`
     is honored as a real backoff signal on rate-limited responses.
     """
+    # Archive failures are rescheduled by ArchiveFetchState. Retrying inline
+    # only holds a worker and can spend the provider quota several times for
+    # one logical job. Live/other calls retain one short retry.
+    retries = (0 if quota_bucket == "archive" else 1) if retries is None else retries
     req_headers = {**DEFAULT_HEADERS, **(headers or {})}
-    reserve_request(quota_bucket)
     attempt = 0
     while attempt <= retries:
+        reserve_request(quota_bucket)
+        from marketdata.workflows import record_http_attempt
+        record_http_attempt(quota=True)
         try:
             response = requests.get(url, params=params, headers=req_headers, timeout=timeout)
         except requests.exceptions.RequestException as exc:

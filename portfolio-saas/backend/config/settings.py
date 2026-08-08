@@ -250,6 +250,9 @@ MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET
 # still read it keep working; the archive budget above is the authoritative value.
 MARKETDATA_ARCHIVE_REQUEST_RESERVE = MARKETDATA_ARCHIVE_REQUEST_BUDGET
 MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "120"))
+MARKETDATA_RECENT_REFRESH_REQUEST_BUDGET = int(
+    os.getenv("MARKETDATA_RECENT_REFRESH_REQUEST_BUDGET", "500")
+)
 
 # Per-day HISTORICAL_PER_DAY endpoints (ticks) walk one calendar day per request,
 # so the trailing window is bounded to keep cost finite. Trading days only -- a
@@ -263,6 +266,22 @@ MARKETDATA_TICK_WINDOW_DAYS = int(os.getenv("MARKETDATA_TICK_WINDOW_DAYS", "90")
 # the state can honestly converge; raise it when the backlog is otherwise idle.
 MARKETDATA_CODAL_MAX_PAGES = int(os.getenv("MARKETDATA_CODAL_MAX_PAGES", "5"))
 
+# Codal document extraction is disabled until an external S3-compatible store
+# and an approved proxy are configured. Tasks record a blocked outcome instead
+# of retrying incomplete infrastructure.
+CODAL_EXTRACTION_ENABLED = os.getenv("CODAL_EXTRACTION_ENABLED", "0") == "1"
+CODAL_HTTP_PROXY = os.getenv("CODAL_HTTP_PROXY", "")
+CODAL_S3_ENDPOINT = os.getenv("CODAL_S3_ENDPOINT", "")
+CODAL_S3_BUCKET = os.getenv("CODAL_S3_BUCKET", "")
+CODAL_S3_REGION = os.getenv("CODAL_S3_REGION", "")
+CODAL_S3_ACCESS_KEY_ID = os.getenv("CODAL_S3_ACCESS_KEY_ID", "")
+CODAL_S3_SECRET_ACCESS_KEY = os.getenv("CODAL_S3_SECRET_ACCESS_KEY", "")
+CODAL_MAX_ARTIFACT_BYTES = int(os.getenv("CODAL_MAX_ARTIFACT_BYTES", str(50 * 1024 * 1024)))
+CODAL_OCR_CONFIDENCE_THRESHOLD = float(os.getenv("CODAL_OCR_CONFIDENCE_THRESHOLD", "0.90"))
+CODAL_PARSER_VERSION = os.getenv("CODAL_PARSER_VERSION", "1")
+CODAL_ENQUEUE_BATCH_SIZE = int(os.getenv("CODAL_ENQUEUE_BATCH_SIZE", "10"))
+WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "30"))
+
 # Live poll cadence by market state (seconds). Beat still ticks every minute; the
 # task itself decides whether enough time has passed, so the cadence can change
 # without a beat restart. See marketdata/market_state.py for the arithmetic.
@@ -271,14 +290,11 @@ MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "
 MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "300"))
 MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "300"))
 
-# Provider calls one live cycle makes: BRS Gold, BRS Crypto, BRS Commodity,
-# TSETMC AllSymbols, TSETMC Options, TSETMC ETF NAV.
-MARKETDATA_LIVE_REQUESTS_PER_CYCLE = int(
-    os.getenv("MARKETDATA_LIVE_REQUESTS_PER_CYCLE", "6")
-)
-
 MARKETDATA_QUOTA_TIMEZONE = os.getenv("MARKETDATA_QUOTA_TIMEZONE", "Asia/Tehran")
 MARKETDATA_IGNORE_MARKET_HOURS = os.getenv("MARKETDATA_IGNORE_MARKET_HOURS", "False").lower() in ("true", "1")
+MARKETDATA_REQUIRE_SHARED_WINDOW = os.getenv(
+    "MARKETDATA_REQUIRE_SHARED_WINDOW", "True"
+).lower() in ("true", "1")
 # Extra TSE symbols to sync beyond assets with a tse_symbol (comma-separated).
 MARKETDATA_EXTRA_SYMBOLS = [
     s.strip() for s in os.getenv("MARKETDATA_EXTRA_SYMBOLS", "").split(",") if s.strip()
@@ -315,6 +331,8 @@ SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 QUEUE_BACKLOG_THRESHOLD = int(os.getenv("QUEUE_BACKLOG_THRESHOLD", "100"))
 APPLICATION_ERROR_THRESHOLD = int(os.getenv("APPLICATION_ERROR_THRESHOLD", "20"))
+WORKFLOW_FAILURE_RATE_THRESHOLD = float(os.getenv("WORKFLOW_FAILURE_RATE_THRESHOLD", "0.10"))
+ARCHIVE_PROGRESS_STALE_SECONDS = int(os.getenv("ARCHIVE_PROGRESS_STALE_SECONDS", "1800"))
 PRICE_STALE_THRESHOLD_SECONDS = int(
     os.getenv("PRICE_STALE_THRESHOLD_SECONDS", "900")
 )
@@ -375,6 +393,7 @@ LOGGING = {
         "console": {
             "format": "%(asctime)s %(levelname)-8s [%(request_id)s] %(name)s: %(message)s",
         },
+        "raw": {"format": "%(message)s"},
     },
     "filters": {
         "request_id": {"()": "config.logging.RequestIDFilter"},
@@ -385,6 +404,10 @@ LOGGING = {
             "formatter": "console",
             "filters": ["request_id"],
         },
+        "workflow": {
+            "class": "logging.StreamHandler",
+            "formatter": "raw",
+        },
     },
     "root": {"handlers": ["console"], "level": "INFO"},
     "loggers": {
@@ -393,6 +416,9 @@ LOGGING = {
         "django.server": {"handlers": ["console"], "level": "INFO", "propagate": False},
         "portfolio": {"handlers": ["console"], "level": "INFO", "propagate": False},
         "marketdata": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "workflow": {"handlers": ["workflow"], "level": "INFO", "propagate": False},
+        "celery": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+        "celery.task": {"handlers": ["console"], "level": "WARNING", "propagate": False},
         # Suspicious-request signals (disallowed host, bad CSRF/session cookie,
         # etc.) that Django's SecurityMiddleware/CommonMiddleware/CSRF raise.
         "django.security": {"handlers": ["console"], "level": "INFO", "propagate": False},

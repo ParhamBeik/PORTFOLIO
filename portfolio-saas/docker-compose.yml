@@ -27,11 +27,25 @@ x-backend-env: &backend-env
   TSETMC_API_KEY: ${TSETMC_API_KEY:-}
   TSETMC_URL: ${TSETMC_URL:-https://Api.BrsApi.ir/Tsetmc/AllSymbols.php}
   REAL_PORTFOLIO_DATA_DIR: /portfolio-data
+  CODAL_EXTRACTION_ENABLED: ${CODAL_EXTRACTION_ENABLED:-0}
+  CODAL_HTTP_PROXY: ${CODAL_HTTP_PROXY:-}
+  CODAL_S3_ENDPOINT: ${CODAL_S3_ENDPOINT:-}
+  CODAL_S3_BUCKET: ${CODAL_S3_BUCKET:-}
+  CODAL_S3_REGION: ${CODAL_S3_REGION:-}
+  CODAL_S3_ACCESS_KEY_ID: ${CODAL_S3_ACCESS_KEY_ID:-}
+  CODAL_S3_SECRET_ACCESS_KEY: ${CODAL_S3_SECRET_ACCESS_KEY:-}
+
+x-json-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   db:
     image: postgres:16.4-alpine
     restart: unless-stopped
+    logging: *json-logging
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-portfolio}
       POSTGRES_USER: ${POSTGRES_USER:-portfolio}
@@ -54,6 +68,7 @@ services:
   redis:
     image: redis:7.2-alpine
     restart: unless-stopped
+    logging: *json-logging
     ports:
       - "6379:6379"
     deploy:
@@ -65,6 +80,7 @@ services:
   migrate:
     build: ./backend
     restart: "no"
+    logging: *json-logging
     entrypoint: []
     depends_on:
       db:
@@ -79,6 +95,7 @@ services:
   backend:
     build: ./backend
     restart: unless-stopped
+    logging: *json-logging
     depends_on:
       db:
         condition: service_healthy
@@ -110,6 +127,7 @@ services:
   celery_worker:
     build: ./backend
     restart: unless-stopped
+    logging: *json-logging
     entrypoint: []        # skip migrate/seed; the backend service owns DB setup
     depends_on:
       backend:
@@ -139,13 +157,14 @@ services:
           cpus: "1"
           memory: 1g
 
-  # Archive queue: claim+dispatch fan-out (archive_tick / daily_sync groups).
-  # Concurrency 4 runs several run_archive_state / sync_symbol tasks in parallel;
+  # Archive queue: archive_tick claims states and fans out run_archive_state tasks.
+  # Concurrency 4 processes several independently leased states in parallel;
   # quota still serializes provider spend. Kept off the live queue so price
   # fetches never wait on a backfill batch.
   celery_worker_archive:
     build: ./backend
     restart: unless-stopped
+    logging: *json-logging
     entrypoint: []        # skip migrate/seed; the backend service owns DB setup
     depends_on:
       backend:
@@ -172,15 +191,48 @@ services:
           cpus: "1"
           memory: 1536m
 
+  celery_worker_codal:
+    build: ./backend
+    restart: unless-stopped
+    logging: *json-logging
+    entrypoint: []
+    depends_on:
+      backend:
+        condition: service_started
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: celery_worker_codal
+    volumes:
+      - ./backend:/app
+    command: celery -A config worker -l info --concurrency=1 -Q codal -n codal@%h --max-memory-per-child=500000
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d codal@$$HOSTNAME"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+
 
   celery_beat:
     build: ./backend
     restart: unless-stopped
+    logging: *json-logging
     entrypoint: []
     depends_on:
       celery_worker:
         condition: service_healthy
       celery_worker_archive:
+        condition: service_healthy
+      celery_worker_codal:
         condition: service_healthy
     environment:
       <<: *backend-env
@@ -202,6 +254,7 @@ services:
   frontend:
     build: ./frontend
     restart: unless-stopped
+    logging: *json-logging
     depends_on:
       backend:
         condition: service_healthy

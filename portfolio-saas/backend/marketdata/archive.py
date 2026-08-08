@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, F, Q, Sum
+from django.db.models import F, Max, Q, Sum
 from django.utils import timezone
 
 from . import ingest, jalali, market_state, validation
@@ -32,7 +32,6 @@ from .models import (
     DailyStockHistory,
     GoldCurrencyHistory,
     MarketCandle,
-    MarketIndexData,
     OptionContractHistory,
     RealLegalHistory,
     RejectedRecord,
@@ -69,18 +68,32 @@ _FULL_HISTORY = (
     ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
     ArchiveFetchState.Endpoint.GOLD_DAILY,
-    ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY,
 )
-_RANGE_HISTORY = (ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,)
-
-
-def _cost_rank_qs(qs):
+def _expected_gain_qs(qs):
+    """Estimate new rows bought by the state's next provider request."""
     from django.db.models import Case, IntegerField, Value, When
+
     return qs.annotate(
-        _cost_rank=Case(
-            When(endpoint__in=_FULL_HISTORY, then=Value(0)),
-            When(endpoint__in=_RANGE_HISTORY, then=Value(1)),
-            default=Value(2),
+        _expected_gain=Case(
+            # Per-day endpoints can only advance one day regardless of the
+            # state's total gap. Production's median tick-day yield is 17 rows.
+            When(
+                endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+                then=Value(17),
+            ),
+            When(
+                endpoint=ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS,
+                then=Value(20),
+            ),
+            When(
+                endpoint=ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
+                then=Value(30),
+            ),
+            # A full-history request can close every currently known gap.
+            When(endpoint__in=_FULL_HISTORY, missing_rows__gt=0, then=F("missing_rows")),
+            When(endpoint__in=_FULL_HISTORY, last_success_at__isnull=True, then=Value(3000)),
+            When(endpoint__in=_FULL_HISTORY, stored_rows=0, then=Value(3000)),
+            default=Value(1),
             output_field=IntegerField(),
         )
     )
@@ -98,16 +111,14 @@ def _coverage_rank_qs(qs):
     from django.db.models import Case, IntegerField, Value, When
     return qs.annotate(
         _coverage_rank=Case(
-            When(last_success_at__isnull=True, then=Value(0)),  # never fetched
-            When(stored_rows=0, then=Value(1)),                 # fetched, holds nothing
-            default=Value(2),                                   # has data, closing a gap
+            When(last_attempt_at__isnull=True, then=Value(0)),  # never attempted
+            When(last_success_at__isnull=True, then=Value(1)),  # attempted, never succeeded
+            When(stored_rows=0, then=Value(2)),                 # succeeded, holds nothing
+            default=Value(3),                                   # has data, closing a gap
             output_field=IntegerField(),
         )
     )
 
-
-# Tuple consumed by the existing `.order_by(*_COST_ORDER)` call sites.
-_COST_ORDER = ("_cost_rank",)
 
 # Endpoints where a parsed-zero-records response proves a bug, not a quiet day.
 # Transaction.php in particular returns [] with HTTP 200 when the date is wrong,
@@ -153,6 +164,7 @@ _REVERIFY_INTERVAL = {
 _RETIRED_ARCHIVE_ENDPOINTS = frozenset({
     ArchiveFetchState.Endpoint.COMMODITY_DAILY,
     ArchiveFetchState.Endpoint.CRYPTO_DAILY,
+    ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY,
     ArchiveFetchState.Endpoint.OPTION_CONTRACT_DAILY,
 })
 
@@ -194,11 +206,12 @@ def ensure_archive_states(stock_symbols=None, gold_symbols=None):
         )
         for symbol in gold_symbols
     ]
-    rows += [
-        ArchiveFetchState(endpoint=ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY, symbol="TEDPIX"),
-    ]
     if rows:
-        ArchiveFetchState.objects.bulk_create(rows, ignore_conflicts=True)
+        existing = set(
+            ArchiveFetchState.objects.values_list("endpoint", "symbol")
+        )
+        missing = [row for row in rows if (row.endpoint, row.symbol) not in existing]
+        ArchiveFetchState.objects.bulk_create(missing, ignore_conflicts=True)
 
 
 def _fetch_and_ingest(state):
@@ -224,13 +237,22 @@ def _fetch_and_ingest(state):
         payload = fetch_daily_history(settings.TSETMC_API_KEY, symbol, history_type=1)
         result = ingest.ingest_real_legal(symbol, payload)
         expected = _record_dates(payload)
-        stored_real_legal = set(RealLegalHistory.objects.filter(
+        stored = set(RealLegalHistory.objects.filter(
             symbol=symbol, date__in=expected,
         ).values_list("date", flat=True))
-        stored_prices = set(DailyStockHistory.objects.filter(
+        # Intersecting with the price table made this state's completion depend
+        # on a *different* endpoint's date coverage: any day the price validator
+        # rejected left a permanent hole here that no amount of re-fetching this
+        # endpoint could fill. Verify what this endpoint writes; still require
+        # that prices landed at all, which is what the intersection was really
+        # guarding against (a payload that stores nothing reporting complete).
+        if not DailyStockHistory.objects.filter(
             symbol=symbol, is_adjusted=False, date__in=expected,
-        ).values_list("date", flat=True))
-        stored = stored_real_legal.intersection(stored_prices)
+        ).exists():
+            raise MarketDataFetchError(
+                "Real/legal payload has no matching daily price rows; the "
+                "unadjusted history pass must land first."
+            )
     elif endpoint == ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED:
         payload = fetch_candlesticks(settings.TSETMC_API_KEY, symbol, candle_type=2)
         result = ingest.ingest_candles(symbol, 2, payload)
@@ -259,7 +281,7 @@ def _fetch_and_ingest(state):
             ).values_list("shareholder_id", "date")
         } & expected
     elif endpoint == ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS:
-        pending = _tick_dates_needed(symbol)
+        pending = _tick_dates_needed(symbol, state.target_window_days)
         if not pending:
             # Nothing pending means one of two opposite things. With no daily
             # candles there is nothing to fetch against and the candle pass must
@@ -267,7 +289,7 @@ def _fetch_and_ingest(state):
             # reconciled -- that is completion. Treating both as an error flipped
             # finished symbols back to incomplete on every tick, so they never
             # converged and burned a retry slot forever.
-            if not _tick_trading_days(symbol):
+            if not _tick_trading_days(symbol, state.target_window_days):
                 raise MarketDataFetchError(
                     "No trading days known for this symbol yet; daily candles must be "
                     "backfilled first to know which dates have ticks."
@@ -278,19 +300,25 @@ def _fetch_and_ingest(state):
             return (0, 0), covered, covered
         day = pending[0]
         payload = fetch_transactions(settings.TSETMC_API_KEY, symbol=symbol, date=day)
-        # A day only reaches here twice if its stored ticks failed to reconcile.
-        # bulk_create(ignore_conflicts=True) cannot correct existing rows, so the
-        # day is cleared first and rebuilt from the fresh payload.
-        StockTransactionTick.objects.filter(symbol=symbol, date=day).delete()
-        result = ingest.ingest_transactions(symbol, day, payload)
-
+        accepted_ticks, rejected_ticks = ingest.screen(
+            "tick",
+            payload if isinstance(payload, list) else [],
+            "stock_transaction_ticks",
+            symbol,
+            default_date=day,
+        )
+        if rejected_ticks:
+            raise MarketDataFetchError(
+                f"{day}: provider returned {rejected_ticks} invalid tick record(s); "
+                "existing ticks were retained."
+            )
         candle_volume = (
             MarketCandle.objects.filter(
                 symbol=symbol, timeframe="1d_unadj", date_time=day
             ).values_list("volume", flat=True).first()
         )
         mismatch = validation.reconcile_tick_volume(
-            payload if isinstance(payload, list) else [], candle_volume
+            accepted_ticks, candle_volume
         )
         if mismatch:
             # The provider's own daily bar disagrees with its own trade list, so
@@ -298,16 +326,21 @@ def _fetch_and_ingest(state):
             # rather than silently banking a wrong total.
             raise MarketDataFetchError(f"{day}: {mismatch}")
 
+        # Validate before replacing, then swap atomically. A malformed payload
+        # or failed insert must leave the previously stored day intact.
+        result = ingest.ingest_transactions(
+            symbol, day, payload, replace=True, require_all_valid=True
+        )
+        if result[1]:
+            raise MarketDataFetchError(
+                f"{day}: provider returned {result[1]} invalid tick record(s); "
+                "existing ticks were retained."
+            )
+
         # Progress is measured across the whole window, not this one day, so the
         # state stays incomplete and reschedules until the window is covered.
         expected = set(pending) | _tick_dates_stored(symbol)
         stored = _tick_dates_stored(symbol)
-    elif endpoint == ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY:
-        from .fetchers.index import fetch_market_index
-        payload = fetch_market_index(settings.TSETMC_API_KEY)
-        result = ingest.ingest_market_index(payload)
-        expected = {payload.get("date")} if (payload and isinstance(payload, dict) and payload.get("date")) else set()
-        stored = set(MarketIndexData.objects.filter(date__in=expected).values_list("date", flat=True))
     else:
         payload = fetch_gold_currency_pro_history_daily(settings.BRS_API_KEY, symbol)
         result = ingest.ingest_gold_currency_history(payload)
@@ -441,20 +474,9 @@ def market_trading_days(window_days=None):
     a per-symbol view cannot tell apart. Requesting ticks for a closed day costs
     a request and returns nothing, so this is a direct quota saving.
     """
-    window = set(jalali.recent_days(window_days or TICK_WINDOW_DAYS))
-    counts = list(
-        MarketCandle.objects.filter(timeframe="1d_unadj", date_time__in=window)
-        .values("date_time")
-        .annotate(n=Count("symbol", distinct=True))
-    )
-    if not counts:
-        return set()
-    busiest = max(row["n"] for row in counts)
-    # A real session has most of the universe quoting. A stray handful of
-    # candles on a closed day (late corrections, off-market prints) should not
-    # promote that day into the calendar.
-    floor = max(1, busiest // 5)
-    return {row["date_time"] for row in counts if row["n"] >= floor}
+    from .candles import actual_trading_days
+
+    return actual_trading_days(window_days=window_days or TICK_WINDOW_DAYS)
 
 
 def _tick_days_unreconciled(symbol, days):
@@ -485,28 +507,28 @@ def _tick_days_unreconciled(symbol, days):
     }
 
 
-def _tick_trading_days(symbol):
+def _tick_trading_days(symbol, window_days=TICK_WINDOW_DAYS):
     """Trading days this symbol actually has a daily candle for.
 
     Empty means the candle pass has not reached this symbol yet. That is a
     different condition from "every tick day is already stored", and callers
     must not conflate the two.
     """
-    return market_trading_days() & set(
+    return market_trading_days(window_days) & set(
         MarketCandle.objects.filter(
             symbol=symbol, timeframe=MarketCandle.UNADJUSTED
         ).values_list("date_time", flat=True)
     )
 
 
-def _tick_dates_needed(symbol):
+def _tick_dates_needed(symbol, window_days=TICK_WINDOW_DAYS):
     """Trading days in the trailing window still owing a correct set of ticks.
 
     Two kinds of work: days never fetched (missing), and days whose stored ticks
     do not add up to the candle (broken). Missing days are prioritized first
     to establish a complete timeline before spending quota on self-repair.
     """
-    trading = _tick_trading_days(symbol)
+    trading = _tick_trading_days(symbol, window_days)
     stored = _tick_dates_stored(symbol)
     missing = trading - stored
     broken = _tick_days_unreconciled(symbol, trading & stored)
@@ -619,7 +641,7 @@ def _transaction_keys(payload):
 def run_archive_state(state_id):
     state = ArchiveFetchState.objects.get(pk=state_id)
     now = timezone.now()
-    logger.info("[INGEST] Processing backfill for %s (%s)...", state.symbol, state.endpoint)
+    logger.debug("Processing archive state %s (%s).", state.symbol, state.endpoint)
     try:
         (created, _), expected, stored = _fetch_and_ingest(state)
     except QuotaExhausted as exc:
@@ -627,7 +649,7 @@ def run_archive_state(state_id):
         state.next_attempt_at = now + timedelta(minutes=1)
         state.last_error = "Daily quota unavailable."
         state.save(update_fields=["last_attempt_at", "next_attempt_at", "last_error"])
-        logger.warning("[QUOTA] Daily API quota exhausted while processing %s (%s): %s", state.symbol, state.endpoint, exc)
+        logger.debug("Archive quota unavailable for %s (%s): %s", state.symbol, state.endpoint, exc)
         raise
     except MarketDataFetchError as exc:
         from .fetchers.base import TransientMarketDataError
@@ -646,7 +668,7 @@ def run_archive_state(state_id):
             state.save(update_fields=[
                 "consecutive_failures", "last_attempt_at", "next_attempt_at", "last_error",
             ])
-            logger.warning("[TRANSIENT_ERROR] Temporary rate-limit or network error on %s (%s): %s. Rescheduling in %dm.", state.symbol, state.endpoint, exc, delay)
+            logger.debug("Archive request retry scheduled for %s (%s) in %dm: %s", state.symbol, state.endpoint, delay, exc)
             return state
 
         failures = state.consecutive_failures + 1
@@ -659,11 +681,12 @@ def run_archive_state(state_id):
             "consecutive_failures", "last_attempt_at", "next_attempt_at",
             "last_error", "verified_complete",
         ])
-        logger.error("[ARCHIVE_FETCH_ERROR] Failed backfill fetch for %s (%s): %s", state.symbol, state.endpoint, exc)
+        logger.debug("Archive fetch retry scheduled for %s (%s): %s", state.symbol, state.endpoint, exc)
         return state
 
     previous_missing = state.missing_rows
     missing = expected - stored
+    known_gaps = set()
     # Records the validator permanently rejects (bad OHLC, volume mismatch)
     # will never land in stored. Without this, the state re-fetches forever.
     # ponytail: DB query only runs when there are actual missing records.
@@ -677,14 +700,15 @@ def run_archive_state(state_id):
         # Handles both date keys ("1405-05-03") and composite snapshot
         # keys ("Bitcoin|1405-05-03") in one pass.
         if rejected_dates:
-            missing = {
-                k for k in missing
-                if k not in rejected_dates
-                and k.split("|")[-1] not in rejected_dates
+            known_gaps = {
+                key for key in missing
+                if key in rejected_dates or key.split("|")[-1] in rejected_dates
             }
+            missing -= known_gaps
     state.expected_rows = len(expected)
     state.stored_rows = len(stored)
     state.missing_rows = len(missing)
+    state.known_gap_rows = len(known_gaps)
     state.first_date = min(expected) if expected else ""
     state.last_date = max(expected) if expected else ""
     state.verified_complete = not missing
@@ -694,7 +718,10 @@ def run_archive_state(state_id):
 
     if state.verified_complete:
         state.consecutive_failures = 0
-        logger.info("[INGEST] Successfully backfilled %s (%s): verified complete (stored %d rows).", state.symbol, state.endpoint, state.stored_rows)
+        logger.debug(
+            "Archive state complete for %s (%s): stored=%d known_gaps=%d.",
+            state.symbol, state.endpoint, state.stored_rows, state.known_gap_rows,
+        )
         # Not a flat +20h: that drifts across the clock, so a state that verified
         # at midday re-verified the same stale history the next midday and never
         # picked up the day it had just missed.
@@ -714,7 +741,7 @@ def run_archive_state(state_id):
             state.next_attempt_at = now + timedelta(
                 hours=min(2 ** max(state.consecutive_failures - 1, 0), 24)
             )
-        logger.info("[INGEST] Backfilled %s (%s): incomplete (stored %d/%d, %d missing).", state.symbol, state.endpoint, state.stored_rows, state.expected_rows, state.missing_rows)
+        logger.debug("Archive state incomplete for %s (%s): stored=%d expected=%d missing=%d.", state.symbol, state.endpoint, state.stored_rows, state.expected_rows, state.missing_rows)
     state.save()
     return state
 
@@ -724,9 +751,6 @@ _ENDPOINT_PRIORITY = (
     ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
     ArchiveFetchState.Endpoint.GOLD_DAILY,
-    # Without a reserved slot TEDPIX competes in the generic pool against
-    # ~4,600 stock states and never surfaces: it was fetched exactly once.
-    ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY,
     ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
     ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
@@ -745,6 +769,65 @@ def release_archive_claims(state_ids):
         ArchiveFetchState.objects.filter(pk__in=state_ids).update(next_attempt_at=timezone.now())
 
 
+def claim_recent_refresh(limit=None):
+    """Lease post-close history/candle refreshes for held then liquid symbols."""
+    from portfolio.models import Holding
+
+    request_limit = min(
+        limit or settings.MARKETDATA_RECENT_REFRESH_REQUEST_BUDGET,
+        max(remaining_requests(ARCHIVE), 0),
+    )
+    symbol_limit = request_limit // 2
+    if not symbol_limit:
+        return []
+
+    held = list(
+        Holding.objects.filter(quantity__gt=0)
+        .exclude(asset__tse_symbol="")
+        .values_list("asset__tse_symbol", flat=True)
+        .distinct()
+    )
+    latest_day = MarketCandle.objects.filter(
+        timeframe=MarketCandle.UNADJUSTED, volume__gt=0
+    ).aggregate(day=Max("date_time"))["day"]
+    liquid = list(
+        MarketCandle.objects.filter(
+            timeframe=MarketCandle.UNADJUSTED,
+            date_time=latest_day,
+            volume__gt=0,
+        )
+        .order_by("-volume")
+        .values_list("symbol", flat=True)[:symbol_limit]
+    ) if latest_day else []
+    symbols = list(dict.fromkeys([*held, *liquid]))[:symbol_limit]
+    if not symbols:
+        return []
+
+    endpoints = (
+        ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
+        ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
+    )
+    now = timezone.now()
+    due = Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now)
+    with transaction.atomic():
+        states = list(
+            ArchiveFetchState.objects.select_for_update(skip_locked=True).filter(
+                due, symbol__in=symbols, endpoint__in=endpoints
+            )
+        )
+        by_key = {(state.symbol, state.endpoint): state for state in states}
+        ordered = [
+            by_key[(symbol, endpoint)]
+            for symbol in symbols
+            for endpoint in endpoints
+            if (symbol, endpoint) in by_key
+        ][:request_limit]
+        ArchiveFetchState.objects.filter(pk__in=[s.pk for s in ordered]).update(
+            next_attempt_at=now + timedelta(hours=3)
+        )
+    return [state.pk for state in ordered]
+
+
 def claim_archive_batch(limit=None):
     now = timezone.now()
     batch_size = min(
@@ -755,28 +838,101 @@ def claim_archive_batch(limit=None):
         return []
     due = Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now)
     with transaction.atomic():
-        base = ArchiveFetchState.objects.select_for_update(skip_locked=True).filter(due)
-        # One state from every due endpoint makes starvation impossible. The
-        # remaining slots keep the user-facing historical-data priority.
-        states = []
-        for endpoint in _ENDPOINT_PRIORITY:
-            state = _coverage_rank_qs(base.filter(endpoint=endpoint)).order_by(
-                "_coverage_rank", _LAST_ATTEMPT_FIRST, "verified_complete"
-            ).first()
-            if state:
-                states.append(state)
-                if len(states) == batch_size:
-                    break
+        base = ArchiveFetchState.objects.select_for_update(skip_locked=True).filter(
+            due, verified_complete=False
+        )
+        tick_endpoint = ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS
+        # Reserve at most two jobs for high-yield/critical non-tick repair. The
+        # rest advances breadth-first tick coverage; completed rows never churn
+        # through this normal batch.
+        non_tick = list(
+            _coverage_rank_qs(_expected_gain_qs(base.exclude(endpoint=tick_endpoint)))
+            .order_by("_coverage_rank", "-_expected_gain", _LAST_ATTEMPT_FIRST)[:2]
+        )
+        states = non_tick
         remaining_slots = batch_size - len(states)
         if remaining_slots > 0:
             states += list(
-                _coverage_rank_qs(
-                    _cost_rank_qs(base.exclude(pk__in=[state.pk for state in states]))
-                )
-                .order_by("verified_complete", "_coverage_rank", *_COST_ORDER, _LAST_ATTEMPT_FIRST)[:remaining_slots]
+                base.filter(endpoint=tick_endpoint)
+                .order_by("target_window_days", "stored_rows", _LAST_ATTEMPT_FIRST)
+                [:remaining_slots]
+            )
+        remaining_slots = batch_size - len(states)
+        if remaining_slots > 0:
+            states += list(
+                _coverage_rank_qs(_expected_gain_qs(
+                    base.exclude(pk__in=[state.pk for state in states])
+                    .exclude(endpoint=tick_endpoint)
+                ))
+                .order_by("_coverage_rank", "-_expected_gain", _LAST_ATTEMPT_FIRST)
+                [:remaining_slots]
             )
         claim_until = now + timedelta(minutes=10)
         ArchiveFetchState.objects.filter(pk__in=[state.pk for state in states]).update(
             next_attempt_at=claim_until
+        )
+    return [state.pk for state in states]
+
+
+def promote_priority_tick_windows(liquid_limit=100):
+    """Begin the 365-day phase only after every 90-day tick state completes."""
+    tick_endpoint = ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS
+    phase_one = ArchiveFetchState.objects.filter(
+        endpoint=tick_endpoint, target_window_days=90
+    )
+    if not phase_one.exists() or phase_one.filter(verified_complete=False).exists():
+        return 0
+
+    from portfolio.models import Holding
+
+    held = list(
+        Holding.objects.filter(quantity__gt=0)
+        .exclude(asset__tse_symbol="")
+        .values_list("asset__tse_symbol", flat=True)
+        .distinct()
+    )
+    latest_day = MarketCandle.objects.filter(
+        timeframe=MarketCandle.UNADJUSTED, volume__gt=0
+    ).aggregate(day=Max("date_time"))["day"]
+    liquid = list(
+        MarketCandle.objects.filter(
+            timeframe=MarketCandle.UNADJUSTED,
+            date_time=latest_day,
+            volume__gt=0,
+        )
+        .order_by("-volume")
+        .values_list("symbol", flat=True)[:liquid_limit]
+    ) if latest_day else []
+    symbols = list(dict.fromkeys([*held, *liquid]))
+    if not symbols:
+        return 0
+    return ArchiveFetchState.objects.filter(
+        endpoint=tick_endpoint, symbol__in=symbols, target_window_days=90
+    ).update(
+        target_window_days=365,
+        verified_complete=False,
+        next_attempt_at=timezone.now(),
+    )
+
+
+def claim_archive_maintenance(limit=2):
+    """Low-rate leases for completed disclosure/shareholder reverification."""
+    now = timezone.now()
+    due = Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now)
+    with transaction.atomic():
+        states = list(
+            ArchiveFetchState.objects.select_for_update(skip_locked=True)
+            .filter(
+                due,
+                verified_complete=True,
+                endpoint__in=(
+                    ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
+                    ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS,
+                ),
+            )
+            .order_by(_LAST_ATTEMPT_FIRST)[:limit]
+        )
+        ArchiveFetchState.objects.filter(pk__in=[state.pk for state in states]).update(
+            next_attempt_at=now + timedelta(hours=3)
         )
     return [state.pk for state in states]

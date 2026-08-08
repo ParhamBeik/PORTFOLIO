@@ -1,6 +1,33 @@
-from django.db.models import Exists, F, OuterRef, Q
+from django.db.models import Count, Exists, F, OuterRef, Q
+from django.core.cache import cache
 
 from .models import MarketCandle
+
+
+def actual_trading_days(*, start=None, end=None, window_days=None):
+    """Jalali days when a meaningful share of the TSE universe traded."""
+    cache_key = f"marketdata:trading-days:{start}:{end}:{window_days}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return set(cached)
+
+    queryset = MarketCandle.objects.filter(timeframe=MarketCandle.UNADJUSTED)
+    if start is not None:
+        queryset = queryset.filter(date_time__gte=start)
+    if end is not None:
+        queryset = queryset.filter(date_time__lte=end)
+    if window_days is not None:
+        from . import jalali
+        queryset = queryset.filter(date_time__in=jalali.recent_days(window_days))
+    counts = list(
+        queryset.values("date_time").annotate(n=Count("symbol", distinct=True))
+    )
+    if not counts:
+        return set()
+    floor = max(1, max(row["n"] for row in counts) // 5)
+    result = {row["date_time"] for row in counts if row["n"] >= floor}
+    cache.set(cache_key, sorted(result), timeout=60 * 60)
+    return result
 
 
 def candle_close_qs(symbol, *, as_of=None):

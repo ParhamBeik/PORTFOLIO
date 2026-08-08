@@ -1,7 +1,6 @@
 """Atomic daily and 5-minute window provider quota shared by every web and Celery process."""
 import collections
 import logging
-import math
 import time
 import uuid
 from datetime import timedelta
@@ -157,41 +156,39 @@ def live_reserve_remaining(row, now=None):
     rollover = (local + timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    # Costing every remaining hour at the open-market cadence reserved for a
-    # session that is not running: the TSE trades 08:30-13:00 five days a week,
-    # so most of any given evening is overnight cadence. The old flat `min()`
-    # over all three intervals reserved ~4,300/day against an observed live spend
-    # of 24-719/day, and blocked the archive from ~19:00 with quota unspent.
     from . import market_state as _market_state
-
-    open_start = timedelta(hours=_market_state.SESSION_START[0], minutes=_market_state.SESSION_START[1])
-    open_end = timedelta(hours=_market_state.SESSION_END[0], minutes=_market_state.SESSION_END[1])
-    elapsed = timedelta(hours=local.hour, minutes=local.minute, seconds=local.second)
-    day_end = timedelta(days=1)
-
-    # Only tomorrow's session can still fall before rollover if today's has ended,
-    # and it cannot -- rollover is midnight tonight. So open time left is whatever
-    # remains of today's window, and none at all on the Thursday/Friday weekend.
-    import jdatetime
-
-    trading_today = (
-        jdatetime.date.fromgregorian(date=local.date()).weekday()
-        in _market_state.TRADING_WEEKDAYS
-    )
-    open_left = (
-        max(timedelta(0), min(open_end, day_end) - max(open_start, elapsed))
-        if trading_today else timedelta(0)
-    )
-    other_left = max(timedelta(0), (day_end - elapsed) - open_left)
-
-    per_cycle = settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE
-    needed = per_cycle * (
-        math.ceil(open_left.total_seconds() / max(1, settings.MARKETDATA_LIVE_INTERVAL_OPEN))
-        + math.ceil(other_left.total_seconds() / max(1, min(
-            settings.MARKETDATA_LIVE_INTERVAL_DAYTIME,
-            settings.MARKETDATA_LIVE_INTERVAL_OVERNIGHT,
-        )))
-    )
+    has_brs = bool(getattr(settings, "BRS_API_KEY", ""))
+    has_tsetmc = bool(getattr(settings, "TSETMC_API_KEY", ""))
+    ignore_hours = getattr(settings, "MARKETDATA_IGNORE_MARKET_HOURS", False)
+    intervals = {
+        _market_state.OPEN: settings.MARKETDATA_LIVE_INTERVAL_OPEN,
+        _market_state.CLOSED_DAYTIME: settings.MARKETDATA_LIVE_INTERVAL_DAYTIME,
+        _market_state.OVERNIGHT: settings.MARKETDATA_LIVE_INTERVAL_OVERNIGHT,
+    }
+    needed = 0
+    cursor = local
+    next_state_probe = local
+    # At most 720 iterations at the supported cadences. Simulating the same
+    # state planner the live loop uses is both smaller and more accurate than a
+    # second formula that drifts whenever endpoint gating changes.
+    while cursor < rollover:
+        state = _market_state.market_state_at(cursor)
+        include_state_probe = (
+            has_tsetmc
+            and state == _market_state.OPEN
+            and cursor >= next_state_probe
+        )
+        needed += len(_market_state.live_job_keys(
+            state=state,
+            now=cursor,
+            has_brs=has_brs,
+            has_tsetmc=has_tsetmc,
+            ignore_hours=ignore_hours,
+            include_state_probe=include_state_probe,
+        ))
+        if include_state_probe:
+            next_state_probe = cursor + timedelta(seconds=_market_state._STATE_TTL_OPEN)
+        cursor += timedelta(seconds=max(1, intervals[state]))
     return max(0, min(needed, bucket_budget(LIVE) - row.live_used))
 
 
@@ -247,7 +244,7 @@ def reserve_request(bucket=OTHER):
 
 
 def reconcile_account(account):
-    """Trust the provider's own counters over ours; return its backoff seconds.
+    """Conservatively merge provider counters; return its backoff seconds.
 
     The `account` block only rides along on ERROR responses, so its absence means
     "no news", never zero usage -- treating a missing block as zero would reset the
@@ -269,14 +266,23 @@ def reconcile_account(account):
             day=quota_day(),
             defaults={"limit": settings.MARKETDATA_DAILY_REQUEST_LIMIT},
         )
-        if row.used != usage:
+        # Responses from concurrent requests can arrive out of order. Lowering
+        # the local counter to an older response re-opens quota that was already
+        # spent, while a larger counter is useful evidence of calls made outside
+        # this process. Keep usage monotonic and account unexplained positive
+        # drift in `other_used` so the bucket sum remains an exact ledger.
+        if usage > row.used:
+            drift = usage - row.used
             logger.info(
-                "[QUOTA] Reconciled day usage from %d to provider-reported %d.",
+                "[QUOTA] Reconciled day usage from %d to provider-reported %d "
+                "(%d unattributed request(s)).",
                 row.used,
                 usage,
+                drift,
             )
             row.used = usage
-            row.save(update_fields=["used", "updated_at"])
+            row.other_used += drift
+            row.save(update_fields=["used", "other_used", "updated_at"])
     return block
 
 

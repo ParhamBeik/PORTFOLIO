@@ -94,6 +94,7 @@ class ArchiveFetchState(models.Model):
     expected_rows = models.PositiveIntegerField(default=0)
     stored_rows = models.PositiveIntegerField(default=0)
     missing_rows = models.PositiveIntegerField(default=0)
+    known_gap_rows = models.PositiveIntegerField(default=0)
     first_date = models.CharField(max_length=32, blank=True, default="")
     last_date = models.CharField(max_length=32, blank=True, default="")
     verified_complete = models.BooleanField(default=False, db_index=True)
@@ -102,6 +103,8 @@ class ArchiveFetchState(models.Model):
     last_attempt_at = models.DateTimeField(null=True, blank=True)
     last_success_at = models.DateTimeField(null=True, blank=True)
     next_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    target_window_days = models.PositiveSmallIntegerField(default=90)
+    archive_cursor = models.PositiveIntegerField(default=1)
 
     class Meta:
         ordering = ["verified_complete", "-missing_rows", "last_attempt_at"]
@@ -155,10 +158,10 @@ class DailyStockHistory(models.Model):
     tno = models.IntegerField(default=0)
     tvol = models.BigIntegerField(default=0)
     tval = models.BigIntegerField(default=0)
-    pmin = models.DecimalField(max_digits=20, decimal_places=4, default=0)
-    pmax = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    pmin = models.DecimalField(max_digits=20, decimal_places=4, default=0, null=True, blank=True)
+    pmax = models.DecimalField(max_digits=20, decimal_places=4, default=0, null=True, blank=True)
     py = models.DecimalField(max_digits=20, decimal_places=4, default=0)
-    pf = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    pf = models.DecimalField(max_digits=20, decimal_places=4, default=0, null=True, blank=True)
     pl = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     plc = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     plp = models.FloatField(default=0.0)
@@ -214,6 +217,10 @@ class RealLegalHistory(models.Model):
     buy_n_value = models.BigIntegerField(null=True, blank=True)
     sell_i_value = models.BigIntegerField(null=True, blank=True)
     sell_n_value = models.BigIntegerField(null=True, blank=True)
+    quality = models.CharField(max_length=24, default="validated", db_index=True)
+    reconciliation_error = models.DecimalField(
+        max_digits=8, decimal_places=6, null=True, blank=True
+    )
 
     class Meta:
         ordering = ["-date"]
@@ -249,9 +256,9 @@ class MarketCandle(models.Model):
     symbol = models.CharField(max_length=64, db_index=True)
     timeframe = models.CharField(max_length=16, db_index=True)  # e.g., 1m, 5m, 15m, 30m, 60m, 1d_adj, 1d_unadj, 1d_agg
     date_time = models.CharField(max_length=32, db_index=True)
-    open_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
-    high_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
-    low_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    open_price = models.DecimalField(max_digits=20, decimal_places=4, default=0, null=True, blank=True)
+    high_price = models.DecimalField(max_digits=20, decimal_places=4, default=0, null=True, blank=True)
+    low_price = models.DecimalField(max_digits=20, decimal_places=4, default=0, null=True, blank=True)
     close_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     volume = models.BigIntegerField(default=0)
 
@@ -358,6 +365,159 @@ class CodalAnnouncement(models.Model):
         ]
 
 
+class CodalReport(models.Model):
+    """Versioned extraction state for one immutable Codal announcement."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        FETCHING = "fetching", "Fetching"
+        PARSED = "parsed", "Parsed"
+        NEEDS_REVIEW = "needs_review", "Needs review"
+        UNSUPPORTED = "unsupported_template", "Unsupported template"
+        BLOCKED_NETWORK = "blocked_network", "Blocked network"
+        BLOCKED_STORAGE = "blocked_storage", "Blocked storage"
+        FAILED = "failed", "Failed"
+
+    class Quality(models.TextChoices):
+        VALIDATED = "validated", "Validated"
+        DEGRADED = "degraded", "Degraded"
+        REVIEW = "needs_review", "Needs review"
+        UNKNOWN = "unknown", "Unknown"
+
+    announcement = models.OneToOneField(
+        CodalAnnouncement, on_delete=models.PROTECT, related_name="report"
+    )
+    category = models.IntegerField(
+        choices=CodalAnnouncement.Category.choices, null=True, blank=True, db_index=True
+    )
+    report_type = models.CharField(max_length=80, blank=True, default="")
+    letter_type = models.CharField(max_length=32, blank=True, default="", db_index=True)
+    period_start = models.CharField(max_length=10, blank=True, default="")
+    period_end = models.CharField(max_length=10, blank=True, default="", db_index=True)
+    is_audited = models.BooleanField(null=True, blank=True)
+    is_consolidated = models.BooleanField(default=False)
+    is_correction = models.BooleanField(default=False)
+    revision_of = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.PROTECT, related_name="revisions"
+    )
+    parser_version = models.CharField(max_length=32, default="1")
+    status = models.CharField(
+        max_length=32, choices=Status.choices, default=Status.PENDING, db_index=True
+    )
+    quality = models.CharField(
+        max_length=24, choices=Quality.choices, default=Quality.UNKNOWN, db_index=True
+    )
+    error_code = models.CharField(max_length=64, blank=True, default="")
+    extracted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-announcement__date_publish", "-announcement__time_publish"]
+
+
+class CodalArtifact(models.Model):
+    class Kind(models.TextChoices):
+        EXCEL = "excel", "Excel"
+        HTML = "html", "HTML"
+        PDF = "pdf", "PDF"
+        ATTACHMENT = "attachment", "Attachment"
+
+    class FetchStatus(models.TextChoices):
+        PENDING = "pending", "Pending"
+        STORED = "stored", "Stored"
+        BLOCKED_NETWORK = "blocked_network", "Blocked network"
+        BLOCKED_STORAGE = "blocked_storage", "Blocked storage"
+        REJECTED = "rejected", "Rejected"
+        FAILED = "failed", "Failed"
+
+    report = models.ForeignKey(CodalReport, on_delete=models.CASCADE, related_name="artifacts")
+    source_url = models.URLField(max_length=2048)
+    kind = models.CharField(max_length=16, choices=Kind.choices)
+    s3_key = models.CharField(max_length=512, blank=True, default="")
+    checksum_sha256 = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    content_type = models.CharField(max_length=128, blank=True, default="")
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    fetch_status = models.CharField(
+        max_length=32, choices=FetchStatus.choices, default=FetchStatus.PENDING, db_index=True
+    )
+    error_code = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["report", "kind", "source_url"], name="uniq_codal_artifact_source"
+            )
+        ]
+
+
+class CodalParsedTable(models.Model):
+    report = models.ForeignKey(CodalReport, on_delete=models.CASCADE, related_name="parsed_tables")
+    artifact = models.ForeignKey(
+        CodalArtifact, null=True, blank=True, on_delete=models.SET_NULL, related_name="parsed_tables"
+    )
+    name = models.CharField(max_length=255, blank=True, default="")
+    sheet_name = models.CharField(max_length=255, blank=True, default="")
+    table_index = models.PositiveIntegerField(default=0)
+    headers = models.JSONField(default=list)
+    rows = models.JSONField(default=list)
+    source_coordinates = models.JSONField(default=dict)
+    parser_version = models.CharField(max_length=32, default="1")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["report", "artifact", "sheet_name", "table_index"],
+                name="uniq_codal_parsed_table",
+            )
+        ]
+
+
+class CodalSection(models.Model):
+    report = models.ForeignKey(CodalReport, on_delete=models.CASCADE, related_name="sections")
+    artifact = models.ForeignKey(
+        CodalArtifact, null=True, blank=True, on_delete=models.SET_NULL, related_name="sections"
+    )
+    heading = models.CharField(max_length=255, blank=True, default="")
+    body = models.TextField()
+    section_index = models.PositiveIntegerField(default=0)
+    source_coordinates = models.JSONField(default=dict)
+    confidence = models.DecimalField(max_digits=5, decimal_places=4, default=1)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["report", "artifact", "section_index"], name="uniq_codal_section"
+            )
+        ]
+
+
+class CodalFact(models.Model):
+    report = models.ForeignKey(CodalReport, on_delete=models.CASCADE, related_name="facts")
+    table = models.ForeignKey(
+        CodalParsedTable, null=True, blank=True, on_delete=models.SET_NULL, related_name="facts"
+    )
+    section = models.ForeignKey(
+        CodalSection, null=True, blank=True, on_delete=models.SET_NULL, related_name="facts"
+    )
+    fact_code = models.CharField(max_length=160, db_index=True)
+    numeric_value = models.DecimalField(max_digits=38, decimal_places=12, null=True, blank=True)
+    text_value = models.TextField(blank=True, default="")
+    unit = models.CharField(max_length=64, blank=True, default="")
+    currency = models.CharField(max_length=16, blank=True, default="")
+    period_start = models.CharField(max_length=10, blank=True, default="")
+    period_end = models.CharField(max_length=10, blank=True, default="", db_index=True)
+    dimensions = models.JSONField(default=dict)
+    confidence = models.DecimalField(max_digits=5, decimal_places=4, default=1)
+    quality = models.CharField(max_length=24, default="validated", db_index=True)
+    parser_version = models.CharField(max_length=32, default="1")
+    source_coordinates = models.JSONField(default=dict)
+
+    class Meta:
+        indexes = [models.Index(fields=["fact_code", "period_end", "quality"])]
+
+
 class CorporateAction(models.Model):
     class Kind(models.TextChoices):
         SPLIT = "split", "Split"
@@ -392,6 +552,10 @@ class CorporateAction(models.Model):
 class GoldCurrencyHistory(models.Model):
     """Gold, Fiat Currency, and Crypto daily and 24h price history."""
 
+    class Source(models.TextChoices):
+        PROVIDER = "provider", "Provider"
+        AGGREGATE = "aggregate", "Live-price aggregate"
+
     symbol = models.CharField(max_length=64, db_index=True)
     name = models.CharField(max_length=120, blank=True, default="")
     unit = models.CharField(max_length=32, blank=True, default="")
@@ -400,6 +564,9 @@ class GoldCurrencyHistory(models.Model):
     high_price = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
     low_price = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
     close_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    source = models.CharField(
+        max_length=16, choices=Source.choices, default=Source.PROVIDER
+    )
 
     class Meta:
         ordering = ["-date"]
@@ -502,7 +669,7 @@ class CryptoHistory(models.Model):
 
     symbol = models.CharField(max_length=64, db_index=True)
     date = models.CharField(max_length=10, db_index=True)
-    close_price_usd = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    close_price_usd = models.DecimalField(max_digits=30, decimal_places=12, default=0)
     # Provider's `price_toman` field, stored verbatim (raw-storage policy).
     close_price_toman = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     volume_24h = models.BigIntegerField(default=0)
@@ -535,6 +702,9 @@ class RejectedRecord(models.Model):
     occurrences = models.IntegerField(default=1)
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
+    disposition = models.CharField(max_length=24, default="quarantined", db_index=True)
+    recovered_at = models.DateTimeField(null=True, blank=True)
+    destination_reference = models.CharField(max_length=255, blank=True, default="")
 
     class Meta:
         ordering = ["-last_seen"]
@@ -561,6 +731,46 @@ class SystemLogEvent(models.Model):
 
     class Meta:
         ordering = ["-timestamp"]
+
+
+class WorkflowRun(models.Model):
+    """One structured terminal outcome for one logical workflow job."""
+
+    class Outcome(models.TextChoices):
+        SUCCESS = "success", "Success"
+        PARTIAL = "partial", "Partial"
+        RETRY = "retry", "Retry"
+        SKIPPED = "skipped", "Skipped"
+        BLOCKED_NETWORK = "blocked_network", "Blocked network"
+        BLOCKED_STORAGE = "blocked_storage", "Blocked storage"
+        FAILED = "failed", "Failed"
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    workflow = models.CharField(max_length=80, db_index=True)
+    task_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    correlation_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    endpoint = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    symbol = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    outcome = models.CharField(max_length=32, choices=Outcome.choices, db_index=True)
+    source = models.CharField(max_length=255, blank=True, default="")
+    destination_table = models.CharField(max_length=128, blank=True, default="")
+    rows_received = models.PositiveIntegerField(default=0)
+    rows_accepted = models.PositiveIntegerField(default=0)
+    rows_created = models.PositiveIntegerField(default=0)
+    rows_updated = models.PositiveIntegerField(default=0)
+    rows_rejected = models.PositiveIntegerField(default=0)
+    http_attempts = models.PositiveSmallIntegerField(default=0)
+    quota_attempts = models.PositiveSmallIntegerField(default=0)
+    duration_ms = models.PositiveIntegerField(default=0)
+    error_code = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    metadata = models.JSONField(default=dict)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["workflow", "outcome", "created_at"]),
+            models.Index(fields=["endpoint", "symbol", "created_at"]),
+        ]
 
 
 class SymbolIntegrity(models.Model):

@@ -43,6 +43,8 @@ app.conf.update(
     # could queue behind a backfill batch. Routing is by module: everything in
     # marketdata is warehouse work, everything in portfolio is customer-facing.
     task_routes={
+        "marketdata.tasks.process_codal_report": {"queue": "codal"},
+        "marketdata.tasks.enqueue_codal_reports": {"queue": "codal"},
         "marketdata.tasks.*": {"queue": "archive"},
         "portfolio.tasks.*": {"queue": "live"},
     },
@@ -61,13 +63,19 @@ app.conf.beat_schedule = {
         "task": "marketdata.tasks.archive_tick",
         "schedule": 60.0,
     },
-
-    # Warehouse sync after TSE close.
-    # over tracked symbols, then gold/currency history and the index snapshot.
-    "marketdata-daily-sync": {
-        "task": "marketdata.tasks.daily_sync",
-        "schedule": crontab(hour=18, minute=15),
+    "codal-extraction-newest-first": {
+        "task": "marketdata.tasks.enqueue_codal_reports",
+        "schedule": 60.0,
     },
+    "marketdata-recent-history-after-close": {
+        "task": "marketdata.tasks.recent_history_refresh",
+        "schedule": crontab(day_of_week="0-4", hour=14, minute=35),
+    },
+    "marketdata-low-rate-maintenance": {
+        "task": "marketdata.tasks.archive_maintenance",
+        "schedule": crontab(hour=4, minute=10),
+    },
+
     # Symbol fundamentals refresh weekly on Friday (TSE closed, API quiet).
     "marketdata-weekly-meta": {
         "task": "marketdata.tasks.weekly_metadata_sync",

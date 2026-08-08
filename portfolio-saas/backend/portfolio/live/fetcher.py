@@ -186,21 +186,6 @@ def _tsetmc_job(tsetmc_url, tsetmc_key, tsetmc_symbol_url):
     return result
 
 
-def is_commodity_market_open(now_tehran):
-    # Commodities close on global weekends: Saturday 01:30 Tehran time to Monday 02:30 Tehran time.
-    # weekday(): 0 = Monday, ..., 5 = Saturday, 6 = Sunday.
-    day = now_tehran.weekday()
-    hour = now_tehran.hour
-    minute = now_tehran.minute
-    if day == 5:  # Saturday
-        return (hour, minute) < (1, 30)
-    if day == 6:  # Sunday
-        return False
-    if day == 0:  # Monday
-        return (hour, minute) >= (2, 30)
-    return True
-
-
 def fetch_all_markets(api_settings):
     """Return all raw market payloads needed by extractor.extract_standard_prices.
 
@@ -217,33 +202,49 @@ def fetch_all_markets(api_settings):
 
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    from marketdata.market_state import market_state, OPEN, CLOSED_DAYTIME
+    from marketdata import ingest
+    from marketdata.fetchers.index import fetch_market_index
+    from marketdata.market_state import (
+        claim_provider_state_probe,
+        live_job_keys,
+        market_state,
+        release_provider_state_probe,
+    )
 
     ignore_hours = getattr(settings, "MARKETDATA_IGNORE_MARKET_HOURS", False)
 
-    if ignore_hours:
-        is_tse_open = True
-        is_gold_currency_open = True
-        is_commodity_open = True
-    else:
-        current_state = market_state()
-        is_tse_open = (current_state == OPEN)
-        is_gold_currency_open = (current_state in (OPEN, CLOSED_DAYTIME))
+    tehran_now = datetime.now(ZoneInfo("Asia/Tehran"))
+    if tsetmc_url and tsetmc_key and claim_provider_state_probe(tehran_now):
+        try:
+            index_payload = fetch_market_index(tsetmc_key)
+            if index_payload:
+                ingest.ingest_market_index(index_payload)
+                raw_data["market_index"] = index_payload
+        except Exception as exc:
+            release_provider_state_probe()
+            logger.warning("[MARKET_STATE_PROBE_ERROR] Index probe failed: %s", exc)
 
-        tehran_now = datetime.now(ZoneInfo("Asia/Tehran"))
-        is_commodity_open = is_commodity_market_open(tehran_now)
+    current_state = market_state()
+    planned = set(live_job_keys(
+        state=current_state,
+        now=tehran_now,
+        has_brs=bool(brs_url and brs_key),
+        has_tsetmc=bool(tsetmc_url and tsetmc_key),
+        ignore_hours=ignore_hours,
+    ))
 
     executor = ThreadPoolExecutor(max_workers=6)
     if brs_url and brs_key:
-        if is_gold_currency_open:
+        if "gold_currency" in planned:
             jobs.append(executor.submit(_brs_job, brs_url, brs_key))
         else:
             logger.info("[FETCH_SKIP] Domestic gold & currency market closed overnight. Skipping.")
 
         # Cryptocurrencies are open 24/7/365
-        jobs.append(executor.submit(_crypto_job))
+        if "crypto" in planned:
+            jobs.append(executor.submit(_crypto_job))
 
-        if is_commodity_open:
+        if "commodity" in planned:
             jobs.append(executor.submit(_commodity_job))
         else:
             logger.info("[FETCH_SKIP] Global commodity market closed on global weekend. Skipping.")
@@ -251,12 +252,14 @@ def fetch_all_markets(api_settings):
         logger.warning("[FETCH_SKIP] BRS API URL or Key missing in Django settings.")
 
     if tsetmc_url and tsetmc_key:
-        if is_tse_open:
+        if "tsetmc" in planned:
             tsetmc_symbol_url = api_settings.get("tsetmc_symbol_url", settings.TSETMC_SYMBOL_URL)
             jobs.append(executor.submit(_tsetmc_job, tsetmc_url, tsetmc_key, tsetmc_symbol_url))
+        if "option_contracts" in planned:
             jobs.append(executor.submit(_option_job))
+        if "etf_nav" in planned:
             jobs.append(executor.submit(_etf_nav_job))
-        else:
+        if not {"tsetmc", "option_contracts", "etf_nav"}.intersection(planned):
             logger.info("[FETCH_SKIP] Tehran Stock Exchange (TSE) is closed. Skipping stocks, options, and ETFs.")
     else:
         logger.warning("[FETCH_SKIP] TSETMC URL or Key missing in Django settings.")

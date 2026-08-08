@@ -24,7 +24,7 @@ WORKDIR /app
 
 # libpq5: psycopg's runtime shared lib. curl: HEALTHCHECK + compose healthchecks.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 curl \
+    libpq5 curl poppler-utils tesseract-ocr tesseract-ocr-fas \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/venv /opt/venv

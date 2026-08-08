@@ -15,6 +15,9 @@ Batches are separate so each can be reviewed and applied on its own:
   units        Rewrite mis-scaled closes to the manifest's `corrected` value.
                `--symbol` / `--date-from` / `--date-to` narrow it further, so a
                verified cluster can be repaired without touching unverified rows.
+  crypto       Recover sub-cent USD quotes rounded to zero by the old schema,
+               using the manifest's per-day cross-rate reconstruction.
+  salvage      Re-ingest rows with a valid close and nullable bad OHLC fields.
 """
 import csv
 import hashlib
@@ -23,10 +26,13 @@ from decimal import Decimal
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.db.models import F
 
-from marketdata.models import MarketCandle, RejectedRecord
+from marketdata.models import (
+    CryptoHistory, DailyStockHistory, MarketCandle, RejectedRecord,
+)
 
-BATCHES = ("quarantine", "candletable", "units")
+BATCHES = ("quarantine", "candletable", "units", "crypto", "salvage")
 TIMEFRAME_OF = {
     "marketdata_marketcandle[1d_adj]": MarketCandle.ADJUSTED,
     "marketdata_marketcandle[1d_unadj]": MarketCandle.UNADJUSTED,
@@ -64,9 +70,17 @@ class Command(BaseCommand):
         self.stdout.write(f"manifest sha256: {digest}")
 
         with open(path, newline="", encoding="utf-8") as fh:
-            rows = [r for r in csv.DictReader(fh) if r["verdict"] == "unit_error"]
+            manifest_rows = list(csv.DictReader(fh))
+        rows = [r for r in manifest_rows if r["verdict"] == "unit_error"]
 
-        if batch == "candletable":
+        if batch == "salvage":
+            rows = [r for r in manifest_rows if r["verdict"] == "salvageable_field"]
+        elif batch == "crypto":
+            rows = [
+                r for r in manifest_rows
+                if r["verdict"] == "precision_loss" and r.get("corrected")
+            ]
+        elif batch == "candletable":
             rows = [r for r in rows if r["check"] == "candletable"]
         elif batch == "units":
             # Any finding that carries a `corrected` value is repairable, whoever
@@ -89,9 +103,13 @@ class Command(BaseCommand):
         for sym, n in Counter(r["symbol"] for r in rows).most_common(10):
             self.stdout.write(f"    {sym:16} {n}")
         for r in rows[:5]:
+            action = (
+                "SALVAGE" if batch == "salvage"
+                else r.get("corrected") or "DELETE"
+            )
             self.stdout.write(
                 f"  e.g. {r['symbol']} {r['date']} {r['table']}: "
-                f"{r['value']} -> {r.get('corrected') or 'DELETE'}"
+                f"{r['value']} -> {action}"
             )
 
         if not o["apply"]:
@@ -103,6 +121,8 @@ class Command(BaseCommand):
             "quarantine": self._quarantine,
             "candletable": self._delete_rows,
             "units": self._rewrite,
+            "crypto": self._repair_crypto,
+            "salvage": self._salvage_ohlc,
         }[batch]
         with transaction.atomic():
             changed = handler(rows)
@@ -138,6 +158,9 @@ class Command(BaseCommand):
     def _rewrite(self, rows):
         n = 0
         for r in rows:
+            if r["table"] == "marketdata_dailystockhistory":
+                n += self._rewrite_daily_history(r)
+                continue
             tf = TIMEFRAME_OF.get(r["table"])
             if not tf:
                 continue
@@ -145,3 +168,55 @@ class Command(BaseCommand):
                 symbol=r["symbol"], timeframe=tf, date_time__startswith=r["date"]
             ).update(close_price=Decimal(r["corrected"]))
         return n
+
+    @staticmethod
+    def _rewrite_daily_history(row):
+        factor = Decimal(row["corrected"].removeprefix("factor:"))
+        queryset = DailyStockHistory.objects.filter(
+            symbol=row["symbol"], date=row["date"], is_adjusted=False,
+            pl=Decimal(row["value"]),
+        )
+        price_fields = ("pmin", "pmax", "py", "pf", "pl", "plc", "pc", "pcc")
+        updates = {field: F(field) * factor for field in price_fields}
+        updates["tval"] = F("tval") * factor
+        return queryset.update(**updates)
+
+    def _repair_crypto(self, rows):
+        n = 0
+        for row in rows:
+            n += CryptoHistory.objects.filter(
+                symbol=row["symbol"], date=row["date"], close_price_usd__lte=0
+            ).update(close_price_usd=Decimal(row["corrected"]))
+        return n
+
+    def _salvage_ohlc(self, rows):
+        from marketdata import ingest
+
+        changed = 0
+        for row in rows:
+            rejected = RejectedRecord.objects.filter(
+                endpoint=row["table"], symbol=row["symbol"], date=row["date"]
+            ).exclude(reason__startswith="field_").first()
+            if rejected is None:
+                continue
+            if row["table"] == "stock_history_unadjusted":
+                ingest.ingest_daily_history(row["symbol"], [rejected.payload], False)
+                landed = DailyStockHistory.objects.filter(
+                    symbol=row["symbol"], date=row["date"], is_adjusted=False
+                ).exists()
+            else:
+                candle_type = 3 if row["table"] == "stock_candle_adjusted" else 2
+                key = "candle_daily_adjusted" if candle_type == 3 else "candle_daily"
+                ingest.ingest_candles(row["symbol"], candle_type, {key: [rejected.payload]})
+                timeframe = (
+                    MarketCandle.ADJUSTED if candle_type == 3
+                    else MarketCandle.UNADJUSTED
+                )
+                landed = MarketCandle.objects.filter(
+                    symbol=row["symbol"], timeframe=timeframe,
+                    date_time__startswith=row["date"],
+                ).exists()
+            if landed:
+                rejected.delete()
+                changed += 1
+        return changed

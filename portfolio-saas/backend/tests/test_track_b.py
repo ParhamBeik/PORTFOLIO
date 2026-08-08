@@ -17,14 +17,29 @@ from portfolio.services.diagnostics import portfolio_diagnostics
 class TestTrackB:
     # We choose an integration test type here because validating data integrity, gate exclusion, and benchmark diagnostics requires component boundaries (models, database state, service functions, and celery tasks) to work in unison.
 
-    def test_nightly_data_integrity_task(self):
+    def test_nightly_data_integrity_task(self, monkeypatch):
         """Verify the nightly Celery task computes and saves integrity metrics for eligible symbols."""
+        calendar_calls = 0
+
+        def market_calendar(**_kwargs):
+            nonlocal calendar_calls
+            calendar_calls += 1
+            return {jdatetime.date.today().strftime("%Y-%m-%d")}
+
+        monkeypatch.setattr("marketdata.integrity.actual_trading_days", market_calendar)
+
         # Create an eligible instrument
         instrument = MarketInstrument.objects.create(
             symbol="TEST_STOCK",
             name="Test Stock",
             source=MarketInstrument.Source.TSETMC,
             eligible=True
+        )
+        MarketInstrument.objects.create(
+            symbol="TEST_STOCK_2",
+            name="Second Test Stock",
+            source=MarketInstrument.Source.TSETMC,
+            eligible=True,
         )
         
         # Add some historical candles
@@ -46,7 +61,8 @@ class TestTrackB:
         integrity = SymbolIntegrity.objects.filter(symbol="TEST_STOCK").first()
         assert integrity is not None
         assert integrity.symbol == "TEST_STOCK"
-        assert integrity.passes_gate is False  # Low coverage ratio since expected_rows defaults to 180 and we only have 1 row.
+        assert integrity.passes_gate is True
+        assert calendar_calls == 1
 
     def test_integrity_gate_enforcement(self):
         """Verify that symbols failing the integrity gate are excluded from the daily returns matrix."""

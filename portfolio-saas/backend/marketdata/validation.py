@@ -164,6 +164,78 @@ def _bad_time(value):
     return None
 
 
+_OHLC_FIELDS = {
+    "candle": ("open", "high", "low", "close"),
+    "daily_history": ("pf", "pmax", "pmin", "pl"),
+    "gold": ("open", "high", "low", "close"),
+}
+
+
+def salvage_ohlc_records(kind, records):
+    """Null bad ancillary OHLC fields while preserving a trustworthy close."""
+    fields = _OHLC_FIELDS.get(kind)
+    if not fields:
+        return records, []
+    salvaged, issues = [], []
+    open_key, high_key, low_key, close_key = fields
+    for original in records:
+        if not isinstance(original, dict):
+            salvaged.append(original)
+            continue
+        if kind == "daily_history" and (_num(original.get("tvol")) or 0) == 0:
+            salvaged.append(original)
+            continue
+        close = _num(original.get(close_key))
+        if close is None or close <= 0 or close > MAX_PRICE:
+            salvaged.append(original)
+            continue
+
+        record = dict(original)
+        changed = []
+
+        def clear(field, reason):
+            if field not in changed:
+                changed.append(field)
+            record[field] = None
+            issues.append(Rejection(
+                f"field_{field}_{reason}",
+                {**original, "field": field},
+            ))
+
+        high, low = _num(record.get(high_key)), _num(record.get(low_key))
+        missing_is_bad = kind != "gold"
+        if high is None or high <= 0 or high > MAX_PRICE:
+            if missing_is_bad or record.get(high_key) is not None:
+                clear(high_key, "invalid")
+            high = None
+        if low is None or low <= 0 or low > MAX_PRICE:
+            if missing_is_bad or record.get(low_key) is not None:
+                clear(low_key, "invalid")
+            low = None
+        if high is not None and low is not None and high < low:
+            clear(high_key, "below_low")
+            clear(low_key, "above_high")
+            high = low = None
+        if high is not None and low is not None and not low <= close <= high:
+            clear(high_key, "excludes_close")
+            clear(low_key, "excludes_close")
+            high = low = None
+
+        opened = _num(record.get(open_key))
+        if opened is None or opened <= 0 or opened > MAX_PRICE:
+            if missing_is_bad or record.get(open_key) is not None:
+                clear(open_key, "invalid")
+        elif high is not None and low is not None and not low <= opened <= high:
+            clear(open_key, "outside_range")
+        elif not 0.5 <= opened / close <= 2.0:
+            clear(open_key, "implausible_vs_close")
+
+        if changed:
+            record["_salvaged_ohlc"] = changed
+        salvaged.append(record)
+    return salvaged, issues
+
+
 def _check_candle(rec):
     reason = _bad_date(rec.get("date"))
     if reason:
@@ -171,6 +243,8 @@ def _check_candle(rec):
     # A candle exists only because the stock traded, so an all-zero candle is a
     # provider artefact -- the matching "no trade" day is expressed by History.php
     # instead, and by the candle simply being absent.
+    if rec.get("_salvaged_ohlc"):
+        return None if (_num(rec.get("volume")) or 0) >= 0 else "volume_negative"
     reason = _bad_ohlc(
         _num(rec.get("open")), _num(rec.get("high")),
         _num(rec.get("low")), _num(rec.get("close")),
@@ -197,6 +271,8 @@ def _check_daily_history(rec):
         # Suspended day: the provider reports the carried-over close and zeroes
         # the rest. Legitimate and common (~22% of rows), so accept it as-is
         # rather than pretending an OHLC exists.
+        return None
+    if rec.get("_salvaged_ohlc"):
         return None
     return _bad_ohlc(
         _num(rec.get("pf")), _num(rec.get("pmax")),
@@ -234,6 +310,8 @@ def _check_gold(rec):
     close = _num(rec.get("close"))
     if close is None:
         return "price_not_numeric"
+    if rec.get("_salvaged_ohlc"):
+        return None
     # open/high/low fall back to close upstream when absent, so mirror that here
     # instead of rejecting a close-only quote.
     return _bad_ohlc(
@@ -303,6 +381,8 @@ def _check_snapshot(rec):
         return "price_not_numeric"
     if (price or 0) < 0 or (toman or 0) < 0:
         return "price_negative"
+    if (price or 0) <= 0 and (toman or 0) <= 0:
+        return "price_not_positive"
     return None
 
 

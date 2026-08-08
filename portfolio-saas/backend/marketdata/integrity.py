@@ -6,7 +6,7 @@ from typing import Any
 import jdatetime
 from django.utils import timezone
 
-from .candles import candle_close_qs
+from .candles import actual_trading_days, candle_close_qs
 from .models import (
     GoldCurrencyHistory,
     MarketCandle,
@@ -17,6 +17,7 @@ from .models import (
 
 MAX_FORWARD_FILL_SESSIONS = 5
 MIN_COVERAGE = 0.90
+MAX_REJECTION_RATIO = 0.01
 
 
 def _as_gregorian_date(value, default: dt.date) -> dt.date:
@@ -46,6 +47,11 @@ def _expected_sessions(
     return sessions
 
 
+def _jalali_text(day: dt.date) -> str:
+    value = jdatetime.date.fromgregorian(date=day)
+    return f"{value.year:04d}-{value.month:02d}-{value.day:02d}"
+
+
 def _stored_date(value: str) -> dt.date | None:
     try:
         year, month, day = (int(part) for part in value.split()[0].split("-"))
@@ -60,6 +66,7 @@ def compute_symbol_integrity(
     start=None,
     end=None,
     timeframe: str = "1d_adj",
+    _tse_sessions: tuple[dt.date, ...] | None = None,
 ) -> dict[str, Any]:
     """Assess one symbol over an explicit Gregorian or Jalali date window."""
     instrument = MarketInstrument.objects.filter(symbol=symbol).first()
@@ -73,11 +80,23 @@ def compute_symbol_integrity(
 
     end_date = _as_gregorian_date(end, timezone.now().date())
     start_date = _as_gregorian_date(start, end_date - dt.timedelta(days=179))
-    sessions = _expected_sessions(
-        start_date,
-        end_date,
-        tse_calendar=instrument.source == MarketInstrument.Source.TSETMC,
-    )
+    tse_calendar = instrument.source == MarketInstrument.Source.TSETMC
+    if tse_calendar:
+        if _tse_sessions is None:
+            market_days = actual_trading_days(
+                start=_jalali_text(start_date), end=_jalali_text(end_date)
+            )
+            sessions = sorted(
+                day for value in market_days
+                if (day := _stored_date(value)) is not None
+            )
+        else:
+            sessions = list(_tse_sessions)
+        # A new/empty warehouse still needs a conservative integrity answer.
+        if not sessions:
+            sessions = _expected_sessions(start_date, end_date, tse_calendar=True)
+    else:
+        sessions = _expected_sessions(start_date, end_date, tse_calendar=False)
     expected = set(sessions)
 
     if instrument.source == MarketInstrument.Source.TSETMC:
@@ -111,7 +130,28 @@ def compute_symbol_integrity(
         len([day for day in sessions if last_valid is None or day > last_valid])
         if sessions else 0
     )
-    rejected_count = RejectedRecord.objects.filter(symbol=symbol).count()
+    if tse_calendar:
+        labels = (
+            ("stock_candle_adjusted", "series:1d_adj")
+            if timeframe == MarketCandle.ADJUSTED
+            else ("stock_candle_unadjusted", "series:1d_unadj")
+        )
+    else:
+        labels = ("gold_daily", "crypto_daily")
+    rejected_count = (
+        RejectedRecord.objects.filter(
+            symbol=symbol,
+            endpoint__in=labels,
+            date__gte=_jalali_text(start_date),
+            date__lte=_jalali_text(end_date),
+        )
+        .exclude(reason__startswith="field_")
+        .count()
+    )
+    rejection_ratio = (
+        rejected_count / (observed_sessions + rejected_count)
+        if observed_sessions + rejected_count else 0.0
+    )
 
     reason_codes = []
     if coverage < MIN_COVERAGE:
@@ -120,8 +160,8 @@ def compute_symbol_integrity(
         reason_codes.append("price_gap_exceeded")
     if freshness > MAX_FORWARD_FILL_SESSIONS:
         reason_codes.append("stale")
-    if rejected_count:
-        reason_codes.append("unresolved_rejections")
+    if rejection_ratio > MAX_REJECTION_RATIO:
+        reason_codes.append("excessive_rejections")
 
     return {
         "symbol": symbol,
@@ -136,6 +176,7 @@ def compute_symbol_integrity(
         "freshness_sessions": freshness,
         "max_gap_days": max_gap,
         "rejected_count": rejected_count,
+        "rejection_ratio": rejection_ratio,
         "passes_gate": not reason_codes,
         "reason_codes": reason_codes,
         "reason": ",".join(reason_codes),
@@ -144,11 +185,37 @@ def compute_symbol_integrity(
 
 def update_all_symbols_integrity():
     """Persist current-window assessments for all eligible instruments."""
+    end_date = timezone.now().date()
+    start_date = end_date - dt.timedelta(days=179)
+    instruments = list(
+        MarketInstrument.objects.filter(eligible=True).values_list("symbol", "source")
+    )
+    tse_sessions = None
+    if any(source == MarketInstrument.Source.TSETMC for _symbol, source in instruments):
+        market_days = actual_trading_days(
+            start=_jalali_text(start_date), end=_jalali_text(end_date)
+        )
+        tse_sessions = tuple(sorted(
+            day for value in market_days
+            if (day := _stored_date(value)) is not None
+        ))
+        if not tse_sessions:
+            tse_sessions = tuple(
+                _expected_sessions(start_date, end_date, tse_calendar=True)
+            )
+
     results = []
-    for symbol in MarketInstrument.objects.filter(eligible=True).values_list(
-        "symbol", flat=True
-    ):
-        metrics = compute_symbol_integrity(symbol)
+    for symbol, source in instruments:
+        metrics = compute_symbol_integrity(
+            symbol,
+            start=start_date,
+            end=end_date,
+            _tse_sessions=(
+                tse_sessions
+                if source == MarketInstrument.Source.TSETMC
+                else None
+            ),
+        )
         obj, _ = SymbolIntegrity.objects.update_or_create(
             symbol=symbol,
             defaults={

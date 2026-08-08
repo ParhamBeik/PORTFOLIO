@@ -13,5 +13,8 @@ urlpatterns = [
     path("performance/", views.PerformanceView.as_view(), name="market-performance"),
     path("compare/", views.CompareView.as_view(), name="market-compare"),
     path("announcements/", views.AnnouncementsView.as_view(), name="market-announcements"),
+    path("reports/<int:report_id>/", views.ReportDetailView.as_view(), name="market-report-detail"),
+    path("reports/<int:report_id>/facts/", views.ReportFactsView.as_view(), name="market-report-facts"),
+    path("facts/", views.FactsView.as_view(), name="market-facts"),
     path("shareholders/", views.ShareholdersView.as_view(), name="market-shareholders"),
 ]

@@ -146,7 +146,11 @@ REGISTRY = {
             required_params=("l18", "type"),
             rows_per_request=4616,
             valid_types=(0, 1),
-            notes="type 0 unadjusted + real/legal split, 1 adjusted. No date param.",
+            notes=(
+                "type 0 is unadjusted OHLC/price history; type 1 is the "
+                "real/legal participant breakdown. Adjusted prices come from "
+                "Candlestick.php type 3. No date param."
+            ),
         ),
         Endpoint(
             key="stock_candles",

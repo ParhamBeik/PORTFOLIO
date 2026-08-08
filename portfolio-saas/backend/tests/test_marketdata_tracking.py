@@ -70,10 +70,16 @@ def test_bucket_budget_caps_a_single_bucket(settings):
 
 
 def test_provider_account_reconciles_local_counter(settings):
-    """The provider's usage_today is truth; a missing block must not reset it."""
+    """Provider drift is monotonic and remains represented in bucket totals."""
     settings.MARKETDATA_DAILY_REQUEST_LIMIT = 10000
     reserve_request(ARCHIVE)
     assert reconcile_account({"usage_today": 4021, "request_block": 120}) == 120
+    row = ApiRequestQuota.objects.get()
+    assert row.used == 4021
+    assert row.archive_used + row.live_used + row.other_used == row.used
+    assert row.other_used == 4020
+    # An out-of-order provider response must not re-open already spent quota.
+    reconcile_account({"usage_today": 4000})
     assert ApiRequestQuota.objects.get().used == 4021
     assert reconcile_account(None) == 0
     assert ApiRequestQuota.objects.get().used == 4021
@@ -108,6 +114,24 @@ def test_transient_http_error_does_not_leak_api_key(settings, caplog):
             fetch_json("https://example.test", params={"key": secret}, retries=0)
     assert secret not in caplog.text
     assert secret not in str(exc.value)
+
+
+def test_every_transient_http_attempt_consumes_quota(settings):
+    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 10
+    settings.MARKETDATA_LIVE_REQUEST_FLOOR = 0
+    settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
+    from requests.exceptions import RequestException
+
+    with (
+        patch("marketdata.fetchers.base.requests.get", side_effect=RequestException("timeout")) as get,
+        patch("marketdata.fetchers.base.time.sleep"),
+    ):
+        with pytest.raises(TransientMarketDataError):
+            fetch_json("https://example.test", retries=2)
+
+    row = ApiRequestQuota.objects.get()
+    assert get.call_count == 3
+    assert row.used == row.other_used == 3
 
 
 def test_catalog_accepts_shares_and_rejects_rights_and_funds():
@@ -176,7 +200,13 @@ def test_archive_state_is_complete_only_after_rows_exist(settings):
 
 
 def test_real_legal_without_price_rows_never_verifies(settings):
-    """No price row for the day means nothing to attach the breakdown to."""
+    """No price row at all means nothing to attach the breakdown to.
+
+    Reported as a missing dependency rather than a row-level gap: re-fetching
+    *this* endpoint can never produce a price row, so the unadjusted pass has to
+    land first. (Partial price coverage is a different case -- see
+    test_real_legal_verifies_despite_individually_rejected_price_days.)
+    """
     settings.TSETMC_API_KEY = "test-key"
     state = ArchiveFetchState.objects.create(
         endpoint=ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
@@ -185,7 +215,31 @@ def test_real_legal_without_price_rows_never_verifies(settings):
     with patch("marketdata.archive.fetch_daily_history", return_value=REAL_LEGAL_PAYLOAD):
         state = run_archive_state(state.pk)
     assert not state.verified_complete
-    assert state.missing_rows == 2
+    assert "no matching daily price rows" in state.last_error
+    assert state.consecutive_failures == 1
+
+
+def test_real_legal_verifies_despite_individually_rejected_price_days(settings):
+    """One price day the validator threw out must not block the whole symbol.
+
+    `stored` used to be the intersection of real/legal and price dates, so a day
+    rejected by the *price* validator left a hole this endpoint could never fill
+    -- 726 symbols sat 1-2 rows short forever, re-fetching every 60 seconds.
+    """
+    settings.TSETMC_API_KEY = "test-key"
+    # REAL_LEGAL_PAYLOAD carries two days; only the first gets a price row --
+    # the second stands in for a day the price validator rejected.
+    DailyStockHistory.objects.create(
+        symbol="TEST", date=REAL_LEGAL_PAYLOAD[0]["date"], is_adjusted=False, pl=100
+    )
+    state = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
+        symbol="TEST",
+    )
+    with patch("marketdata.archive.fetch_daily_history", return_value=REAL_LEGAL_PAYLOAD):
+        state = run_archive_state(state.pk)
+    assert state.verified_complete
+    assert state.missing_rows == 0
 
 
 def test_archive_state_records_missing_rows_instead_of_claiming_success(settings):
@@ -202,6 +256,26 @@ def test_archive_state_records_missing_rows_instead_of_claiming_success(settings
         state = run_archive_state(state.pk)
     assert not state.verified_complete
     assert state.missing_rows == 2
+
+
+def test_archive_exposes_permanently_rejected_dates_as_known_gaps(settings):
+    settings.TSETMC_API_KEY = "test-key"
+    state = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
+        symbol="KNOWN_GAP",
+    )
+    payload = {"candle_daily_adjusted": [
+        {"date": "1404-01-01", "open": 100, "high": 110, "low": 90,
+         "close": 105, "volume": 1000},
+        {"date": "1404-01-02", "open": 0, "high": 0, "low": 0,
+         "close": 0, "volume": 0},
+    ]}
+    with patch("marketdata.archive.fetch_candlesticks", return_value=payload):
+        state = run_archive_state(state.pk)
+    assert state.verified_complete
+    assert state.stored_rows == 1
+    assert state.known_gap_rows == 1
+    assert state.missing_rows == 0
 
 
 def test_active_asset_must_exist_in_verified_catalog():
@@ -286,6 +360,51 @@ def test_ensure_archive_states_covers_all_endpoints():
     assert ArchiveFetchState.Endpoint.ETF_NAV_DAILY not in endpoints
 
 
+def test_expected_gain_ranks_full_history_ahead_of_tick_backlog():
+    from marketdata.archive import _expected_gain_qs
+
+    candle = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
+        symbol="HIGH_YIELD",
+    )
+    ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+        symbol="LOW_YIELD",
+        expected_rows=90,
+        stored_rows=1,
+        missing_rows=89,
+    )
+    first = _expected_gain_qs(ArchiveFetchState.objects.all()).order_by(
+        "-_expected_gain"
+    ).first()
+    assert first == candle
+
+
+def test_recent_refresh_prefers_the_most_liquid_symbol():
+    from marketdata.archive import claim_recent_refresh
+    from marketdata.models import MarketCandle
+
+    for symbol, volume in (("QUIET", 10), ("LIQUID", 1000)):
+        MarketCandle.objects.create(
+            symbol=symbol,
+            timeframe=MarketCandle.UNADJUSTED,
+            date_time="1405-05-17",
+            close_price=100,
+            volume=volume,
+        )
+        for endpoint in (
+            ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
+            ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
+        ):
+            ArchiveFetchState.objects.create(endpoint=endpoint, symbol=symbol)
+
+    with patch("marketdata.archive.remaining_requests", return_value=10):
+        claimed = claim_recent_refresh(limit=2)
+    assert set(
+        ArchiveFetchState.objects.filter(pk__in=claimed).values_list("symbol", flat=True)
+    ) == {"LIQUID"}
+
+
 def test_archive_state_for_codal_shareholder_and_ticks(settings):
     """We choose an integration test because testing run_archive_state for Codal, Shareholder, and Ticks verifies fetcher response handling and database ingestion boundary logic."""
     from marketdata.archive import run_archive_state
@@ -334,7 +453,7 @@ def test_archive_state_for_codal_shareholder_and_ticks(settings):
     from marketdata.models import MarketCandle
     tick_day = jalali.today()
     MarketCandle.objects.create(
-        symbol="KAMA", timeframe="1d_unadj", date_time=tick_day,
+        symbol="KAMA", timeframe="1d_unadj", date_time=tick_day, volume=100,
     )
     tick_payload = [{"row": 1, "price": 1500, "volume": 100, "time": "09:30:00", "date": tick_day}]
     with patch("marketdata.archive.fetch_transactions", return_value=tick_payload):
@@ -434,4 +553,3 @@ def test_archive_state_permanent_error_exponential_backoff(settings):
     # Should back off exponentially (1 hour for first failure)
     diff = updated_state.next_attempt_at - updated_state.last_attempt_at
     assert 3599 <= diff.total_seconds() <= 3601
-

@@ -14,6 +14,7 @@ The calendar helpers query two tables, so they are narrow integration tests. The
 reserve is arithmetic over a settings object and one row, so it is a unit test.
 """
 from datetime import datetime, timezone as dt_timezone
+from unittest.mock import patch
 
 import pytest
 
@@ -114,6 +115,32 @@ class TestTickCoverage:
         ], ignore_conflicts=True)
         assert StockTransactionTick.objects.filter(symbol="SYM0", row=2).count() == 2
 
+    def test_failed_tick_replacement_retains_the_previous_day(self, settings):
+        from unittest.mock import patch
+        from marketdata.archive import run_archive_state
+        from marketdata.models import ArchiveFetchState
+
+        settings.TSETMC_API_KEY = "test-key"
+        day = jalali.today()
+        _candles(day, 50, volume=100)
+        old = StockTransactionTick.objects.create(
+            symbol="SYM0", date=day, row=1, time="09:15:00",
+            price=100, volume=50,
+        )
+        state = ArchiveFetchState.objects.create(
+            endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+            symbol="SYM0",
+        )
+        replacement = [{
+            "row": 2, "time": "09:20:00", "price": 101,
+            "volume": 60, "date": day,
+        }]
+        with patch("marketdata.archive.fetch_transactions", return_value=replacement):
+            run_archive_state(state.pk)
+
+        assert StockTransactionTick.objects.filter(pk=old.pk, volume=50).exists()
+        assert not StockTransactionTick.objects.filter(symbol="SYM0", row=2).exists()
+
 
 @pytest.mark.django_db
 class TestLiveReserve:
@@ -125,37 +152,34 @@ class TestLiveReserve:
         fields.update(over)
         return ApiRequestQuota(**fields)
 
-    def test_a_full_day_ahead_reserves_every_cycle_it_will_need(self, settings):
-        """288 five-minute cycles x 2 calls = 576, the figure the cadence implies."""
-        settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE = 2
+    @staticmethod
+    def _configure(settings, *, tse=False):
+        settings.BRS_API_KEY = "brs-key"
+        settings.TSETMC_API_KEY = "tse-key" if tse else ""
         settings.MARKETDATA_LIVE_INTERVAL_OPEN = 300
         settings.MARKETDATA_LIVE_INTERVAL_DAYTIME = 300
         settings.MARKETDATA_LIVE_INTERVAL_OVERNIGHT = 300
-        settings.MARKETDATA_LIVE_REQUEST_FLOOR = 600
-        settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 200
+        settings.MARKETDATA_LIVE_REQUEST_FLOOR = 6000
+        settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
         settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
+
+    def test_a_full_day_ahead_reserves_every_cycle_it_will_need(self, settings):
+        """Reserve the real BRS plan, including Monday's commodity opening."""
+        self._configure(settings)
         # 00:00 Tehran is 20:30 UTC the previous day: a whole quota day remains.
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(self._row(), now=midnight_tehran) == 576
+        assert quota.live_reserve_remaining(self._row(), now=midnight_tehran) == 738
 
     def test_the_reserve_shrinks_as_the_day_closes(self, settings):
-        settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE = 2
-        settings.MARKETDATA_LIVE_INTERVAL_OPEN = 300
-        settings.MARKETDATA_LIVE_INTERVAL_DAYTIME = 300
-        settings.MARKETDATA_LIVE_INTERVAL_OVERNIGHT = 300
-        settings.MARKETDATA_LIVE_REQUEST_FLOOR = 600
-        settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 200
-        settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
-        # 22:00 Tehran: two hours left = 24 cycles = 48 requests.
+        self._configure(settings)
+        # 22:00-23:00 has gold+crypto+commodity; 23:00-00:00 has two jobs.
         two_hours_left = datetime(2026, 7, 27, 18, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(self._row(), now=two_hours_left) == 48
+        assert quota.live_reserve_remaining(self._row(), now=two_hours_left) == 60
 
     def test_the_reserve_never_exceeds_what_live_could_still_spend(self, settings):
         """Live cannot borrow, so holding more than its bucket protects nothing."""
-        settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE = 2
+        self._configure(settings)
         settings.MARKETDATA_LIVE_REQUEST_FLOOR = 100
-        settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
-        settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
         row = self._row(live_used=70)
         assert quota.live_reserve_remaining(row, now=midnight_tehran) == 30
@@ -168,10 +192,7 @@ class TestLiveReserve:
         observed live spend of 24-719/day and locked the archive out of the tail
         of every day, so the reserve is now priced per market state.
         """
-        settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE = 2
-        settings.MARKETDATA_LIVE_REQUEST_FLOOR = 6000
-        settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
-        settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
+        self._configure(settings, tse=True)
         # 1405-05-05, a Monday: the session runs, so the open interval bites.
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
 
@@ -181,20 +202,68 @@ class TestLiveReserve:
         faster = quota.live_reserve_remaining(self._row(), now=midnight_tehran)
 
         assert faster > baseline
-        # 4.5h of session at 120s + 19.5h off-session at 300s, x2 calls.
-        assert faster == 2 * (135 + 234)
-        # The whole day at the open cadence would have been 1,440.
-        assert faster < 1440
+        # BRS costs 576 off-session; six jobs run during the 135 open cycles,
+        # plus one provider-state probe every 30 minutes of the 4.5h session.
+        assert faster == 576 + 6 * 135 + 9
+        assert faster < 6 * 720
 
     def test_the_session_cadence_is_not_charged_on_a_closed_day(self, settings):
         """Thursday/Friday is the Iranian weekend; no session runs to pay for."""
-        settings.MARKETDATA_LIVE_REQUESTS_PER_CYCLE = 2
-        settings.MARKETDATA_LIVE_REQUEST_FLOOR = 6000
-        settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
+        self._configure(settings, tse=True)
         settings.MARKETDATA_LIVE_INTERVAL_OPEN = 120
-        settings.MARKETDATA_LIVE_INTERVAL_DAYTIME = 300
-        settings.MARKETDATA_LIVE_INTERVAL_OVERNIGHT = 300
-        settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
         # 1405-05-09 is a Friday (jdatetime weekday 6).
         friday_midnight = datetime(2026, 7, 30, 20, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(self._row(), now=friday_midnight) == 576
+        assert quota.live_reserve_remaining(self._row(), now=friday_midnight) == 768
+
+    def test_no_credentials_means_no_phantom_reserve(self, settings):
+        self._configure(settings)
+        settings.BRS_API_KEY = ""
+        midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
+        assert quota.live_reserve_remaining(self._row(), now=midnight_tehran) == 0
+
+
+def test_live_job_plan_changes_with_market_state():
+    from marketdata.market_state import CLOSED_DAYTIME, OPEN, OVERNIGHT, live_job_keys
+
+    monday_noon = datetime(2026, 7, 27, 8, 30, tzinfo=dt_timezone.utc)
+    assert live_job_keys(
+        state=OPEN, now=monday_noon, has_brs=True, has_tsetmc=True
+    ) == (
+        "gold_currency", "crypto", "commodity",
+        "tsetmc", "option_contracts", "etf_nav",
+    )
+    assert live_job_keys(
+        state=CLOSED_DAYTIME, now=monday_noon, has_brs=True, has_tsetmc=True
+    ) == ("gold_currency", "crypto", "commodity")
+    assert live_job_keys(
+        state=OVERNIGHT, now=monday_noon, has_brs=True, has_tsetmc=True
+    ) == ("crypto", "commodity")
+
+
+def test_index_probe_closes_a_holiday_before_tse_jobs(settings):
+    from marketdata.market_state import CLOSED_DAYTIME
+    from portfolio.live.fetcher import fetch_all_markets
+
+    settings.MARKETDATA_IGNORE_MARKET_HOURS = False
+    settings.TSETMC_SYMBOL_URL = "https://example.test/symbol"
+    index_payload = {"date": "1405-05-17", "time": "08:30", "state": "بسته"}
+    with (
+        patch("marketdata.market_state.claim_provider_state_probe", return_value=True),
+        patch("marketdata.fetchers.index.fetch_market_index", return_value=index_payload) as index,
+        patch("marketdata.ingest.ingest_market_index", return_value=(1, 0)),
+        patch("marketdata.market_state.market_state", return_value=CLOSED_DAYTIME),
+        patch("portfolio.live.fetcher._tsetmc_job") as stocks,
+        patch("portfolio.live.fetcher._option_job") as options,
+        patch("portfolio.live.fetcher._etf_nav_job") as etfs,
+    ):
+        raw = fetch_all_markets({
+            "brs_url": "", "brs_api_key": "",
+            "tsetmc_url": "https://example.test/tse", "tsetmc_api_key": "key",
+            "tsetmc_symbol_url": "https://example.test/symbol",
+        })
+
+    index.assert_called_once_with("key")
+    assert raw["market_index"] == index_payload
+    stocks.assert_not_called()
+    options.assert_not_called()
+    etfs.assert_not_called()

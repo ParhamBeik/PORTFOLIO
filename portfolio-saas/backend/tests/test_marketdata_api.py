@@ -46,8 +46,9 @@ def test_candles_returns_series_for_free_user(make_user):
     body = resp.json()
     assert len(body) == 3
     assert {
-        "date_time", "open", "high", "low", "close", "volume", "source"
+        "date_time", "open", "high", "low", "close", "volume", "source", "unit"
     } == set(body[0])
+    assert body[0]["unit"] == "IRR"
     # Oldest-first for charting.
     assert body[0]["date_time"] < body[-1]["date_time"]
 
@@ -203,6 +204,7 @@ def test_ticks_returns_series(make_user):
     assert len(body) == 1
     assert body[0]["price"] == 7050.0
     assert body[0]["volume"] == 5000
+    assert body[0]["unit"] == "IRR"
 
 
 def test_ticks_requires_symbol(make_user):

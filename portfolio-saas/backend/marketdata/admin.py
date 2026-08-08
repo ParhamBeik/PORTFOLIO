@@ -11,6 +11,9 @@ from .models import (
     ApiRequestQuota,
     ArchiveFetchState,
     CodalAnnouncement,
+    CodalArtifact,
+    CodalFact,
+    CodalReport,
     DailyStockHistory,
     GoldCurrencyHistory,
     MarketCandle,
@@ -20,6 +23,7 @@ from .models import (
     StockSymbolMetadata,
     StockTransactionTick,
     SystemLogEvent,
+    WorkflowRun,
 )
 
 
@@ -36,6 +40,7 @@ class ArchiveFetchStateAdmin(admin.ModelAdmin):
         "stored_rows",
         "expected_rows",
         "missing_rows",
+        "known_gap_rows",
         "consecutive_failures",
         "verified_complete",
         "last_attempt_at",
@@ -45,6 +50,7 @@ class ArchiveFetchStateAdmin(admin.ModelAdmin):
     ordering = ("verified_complete", "-missing_rows", "-consecutive_failures")
     readonly_fields = (
         "symbol", "endpoint", "stored_rows", "expected_rows", "missing_rows",
+        "known_gap_rows",
         "first_date", "last_date", "verified_complete", "consecutive_failures",
         "last_error", "last_attempt_at", "last_success_at", "next_attempt_at",
     )
@@ -55,7 +61,9 @@ class ArchiveFetchStateAdmin(admin.ModelAdmin):
     def progress_display(self, obj):
         if obj.expected_rows == 0:
             return "—"
-        pct = round(obj.stored_rows / obj.expected_rows * 100, 1)
+        pct = round(
+            (obj.stored_rows + obj.known_gap_rows) / obj.expected_rows * 100, 1
+        )
         return f"{pct}%"
 
     @admin.action(description="Retry selected backfill jobs")
@@ -115,6 +123,47 @@ class SystemLogEventAdmin(admin.ModelAdmin):
     @admin.display(description="Message")
     def message_truncated(self, obj):
         return obj.message[:120] + "…" if len(obj.message) > 120 else obj.message
+
+
+@admin.register(WorkflowRun)
+class WorkflowRunAdmin(admin.ModelAdmin):
+    list_display = (
+        "created_at", "workflow", "endpoint", "symbol", "outcome",
+        "rows_accepted", "rows_rejected", "duration_ms", "error_code",
+    )
+    list_filter = ("workflow", "endpoint", "symbol", "outcome", "created_at")
+    search_fields = ("task_id", "correlation_id", "symbol", "error_code")
+    ordering = ("-created_at",)
+    readonly_fields = tuple(field.name for field in WorkflowRun._meta.fields)
+
+
+class CodalArtifactInline(admin.TabularInline):
+    model = CodalArtifact
+    extra = 0
+    readonly_fields = ("kind", "source_url", "s3_key", "checksum_sha256", "content_type", "size_bytes", "fetch_status", "error_code")
+
+
+@admin.register(CodalReport)
+class CodalReportAdmin(admin.ModelAdmin):
+    list_display = ("id", "symbol", "category", "report_type", "period_end", "status", "quality", "updated_at")
+    list_filter = ("category", "status", "quality", "is_audited", "is_consolidated", "is_correction")
+    search_fields = ("announcement__symbol", "announcement__title", "letter_type")
+    inlines = (CodalArtifactInline,)
+
+    @admin.display(ordering="announcement__symbol")
+    def symbol(self, obj):
+        return obj.announcement.symbol
+
+
+@admin.register(CodalFact)
+class CodalFactAdmin(admin.ModelAdmin):
+    list_display = ("fact_code", "symbol", "period_end", "numeric_value", "unit", "quality", "confidence")
+    list_filter = ("fact_code", "quality", "report__category")
+    search_fields = ("report__announcement__symbol", "fact_code", "text_value")
+
+    @admin.display(ordering="report__announcement__symbol")
+    def symbol(self, obj):
+        return obj.report.announcement.symbol
 
 
 # ---------------------------------------------------------------------------

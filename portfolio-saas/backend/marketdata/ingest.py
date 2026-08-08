@@ -19,7 +19,7 @@ Conventions:
 import logging
 from decimal import Decimal
 from . import jalali, validation
-from .currency import canonical_symbol, to_toman
+from .currency import canonical_symbol, gold_history_storage_unit, to_toman
 from .models import (
     CodalAnnouncement,
     CommodityHistory,
@@ -116,8 +116,9 @@ def screen(kind, records, endpoint, symbol="", date_key="date", default_date="")
     computed here once, a screened-out record can never be dropped silently, and
     the archive verifier still sees the endpoint as incomplete.
     """
+    records, field_rejections = validation.salvage_ohlc_records(kind, records)
     accepted, rejections = validation.validate(kind, records)
-    for rejection in rejections:
+    for rejection in [*field_rejections, *rejections]:
         day = rejection.record.get(date_key) or default_date
         day = normalize_jalali(day) if isinstance(day, str) else ""
         row, created = RejectedRecord.objects.get_or_create(
@@ -131,11 +132,11 @@ def screen(kind, records, endpoint, symbol="", date_key="date", default_date="")
             RejectedRecord.objects.filter(pk=row.pk).update(
                 occurrences=row.occurrences + 1, payload=_jsonable(rejection.record)
             )
-    if rejections:
+    if field_rejections or rejections:
         logger.warning(
-            "%s(%s): rejected %d of %d records (%s)",
-            endpoint, symbol, len(rejections), len(records),
-            ", ".join(sorted({r.reason for r in rejections})),
+            "%s(%s): rejected %d row(s), salvaged %d field(s) from %d records (%s)",
+            endpoint, symbol, len(rejections), len(field_rejections), len(records),
+            ", ".join(sorted({r.reason for r in [*field_rejections, *rejections]})),
         )
     return accepted, len(rejections)
 
@@ -256,7 +257,10 @@ fold_digits = jalali.fold_digits
 normalize_jalali = jalali.normalize_jalali
 
 
-def _bulk(model, rows, scope=None):
+def _bulk(
+    model, rows, scope=None, *, update_fields=(), unique_fields=(),
+    recent_field=None, recent_limit=10,
+):
     """bulk_create with conflict-skip; returns (created, conflicts).
 
     Postgres does not return pks for rows under ignore_conflicts (verified on
@@ -271,6 +275,15 @@ def _bulk(model, rows, scope=None):
     before = qs.count()
     model.objects.bulk_create(rows, batch_size=500, ignore_conflicts=True)
     landed = qs.count() - before
+    if update_fields:
+        recent_values = sorted({getattr(row, recent_field) for row in rows})[-recent_limit:]
+        model.objects.bulk_create(
+            [row for row in rows if getattr(row, recent_field) in recent_values],
+            batch_size=500,
+            update_conflicts=True,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+        )
     return landed, len(rows) - landed
 
 
@@ -320,10 +333,10 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
     rows = []
     for rec in accepted:
         try:
-            pmin_val = rec.get("pmin") or 0
-            pmax_val = rec.get("pmax") or 0
+            pmin_val = rec.get("pmin") if "pmin" in rec else 0
+            pmax_val = rec.get("pmax") if "pmax" in rec else 0
             py_val = rec.get("py") or 0
-            pf_val = rec.get("pf") or 0
+            pf_val = rec.get("pf") if "pf" in rec else 0
             pl_val = rec.get("pl") or 0
             plc_val = rec.get("plc") or 0
             pc_val = rec.get("pc") or 0
@@ -342,10 +355,10 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
                 tno=rec.get("tno") or 0,
                 tvol=rec.get("tvol") or 0,
                 tval=int(float(tval_val)),
-                pmin=Decimal(str(pmin_val)),
-                pmax=Decimal(str(pmax_val)),
+                pmin=Decimal(str(pmin_val)) if pmin_val is not None else None,
+                pmax=Decimal(str(pmax_val)) if pmax_val is not None else None,
                 py=Decimal(str(py_val)),
-                pf=Decimal(str(pf_val)),
+                pf=Decimal(str(pf_val)) if pf_val is not None else None,
                 pl=Decimal(str(pl_val)),
                 plc=Decimal(str(plc_val)),
                 plp=rec.get("plp") or 0.0,
@@ -371,7 +384,16 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
             bad += 1
             logger.warning("skipping malformed history record for %s: %r", symbol, rec)
     created, conflicts = _bulk(
-        DailyStockHistory, rows, scope={"symbol": symbol, "is_adjusted": is_adjusted}
+        DailyStockHistory, rows, scope={"symbol": symbol, "is_adjusted": is_adjusted},
+        update_fields=(
+            "time", "tno", "tvol", "tval", "pmin", "pmax", "py", "pf",
+            "pl", "plc", "plp", "pc", "pcc", "pcp", "buy_count_i",
+            "buy_count_n", "sell_count_i", "sell_count_n", "buy_i_volume",
+            "buy_n_volume", "sell_i_volume", "sell_n_volume", "buy_i_value",
+            "buy_n_value", "sell_i_value", "sell_n_value",
+        ),
+        unique_fields=("symbol", "date", "is_adjusted"),
+        recent_field="date",
     )
     return created, conflicts + bad
 
@@ -455,9 +477,9 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
                 symbol=symbol,
                 timeframe=timeframe,
                 date_time=dt_str,
-                open_price=rec.get("open") or 0,
-                high_price=rec.get("high") or 0,
-                low_price=rec.get("low") or 0,
+                open_price=rec.get("open") if rec.get("open") is not None else None,
+                high_price=rec.get("high") if rec.get("high") is not None else None,
+                low_price=rec.get("low") if rec.get("low") is not None else None,
                 close_price=rec.get("close") or 0,
                 volume=rec.get("volume") or 0,
             ))
@@ -465,12 +487,17 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
             bad += 1
             logger.warning("skipping malformed candle for %s: %r", symbol, rec)
     created, conflicts = _bulk(
-        MarketCandle, rows, scope={"symbol": symbol, "timeframe": timeframe}
+        MarketCandle, rows, scope={"symbol": symbol, "timeframe": timeframe},
+        update_fields=("open_price", "high_price", "low_price", "close_price", "volume"),
+        unique_fields=("symbol", "timeframe", "date_time"),
+        recent_field="date_time",
     )
     return created, conflicts + bad
 
 
-def ingest_transactions(symbol: str, date: str, payload) -> tuple[int, int]:
+def ingest_transactions(
+    symbol: str, date: str, payload, *, replace=False, require_all_valid=False,
+) -> tuple[int, int]:
     """Transaction.php payload -> StockTransactionTick rows for one day."""
     if not isinstance(payload, list):
         return 0, 0 if payload is None else 1
@@ -481,6 +508,8 @@ def ingest_transactions(symbol: str, date: str, payload) -> tuple[int, int]:
     accepted, bad = screen(
         "tick", payload, "stock_transaction_ticks", symbol, default_date=day
     )
+    if require_all_valid and bad:
+        return 0, bad
     for rec in accepted:
         try:
             rows.append(StockTransactionTick(
@@ -495,9 +524,14 @@ def ingest_transactions(symbol: str, date: str, payload) -> tuple[int, int]:
         except (KeyError, TypeError, ValueError):
             bad += 1
             logger.warning("skipping malformed tick for %s %s: %r", symbol, day, rec)
-    created, conflicts = _bulk(
-        StockTransactionTick, rows, scope={"symbol": symbol, "date": day}
-    )
+    from django.db import transaction
+
+    with transaction.atomic():
+        if replace:
+            StockTransactionTick.objects.filter(symbol=symbol, date=day).delete()
+        created, conflicts = _bulk(
+            StockTransactionTick, rows, scope={"symbol": symbol, "date": day}
+        )
     return created, conflicts + bad
 
 
@@ -625,17 +659,12 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
 
     # Rial- and Toman-quoted input both end up Toman, so both get the Toman
     # label; a USD/Tether-quoted payload is never converted and keeps its own.
-    folded_unit = raw_unit.strip().casefold()
-    is_irr_quoted = folded_unit in {
-        "ریال".casefold(), "rial", "irr", "تومان".casefold(), "toman",
-    }
+    unit = gold_history_storage_unit(raw_unit)
+    is_irr_quoted = unit == "تومان"
     # Fail closed on anything else. valuation.py reads close_price straight as
     # Toman, so storing a quote whose scale we cannot name is a silent 10x
     # waiting to happen -- refusing the batch is the safe default.
-    is_foreign_quoted = folded_unit in {
-        "دلار".casefold(), "dollar", "usd", "تتر".casefold(), "tether", "usdt",
-    }
-    if not (is_irr_quoted or is_foreign_quoted):
+    if unit is None:
         RejectedRecord.objects.get_or_create(
             endpoint="gold_daily",
             symbol=symbol,
@@ -648,8 +677,6 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
             symbol, raw_unit,
         )
         return 0, len(payload["history_daily"])
-
-    unit = "تومان" if is_irr_quoted else raw_unit
 
     def to_storage(value):
         return float(to_toman(symbol, value, raw_unit)) if is_irr_quoted else float(value)
@@ -675,9 +702,13 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
     for rec in accepted_sorted:
         try:
             c = to_storage(float(rec["close"]))
-            o = to_storage(float(rec.get("open"))) if rec.get("open") is not None else c
-            h = to_storage(float(rec.get("high"))) if rec.get("high") is not None else c
-            l = to_storage(float(rec.get("low"))) if rec.get("low") is not None else c
+            salvaged_fields = set(rec.get("_salvaged_ohlc", ()))
+            o = (None if "open" in salvaged_fields else
+                 to_storage(float(rec.get("open"))) if rec.get("open") is not None else c)
+            h = (None if "high" in salvaged_fields else
+                 to_storage(float(rec.get("high"))) if rec.get("high") is not None else c)
+            l = (None if "low" in salvaged_fields else
+                 to_storage(float(rec.get("low"))) if rec.get("low") is not None else c)
 
             # Cross-day outlier screening (both sides are on the storage scale).
             if len(rolling_closes) >= 3:
@@ -716,15 +747,24 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
                 name=name,
                 unit=unit,
                 date=normalize_jalali(rec["date"]),
-                open_price=Decimal(str(o)),
-                high_price=Decimal(str(h)),
-                low_price=Decimal(str(l)),
+                open_price=Decimal(str(o)) if o is not None else None,
+                high_price=Decimal(str(h)) if h is not None else None,
+                low_price=Decimal(str(l)) if l is not None else None,
                 close_price=Decimal(str(c)),
+                source=GoldCurrencyHistory.Source.PROVIDER,
             ))
         except (KeyError, TypeError, ValueError):
             bad += 1
             logger.warning("skipping malformed gold/currency record for %s: %r", symbol, rec)
-    created, conflicts = _bulk(GoldCurrencyHistory, rows, scope={"symbol": symbol})
+    created, conflicts = _bulk(
+        GoldCurrencyHistory, rows, scope={"symbol": symbol},
+        update_fields=(
+            "name", "unit", "open_price", "high_price", "low_price",
+            "close_price", "source",
+        ),
+        unique_fields=("symbol", "date"),
+        recent_field="date",
+    )
     return created, conflicts + bad
 
 

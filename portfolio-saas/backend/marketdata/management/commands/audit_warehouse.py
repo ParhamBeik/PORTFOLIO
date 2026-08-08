@@ -18,11 +18,12 @@ Verdicts:
 """
 import csv
 import hashlib
+import itertools
 import re
 from collections import Counter
 
 from django.core.management.base import BaseCommand
-from django.db import connection
+from django.db import connection, transaction
 
 # A capital increase moves the unadjusted series only; the adjusted series is
 # back-corrected and stays flat. Both moving means the underlying number changed.
@@ -61,6 +62,18 @@ def _rows(sql, params=None):
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+def _stream_rows(sql, *, chunk_size=10000):
+    """Yield a large PostgreSQL result without materialising it in RAM."""
+    connection.ensure_connection()
+    with transaction.atomic():
+        with connection.connection.cursor(name="warehouse_audit_stream") as cur:
+            cur.itersize = chunk_size
+            cur.execute(sql)
+            cols = [item[0] for item in cur.description]
+            for values in cur:
+                yield dict(zip(cols, values))
+
+
 class Command(BaseCommand):
     help = "Read-only audit of warehouse unit coherence, date formats and ledger drift."
 
@@ -69,7 +82,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--check", action="append",
             help="Run only named checks (repeatable): units, crosstable, gold, "
-                 "candletable, dates, ledger, census",
+                 "candletable, salvage, crypto, dates, ledger, census",
         )
 
     def handle(self, *args, **opts):
@@ -79,7 +92,9 @@ class Command(BaseCommand):
             ("units", self.check_unit_steps),
             ("crosstable", self.check_cross_table),
             ("gold", self.check_gold_units),
+            ("crypto", self.check_crypto_precision),
             ("candletable", self.check_candle_table_purity),
+            ("salvage", self.check_salvageable_rejections),
             ("dates", self.check_date_conformance),
             ("ledger", self.check_ledger_drift),
             ("census", self.census),
@@ -129,7 +144,7 @@ class Command(BaseCommand):
         genuine 10x capital increase (which shifts a contiguous run, dragging
         the median with it) is not mistaken for a one-row unit slip.
         """
-        rows = _rows(
+        rows = _stream_rows(
             """
             SELECT u.symbol, left(u.date_time,10) AS d,
                    u.close_price::float AS unadj, a.close_price::float AS adj,
@@ -142,12 +157,9 @@ class Command(BaseCommand):
             ORDER BY u.symbol, u.date_time
             """
         )
-        by_symbol = {}
-        for r in rows:
-            by_symbol.setdefault(r["symbol"], []).append(r)
         out = []
-        for symbol, series in by_symbol.items():
-            out.extend(self._classify_spikes(symbol, series))
+        for symbol, group in itertools.groupby(rows, key=lambda row: row["symbol"]):
+            out.extend(self._classify_spikes(symbol, list(group)))
 
         # CORROBORATION GATE. A single symbol deviating on its own is not enough
         # to rewrite a price: a provider re-fetch of کاما returned 153 such rows
@@ -202,6 +214,10 @@ class Command(BaseCommand):
         out = []
         n = len(series)
         factors = [r["factor"] for r in series]
+        values = {
+            "adj": [row["adj"] for row in series],
+            "unadj": [row["unadj"] for row in series],
+        }
         half = LOCAL_WINDOW // 2
         for i in range(n):
             lo, hi = max(0, i - half), min(n, i + half + 1)
@@ -219,7 +235,7 @@ class Command(BaseCommand):
                 # unadj is 10x low; break the tie on each column's own local
                 # median, which market drift cannot fake at this exactness.
                 for col in ("adj", "unadj"):
-                    vals = [r[col] for r in series]
+                    vals = values[col]
                     cn = vals[lo:i] + vals[i + 1:hi]
                     cmed = statistics.median(cn)
                     if cmed <= 0 or vals[i] <= 0:
@@ -272,10 +288,9 @@ class Command(BaseCommand):
     def check_cross_table(self):
         """MarketCandle and DailyStockHistory must agree for the same symbol+day.
 
-        The adjusted candle is pulled in as an arbiter. A `corrected` value is
-        only proposed when the OTHER two sources agree against the unadjusted
-        candle -- two votes to one. Where they disagree three ways the row is
-        reported but left unrepairable, because there is nothing to prefer.
+        The adjusted candle is pulled in as an arbiter. A repair is proposed
+        only when two sources agree against the third. Where they disagree
+        three ways the row is reported but left unrepairable.
         """
         rows = _rows(
             """
@@ -300,21 +315,29 @@ class Command(BaseCommand):
             ratio = r["ratio"] or 0
             is_unit = 9 <= ratio <= 11 or 0.09 <= ratio <= 0.11
             corrected, table = "", "marketcandle_vs_dailystockhistory"
+            value = r["candle"]
             adj = r["adj"]
             # Arbiter: does the adjusted candle side with DailyStockHistory?
             if is_unit and adj and abs(adj / r["hist"] - 1.0) <= 0.01:
                 corrected = f"{r['candle'] * 10:g}" if ratio < 1 else f"{r['candle'] / 10:g}"
                 table = "marketdata_marketcandle[1d_unadj]"
+            # Or do both candle feeds agree, proving the history row is scaled?
+            elif is_unit and adj and abs(adj / r["candle"] - 1.0) <= 0.01:
+                corrected = "factor:10" if ratio > 1 else "factor:0.1"
+                table = "marketdata_dailystockhistory"
+                value = r["hist"]
             out.append({
                 "check": "crosstable", "table": table,
-                "symbol": r["symbol"], "date": r["d"], "value": r["candle"],
+                "symbol": r["symbol"], "date": r["d"], "value": value,
                 "corrected": corrected,
                 "verdict": "unit_error" if is_unit else "suspect",
                 "evidence": (
                     f"unadj_candle={r['candle']:g} history_pl={r['hist']:g} "
                     f"ratio={ratio:.3f}"
                     + (f"; adjusted={adj:g} agrees with history -> candle is the "
-                       f"odd one out" if corrected else
+                       f"odd one out" if table.startswith("marketdata_marketcandle[") else
+                       f"; adjusted={adj:g} agrees with unadjusted candle -> history "
+                       f"is the odd one out" if table == "marketdata_dailystockhistory" else
                        f"; adjusted={adj:g} does not arbitrate, left unrepaired"
                        if adj else "; no adjusted row to arbitrate")
                 ),
@@ -352,6 +375,46 @@ class Command(BaseCommand):
                 })
         return out
 
+    def check_crypto_precision(self):
+        """Recover USD values rounded away by the old four-decimal column."""
+        rows = _rows(
+            """
+            WITH rates AS (
+              SELECT date,
+                     percentile_cont(0.5) WITHIN GROUP (
+                       ORDER BY (close_price_toman/NULLIF(close_price_usd,0))::float8
+                     ) FILTER (WHERE close_price_usd>0 AND close_price_toman>0) rate
+              FROM marketdata_cryptohistory GROUP BY date
+            )
+            SELECT c.symbol, c.date, c.close_price_usd::float usd,
+                   c.close_price_toman::float toman, r.rate
+            FROM marketdata_cryptohistory c
+            LEFT JOIN rates r USING (date)
+            WHERE c.close_price_usd<=0
+            ORDER BY c.date, c.symbol
+            """
+        )
+        out = []
+        for row in rows:
+            recoverable = row["toman"] > 0 and row["rate"] and row["rate"] > 0
+            corrected = row["toman"] / row["rate"] if recoverable else None
+            out.append({
+                "check": "crypto",
+                "table": "marketdata_cryptohistory[close_price_usd]",
+                "symbol": row["symbol"],
+                "date": row["date"],
+                "value": row["usd"],
+                "corrected": f"{corrected:.12f}" if recoverable else "",
+                "verdict": "precision_loss" if recoverable else "unrecoverable",
+                "evidence": (
+                    f"price_toman={row['toman']:g}; daily median Toman/USD="
+                    f"{row['rate']:g}; old Decimal(20,4) rounded USD to zero"
+                    if recoverable else
+                    "both USD and Toman prices are non-positive; no defensible reconstruction"
+                ),
+            })
+        return out
+
     def check_candle_table_purity(self):
         """MarketCandle is Rial TSE data; a BRS symbol in it is a Toman row."""
         rows = _rows(
@@ -369,6 +432,43 @@ class Command(BaseCommand):
             "verdict": "unit_error",
             "evidence": f"BRS (Toman) symbol in the Rial candle table, timeframe={r['timeframe']}",
         } for r in rows]
+
+    def check_salvageable_rejections(self):
+        """Rows whose close is valid and only ancillary OHLC fields failed."""
+        from marketdata import validation
+        from marketdata.models import RejectedRecord
+
+        kind_by_endpoint = {
+            "stock_candle_adjusted": "candle",
+            "stock_candle_unadjusted": "candle",
+            "stock_history_unadjusted": "daily_history",
+        }
+        out = []
+        queryset = RejectedRecord.objects.filter(
+            endpoint__in=kind_by_endpoint
+        ).exclude(reason__startswith="field_")
+        for rejected in queryset.iterator(chunk_size=1000):
+            salvaged, issues = validation.salvage_ohlc_records(
+                kind_by_endpoint[rejected.endpoint], [rejected.payload]
+            )
+            accepted, fatal = validation.validate(
+                kind_by_endpoint[rejected.endpoint], salvaged
+            )
+            if not accepted or fatal or not issues:
+                continue
+            out.append({
+                "check": "salvage",
+                "table": rejected.endpoint,
+                "symbol": rejected.symbol,
+                "date": rejected.date,
+                "value": rejected.reason,
+                "verdict": "salvageable_field",
+                "evidence": (
+                    "close remains valid; nullable ancillary fields: "
+                    + ",".join(salvaged[0].get("_salvaged_ohlc", ()))
+                ),
+            })
+        return out
 
     def check_date_conformance(self):
         """Jalali shape, plausible year, and date_time suffix consistency."""

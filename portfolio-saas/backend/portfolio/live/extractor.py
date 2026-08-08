@@ -116,10 +116,10 @@ def extract_standard_prices(raw_data, last_prices=None):
     prices = {}
 
     lookup = _build_lookup(raw_data.get("brsapi"))
-    prices["emami_coin"] = _lookup_price(lookup, ["IR_COIN_EMAMI"])
-    prices["half_coin"] = _lookup_price(lookup, ["IR_COIN_HALF"])
-    prices["quarter_coin"] = _lookup_price(lookup, ["IR_COIN_QUARTER"])
-    prices["gold_18k_gram"] = _lookup_price(lookup, ["IR_GOLD_18K"])
+    prices["emami_coin"] = _lookup_toman(lookup, ["IR_COIN_EMAMI"])
+    prices["half_coin"] = _lookup_toman(lookup, ["IR_COIN_HALF"])
+    prices["quarter_coin"] = _lookup_toman(lookup, ["IR_COIN_QUARTER"])
+    prices["gold_18k_gram"] = _lookup_toman(lookup, ["IR_GOLD_18K"])
     prices["usd_cash"] = _lookup_toman(lookup, ["USD"])
     prices["bitcoin_usd"] = _lookup_price(
         lookup, ["BTC", "BTCUSDT", "BITCOIN", "Bitcoin", "بیتکوین", "بیت کوین"]
@@ -142,7 +142,9 @@ def extract_standard_prices(raw_data, last_prices=None):
     quarter_price = prices.get("quarter_coin", Decimal("0"))
     prices["quarter_coin_pre86"] = (quarter_price * QUARTER_PRE86_FACTOR).quantize(Decimal("1"))
 
-    coin_1g = _lookup_price(lookup, ["IR_COIN_1G", "IR_COIN_GRAM", "IR_GOLD_1G", "GOLD_1G"])
+    coin_1g = _lookup_toman(
+        lookup, ["IR_COIN_1G", "IR_COIN_GRAM", "IR_GOLD_1G", "GOLD_1G"]
+    )
     if not coin_1g:
         prices["one_gram_coin"] = (quarter_price * QUARTER_TO_1G_RATIO).quantize(Decimal("1"))
     else:

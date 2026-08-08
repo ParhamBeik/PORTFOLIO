@@ -8,6 +8,7 @@ shareholder moves) is a Pro differentiator alongside the analytics endpoints.
 from django.views import View
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.db.models import Exists, OuterRef, Q
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -19,6 +20,8 @@ from portfolio.models import Account, Asset, Holding, Price, Snapshot, Transacti
 from .candles import candle_close_qs
 from .models import (
     CodalAnnouncement,
+    CodalFact,
+    CodalReport,
     DailyStockHistory,
     GoldCurrencyHistory,
     MarketCandle,
@@ -68,12 +71,13 @@ class CandlesView(APIView):
         return Response([
             {
                 "date_time": r.date_time,
-                "open": float(r.open_price),
-                "high": float(r.high_price),
-                "low": float(r.low_price),
+                "open": float(r.open_price) if r.open_price is not None else None,
+                "high": float(r.high_price) if r.high_price is not None else None,
+                "low": float(r.low_price) if r.low_price is not None else None,
                 "close": float(r.close_price),
                 "volume": r.volume,
                 "source": getattr(r, "candle_source", r.timeframe),
+                "unit": "IRR",
             }
             for r in reversed(list(rows))
         ])
@@ -99,11 +103,12 @@ class DailyHistoryView(APIView):
                     "date": r.date_time,
                     "close": float(r.close_price),
                     "close_final": float(r.close_price),
-                    "min": float(r.low_price),
-                    "max": float(r.high_price),
+                    "min": float(r.low_price) if r.low_price is not None else None,
+                    "max": float(r.high_price) if r.high_price is not None else None,
                     "volume": r.volume,
                     "change_pct": 0.0,
                     "source": r.candle_source,
+                    "unit": "IRR",
                 }
                 for r in reversed(list(rows))
             ])
@@ -117,10 +122,11 @@ class DailyHistoryView(APIView):
                     "date": r.date,
                     "close": float(r.pl),
                     "close_final": float(r.pc),
-                    "min": float(r.pmin),
-                    "max": float(r.pmax),
+                    "min": float(r.pmin) if r.pmin is not None else None,
+                    "max": float(r.pmax) if r.pmax is not None else None,
                     "volume": r.tvol,
                     "change_pct": r.plp,
+                    "unit": "IRR",
                 }
                 for r in reversed(list(rows))
             ])
@@ -148,6 +154,7 @@ class TicksView(APIView):
                 "price": float(r.price),
                 "volume": r.volume,
                 "canceled": r.canceled,
+                "unit": "IRR",
             }
             for r in reversed(list(rows))
         ])
@@ -169,6 +176,7 @@ class MarketIndexView(APIView):
                 "index_overall_change": r.index_overall_change,
                 "index_equal_weight": r.index_equal_weight,
                 "trade_value": r.trade_value,
+                "trade_value_unit": "IRR",
             }
             for r in reversed(list(rows))
         ])
@@ -463,9 +471,9 @@ class PerformanceView(APIView):
             for row in reversed(rows):
                 series.append({
                     "date": row.date_time,
-                    "open": float(row.open_price),
-                    "high": float(row.high_price),
-                    "low": float(row.low_price),
+                    "open": float(row.open_price) if row.open_price is not None else None,
+                    "high": float(row.high_price) if row.high_price is not None else None,
+                    "low": float(row.low_price) if row.low_price is not None else None,
                     "close": float(row.close_price),
                     "volume": row.volume,
                     "source": row.candle_source,
@@ -527,13 +535,15 @@ class AnnouncementsView(APIView):
     permission_classes = [IsAuthenticated, RequiresFeature("market_announcements")]
 
     def get(self, request):
-        qs = CodalAnnouncement.objects.order_by("-date_publish", "-time_publish")
+        qs = CodalAnnouncement.objects.select_related("report").order_by("-date_publish", "-time_publish")
         symbol = request.query_params.get("symbol")
         if symbol:
             qs = qs.filter(symbol=symbol)
         rows = qs[: _limit(request, 20, 50)]
-        return Response([
-            {
+        response = []
+        for r in rows:
+            report = getattr(r, "report", None)
+            response.append({
                 "symbol": r.symbol,
                 "title": r.title,
                 "category": r.category,
@@ -543,9 +553,132 @@ class AnnouncementsView(APIView):
                 "time_publish": r.time_publish,
                 "link": r.link,
                 "link_pdf": r.link_pdf,
-            }
-            for r in rows
-        ])
+                "report_id": report.pk if report else None,
+                "derived_category": report.category if report else r.category,
+                "derived_type": report.report_type if report else r.category_title,
+                "period": report.period_end if report else "",
+                "is_consolidated": report.is_consolidated if report else False,
+                "is_correction": report.is_correction if report else False,
+                "revision_of": report.revision_of_id if report else None,
+                "extraction_status": report.status if report else CodalReport.Status.PENDING,
+                "facts_available": bool(report and report.facts.exists()),
+            })
+        return Response(response)
+
+
+def _fact_payload(fact):
+    return {
+        "id": fact.pk,
+        "report_id": fact.report_id,
+        "symbol": fact.report.announcement.symbol,
+        "category": fact.report.category,
+        "fact_code": fact.fact_code,
+        "numeric_value": fact.numeric_value,
+        "text_value": fact.text_value,
+        "unit": fact.unit,
+        "currency": fact.currency,
+        "period_start": fact.period_start,
+        "period_end": fact.period_end,
+        "dimensions": fact.dimensions,
+        "confidence": fact.confidence,
+        "quality": fact.quality,
+        "parser_version": fact.parser_version,
+        "source_coordinates": fact.source_coordinates,
+    }
+
+
+class ReportDetailView(APIView):
+    permission_classes = [IsAuthenticated, RequiresFeature("market_announcements")]
+
+    def get(self, request, report_id):
+        report = get_object_or_404(
+            CodalReport.objects.select_related("announcement", "revision_of"), pk=report_id
+        )
+        from .codal_pipeline import presigned_artifact_url
+
+        artifacts = []
+        for artifact in report.artifacts.all():
+            try:
+                download_url = presigned_artifact_url(artifact)
+            except Exception:
+                download_url = None
+            artifacts.append({
+                "id": artifact.pk,
+                "kind": artifact.kind,
+                "source_url": artifact.source_url,
+                "checksum_sha256": artifact.checksum_sha256,
+                "content_type": artifact.content_type,
+                "size_bytes": artifact.size_bytes,
+                "fetch_status": artifact.fetch_status,
+                "error_code": artifact.error_code,
+                "download_url": download_url,
+            })
+        revisions = CodalReport.objects.filter(
+            announcement__symbol=report.announcement.symbol,
+            report_type=report.report_type,
+            period_end=report.period_end,
+        ).order_by("announcement__date_publish", "announcement__time_publish")
+        return Response({
+            "id": report.pk,
+            "announcement_id": report.announcement_id,
+            "symbol": report.announcement.symbol,
+            "title": report.announcement.title,
+            "category": report.category,
+            "report_type": report.report_type,
+            "letter_type": report.letter_type,
+            "period_start": report.period_start,
+            "period_end": report.period_end,
+            "is_audited": report.is_audited,
+            "is_consolidated": report.is_consolidated,
+            "is_correction": report.is_correction,
+            "revision_of": report.revision_of_id,
+            "parser_version": report.parser_version,
+            "status": report.status,
+            "quality": report.quality,
+            "artifacts": artifacts,
+            "tables": list(report.parsed_tables.values(
+                "id", "name", "sheet_name", "headers", "rows", "source_coordinates", "parser_version"
+            )),
+            "sections": list(report.sections.values(
+                "id", "heading", "body", "source_coordinates", "confidence"
+            )),
+            "revision_history": list(revisions.values(
+                "id", "announcement__date_publish", "status", "quality", "parser_version"
+            )),
+        })
+
+
+class ReportFactsView(APIView):
+    permission_classes = [IsAuthenticated, RequiresFeature("market_announcements")]
+
+    def get(self, request, report_id):
+        report = get_object_or_404(CodalReport, pk=report_id)
+        facts = report.facts.select_related("report__announcement").order_by("fact_code", "id")
+        return Response([_fact_payload(fact) for fact in facts])
+
+
+class FactsView(APIView):
+    permission_classes = [IsAuthenticated, RequiresFeature("market_announcements")]
+
+    def get(self, request):
+        newer_revision = CodalReport.objects.filter(
+            revision_of=OuterRef("report_id"), status=CodalReport.Status.PARSED
+        )
+        facts = (
+            CodalFact.objects.select_related("report__announcement")
+            .annotate(has_newer_revision=Exists(newer_revision))
+            .filter(has_newer_revision=False, report__status=CodalReport.Status.PARSED)
+        )
+        filters = {
+            "report__announcement__symbol": request.query_params.get("symbol"),
+            "report__category": request.query_params.get("category"),
+            "fact_code": request.query_params.get("fact_code"),
+            "period_end": request.query_params.get("period"),
+            "quality": request.query_params.get("quality"),
+        }
+        facts = facts.filter(**{key: value for key, value in filters.items() if value})
+        facts = facts.order_by("-period_end", "fact_code")[: _limit(request, 100, 1000)]
+        return Response([_fact_payload(fact) for fact in facts])
 
 
 class ShareholdersView(APIView):
@@ -576,6 +709,3 @@ class ShareholdersView(APIView):
             }
             for r in rows
         ])
-
-
-

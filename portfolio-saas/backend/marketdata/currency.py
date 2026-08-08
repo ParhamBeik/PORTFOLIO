@@ -55,6 +55,13 @@ UNIT_OVERRIDES = {
 # Transaction.php) quotes Rial, and ingest stores that number verbatim.
 TSE_PRICE_UNIT = "rial"
 
+IRR_QUOTE_UNITS = frozenset({
+    "ریال".casefold(), "rial", "irr", "تومان".casefold(), "toman",
+})
+FOREIGN_QUOTE_UNITS = frozenset({
+    "دلار".casefold(), "dollar", "usd", "تتر".casefold(), "tether", "usdt",
+})
+
 
 def tse_unit_verified() -> bool:
     return TSE_PRICE_UNIT in {"rial", "toman"}
@@ -126,3 +133,13 @@ def to_toman(symbol, price, unit="", *, usd_rate=None):
     if unit in {"usd", "dollar"} and usd_rate:
         return value * Decimal(str(usd_rate))
     return value
+
+
+def gold_history_storage_unit(raw_unit):
+    """Canonical warehouse unit for one declared historical BRS quote."""
+    folded = str(raw_unit or "").strip().casefold()
+    if folded in IRR_QUOTE_UNITS:
+        return "تومان"
+    if folded in FOREIGN_QUOTE_UNITS:
+        return str(raw_unit).strip()
+    return None
