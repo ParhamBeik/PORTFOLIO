@@ -54,6 +54,10 @@ class CodalArtifactRejected(RuntimeError):
     pass
 
 
+class CodalExtractionRegressed(RuntimeError):
+    """A re-parse produced less than what is already stored."""
+
+
 def storage_error():
     """Why local storage is unusable, or None. Checked by writing, not guessing."""
     root = settings.CODAL_STORAGE_DIR
@@ -152,7 +156,14 @@ def download_artifact(url, kind):
             content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
             if content_type not in ALLOWED_TYPES[kind]:
                 raise CodalArtifactRejected("invalid_content_type")
-            declared = int(response.headers.get("Content-Length") or 0)
+            # A doubled or malformed header ("1,234") raised ValueError straight
+            # out of the whole try, leaving the artifact row at `pending` forever
+            # while the report recorded a bare "ValueError". Unknown length is
+            # fine; the streaming cap below is the real limit.
+            try:
+                declared = int(response.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                declared = 0
             if declared > settings.CODAL_MAX_ARTIFACT_BYTES:
                 raise CodalArtifactRejected("artifact_too_large")
             chunks, size = [], 0
@@ -170,7 +181,13 @@ def download_artifact(url, kind):
     except CodalArtifactRejected:
         raise
     except requests.RequestException as exc:
-        raise CodalBlockedNetwork(type(exc).__name__) from exc
+        # `type(exc).__name__` alone flattened every HTTP status into "HTTPError":
+        # 403 (blocked), 404 (withdrawn), 429 (rate-limited) and 503 read
+        # identically, and 429 is the one that should change behaviour. Keep the
+        # status where there is one, and the host, so a log line is actionable.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        label = f"HTTP{status}" if status else type(exc).__name__
+        raise CodalBlockedNetwork(f"{label}@{urlsplit(current).hostname or '?'}") from exc
     finally:
         session.close()
 
@@ -234,6 +251,19 @@ def artifact_download_url(artifact):
     return reverse("codal-artifact-download", args=[artifact.pk])
 
 
+def _artifact_states(report):
+    """Per-artifact outcome, compact enough for one ledger line.
+
+    The WorkflowOutcome is per *report*, so without this the four downloads
+    behind it are invisible to anyone reading logs -- they exist only as
+    CodalArtifact rows reachable through un-indexed ledger JSON.
+    """
+    return {
+        artifact.kind: artifact.error_code or artifact.fetch_status
+        for artifact in report.artifacts.all()
+    }
+
+
 def _artifact_sources(announcement):
     return [
         (CodalArtifact.Kind.EXCEL, announcement.link_excel),
@@ -259,6 +289,14 @@ def _find_revision(report):
 
 
 def _persist_parsed(report, artifact, parsed):
+    # Re-running a report replaces its extraction wholesale, which is right when
+    # the new parse is at least as good. It is not right when the new parse
+    # yields nothing: that silently destroyed a previous run's good facts and
+    # left no reason behind. A worse result does not get to overwrite a better one.
+    if not parsed.facts and report.facts.exists():
+        raise CodalExtractionRegressed(
+            f"parse produced 0 facts but {report.facts.count()} are already stored"
+        )
     with transaction.atomic():
         report.parsed_tables.all().delete()
         report.sections.all().delete()
@@ -348,6 +386,13 @@ def extract_report(report):
             artifact.fetch_status = CodalArtifact.FetchStatus.BLOCKED_STORAGE
             artifact.error_code = str(exc)[:64]
             artifact.save(update_fields=["fetch_status", "error_code"])
+        except Exception as exc:
+            # Anything unforeseen (a malformed header, a zlib error) used to
+            # escape the whole loop and leave this row claiming `pending` -- the
+            # database said the artifact was never attempted when it had been.
+            artifact.fetch_status = CodalArtifact.FetchStatus.FAILED
+            artifact.error_code = type(exc).__name__[:64]
+            artifact.save(update_fields=["fetch_status", "error_code"])
 
     if not downloaded:
         statuses = set(report.artifacts.values_list("fetch_status", flat=True))
@@ -358,9 +403,17 @@ def extract_report(report):
             if CodalArtifact.FetchStatus.BLOCKED_NETWORK in statuses
             else CodalReport.Status.FAILED
         )
-        report.error_code = "no_usable_artifact"
+        # An announcement carrying no links at all is not the same failure as
+        # four downloads that were all refused, and both used to read
+        # "no_usable_artifact" with nothing to tell them apart.
+        report.error_code = (
+            "no_artifact_links" if not statuses else "no_usable_artifact"
+        )
         report.save(update_fields=["status", "error_code", "updated_at"])
-        return report, {"error_code": report.error_code}
+        return report, {
+            "error_code": report.error_code,
+            "artifacts": _artifact_states(report),
+        }
 
     parsed = None
     chosen = None
@@ -394,19 +447,26 @@ def extract_report(report):
         parsed.facts = []
     _persist_parsed(report, chosen, parsed)
     report.revision_of = _find_revision(report)
+    # Every one of these states used to clear error_code to "", so a report that
+    # downloaded and parsed but produced nothing recorded no reason at all. The
+    # status said "needs_review"; nothing said why, and the ledger line carried
+    # an empty error_code. Name the cause instead.
     if not report.category:
         report.status = CodalReport.Status.UNSUPPORTED
         report.quality = CodalReport.Quality.REVIEW
+        report.error_code = "unknown_category"
     elif parsed.used_ocr and not ocr_publishable:
         report.status = CodalReport.Status.NEEDS_REVIEW
         report.quality = CodalReport.Quality.REVIEW
+        report.error_code = f"ocr_below_threshold:{parsed.confidence:.2f}"
     elif not reconciled:
         report.status = CodalReport.Status.NEEDS_REVIEW
         report.quality = CodalReport.Quality.REVIEW
+        report.error_code = f"no_typed_facts:category={report.category}"
     else:
         report.status = CodalReport.Status.PARSED
         report.quality = CodalReport.Quality.VALIDATED
-    report.error_code = ""
+        report.error_code = ""
     report.extracted_at = timezone.now()
     report.save()
     announcement.category = report.category
@@ -415,6 +475,12 @@ def extract_report(report):
     announcement.save(update_fields=["category", "category_title", "is_audited"])
     return report, {
         "artifact_count": len(downloaded),
+        "parsed_from": chosen.kind if chosen else "",
+        # Without this a report whose Excel link 403s but whose HTML parses fine
+        # reads as a clean success, while the pipeline has quietly fallen back to
+        # a lower-fidelity source. That is the failure most likely to happen at
+        # scale, since the prioritised family is exactly the Excel-bearing one.
+        "artifacts": _artifact_states(report),
         "table_count": len(parsed.tables),
         "section_count": len(parsed.sections),
         "fact_count": len(parsed.facts),

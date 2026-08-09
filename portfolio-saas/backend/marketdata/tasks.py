@@ -466,11 +466,27 @@ def enqueue_codal_reports():
     if not settings.CODAL_EXTRACTION_ENABLED:
         outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "disabled"})
         return
-    stale = timezone.now() - timedelta(hours=1)
+    now = timezone.now()
+    stale = now - timedelta(hours=1)
+    # Infrastructure blocks were terminal: one DNS blip or a single 503 parked a
+    # document at blocked_network permanently, with no retry, no backoff and no
+    # command to reset it. Recovery was a manual UPDATE. They are transient by
+    # definition, so re-offer them after a cool-down; parse outcomes
+    # (unsupported, needs_review) stay terminal because re-running changes
+    # nothing until the parser does.
+    retry_after = now - timedelta(hours=settings.CODAL_BLOCKED_RETRY_HOURS)
     pending = CodalAnnouncement.objects.filter(
         Q(report__isnull=True)
         | Q(report__status=CodalReport.Status.PENDING)
         | Q(report__status=CodalReport.Status.FETCHING, report__updated_at__lt=stale)
+        | Q(
+            report__status__in=(
+                CodalReport.Status.BLOCKED_NETWORK,
+                CodalReport.Status.BLOCKED_STORAGE,
+                CodalReport.Status.FAILED,
+            ),
+            report__updated_at__lt=retry_after,
+        )
     ).order_by("-date_publish", "-time_publish")
 
     # Monthly activity reports first: 17,808 documents over 725 companies, every
@@ -491,18 +507,37 @@ def enqueue_codal_reports():
         ][: settings.CODAL_ENQUEUE_BATCH_SIZE - len(batch)]
     announcements = batch
     report_ids = []
-    for announcement in announcements:
-        defaults = classify_announcement(announcement)
-        report, _created = CodalReport.objects.get_or_create(
-            announcement=announcement,
-            defaults={**defaults, "parser_version": settings.CODAL_PARSER_VERSION},
+    # This task had no exception handler at all. It marks each report FETCHING and
+    # commits before dispatching, so a broker outage on .delay() left a whole
+    # batch stranded at FETCHING with no task in flight and -- worse -- no ledger
+    # row at all. The only signal was a gap where a row should have been.
+    try:
+        for announcement in announcements:
+            defaults = classify_announcement(announcement)
+            report, _created = CodalReport.objects.get_or_create(
+                announcement=announcement,
+                defaults={**defaults, "parser_version": settings.CODAL_PARSER_VERSION},
+            )
+            report.status = CodalReport.Status.FETCHING
+            report.error_code = ""
+            report.save(update_fields=["status", "error_code", "updated_at"])
+            report_ids.append(report.pk)
+        for report_id in report_ids:
+            process_codal_report.delay(report_id)
+    except Exception as err:
+        # Hand the stranded reports back so the next tick retries them, rather
+        # than waiting an hour for the stale-FETCHING sweep to notice.
+        CodalReport.objects.filter(
+            pk__in=report_ids, status=CodalReport.Status.FETCHING
+        ).update(status=CodalReport.Status.PENDING)
+        outcome.finish(
+            WorkflowRun.Outcome.FAILED,
+            error_code=type(err).__name__,
+            rows_received=len(announcements),
+            metadata={"reason": str(err)[:300], "released": len(report_ids)},
         )
-        report.status = CodalReport.Status.FETCHING
-        report.error_code = ""
-        report.save(update_fields=["status", "error_code", "updated_at"])
-        report_ids.append(report.pk)
-    for report_id in report_ids:
-        process_codal_report.delay(report_id)
+        logger.exception("Codal enqueue failed correlation_id=%s", outcome.correlation_id)
+        raise
     outcome.finish(
         WorkflowRun.Outcome.SUCCESS,
         rows_received=len(announcements),

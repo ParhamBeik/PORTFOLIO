@@ -280,6 +280,10 @@ CODAL_MAX_ARTIFACT_BYTES = int(os.getenv("CODAL_MAX_ARTIFACT_BYTES", str(50 * 10
 CODAL_OCR_CONFIDENCE_THRESHOLD = float(os.getenv("CODAL_OCR_CONFIDENCE_THRESHOLD", "0.90"))
 CODAL_PARSER_VERSION = os.getenv("CODAL_PARSER_VERSION", "1")
 CODAL_ENQUEUE_BATCH_SIZE = int(os.getenv("CODAL_ENQUEUE_BATCH_SIZE", "10"))
+# Cool-down before a network/storage-blocked document is offered again. Long
+# enough that a sustained outage does not spin, short enough that a blip heals
+# itself instead of needing a manual UPDATE.
+CODAL_BLOCKED_RETRY_HOURS = int(os.getenv("CODAL_BLOCKED_RETRY_HOURS", "6"))
 WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "30"))
 
 # Live poll cadence by market state (seconds). Beat still ticks every minute; the
