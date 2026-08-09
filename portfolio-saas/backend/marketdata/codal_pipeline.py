@@ -70,16 +70,16 @@ def storage_error():
 
 
 def configuration_error():
-    """Missing configuration, network requirement first.
+    """Missing configuration.
 
-    Storage used to need five S3 values; on local disk it needs one writable
-    directory, so the proxy is the only thing a deployment must supply. Order
-    matters: the caller maps a leading proxy entry to BLOCKED_NETWORK and a
-    storage entry to BLOCKED_STORAGE.
+    Only storage is mandatory. `CODAL_HTTP_PROXY` is optional: unset means
+    connect to codal.ir directly, which is correct on any host that can already
+    reach it. Demanding a proxy everywhere would block exactly the deployments
+    that need no help. The host allowlist, size caps, content-type and magic-byte
+    checks and zip-expansion limits apply identically either way, so the trust
+    boundary does not move.
     """
     missing = []
-    if not settings.CODAL_HTTP_PROXY:
-        missing.append("CODAL_HTTP_PROXY")
     storage = storage_error()
     if storage:
         missing.append(storage)
@@ -122,6 +122,9 @@ def _check_archive(content):
 
 def download_artifact(url, kind):
     proxy = settings.CODAL_HTTP_PROXY
+    # No proxy configured means go direct. `proxies=None` lets requests fall back
+    # to the environment's own settings; passing {"https": ""} would not.
+    proxies = {"http": proxy, "https": proxy} if proxy else None
     session = requests.Session()
     current = _absolute_url(url)
     headers = {"User-Agent": "Portfolio-Codal-Warehouse/1.0"}
@@ -133,7 +136,7 @@ def download_artifact(url, kind):
             response = session.get(
                 current,
                 headers=headers,
-                proxies={"http": proxy, "https": proxy},
+                proxies=proxies,
                 timeout=(10, 30),
                 stream=True,
                 allow_redirects=False,
@@ -301,13 +304,8 @@ def _persist_parsed(report, artifact, parsed):
 def extract_report(report):
     missing = configuration_error()
     if missing:
-        # Network is the harder blocker and is reported first when both apply:
-        # a proxy needs a human, an unwritable directory needs a restart.
-        report.status = (
-            CodalReport.Status.BLOCKED_NETWORK
-            if "CODAL_HTTP_PROXY" in missing
-            else CodalReport.Status.BLOCKED_STORAGE
-        )
+        # Only storage can be missing now; the proxy is optional.
+        report.status = CodalReport.Status.BLOCKED_STORAGE
         report.error_code = "missing_configuration"
         report.save(update_fields=["status", "error_code", "updated_at"])
         return report, {"error_code": "missing_configuration", "missing": missing}

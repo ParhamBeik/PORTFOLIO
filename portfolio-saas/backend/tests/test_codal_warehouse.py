@@ -145,14 +145,45 @@ def test_storage_key_cannot_escape_the_storage_root(settings, tmp_path):
         artifact_path("../../etc/passwd")
 
 
-def test_only_the_proxy_is_required_once_storage_is_writable(settings, tmp_path):
-    """Storage needed five S3 values; on disk it needs one writable directory."""
+def test_writable_storage_is_the_only_requirement(settings, tmp_path):
+    """Storage needed five S3 values; on disk it needs one writable directory.
+
+    The proxy is deliberately optional -- a host that can already reach codal.ir
+    must not be blocked for lacking one.
+    """
     settings.CODAL_STORAGE_DIR = str(tmp_path)
     settings.CODAL_HTTP_PROXY = ""
-    assert configuration_error() == ["CODAL_HTTP_PROXY"]
-
-    settings.CODAL_HTTP_PROXY = "https://proxy.example"
     assert configuration_error() == []
+
+    settings.CODAL_STORAGE_DIR = "/proc/nonexistent/codal"
+    assert configuration_error() != []
+
+
+def test_no_proxy_means_a_direct_connection(settings, tmp_path):
+    settings.CODAL_STORAGE_DIR = str(tmp_path)
+    settings.CODAL_HTTP_PROXY = ""
+    settings.CODAL_MAX_ARTIFACT_BYTES = 1024
+
+    with patch(
+        "marketdata.codal_pipeline.requests.Session.get", return_value=_pdf_response()
+    ) as get:
+        download_artifact("https://codal.ir/a.pdf", "pdf")
+
+    # None, not {"https": ""} -- the latter would not fall back to the environment.
+    assert get.call_args.kwargs["proxies"] is None
+
+
+def test_a_configured_proxy_is_still_used(settings, tmp_path):
+    settings.CODAL_STORAGE_DIR = str(tmp_path)
+    settings.CODAL_HTTP_PROXY = "http://gateway.example:8080"
+    settings.CODAL_MAX_ARTIFACT_BYTES = 1024
+
+    with patch(
+        "marketdata.codal_pipeline.requests.Session.get", return_value=_pdf_response()
+    ) as get:
+        download_artifact("https://codal.ir/a.pdf", "pdf")
+
+    assert get.call_args.kwargs["proxies"]["https"] == "http://gateway.example:8080"
 
 
 def test_report_apis_expose_metadata_and_default_to_latest_revision(make_user):
