@@ -222,6 +222,9 @@ def weekly_metadata_sync():
     logger.info("weekly_metadata_sync: done")
 
 
+# The Codal family processed ahead of everything else; see enqueue_codal_reports.
+CODAL_PRIORITY_TITLE = "گزارش فعالیت ماهانه"
+
 _RETRY_CLASS_RE = re.compile(r"\((\w+), status=")
 
 
@@ -464,15 +467,29 @@ def enqueue_codal_reports():
         outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "disabled"})
         return
     stale = timezone.now() - timedelta(hours=1)
-    announcements = list(
-        CodalAnnouncement.objects.filter(
-            Q(report__isnull=True)
-            | Q(report__status=CodalReport.Status.PENDING)
-            | Q(report__status=CodalReport.Status.FETCHING, report__updated_at__lt=stale)
-        )
-        .order_by("-date_publish", "-time_publish")
-        [: settings.CODAL_ENQUEUE_BATCH_SIZE]
-    )
+    pending = CodalAnnouncement.objects.filter(
+        Q(report__isnull=True)
+        | Q(report__status=CodalReport.Status.PENDING)
+        | Q(report__status=CodalReport.Status.FETCHING, report__updated_at__lt=stale)
+    ).order_by("-date_publish", "-time_publish")
+
+    # Monthly activity reports first: 17,808 documents over 725 companies, every
+    # one carrying an Excel link, so they take the most reliable parse path and
+    # never touch OCR. They are also the richest recurring dataset here --
+    # monthly production and sales per product. Proving the pipeline on one
+    # uniform template beats spreading thin across ~50 of them, and the corpus
+    # spans sixteen years, so newest-first within the family still matters.
+    batch = list(pending.filter(title__startswith=CODAL_PRIORITY_TITLE)[
+        : settings.CODAL_ENQUEUE_BATCH_SIZE
+    ])
+    if len(batch) < settings.CODAL_ENQUEUE_BATCH_SIZE:
+        seen = {row.pk for row in batch}
+        batch += [
+            row
+            for row in pending[: settings.CODAL_ENQUEUE_BATCH_SIZE * 2]
+            if row.pk not in seen
+        ][: settings.CODAL_ENQUEUE_BATCH_SIZE - len(batch)]
+    announcements = batch
     report_ids = []
     for announcement in announcements:
         defaults = classify_announcement(announcement)
