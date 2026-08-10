@@ -298,7 +298,7 @@ def _rebalance_trades(
 def _constraints_hash(constraints: dict) -> str:
     """Stable short hash for cache keying."""
     payload = json.dumps(constraints, sort_keys=True, default=str)
-    return hashlib.md5(payload.encode("utf-8")).hexdigest()[:12]
+    return hashlib.md5(payload.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
 
 # ---------- scenario solvers -------------------------------------------------
@@ -593,7 +593,9 @@ def optimize(
         univ_str = "default"
     else:
         sorted_univ = sorted(universe)
-        univ_str = hashlib.md5(",".join(sorted_univ).encode("utf-8")).hexdigest()[:16]
+        univ_str = hashlib.md5(
+            ",".join(sorted_univ).encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:16]
 
     as_of_str = "latest" if as_of_dt is None else as_of_dt.date().isoformat()
 

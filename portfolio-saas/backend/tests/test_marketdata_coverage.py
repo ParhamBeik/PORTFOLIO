@@ -162,6 +162,7 @@ class TestLiveReserve:
         settings.MARKETDATA_LIVE_REQUEST_FLOOR = 6000
         settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
         settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
+        settings.MARKETDATA_IGNORE_MARKET_HOURS = False
 
     def test_a_full_day_ahead_reserves_every_cycle_it_will_need(self, settings):
         """Reserve the real BRS plan, including Monday's commodity opening."""

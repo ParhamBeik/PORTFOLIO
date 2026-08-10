@@ -257,7 +257,9 @@ def _returns_cache_key(history_days: int, as_of: dt.datetime | None, universe: l
         univ_str = "default"
     else:
         sorted_univ = sorted(universe)
-        univ_str = hashlib.md5(",".join(sorted_univ).encode("utf-8")).hexdigest()[:16]
+        univ_str = hashlib.md5(
+            ",".join(sorted_univ).encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:16]
 
     as_of_str = "latest" if as_of is None else as_of.date().isoformat()
     return f"returns:daily:{history_days}d:as_of:{as_of_str}:univ:{univ_str}:basis:{basis}:v{version}"

@@ -28,11 +28,22 @@ Demo users seeded on first boot (DEBUG only): **demopro@portfolio.local / demopr
 
 ## Production
 
-See `docker-compose.prod.yml` + `.env.production` (gitignored) + `scripts/deploy.sh`. Caddy
-terminates TLS (auto Let's Encrypt), serves the built frontend, and
-reverse-proxies `/api`. Target host: a Parspack VPS4 in an Iranian datacenter —
-users and server share domestic routing, so no CDN layer is needed and
-BrsApi.ir is directly reachable. Commands are at the bottom of this file.
+Portfolio keeps its own private database, Redis, backend, frontend, and Celery
+workers. Its frontend alone joins `vps-edge`; the independent edge stack under
+`deploy/edge/` terminates TLS and routes each domain to its own frontend. Codal
+document extraction runs directly from its dedicated worker and persistent
+volume without a proxy.
+
+```bash
+cp .env.production.example .env.production
+chmod 600 .env.production
+# Start deploy/edge first (creates the vps-edge network), then:
+BACKUP_PASSPHRASE_FILE=/root/secrets/portfolio-backup-passphrase ./scripts/deploy.sh
+```
+
+The passphrase file must live outside the repository with mode `400` or `600`.
+The first deployment skips the pre-deploy backup because no database exists yet;
+later deploys refuse to continue unless the encrypted backup succeeds.
 
 ## Why it scales
 
@@ -170,8 +181,14 @@ cd frontend && npm install && npm run dev
 ## Production commands
 
 ```bash
-# create .env.production with DOMAIN, SECRET_KEY, BRS/TSETMC keys, DB password
-DOMAIN=your.domain ./scripts/deploy.sh       # backup, build, migrate, up, health-check
+# Prepare application and edge configuration once.
+cp .env.production.example .env.production
+cp deploy/edge/.env.example deploy/edge/.env
+chmod 600 .env.production deploy/edge/.env
+
+# The edge owns public ports 80/443; each application remains a separate stack.
+deploy/edge/deploy.sh
+BACKUP_PASSPHRASE_FILE=/root/secrets/portfolio-backup-passphrase scripts/deploy.sh
 docker compose -f docker-compose.prod.yml exec backend python manage.py seed_assets
-curl https://$DOMAIN/api/health/            # -> ok
+curl https://portfolio.example.com/api/health/            # -> ok
 ```

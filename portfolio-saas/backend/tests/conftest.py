@@ -113,6 +113,8 @@ def clear_caches():
     """
     from django.core.cache import cache
     cache.clear()
+    from marketdata.quota import _LOCAL_WINDOWS
+    _LOCAL_WINDOWS.clear()
     try:
         from portfolio.live.pubsub import get_redis
         r = get_redis()

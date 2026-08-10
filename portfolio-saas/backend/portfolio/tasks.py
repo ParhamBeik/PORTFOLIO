@@ -176,7 +176,7 @@ def _write_snapshots(priced: dict) -> None:
     active_users_qs = (
         User.objects.filter(accounts__isnull=False)
         .distinct()
-        .prefetch_related("accounts__holdings__asset")
+        .prefetch_related("accounts__holdings__asset", "accounts__liabilities")
     )
 
     total_written = 0
@@ -210,6 +210,9 @@ def _flush_user_snapshots(users: list, prices: dict, gap_timestamps: list) -> in
                     unit_price = prices.get(holding.asset.key)
                     value = asset_value(holding, unit_price)
                     account_total += value
+                # Match value_account: net mortgage / other liabilities.
+                for liability in account.liabilities.all():
+                    account_total -= liability.amount_tomans
                 user_total += account_total
                 snap = Snapshot(user=user, account=account, total_value_tomans=account_total, is_estimated=is_est)
                 if ts:

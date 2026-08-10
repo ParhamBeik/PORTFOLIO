@@ -32,12 +32,13 @@ pytestmark = pytest.mark.django_db
 
 
 @pytest.fixture(autouse=True)
-def mock_timezone_now(monkeypatch):
+def mock_timezone_now(monkeypatch, settings):
     import datetime
     from django.utils import timezone
     # Set to a fixed time (e.g. 09:00:00 UTC) to ensure consistent quota limits
     mocked_dt = datetime.datetime(2026, 8, 1, 9, 0, 0, tzinfo=datetime.timezone.utc)
     monkeypatch.setattr(timezone, "now", lambda: mocked_dt)
+    settings.BRS_API_KEY = "test-key"
 
 
 def test_live_floor_survives_an_archive_burst(settings):

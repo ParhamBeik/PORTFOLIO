@@ -309,3 +309,20 @@ def test_backfill_validation_dry_run_command_safety():
             assert len(lines) >= 2
             assert "confirmed_corporate_action" in lines[1]
 
+
+def test_backfill_validation_default_manifest_is_secure(monkeypatch, tmp_path):
+    """The default manifest path is uniquely created with owner-only permissions."""
+    import os
+    from django.core.management import call_command
+    from marketdata.management.commands import backfill_validation
+
+    manifest = tmp_path / "manifest.csv"
+
+    def create_manifest(**_kwargs):
+        return os.open(manifest, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600), str(manifest)
+
+    monkeypatch.setattr(backfill_validation.tempfile, "mkstemp", create_manifest)
+    call_command("backfill_validation", symbols="", gold_symbols="")
+
+    assert manifest.exists()
+    assert manifest.stat().st_mode & 0o777 == 0o600

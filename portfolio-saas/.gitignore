@@ -17,6 +17,7 @@ frontend/playwright-report/
 .env
 .env.local
 .env.production
+!.env.production.example
 
 # OS
 .DS_Store

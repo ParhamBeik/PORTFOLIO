@@ -11,7 +11,7 @@ from decimal import Decimal
 import numpy as np
 import pandas as pd
 from django.contrib.postgres.aggregates import BoolOr
-from django.db.models import Avg
+from django.db.models import Avg, Count, Q
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
@@ -633,11 +633,19 @@ class SnapshotListView(APIView):
         prices = get_latest_prices()
         usd_rate = Decimal(prices.get("usd_cash", 0) or 0)
 
+        # Prefer live (non-estimated) rows when a day has both. Downtime gap-fills
+        # reuse the *current* price map stamped onto past slots; a bad price map
+        # then floods the day and pulls Avg() off a cliff.
         daily = list(
             snapshots
             .annotate(day=TruncDate("timestamp"))
             .values("day")
-            .annotate(avg_total=Avg("total_value_tomans"), any_estimated=BoolOr("is_estimated"))
+            .annotate(
+                live_avg=Avg("total_value_tomans", filter=Q(is_estimated=False)),
+                live_n=Count("id", filter=Q(is_estimated=False)),
+                all_avg=Avg("total_value_tomans"),
+                any_estimated=BoolOr("is_estimated"),
+            )
             .order_by("day")
         )
 
@@ -675,11 +683,18 @@ class SnapshotListView(APIView):
             if not daily:
                 fallback_val = value_account(account)["total"] if account else value_user(request.user)["total"]
                 if fallback_val > 0:
-                    daily = [{"day": now.date(), "avg_total": fallback_val, "any_estimated": False}]
+                    daily = [{
+                        "day": now.date(),
+                        "live_avg": fallback_val,
+                        "live_n": 1,
+                        "all_avg": fallback_val,
+                        "any_estimated": False,
+                    }]
 
             series = []
             for row in daily:
-                total = Decimal(row["avg_total"] or 0)
+                use_live = (row.get("live_n") or 0) > 0
+                total = Decimal((row["live_avg"] if use_live else row["all_avg"]) or 0)
                 val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
                 day_str = row["day"].strftime("%Y-%m-%d")
                 series.append({
@@ -687,7 +702,7 @@ class SnapshotListView(APIView):
                     "date": day_str,
                     "total": str(total),
                     "total_usd": val_usd,
-                    "is_estimated": bool(row["any_estimated"]),
+                    "is_estimated": False if use_live else bool(row["any_estimated"]),
                 })
 
         trades = (

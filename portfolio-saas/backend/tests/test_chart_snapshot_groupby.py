@@ -49,6 +49,43 @@ def test_same_day_snapshots_collapse_to_one_averaged_point(make_user):
 
 
 @pytest.mark.django_db
+def test_day_avg_prefers_live_over_estimated_gap_fills(make_user):
+    """Gap-fill estimates must not drag a day that also has live snaps."""
+    user = make_user("chart_live_pref@example.com")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    account = Account.objects.create(user=user, name="Test Account")
+    asset = Asset.objects.create(
+        key="test_live_pref", name="Gold", asset_class=Asset.AssetClass.GOLD, is_active=True
+    )
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("1"))
+    _mark_traded(account, asset)
+
+    now = timezone.now()
+    for i in range(10):
+        Snapshot.objects.create(
+            user=user,
+            account=account,
+            total_value_tomans=Decimal("18000000000"),
+            timestamp=now - timedelta(minutes=2 * i),
+            is_estimated=True,
+        )
+    Snapshot.objects.create(
+        user=user,
+        account=account,
+        total_value_tomans=Decimal("27000000000"),
+        timestamp=now,
+        is_estimated=False,
+    )
+
+    series = client.get(f"/api/snapshots/?days=7&account={account.id}").json()["series"]
+    assert len(series) == 1
+    assert Decimal(series[0]["total"]) == Decimal("27000000000")
+    assert series[0]["is_estimated"] is False
+
+
+@pytest.mark.django_db
 def test_snapshots_across_multiple_days_yield_one_point_per_day(make_user):
     user = make_user("chart_multi_day@example.com")
     account = Account.objects.create(user=user, name="Test Account")

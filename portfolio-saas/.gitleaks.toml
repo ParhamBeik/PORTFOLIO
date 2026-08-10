@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Historical analytics field names misidentified as API keys"
+commits = ["1c5df46c6616feb5d1f4fd9cd4cfcd0cdfe5f701"]

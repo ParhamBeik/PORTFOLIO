@@ -1,5 +1,7 @@
 import csv
 import hashlib
+import os
+import tempfile
 import time
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection, transaction
@@ -117,7 +119,12 @@ class Command(BaseCommand):
         unconfirmed_candidates = [c for c in corporate_candidates if c["status"] == "unconfirmed"]
 
         # Write manifest if path provided
-        manifest_file_path = options["manifest_path"] or "/tmp/f2_f3_backfill_manifest.csv"
+        manifest_file_path = options["manifest_path"]
+        if not manifest_file_path:
+            fd, manifest_file_path = tempfile.mkstemp(
+                prefix="f2_f3_backfill_manifest_", suffix=".csv"
+            )
+            os.close(fd)
         self.stdout.write(f"Writing manifest to: {manifest_file_path}")
 
         normal_count = 0
