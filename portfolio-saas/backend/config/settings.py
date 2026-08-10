@@ -250,6 +250,11 @@ MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET
 # still read it keep working; the archive budget above is the authoritative value.
 MARKETDATA_ARCHIVE_REQUEST_RESERVE = MARKETDATA_ARCHIVE_REQUEST_BUDGET
 MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "120"))
+# Pending work, not active workers. Keep one worker-sized buffer so a slow
+# provider cannot turn delayed scheduler ticks into an ever-growing queue.
+MARKETDATA_ARCHIVE_QUEUE_LIMIT = int(
+    os.getenv("MARKETDATA_ARCHIVE_QUEUE_LIMIT", "4")
+)
 MARKETDATA_RECENT_REFRESH_REQUEST_BUDGET = int(
     os.getenv("MARKETDATA_RECENT_REFRESH_REQUEST_BUDGET", "500")
 )
@@ -258,6 +263,12 @@ MARKETDATA_RECENT_REFRESH_REQUEST_BUDGET = int(
 # so the trailing window is bounded to keep cost finite. Trading days only -- a
 # non-trading day simply has no daily candle, so it is never requested.
 MARKETDATA_TICK_WINDOW_DAYS = int(os.getenv("MARKETDATA_TICK_WINDOW_DAYS", "90"))
+# Relative |tick_vol - candle_vol| / max(...) allowed before quarantine. Measured
+# mismatch distribution: ~75% of provider disagreements sit under 1%; the long
+# tail (near-total disagreement) still rejects. Override via env if needed.
+MARKETDATA_TICK_VOLUME_TOLERANCE = float(
+    os.getenv("MARKETDATA_TICK_VOLUME_TOLERANCE", "0.01")
+)
 
 # Codal announcements are paged 20 per request and a mature symbol has ~50 pages,
 # so "all history for all symbols" is ~32,000 requests -- more than three days of
@@ -280,6 +291,9 @@ CODAL_MAX_ARTIFACT_BYTES = int(os.getenv("CODAL_MAX_ARTIFACT_BYTES", str(50 * 10
 CODAL_OCR_CONFIDENCE_THRESHOLD = float(os.getenv("CODAL_OCR_CONFIDENCE_THRESHOLD", "0.90"))
 CODAL_PARSER_VERSION = os.getenv("CODAL_PARSER_VERSION", "1")
 CODAL_ENQUEUE_BATCH_SIZE = int(os.getenv("CODAL_ENQUEUE_BATCH_SIZE", "10"))
+MARKETDATA_CODAL_QUEUE_LIMIT = int(
+    os.getenv("MARKETDATA_CODAL_QUEUE_LIMIT", "1")
+)
 # Cool-down before a network/storage-blocked document is offered again. Long
 # enough that a sustained outage does not spin, short enough that a blip heals
 # itself instead of needing a manual UPDATE.

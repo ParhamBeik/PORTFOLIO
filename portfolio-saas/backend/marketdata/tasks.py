@@ -144,6 +144,18 @@ from portfolio.live.pubsub import get_redis
 logger = logging.getLogger(__name__)
 
 
+def _queue_slots(queue, limit):
+    """Return free pending slots; fail closed when the broker is unavailable."""
+    from redis import Redis
+
+    try:
+        depth = Redis.from_url(settings.CELERY_BROKER_URL).llen(queue)
+    except Exception:
+        logger.exception("Could not inspect Celery queue %s.", queue)
+        return 0, None
+    return max(0, limit - depth), depth
+
+
 def _pause():
     time.sleep(settings.MARKETDATA_FETCH_DELAY)
 
@@ -317,10 +329,31 @@ def archive_tick():
         return
     try:
         from .models import ArchiveFetchState
+        from .quota import ARCHIVE, remaining_requests
+        if remaining_requests(ARCHIVE) <= 0:
+            outcome.finish(
+                WorkflowRun.Outcome.SKIPPED,
+                error_code="quota_exhausted",
+                metadata={"reason": "archive_budget_empty"},
+            )
+            return
+        slots, depth = _queue_slots(
+            "archive", settings.MARKETDATA_ARCHIVE_QUEUE_LIMIT
+        )
+        if not slots:
+            outcome.finish(
+                WorkflowRun.Outcome.SKIPPED,
+                metadata={
+                    "reason": "queue_unavailable" if depth is None else "queue_full",
+                    "queue_depth": depth,
+                    "queue_limit": settings.MARKETDATA_ARCHIVE_QUEUE_LIMIT,
+                },
+            )
+            return
         if not ArchiveFetchState.objects.exists():
             ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
         promote_priority_tick_windows()
-        batch = claim_archive_batch(limit=12)
+        batch = claim_archive_batch(limit=min(12, slots))
         if not batch:
             outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "no_due_states"})
             return
@@ -352,7 +385,11 @@ def archive_tick():
 @shared_task(ignore_result=True)
 def recent_history_refresh():
     """Refresh authoritative recent stock series after the TSE close."""
-    state_ids = claim_recent_refresh()
+    slots, depth = _queue_slots("archive", settings.MARKETDATA_ARCHIVE_QUEUE_LIMIT)
+    if not slots:
+        logger.info("recent_history_refresh: queue full at %s", depth)
+        return
+    state_ids = claim_recent_refresh(limit=slots)
     if state_ids:
         group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
     logger.info("recent_history_refresh: enqueued %d archive states", len(state_ids))
@@ -400,7 +437,11 @@ def prune_workflow_runs():
 @shared_task(ignore_result=True)
 def archive_maintenance():
     """Reverify completed low-volatility endpoints outside normal batches."""
-    state_ids = claim_archive_maintenance(limit=2)
+    slots, depth = _queue_slots("archive", settings.MARKETDATA_ARCHIVE_QUEUE_LIMIT)
+    if not slots:
+        logger.info("archive_maintenance: queue full at %s", depth)
+        return
+    state_ids = claim_archive_maintenance(limit=min(2, slots))
     if state_ids:
         group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
     logger.info("archive_maintenance: enqueued %d archive states", len(state_ids))
@@ -466,6 +507,18 @@ def enqueue_codal_reports():
     if not settings.CODAL_EXTRACTION_ENABLED:
         outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "disabled"})
         return
+    slots, depth = _queue_slots("codal", settings.MARKETDATA_CODAL_QUEUE_LIMIT)
+    if not slots:
+        outcome.finish(
+            WorkflowRun.Outcome.SKIPPED,
+            metadata={
+                "reason": "queue_unavailable" if depth is None else "queue_full",
+                "queue_depth": depth,
+                "queue_limit": settings.MARKETDATA_CODAL_QUEUE_LIMIT,
+            },
+        )
+        return
+    batch_size = min(settings.CODAL_ENQUEUE_BATCH_SIZE, slots)
     now = timezone.now()
     stale = now - timedelta(hours=1)
     # Infrastructure blocks were terminal: one DNS blip or a single 503 parked a
@@ -496,15 +549,15 @@ def enqueue_codal_reports():
     # uniform template beats spreading thin across ~50 of them, and the corpus
     # spans sixteen years, so newest-first within the family still matters.
     batch = list(pending.filter(title__startswith=CODAL_PRIORITY_TITLE)[
-        : settings.CODAL_ENQUEUE_BATCH_SIZE
+        :batch_size
     ])
-    if len(batch) < settings.CODAL_ENQUEUE_BATCH_SIZE:
+    if len(batch) < batch_size:
         seen = {row.pk for row in batch}
         batch += [
             row
-            for row in pending[: settings.CODAL_ENQUEUE_BATCH_SIZE * 2]
+            for row in pending[: batch_size * 2]
             if row.pk not in seen
-        ][: settings.CODAL_ENQUEUE_BATCH_SIZE - len(batch)]
+        ][: batch_size - len(batch)]
     announcements = batch
     report_ids = []
     # This task had no exception handler at all. It marks each report FETCHING and
@@ -630,7 +683,6 @@ def aggregate_daily_stock_history(date_str: str = None):
     from django.db.models import Max, Min, Sum
     from django.utils import timezone
     from portfolio.models import Asset, Price
-    from .currency import toman_to_tse_close
     from .models import MarketCandle, StockTransactionTick
 
     today_jalali = date_str or jdatetime.date.today().strftime("%Y-%m-%d")
@@ -656,15 +708,12 @@ def aggregate_daily_stock_history(date_str: str = None):
             p_ticks = Price.objects.filter(asset=asset, fetched_at__gte=since).order_by("fetched_at")
             if not p_ticks.exists():
                 continue
-            # `Price` is Toman (extractor.py routes TSE quotes through
-            # tse_close_to_toman); MarketCandle is Rial. Convert on the way in,
-            # or candle_close_qs serves this row and the read side divides by 10
-            # a second time -- a 10x understatement of the current session.
-            open_p = toman_to_tse_close(p_ticks.first().price)
-            close_p = toman_to_tse_close(p_ticks.last().price)
+            # `Price` for TSE stocks is Rial (same unit as MarketCandle).
+            open_p = p_ticks.first().price
+            close_p = p_ticks.last().price
             stats = p_ticks.aggregate(high=Max("price"), low=Min("price"))
-            high_p = toman_to_tse_close(stats["high"]) or close_p
-            low_p = toman_to_tse_close(stats["low"]) or close_p
+            high_p = stats["high"] or close_p
+            low_p = stats["low"] or close_p
             vol = 0
 
         # No DailyStockHistory write: this aggregate is tick-derived and would

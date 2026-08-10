@@ -112,21 +112,18 @@ def _write_prices(priced: dict) -> None:
         if key not in assets:
             continue
         asset = assets[key]
-        # Every value here is Toman: extract_standard_prices() routes TSE
-        # quotes through tse_close_to_toman() and BRS gold/currency through
-        # to_toman(). portfolio_price is single-unit by construction, which
-        # is what valuation's cross-asset sums depend on.
-        # USD-quoted keys are the exception: extractor.py stores them at their
-        # provider-native USD magnitude, so stamping IRT/verified would licence
-        # valuation to add dollars straight into a Toman total. returns.py
-        # already special-cases them via USD_QUOTED_KEYS; mark them UNKNOWN so
-        # valuation cannot silently treat them as Toman either.
+        # BRS gold/FX and manuals are Toman. TSE stocks are stored as **Rial**
+        # (see extractor._price_from_tsetmc_record) so qty×price matches the
+        # 1/10-share broker hack. USD-quoted keys stay provider-native.
         from portfolio.services.returns import USD_QUOTED_KEYS
 
         if key in USD_QUOTED_KEYS:
             unit = Price.Unit.UNKNOWN
             verified = False
-        elif asset.tse_symbol or asset.brs_symbol or asset.is_manual:
+        elif asset.tse_symbol:
+            unit = Price.Unit.IRR
+            verified = True
+        elif asset.brs_symbol or asset.is_manual:
             unit = Price.Unit.IRT
             verified = True
         else:

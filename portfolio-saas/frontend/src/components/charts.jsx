@@ -61,6 +61,19 @@ const Frame = ({ height, label, children }) => (
   </div>
 );
 
+/** Y domain tightly around series values (~8% pad; never forced through 0). */
+export function moneyTrendDomain(dataMin, dataMax) {
+  const min = Number(dataMin);
+  const max = Number(dataMax);
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return [0, 1];
+  const lo = Math.min(min, max);
+  const hi = Math.max(min, max);
+  const span = hi - lo;
+  const pad = span > 0 ? span * 0.08 : Math.max(Math.abs(hi) * 0.02, 1);
+  const paddedMin = lo - pad;
+  return [paddedMin < 0 && lo >= 0 ? 0 : paddedMin, hi + pad];
+}
+
 /**
  * Net-worth over time. One series, so no legend — the panel title names it.
  * `data` is [{ x: ISO date, y: number }].
@@ -77,7 +90,13 @@ export function AreaTrend({ data, height = 260, label = "Portfolio value over ti
         </defs>
         <CartesianGrid stroke={GRID} vertical={false} />
         <XAxis dataKey="x" {...axis} minTickGap={40} tickFormatter={(v) => dateTick(v, longTicks)} />
-        <YAxis {...axis} width={56} tickFormatter={tomanCompact} />
+        <YAxis
+          {...axis}
+          width={56}
+          tickFormatter={tomanCompact}
+          domain={([dataMin, dataMax]) => moneyTrendDomain(dataMin, dataMax)}
+          allowDataOverflow={false}
+        />
         <Tooltip
           {...tooltipProps}
           labelFormatter={date}

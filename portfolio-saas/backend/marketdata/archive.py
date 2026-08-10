@@ -326,6 +326,10 @@ def _fetch_and_ingest(state):
             # unrecorded it re-fetched forever (24 states, none able to complete)
             # and, because promotion to the 365-day window demands that *every*
             # tick state be complete, a single such day blocked the whole phase.
+            #
+            # Do not raise: the failure path never reaches known_gaps forgiveness,
+            # so the same day stayed in `_tick_dates_needed` forever. Return the
+            # window so run_archive_state can credit the RejectedRecord as a gap.
             RejectedRecord.objects.update_or_create(
                 endpoint="stock_transaction_ticks",
                 symbol=symbol[:64],
@@ -333,7 +337,9 @@ def _fetch_and_ingest(state):
                 reason=mismatch.split(":")[0][:64],
                 defaults={"payload": {"day": day, "detail": mismatch}},
             )
-            raise MarketDataFetchError(f"{day}: {mismatch}")
+            trading = _tick_trading_days(symbol, state.target_window_days)
+            stored = _tick_dates_stored(symbol)
+            return (0, 0), trading | stored | {day}, stored
 
         # Validate before replacing, then swap atomically. A malformed payload
         # or failed insert must leave the previously stored day intact.
@@ -517,15 +523,26 @@ def _symbol_candle_volumes(symbol, days=None):
     return volumes
 
 
+def _tick_rejected_dates(symbol):
+    return set(
+        RejectedRecord.objects.filter(
+            endpoint="stock_transaction_ticks",
+            symbol=symbol,
+        ).values_list("date", flat=True)
+    )
+
+
 def _tick_days_unreconciled(symbol, days):
     """Stored tick days whose traded volume disagrees with the daily candle.
 
     Cancelled trades are excluded, which is the whole point: including them
     inflated volume by up to 14% and is why 370 stored stock-days disagreed with
     their own candles. A day that fails here is re-fetched, not patched.
+    Permanently quarantined days are left alone -- re-fetching them loops forever.
     """
     if not days:
         return set()
+    rejected = _tick_rejected_dates(symbol)
     tick_totals = dict(
         StockTransactionTick.objects.filter(
             symbol=symbol, date__in=days, canceled=False
@@ -534,11 +551,16 @@ def _tick_days_unreconciled(symbol, days):
         .annotate(total=Sum("volume"))
     )
     candle_totals = _symbol_candle_volumes(symbol, days)
-    return {
-        day
-        for day, candle_volume in candle_totals.items()
-        if day in tick_totals and int(tick_totals[day] or 0) != int(candle_volume or 0)
-    }
+    broken = set()
+    for day, candle_volume in candle_totals.items():
+        if day in rejected or day not in tick_totals:
+            continue
+        if validation.reconcile_tick_volume(
+            [{"volume": tick_totals[day], "canceled": 0}],
+            candle_volume,
+        ):
+            broken.add(day)
+    return broken
 
 
 def _tick_trading_days(symbol, window_days=TICK_WINDOW_DAYS):
@@ -557,10 +579,12 @@ def _tick_dates_needed(symbol, window_days=TICK_WINDOW_DAYS):
     Two kinds of work: days never fetched (missing), and days whose stored ticks
     do not add up to the candle (broken). Missing days are prioritized first
     to establish a complete timeline before spending quota on self-repair.
+    Quarantined mismatch days are never re-requested.
     """
     trading = _tick_trading_days(symbol, window_days)
     stored = _tick_dates_stored(symbol)
-    missing = trading - stored
+    rejected = _tick_rejected_dates(symbol)
+    missing = trading - stored - rejected
     broken = _tick_days_unreconciled(symbol, trading & stored)
     return sorted(missing, reverse=True) + sorted(broken, reverse=True)
 
@@ -668,6 +692,24 @@ def _transaction_keys(payload):
     }
 
 
+_PREREQ_ERROR_MARKERS = (
+    "No trading days known for this symbol yet",
+    "Real/legal payload has no matching daily price rows",
+)
+
+
+def next_quota_day_start(now=None):
+    """UTC datetime of the next Tehran midnight (provider quota day boundary)."""
+    from datetime import datetime, timezone as dt_timezone
+
+    now = now or timezone.now()
+    local = now.astimezone(market_state.TEHRAN)
+    nxt = (local + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    return nxt.astimezone(dt_timezone.utc)
+
+
 def run_archive_state(state_id):
     state = ArchiveFetchState.objects.get(pk=state_id)
     now = timezone.now()
@@ -675,15 +717,43 @@ def run_archive_state(state_id):
     try:
         (created, _), expected, stored = _fetch_and_ingest(state)
     except QuotaExhausted as exc:
+        rollover = next_quota_day_start(now)
         state.last_attempt_at = now
-        state.next_attempt_at = now + timedelta(minutes=1)
+        state.next_attempt_at = rollover
         state.last_error = "Daily quota unavailable."
         state.save(update_fields=["last_attempt_at", "next_attempt_at", "last_error"])
+        # Other states leased in this tick still wake within ~10m; push them to
+        # rollover so the queue does not spin once the day budget is gone.
+        ArchiveFetchState.objects.filter(
+            verified_complete=False,
+            next_attempt_at__gt=now,
+            next_attempt_at__lte=now + timedelta(minutes=10),
+        ).exclude(pk=state.pk).update(
+            next_attempt_at=rollover,
+            last_error="Daily quota unavailable.",
+        )
         logger.debug("Archive quota unavailable for %s (%s): %s", state.symbol, state.endpoint, exc)
         raise
     except MarketDataFetchError as exc:
         from .fetchers.base import TransientMarketDataError
         is_transient = isinstance(exc, TransientMarketDataError) or getattr(exc, "status_code", None) == 429
+        message = str(exc)
+
+        if any(marker in message for marker in _PREREQ_ERROR_MARKERS):
+            # Candles / unadj history must land first. Failing and backing off
+            # burned claim slots and wedged counters without spending useful quota.
+            state.last_attempt_at = now
+            state.next_attempt_at = now + timedelta(hours=3)
+            state.last_error = f"{type(exc).__name__}: {exc}"[:500]
+            state.verified_complete = False
+            state.save(update_fields=[
+                "last_attempt_at", "next_attempt_at", "last_error", "verified_complete",
+            ])
+            logger.debug(
+                "Archive prereq defer for %s (%s): %s",
+                state.symbol, state.endpoint, exc,
+            )
+            return state
 
         if is_transient:
             # A flat 2m retry never escalated, so a symbol that always times out
@@ -823,6 +893,97 @@ def release_archive_claims(state_ids):
         ArchiveFetchState.objects.filter(pk__in=state_ids).update(next_attempt_at=timezone.now())
 
 
+def _archive_prereqs_ready(state):
+    """Whether dependency endpoints have landed enough for this state to spend quota."""
+    if state.endpoint == ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS:
+        return bool(_tick_trading_days(state.symbol, state.target_window_days))
+    if state.endpoint == ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED:
+        return DailyStockHistory.objects.filter(
+            symbol=state.symbol, is_adjusted=False,
+        ).exists()
+    return True
+
+
+def _pick_ready_states(candidates, limit, now, deferred_pks):
+    """Take up to `limit` prereq-ready states; soft-defer the rest without failing."""
+    ready = []
+    for state in candidates:
+        if len(ready) >= limit:
+            break
+        if state.pk in deferred_pks:
+            continue
+        if _archive_prereqs_ready(state):
+            ready.append(state)
+        else:
+            deferred_pks.add(state.pk)
+            ArchiveFetchState.objects.filter(pk=state.pk).update(
+                next_attempt_at=now + timedelta(hours=3),
+            )
+    return ready
+
+
+def claim_archive_batch(limit=None):
+    now = timezone.now()
+    batch_size = min(
+        limit or settings.MARKETDATA_ARCHIVE_BATCH_SIZE,
+        max(remaining_requests(ARCHIVE), 0),
+    )
+    if not batch_size:
+        return []
+    due = Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now)
+    deferred_pks = set()
+    with transaction.atomic():
+        base = ArchiveFetchState.objects.select_for_update(skip_locked=True).filter(
+            due, verified_complete=False
+        )
+        tick_endpoint = ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS
+        # Over-fetch then filter: prereq-empty states are soft-deferred so they
+        # do not consume lease slots that ticks/history could use.
+        non_tick = _pick_ready_states(
+            list(
+                _coverage_rank_qs(_expected_gain_qs(base.exclude(endpoint=tick_endpoint)))
+                .order_by("_coverage_rank", "-_expected_gain", _LAST_ATTEMPT_FIRST)[: batch_size + 8]
+            ),
+            limit=2,
+            now=now,
+            deferred_pks=deferred_pks,
+        )
+        states = list(non_tick)
+        remaining_slots = batch_size - len(states)
+        if remaining_slots > 0:
+            states += _pick_ready_states(
+                list(
+                    base.filter(endpoint=tick_endpoint)
+                    .exclude(pk__in=deferred_pks)
+                    .order_by("target_window_days", "stored_rows", _LAST_ATTEMPT_FIRST)
+                    [: remaining_slots + 16]
+                ),
+                limit=remaining_slots,
+                now=now,
+                deferred_pks=deferred_pks,
+            )
+        remaining_slots = batch_size - len(states)
+        if remaining_slots > 0:
+            taken = {state.pk for state in states} | deferred_pks
+            states += _pick_ready_states(
+                list(
+                    _coverage_rank_qs(_expected_gain_qs(
+                        base.exclude(pk__in=taken).exclude(endpoint=tick_endpoint)
+                    ))
+                    .order_by("_coverage_rank", "-_expected_gain", _LAST_ATTEMPT_FIRST)
+                    [: remaining_slots + 8]
+                ),
+                limit=remaining_slots,
+                now=now,
+                deferred_pks=deferred_pks,
+            )
+        claim_until = now + timedelta(minutes=10)
+        ArchiveFetchState.objects.filter(pk__in=[state.pk for state in states]).update(
+            next_attempt_at=claim_until
+        )
+    return [state.pk for state in states]
+
+
 def claim_recent_refresh(limit=None):
     """Lease post-close history/candle refreshes for held then liquid symbols."""
     from portfolio.models import Holding
@@ -880,52 +1041,6 @@ def claim_recent_refresh(limit=None):
             next_attempt_at=now + timedelta(hours=3)
         )
     return [state.pk for state in ordered]
-
-
-def claim_archive_batch(limit=None):
-    now = timezone.now()
-    batch_size = min(
-        limit or settings.MARKETDATA_ARCHIVE_BATCH_SIZE,
-        max(remaining_requests(ARCHIVE), 0),
-    )
-    if not batch_size:
-        return []
-    due = Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now)
-    with transaction.atomic():
-        base = ArchiveFetchState.objects.select_for_update(skip_locked=True).filter(
-            due, verified_complete=False
-        )
-        tick_endpoint = ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS
-        # Reserve at most two jobs for high-yield/critical non-tick repair. The
-        # rest advances breadth-first tick coverage; completed rows never churn
-        # through this normal batch.
-        non_tick = list(
-            _coverage_rank_qs(_expected_gain_qs(base.exclude(endpoint=tick_endpoint)))
-            .order_by("_coverage_rank", "-_expected_gain", _LAST_ATTEMPT_FIRST)[:2]
-        )
-        states = non_tick
-        remaining_slots = batch_size - len(states)
-        if remaining_slots > 0:
-            states += list(
-                base.filter(endpoint=tick_endpoint)
-                .order_by("target_window_days", "stored_rows", _LAST_ATTEMPT_FIRST)
-                [:remaining_slots]
-            )
-        remaining_slots = batch_size - len(states)
-        if remaining_slots > 0:
-            states += list(
-                _coverage_rank_qs(_expected_gain_qs(
-                    base.exclude(pk__in=[state.pk for state in states])
-                    .exclude(endpoint=tick_endpoint)
-                ))
-                .order_by("_coverage_rank", "-_expected_gain", _LAST_ATTEMPT_FIRST)
-                [:remaining_slots]
-            )
-        claim_until = now + timedelta(minutes=10)
-        ArchiveFetchState.objects.filter(pk__in=[state.pk for state in states]).update(
-            next_attempt_at=claim_until
-        )
-    return [state.pk for state in states]
 
 
 def promote_priority_tick_windows(liquid_limit=100):

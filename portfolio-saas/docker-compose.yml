@@ -26,7 +26,6 @@ x-backend-env: &backend-env
   BRS_URL: ${BRS_URL:-https://Api.BrsApi.ir/Market/Gold_Currency.php}
   TSETMC_API_KEY: ${TSETMC_API_KEY:-}
   TSETMC_URL: ${TSETMC_URL:-https://Api.BrsApi.ir/Tsetmc/AllSymbols.php}
-  REAL_PORTFOLIO_DATA_DIR: /portfolio-data
   CODAL_EXTRACTION_ENABLED: ${CODAL_EXTRACTION_ENABLED:-0}
   CODAL_HTTP_PROXY: ${CODAL_HTTP_PROXY:-}
   CODAL_STORAGE_DIR: ${CODAL_STORAGE_DIR:-/var/lib/codal}
@@ -105,7 +104,6 @@ services:
     command: gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --workers 1 --reload
     volumes:
       - ./backend:/app
-      - "${IMPORT_DATA_DIR:-./import-data}:/portfolio-data:ro"
       # Read-only here: the backend only ever serves these, the codal worker writes.
       - codal_documents:/var/lib/codal:ro
     ports:

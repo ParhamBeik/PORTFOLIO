@@ -5,7 +5,7 @@ from rest_framework import serializers
 from accounts.features import limit_for
 from .models import Account, Asset, Holding, LedgerEntry, Transaction, Liability
 from marketdata.models import MarketCandle, GoldCurrencyHistory
-from marketdata.currency import to_toman, tse_close_to_toman
+from marketdata.currency import to_toman
 from marketdata.jalali import normalize_jalali
 import jdatetime
 
@@ -178,8 +178,9 @@ class TradeInputSerializer(serializers.Serializer):
                     if not candle:
                         candle = MarketCandle.objects.filter(symbol=asset.tse_symbol, timeframe="1d_unadj", date_time__lte=j_date_str + " 23:59:59").order_by("-date_time").first()
                     if candle:
-                        # Warehouse TSE closes are raw Rial; the ledger is Toman.
-                        attrs['price_tomans'] = tse_close_to_toman(candle.close_price)
+                        # TSE portfolio quotes are Rial (qty hack); ledger column
+                        # stores that same number under price_tomans.
+                        attrs['price_tomans'] = candle.close_price
                     else:
                         latest_price = Price.objects.filter(asset=asset).order_by("-fetched_at").first()
                         if latest_price:

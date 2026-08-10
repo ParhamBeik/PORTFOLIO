@@ -23,9 +23,11 @@ def _announcement(title, day, code="ن-10"):
 
 
 @pytest.fixture(autouse=True)
-def _enabled(settings):
+def _enabled(settings, monkeypatch):
     settings.CODAL_EXTRACTION_ENABLED = True
     settings.CODAL_ENQUEUE_BATCH_SIZE = 2
+    settings.MARKETDATA_CODAL_QUEUE_LIMIT = 2
+    monkeypatch.setattr("marketdata.tasks._queue_slots", lambda *_args: (2, 0))
 
 
 def test_monthly_reports_go_first():
@@ -75,3 +77,24 @@ def test_disabled_extraction_enqueues_nothing(settings):
         enqueue_codal_reports()
 
     assert delay.call_count == 0
+
+
+def test_full_queue_enqueues_nothing(monkeypatch):
+    _announcement(f"{CODAL_PRIORITY_TITLE} الف", "1405-05-17")
+    monkeypatch.setattr("marketdata.tasks._queue_slots", lambda *_args: (0, 2))
+
+    with patch("marketdata.tasks.process_codal_report.delay") as delay:
+        enqueue_codal_reports()
+
+    assert delay.call_count == 0
+
+
+def test_enqueue_is_limited_to_free_queue_slots(monkeypatch):
+    _announcement(f"{CODAL_PRIORITY_TITLE} الف", "1405-05-17")
+    _announcement(f"{CODAL_PRIORITY_TITLE} ب", "1405-05-18")
+    monkeypatch.setattr("marketdata.tasks._queue_slots", lambda *_args: (1, 1))
+
+    with patch("marketdata.tasks.process_codal_report.delay") as delay:
+        enqueue_codal_reports()
+
+    assert delay.call_count == 1

@@ -11,8 +11,6 @@ from decimal import Decimal
 from django.core.cache import cache
 from django.utils import timezone
 
-from marketdata.currency import tse_close_to_toman
-
 from ..models import HOUSE_AREA_SQM, Account, Asset, Holding, Price
 
 logger = logging.getLogger(__name__)
@@ -31,7 +29,10 @@ def _q(value) -> Decimal:
 
 
 def get_latest_prices() -> dict:
-    """Return {asset_key: Decimal price in Rials}, cached ~10s.
+    """Return cached provider-scale prices keyed by asset.
+
+    TSE stock values are Rial under the legacy quantity convention; other
+    portfolio values are normally Toman.
 
     Uses Postgres DISTINCT ON to fetch the newest price for every asset in a
     single query, so this is O(1) regardless of how many assets or users exist.
@@ -133,9 +134,8 @@ def _archive_replacements(prices: dict) -> dict:
     for row in stock_rows:
         dt_str = row["date_time"].split()[0]
         if (row["symbol"], dt_str) not in rejections:
-            # Warehouse TSE closes are raw Rial; live prices are Toman.
             archive_prices.setdefault(
-                stock_symbols[row["symbol"]], tse_close_to_toman(row["close_price"])
+                stock_symbols[row["symbol"]], _q(row["close_price"])
             )
 
     brs_rows = (
@@ -344,35 +344,52 @@ def value_user(user) -> dict:
     }
 
 
+SYNTHETIC_HISTORY_MAX_DAYS = 90
+
+
+def _accounts_have_buy_sell(accounts) -> bool:
+    from portfolio.models import LedgerEntry
+
+    return LedgerEntry.objects.filter(
+        account__in=list(accounts),
+        kind__in=[LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL],
+    ).exists()
+
+
 def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list[dict]:
     """Compute an instant on-the-fly historical net worth series for a portfolio.
 
     Multiplies holdings against historical asset price time-series in
-    MarketCandle ("1d_adj") and GoldCurrencyHistory for past `days`, adjusting
-    holding quantities backward using trade ledger events (Transaction).
+    MarketCandle and GoldCurrencyHistory for past `days` (capped at 90).
+
+    When the account(s) have no BUY/SELL ledger rows (opening/quantity-only),
+    current quantities are held constant across the window. Otherwise quantities
+    are walked backward via `holdings_as_of`.
     """
     from datetime import timedelta
     import jdatetime
     from django.utils import timezone
     from marketdata.candles import candle_close_qs
     from marketdata.models import GoldCurrencyHistory
-    from portfolio.models import Holding, Transaction
+    from portfolio.models import Holding, Liability
     from portfolio.services.timeline import holdings_as_of
 
-    days = max(1, min(days, 365))
+    days = max(1, min(int(days), SYNTHETIC_HISTORY_MAX_DAYS))
     now = timezone.now()
-    since = now - timedelta(days=days)
 
     if account is not None:
         holdings = list(account.holdings.select_related("asset").all())
+        accounts = [account]
     else:
         holdings = list(Holding.objects.filter(account__user=user).select_related("asset").all())
+        accounts = list(user.accounts.all())
 
     if not holdings:
         return []
 
-    latest_quantities = {h.asset.key: Decimal(str(h.quantity)) for h in holdings}
+    latest_quantities = {h.asset.key: _q(h.quantity) for h in holdings}
     assets = {h.asset.key: h.asset for h in holdings}
+    constant_holdings = not _accounts_have_buy_sell(accounts)
 
     stock_symbols = {a.tse_symbol: a.key for a in assets.values() if a.tse_symbol}
     brs_symbols = {a.brs_symbol: a.key for a in assets.values() if a.brs_symbol}
@@ -384,8 +401,9 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
         )
         for r in s_rows:
             key = stock_symbols[r["symbol"]]
-            # Raw Rial in the warehouse -> Toman for portfolio arithmetic.
-            stock_closes.setdefault(r["date_time"], {})[key] = tse_close_to_toman(r["close_price"])
+            # Portfolio TSE quotes follow warehouse Rial under the legacy
+            # one-tenth-share convention.
+            stock_closes.setdefault(r["date_time"], {})[key] = _q(r["close_price"])
 
     gold_closes = {}
     if brs_symbols:
@@ -402,12 +420,9 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     # Track last known price for each asset to seamlessly fill non-trading days
     last_known_prices = {key: _q(latest_prices.get(key, 0)) for key in assets}
 
-    # Get all accounts to iterate over
-    accounts = [account] if account else user.accounts.all()
-    from portfolio.models import Liability
     liabilities = Liability.objects.filter(account__in=accounts)
     total_liabilities = sum(l.amount_tomans for l in liabilities)
-    
+
     series = []
     for i in range(days - 1, -1, -1):
         target_date = now - timedelta(days=i)
@@ -415,13 +430,14 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
         jalali_str = jdatetime.date.fromgregorian(date=target_date.date()).strftime("%Y-%m-%d")
 
         total = Decimal("0")
-        
-        # Calculate holdings for each account as of the target date
-        day_holdings = {}
-        for acc in accounts:
-            acc_holdings = holdings_as_of(user, acc, target_date)
-            for k, v in acc_holdings.items():
-                day_holdings[k] = day_holdings.get(k, Decimal("0")) + v
+
+        if constant_holdings:
+            day_holdings = dict(latest_quantities)
+        else:
+            day_holdings = {}
+            for acc in accounts:
+                for k, v in holdings_as_of(user, acc, target_date).items():
+                    day_holdings[k] = day_holdings.get(k, Decimal("0")) + v
 
         for key, asset in assets.items():
             qty = day_holdings.get(key, Decimal("0"))
@@ -446,6 +462,7 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
             "date": date_str,
             "total": str(round(total, 4)),
             "total_usd": val_usd,
+            "is_estimated": True,
         })
 
     return series
@@ -561,9 +578,8 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                     candles = candle_close_qs(asset.tse_symbol, as_of=jalali_str).exclude(date_time__in=rejections)
                     candle = candles.order_by("-date_time").first()
                     if candle:
-                        # Raw Rial in the warehouse -> Toman, matching the
-                        # ledger's own unit for cash and cost basis below.
-                        price = tse_close_to_toman(candle.close_price)
+                        # Portfolio TSE quotes are Rial (same as warehouse).
+                        price = _q(candle.close_price)
                         stale_sessions = _stale_sessions(
                             candles, "date_time", candle.date_time, jalali_str
                         )

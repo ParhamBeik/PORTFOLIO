@@ -28,12 +28,18 @@ def _state(symbol, endpoint=Endpoint.STOCK_HISTORY_ADJUSTED, **kwargs):
 
 def test_claim_order_is_coverage_first():
     """A symbol with no data must be claimed before one missing 6 of 3,028 rows."""
+    from marketdata.models import DailyStockHistory
+
     now = timezone.now()
     full = _state("has_data_small_gap", stored_rows=3022, expected_rows=3028,
                   missing_rows=6, last_success_at=now, last_attempt_at=now)
     empty = _state("fetched_but_empty", stored_rows=0, last_success_at=now,
                    last_attempt_at=now)
     never = _state("never_fetched")
+    for symbol in ("has_data_small_gap", "fetched_but_empty", "never_fetched"):
+        DailyStockHistory.objects.create(
+            symbol=symbol, date="1405-01-01", is_adjusted=False, pl=100,
+        )
 
     batch = claim_archive_batch(limit=3)
 
@@ -133,3 +139,30 @@ def test_repeated_transients_escalate():
     assert state.consecutive_failures == 4
     # Was a flat 2 minutes on every attempt, forever.
     assert state.next_attempt_at - timezone.now() > timedelta(minutes=10)
+
+
+def test_quota_exhausted_defers_to_tehran_day_rollover_not_one_minute():
+    from marketdata.archive import next_quota_day_start
+    from marketdata.quota import QuotaExhausted
+
+    now = timezone.now()
+    state = _state("quota-sym")
+    sibling = _state(
+        "quota-sib",
+        next_attempt_at=now + timedelta(minutes=5),
+    )
+    with patch(
+        "marketdata.archive._fetch_and_ingest",
+        side_effect=QuotaExhausted("archive budget gone"),
+    ):
+        with pytest.raises(QuotaExhausted):
+            run_archive_state(state.pk)
+
+    state.refresh_from_db()
+    sibling.refresh_from_db()
+    rollover = next_quota_day_start(now)
+    assert state.last_error == "Daily quota unavailable."
+    assert state.next_attempt_at >= rollover - timedelta(seconds=2)
+    assert abs((state.next_attempt_at - rollover).total_seconds()) < 2
+    assert sibling.next_attempt_at >= rollover - timedelta(seconds=2)
+    assert sibling.last_error == "Daily quota unavailable."

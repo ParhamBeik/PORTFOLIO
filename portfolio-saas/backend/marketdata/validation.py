@@ -23,6 +23,8 @@ Every rule here encodes something observed in the live payloads, not a guess:
 from dataclasses import dataclass
 import math
 
+from django.conf import settings
+
 from . import jalali
 
 # A Jalali day the provider could plausibly report. TSE data starts in the
@@ -435,23 +437,34 @@ def validate(kind, records):
     return accepted, rejections
 
 
-def reconcile_tick_volume(tick_records, candle_volume):
+def reconcile_tick_volume(tick_records, candle_volume, *, tolerance=None):
     """Does a day of ticks add up to the day's reported volume?
 
-    The strongest check available anywhere in this system: two independently
-    fetched endpoints must agree. Cancelled trades carry the same `row` as the
-    original and must be excluded -- doing so reproduced the candle volume
-    exactly on every sampled day that previously disagreed.
+    Two independently fetched endpoints should agree. Cancelled trades carry the
+    same `row` as the original and must be excluded. Exact equality was too
+    brittle against provider noise (~75% of quarantines were under 1% relative),
+    so a small relative tolerance (default MARKETDATA_TICK_VOLUME_TOLERANCE) is
+    allowed. A zero-vs-nonzero split still fails.
 
     Returns None when it reconciles (or cannot be judged), else a reason.
     """
     if candle_volume is None:
         return None
-    traded = sum(
+    traded = int(sum(
         _num(rec.get("volume")) or 0
         for rec in tick_records
         if isinstance(rec, dict) and not rec.get("canceled")
+    ))
+    candle = int(candle_volume)
+    if traded == candle:
+        return None
+    if traded == 0 or candle == 0:
+        return f"tick_volume_mismatch:{traded}!={candle}"
+    tol = (
+        settings.MARKETDATA_TICK_VOLUME_TOLERANCE
+        if tolerance is None
+        else float(tolerance)
     )
-    if int(traded) != int(candle_volume):
-        return f"tick_volume_mismatch:{int(traded)}!={int(candle_volume)}"
-    return None
+    if abs(traded - candle) / max(traded, candle) <= tol:
+        return None
+    return f"tick_volume_mismatch:{traded}!={candle}"

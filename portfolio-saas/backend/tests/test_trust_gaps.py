@@ -211,11 +211,13 @@ def test_sold_out_position_is_visible_before_its_sale(ledger_account, asset_cata
     }
 
 
-def test_celery_routes_archive_and_live_queues_separately():
-    """Production workers consume disjoint queues; routing must stay module-scoped."""
+def test_celery_routes_work_and_producers_separately():
+    """Backlogged work queues must not starve their lightweight producers."""
     from config.celery import app
 
     routes = app.conf.task_routes
+    assert routes["marketdata.tasks.archive_tick"]["queue"] == "live"
+    assert routes["marketdata.tasks.enqueue_codal_reports"]["queue"] == "live"
     assert routes["marketdata.tasks.*"]["queue"] == "archive"
     assert routes["portfolio.tasks.*"]["queue"] == "live"
     assert app.conf.task_default_queue == "live"

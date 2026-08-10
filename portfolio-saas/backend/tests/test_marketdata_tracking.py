@@ -204,8 +204,7 @@ def test_real_legal_without_price_rows_never_verifies(settings):
 
     Reported as a missing dependency rather than a row-level gap: re-fetching
     *this* endpoint can never produce a price row, so the unadjusted pass has to
-    land first. (Partial price coverage is a different case -- see
-    test_real_legal_verifies_despite_individually_rejected_price_days.)
+    land first. Soft-defer without wedging consecutive_failures.
     """
     settings.TSETMC_API_KEY = "test-key"
     state = ArchiveFetchState.objects.create(
@@ -216,7 +215,8 @@ def test_real_legal_without_price_rows_never_verifies(settings):
         state = run_archive_state(state.pk)
     assert not state.verified_complete
     assert "no matching daily price rows" in state.last_error
-    assert state.consecutive_failures == 1
+    assert state.consecutive_failures == 0
+    assert state.next_attempt_at is not None
 
 
 def test_real_legal_verifies_despite_individually_rejected_price_days(settings):

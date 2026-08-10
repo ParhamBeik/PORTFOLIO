@@ -348,21 +348,6 @@ def test_salvage_nulls_scaled_open_when_range_is_unusable():
     }
 
 
-def test_toman_to_tse_close_round_trips_the_read_boundary():
-    """The write-side inverse must undo tse_close_to_toman exactly.
-
-    aggregate_daily_stock_history's tickless fallback relies on this: a Toman
-    `Price` goes back to Rial before landing in MarketCandle, so the read side's
-    divide-by-ten returns the original number instead of a tenth of it.
-    """
-    from marketdata.currency import toman_to_tse_close, tse_close_to_toman
-
-    for rial in ("3610", "70.5", "192880", "0.1"):
-        assert toman_to_tse_close(tse_close_to_toman(rial)) == Decimal(rial)
-    assert toman_to_tse_close(None) is None
-    assert toman_to_tse_close("") is None
-
-
 def test_gold_ingest_refuses_a_quote_whose_unit_it_cannot_name():
     """Fail closed: an unnameable scale is a silent 10x, so store nothing.
 

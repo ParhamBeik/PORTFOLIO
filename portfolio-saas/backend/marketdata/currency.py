@@ -7,13 +7,19 @@ Authoritative storage units:
 | marketdata_marketcandle, _dailystockhistory, _stocktransactiontick | Rial, provider-verbatim |
 | marketdata_goldcurrencyhistory | Toman for IRR-denominated; provider-native for USD/Tether (XAUUSD=دلار, BTC=تتر) |
 | marketdata_cryptohistory | close_price_usd USD, close_price_toman Toman |
-| portfolio_price, Snapshot, LedgerEntry, Liability | Toman (price_unit=IRT) |
+| portfolio_price (TSE stocks / `tse_symbol`) | **Rial** (deliberate: holdings qty is 1/10 of broker shares so qty×rial ≈ Toman value) |
+| portfolio_price (gold/FX/manual), Snapshot, LedgerEntry amounts | Toman for non-TSE; TSE ledger unit prices follow portfolio_price (Rial) |
 | marketdata_reallegalhistory (buy_*/sell_*_value) | Rial, provider-verbatim (same TSE feed) |
 | marketdata_marketindexdata (market_value, trade_value) | Rial; index_* are points, not money |
 | marketdata_stocksymbolmetadata (market_cap, eps) | Rial; pe/ps/g_pe are dimensionless |
 | marketdata_etfnavhistory (nav_*, market_price) | Rial (TSE feed); table currently empty |
 | marketdata_optioncontracthistory (strike, settlement, notional) | Rial (TSE feed); table currently empty |
 | marketdata_commodityhistory (close_price) | provider-native; the sibling `unit` string is the only label |
+
+`tse_close_to_toman()` remains for **analytics** readers that need a pure-Toman
+panel (returns matrix, universe) when combining TSE closes with gold Toman.
+Portfolio live valuation / `portfolio_price` for stocks must NOT convert — keep
+Rial so the share-count hack stays consistent.
 
 Non-monetary conventions that bite just as hard:
   * Warehouse dates are Jalali STRINGS ("1403-10-19"); user-land time
@@ -28,15 +34,12 @@ Non-monetary conventions that bite just as hard:
     Rial TSE data and BRS quotes are Toman. Guarded by a test in
     tests/test_raw_storage.py.
 
-`tse_close_to_toman()` is THE single Rial→Toman read boundary for TSE warehouse
-rows. Read paths that combine those closes with app Toman must route through it.
-
 Gold ingest is the one deliberate write-path exception: `ingest_gold_currency_history`
 calls `to_toman()` for IRR-quoted symbols and stores unit="تومان" so the table
 stays uniform with existing rows.
 
-`to_toman()` is also the live-price blender for mixed providers
-(`portfolio.live.extractor` → `portfolio_price`).
+`to_toman()` normalizes non-TSE live provider values where their declared quote
+unit requires it (`portfolio.live.extractor` → `portfolio_price`).
 """
 from decimal import Decimal
 
@@ -89,36 +92,15 @@ def canonical_symbol(symbol):
 
 
 def tse_close_to_toman(value):
-    """Warehouse TSE price (raw Rial) -> Toman, the app's unit.
+    """Warehouse TSE price (raw Rial) -> Toman for mixed-unit analytics.
 
-    THE unit boundary. `marketdata_marketcandle` / `marketdata_dailystockhistory`
-    / `marketdata_stocktransactiontick` store BrsApi's TSE numbers verbatim, and
-    those endpoints quote Rial (see TSE_PRICE_UNIT). Every app-level consumer --
-    valuation, the returns panel, trade-price resolution -- works in Toman,
-    because that is the unit the user's own ledger is entered in.
-
-    Read paths that compare or combine a warehouse close with a
-    `portfolio_price` value MUST route through here; skipping it silently
-    compares a Rial against a Toman and lands 10x off. Gold/currency rows need
-    no conversion: that endpoint already answers in Toman.
+    Returns/universe readers combine provider-verbatim TSE rows with Toman gold
+    data and therefore convert here. Portfolio valuation deliberately does not;
+    see the legacy quantity convention in docs/F1_POLICY.md.
     """
     if value in (None, ""):
         return None
     return Decimal(str(value)) / Decimal("10")
-
-
-def toman_to_tse_close(value):
-    """Toman -> raw Rial, the inverse of `tse_close_to_toman()`.
-
-    THE write-side boundary. Anything derived from `portfolio_price` (already
-    Toman) that lands in a Rial table -- `marketdata_marketcandle` and friends --
-    must route through here, or the read side divides by 10 a second time and the
-    value shows up at a tenth of the truth. `aggregate_daily_stock_history`'s
-    tickless fallback is the one live caller.
-    """
-    if value in (None, ""):
-        return None
-    return Decimal(str(value)) * Decimal("10")
 
 
 def to_toman(symbol, price, unit="", *, usd_rate=None):

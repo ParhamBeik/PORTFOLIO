@@ -119,6 +119,47 @@ def test_compute_dynamic_net_worth_series(asset_catalog, write_prices, make_user
     assert "total" in series[0]
     assert "total_usd" in series[0]
     assert float(series[0]["total"]) > 0
+    assert series[0]["is_estimated"] is True
+    # Opening-only: constant qty → flat when only latest prices exist.
+    assert series[0]["total"] == series[-1]["total"]
+
+
+def test_compute_dynamic_caps_at_90_days(asset_catalog, write_prices, make_user):
+    from portfolio.services.valuation import SYNTHETIC_HISTORY_MAX_DAYS, compute_dynamic_net_worth_series
+    write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
+    user = make_user(email="dynamic-cap@test.test")
+    account = Account.objects.create(user=user, name="Dynamic")
+    Holding.objects.create(account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("1"))
+    series = compute_dynamic_net_worth_series(user, account, days=365)
+    assert len(series) == SYNTHETIC_HISTORY_MAX_DAYS
+
+
+def test_compute_dynamic_respects_buy_sell_timeline(asset_catalog, write_prices, make_user):
+    """With a recent BUY, pre-buy days should not include that position."""
+    from django.utils import timezone
+    from portfolio.models import LedgerEntry
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+
+    write_prices({"emami_coin": Decimal("100"), "usd_cash": Decimal("60000")})
+    user = make_user(email="dynamic-buy@test.test")
+    account = Account.objects.create(user=user, name="Traded")
+    Holding.objects.create(account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("5"))
+    # BUY "now" — walking holdings_as_of zeros qty before this timestamp.
+    LedgerEntry.objects.create(
+        account=account,
+        asset=asset_catalog["emami_coin"],
+        kind=LedgerEntry.Kind.BUY,
+        quantity=Decimal("5"),
+        price_tomans=Decimal("100"),
+        amount_tomans=Decimal("500"),
+        timestamp=timezone.now(),
+        source="manual",
+    )
+
+    series = compute_dynamic_net_worth_series(user, account, days=5)
+    assert len(series) == 5
+    assert float(series[0]["total"]) == 0.0
+    assert float(series[-1]["total"]) > 0
 
 
 def test_guard_price_map_accepts_legitimate_large_moves(asset_catalog, write_prices):

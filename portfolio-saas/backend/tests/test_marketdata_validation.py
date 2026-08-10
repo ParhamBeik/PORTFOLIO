@@ -165,6 +165,18 @@ def test_ticks_reconcile_against_the_candle_once_cancellations_are_excluded():
     assert validation.reconcile_tick_volume(ticks, 600).startswith("tick_volume_mismatch")
 
 
+def test_tick_volume_tolerance_accepts_sub_percent_noise(settings):
+    settings.MARKETDATA_TICK_VOLUME_TOLERANCE = 0.01
+    ticks = [{"volume": 10000, "canceled": 0}]
+    assert validation.reconcile_tick_volume(ticks, 9950) is None
+    assert validation.reconcile_tick_volume(ticks, 9900) is None
+    assert validation.reconcile_tick_volume(ticks, 9500).startswith("tick_volume_mismatch")
+    assert validation.reconcile_tick_volume(ticks, 0).startswith("tick_volume_mismatch")
+    assert validation.reconcile_tick_volume([{"volume": 0}], 100).startswith(
+        "tick_volume_mismatch"
+    )
+
+
 def test_reconciliation_is_silent_when_there_is_no_candle_to_compare():
     assert validation.reconcile_tick_volume([{"row": 1, "volume": 5}], None) is None
 

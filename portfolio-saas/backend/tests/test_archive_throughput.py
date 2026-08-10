@@ -12,6 +12,20 @@ pytestmark = pytest.mark.django_db
 
 
 def test_batch_reserves_two_non_tick_and_uses_ten_tick_slots():
+    from django.core.cache import cache
+
+    from marketdata import jalali
+
+    cache.clear()
+    day = sorted(jalali.recent_days(90))[-1]
+    for peer in range(5):
+        MarketCandle.objects.create(
+            symbol=f"peer-{peer}",
+            timeframe=MarketCandle.UNADJUSTED,
+            date_time=day,
+            close_price=100,
+            volume=10,
+        )
     non_ticks = [
         ArchiveFetchState.objects.create(
             endpoint=ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
@@ -27,6 +41,14 @@ def test_batch_reserves_two_non_tick_and_uses_ten_tick_slots():
         )
         for index in range(12)
     ]
+    for row in ticks:
+        MarketCandle.objects.create(
+            symbol=row.symbol,
+            timeframe=MarketCandle.UNADJUSTED,
+            date_time=day,
+            close_price=1,
+            volume=100,
+        )
 
     claimed = claim_archive_batch(limit=12)
 
@@ -34,6 +56,44 @@ def test_batch_reserves_two_non_tick_and_uses_ten_tick_slots():
     assert len(set(claimed) & {row.pk for row in ticks}) == 10
     claimed_ticks = [row.pk for row in ticks[:10]]
     assert set(claimed_ticks).issubset(claimed)
+
+
+def test_claim_skips_ticks_without_candles():
+    from django.core.cache import cache
+
+    from marketdata import jalali
+
+    cache.clear()
+    day = sorted(jalali.recent_days(90))[-1]
+    for peer in range(5):
+        MarketCandle.objects.create(
+            symbol=f"peer-{peer}",
+            timeframe=MarketCandle.UNADJUSTED,
+            date_time=day,
+            close_price=100,
+            volume=10,
+        )
+    blocked = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+        symbol="no-candles",
+    )
+    ready = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+        symbol="has-candles",
+    )
+    MarketCandle.objects.create(
+        symbol="has-candles",
+        timeframe=MarketCandle.UNADJUSTED,
+        date_time=day,
+        close_price=1,
+        volume=100,
+    )
+
+    claimed = claim_archive_batch(limit=12)
+    assert ready.pk in claimed
+    assert blocked.pk not in claimed
+    blocked.refresh_from_db()
+    assert blocked.next_attempt_at is not None
 
 
 def test_completed_state_is_not_claimed_by_normal_batch():
@@ -90,7 +150,7 @@ def test_volume_mismatch_is_recorded_so_the_day_can_be_forgiven():
     promotion, since that requires every tick state to be complete.
     """
     from marketdata import ingest, validation
-    from marketdata.archive import _fetch_and_ingest
+    from marketdata.archive import _fetch_and_ingest, _tick_dates_needed, run_archive_state
     from marketdata.models import RejectedRecord
 
     state = ArchiveFetchState.objects.create(
@@ -101,14 +161,29 @@ def test_volume_mismatch_is_recorded_so_the_day_can_be_forgiven():
         "marketdata.archive.fetch_transactions", return_value=[{"volume": 5}]
     ), patch.object(ingest, "screen", return_value=([{"volume": 5}], 0)), patch.object(
         validation, "reconcile_tick_volume", return_value="tick_volume_mismatch:5!=99"
-    ), patch("marketdata.archive._symbol_candle_volumes", return_value={day: 99}):
-        with pytest.raises(Exception, match="tick_volume_mismatch"):
-            _fetch_and_ingest(state)
+    ), patch("marketdata.archive._symbol_candle_volumes", return_value={day: 99}), patch(
+        "marketdata.archive._tick_trading_days", return_value={day}
+    ), patch("marketdata.archive._tick_dates_stored", return_value=set()):
+        result, expected, stored = _fetch_and_ingest(state)
 
+    assert result == (0, 0)
+    assert day in expected
+    assert day not in stored
     record = RejectedRecord.objects.get(endpoint="stock_transaction_ticks", symbol="MM")
     assert record.date == day
     assert record.reason == "tick_volume_mismatch"
     assert "5!=99" in record.payload["detail"]
+    assert day not in _tick_dates_needed("MM")
+
+    with patch(
+        "marketdata.archive._fetch_and_ingest",
+        return_value=((0, 0), {day}, set()),
+    ):
+        state = run_archive_state(state.pk)
+    assert state.verified_complete
+    assert state.known_gap_rows == 1
+    assert state.missing_rows == 0
+    assert state.last_error == ""
 
 
 def test_banking_a_day_counts_as_progress_even_when_the_gap_does_not_shrink():

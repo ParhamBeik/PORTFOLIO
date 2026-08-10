@@ -24,6 +24,8 @@ celerybeat-schedule
 celerybeat-schedule.db
 backups/
 
-# Local data mounted into the backend for import_real_portfolios (see IMPORT_DATA_DIR)
-import-data/*
-!import-data/.gitkeep
+# Generated operational evidence; durable conclusions belong in docs.
+backend/recovery-manifests/
+
+# Local inputs for import_real_portfolios --data-dir.
+import-data/

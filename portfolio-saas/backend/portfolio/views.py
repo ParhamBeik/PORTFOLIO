@@ -35,6 +35,10 @@ from .serializers import (
     LiabilitySerializer,
 )
 from .services import execute_trade, get_latest_prices, undo_trade, value_account, value_user
+from .services.valuation import (
+    SYNTHETIC_HISTORY_MAX_DAYS,
+    compute_dynamic_net_worth_series,
+)
 from .services.trades import TradeError
 from .services.ledger import LedgerError, create_ledger_entry, reverse_ledger_entry
 from .services.imports import (
@@ -595,6 +599,9 @@ class SnapshotListView(APIView):
     buy/sell events in the same window so the chart can annotate the exact
     points where holdings changed.
 
+    Holdings-only accounts (no BUY/SELL ledger) with thin Snapshot coverage get
+    a warehouse-backed synthetic series capped at 90 days.
+
     `?account=<id>` scopes both the snapshot series and the trade markers to one
     portfolio (reads that account's per-account snapshot rows); absent = aggregate.
     """
@@ -634,24 +641,54 @@ class SnapshotListView(APIView):
             .order_by("day")
         )
 
-        # No snapshot rows yet (brand-new user) -> fall back to today's live total.
-        if not daily:
-            fallback_val = value_account(account)["total"] if account else value_user(request.user)["total"]
-            if fallback_val > 0:
-                daily = [{"day": now.date(), "avg_total": fallback_val, "any_estimated": False}]
+        accounts = [account] if account is not None else list(request.user.accounts.all())
+        holdings_only = bool(accounts) and not LedgerEntry.objects.filter(
+            account__in=accounts,
+            kind__in=[LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL],
+        ).exists()
+        has_holdings = Holding.objects.filter(account__in=accounts).exists() if accounts else False
 
-        series = []
-        for row in daily:
-            total = Decimal(row["avg_total"] or 0)
-            val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
-            day_str = row["day"].strftime("%Y-%m-%d")
-            series.append({
-                "timestamp": day_str,
-                "date": day_str,
-                "total": str(total),
-                "total_usd": val_usd,
-                "is_estimated": bool(row["any_estimated"]),
-            })
+        short_window = not show_all and days <= SYNTHETIC_HISTORY_MAX_DAYS
+        use_synthetic = (
+            has_holdings
+            and holdings_only
+            and (len(daily) < days if short_window else len(daily) < 2)
+        )
+
+        if use_synthetic:
+            synth_days = days if short_window else SYNTHETIC_HISTORY_MAX_DAYS
+            dynamic = compute_dynamic_net_worth_series(
+                request.user, account=account, days=synth_days
+            )
+            series = [
+                {
+                    "timestamp": row["date"],
+                    "date": row["date"],
+                    "total": row["total"],
+                    "total_usd": row["total_usd"],
+                    "is_estimated": True,
+                }
+                for row in dynamic
+            ]
+        else:
+            # No snapshot rows yet (brand-new user) -> fall back to today's live total.
+            if not daily:
+                fallback_val = value_account(account)["total"] if account else value_user(request.user)["total"]
+                if fallback_val > 0:
+                    daily = [{"day": now.date(), "avg_total": fallback_val, "any_estimated": False}]
+
+            series = []
+            for row in daily:
+                total = Decimal(row["avg_total"] or 0)
+                val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
+                day_str = row["day"].strftime("%Y-%m-%d")
+                series.append({
+                    "timestamp": day_str,
+                    "date": day_str,
+                    "total": str(total),
+                    "total_usd": val_usd,
+                    "is_estimated": bool(row["any_estimated"]),
+                })
 
         trades = (
             Transaction.objects.filter(

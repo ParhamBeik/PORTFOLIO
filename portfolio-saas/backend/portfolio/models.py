@@ -74,7 +74,7 @@ class Asset(models.Model):
     def clean(self):
         if not self.is_active:
             return
-        if self.is_house:
+        if self.is_house or self.is_manual:
             return
         from marketdata.models import MarketInstrument
 
@@ -172,9 +172,10 @@ class Price(models.Model):
     per asset via DISTINCT ON (asset) ORDER BY fetched_at DESC.
 
     `price_unit` / `price_unit_verified` mark provider unit confidence.
-    TSE warehouse rows stay Rial; they become Toman only via `tse_close_to_toman()`
-    at the read/blend boundary before landing here. Default for unsure sources is
-    UNKNOWN/unverified until confirmed.
+    TSE stock rows (`Asset.tse_symbol`) are stored as **Rial** (price_unit=IRR)
+    so qty×price matches the 1/10 broker-share convention. Gold/FX/manual rows
+    stay Toman (IRT). Analytics that need a pure-Toman TSE series still use
+    `tse_close_to_toman()` on warehouse candles, not these rows.
     """
 
     class Unit(models.TextChoices):
@@ -271,9 +272,8 @@ class LedgerEntry(models.Model):
     quantity = models.DecimalField(
         max_digits=20, decimal_places=6, null=True, blank=True
     )
-    # Unit price in Tomans at execution; 0 when the asset had no price yet.
-    # (Warehouse TSE closes are Rial and pass through `tse_close_to_toman()`
-    # in TradeInputSerializer before landing here.)
+    # Provider-scale unit price at execution; 0 when the asset had no price yet.
+    # TSE uses the legacy Rial/one-tenth-share convention; other assets use Toman.
     price_tomans = models.DecimalField(
         max_digits=20, decimal_places=4, null=True, blank=True
     )

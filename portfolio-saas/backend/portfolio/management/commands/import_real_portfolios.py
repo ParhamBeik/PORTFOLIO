@@ -1,18 +1,8 @@
 """One-time correct load of the real Father/Mother portfolios.
 
-This replaces the fabricated `seed_samples` random-walk data. It reads:
+Reads an explicit --data-dir containing current_state.json and
+history_snapshots.jsonl. Does not create or assume repo-side drop folders.
 
-    import-data/current_state.json      -> exact holdings
-    import-data/history_snapshots.jsonl -> real daily history
-
-(mounted in Docker as /portfolio-data). After this load the app operates only
-on data entered through the website; this command just corrects the seeded
-starting state.
-
-One-time: once the sample family has accounts, re-running leaves all browser
-changes untouched. Imported holdings become opening-position ledger entries.
-
-    manage.py import_real_portfolios
     manage.py import_real_portfolios --data-dir /path/to/data
 """
 import json
@@ -21,7 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from accounts.models import User
@@ -37,13 +27,6 @@ REAL_SOURCE = "REAL"
 HOUSE_STATE_KEY = "house_price_per_sqm_million"
 HOUSE_ASSET_KEY = "house_asset"
 
-def _default_data_dir() -> Path:
-    """Prefer the Docker import mount, then repo import-data/."""
-    for candidate in (Path("/portfolio-data"), Path(settings.BASE_DIR).parent / "import-data"):
-        if candidate.is_dir():
-            return candidate
-    return Path(settings.BASE_DIR) / "import-data"
-
 
 class Command(BaseCommand):
     help = "Load the real Father/Mother portfolios from the tracker data files."
@@ -51,8 +34,8 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             "--data-dir",
-            default=str(_default_data_dir()),
-            help="Directory holding current_state.json and history_snapshots.jsonl.",
+            required=True,
+            help="Existing directory with current_state.json and history_snapshots.jsonl.",
         )
 
     def handle(self, *args, **options):
@@ -61,13 +44,14 @@ class Command(BaseCommand):
             return
 
         data_dir = Path(options["data_dir"])
+        if not data_dir.is_dir():
+            raise CommandError(f"--data-dir does not exist: {data_dir}")
         state_path = data_dir / "current_state.json"
         history_path = data_dir / "history_snapshots.jsonl"
         if not state_path.exists() or not history_path.exists():
-            self.stdout.write(self.style.WARNING(
-                f"Data files not found under {data_dir}; skipping."
-            ))
-            return
+            raise CommandError(
+                f"Need current_state.json and history_snapshots.jsonl under {data_dir}"
+            )
 
         state = json.loads(state_path.read_text())
         history = self._latest_per_day(history_path)

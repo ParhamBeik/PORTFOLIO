@@ -38,13 +38,14 @@ app.conf.update(
     result_expires=3600,  # results aren't polled here (fire-and-forget beat schedule); don't let them pile up in Redis
     broker_transport_options={"visibility_timeout": 300},
     task_default_queue="live",
-    # Two queues, two workers. Archive ticks run for up to 50s each and used to
-    # sit in the same queue as the price loop, so a customer-facing price fetch
-    # could queue behind a backfill batch. Routing is by module: everything in
-    # marketdata is warehouse work, everything in portfolio is customer-facing.
+    # Lightweight producers stay on live so their own backlog cannot starve
+    # dispatch control. The work they create still runs on its dedicated queue.
     task_routes={
         "marketdata.tasks.process_codal_report": {"queue": "codal"},
-        "marketdata.tasks.enqueue_codal_reports": {"queue": "codal"},
+        "marketdata.tasks.enqueue_codal_reports": {"queue": "live"},
+        "marketdata.tasks.archive_tick": {"queue": "live"},
+        "marketdata.tasks.recent_history_refresh": {"queue": "live"},
+        "marketdata.tasks.archive_maintenance": {"queue": "live"},
         "marketdata.tasks.*": {"queue": "archive"},
         "portfolio.tasks.*": {"queue": "live"},
     },
