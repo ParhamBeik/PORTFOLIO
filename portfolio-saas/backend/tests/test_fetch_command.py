@@ -113,6 +113,24 @@ def test_partial_fetch_keeps_previous_prices_in_snapshots(asset_catalog, monkeyp
     assert Price.objects.filter(asset=gold).count() == 1
 
 
+def test_fetch_snapshots_subtract_liabilities(asset_catalog, monkeypatch):
+    gold = asset_catalog["emami_coin"]
+    Price.objects.create(asset=gold, price=Decimal("400000000"), source="SEED")
+    user = User.objects.create_user(email="liability@test.test", password="Sup3rSecret!")
+    account = Account.objects.create(user=user, name="Main")
+    account.holdings.create(asset=gold, quantity=Decimal("2"))
+    account.liabilities.create(label="Loan", amount_tomans=Decimal("300000000"))
+    _patch_fetch(monkeypatch, {
+        "brsapi": {"currency": [{"symbol": "USD", "price": 63200}]},
+        "tsetmc": [],
+    })
+
+    call_command("fetch_prices", stdout=StringIO())
+
+    assert Snapshot.objects.get(user=user, account=account).total_value_tomans == Decimal("500000000")
+    assert Snapshot.objects.get(user=user, account=None).total_value_tomans == Decimal("500000000")
+
+
 def test_fetch_no_users_still_writes_prices(asset_catalog, raw_market_sample, monkeypatch):
     """Prices are global; a fetch with zero users still records the market."""
     _patch_fetch(monkeypatch, raw_market_sample)

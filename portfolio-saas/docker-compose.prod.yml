@@ -6,7 +6,7 @@
 #   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
 #
 # Health: backend exposes /api/health/ (liveness) + /api/health/ready/ (DB +
-# cache). Caddy's healthcheck pings liveness through itself.
+# cache); the shared edge Caddy routes public traffic through frontend nginx.
 x-backend-env: &backend-env
   DJANGO_SETTINGS_MODULE: config.settings
   DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY}
