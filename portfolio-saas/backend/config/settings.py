@@ -250,10 +250,11 @@ MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET
 # still read it keep working; the archive budget above is the authoritative value.
 MARKETDATA_ARCHIVE_REQUEST_RESERVE = MARKETDATA_ARCHIVE_REQUEST_BUDGET
 MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "120"))
-# Pending work, not active workers. Keep one worker-sized buffer so a slow
-# provider cannot turn delayed scheduler ticks into an ever-growing queue.
+# Pending work, not active workers. Sized to keep archive workers busy between
+# scheduler ticks without exceeding the archive slice of the 5-minute window
+# (~750 req / 5 min). Was 4 and starved fill rate (~4 HTTP/min vs ~100+ capacity).
 MARKETDATA_ARCHIVE_QUEUE_LIMIT = int(
-    os.getenv("MARKETDATA_ARCHIVE_QUEUE_LIMIT", "4")
+    os.getenv("MARKETDATA_ARCHIVE_QUEUE_LIMIT", "48")
 )
 MARKETDATA_RECENT_REFRESH_REQUEST_BUDGET = int(
     os.getenv("MARKETDATA_RECENT_REFRESH_REQUEST_BUDGET", "500")

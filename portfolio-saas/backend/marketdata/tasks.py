@@ -353,7 +353,8 @@ def archive_tick():
         if not ArchiveFetchState.objects.exists():
             ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
         promote_priority_tick_windows()
-        batch = claim_archive_batch(limit=min(12, slots))
+        claim_limit = min(settings.MARKETDATA_ARCHIVE_BATCH_SIZE, slots)
+        batch = claim_archive_batch(limit=claim_limit)
         if not batch:
             outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "no_due_states"})
             return

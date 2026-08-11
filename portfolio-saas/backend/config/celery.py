@@ -36,7 +36,11 @@ app.conf.update(
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,  # pair with acks_late so one worker doesn't hoard several long tasks
     result_expires=3600,  # results aren't polled here (fire-and-forget beat schedule); don't let them pile up in Redis
-    broker_transport_options={"visibility_timeout": 300},
+    # Nightly integrity/validation/metrics can run longer than five minutes on a
+    # cold restart. Redis redelivers unacked messages after visibility_timeout,
+    # which duplicated those jobs onto the capped archive queue and starved
+    # run_archive_state (workers unhealthy, pending stuck above the claim limit).
+    broker_transport_options={"visibility_timeout": 3600},
     task_default_queue="live",
     # Lightweight producers stay on live so their own backlog cannot starve
     # dispatch control. The work they create still runs on its dedicated queue.
@@ -62,7 +66,7 @@ app.conf.beat_schedule = {
     },
     "marketdata-archive-every-minute": {
         "task": "marketdata.tasks.archive_tick",
-        "schedule": 60.0,
+        "schedule": 15.0,
     },
     "codal-extraction-newest-first": {
         "task": "marketdata.tasks.enqueue_codal_reports",
