@@ -30,6 +30,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+RUN rm -rf /opt/venv/bin/pip* /opt/venv/lib/python*/site-packages/pip* \
+    /usr/local/lib/python*/site-packages/pip* \
+    /usr/local/lib/python*/site-packages/setuptools* \
+    /usr/local/lib/python*/site-packages/_distutils_hack \
+    /usr/local/lib/python*/site-packages/wheel* \
+    && rm -f /usr/local/bin/pip*
 
 COPY . /app/
 # /var/lib/codal must exist and be owned here, before the named volume is first
