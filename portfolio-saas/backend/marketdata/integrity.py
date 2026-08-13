@@ -18,6 +18,10 @@ from .models import (
 MAX_FORWARD_FILL_SESSIONS = 5
 MIN_COVERAGE = 0.90
 MAX_REJECTION_RATIO = 0.01
+# Longest genuine market closure is Nowruz at roughly two weeks. A quiet
+# stretch longer than this is the warehouse missing data, not the exchange
+# being shut.
+MAX_OUTAGE_CALENDAR_DAYS = 21
 
 
 def _as_gregorian_date(value, default: dt.date) -> dt.date:
@@ -163,6 +167,7 @@ def compute_symbol_integrity(
     if rejection_ratio > MAX_REJECTION_RATIO:
         reason_codes.append("excessive_rejections")
 
+    missing_sessions = [day for day in sessions if day not in observed]
     return {
         "symbol": symbol,
         "source": instrument.source,
@@ -180,7 +185,35 @@ def compute_symbol_integrity(
         "passes_gate": not reason_codes,
         "reason_codes": reason_codes,
         "reason": ",".join(reason_codes),
+        "missing_count": len(missing_sessions),
+        "missing_dates": [_jalali_text(day) for day in missing_sessions[:20]],
     }
+
+
+def market_outage_windows(start=None, end=None) -> list[tuple[dt.date, dt.date]]:
+    """Stretches where the whole session calendar goes dark.
+
+    Every other check here measures a symbol against `actual_trading_days()`,
+    which is built from the candle table. That makes the per-symbol gate blind
+    to a period where nothing was ingested at all: with no candles there are no
+    sessions, so no symbol is missing any, and coverage reads as healthy. The
+    only way to see it is to ask whether the calendar itself has a hole too
+    long to be a holiday.
+    """
+    end_date = _as_gregorian_date(end, timezone.now().date())
+    start_date = _as_gregorian_date(start, end_date - dt.timedelta(days=730))
+    sessions = sorted(
+        day
+        for value in actual_trading_days(
+            start=_jalali_text(start_date), end=_jalali_text(end_date)
+        )
+        if (day := _stored_date(value)) is not None
+    )
+    return [
+        (previous, current)
+        for previous, current in zip(sessions, sessions[1:])
+        if (current - previous).days > MAX_OUTAGE_CALENDAR_DAYS
+    ]
 
 
 def update_all_symbols_integrity():
@@ -229,3 +262,22 @@ def update_all_symbols_integrity():
         )
         results.append(obj)
     return results
+
+
+def update_symbol_integrity(symbol: str) -> dict:
+    """Recompute and persist the 179-day gate for one symbol."""
+    metrics = compute_symbol_integrity(symbol)
+    if metrics.get("reason_codes") == ["unknown_symbol"] or metrics.get("reason") == "unknown_symbol":
+        return metrics
+    SymbolIntegrity.objects.update_or_create(
+        symbol=symbol,
+        defaults={
+            "source": metrics.get("source", ""),
+            "coverage_ratio": metrics.get("coverage_ratio", 0.0),
+            "max_gap_days": metrics.get("max_gap_days", 0),
+            "rejected_count": metrics.get("rejected_count", 0),
+            "passes_gate": metrics.get("passes_gate", False),
+            "reason": metrics.get("reason", ""),
+        },
+    )
+    return metrics

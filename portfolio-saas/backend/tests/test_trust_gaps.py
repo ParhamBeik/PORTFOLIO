@@ -217,7 +217,6 @@ def test_celery_routes_work_and_producers_separately():
 
     routes = app.conf.task_routes
     assert routes["marketdata.tasks.archive_tick"]["queue"] == "live"
-    assert routes["marketdata.tasks.enqueue_codal_reports"]["queue"] == "live"
     assert routes["marketdata.tasks.*"]["queue"] == "archive"
     assert routes["portfolio.tasks.*"]["queue"] == "live"
     assert app.conf.task_default_queue == "live"

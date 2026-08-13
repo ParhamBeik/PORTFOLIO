@@ -45,11 +45,10 @@ app.conf.update(
     # Lightweight producers stay on live so their own backlog cannot starve
     # dispatch control. The work they create still runs on its dedicated queue.
     task_routes={
-        "marketdata.tasks.process_codal_report": {"queue": "codal"},
-        "marketdata.tasks.enqueue_codal_reports": {"queue": "live"},
         "marketdata.tasks.archive_tick": {"queue": "live"},
         "marketdata.tasks.recent_history_refresh": {"queue": "live"},
         "marketdata.tasks.archive_maintenance": {"queue": "live"},
+        "marketdata.tasks.capture_operational_metrics": {"queue": "live"},
         "marketdata.tasks.*": {"queue": "archive"},
         "portfolio.tasks.*": {"queue": "live"},
     },
@@ -67,10 +66,6 @@ app.conf.beat_schedule = {
     "marketdata-archive-every-minute": {
         "task": "marketdata.tasks.archive_tick",
         "schedule": 15.0,
-    },
-    "codal-extraction-newest-first": {
-        "task": "marketdata.tasks.enqueue_codal_reports",
-        "schedule": 60.0,
     },
     "marketdata-recent-history-after-close": {
         "task": "marketdata.tasks.recent_history_refresh",
@@ -117,6 +112,10 @@ app.conf.beat_schedule = {
         "task": "marketdata.tasks.operational_health_check",
         "schedule": crontab(minute="*/15"),
     },
+    "capture-operational-metrics-every-15-minutes": {
+        "task": "marketdata.tasks.capture_operational_metrics",
+        "schedule": crontab(minute="*/15"),
+    },
     # The workflow ledger enforces its own 30-day window. Without this it grows
     # forever, which is the exact failure it was built to replace.
     "prune-workflow-runs-nightly": {
@@ -134,6 +133,10 @@ app.conf.beat_schedule = {
     "prune-snapshots-nightly": {
         "task": "portfolio.services.maintenance.prune_snapshots",
         "schedule": crontab(hour=2, minute=0),
+    },
+    "prune-prices-nightly": {
+        "task": "portfolio.services.maintenance.prune_prices",
+        "schedule": crontab(hour=2, minute=20),
     },
     # "Best Possible Portfolio Overall" precompute: 4 windows x 2 scenarios,
     # market-wide. Runs after nightly-asset-metrics (01:00) so AssetMetricSnapshot

@@ -47,9 +47,7 @@ def get_latest_prices() -> dict:
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     )
-    prices = guard_price_map({row.asset.key: _q(row.price) for row in latest})
-    # TTL matches the fetch cadence so the cache only misses when the fetcher
-    # explicitly invalidates it, not on a timer (M1: no periodic stampede).
+    prices = {row.asset.key: _q(row.price) for row in latest}
     cache.set(_LATEST_PRICES_CACHE_KEY, prices, timeout=120)
     return prices
 
@@ -191,6 +189,56 @@ def asset_value(holding: Holding, price: Decimal) -> Decimal:
 
 
 
+def _latest_archive_close(asset) -> dict | None:
+    """Latest warehouse close used when live Price is missing or replaced."""
+    from marketdata.candles import candle_close_qs
+    from marketdata.models import GoldCurrencyHistory
+
+    if asset.tse_symbol:
+        row = (
+            candle_close_qs(asset.tse_symbol)
+            .order_by("-date_time")
+            .values("id", "date_time", "timeframe", "close_price")
+            .first()
+        )
+        if row:
+            return {
+                "id": row["id"],
+                "date": str(row["date_time"]).split()[0],
+                "timeframe": row["timeframe"],
+                "table": "MarketCandle",
+                "close": row["close_price"],
+            }
+    if asset.brs_symbol:
+        row = (
+            GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol, close_price__gt=0)
+            .order_by("-date")
+            .values("id", "date", "close_price")
+            .first()
+        )
+        if row:
+            return {
+                "id": row["id"],
+                "date": row["date"],
+                "timeframe": None,
+                "table": "GoldCurrencyHistory",
+                "close": row["close_price"],
+            }
+    return None
+
+
+
+def _quality_rollup(items, excluded, total_assets, priced_assets):
+    if total_assets and priced_assets == 0:
+        return "unavailable"
+    statuses = {item["quality_status"] for item in items}
+    if excluded or statuses & {"unavailable", "stale", "fallback"}:
+        return "partial"
+    if statuses <= {"live"}:
+        return "complete"
+    return "manual"
+
+
 def value_account(account: Account, prices: dict | None = None) -> dict:
     """Compute one account's per-asset values and total.
 
@@ -221,12 +269,16 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
         # None when the asset has no price yet — distinguishable from a real 0 (M2).
         unit_price = prices.get(holding.asset.key)
         row = latest_rows.get(holding.asset_id)
-        if holding.asset.is_house:
+        archive_record = None
+        if holding.asset.is_house or (
+            holding.asset.is_manual and unit_price is not None and _q(unit_price) > 0
+        ):
             value = asset_value(holding, unit_price)
             source = "manual_valuation"
             priced_at = holding.updated_at
             age_seconds = max(0, int((now - holding.updated_at).total_seconds()))
-            quality_status = "fallback"
+            # Manual marks never poll; stop calling them live after 90 days.
+            quality_status = "manual" if age_seconds <= 90 * 86400 else "stale"
         elif unit_price is None or _q(unit_price) <= 0:
             value = None
             source = None
@@ -249,13 +301,14 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
                 priced_at = None
                 age_seconds = None
                 quality_status = "fallback"
+                archive_record = _latest_archive_close(holding.asset)
         if value is not None:
             total += value
             priced_assets += 1
         price_unit_status = "ok"
         if holding.asset.tse_symbol and not tse_unit_verified():
             price_unit_status = "unverified"
-        items.append({
+        item = {
             "asset": holding.asset.name,
             "key": holding.asset.key,
             "class": holding.asset.asset_class,
@@ -267,14 +320,12 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
             "age_seconds": age_seconds,
             "quality_status": quality_status,
             "price_unit_status": price_unit_status,
-        })
+        }
+        if archive_record:
+            item["archive_record"] = archive_record
+        items.append(item)
     total_assets = len(holdings)
-    if total_assets and priced_assets == 0:
-        quality_status = "unavailable"
-    elif excluded or any(item["quality_status"] != "live" for item in items):
-        quality_status = "partial"
-    else:
-        quality_status = "complete"
+    quality_status = _quality_rollup(items, excluded, total_assets, priced_assets)
     total -= total_liabilities
     return {
         "total": total,
@@ -327,17 +378,20 @@ def value_user(user) -> dict:
             {"account_id": account.id, "account_name": account.name, **l}
             for l in valuation.get("liabilities", [])
         ])
+    items = [
+        {"account_id": acc["id"], "account_name": acc["name"], **item}
+        for acc in accounts
+        for item in acc["items"]
+    ]
+    quality_status = _quality_rollup(items, excluded, total_assets, priced_assets)
     return {
         "total": total,
         "accounts": accounts,
+        "items": items,
         "prices": prices,
         "priced_assets": priced_assets,
         "total_assets": total_assets,
-        "quality_status": (
-            "unavailable" if total_assets and priced_assets == 0
-            else "partial" if excluded or priced_assets < total_assets
-            else "complete"
-        ),
+        "quality_status": quality_status,
         "excluded": excluded,
         "liabilities": all_liabilities,
         "total_liabilities": float(total_liabilities),

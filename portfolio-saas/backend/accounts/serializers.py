@@ -48,7 +48,6 @@ class RegisterSerializer(serializers.ModelSerializer):
             first_name=validated_data.get("first_name", ""),
             last_name=validated_data.get("last_name", ""),
             is_active=True,
-            email_verified_at=None,
         )
         return user
 
@@ -61,20 +60,12 @@ class UserSerializer(serializers.ModelSerializer):
             "email",
             "first_name",
             "last_name",
-            "tier",
-            "is_pro",
-            "pro_expires_at",
-            "email_verified_at",
             "is_staff",
             "is_superuser",
         )
         read_only_fields = (
             "id",
             "email",
-            "tier",
-            "is_pro",
-            "pro_expires_at",
-            "email_verified_at",
             "is_staff",
             "is_superuser",
         )

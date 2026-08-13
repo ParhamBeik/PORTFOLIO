@@ -118,42 +118,6 @@ def _brs_job(brs_url, brs_key):
     return {"brsapi": fetch_brsapi(brs_url, brs_key)}
 
 
-def _crypto_job():
-    from marketdata.fetchers.expanded import fetch_crypto_prices
-    try:
-        return {"crypto": fetch_crypto_prices()}
-    except Exception as exc:
-        logger.error("[FETCH_CRYPTO_ERROR] Failed fetching cryptocurrency: %s", exc)
-        return {}
-
-
-def _commodity_job():
-    from marketdata.fetchers.expanded import fetch_commodity_prices
-    try:
-        return {"commodity": fetch_commodity_prices()}
-    except Exception as exc:
-        logger.error("[FETCH_COMMODITY_ERROR] Failed fetching commodity: %s", exc)
-        return {}
-
-
-def _option_job():
-    from marketdata.fetchers.expanded import fetch_option_contracts
-    try:
-        return {"option_contracts": fetch_option_contracts()}
-    except Exception as exc:
-        logger.error("[FETCH_OPTION_ERROR] Failed fetching options: %s", exc)
-        return {}
-
-
-def _etf_nav_job():
-    from marketdata.fetchers.expanded import fetch_etf_navs
-    try:
-        return {"etf_nav": fetch_etf_navs()}
-    except Exception as exc:
-        logger.error("[FETCH_ETF_NAV_ERROR] Failed fetching ETF NAVs: %s", exc)
-        return {}
-
-
 def _tsetmc_job(tsetmc_url, tsetmc_key, tsetmc_symbol_url):
     from django.core.cache import cache
     result = {"tsetmc": fetch_tsetmc(tsetmc_url, tsetmc_key)}
@@ -239,15 +203,6 @@ def fetch_all_markets(api_settings):
             jobs.append(executor.submit(_brs_job, brs_url, brs_key))
         else:
             logger.info("[FETCH_SKIP] Domestic gold & currency market closed overnight. Skipping.")
-
-        # Cryptocurrencies are open 24/7/365
-        if "crypto" in planned:
-            jobs.append(executor.submit(_crypto_job))
-
-        if "commodity" in planned:
-            jobs.append(executor.submit(_commodity_job))
-        else:
-            logger.info("[FETCH_SKIP] Global commodity market closed on global weekend. Skipping.")
     else:
         logger.warning("[FETCH_SKIP] BRS API URL or Key missing in Django settings.")
 
@@ -255,12 +210,8 @@ def fetch_all_markets(api_settings):
         if "tsetmc" in planned:
             tsetmc_symbol_url = api_settings.get("tsetmc_symbol_url", settings.TSETMC_SYMBOL_URL)
             jobs.append(executor.submit(_tsetmc_job, tsetmc_url, tsetmc_key, tsetmc_symbol_url))
-        if "option_contracts" in planned:
-            jobs.append(executor.submit(_option_job))
-        if "etf_nav" in planned:
-            jobs.append(executor.submit(_etf_nav_job))
-        if not {"tsetmc", "option_contracts", "etf_nav"}.intersection(planned):
-            logger.info("[FETCH_SKIP] Tehran Stock Exchange (TSE) is closed. Skipping stocks, options, and ETFs.")
+        else:
+            logger.info("[FETCH_SKIP] Tehran Stock Exchange (TSE) is closed. Skipping stocks.")
     else:
         logger.warning("[FETCH_SKIP] TSETMC URL or Key missing in Django settings.")
 

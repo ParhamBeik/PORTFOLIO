@@ -9,6 +9,7 @@ import {
   updateHolding,
   removeHolding,
   listAssets,
+  adminAssetEvidence,
 } from "../api.js";
 import { num, toman, pct, signedToman, humanize, assetLabel } from "../format.js";
 import { AreaTrend, Donut } from "../components/charts.jsx";
@@ -37,8 +38,9 @@ const RANGES = [
   { value: "all", label: "All" },
 ];
 
-const QUALITY_BADGE = { complete: "good", partial: "warn", unavailable: "critical" };
-const ITEM_BADGE = { live: "good", stale: "warn", fallback: "serious", unavailable: "critical" };
+const QUALITY_BADGE = { complete: "good", manual: "warn", partial: "warn", unavailable: "critical" };
+const QUALITY_LABEL = { complete: "Live", manual: "Manual", partial: "Mixed", unavailable: "Unavailable" };
+const ITEM_BADGE = { live: "good", manual: "warn", stale: "warn", fallback: "serious", unavailable: "critical" };
 
 // Groups valuation items by asset class for the donut. Palette has 8 fixed
 // slots (charts.jsx SERIES), so anything past the top 7 folds into "Other"
@@ -71,11 +73,11 @@ function HeroRow({ state }) {
               testId="dashboard-usd"
             />
             <StatTile
-              label="Coverage"
+              label="Priced holdings"
               value={`${data.priced_assets}/${data.total_assets}`}
               sub={
                 <Badge variant={QUALITY_BADGE[data.quality_status] || "neutral"} testId="dashboard-quality-badge">
-                  {humanize(data.quality_status)}
+                  {QUALITY_LABEL[data.quality_status] || humanize(data.quality_status)}
                 </Badge>
               }
               testId="dashboard-coverage"
@@ -87,10 +89,10 @@ function HeroRow({ state }) {
   );
 }
 
-function TrendCard({ activeId }) {
+function TrendCard({ activeId, basis }) {
   const [range, setRange] = useState("30");
   const days = range === "all" ? "all" : Number(range);
-  const state = useApi(() => snapshots(days, activeId), [days, activeId]);
+  const state = useApi(() => snapshots(days, activeId, basis), [days, activeId, basis]);
   return (
     <Card
       title="Net worth"
@@ -147,7 +149,7 @@ function PerformanceCard({ activeId, basis }) {
       <Async {...state} testId="dashboard-performance-body">
         {(data) => {
           if (!data.performance_available) {
-            return <Empty testId="dashboard-performance-empty">{data.detail}</Empty>;
+            return <Empty testId="dashboard-performance-empty">{data.detail || "Record opening balances on the Ledger page to unlock TWR and XIRR."}</Empty>;
           }
           const rows = Object.entries(data.assets || {}).map(([key, v]) => ({ key, ...v }));
           return (
@@ -239,10 +241,11 @@ function AddHoldingRow({ activeId, onDone }) {
   );
 }
 
-function HoldingsCard({ activeId, valuationState, portfolio }) {
+function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
   const [editId, setEditId] = useState(null);
   const [editQty, setEditQty] = useState("");
   const [actionError, setActionError] = useState(null);
+  const [whyKey, setWhyKey] = useState(null);
 
   const reloadAll = () => {
     valuationState.reload();
@@ -298,7 +301,19 @@ function HoldingsCard({ activeId, valuationState, portfolio }) {
                 </div>
               ),
             },
+            { key: "source", header: "Source", render: (r) => r.source || "—" },
+            { key: "priced_at", header: "As of", render: (r) => r.priced_at ? `${r.age_seconds}s` : (r.archive_record?.date || "—") },
           ];
+
+          if (staff) {
+            columns.push({
+              key: "why",
+              header: "",
+              render: (r) => (
+                <Button variant="ghost" onClick={() => setWhyKey(r.key)} data-testid="dashboard-why">Why</Button>
+              ),
+            });
+          }
 
           if (activeId != null) {
             columns.push({
@@ -351,7 +366,7 @@ function HoldingsCard({ activeId, valuationState, portfolio }) {
 
           return (
             <>
-              <Table testId="dashboard-holdings-table" rowKey={(r) => r.key} rows={items} columns={columns} empty="No holdings priced yet." />
+              <Table testId="dashboard-holdings-table" rowKey={(r) => r.account_id != null ? `${r.account_id}:${r.key}` : r.key} rows={items} columns={columns} empty="No holdings priced yet." />
               {actionError && (
                 <div className="mt-2">
                   <ErrorState error={actionError} testId="dashboard-holdings-error" />
@@ -364,6 +379,7 @@ function HoldingsCard({ activeId, valuationState, portfolio }) {
               ) : (
                 <AddHoldingRow activeId={activeId} onDone={reloadAll} />
               )}
+              {staff && whyKey && <WhyDrawer assetKey={whyKey} onClose={() => setWhyKey(null)} />}
             </>
           );
         }}
@@ -388,20 +404,48 @@ function ExcludedDisclosure({ valuationState }) {
   );
 }
 
-export default function Dashboard() {
+function WhyDrawer({ assetKey, onClose }) {
+  const state = useApi(() => adminAssetEvidence(assetKey), [assetKey]);
+  return (
+    <Card
+      className="mt-3"
+      testId="dashboard-why-drawer"
+      title={`Why ${assetKey}`}
+      actions={<Button variant="ghost" onClick={onClose}>Close</Button>}
+    >
+      <Async {...state} testId="dashboard-why-body">
+        {(data) => (
+          <div className="space-y-2 text-sm">
+            {(data.claims || []).map((c) => (
+              <p key={c.id} title={c.definition}>
+                <Badge variant={c.passed ? "good" : "warn"}>{c.label}: {c.passed ? "yes" : "no"}</Badge>
+              </p>
+            ))}
+            <p className="text-muted">
+              Source {data.displayed_value?.source || "—"} · as of {data.displayed_value?.priced_at || data.displayed_value?.archive_record?.date || "—"}
+            </p>
+            {data.suggested_cli && <p className="text-xs text-muted">{data.suggested_cli}</p>}
+          </div>
+        )}
+      </Async>
+    </Card>
+  );
+}
+
+export default function Dashboard({ user }) {
   const portfolio = usePortfolio();
   const { activeId, basis } = portfolio;
   const valuationState = useApi(() => valuation(activeId, basis), [activeId, basis], { pollMs: 60000 });
 
   return (
     <div>
-      <PageHeader title="Portfolio" subtitle="Live valuation, allocation, and performance across your holdings." />
+      <PageHeader title="Portfolio" subtitle="Live = every holding priced ≤5 min ago. Manual = house/bars updated within 90 days. Mixed includes stale or archive fallback. Real Toman uses SCI CPI through 1404." />
       <div className="space-y-5">
         <HeroRow state={valuationState} />
-        <TrendCard activeId={activeId} />
+        <TrendCard activeId={activeId} basis={basis} />
         <AllocationCard state={valuationState} />
         <PerformanceCard activeId={activeId} basis={basis} />
-        <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} />
+        <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} staff={!!user?.is_staff} />
         <ExcludedDisclosure valuationState={valuationState} />
       </div>
     </div>

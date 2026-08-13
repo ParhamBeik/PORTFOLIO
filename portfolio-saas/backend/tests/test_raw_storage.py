@@ -184,61 +184,6 @@ def test_nightly_aggregate_never_overwrites_provider_history():
     assert GoldCurrencyHistory.objects.get().close_price == Decimal("105")
 
 
-def test_ingest_crypto_history_stores_price_toman_verbatim():
-    """Provider's price_toman field lands in close_price_toman untouched."""
-    from marketdata import ingest
-    from marketdata.models import CryptoHistory
-
-    payload = [{
-        "name_en": "TestCoin", "date": "1404-03-21", "price": 1.0,
-        "price_toman": 632000, "volume_24h": 100, "market_cap": 1000,
-    }]
-    created, _ = ingest.ingest_crypto_history("testcoin", payload)
-    assert created == 1
-    row = CryptoHistory.objects.get(symbol="TestCoin", date="1404-03-21")
-    assert row.close_price_toman == Decimal("632000")
-
-
-def test_crypto_usd_storage_preserves_sub_cent_precision():
-    from marketdata import ingest
-    from marketdata.models import CryptoHistory
-
-    payload = [{
-        "name_en": "TinyCoin", "date": "1404-03-21",
-        "price": "0.000000123456", "price_toman": "0.0233",
-    }]
-    created, rejected = ingest.ingest_crypto_history("CRYPTO", payload)
-    assert (created, rejected) == (1, 0)
-    assert CryptoHistory.objects.get().close_price_usd == Decimal("0.000000123456")
-
-
-def test_crypto_repair_is_dry_run_safe_and_manifest_hash_locked(tmp_path):
-    from marketdata.models import CryptoHistory
-
-    CryptoHistory.objects.create(
-        symbol="USD_ANCHOR", date="1404-03-21",
-        close_price_usd=1, close_price_toman=200000,
-    )
-    tiny = CryptoHistory.objects.create(
-        symbol="TINY", date="1404-03-21",
-        close_price_usd=0, close_price_toman=2,
-    )
-    manifest = tmp_path / "crypto.csv"
-    call_command("audit_warehouse", "--check", "crypto", manifest_path=manifest)
-
-    call_command("repair_warehouse", manifest_path=manifest, batch="crypto")
-    tiny.refresh_from_db()
-    assert tiny.close_price_usd == 0
-
-    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
-    call_command(
-        "repair_warehouse", manifest_path=manifest, batch="crypto",
-        apply=True, manifest_hash=digest,
-    )
-    tiny.refresh_from_db()
-    assert tiny.close_price_usd == Decimal("0.000010000000")
-
-
 def test_salvage_repair_preserves_close_and_nulls_only_bad_open(tmp_path):
     from marketdata.models import MarketCandle, RejectedRecord
 

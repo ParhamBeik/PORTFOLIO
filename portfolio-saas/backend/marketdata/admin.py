@@ -19,9 +19,12 @@ from .models import (
     MarketCandle,
     MarketIndexData,
     MarketInstrument,
+    OperationalMetricSnapshot,
+    RejectedRecord,
     ShareholderRecord,
     StockSymbolMetadata,
     StockTransactionTick,
+    SymbolIntegrity,
     SystemLogEvent,
     WorkflowRun,
 )
@@ -68,15 +71,24 @@ class ArchiveFetchStateAdmin(admin.ModelAdmin):
 
     @admin.action(description="Retry selected backfill jobs")
     def retry_selected_jobs(self, request, queryset):
-        now = timezone.now()
-        count = 0
-        for state in queryset:
-            state.consecutive_failures = 0
-            state.last_error = "Manually triggered retry (admin action)."
-            state.next_attempt_at = now
-            state.save(update_fields=["consecutive_failures", "last_error", "next_attempt_at"])
-            count += 1
-        self.message_user(request, f"Queued {count} job(s) for retry.")
+        from .admin_api import RetryBlocked, enqueue_archive_retries
+
+        ids = list(queryset.values_list("id", flat=True)[:50])
+        if not ids:
+            self.message_user(request, "No archive states selected.")
+            return
+        try:
+            result = enqueue_archive_retries(ids, request.user.email)
+        except RetryBlocked as err:
+            self.message_user(request, err.detail, level=40)
+            return
+        queued = result.get("queued") or []
+        skipped = result.get("skipped_missing_or_healthy") or []
+        self.message_user(
+            request,
+            f"Enqueued {len(queued)} job(s) for retry"
+            + (f"; skipped {len(skipped)} healthy/missing." if skipped else "."),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +147,59 @@ class WorkflowRunAdmin(admin.ModelAdmin):
     search_fields = ("task_id", "correlation_id", "symbol", "error_code")
     ordering = ("-created_at",)
     readonly_fields = tuple(field.name for field in WorkflowRun._meta.fields)
+
+
+class StaffReadOnlyAdmin(admin.ModelAdmin):
+    """Operational evidence is visible to staff and never editable here."""
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_staff
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(OperationalMetricSnapshot)
+class OperationalMetricSnapshotAdmin(StaffReadOnlyAdmin):
+    list_display = ("captured_at", "tracked_table_count")
+    ordering = ("-captured_at",)
+    readonly_fields = (
+        "captured_at", "database_counts", "table_bytes", "archive", "quota",
+        "queues", "codal_status", "workflow_15m", "workers", "disk",
+    )
+
+    @admin.display(description="Tracked tables")
+    def tracked_table_count(self, obj):
+        return len(obj.database_counts)
+
+
+@admin.register(RejectedRecord)
+class RejectedRecordAdmin(StaffReadOnlyAdmin):
+    list_display = (
+        "last_seen", "endpoint", "symbol", "reason", "occurrences", "disposition",
+    )
+    list_filter = ("endpoint", "reason", "disposition")
+    search_fields = ("symbol", "reason")
+    ordering = ("-last_seen",)
+    readonly_fields = tuple(field.name for field in RejectedRecord._meta.fields)
+
+
+@admin.register(SymbolIntegrity)
+class SymbolIntegrityAdmin(StaffReadOnlyAdmin):
+    list_display = (
+        "symbol", "source", "coverage_ratio", "max_gap_days", "rejected_count",
+        "passes_gate", "computed_at",
+    )
+    list_filter = ("passes_gate", "source")
+    search_fields = ("symbol", "reason")
+    ordering = ("passes_gate", "symbol")
+    readonly_fields = tuple(field.name for field in SymbolIntegrity._meta.fields)
 
 
 class CodalArtifactInline(admin.TabularInline):

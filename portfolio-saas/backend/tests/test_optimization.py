@@ -513,49 +513,8 @@ def test_infeasible_caps_are_rejected():
 # ---------- 13. analytics pro gated -----------------------------------------
 
 
-def test_analytics_pro_gated(synthetic_history, make_user):
-    free = make_user(tier="FREE", email="free@t.t")
-    pro = make_user(tier="PRO", email="pro@t.t")
-    _make_portfolio(
-        pro,
-        synthetic_history,
-        {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3},
-    )
-    _make_portfolio(
-        free,
-        synthetic_history,
-        {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3},
-        account_name="FreeAcct",
-    )
-    assert _client(free).get("/api/analytics/").status_code == 403
-    resp = _client(pro).get("/api/analytics/")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "metrics" in body
-    assert "eligible_assets" in body
-
-
-# ---------- 14. optimization pro gated --------------------------------------
-
-
-def test_optimization_pro_gated(synthetic_history, make_user):
-    free = make_user(tier="FREE", email="free2@t.t")
-    _make_portfolio(
-        free,
-        synthetic_history,
-        {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3},
-    )
-    resp = _client(free).post(
-        "/api/optimization/", {"scenario": "max_sharpe"}, format="json"
-    )
-    assert resp.status_code == 403
-
-
-# ---------- 15. unknown scenario 400 ----------------------------------------
-
-
 def test_optimization_unknown_scenario_400(synthetic_history, make_user):
-    pro = make_user(tier="PRO", email="pro2@t.t")
+    pro = make_user(email="pro2@t.t")
     _make_portfolio(
         pro,
         synthetic_history,
@@ -571,7 +530,7 @@ def test_optimization_unknown_scenario_400(synthetic_history, make_user):
 
 
 def test_optimization_universe_too_small_503(make_user, asset_catalog):
-    pro = make_user(tier="PRO", email="pro3@t.t")
+    pro = make_user(email="pro3@t.t")
     # Only 2 days of history for 2 assets -> excluded (< MIN_DAILY_RETURNS).
     now = timezone.now()
     rows = []
@@ -598,7 +557,7 @@ def test_optimization_universe_too_small_503(make_user, asset_catalog):
 
 
 def test_my_optimal_returns_one_entry_per_window(synthetic_history, make_user):
-    pro = make_user(tier="PRO", email="my_optimal@t.t")
+    pro = make_user(email="my_optimal@t.t")
     acct = _make_portfolio(
         pro,
         synthetic_history,
@@ -619,15 +578,8 @@ def test_my_optimal_returns_one_entry_per_window(synthetic_history, make_user):
             assert "actual" in window
 
 
-def test_my_optimal_pro_gated(synthetic_history, make_user):
-    free = make_user(tier="FREE", email="my_optimal_free@t.t")
-    _make_portfolio(free, synthetic_history, {"emami_coin": 1.0})
-    resp = _client(free).get("/api/optimization/my-optimal/")
-    assert resp.status_code == 403
-
-
 def test_frontier_endpoint_includes_cloud(synthetic_history, make_user):
-    pro = make_user(tier="PRO", email="frontier_cloud@t.t")
+    pro = make_user(email="frontier_cloud@t.t")
     _make_portfolio(
         pro,
         synthetic_history,

@@ -49,6 +49,11 @@ RETURNS_CACHE_TTL = 600
 USD_QUOTED_KEYS = ("bitcoin_usd", "gold_ounce_usd")
 # Extra days we fetch upstream of the window so resampling keeps the first row.
 _HISTORY_BUFFER_DAYS = 7
+# The session calendar is derived from the warehouse itself, so a stretch where
+# nothing was ingested looks identical to a stretch where the market was shut.
+# Nowruz is the longest genuine closure at ~14 days; past this it is an ingest
+# hole and must not be spliced across.
+MAX_OUTAGE_CALENDAR_DAYS = 21
 
 
 def _price_version_fingerprint() -> str:
@@ -88,6 +93,56 @@ def _jalali_to_gregorian_index(dates: pd.Series) -> pd.DatetimeIndex:
             return pd.NaT
 
     return pd.DatetimeIndex([convert(v) for v in dates])
+
+
+def _trading_session_index(start: dt.datetime, end: dt.datetime) -> pd.DatetimeIndex:
+    """Gregorian index of the days the TSE actually traded, from the warehouse.
+
+    Shares `actual_trading_days()` with `marketdata.integrity` so the gap gate
+    here and the nightly integrity gate agree on what a missing session is.
+    """
+    from marketdata.candles import actual_trading_days
+
+    days = actual_trading_days(start=to_jalali_str(start), end=to_jalali_str(end))
+    if not days:
+        return pd.DatetimeIndex([])
+    index = _jalali_to_gregorian_index(pd.Series(sorted(days)))
+    return index[index.notna()].sort_values()
+
+
+def _align_to_trading_sessions(panel: pd.DataFrame) -> pd.DataFrame:
+    """Resample a mixed panel onto the TSE session calendar.
+
+    Gold, FX and crypto quote seven days a week; TSE stocks trade five. On a
+    plain calendar index every weekend and holiday reads as missing data for
+    every stock, so a gap test counted in calendar days disqualifies the entire
+    exchange. Sampling the always-on series on trading days instead is lossless
+    for them and makes the two kinds of column directly comparable.
+    """
+    if panel.empty:
+        return panel
+    sessions = _trading_session_index(panel.index.min(), panel.index.max())
+    if sessions.empty:
+        return panel
+    return panel.reindex(panel.index.intersection(sessions))
+
+
+def _trim_to_contiguous(panel: pd.DataFrame) -> pd.DataFrame:
+    """Drop everything before the most recent ingest outage.
+
+    A hole in the warehouse leaves no trace in the index once the panel is on
+    the session calendar, because that calendar is built from the same rows.
+    Splicing across it would turn three missing months into one enormous daily
+    return, so the window starts after the break instead.
+    """
+    index = panel.index
+    if len(index) < 2:
+        return panel
+    spans = (index[1:] - index[:-1]).days
+    breaks = [i for i, days in enumerate(spans) if days > MAX_OUTAGE_CALENDAR_DAYS]
+    if not breaks:
+        return panel
+    return panel.iloc[breaks[-1] + 1:]
 
 
 def normalize_as_of(as_of) -> dt.datetime | None:
@@ -507,13 +562,20 @@ def _load_price_panel(
                 "detail": "No trustworthy price observations in the requested window",
             })
 
+    tse_keys = {item["key"] for item in resolved_univ if item["source"] == "tse"}
     if not warehouse_cols:
-        return fallback_panel, gate_excluded
-    panel = pd.DataFrame(warehouse_cols)
-    panel.index = panel.index.normalize()
-    if not fallback_panel.empty:
-        panel = panel.join(fallback_panel, how="outer")
-    return panel.sort_index(), gate_excluded
+        panel = fallback_panel
+    else:
+        panel = pd.DataFrame(warehouse_cols)
+        panel.index = panel.index.normalize()
+        if not fallback_panel.empty:
+            panel = panel.join(fallback_panel, how="outer")
+        panel = panel.sort_index()
+    # Only worth doing when a five-day-a-week column is in play; a gold-only
+    # panel is legitimately daily and should keep its weekend observations.
+    if tse_keys.intersection(panel.columns):
+        panel = _align_to_trading_sessions(panel)
+    return _trim_to_contiguous(panel), gate_excluded
 
 
 def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys: list[str]) -> pd.DataFrame:
@@ -640,11 +702,16 @@ def _build_returns_matrix(panel: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]
     """Price panel -> (daily simple returns, excluded list).
 
     Excludes any asset with fewer than MIN_DAILY_RETURNS non-NaN return rows.
+    Gaps are counted in trading sessions, matching `marketdata.integrity`, and
+    separately in calendar days to catch ingest outages that the session
+    calendar cannot see because it is derived from the same warehouse.
     """
+    from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS, MIN_COVERAGE
+
     if panel.empty:
         return pd.DataFrame(), []
 
-    filled = panel.ffill(limit=5)
+    filled = panel.ffill(limit=MAX_FORWARD_FILL_SESSIONS)
     returns = filled.pct_change(fill_method=None)
     excluded: list[dict] = []
     keep: list[str] = []
@@ -657,7 +724,7 @@ def _build_returns_matrix(panel: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]
         non_nan = int(returns[key].notna().sum())
         expected = max(len(returns.index) - 1, 0)
         coverage = non_nan / expected if expected else 0.0
-        if longest_gap > 5:
+        if longest_gap > MAX_FORWARD_FILL_SESSIONS:
             excluded.append({
                 "key": key,
                 "reason": "price_gap_exceeded",
@@ -667,7 +734,7 @@ def _build_returns_matrix(panel: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]
             excluded.append(
                 {"key": key, "reason": "insufficient_history", "days": non_nan}
             )
-        elif coverage < 0.90:
+        elif coverage < MIN_COVERAGE:
             excluded.append({
                 "key": key,
                 "reason": "insufficient_coverage",

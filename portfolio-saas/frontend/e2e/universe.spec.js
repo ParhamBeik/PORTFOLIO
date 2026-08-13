@@ -11,8 +11,7 @@ test.describe("universe", () => {
     const known = page
       .getByTestId("universe-best")
       .or(page.getByTestId("universe-not-computed"))
-      .or(page.getByTestId("universe-window"))
-      .or(page.getByTestId("pro-required"));
+      .or(page.getByTestId("universe-window"));
 
     await expect(known.first()).toBeVisible({ timeout: 25000 });
   });
@@ -20,9 +19,8 @@ test.describe("universe", () => {
   test("not-computed empty state is graceful", async ({ page }) => {
     const empty = page.getByTestId("universe-not-computed");
     const windows = page.getByTestId("universe-window");
-    const pro = page.getByTestId("pro-required");
 
-    await expect(empty.or(windows).or(pro).first()).toBeVisible({ timeout: 25000 });
+    await expect(empty.or(windows).first()).toBeVisible({ timeout: 25000 });
     if (await empty.isVisible().catch(() => false)) {
       await expect(empty).toBeVisible();
     }
@@ -32,10 +30,6 @@ test.describe("universe", () => {
     if (await page.getByTestId("universe-not-computed").isVisible().catch(() => false)) {
       test.skip(true, "nightly best-overall not computed yet");
     }
-    if (await page.getByTestId("pro-required").isVisible().catch(() => false)) {
-      test.skip(true, "pro required for universe");
-    }
-
     const windowTabs = page.getByTestId("universe-window");
     if (!(await windowTabs.isVisible().catch(() => false))) {
       test.skip(true, "universe windows not available");

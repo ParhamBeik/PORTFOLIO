@@ -14,6 +14,11 @@ from celery import current_task
 logger = logging.getLogger("workflow")
 http_attempt_var = ContextVar("workflow_http_attempts", default=0)
 quota_attempt_var = ContextVar("workflow_quota_attempts", default=0)
+correlation_id_var = ContextVar("workflow_correlation_id", default="")
+
+
+def current_correlation_id() -> str:
+    return correlation_id_var.get() or ""
 
 _SECRET_KEY = re.compile(r"(api.?key|secret|password|credential|token|signature)", re.I)
 _SIGNED_QUERY = re.compile(r"^(x-amz-|awsaccesskeyid|signature|expires$)", re.I)
@@ -77,6 +82,7 @@ class WorkflowOutcome:
     def __post_init__(self):
         self._http_start = http_attempt_var.get()
         self._quota_start = quota_attempt_var.get()
+        self._correlation_token = correlation_id_var.set(self.correlation_id)
 
     def finish(self, outcome, **values):
         from .models import WorkflowRun
@@ -110,3 +116,7 @@ class WorkflowOutcome:
                 "workflow_ledger_write_failed correlation_id=%s", self.correlation_id
             )
             return None
+        finally:
+            token = getattr(self, "_correlation_token", None)
+            if token is not None:
+                correlation_id_var.reset(token)

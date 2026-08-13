@@ -15,7 +15,7 @@ class TestTrackD(APITestCase):
         # Create users
         self.pro_group, _ = Group.objects.get_or_create(name="Pro")
         
-        self.pro_user = User.objects.create_user(email="pro@example.com", password="password", tier="PRO")
+        self.pro_user = User.objects.create_user(email="pro@example.com", password="password")
         self.pro_user.groups.add(self.pro_group)
         
         self.free_user = User.objects.create_user(email="free@example.com", password="password")

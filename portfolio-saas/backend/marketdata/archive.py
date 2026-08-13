@@ -19,20 +19,12 @@ from .fetchers import (
     fetch_transactions,
 )
 from .fetchers.base import MarketDataFetchError
-from .fetchers.expanded import (
-    fetch_commodity_prices,
-    fetch_crypto_prices,
-    fetch_option_contracts,
-)
 from .models import (
     ArchiveFetchState,
     CodalAnnouncement,
-    CommodityHistory,
-    CryptoHistory,
     DailyStockHistory,
     GoldCurrencyHistory,
     MarketCandle,
-    OptionContractHistory,
     RealLegalHistory,
     RejectedRecord,
     ShareholderRecord,
@@ -922,6 +914,54 @@ def _pick_ready_states(candidates, limit, now, deferred_pks):
     return ready
 
 
+_HISTORICAL_FULL_ENDPOINTS = (
+    ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
+    ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED,
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
+    ArchiveFetchState.Endpoint.GOLD_DAILY,
+    ArchiveFetchState.Endpoint.CRYPTO_DAILY,
+    ArchiveFetchState.Endpoint.COMMODITY_DAILY,
+    ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY,
+    ArchiveFetchState.Endpoint.ETF_NAV_DAILY,
+    ArchiveFetchState.Endpoint.OPTION_CONTRACT_DAILY,
+)
+
+
+_GAP_REFETCHABLE_ENDPOINTS = (
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED,
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
+    ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
+    ArchiveFetchState.Endpoint.GOLD_DAILY,
+)
+
+
+def reopen_states_with_gaps(symbols=None):
+    """Put symbols with missing sessions back in the fetch queue.
+
+    `symbols=None` means every symbol, which is what a market-wide ingest
+    outage calls for.
+
+    A state marks itself complete once it has stored everything the provider's
+    last payload contained, which says nothing about history outside that
+    payload. `claim_archive_batch` then skips it forever, so a hole in the
+    warehouse is self-sealing: the only component that can see missing sessions
+    is `compute_symbol_integrity`, and it had no way to ask for a re-fetch.
+    This is that way.
+    """
+    states = ArchiveFetchState.objects.filter(
+        endpoint__in=_GAP_REFETCHABLE_ENDPOINTS, verified_complete=True
+    )
+    if symbols is not None:
+        symbols = list(symbols)
+        if not symbols:
+            return 0
+        states = states.filter(symbol__in=symbols)
+    return states.update(
+        verified_complete=False, next_attempt_at=None, consecutive_failures=0
+    )
+
+
 def claim_archive_batch(limit=None):
     now = timezone.now()
     batch_size = min(
@@ -932,50 +972,48 @@ def claim_archive_batch(limit=None):
         return []
     due = Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now)
     deferred_pks = set()
+    tick_endpoint = ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS
     with transaction.atomic():
         base = ArchiveFetchState.objects.select_for_update(skip_locked=True).filter(
             due, verified_complete=False
         )
-        tick_endpoint = ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS
-        # Over-fetch then filter: prereq-empty states are soft-deferred so they
-        # do not consume lease slots that ticks/history could use.
-        non_tick = _pick_ready_states(
+        states = []
+
+        def take(candidates, n):
+            picked = _pick_ready_states(candidates, n, now, deferred_pks)
+            deferred_pks.update(state.pk for state in picked)
+            states.extend(picked)
+
+        remaining = batch_size
+        take(
             list(
-                _coverage_rank_qs(_expected_gain_qs(base.exclude(endpoint=tick_endpoint)))
-                .order_by("_coverage_rank", "-_expected_gain", _LAST_ATTEMPT_FIRST)[: batch_size + 8]
+                _coverage_rank_qs(_expected_gain_qs(base.filter(endpoint__in=_HISTORICAL_FULL_ENDPOINTS)))
+                .order_by("_coverage_rank", "-_expected_gain", _LAST_ATTEMPT_FIRST)[: remaining + 8]
             ),
-            limit=2,
-            now=now,
-            deferred_pks=deferred_pks,
+            remaining,
         )
-        states = list(non_tick)
-        remaining_slots = batch_size - len(states)
-        if remaining_slots > 0:
-            states += _pick_ready_states(
+        remaining = batch_size - len(states)
+        if remaining > 0:
+            take(
+                list(
+                    _coverage_rank_qs(_expected_gain_qs(
+                        base.exclude(endpoint__in=(*_HISTORICAL_FULL_ENDPOINTS, tick_endpoint))
+                        .exclude(pk__in=deferred_pks)
+                    ))
+                    .order_by("_coverage_rank", "-_expected_gain", _LAST_ATTEMPT_FIRST)[: remaining + 8]
+                ),
+                remaining,
+            )
+        remaining = batch_size - len(states)
+        if remaining > 0:
+            take(
                 list(
                     base.filter(endpoint=tick_endpoint)
                     .exclude(pk__in=deferred_pks)
                     .order_by("target_window_days", "stored_rows", _LAST_ATTEMPT_FIRST)
-                    [: remaining_slots + 16]
+                    [: remaining + 16]
                 ),
-                limit=remaining_slots,
-                now=now,
-                deferred_pks=deferred_pks,
-            )
-        remaining_slots = batch_size - len(states)
-        if remaining_slots > 0:
-            taken = {state.pk for state in states} | deferred_pks
-            states += _pick_ready_states(
-                list(
-                    _coverage_rank_qs(_expected_gain_qs(
-                        base.exclude(pk__in=taken).exclude(endpoint=tick_endpoint)
-                    ))
-                    .order_by("_coverage_rank", "-_expected_gain", _LAST_ATTEMPT_FIRST)
-                    [: remaining_slots + 8]
-                ),
-                limit=remaining_slots,
-                now=now,
-                deferred_pks=deferred_pks,
+                remaining,
             )
         claim_until = now + timedelta(minutes=10)
         ArchiveFetchState.objects.filter(pk__in=[state.pk for state in states]).update(

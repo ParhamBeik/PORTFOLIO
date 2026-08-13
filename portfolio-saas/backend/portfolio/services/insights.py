@@ -112,7 +112,7 @@ from portfolio.services.valuation import get_latest_prices
 
 
 def build_insights(user, account=None) -> dict:
-    """Run all insights for a user. Only callable by PRO users (IsPro gate).
+    """Run all insights for a user.
 
     `account=None` analyzes the whole-user portfolio; passing an account scopes
     every insight to that single portfolio.

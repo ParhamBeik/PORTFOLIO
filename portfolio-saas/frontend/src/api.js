@@ -139,72 +139,12 @@ export const register = (email, password) =>
   api("/api/auth/register/", { method: "POST", body: { email, password } });
 export const login = (email, password) =>
   api("/api/auth/login/", { method: "POST", body: { email, password } });
-export const googleLogin = (credential) =>
-  api("/api/auth/google/", { method: "POST", body: { credential } });
-export const verifyEmail = (token) =>
-  api("/api/auth/verify-email/", { method: "POST", body: { token } });
-export const resendVerification = (email) =>
-  api("/api/auth/resend-verification/", { method: "POST", body: { email } });
-export const requestPasswordReset = (email) =>
-  api("/api/auth/password-reset/request/", { method: "POST", body: { email } });
-export const confirmPasswordReset = (uid, token, newPassword, confirmPassword) =>
-  api("/api/auth/password-reset/confirm/", {
-    method: "POST",
-    body: {
-      uid,
-      token,
-      new_password: newPassword,
-      confirm_password: confirmPassword,
-    },
-  });
 export const me = () => api("/api/auth/me/");
-export const updateProfile = (data) =>
-  api("/api/auth/me/", { method: "PATCH", body: data });
-export const changePassword = (oldPassword, newPassword, confirmPassword) =>
-  api("/api/auth/change-password/", {
-    method: "POST",
-    body: {
-      old_password: oldPassword,
-      new_password: newPassword,
-      confirm_password: confirmPassword,
-    },
-  });
-export const deleteMe = (password, confirmation) =>
-  api("/api/auth/me/", {
-    method: "DELETE",
-    body: { password, confirmation },
-  });
-export async function downloadExport() {
-  const response = await fetch(`${API_BASE}/api/auth/export/`, {
-    credentials: "include",
-    headers: auth.token ? { Authorization: `Bearer ${auth.token}` } : {},
-  });
-  if (!response.ok) throw apiError("Export failed.", response.status);
-  const url = URL.createObjectURL(await response.blob());
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "lattice-export.zip";
-  link.click();
-  URL.revokeObjectURL(url);
-}
-// NOTE: tier upgrades go through billing (Part 3-B), not a self-service endpoint.
-
-
-// Catalog & accounts
 export const listAssets = () => api("/api/assets/");
 export const listAccounts = () => api("/api/accounts/");
 export const createAccount = (name, broker = "") =>
   api("/api/accounts/", { method: "POST", body: { name, broker } });
-export const updateAccount = (id, { name, broker, goal }) =>
-  api(`/api/accounts/${id}/`, {
-    method: "PATCH",
-    body: { name, broker, goal },
-  });
-export const deleteAccount = (id) =>
-  api(`/api/accounts/${id}/`, { method: "DELETE" });
 export const accountValuation = (id) => api(`/api/accounts/${id}/valuation/`);
-export const listHoldings = (accountId) =>
-  api(`/api/accounts/${accountId}/holdings/`);
 export const addHolding = (accountId, assetKey, quantity) =>
   api(`/api/accounts/${accountId}/holdings/`, {
     method: "POST",
@@ -232,8 +172,6 @@ export const deleteTransaction = (id) =>
   api(`/api/transactions/${id}/`, { method: "DELETE" });
 export const getPerformance = (accountId, basis = "nominal_toman") =>
   api(`/api/accounts/${accountId}/performance/?basis=${basis}`);
-export const getIntegrity = () =>
-  api(`/api/integrity/`);
 
 // The account ledger: the immutable event log behind holdings and cash.
 // Corrections append a reversal — nothing is ever edited or deleted.
@@ -242,42 +180,6 @@ export const createLedgerEntry = (accountId, entry) =>
   api(`/api/accounts/${accountId}/ledger/`, { method: "POST", body: entry });
 export const reverseLedgerEntry = (accountId, entryId) =>
   api(`/api/accounts/${accountId}/ledger/${entryId}/reverse/`, { method: "POST" });
-
-// CSV import is two calls by design: preview validates every row and writes
-// nothing, commit re-validates and writes one atomic batch. Both are multipart,
-// so they bypass `api()` (JSON-only) but reuse its auth and refresh behaviour.
-const upload = async (path, file, _retried = false) => {
-  const form = new FormData();
-  form.append("file", file);
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    credentials: "include",
-    headers: auth.token ? { Authorization: `Bearer ${auth.token}` } : {},
-    body: form,
-  });
-  if (res.status === 401 && !_retried && auth.token) {
-    const fresh = await refreshAccessToken();
-    if (fresh) return upload(path, file, true);
-    expireSession();
-    throw apiError("Session expired", 401);
-  }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const error = apiError(extractError(data) || res.statusText, res.status);
-    // The backend reports the offending CSV line; the review screen shows it.
-    error.row = data.row ?? null;
-    throw error;
-  }
-  return data;
-};
-export const previewImport = (accountId, file) =>
-  upload(`/api/accounts/${accountId}/imports/preview/`, file);
-export const commitImport = (accountId, file) =>
-  upload(`/api/accounts/${accountId}/imports/commit/`, file);
-
-// Per-asset integrity for one account: coverage, freshness, and reason codes.
-export const accountDataQuality = (accountId) =>
-  api(`/api/accounts/${accountId}/data-quality/`);
 
 // Valuation & pricing
 //
@@ -295,31 +197,18 @@ export const valuation = (account = null, basis = null) => {
   }
   return api(url);
 };
-export const latestPrices = () => api("/api/prices/latest/");
-export const priceHistory = (assetKey, limit = 100) =>
-  api(`/api/prices/history/?asset=${encodeURIComponent(assetKey)}&limit=${limit}`);
-export const insights = (account = null) =>
-  api(`/api/insights/${accountParam(account) ? "?" + accountParam(account) : ""}`);
-
-// FREE: net-worth history for the trend chart. account=None -> aggregate series;
+// Net-worth history for the trend chart. account=None -> aggregate series;
 // an account id -> that portfolio's per-account snapshot series.
-export const snapshots = (days = 30, account = null) =>
-  api(
-    `/api/snapshots/?days=${days}` + (account ? `&${accountParam(account)}` : "")
-  );
+export const snapshots = (days = 30, account = null, basis = null) => {
+  let url = `/api/snapshots/?days=${days}`;
+  if (account) url += `&${accountParam(account)}`;
+  if (basis) url += `&basis=${basis}`;
+  return api(url);
+};
 
-// Pro analytics & optimization. All gated by IsPro on the backend. All scope to
-// the active portfolio via ?account=.
+// Analytics & optimization, scoped to the active portfolio via ?account=.
 export const analytics = (account = null) =>
   api(`/api/analytics/${accountParam(account) ? "?" + accountParam(account) : ""}`);
-export const optimize = (scenario, constraints = null, account = null) =>
-  api(
-    `/api/optimization/${accountParam(account) ? "?" + accountParam(account) : ""}`,
-    {
-      method: "POST",
-      body: constraints ? { scenario, constraints } : { scenario },
-    }
-  );
 export const frontier = (account = null) =>
   api(
     `/api/optimization/frontier/${accountParam(account) ? "?" + accountParam(account) : ""}`
@@ -329,41 +218,27 @@ export const myOptimal = (account = null) =>
     `/api/optimization/my-optimal/${accountParam(account) ? "?" + accountParam(account) : ""}`
   );
 export const bestOverall = () => api("/api/optimization/best-overall/");
-export const assetReturns = (days = 180) => api(`/api/assets/returns/?days=${days}`);
 
-// Market data (TSE). Symbols/candles/history/index are FREE;
-// announcements & shareholders are Pro (403 for free users).
-export const marketSymbols = () => api("/api/market/symbols/");
-export const marketAssets = () => api("/api/market/assets/");
-export const marketPerformance = (asset, limit = 5000) =>
-  api(`/api/market/performance/?asset=${encodeURIComponent(asset)}&limit=${limit}`);
-export const marketCandles = (symbol, timeframe = "1d_adj", limit = 200) =>
-  api(
-    `/api/market/candles/?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=${limit}`
-  );
-export const marketHistory = (symbol, { adjusted = 1, limit = 365 } = {}) =>
-  api(
-    `/api/market/history/?symbol=${encodeURIComponent(symbol)}&adjusted=${adjusted}&limit=${limit}`
-  );
-export const marketTicks = (symbol, date = "", limit = 500) =>
-  api(
-    `/api/market/ticks/?symbol=${encodeURIComponent(symbol)}${date ? `&date=${encodeURIComponent(date)}` : ""}&limit=${limit}`
-  );
-export const marketIndex = (limit = 365) => api(`/api/market/index/?limit=${limit}`);
-export const marketAnnouncements = (symbol, limit = 20) =>
-  api(`/api/market/announcements/?symbol=${encodeURIComponent(symbol)}&limit=${limit}`);
-export const marketShareholders = (symbol) =>
-  api(`/api/market/shareholders/?symbol=${encodeURIComponent(symbol)}`);
-export const adminCleanPricesScan = () => api("/api/admin/clean-prices/scan/");
-export const adminCleanPricesExecute = (confirm) =>
-  api("/api/admin/clean-prices/execute/", { method: "POST", body: { confirm } });
-
-export const listAdminUsers = (search = "") =>
-  api(`/api/auth/admin/users/${search ? `?search=${encodeURIComponent(search)}` : ""}`);
-
-export const getWatchlist = (accountId) => api(`/api/portfolio/watchlist/?account=${accountId}`);
-export const toggleWatchlistItem = (accountId, symbol, action) =>
-  api(`/api/portfolio/watchlist/?account=${accountId}`, {
-    method: "POST",
-    body: { symbol, action },
+function qs(params) {
+  const u = new URLSearchParams();
+  Object.entries(params || {}).forEach(([k, v]) => {
+    if (v != null && v !== "") u.set(k, String(v));
   });
+  const s = u.toString();
+  return s ? `?${s}` : "";
+}
+
+export const adminOverview = () => api("/api/admin/overview/");
+export const adminWorkflows = (params) => api(`/api/admin/workflows/${qs(params)}`);
+export const adminArchiveStates = (params) => api(`/api/admin/archive-states/${qs(params)}`);
+export const adminArchiveRetry = (ids) =>
+  api("/api/admin/archive-states/retry/", { method: "POST", body: { ids, confirm: true } });
+export const adminAssetEvidence = (key) =>
+  api(`/api/admin/assets/${encodeURIComponent(key)}/evidence/`);
+export const adminAssetRetry = (key) =>
+  api(`/api/admin/assets/${encodeURIComponent(key)}/retry/`, { method: "POST", body: { confirm: true } });
+export const adminAssetRecomputeIntegrity = (key) =>
+  api(`/api/admin/assets/${encodeURIComponent(key)}/recompute-integrity/`, { method: "POST", body: { confirm: true } });
+export const adminAssetRefresh = (key) =>
+  api(`/api/admin/assets/${encodeURIComponent(key)}/refresh/`, { method: "POST", body: { confirm: true } });
+

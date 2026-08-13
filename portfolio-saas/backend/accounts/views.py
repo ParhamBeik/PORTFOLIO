@@ -1,22 +1,14 @@
 """Authentication and account endpoints."""
 import csv
-import hashlib
 import io
 import json
 import zipfile
 
 from django.conf import settings
-from django.contrib.auth.password_validation import validate_password
-from django.contrib.auth.tokens import default_token_generator
-from django.core import signing
-from django.core.cache import cache
-from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.http import HttpResponse
 from django.middleware.csrf import get_token
 from django.utils import timezone
-from django.utils.encoding import force_str
-from django.utils.http import urlsafe_base64_decode
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_protect
 from rest_framework import generics, serializers, status
@@ -31,17 +23,11 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from portfolio.models import Account, Holding, ImportBatch, LedgerEntry
 
 from .models import User
-from .permissions import IsEmailVerified, IsPro
 from .serializers import (
     ChangePasswordSerializer,
     PasswordAwareTokenRefreshSerializer,
     RegisterSerializer,
     UserSerializer,
-)
-from .services import (
-    send_password_reset_email,
-    send_verification_email,
-    verified_user_from_token,
 )
 
 
@@ -147,7 +133,6 @@ class RegisterView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
-        send_verification_email(user)
         access, refresh = _tokens(user)
         response = Response(
             {
@@ -157,72 +142,6 @@ class RegisterView(generics.CreateAPIView):
             },
             status=status.HTTP_201_CREATED,
         )
-        return _set_refresh_cookie(response, request, refresh)
-
-
-class GoogleAuthView(APIView):
-    """Google Identity Services sign-in: verify the ID token, mint our own JWTs.
-
-    Matching order: `google_sub` (stable across email changes) first, then
-    `email` (only for the first link — email_verified must be true on Google's
-    side, otherwise an attacker-controlled unverified Google account could
-    take over an existing Lattice account by email alone).
-    """
-
-    permission_classes = [AllowAny]
-    authentication_classes = []
-
-    def post(self, request):
-        if not settings.GOOGLE_OAUTH_CLIENT_ID:
-            return Response({"detail": "Google sign-in is not configured."}, status=503)
-
-        credential = request.data.get("credential")
-        if not credential:
-            return Response({"credential": ["This field is required."]}, status=400)
-
-        from google.auth.transport import requests as google_requests
-        from google.oauth2 import id_token as google_id_token
-
-        try:
-            claims = google_id_token.verify_oauth2_token(
-                credential, google_requests.Request(), settings.GOOGLE_OAUTH_CLIENT_ID
-            )
-        except ValueError:
-            return Response({"detail": "Invalid Google credential."}, status=400)
-
-        if not claims.get("email_verified"):
-            return Response({"detail": "Google account email is not verified."}, status=400)
-
-        sub = claims["sub"]
-        email = User.objects.normalize_email(claims["email"])
-
-        with transaction.atomic():
-            user = User.objects.select_for_update().filter(google_sub=sub).first()
-            if user is None:
-                user = User.objects.select_for_update().filter(email__iexact=email).first()
-                if user is not None:
-                    user.google_sub = sub
-                    if user.email_verified_at is None:
-                        user.email_verified_at = timezone.now()
-                    user.save(update_fields=["google_sub", "email_verified_at"])
-                else:
-                    # set_password(None) below leaves the account with an
-                    # unusable password — Google is the only way in.
-                    user = User.objects.create_user(
-                        email=email,
-                        password=None,
-                        first_name=claims.get("given_name", ""),
-                        last_name=claims.get("family_name", ""),
-                        google_sub=sub,
-                        email_verified_at=timezone.now(),
-                    )
-
-        access, refresh = _tokens(user)
-        response = Response({
-            "user": UserSerializer(user).data,
-            "access": access,
-            "session_expires_at": _session_expires_at(),
-        })
         return _set_refresh_cookie(response, request, refresh)
 
 
@@ -251,7 +170,7 @@ class MeView(APIView):
 
 
 class ChangePasswordView(APIView):
-    permission_classes = [IsAuthenticated, IsEmailVerified]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         serializer = ChangePasswordSerializer(
@@ -266,92 +185,6 @@ class ChangePasswordView(APIView):
         }), request, refresh)
 
 
-class VerifyEmailView(APIView):
-    permission_classes = [AllowAny]
-    authentication_classes = []
-
-    def post(self, request):
-        try:
-            user = verified_user_from_token(request.data.get("token", ""))
-        except (
-            signing.BadSignature,
-            signing.SignatureExpired,
-            User.DoesNotExist,
-            KeyError,
-            TypeError,
-        ):
-            return Response({"detail": "Verification link is invalid or expired."}, status=400)
-        if user.email_verified_at is None:
-            user.email_verified_at = timezone.now()
-            user.is_active = True
-            user.save(update_fields=["email_verified_at", "is_active"])
-        return Response({"detail": "Email verified."})
-
-
-class ResendVerificationView(APIView):
-    permission_classes = [AllowAny]
-    authentication_classes = []
-
-    def post(self, request):
-        email = User.objects.normalize_email(request.data.get("email", ""))
-        key = f"resend-verification:{hashlib.sha256(email.encode()).hexdigest()}"
-        if not cache.add(key, True, timeout=60):
-            return Response(
-                {"detail": "Please wait before requesting another email."},
-                status=429,
-            )
-        user = User.objects.filter(email__iexact=email).first()
-        if user and user.email_verified_at is None:
-            send_verification_email(user)
-        return Response({"detail": "If verification is pending, an email was sent."})
-
-
-class PasswordResetRequestView(APIView):
-    permission_classes = [AllowAny]
-    authentication_classes = []
-
-    def post(self, request):
-        email = User.objects.normalize_email(request.data.get("email", ""))
-        user = User.objects.filter(
-            email__iexact=email, email_verified_at__isnull=False
-        ).first()
-        if user:
-            send_password_reset_email(user)
-        return Response({"detail": "If the account exists, a reset email was sent."})
-
-
-class PasswordResetConfirmView(APIView):
-    permission_classes = [AllowAny]
-    authentication_classes = []
-
-    @transaction.atomic
-    def post(self, request):
-        try:
-            user_id = force_str(urlsafe_base64_decode(request.data.get("uid", "")))
-            user = User.objects.select_for_update().get(pk=user_id)
-        except (ValueError, TypeError, User.DoesNotExist):
-            return Response({"detail": "Reset link is invalid or expired."}, status=400)
-        if not default_token_generator.check_token(
-            user, request.data.get("token", "")
-        ):
-            return Response({"detail": "Reset link is invalid or expired."}, status=400)
-        new_password = request.data.get("new_password", "")
-        if new_password != request.data.get("confirm_password", ""):
-            return Response(
-                {"confirm_password": ["Passwords do not match."]}, status=400
-            )
-        try:
-            validate_password(new_password, user)
-        except DjangoValidationError as exc:
-            return Response({"new_password": exc.messages}, status=400)
-        user.set_password(new_password)
-        user.save(update_fields=["password"])
-        _revoke_all(user)
-        return _clear_refresh_cookie(
-            Response({"detail": "Password reset successfully."})
-        )
-
-
 def _csv_bytes(headers, rows) -> bytes:
     output = io.StringIO()
     writer = csv.writer(output)
@@ -361,7 +194,7 @@ def _csv_bytes(headers, rows) -> bytes:
 
 
 class ExportView(APIView):
-    permission_classes = [IsAuthenticated, IsEmailVerified]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         user = request.user
@@ -369,15 +202,8 @@ class ExportView(APIView):
         account_ids = list(accounts.values_list("id", flat=True))
         files = {
             "profile.csv": _csv_bytes(
-                ["id", "email", "first_name", "last_name", "tier", "email_verified_at"],
-                [[
-                    user.id,
-                    user.email,
-                    user.first_name,
-                    user.last_name,
-                    user.tier,
-                    user.email_verified_at,
-                ]],
+                ["id", "email", "first_name", "last_name"],
+                [[user.id, user.email, user.first_name, user.last_name]],
             ),
             "accounts.csv": _csv_bytes(
                 ["id", "name", "broker", "goal", "cash_balance_tomans", "ledger_complete"],
@@ -420,16 +246,6 @@ class ExportView(APIView):
         response = HttpResponse(output.getvalue(), content_type="application/zip")
         response["Content-Disposition"] = 'attachment; filename="lattice-export.zip"'
         return response
-
-
-
-class ProCheckView(APIView):
-    """Tiny endpoint proving the IsPro gate works (used by the demo)."""
-
-    permission_classes = [IsPro]
-
-    def get(self, request):
-        return Response({"message": "You are seeing Pro-only content."})
 
 
 class AdminUserListView(generics.ListAPIView):

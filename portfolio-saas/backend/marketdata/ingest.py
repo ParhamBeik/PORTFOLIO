@@ -22,14 +22,10 @@ from . import jalali, validation
 from .currency import canonical_symbol, gold_history_storage_unit, to_toman
 from .models import (
     CodalAnnouncement,
-    CommodityHistory,
-    CryptoHistory,
     DailyStockHistory,
-    EtfNavHistory,
     GoldCurrencyHistory,
     MarketCandle,
     MarketIndexData,
-    OptionContractHistory,
     RealLegalHistory,
     RejectedRecord,
     ShareholderRecord,
@@ -38,71 +34,21 @@ from .models import (
 )
 
 
-def ingest_etf_nav(symbol: str, payload) -> tuple[int, int]:
-    """EtfNav.php payload -> EtfNavHistory rows."""
-    items = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
-    if not items:
-        return 0, 0 if payload is None else 1
-    rows, bad = [], 0
-    for rec in items:
-        if not isinstance(rec, dict):
-            bad += 1
-            continue
-        try:
-            sym = rec.get("l18") or symbol
-            d_str = normalize_jalali(rec.get("date") or rec.get("d") or "")
-            if not sym or not d_str:
-                bad += 1
-                continue
-            rows.append(
-                EtfNavHistory(
-                    symbol=sym,
-                    date=d_str,
-                    nav_stat=rec.get("nav_stat") or rec.get("nav") or 0,
-                    nav_issue=rec.get("nav_issue") or 0,
-                    nav_cancel=rec.get("nav_cancel") or 0,
-                    market_price=rec.get("market_price") or rec.get("p") or 0,
-                    discount_pct=rec.get("discount_pct") or 0.0,
-                )
-            )
-        except Exception:
-            bad += 1
-    created, conflicts = _bulk(EtfNavHistory, rows)
-    return created, conflicts + bad
+logger = logging.getLogger(__name__)
+
+# candle_type param of fetch_candlesticks -> stored timeframe label
+CANDLE_TIMEFRAMES = {1: "intraday", 2: "1d_unadj", 3: "1d_adj"}
 
 
-def ingest_option_contracts(symbol: str, payload) -> tuple[int, int]:
-    """Option.php payload -> OptionContractHistory rows."""
-    items = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
-    if not items:
-        return 0, 0 if payload is None else 1
-    rows, bad = [], 0
-    for rec in items:
-        if not isinstance(rec, dict):
-            bad += 1
-            continue
-        try:
-            sym = rec.get("l18") or symbol
-            d_str = normalize_jalali(rec.get("date") or "")
-            if not sym or not d_str:
-                bad += 1
-                continue
-            rows.append(
-                OptionContractHistory(
-                    symbol=sym,
-                    ua_symbol=rec.get("ua_symbol") or rec.get("ua") or "",
-                    strike_price=rec.get("strike_price") or rec.get("k") or 0,
-                    expiry_date=normalize_jalali(rec.get("expiry_date") or rec.get("exp") or ""),
-                    date=d_str,
-                    settlement_price=rec.get("settlement_price") or rec.get("pc") or 0,
-                    open_interest=rec.get("open_interest") or rec.get("oi") or 0,
-                    notional_value=rec.get("notional_value") or rec.get("val") or 0,
-                )
-            )
-        except Exception:
-            bad += 1
-    created, conflicts = _bulk(OptionContractHistory, rows)
-    return created, conflicts + bad
+# Codal is the one provider surface that answers in Persian/Arabic-Indic digits
+# ("۱۴۰۵/۰۵/۰۳"). Stored raw they are unjoinable and unsortable against every
+# other table, and the read-back verifier cannot see it because both sides of the
+# comparison are equally Persian. Fold on the way in, once, for every field.
+# Both helpers live in `jalali` so `validation` can screen dates with the same
+# rules without importing this module (which imports it); re-exported here
+# because every write path already calls them as `ingest.normalize_jalali`.
+fold_digits = jalali.fold_digits
+normalize_jalali = jalali.normalize_jalali
 
 
 def screen(kind, records, endpoint, symbol="", date_key="date", default_date=""):
@@ -171,90 +117,14 @@ def flatten_records(payload) -> list:
     return [payload]
 
 
-def ingest_commodity_history(symbol: str, payload) -> tuple[int, int]:
-    """Commodity.php payload -> CommodityHistory rows.
+def _lineage():
+    from django.utils import timezone
+    from .workflows import current_correlation_id
 
-    A live snapshot, not a history: one request returns the current quote for
-    each of ~14 commodities, so rows accumulate one day at a time. The `symbol`
-    request param is ignored by the provider -- every call returns all of them.
-    """
-    items, bad = screen("snapshot", flatten_records(payload), "commodity_daily", symbol)
-    if not items:
-        return 0, bad or (0 if payload is None else 1)
-    rows = []
-    for rec in items:
-        try:
-            sym = rec.get("symbol") or symbol
-            d_str = normalize_jalali(rec.get("date") or "")
-            if not sym or not d_str:
-                bad += 1
-                continue
-            rows.append(
-                CommodityHistory(
-                    symbol=sym,
-                    date=d_str,
-                    close_price=rec.get("price") or rec.get("close") or 0,
-                    unit=rec.get("unit") or "",
-                )
-            )
-        except Exception:
-            bad += 1
-    created, conflicts = _bulk(CommodityHistory, rows)
-    return created, conflicts + bad
-
-
-def ingest_crypto_history(symbol: str, payload) -> tuple[int, int]:
-    """Cryptocurrency.php payload -> CryptoHistory rows.
-
-    A live snapshot of ~547 coins, not a history, and the `symbol` request param
-    is ignored. Records identify themselves by `name_en`/`id`, never by a
-    `symbol` key, so the old fallback stamped all 547 with the caller's
-    placeholder and the (symbol, date) unique constraint discarded 546 of them.
-    Price is `price` (USD); there is no volume field on this endpoint.
-    """
-    items, bad = screen("snapshot", flatten_records(payload), "crypto_daily", symbol)
-    if not items:
-        return 0, bad or (0 if payload is None else 1)
-    rows = []
-    for rec in items:
-        try:
-            sym = rec.get("name_en") or rec.get("symbol") or (
-                f"ID_{rec['id']}" if rec.get("id") is not None else ""
-            )
-            d_str = normalize_jalali(rec.get("date") or "")
-            if not sym or not d_str:
-                bad += 1
-                continue
-            rows.append(
-                CryptoHistory(
-                    symbol=str(sym)[:64],
-                    date=d_str,
-                    close_price_usd=rec.get("price") or 0,
-                    close_price_toman=rec.get("price_toman") or 0,
-                    volume_24h=rec.get("volume_24h") or 0,
-                    market_cap=rec.get("market_cap") or 0,
-                )
-            )
-        except Exception:
-            bad += 1
-    created, conflicts = _bulk(CryptoHistory, rows)
-    return created, conflicts + bad
-
-logger = logging.getLogger(__name__)
-
-# candle_type param of fetch_candlesticks -> stored timeframe label
-CANDLE_TIMEFRAMES = {1: "intraday", 2: "1d_unadj", 3: "1d_adj"}
-
-
-# Codal is the one provider surface that answers in Persian/Arabic-Indic digits
-# ("۱۴۰۵/۰۵/۰۳"). Stored raw they are unjoinable and unsortable against every
-# other table, and the read-back verifier cannot see it because both sides of the
-# comparison are equally Persian. Fold on the way in, once, for every field.
-# Both helpers live in `jalali` so `validation` can screen dates with the same
-# rules without importing this module (which imports it); re-exported here
-# because every write path already calls them as `ingest.normalize_jalali`.
-fold_digits = jalali.fold_digits
-normalize_jalali = jalali.normalize_jalali
+    return {
+        "ingested_at": timezone.now(),
+        "last_correlation_id": current_correlation_id(),
+    }
 
 
 def _bulk(
@@ -379,6 +249,7 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
                 buy_n_value=int(float(buy_n_val)) if buy_n_val is not None else None,
                 sell_i_value=int(float(sell_i_val)) if sell_i_val is not None else None,
                 sell_n_value=int(float(sell_n_val)) if sell_n_val is not None else None,
+                **_lineage(),
             ))
         except (KeyError, TypeError, ValueError):
             bad += 1
@@ -391,6 +262,7 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
             "buy_count_n", "sell_count_i", "sell_count_n", "buy_i_volume",
             "buy_n_volume", "sell_i_volume", "sell_n_volume", "buy_i_value",
             "buy_n_value", "sell_i_value", "sell_n_value",
+            "ingested_at", "last_correlation_id",
         ),
         unique_fields=("symbol", "date", "is_adjusted"),
         recent_field="date",
@@ -482,13 +354,14 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
                 low_price=rec.get("low") if rec.get("low") is not None else None,
                 close_price=rec.get("close") or 0,
                 volume=rec.get("volume") or 0,
+                **_lineage(),
             ))
         except (KeyError, TypeError, ValueError):
             bad += 1
             logger.warning("skipping malformed candle for %s: %r", symbol, rec)
     created, conflicts = _bulk(
         MarketCandle, rows, scope={"symbol": symbol, "timeframe": timeframe},
-        update_fields=("open_price", "high_price", "low_price", "close_price", "volume"),
+        update_fields=("open_price", "high_price", "low_price", "close_price", "volume", "ingested_at", "last_correlation_id"),
         unique_fields=("symbol", "timeframe", "date_time"),
         recent_field="date_time",
     )
@@ -752,6 +625,7 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
                 low_price=Decimal(str(l)) if l is not None else None,
                 close_price=Decimal(str(c)),
                 source=GoldCurrencyHistory.Source.PROVIDER,
+                **_lineage(),
             ))
         except (KeyError, TypeError, ValueError):
             bad += 1
@@ -760,7 +634,7 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
         GoldCurrencyHistory, rows, scope={"symbol": symbol},
         update_fields=(
             "name", "unit", "open_price", "high_price", "low_price",
-            "close_price", "source",
+            "close_price", "source", "ingested_at", "last_correlation_id",
         ),
         unique_fields=("symbol", "date"),
         recent_field="date",

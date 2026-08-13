@@ -11,8 +11,6 @@ from .views import (
     AccountDetailView,
     AccountListCreateView,
     AccountValuationView,
-    AdminCleanPricesExecuteView,
-    AdminCleanPricesScanView,
     AnalyticsView,
     AssetListView,
     AssetReturnsView,
@@ -82,9 +80,6 @@ urlpatterns = [
     path("prices/latest/", LatestPricesView.as_view(), name="prices-latest"),
     path("prices/stream/", PriceStreamView.as_view(), name="prices-stream"),
     path("prices/history/", PriceHistoryView.as_view(), name="prices-history"),
-    # Admin DB Data Repair
-    path("admin/clean-prices/scan/", AdminCleanPricesScanView.as_view(), name="admin-clean-prices-scan"),
-    path("admin/clean-prices/execute/", AdminCleanPricesExecuteView.as_view(), name="admin-clean-prices-execute"),
     # Pro analytics
     path("insights/", InsightsView.as_view(), name="insights"),
     path("analytics/", AnalyticsView.as_view(), name="analytics"),

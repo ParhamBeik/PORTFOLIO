@@ -71,14 +71,6 @@ def run_price_fetch(*, dry_run=False, publish=True):
             try:
                 if raw.get("brsapi"):
                     ingest.ingest_gold_currency_history(raw["brsapi"])
-                if raw.get("crypto"):
-                    ingest.ingest_crypto_history("CRYPTO", raw["crypto"])
-                if raw.get("commodity"):
-                    ingest.ingest_commodity_history("COMMODITIES", raw["commodity"])
-                if raw.get("option_contracts"):
-                    ingest.ingest_option_contracts("", raw["option_contracts"])
-                if raw.get("etf_nav"):
-                    ingest.ingest_etf_nav("", raw["etf_nav"])
             except Exception as exc:
                 logger.error("[LIVE_INGEST_HISTORICAL_ERROR] Error ingesting bulk live data: %s", exc)
 

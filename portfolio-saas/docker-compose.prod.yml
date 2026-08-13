@@ -1,7 +1,7 @@
 # Production stack: Postgres, Redis, Django API (ASGI/gunicorn), separate live
 # archive/Codal Celery workers, Celery Beat, and the built SPA behind nginx.
-# The frontend alone joins the shared edge network; all application state stays
-# isolated on this Compose project's private default network.
+# Dedicated 16 GB RAM / 250 GB disk VPS. Do not colocate other stacks on 16 GB.
+# Application state stays on the private network; only frontend joins vps-edge.
 #
 #   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
 #
@@ -26,6 +26,9 @@ x-backend-env: &backend-env
   TSETMC_API_KEY: ${TSETMC_API_KEY:-}
   TSETMC_URL: ${TSETMC_URL:-https://Api.BrsApi.ir/Tsetmc/AllSymbols.php}
   CODAL_EXTRACTION_ENABLED: "1"
+  SNAPSHOT_PRUNE_ENABLED: "1"
+  PRICE_PRUNE_ENABLED: "1"
+  VPS_DISK_BUDGET_GB: "250"
   CODAL_HTTP_PROXY: ""
   CODAL_STORAGE_DIR: /var/lib/codal
   EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
@@ -75,7 +78,7 @@ services:
     image: redis:7.2-alpine
     restart: unless-stopped
     logging: *logging
-    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning", "--maxmemory", "400mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
       - redisdata:/data   # --save 60 1 writes an RDB snapshot; persist it outside the container layer
     healthcheck:

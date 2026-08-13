@@ -28,7 +28,7 @@ def _client(user):
 
 def test_analytics_scoped_to_one_account(asset_catalog, write_prices, make_user):
     write_prices({"emami_coin": Decimal("480000000"), "kama_stock": Decimal("5230")})
-    pro = make_user(tier=User.Tier.PRO, email="scope@t.t")
+    pro = make_user(email="scope@t.t")
 
     # Two portfolios with disjoint holdings: A is all gold, B is all stock.
     a = Account.objects.create(user=pro, name="Retirement")
@@ -63,8 +63,8 @@ def test_analytics_scoped_to_one_account(asset_catalog, write_prices, make_user)
 
 def test_analytics_rejects_account_owned_by_another_user(asset_catalog, write_prices, make_user):
     write_prices({"emami_coin": Decimal("480000000"), "kama_stock": Decimal("5230")})
-    pro = make_user(tier=User.Tier.PRO, email="owner@t.t")
-    other = make_user(tier=User.Tier.PRO, email="other@t.t")
+    pro = make_user(email="owner@t.t")
+    other = make_user(email="other@t.t")
 
     mine = Account.objects.create(user=pro, name="Retirement")
     Holding.objects.create(account=mine, asset=asset_catalog["emami_coin"], quantity=Decimal("2"))
@@ -77,12 +77,12 @@ def test_analytics_rejects_account_owned_by_another_user(asset_catalog, write_pr
 
 
 def test_analytics_rejects_invalid_account_id(make_user):
-    pro = make_user(tier=User.Tier.PRO, email="invalid-scope@t.t")
+    pro = make_user(email="invalid-scope@t.t")
     assert _client(pro).get("/api/analytics/?account=abc").status_code == 400
 
 
 def test_aggregate_trend_ignores_account_snapshots(make_user):
-    user = make_user(tier=User.Tier.PRO, email="trend@t.t")
+    user = make_user(email="trend@t.t")
     account = Account.objects.create(user=user, name="Trading")
     Snapshot.objects.create(user=user, account=None, total_value_tomans=100)
     Snapshot.objects.create(user=user, account=account, total_value_tomans=1000)
@@ -91,7 +91,7 @@ def test_aggregate_trend_ignores_account_snapshots(make_user):
 
 
 def test_asset_ranking_is_scoped_to_owned_account(asset_catalog, make_user):
-    pro = make_user(tier=User.Tier.PRO, email="ranking@t.t")
+    pro = make_user(email="ranking@t.t")
     account = Account.objects.create(user=pro, name="Mine")
     other = Account.objects.create(user=pro, name="Other")
     asset_catalog["emami_coin"].brs_symbol = "IR_COIN_EMAMI"

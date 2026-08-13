@@ -2,7 +2,6 @@ from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
 
-from accounts.features import limit_for
 from .models import Account, Asset, Holding, LedgerEntry, Transaction, Liability
 from marketdata.models import MarketCandle, GoldCurrencyHistory
 from marketdata.currency import to_toman
@@ -52,29 +51,6 @@ class AccountSerializer(serializers.ModelSerializer):
             "id", "tracking_started_at", "cash_balance_tomans", "ledger_complete",
             "created_at", "updated_at",
         )
-
-    def validate(self, attrs):
-        """Enforce the per-tier portfolio ceiling on creation.
-
-        Lives here rather than in the view so every API path that creates an
-        Account is covered by one check. Renames (`self.instance` set) are
-        exempt: an existing portfolio is not a new one, and a user already over
-        a lowered ceiling must still be able to edit what they have.
-        """
-        if self.instance is None:
-            request = self.context.get("request")
-            user = getattr(request, "user", None)
-            ceiling = limit_for(user, "portfolios")
-            if ceiling is not None and Account.objects.filter(user=user).count() >= ceiling:
-                raise serializers.ValidationError(
-                    {
-                        "detail": (
-                            f"Your plan allows {ceiling} portfolios. "
-                            "Upgrade to Pro to add more."
-                        )
-                    }
-                )
-        return super().validate(attrs)
 
 
 class LedgerEntryInputSerializer(serializers.Serializer):

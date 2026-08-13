@@ -165,17 +165,17 @@ class TestLiveReserve:
         settings.MARKETDATA_IGNORE_MARKET_HOURS = False
 
     def test_a_full_day_ahead_reserves_every_cycle_it_will_need(self, settings):
-        """Reserve the real BRS plan, including Monday's commodity opening."""
+        """Reserve the real BRS plan for a full quota day."""
         self._configure(settings)
         # 00:00 Tehran is 20:30 UTC the previous day: a whole quota day remains.
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(self._row(), now=midnight_tehran) == 738
+        assert quota.live_reserve_remaining(self._row(), now=midnight_tehran) == 192
 
     def test_the_reserve_shrinks_as_the_day_closes(self, settings):
         self._configure(settings)
-        # 22:00-23:00 has gold+crypto+commodity; 23:00-00:00 has two jobs.
+        # Overnight gold only: one job every 5 minutes for the last two hours.
         two_hours_left = datetime(2026, 7, 27, 18, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(self._row(), now=two_hours_left) == 60
+        assert quota.live_reserve_remaining(self._row(), now=two_hours_left) == 12
 
     def test_the_reserve_never_exceeds_what_live_could_still_spend(self, settings):
         """Live cannot borrow, so holding more than its bucket protects nothing."""
@@ -203,9 +203,9 @@ class TestLiveReserve:
         faster = quota.live_reserve_remaining(self._row(), now=midnight_tehran)
 
         assert faster > baseline
-        # BRS costs 576 off-session; six jobs run during the 135 open cycles,
-        # plus one provider-state probe every 30 minutes of the 4.5h session.
-        assert faster == 576 + 6 * 135 + 9
+        # BRS gold is one job off-session; during the 135 open cycles gold plus
+        # tsetmc run, plus one provider-state probe every 30 minutes of the 4.5h session.
+        assert faster == 417
         assert faster < 6 * 720
 
     def test_the_session_cadence_is_not_charged_on_a_closed_day(self, settings):
@@ -214,7 +214,7 @@ class TestLiveReserve:
         settings.MARKETDATA_LIVE_INTERVAL_OPEN = 120
         # 1405-05-09 is a Friday (jdatetime weekday 6).
         friday_midnight = datetime(2026, 7, 30, 20, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(self._row(), now=friday_midnight) == 768
+        assert quota.live_reserve_remaining(self._row(), now=friday_midnight) == 192
 
     def test_no_credentials_means_no_phantom_reserve(self, settings):
         self._configure(settings)
@@ -229,16 +229,13 @@ def test_live_job_plan_changes_with_market_state():
     monday_noon = datetime(2026, 7, 27, 8, 30, tzinfo=dt_timezone.utc)
     assert live_job_keys(
         state=OPEN, now=monday_noon, has_brs=True, has_tsetmc=True
-    ) == (
-        "gold_currency", "crypto", "commodity",
-        "tsetmc", "option_contracts", "etf_nav",
-    )
+    ) == ("gold_currency", "tsetmc")
     assert live_job_keys(
         state=CLOSED_DAYTIME, now=monday_noon, has_brs=True, has_tsetmc=True
-    ) == ("gold_currency", "crypto", "commodity")
+    ) == ("gold_currency",)
     assert live_job_keys(
         state=OVERNIGHT, now=monday_noon, has_brs=True, has_tsetmc=True
-    ) == ("crypto", "commodity")
+    ) == ()
 
 
 def test_index_probe_closes_a_holiday_before_tse_jobs(settings):
@@ -254,8 +251,6 @@ def test_index_probe_closes_a_holiday_before_tse_jobs(settings):
         patch("marketdata.ingest.ingest_market_index", return_value=(1, 0)),
         patch("marketdata.market_state.market_state", return_value=CLOSED_DAYTIME),
         patch("portfolio.live.fetcher._tsetmc_job") as stocks,
-        patch("portfolio.live.fetcher._option_job") as options,
-        patch("portfolio.live.fetcher._etf_nav_job") as etfs,
     ):
         raw = fetch_all_markets({
             "brs_url": "", "brs_api_key": "",
@@ -266,5 +261,61 @@ def test_index_probe_closes_a_holiday_before_tse_jobs(settings):
     index.assert_called_once_with("key")
     assert raw["market_index"] == index_payload
     stocks.assert_not_called()
-    options.assert_not_called()
-    etfs.assert_not_called()
+
+
+@pytest.mark.django_db
+class TestIngestOutageDetection:
+    """The gap that no per-symbol check could see.
+
+    `compute_symbol_integrity` measures a symbol against the trading calendar,
+    and that calendar is read out of the candle table. So a stretch where
+    nothing was ingested contributes no sessions, no symbol is short any
+    session, and every symbol reports healthy coverage over a hole. Meanwhile
+    the archive marks a state complete once it has stored whatever the last
+    payload held, and `claim_archive_batch` never looks at a complete state
+    again -- so the hole seals itself shut. These cover the two halves of the
+    escape hatch.
+    """
+
+    def _month_of_sessions(self, year, month, count=20):
+        for day in range(1, count + 1):
+            _candles(f"{year:04d}-{month:02d}-{day:02d}", 50)
+
+    def test_a_quiet_stretch_longer_than_a_holiday_is_reported_as_an_outage(self):
+        from marketdata.integrity import market_outage_windows
+
+        self._month_of_sessions(1404, 9)
+        # 1404-10 and 1404-11 ingested nothing at all.
+        self._month_of_sessions(1404, 12)
+
+        outages = market_outage_windows(start="1404-09-01", end="1404-12-29")
+
+        assert len(outages) == 1
+        start, end = outages[0]
+        assert (end - start).days > 21
+
+    def test_nowruz_length_closure_is_not_an_outage(self):
+        from marketdata.integrity import market_outage_windows
+
+        # Trading runs to the last week of Esfand and resumes mid-Farvardin.
+        self._month_of_sessions(1404, 12, count=28)
+        _candles("1405-01-14", 50)
+
+        assert market_outage_windows(start="1404-12-01", end="1405-01-20") == []
+
+    def test_reopening_puts_completed_states_back_in_the_queue(self):
+        from marketdata.archive import claim_archive_batch, reopen_states_with_gaps
+        from marketdata.models import ArchiveFetchState
+
+        state = ArchiveFetchState.objects.create(
+            endpoint=ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
+            symbol="SYM0",
+            verified_complete=True,
+        )
+        assert state.pk not in claim_archive_batch(limit=5)
+
+        assert reopen_states_with_gaps(None) == 1
+
+        state.refresh_from_db()
+        assert state.verified_complete is False
+        assert state.pk in claim_archive_batch(limit=5)

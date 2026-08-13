@@ -14,11 +14,10 @@ def clear_auth_throttles():
     cache.clear()
 
 
-def test_register_logs_in_immediately_and_sends_verification_email():
+def test_register_logs_in_immediately():
     """Signup is minimal-friction: no first/last name, and no wait for the
     verification email before the user can use the app."""
-    from django.core import mail
-
+    
     client = APIClient()
     resp = client.post(
         "/api/auth/register/",
@@ -28,7 +27,6 @@ def test_register_logs_in_immediately_and_sends_verification_email():
     assert resp.status_code == 201
     data = resp.json()
     assert data["user"]["email"] == "new@test.test"
-    assert data["user"]["tier"] == "FREE"
     assert "access" in data
     assert "session_expires_at" in data
     assert resp.cookies["ps_refresh"]["httponly"] is True
@@ -36,8 +34,6 @@ def test_register_logs_in_immediately_and_sends_verification_email():
     from accounts.models import User
     user = User.objects.get(email="new@test.test")
     assert user.is_active is True
-    assert user.email_verified_at is None
-    assert len(mail.outbox) == 1
 
     # /me/ works right away with the token from registration.
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {data['access']}")
@@ -113,19 +109,6 @@ def test_jwt_access_token_authenticates_me():
     resp = client.get("/api/auth/me/")
     assert resp.status_code == 200
     assert resp.json()["email"] == "jwt@test.test"
-
-
-def test_me_exposes_pro_expiry(make_user):
-    user = make_user(tier="PRO")
-    user.pro_expires_at = timezone.now() + timedelta(days=30)
-    user.save(update_fields=["pro_expires_at"])
-    client = APIClient()
-    client.force_authenticate(user=user)
-
-    response = client.get("/api/auth/me/")
-
-    assert response.status_code == 200
-    assert response.json()["pro_expires_at"] is not None
 
 
 def test_register_rejects_weak_all_numeric_password():
@@ -315,25 +298,3 @@ def test_change_password_mismatched_or_weak(make_user):
     assert "new_password" in resp.json()
 
 
-def test_change_password_and_export_require_verified_email():
-    """Signup no longer blocks login on verification, but sensitive actions
-    (password change, data export) still require a verified email."""
-    from accounts.models import User
-
-    user = User.objects.create_user(
-        email="unverified@test.test", password="Sup3rSecret!", email_verified_at=None
-    )
-    client = APIClient()
-    client.force_authenticate(user=user)
-
-    resp = client.post(
-        "/api/auth/change-password/",
-        {
-            "old_password": "Sup3rSecret!",
-            "new_password": "N3wSecretPass123!",
-            "confirm_password": "N3wSecretPass123!",
-        },
-        format="json",
-    )
-    assert resp.status_code == 403
-    assert client.get("/api/auth/export/").status_code == 403

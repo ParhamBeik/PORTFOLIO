@@ -169,6 +169,8 @@ class DailyStockHistory(models.Model):
     pcc = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     pcp = models.FloatField(default=0.0)
     is_adjusted = models.BooleanField(default=False)
+    ingested_at = models.DateTimeField(null=True, blank=True)
+    last_correlation_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
 
     # Real / Legal participant distribution (حقیقی / حقوقی)
     buy_count_i = models.IntegerField(null=True, blank=True)
@@ -261,6 +263,8 @@ class MarketCandle(models.Model):
     low_price = models.DecimalField(max_digits=20, decimal_places=4, default=0, null=True, blank=True)
     close_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     volume = models.BigIntegerField(default=0)
+    ingested_at = models.DateTimeField(null=True, blank=True)
+    last_correlation_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
 
     class Meta:
         ordering = ["-date_time"]
@@ -567,6 +571,8 @@ class GoldCurrencyHistory(models.Model):
     source = models.CharField(
         max_length=16, choices=Source.choices, default=Source.PROVIDER
     )
+    ingested_at = models.DateTimeField(null=True, blank=True)
+    last_correlation_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
 
     class Meta:
         ordering = ["-date"]
@@ -599,88 +605,6 @@ class MarketIndexData(models.Model):
             models.UniqueConstraint(
                 fields=["date", "time"],
                 name="uniq_market_index_date_time",
-            )
-        ]
-
-
-class EtfNavHistory(models.Model):
-    """ETF Funds daily NAV and market price history."""
-
-    symbol = models.CharField(max_length=64, db_index=True)
-    date = models.CharField(max_length=10, db_index=True)
-    nav_stat = models.DecimalField(max_digits=20, decimal_places=4, default=0)
-    nav_issue = models.DecimalField(max_digits=20, decimal_places=4, default=0)
-    nav_cancel = models.DecimalField(max_digits=20, decimal_places=4, default=0)
-    market_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
-    discount_pct = models.FloatField(default=0.0)
-
-    class Meta:
-        ordering = ["-date", "symbol"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["symbol", "date"],
-                name="uniq_etf_nav_symbol_date",
-            )
-        ]
-
-
-class OptionContractHistory(models.Model):
-    """Options contract trading quotes and underlying asset metrics."""
-
-    symbol = models.CharField(max_length=64, db_index=True)
-    ua_symbol = models.CharField(max_length=64, db_index=True)  # Underlying asset
-    strike_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
-    expiry_date = models.CharField(max_length=10, blank=True, default="")
-    date = models.CharField(max_length=10, db_index=True)
-    settlement_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
-    open_interest = models.BigIntegerField(default=0)
-    notional_value = models.BigIntegerField(default=0)
-
-    class Meta:
-        ordering = ["-date", "symbol"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["symbol", "date"],
-                name="uniq_option_contract_symbol_date",
-            )
-        ]
-
-
-class CommodityHistory(models.Model):
-    """Industrial metals, energy, and global commodity price history."""
-
-    symbol = models.CharField(max_length=64, db_index=True)
-    date = models.CharField(max_length=10, db_index=True)
-    close_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
-    unit = models.CharField(max_length=32, blank=True, default="")
-
-    class Meta:
-        ordering = ["-date", "symbol"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["symbol", "date"],
-                name="uniq_commodity_symbol_date",
-            )
-        ]
-
-
-class CryptoHistory(models.Model):
-    """Cryptocurrency daily price, volume, and market cap history."""
-
-    symbol = models.CharField(max_length=64, db_index=True)
-    date = models.CharField(max_length=10, db_index=True)
-    close_price_usd = models.DecimalField(max_digits=30, decimal_places=12, default=0)
-    # Provider's `price_toman` field, stored verbatim (raw-storage policy).
-    close_price_toman = models.DecimalField(max_digits=20, decimal_places=4, default=0)
-    volume_24h = models.BigIntegerField(default=0)
-    market_cap = models.BigIntegerField(default=0)
-
-    class Meta:
-        ordering = ["-date", "symbol"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["symbol", "date"],
-                name="uniq_crypto_symbol_date",
             )
         ]
 
@@ -771,6 +695,24 @@ class WorkflowRun(models.Model):
             models.Index(fields=["workflow", "outcome", "created_at"]),
             models.Index(fields=["endpoint", "symbol", "created_at"]),
         ]
+
+
+class OperationalMetricSnapshot(models.Model):
+    """15-minute ops snapshot: counts, bytes, completeness, queues, Codal."""
+
+    captured_at = models.DateTimeField(unique=True)
+    database_counts = models.JSONField(default=dict)
+    table_bytes = models.JSONField(default=dict)
+    archive = models.JSONField(default=dict)
+    quota = models.JSONField(default=dict)
+    queues = models.JSONField(default=dict)
+    codal_status = models.JSONField(default=dict)
+    workflow_15m = models.JSONField(default=dict)
+    workers = models.JSONField(default=dict)
+    disk = models.JSONField(default=dict)
+
+    class Meta:
+        ordering = ["-captured_at"]
 
 
 class SymbolIntegrity(models.Model):

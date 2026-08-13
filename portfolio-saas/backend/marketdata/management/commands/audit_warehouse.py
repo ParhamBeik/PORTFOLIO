@@ -91,7 +91,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--check", action="append",
             help="Run only named checks (repeatable): units, crosstable, gold, "
-                 "collision, candletable, salvage, crypto, dates, ledger, census",
+                 "collision, candletable, salvage, dates, ledger, census",
         )
 
     def handle(self, *args, **opts):
@@ -102,7 +102,6 @@ class Command(BaseCommand):
             ("crosstable", self.check_cross_table),
             ("gold", self.check_gold_units),
             ("collision", self.check_same_day_collisions),
-            ("crypto", self.check_crypto_precision),
             ("candletable", self.check_candle_table_purity),
             ("salvage", self.check_salvageable_rejections),
             ("dates", self.check_date_conformance),
@@ -451,46 +450,6 @@ class Command(BaseCommand):
                 })
         return out
 
-    def check_crypto_precision(self):
-        """Recover USD values rounded away by the old four-decimal column."""
-        rows = _rows(
-            """
-            WITH rates AS (
-              SELECT date,
-                     percentile_cont(0.5) WITHIN GROUP (
-                       ORDER BY (close_price_toman/NULLIF(close_price_usd,0))::float8
-                     ) FILTER (WHERE close_price_usd>0 AND close_price_toman>0) rate
-              FROM marketdata_cryptohistory GROUP BY date
-            )
-            SELECT c.symbol, c.date, c.close_price_usd::float usd,
-                   c.close_price_toman::float toman, r.rate
-            FROM marketdata_cryptohistory c
-            LEFT JOIN rates r USING (date)
-            WHERE c.close_price_usd<=0
-            ORDER BY c.date, c.symbol
-            """
-        )
-        out = []
-        for row in rows:
-            recoverable = row["toman"] > 0 and row["rate"] and row["rate"] > 0
-            corrected = row["toman"] / row["rate"] if recoverable else None
-            out.append({
-                "check": "crypto",
-                "table": "marketdata_cryptohistory[close_price_usd]",
-                "symbol": row["symbol"],
-                "date": row["date"],
-                "value": row["usd"],
-                "corrected": f"{corrected:.12f}" if recoverable else "",
-                "verdict": "precision_loss" if recoverable else "unrecoverable",
-                "evidence": (
-                    f"price_toman={row['toman']:g}; daily median Toman/USD="
-                    f"{row['rate']:g}; old Decimal(20,4) rounded USD to zero"
-                    if recoverable else
-                    "both USD and Toman prices are non-positive; no defensible reconstruction"
-                ),
-            })
-        return out
-
     def check_candle_table_purity(self):
         """MarketCandle is Rial TSE data; a BRS symbol in it is a Toman row."""
         rows = _rows(
@@ -623,11 +582,7 @@ class Command(BaseCommand):
             ("marketdata_reallegalhistory", None),
             ("marketdata_codalannouncement", None),
             ("marketdata_shareholderrecord", None),
-            ("marketdata_cryptohistory", "close_price_usd"),
-            ("marketdata_commodityhistory", "close_price"),
             ("marketdata_marketindexdata", None),
-            ("marketdata_etfnavhistory", None),
-            ("marketdata_optioncontracthistory", None),
             ("marketdata_stocksymbolmetadata", None),
         ):
             n = _rows(f"SELECT count(*) c FROM {table}")[0]["c"]

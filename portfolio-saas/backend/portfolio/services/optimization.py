@@ -539,6 +539,26 @@ _SCENARIO_DISPATCH = {
 # ---------- public entry point -----------------------------------------------
 
 
+def _window_limitations(returns, history_days: int) -> list[str]:
+    """Say so when the data does not span the lookback that was asked for.
+
+    An ingest outage truncates every lookback to the same contiguous stretch
+    after the hole, so a 1-year and a 10-year request can return identical
+    weights. Without this the four windows look like four analyses that happen
+    to agree, rather than one analysis shown four times.
+    """
+    if returns.empty:
+        return []
+    span_days = (returns.index.max() - returns.index.min()).days
+    if span_days >= history_days * 0.8:
+        return []
+    return [
+        f"Requested a {history_days}-day lookback but only {span_days} days of "
+        f"contiguous history exist ({len(returns.index)} sessions); longer "
+        "lookbacks will return the same result until the gap is backfilled."
+    ]
+
+
 def optimize(
     *,
     scenario: str,
@@ -599,8 +619,11 @@ def optimize(
 
     as_of_str = "latest" if as_of_dt is None else as_of_dt.date().isoformat()
 
+    # `history_days` belongs here: the four lookback windows on the Best
+    # Overall page differ by nothing else, so leaving it out served every
+    # window whichever one ran first.
     cache_key = (
-        f"opt:{user_id}:{portfolio_hash}:{scenario}:as_of:{as_of_str}:univ_mode:{universe_mode}:univ:{univ_str}:basis:{basis}:v{version}:{_constraints_hash(resolved)}"
+        f"opt:{user_id}:{portfolio_hash}:{scenario}:as_of:{as_of_str}:univ_mode:{universe_mode}:univ:{univ_str}:basis:{basis}:hist:{history_days}:v{version}:{_constraints_hash(resolved)}"
     )
     cached = cache.get(cache_key)
     if cached is not None:
@@ -699,6 +722,7 @@ def optimize(
         "limitations": [
             "Decision-support scenario; no portfolio is objectively best.",
             "Expected returns are historical estimates, not forecasts.",
+            *_window_limitations(returns, history_days),
         ],
         "price_version": version,
         "cached": False,

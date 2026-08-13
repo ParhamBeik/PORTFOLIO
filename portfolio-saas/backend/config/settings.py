@@ -134,24 +134,6 @@ else:
 
 AUTH_USER_MODEL = "accounts.User"
 
-EMAIL_BACKEND = os.getenv(
-    "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
-)
-EMAIL_FILE_PATH = os.getenv("EMAIL_FILE_PATH", str(BASE_DIR / "test-emails"))
-EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
-EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
-EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
-EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "0") == "1"
-DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "Lattice <no-reply@localhost>")
-FRONTEND_VERIFICATION_URL = os.getenv(
-    "FRONTEND_VERIFICATION_URL", "http://localhost:5173/verify-email"
-)
-FRONTEND_PASSWORD_RESET_URL = os.getenv(
-    "FRONTEND_PASSWORD_RESET_URL", "http://localhost:5173/reset-password"
-)
-EMAIL_VERIFICATION_TIMEOUT = 24 * 60 * 60
-PASSWORD_RESET_TIMEOUT = 60 * 60
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -202,9 +184,17 @@ SIMPLE_JWT = {
     "CHECK_REVOKE_TOKEN": True,
 }
 JWT_COOKIE_SECURE = not DEBUG
-GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
 SNAPSHOT_RETENTION_DAYS = int(os.getenv("SNAPSHOT_RETENTION_DAYS", "30"))
-SNAPSHOT_PRUNE_ENABLED = os.getenv("SNAPSHOT_PRUNE_ENABLED", "0") == "1"
+SNAPSHOT_PRUNE_ENABLED = os.getenv(
+    "SNAPSHOT_PRUNE_ENABLED", "1" if ENVIRONMENT == "production" else "0"
+) == "1"
+PRICE_RETENTION_DAYS = int(os.getenv("PRICE_RETENTION_DAYS", "14"))
+PRICE_PRUNE_ENABLED = os.getenv(
+    "PRICE_PRUNE_ENABLED", "1" if ENVIRONMENT == "production" else "0"
+) == "1"
+VPS_DISK_BUDGET_GB = int(os.getenv("VPS_DISK_BUDGET_GB", "250"))
+MARKETDATA_HTTP_CONNECT_TIMEOUT = float(os.getenv("MARKETDATA_HTTP_CONNECT_TIMEOUT", "5"))
+MARKETDATA_HTTP_READ_TIMEOUT = float(os.getenv("MARKETDATA_HTTP_READ_TIMEOUT", "12"))
 # token_blacklist (INSTALLED_APPS above) is now available for a "log out all
 # devices" endpoint (blacklist a user's OutstandingToken set) — add it in
 # accounts/views.py, not here.
@@ -220,11 +210,6 @@ TSETMC_URL = os.getenv("TSETMC_URL", "https://Api.BrsApi.ir/Tsetmc/AllSymbols.ph
 TSETMC_SYMBOL_URL = os.getenv(
     "TSETMC_SYMBOL_URL", "https://Api.BrsApi.ir/Tsetmc/Symbol.php"
 )
-# Per-tier portfolio ceilings, read by accounts.features.limit_for(). Unset
-# means "use the registry default" (Free 3, Pro unlimited); PRO_PORTFOLIO_LIMIT
-# exists so a deployment can cap Pro without a code change.
-FREE_PORTFOLIO_LIMIT = os.getenv("FREE_PORTFOLIO_LIMIT")
-PRO_PORTFOLIO_LIMIT = os.getenv("PRO_PORTFOLIO_LIMIT")
 
 # Seconds to sleep between BrsApi calls inside one sync task (paid API courtesy).
 MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "0.05"))
@@ -278,27 +263,6 @@ MARKETDATA_TICK_VOLUME_TOLERANCE = float(
 # the state can honestly converge; raise it when the backlog is otherwise idle.
 MARKETDATA_CODAL_MAX_PAGES = int(os.getenv("MARKETDATA_CODAL_MAX_PAGES", "5"))
 
-# Codal document extraction is disabled until an external S3-compatible store
-# and an approved proxy are configured. Tasks record a blocked outcome instead
-# of retrying incomplete infrastructure.
-CODAL_EXTRACTION_ENABLED = os.getenv("CODAL_EXTRACTION_ENABLED", "0") == "1"
-CODAL_HTTP_PROXY = os.getenv("CODAL_HTTP_PROXY", "")
-# Documents live on a mounted volume, content-addressed by SHA-256. Local disk
-# replaced S3 so the pipeline needs no credentials at all and the proxy is the
-# only thing a deployment must supply. Served exclusively through the
-# authenticated download view -- never as static files.
-CODAL_STORAGE_DIR = os.getenv("CODAL_STORAGE_DIR", "/var/lib/codal")
-CODAL_MAX_ARTIFACT_BYTES = int(os.getenv("CODAL_MAX_ARTIFACT_BYTES", str(50 * 1024 * 1024)))
-CODAL_OCR_CONFIDENCE_THRESHOLD = float(os.getenv("CODAL_OCR_CONFIDENCE_THRESHOLD", "0.90"))
-CODAL_PARSER_VERSION = os.getenv("CODAL_PARSER_VERSION", "1")
-CODAL_ENQUEUE_BATCH_SIZE = int(os.getenv("CODAL_ENQUEUE_BATCH_SIZE", "10"))
-MARKETDATA_CODAL_QUEUE_LIMIT = int(
-    os.getenv("MARKETDATA_CODAL_QUEUE_LIMIT", "1")
-)
-# Cool-down before a network/storage-blocked document is offered again. Long
-# enough that a sustained outage does not spin, short enough that a blip heals
-# itself instead of needing a manual UPDATE.
-CODAL_BLOCKED_RETRY_HOURS = int(os.getenv("CODAL_BLOCKED_RETRY_HOURS", "6"))
 WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "30"))
 
 # Live poll cadence by market state (seconds). Beat still ticks every minute; the

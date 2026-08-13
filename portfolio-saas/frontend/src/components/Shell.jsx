@@ -6,6 +6,8 @@ import { Button, ErrorState, Select } from "./ui.jsx";
 
 const PAGES = [
   { to: "/", label: "Portfolio", end: true },
+  { to: "/ledger", label: "Ledger" },
+  { to: "/family", label: "Family" },
   { to: "/optimal", label: "My Optimal" },
   { to: "/universe", label: "Best Overall" },
 ];
@@ -56,6 +58,19 @@ export default function Shell({ user, onLogout }) {
               {p.label}
             </NavLink>
           ))}
+          {user?.is_staff && (
+            <NavLink
+              to="/ops"
+              data-testid="nav-ops"
+              className={({ isActive }) =>
+                `rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                  isActive ? "bg-panel-2 text-text" : "text-muted hover:text-text"
+                }`
+              }
+            >
+              Ops
+            </NavLink>
+          )}
         </nav>
 
         <div className="ml-auto flex flex-wrap items-center gap-2">

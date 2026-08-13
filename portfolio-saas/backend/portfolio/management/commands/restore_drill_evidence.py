@@ -45,7 +45,7 @@ class Command(BaseCommand):
     def _seed(self):
         user, _ = User.objects.get_or_create(
             email="restore-drill@test.local",
-            defaults={"email_verified_at": timezone.now()},
+            defaults={},
         )
         if not user.has_usable_password():
             user.set_unusable_password()

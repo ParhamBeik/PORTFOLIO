@@ -11,7 +11,7 @@ from marketdata.models import GoldCurrencyHistory, ArchiveFetchState
 
 @pytest.fixture
 def auth_client(db, make_user):
-    user = make_user(email="admin@test.test", tier=User.Tier.PRO)
+    user = make_user(email="admin@test.test")
     user.is_staff = True
     user.save()
     client = APIClient()

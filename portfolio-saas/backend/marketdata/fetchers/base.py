@@ -77,6 +77,12 @@ def fetch_json(
     # only holds a worker and can spend the provider quota several times for
     # one logical job. Live/other calls retain one short retry.
     retries = (0 if quota_bucket == "archive" else 1) if retries is None else retries
+    if timeout is None or timeout == 20:
+        from django.conf import settings as django_settings
+        timeout = (
+            django_settings.MARKETDATA_HTTP_CONNECT_TIMEOUT,
+            django_settings.MARKETDATA_HTTP_READ_TIMEOUT,
+        )
     req_headers = {**DEFAULT_HEADERS, **(headers or {})}
     attempt = 0
     while attempt <= retries:

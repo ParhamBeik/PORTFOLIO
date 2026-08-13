@@ -26,6 +26,8 @@ def normalize_basis(basis: str | None) -> str:
 
 def cpi_for_date(value) -> float:
     """Linearly interpolate the configured annual CPI index within a Jalali year."""
+    if isinstance(value, str):
+        value = dt.date.fromisoformat(value[:10])
     if isinstance(value, pd.Timestamp):
         value = value.date()
     if isinstance(value, dt.datetime):

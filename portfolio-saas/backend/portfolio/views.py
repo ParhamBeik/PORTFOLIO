@@ -3,7 +3,6 @@
 Valuation is computed live on read (holdings x latest prices) and the heavy
 part (latest prices) is cached, so these endpoints stay cheap at scale.
 Pro endpoints (insights/analytics/optimization) are gated by
-RequiresFeature("<capability>"), resolved against the accounts.features registry.
 """
 from datetime import timedelta
 from decimal import Decimal
@@ -21,7 +20,6 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.permissions import RequiresFeature
 
 from .models import Account, Asset, Holding, LedgerEntry, Price, Snapshot, Transaction, Liability
 from .serializers import (
@@ -73,7 +71,7 @@ class AccountListCreateView(generics.ListCreateAPIView):
     serializer_class = AccountSerializer
 
     def get_queryset(self):
-        return self.request.user.accounts.all()
+        return self.request.user.accounts.all().prefetch_related("holdings__asset")
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
@@ -484,6 +482,8 @@ class ValuationView(APIView):
         valuation = _with_usd(valuation)
         if basis in {"usd_real", "usd_denominated", "usdt_denominated"}:
             valuation = _express_usd_real(valuation, basis)
+        elif basis == "real_toman":
+            valuation = _express_real_toman(valuation)
         return Response(valuation)
 
 
@@ -511,6 +511,8 @@ class AccountValuationView(APIView):
         result = _with_usd(result)
         if basis in {"usd_real", "usd_denominated", "usdt_denominated"}:
             result = _express_usd_real(result, basis)
+        elif basis == "real_toman":
+            result = _express_real_toman(result)
         return Response({
             "id": account.id,
             "name": account.name,
@@ -590,6 +592,37 @@ def _express_usd_real(valuation: dict, basis: str = "usd_denominated") -> dict:
     return valuation
 
 
+
+def _express_real_toman(valuation: dict) -> dict:
+    """Deflate a live Toman valuation by the last published SCI CPI vintage."""
+    from django.conf import settings
+    from portfolio.services.deflator import cpi_for_date
+
+    cpi = Decimal(str(cpi_for_date(timezone.now())))
+    factor = cpi / Decimal("100")
+    vintage = max(settings.CPI_BY_JALALI_YEAR)
+
+    def _scale_items(items):
+        for item in items or []:
+            if item.get("value") is not None:
+                item["value"] = float(Decimal(str(item["value"])) / factor)
+            if item.get("unit_price") is not None:
+                item["unit_price"] = float(Decimal(str(item["unit_price"])) / factor)
+
+    valuation["total"] = Decimal(str(valuation.get("total", 0) or 0)) / factor
+    if valuation.get("total_usd") is not None:
+        valuation["total_usd"] = Decimal(str(valuation["total_usd"])) / factor
+    _scale_items(valuation.get("items"))
+    for account in valuation.get("accounts", []) or []:
+        if account.get("total") is not None:
+            account["total"] = Decimal(str(account["total"])) / factor
+        _scale_items(account.get("items"))
+    valuation["basis"] = "real_toman"
+    valuation["cpi_vintage_year"] = vintage
+    valuation["cpi_source"] = settings.CPI_SOURCE
+    return valuation
+
+
 class SnapshotListView(APIView):
     """Per-user net-worth history for the FREE trend chart, plus trade markers.
 
@@ -621,6 +654,7 @@ class SnapshotListView(APIView):
             days = max(1, min(days, 3650))
         now = timezone.now()
         account = _scope(request)
+        basis = request.query_params.get("basis") or "nominal_toman"
         snapshots = Snapshot.objects.filter(
             user=request.user, total_value_tomans__gt=0
         )
@@ -729,6 +763,16 @@ class SnapshotListView(APIView):
             }
             for t in trades
         ]
+        if basis == "real_toman":
+            from django.conf import settings
+            from portfolio.services.deflator import cpi_for_date
+            for row in series:
+                day = row.get("date") or row.get("timestamp")
+                cpi = Decimal(str(cpi_for_date(day))) / Decimal("100")
+                if row.get("total") is not None:
+                    row["total"] = float(Decimal(str(row["total"])) / cpi)
+                if row.get("total_usd") is not None:
+                    row["total_usd"] = float(Decimal(str(row["total_usd"])) / cpi)
         return Response({"series": series, "trades": markers})
 
 
@@ -768,9 +812,9 @@ class PriceHistoryView(APIView):
 
 
 class InsightsView(APIView):
-    """Pro-tier financial insights. Free users get a 403 here."""
+    """financial insights. Free users get a 403 here."""
 
-    permission_classes = [IsAuthenticated, RequiresFeature("insights")]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         return Response(build_insights(request.user, _scope(request)))
@@ -796,9 +840,9 @@ def _current_weights_and_total(user, account=None) -> tuple[dict[str, float], De
 
 
 class AnalyticsView(APIView):
-    """Pro-tier portfolio diagnostics: vol, Sharpe, drawdown, VaR, etc."""
+    """portfolio diagnostics: vol, Sharpe, drawdown, VaR, etc."""
 
-    permission_classes = [IsAuthenticated, RequiresFeature("analytics")]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         weights, total = _current_weights_and_total(request.user, _scope(request))
@@ -808,9 +852,9 @@ class AnalyticsView(APIView):
 
 
 class OptimizationView(APIView):
-    """Pro-tier scenario optimizer: max_sharpe / min_volatility / risk_parity / hrp."""
+    """scenario optimizer: max_sharpe / min_volatility / risk_parity / hrp."""
 
-    permission_classes = [IsAuthenticated, RequiresFeature("optimization")]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         scenario = request.data.get("scenario")
@@ -861,9 +905,9 @@ class OptimizationView(APIView):
 
 
 class FrontierView(APIView):
-    """Pro-tier efficient frontier + max_sharpe / min_volatility reference points."""
+    """efficient frontier + max_sharpe / min_volatility reference points."""
 
-    permission_classes = [IsAuthenticated, RequiresFeature("frontier")]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         weights, total = _current_weights_and_total(request.user, _scope(request))
@@ -942,7 +986,7 @@ def _lifetime_days(user, account=None) -> int:
 
 
 class MyOptimalView(APIView):
-    """Pro-tier: "if a quant had optimized MY existing assets, what would it
+    """"if a quant had optimized MY existing assets, what would it
     look like?" -- per lookback window, max-Sharpe and min-volatility weights
     over the user's OWN held assets, next to how the portfolio actually did.
 
@@ -951,7 +995,7 @@ class MyOptimalView(APIView):
     still sees their 1Y result even when 5Y/lifetime can't solve.
     """
 
-    permission_classes = [IsAuthenticated, RequiresFeature("optimization")]
+    permission_classes = [IsAuthenticated]
 
     WINDOWS = (("1Y", 365), ("3Y", 1095), ("5Y", 1825), ("Lifetime", None))
 
@@ -1005,9 +1049,9 @@ class MyOptimalView(APIView):
 
 
 class AssetReturnsView(APIView):
-    """Pro-tier daily-returns matrix + correlation, for heatmaps and scatter plots."""
+    """daily-returns matrix + correlation, for heatmaps and scatter plots."""
 
-    permission_classes = [IsAuthenticated, RequiresFeature("asset_returns")]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         try:
@@ -1088,14 +1132,14 @@ def _asset_class_leaders():
 
 
 class BestOverallView(APIView):
-    """Pro-tier: "what is the best portfolio available across ALL tracked
+    """"what is the best portfolio available across ALL tracked
     assets?" -- a pure read of the nightly `run_best_overall_snapshots`
     precompute (see `portfolio/services/best_overall.py`). No solver call in
     the request path; a window with no snapshot yet reports its own status
     rather than leaving the whole response empty.
     """
 
-    permission_classes = [IsAuthenticated, RequiresFeature("discovery")]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         from .optimization_models import OptimizationSnapshot
@@ -1132,7 +1176,7 @@ class BestOverallView(APIView):
 
 
 class AssetRankingView(APIView):
-    permission_classes = [IsAuthenticated, RequiresFeature("asset_ranking")]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         from marketdata.models import AssetMetricSnapshot
@@ -1193,23 +1237,29 @@ class IntegrityView(APIView):
             return Response({"detail": "Staff only endpoint."}, status=status.HTTP_403_FORBIDDEN)
 
         from marketdata.models import SymbolIntegrity, RejectedRecord
-        integrities = SymbolIntegrity.objects.all()
-        rejected = RejectedRecord.objects.all().order_by("-occurrences")
 
-        integrity_data = []
-        for i in integrities:
-            integrity_data.append({
+        try:
+            page = max(1, int(request.query_params.get("page") or 1))
+            page_size = min(100, max(1, int(request.query_params.get("page_size") or 50)))
+        except (TypeError, ValueError):
+            return Response({"detail": "page and page_size must be integers."}, status=400)
+        offset = (page - 1) * page_size
+
+        integrities = SymbolIntegrity.objects.all().order_by("symbol")
+        rejected = RejectedRecord.objects.all().order_by("-occurrences")
+        integrity_data = [
+            {
                 "symbol": i.symbol,
                 "passes_gate": i.passes_gate,
                 "coverage_ratio": float(i.coverage_ratio) if i.coverage_ratio else 0.0,
                 "max_gap_days": i.max_gap_days,
                 "reason": i.reason,
                 "computed_at": i.computed_at.isoformat() if i.computed_at else None,
-            })
-
-        rejected_data = []
-        for r in rejected:
-            rejected_data.append({
+            }
+            for i in integrities[offset:offset + page_size]
+        ]
+        rejected_data = [
+            {
                 "id": r.id,
                 "endpoint": r.endpoint,
                 "symbol": r.symbol,
@@ -1217,11 +1267,16 @@ class IntegrityView(APIView):
                 "reason": r.reason,
                 "occurrences": r.occurrences,
                 "last_seen": r.last_seen.isoformat() if r.last_seen else None,
-            })
-
+            }
+            for r in rejected[offset:offset + page_size]
+        ]
         return Response({
+            "integrity_count": integrities.count(),
+            "rejected_count": rejected.count(),
+            "page": page,
+            "page_size": page_size,
             "integrity": integrity_data,
-            "rejected": rejected_data
+            "rejected": rejected_data,
         })
 
 

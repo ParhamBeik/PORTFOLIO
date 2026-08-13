@@ -245,6 +245,38 @@ export function RiskScatter({ frontier = [], cloud = [], points = [], height = 3
   );
 }
 
+export function CountTrend({ data, height = 180, label = "Count over time", color = "var(--c-s1)" }) {
+  return (
+    <Frame height={height} label={label}>
+      <AreaChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+        <CartesianGrid stroke={GRID} vertical={false} />
+        <XAxis dataKey="x" {...axis} minTickGap={32} tickFormatter={(v) => dateTick(v)} />
+        <YAxis {...axis} width={48} tickFormatter={numFmt} />
+        <Tooltip {...tooltipProps} labelFormatter={date} formatter={(v) => [numFmt(v), ""]} />
+        <Area
+          type="monotone"
+          dataKey="y"
+          stroke={color}
+          strokeWidth={2}
+          fill={color}
+          fillOpacity={0.15}
+          dot={false}
+          isAnimationActive={false}
+        />
+      </AreaChart>
+    </Frame>
+  );
+}
+
+function numFmt(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  if (Math.abs(n) >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+  if (Math.abs(n) >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (Math.abs(n) >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
 export const STATUS_COLOR = {
   good: "var(--c-good)",
   warn: "var(--c-warn)",

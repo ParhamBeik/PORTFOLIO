@@ -2,6 +2,7 @@
 from django.contrib import admin
 from django.urls import include, path
 from accounts.views import CookieTokenRefreshView
+from portfolio.views import AdminCleanPricesExecuteView, AdminCleanPricesScanView
 from .health import HealthView, PriceFeedView, ReadyView
 
 # Monkeypatch django admin index page to inject operational telemetry
@@ -28,8 +29,10 @@ urlpatterns = [
     path("api/health/ready/", ReadyView.as_view(), name="health-ready"),
     path("api/health/prices/", PriceFeedView.as_view(), name="health-prices"),
     path("api/auth/", include("accounts.urls")),
+    path("api/admin/clean-prices/scan/", AdminCleanPricesScanView.as_view(), name="admin-clean-prices-scan"),
+    path("api/admin/clean-prices/execute/", AdminCleanPricesExecuteView.as_view(), name="admin-clean-prices-execute"),
+    path("api/admin/", include("marketdata.admin_urls")),
     path("api/", include("portfolio.urls")),
-    path("api/market/", include("marketdata.urls")),
     path(
         "api/token/refresh/",
         CookieTokenRefreshView.as_view(),

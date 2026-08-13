@@ -15,8 +15,6 @@ Batches are separate so each can be reviewed and applied on its own:
   units        Rewrite mis-scaled closes to the manifest's `corrected` value.
                `--symbol` / `--date-from` / `--date-to` narrow it further, so a
                verified cluster can be repaired without touching unverified rows.
-  crypto       Recover sub-cent USD quotes rounded to zero by the old schema,
-               using the manifest's per-day cross-rate reconstruction.
   salvage      Re-ingest rows with a valid close and nullable bad OHLC fields.
 """
 import csv
@@ -29,10 +27,10 @@ from django.db import transaction
 from django.db.models import F
 
 from marketdata.models import (
-    CryptoHistory, DailyStockHistory, MarketCandle, RejectedRecord,
+    DailyStockHistory, MarketCandle, RejectedRecord,
 )
 
-BATCHES = ("quarantine", "candletable", "units", "crypto", "salvage")
+BATCHES = ("quarantine", "candletable", "units", "salvage")
 TIMEFRAME_OF = {
     "marketdata_marketcandle[1d_adj]": MarketCandle.ADJUSTED,
     "marketdata_marketcandle[1d_unadj]": MarketCandle.UNADJUSTED,
@@ -75,11 +73,6 @@ class Command(BaseCommand):
 
         if batch == "salvage":
             rows = [r for r in manifest_rows if r["verdict"] == "salvageable_field"]
-        elif batch == "crypto":
-            rows = [
-                r for r in manifest_rows
-                if r["verdict"] == "precision_loss" and r.get("corrected")
-            ]
         elif batch == "candletable":
             rows = [r for r in rows if r["check"] == "candletable"]
         elif batch == "units":
@@ -121,7 +114,6 @@ class Command(BaseCommand):
             "quarantine": self._quarantine,
             "candletable": self._delete_rows,
             "units": self._rewrite,
-            "crypto": self._repair_crypto,
             "salvage": self._salvage_ohlc,
         }[batch]
         with transaction.atomic():
@@ -180,14 +172,6 @@ class Command(BaseCommand):
         updates = {field: F(field) * factor for field in price_fields}
         updates["tval"] = F("tval") * factor
         return queryset.update(**updates)
-
-    def _repair_crypto(self, rows):
-        n = 0
-        for row in rows:
-            n += CryptoHistory.objects.filter(
-                symbol=row["symbol"], date=row["date"], close_price_usd__lte=0
-            ).update(close_price_usd=Decimal(row["corrected"]))
-        return n
 
     def _salvage_ohlc(self, rows):
         from marketdata import ingest

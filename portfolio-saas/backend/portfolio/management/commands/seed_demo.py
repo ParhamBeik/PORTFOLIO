@@ -68,8 +68,6 @@ class Command(BaseCommand):
             defaults={
                 "first_name": "Demo",
                 "last_name": "Free",
-                "tier": User.Tier.FREE,
-                "email_verified_at": timezone.now(),
                 "is_active": True,
             },
         )
@@ -86,8 +84,6 @@ class Command(BaseCommand):
             defaults={
                 "first_name": "Demo",
                 "last_name": "Pro",
-                "tier": User.Tier.PRO,
-                "email_verified_at": timezone.now(),
                 "is_active": True,
             },
         )
@@ -103,10 +99,8 @@ class Command(BaseCommand):
             defaults={
                 "first_name": "Admin",
                 "last_name": "User",
-                "tier": User.Tier.PRO,
                 "is_staff": True,
                 "is_superuser": True,
-                "email_verified_at": timezone.now(),
                 "is_active": True,
             },
         )

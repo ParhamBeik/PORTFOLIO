@@ -59,19 +59,6 @@ def _within(now, start, end):
     return start <= (now.hour, now.minute) < end
 
 
-def is_commodity_market_open(now):
-    """Whether the global commodity feed is inside its Tehran-time weekend."""
-    day = now.weekday()  # Monday=0 ... Sunday=6
-    clock = (now.hour, now.minute)
-    if day == 5:
-        return clock < (1, 30)
-    if day == 6:
-        return False
-    if day == 0:
-        return clock >= (2, 30)
-    return True
-
-
 def remember_provider_state(payload, *, now=None):
     """Cache the `state` string off any Index.php response we already paid for."""
     state = None
@@ -166,13 +153,10 @@ def live_job_keys(
     if has_brs:
         if ignore_hours or state in (OPEN, CLOSED_DAYTIME):
             jobs.append("gold_currency")
-        jobs.append("crypto")
-        if ignore_hours or is_commodity_market_open(now):
-            jobs.append("commodity")
     if has_tsetmc and (ignore_hours or state == OPEN):
         if include_state_probe:
             jobs.append("market_index")
-        jobs.extend(("tsetmc", "option_contracts", "etf_nav"))
+        jobs.append("tsetmc")
     return tuple(jobs)
 
 

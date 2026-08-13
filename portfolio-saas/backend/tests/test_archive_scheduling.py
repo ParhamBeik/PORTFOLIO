@@ -26,6 +26,21 @@ def _state(symbol, endpoint=Endpoint.STOCK_HISTORY_ADJUSTED, **kwargs):
     return ArchiveFetchState.objects.create(symbol=symbol, endpoint=endpoint, **kwargs)
 
 
+def test_claim_fills_historical_full_before_ticks(monkeypatch):
+    monkeypatch.setattr("marketdata.archive._archive_prereqs_ready", lambda state: True)
+    histories = [
+        _state(f"h{i}", Endpoint.STOCK_HISTORY_UNADJUSTED) for i in range(8)
+    ]
+    ticks = [
+        _state(f"t{i}", Endpoint.STOCK_TRANSACTION_TICKS) for i in range(8)
+    ]
+    batch = claim_archive_batch(limit=5)
+    history_ids = {row.pk for row in histories}
+    tick_ids = {row.pk for row in ticks}
+    assert set(batch) <= history_ids
+    assert not (set(batch) & tick_ids)
+
+
 def test_claim_order_is_coverage_first():
     """A symbol with no data must be claimed before one missing 6 of 3,028 rows."""
     from marketdata.models import DailyStockHistory
@@ -121,7 +136,10 @@ def test_codal_reverifies_weekly_not_daily():
     prices.refresh_from_db()
     assert codal.verified_complete and prices.verified_complete
     assert codal.next_attempt_at - timezone.now() > timedelta(days=6)
-    assert prices.next_attempt_at - timezone.now() < timedelta(days=2)
+    # Daily series re-verify at the next post-close after +0d. From a Thursday
+    # morning that can be ~2.1 days out (Sat close); still far below weekly.
+    assert prices.next_attempt_at < codal.next_attempt_at
+    assert prices.next_attempt_at - timezone.now() < timedelta(days=4)
 
 
 def test_repeated_transients_escalate():

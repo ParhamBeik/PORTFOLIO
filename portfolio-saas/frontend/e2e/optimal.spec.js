@@ -13,8 +13,7 @@ test.describe("optimal", () => {
       .or(page.getByTestId("optimal-window-tabs"))
       .or(page.getByTestId("optimal-empty-holdings"))
       .or(page.getByTestId("optimal-empty-universe"))
-      .or(page.getByTestId("optimal-insufficient"))
-      .or(page.getByTestId("pro-required"));
+      .or(page.getByTestId("optimal-insufficient"));
 
     await expect(known.first()).toBeVisible({ timeout: 25000 });
   });
@@ -74,7 +73,6 @@ test.describe("optimal", () => {
         .getByTestId("optimal-empty-holdings")
         .or(page.getByTestId("optimal-empty-universe"))
         .or(page.getByTestId("optimal-empty-windows"))
-        .or(page.getByTestId("pro-required"))
         .or(page.getByTestId("optimal-insufficient"));
       await expect(graceful.first()).toBeVisible({ timeout: 20000 });
       return;

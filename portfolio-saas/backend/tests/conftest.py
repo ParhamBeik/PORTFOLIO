@@ -88,14 +88,13 @@ def write_prices(db):
 
 @pytest.fixture
 def make_user(db):
-    """Return a helper that creates a user with an explicit tier."""
+    """Return a helper that creates a user."""
     from accounts.models import User
 
-    def _make(email="user@test.test", tier=User.Tier.FREE, password="Sup3rSecret!", first_name="", last_name=""):
-        user = User.objects.create_user(email=email, password=password, first_name=first_name, last_name=last_name)
-        user.tier = tier
-        user.save(update_fields=["tier"])
-        return user
+    def _make(email="user@test.test", password="Sup3rSecret!", first_name="", last_name=""):
+        return User.objects.create_user(
+            email=email, password=password, first_name=first_name, last_name=last_name
+        )
 
     return _make
 

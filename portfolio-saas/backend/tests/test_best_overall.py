@@ -52,7 +52,7 @@ def test_best_overall_view_reads_precomputed_snapshots(held_universe, make_user)
     ):
         run_best_overall_snapshots()
 
-    pro = make_user(tier="PRO", email="best_overall@t.t")
+    pro = make_user(email="best_overall@t.t")
     resp = _client(pro).get("/api/optimization/best-overall/")
     assert resp.status_code == 200
     body = resp.json()
@@ -62,7 +62,3 @@ def test_best_overall_view_reads_precomputed_snapshots(held_universe, make_user)
     assert any(w["status"] == "ok" for w in body["windows"])
 
 
-def test_best_overall_pro_gated(make_user):
-    free = make_user(tier="FREE", email="best_overall_free@t.t")
-    resp = _client(free).get("/api/optimization/best-overall/")
-    assert resp.status_code == 403

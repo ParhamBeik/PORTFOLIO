@@ -14,7 +14,7 @@ from django.db.models import Avg
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 
-from portfolio.models import Snapshot
+from portfolio.models import Price, Snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,9 @@ def prune_snapshots():
             "rows (cutoff=%s). Set SNAPSHOT_PRUNE_ENABLED=1 to actually run this.",
             stale_row_count, len(groups), cutoff.isoformat(),
         )
-        return {"enabled": False, "would_collapse": stale_row_count, "would_write": len(groups)}
+        result = {"enabled": False, "would_collapse": stale_row_count, "would_write": len(groups)}
+        _ledger_prune("prune_snapshots", "Snapshot", result)
+        return result
 
     written = 0
     with transaction.atomic():
@@ -73,4 +75,44 @@ def prune_snapshots():
         "[SNAPSHOT_PRUNE] Collapsed %d day-groups (%d stale rows) into %d rows.",
         written, stale_row_count, written,
     )
-    return {"enabled": True, "groups_collapsed": written, "stale_rows_seen": stale_row_count}
+    result = {"enabled": True, "groups_collapsed": written, "stale_rows_seen": stale_row_count}
+    _ledger_prune("prune_snapshots", "Snapshot", result)
+    return result
+
+
+@shared_task(ignore_result=True)
+def prune_prices():
+    """Drop intra-day Price rows older than PRICE_RETENTION_DAYS; keep latest per asset."""
+    cutoff = timezone.now() - dt.timedelta(days=settings.PRICE_RETENTION_DAYS)
+    stale = Price.objects.filter(fetched_at__lt=cutoff)
+    stale_count = stale.count()
+    if not settings.PRICE_PRUNE_ENABLED:
+        logger.info(
+            "[PRICE_PRUNE_DRY_RUN] Would delete %d price rows older than %s. "
+            "Set PRICE_PRUNE_ENABLED=1 to run.",
+            stale_count, cutoff.isoformat(),
+        )
+        result = {"enabled": False, "would_delete": stale_count}
+        _ledger_prune("prune_prices", "Price", result)
+        return result
+
+    latest_ids = list(
+        Price.objects.order_by("asset_id", "-fetched_at", "-id")
+        .distinct("asset_id")
+        .values_list("id", flat=True)
+    )
+    deleted, _ = stale.exclude(id__in=latest_ids).delete()
+    logger.info("[PRICE_PRUNE] Deleted %d stale price rows (kept latest per asset).", deleted)
+    result = {"enabled": True, "deleted": deleted, "kept_latest": len(latest_ids)}
+    _ledger_prune("prune_prices", "Price", result)
+    return result
+
+
+def _ledger_prune(workflow, table, metadata):
+    from marketdata.models import WorkflowRun
+    from marketdata.workflows import WorkflowOutcome
+
+    WorkflowOutcome(workflow, destination_table=table).finish(
+        WorkflowRun.Outcome.SUCCESS,
+        metadata=metadata,
+    )

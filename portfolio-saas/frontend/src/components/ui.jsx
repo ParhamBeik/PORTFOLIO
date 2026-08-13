@@ -224,25 +224,13 @@ export const ErrorState = ({ error, onRetry, testId }) => (
   </div>
 );
 
-/** The single upsell in the app. Rendered on any 403 from RequiresFeature. */
-export const ProRequired = ({ testId = "pro-required" }) => (
-  <Card testId={testId}>
-    <h2 className="text-base font-semibold">This analysis needs a Pro plan</h2>
-    <p className="mt-2 max-w-prose text-sm text-muted">
-      Portfolio optimization runs against the full price warehouse and is available on Pro.
-      Your holdings and valuations stay available on every plan.
-    </p>
-  </Card>
-);
-
 /**
  * Renders the right state for a `useApi` result, so no page repeats the
- * loading / error / pro / empty ladder.
+ * loading / error / empty ladder.
  *
  *   <Async {...state}>{(data) => <Table … />}</Async>
  */
-export function Async({ data, error, loading, reload, proRequired, children, empty, testId }) {
-  if (proRequired) return <ProRequired />;
+export function Async({ data, error, loading, reload, children, empty, testId }) {
   if (error) return <ErrorState error={error} onRetry={reload} testId={testId} />;
   if (loading && data == null) return <Loading testId={testId} />;
   if (data == null) return <Empty testId={testId}>{empty || "No data yet."}</Empty>;

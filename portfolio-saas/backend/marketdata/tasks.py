@@ -129,6 +129,12 @@ def operational_health_check():
         if bucket_total != quota.used:
             alerts.append(("quota-ledger-drift", {"used": quota.used, "bucket_total": bucket_total}))
 
+    from marketdata.admin_telemetry import project_disk
+
+    disk = project_disk()
+    if disk.get("alert"):
+        alerts.append(("disk-projection", disk))
+
     for event, details in alerts:
         notify(event, details, dedupe_seconds=900)
     return {"alerts": [event for event, _details in alerts]}
@@ -142,6 +148,29 @@ from .quota import QuotaExhausted
 from portfolio.live.pubsub import get_redis
 
 logger = logging.getLogger(__name__)
+
+
+def _ledgered(workflow, *, endpoint="", destination_table=""):
+    from .models import WorkflowRun
+    from .workflows import WorkflowOutcome
+
+    return WorkflowOutcome(workflow, endpoint=endpoint, destination_table=destination_table)
+
+
+def _finish_ok(outcome, **values):
+    from .models import WorkflowRun
+
+    outcome.finish(WorkflowRun.Outcome.SUCCESS, **values)
+
+
+def _finish_fail(outcome, err):
+    from .models import WorkflowRun
+
+    outcome.finish(
+        WorkflowRun.Outcome.FAILED,
+        error_code=type(err).__name__,
+        metadata={"reason": str(err)[:300]},
+    )
 
 
 def _queue_slots(queue, limit):
@@ -221,21 +250,26 @@ def _invalidate_returns():
 @shared_task(ignore_result=True)
 def weekly_metadata_sync():
     """Refresh StockSymbolMetadata fundamentals for every tracked symbol."""
-    key = settings.TSETMC_API_KEY
-    if not key:
-        return
-    import re
-    for symbol in tracked_tse_symbols():
-        # Exclude derivative symbols ending in digits
-        if re.search(r"\d$", symbol):
-            continue
-        ingest.ingest_symbol_metadata(fetch_symbol_data(key, symbol))
-        _pause()
-    logger.info("weekly_metadata_sync: done")
+    outcome = _ledgered("weekly_metadata_sync", destination_table="StockSymbolMetadata")
+    try:
+        key = settings.TSETMC_API_KEY
+        if not key:
+            _finish_ok(outcome, metadata={"reason": "no_api_key"})
+            return
+        import re
+        count = 0
+        for symbol in tracked_tse_symbols():
+            if re.search(r"\d$", symbol):
+                continue
+            ingest.ingest_symbol_metadata(fetch_symbol_data(key, symbol))
+            _pause()
+            count += 1
+        logger.info("weekly_metadata_sync: done")
+        _finish_ok(outcome, rows_accepted=count)
+    except Exception as err:
+        _finish_fail(outcome, err)
+        raise
 
-
-# The Codal family processed ahead of everything else; see enqueue_codal_reports.
-CODAL_PRIORITY_TITLE = "گزارش فعالیت ماهانه"
 
 _RETRY_CLASS_RE = re.compile(r"\((\w+), status=")
 
@@ -386,36 +420,75 @@ def archive_tick():
 @shared_task(ignore_result=True)
 def recent_history_refresh():
     """Refresh authoritative recent stock series after the TSE close."""
-    slots, depth = _queue_slots("archive", settings.MARKETDATA_ARCHIVE_QUEUE_LIMIT)
-    if not slots:
-        logger.info("recent_history_refresh: queue full at %s", depth)
-        return
-    state_ids = claim_recent_refresh(limit=slots)
-    if state_ids:
-        group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
-    logger.info("recent_history_refresh: enqueued %d archive states", len(state_ids))
+    outcome = _ledgered("recent_history_refresh", destination_table="ArchiveFetchState")
+    try:
+        slots, depth = _queue_slots("archive", settings.MARKETDATA_ARCHIVE_QUEUE_LIMIT)
+        if not slots:
+            from .models import WorkflowRun
+            outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "queue_full", "queue_depth": depth})
+            return
+        state_ids = claim_recent_refresh(limit=slots)
+        if state_ids:
+            group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
+        logger.info("recent_history_refresh: enqueued %d archive states", len(state_ids))
+        _finish_ok(outcome, rows_accepted=len(state_ids))
+    except Exception as err:
+        _finish_fail(outcome, err)
+        raise
 
 
 @shared_task(ignore_result=True)
 def weekly_warehouse_audit():
-    """Run the full read-only audit and leave a timestamped manifest behind.
+    """Run the full read-only audit and leave a timestamped manifest behind."""
+    outcome = _ledgered("weekly_warehouse_audit")
+    try:
+        from django.core.management import call_command
 
-    Only two of the nine checks ran on a schedule (inside nightly_data_integrity);
-    the full sweep had none, so drift was found only when someone thought to look.
-    Read-only by construction -- `audit_warehouse` has no --apply. Repairs still
-    go through `repair_warehouse`, which refuses to act without the manifest's
-    exact SHA-256.
-    """
-    from django.core.management import call_command
+        path = os.path.join(
+            settings.WAREHOUSE_AUDIT_DIR,
+            f"warehouse_audit_{timezone.now():%Y%m%d}.csv",
+        )
+        os.makedirs(settings.WAREHOUSE_AUDIT_DIR, exist_ok=True)
+        call_command("audit_warehouse", manifest_path=path)
+        logger.info("weekly_warehouse_audit: manifest written to %s", path)
+        _finish_ok(outcome, metadata={"path": path})
+        return path
+    except Exception as err:
+        _finish_fail(outcome, err)
+        raise
 
-    path = os.path.join(
-        settings.WAREHOUSE_AUDIT_DIR,
-        f"warehouse_audit_{timezone.now():%Y%m%d}.csv",
+
+@shared_task(ignore_result=True)
+def capture_operational_metrics():
+    """Capture one idempotent 15-minute ops point and retain 90 days."""
+    from marketdata.admin_telemetry import collect_metric_payload, invalidate_ops_cache
+    from marketdata.models import OperationalMetricSnapshot, WorkflowRun
+    from marketdata.workflows import WorkflowOutcome
+
+    outcome = WorkflowOutcome(
+        "capture_operational_metrics",
+        endpoint="ops_metrics",
+        destination_table="OperationalMetricSnapshot",
     )
-    os.makedirs(settings.WAREHOUSE_AUDIT_DIR, exist_ok=True)
-    call_command("audit_warehouse", manifest_path=path)
-    logger.info("weekly_warehouse_audit: manifest written to %s", path)
-    return path
+    now = timezone.now()
+    slot = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
+    payload = collect_metric_payload()
+    snapshot, created = OperationalMetricSnapshot.objects.update_or_create(
+        captured_at=slot,
+        defaults=payload,
+    )
+    invalidate_ops_cache()
+    OperationalMetricSnapshot.objects.filter(
+        captured_at__lt=now - timedelta(days=90)
+    ).delete()
+    outcome.finish(
+        WorkflowRun.Outcome.SUCCESS,
+        rows_accepted=1,
+        rows_created=1 if created else 0,
+        rows_updated=0 if created else 1,
+        metadata={"slot": slot.isoformat()},
+    )
+    return snapshot.pk
 
 
 @shared_task(ignore_result=True)
@@ -438,172 +511,35 @@ def prune_workflow_runs():
 @shared_task(ignore_result=True)
 def archive_maintenance():
     """Reverify completed low-volatility endpoints outside normal batches."""
-    slots, depth = _queue_slots("archive", settings.MARKETDATA_ARCHIVE_QUEUE_LIMIT)
-    if not slots:
-        logger.info("archive_maintenance: queue full at %s", depth)
-        return
-    state_ids = claim_archive_maintenance(limit=min(2, slots))
-    if state_ids:
-        group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
-    logger.info("archive_maintenance: enqueued %d archive states", len(state_ids))
-
-
-@shared_task(ignore_result=True, rate_limit="1/s")
-def process_codal_report(report_id):
-    """Download and extract one report; infrastructure blocks are terminal."""
-    from .codal_pipeline import extract_report
-    from .models import CodalReport, WorkflowRun
-    from .workflows import WorkflowOutcome
-
-    report = CodalReport.objects.select_related("announcement").get(pk=report_id)
-    outcome = WorkflowOutcome(
-        "codal_extract",
-        endpoint="codal_document",
-        symbol=report.announcement.symbol,
-        source="codal.ir",
-        destination_table="CodalReport",
-    )
+    outcome = _ledgered("archive_maintenance", destination_table="ArchiveFetchState")
     try:
-        report, metadata = extract_report(report)
+        slots, depth = _queue_slots("archive", settings.MARKETDATA_ARCHIVE_QUEUE_LIMIT)
+        if not slots:
+            from .models import WorkflowRun
+            outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "queue_full", "queue_depth": depth})
+            return
+        state_ids = claim_archive_maintenance(limit=min(2, slots))
+        if state_ids:
+            group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
+        logger.info("archive_maintenance: enqueued %d archive states", len(state_ids))
+        _finish_ok(outcome, rows_accepted=len(state_ids))
     except Exception as err:
-        report.status = CodalReport.Status.FAILED
-        report.error_code = type(err).__name__[:64]
-        report.save(update_fields=["status", "error_code", "updated_at"])
-        outcome.finish(
-            WorkflowRun.Outcome.FAILED,
-            error_code=type(err).__name__,
-            metadata={"report_id": report_id, "reason": str(err)},
-        )
-        logger.exception("Unhandled Codal failure correlation_id=%s", outcome.correlation_id)
+        _finish_fail(outcome, err)
         raise
-
-    terminal = {
-        CodalReport.Status.PARSED: WorkflowRun.Outcome.SUCCESS,
-        CodalReport.Status.NEEDS_REVIEW: WorkflowRun.Outcome.PARTIAL,
-        CodalReport.Status.UNSUPPORTED: WorkflowRun.Outcome.PARTIAL,
-        CodalReport.Status.BLOCKED_NETWORK: WorkflowRun.Outcome.BLOCKED_NETWORK,
-        CodalReport.Status.BLOCKED_STORAGE: WorkflowRun.Outcome.BLOCKED_STORAGE,
-    }.get(report.status, WorkflowRun.Outcome.FAILED)
-    outcome.finish(
-        terminal,
-        rows_received=metadata.get("table_count", 0) + metadata.get("section_count", 0),
-        rows_accepted=metadata.get("fact_count", 0),
-        error_code=metadata.get("error_code", ""),
-        metadata={"report_id": report_id, **metadata},
-    )
-
-
-@shared_task(ignore_result=True)
-def enqueue_codal_reports():
-    """Stage a bounded newest-first slice of the existing Codal corpus."""
-    from datetime import timedelta
-
-    from django.db.models import Q
-
-    from .codal_classification import classify_announcement
-    from .models import CodalAnnouncement, CodalReport, WorkflowRun
-    from .workflows import WorkflowOutcome
-
-    outcome = WorkflowOutcome("codal_enqueue", endpoint="codal_document")
-    if not settings.CODAL_EXTRACTION_ENABLED:
-        outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "disabled"})
-        return
-    slots, depth = _queue_slots("codal", settings.MARKETDATA_CODAL_QUEUE_LIMIT)
-    if not slots:
-        outcome.finish(
-            WorkflowRun.Outcome.SKIPPED,
-            metadata={
-                "reason": "queue_unavailable" if depth is None else "queue_full",
-                "queue_depth": depth,
-                "queue_limit": settings.MARKETDATA_CODAL_QUEUE_LIMIT,
-            },
-        )
-        return
-    batch_size = min(settings.CODAL_ENQUEUE_BATCH_SIZE, slots)
-    now = timezone.now()
-    stale = now - timedelta(hours=1)
-    # Infrastructure blocks were terminal: one DNS blip or a single 503 parked a
-    # document at blocked_network permanently, with no retry, no backoff and no
-    # command to reset it. Recovery was a manual UPDATE. They are transient by
-    # definition, so re-offer them after a cool-down; parse outcomes
-    # (unsupported, needs_review) stay terminal because re-running changes
-    # nothing until the parser does.
-    retry_after = now - timedelta(hours=settings.CODAL_BLOCKED_RETRY_HOURS)
-    pending = CodalAnnouncement.objects.filter(
-        Q(report__isnull=True)
-        | Q(report__status=CodalReport.Status.PENDING)
-        | Q(report__status=CodalReport.Status.FETCHING, report__updated_at__lt=stale)
-        | Q(
-            report__status__in=(
-                CodalReport.Status.BLOCKED_NETWORK,
-                CodalReport.Status.BLOCKED_STORAGE,
-                CodalReport.Status.FAILED,
-            ),
-            report__updated_at__lt=retry_after,
-        )
-    ).order_by("-date_publish", "-time_publish")
-
-    # Monthly activity reports first: 17,808 documents over 725 companies, every
-    # one carrying an Excel link, so they take the most reliable parse path and
-    # never touch OCR. They are also the richest recurring dataset here --
-    # monthly production and sales per product. Proving the pipeline on one
-    # uniform template beats spreading thin across ~50 of them, and the corpus
-    # spans sixteen years, so newest-first within the family still matters.
-    batch = list(pending.filter(title__startswith=CODAL_PRIORITY_TITLE)[
-        :batch_size
-    ])
-    if len(batch) < batch_size:
-        seen = {row.pk for row in batch}
-        batch += [
-            row
-            for row in pending[: batch_size * 2]
-            if row.pk not in seen
-        ][: batch_size - len(batch)]
-    announcements = batch
-    report_ids = []
-    # This task had no exception handler at all. It marks each report FETCHING and
-    # commits before dispatching, so a broker outage on .delay() left a whole
-    # batch stranded at FETCHING with no task in flight and -- worse -- no ledger
-    # row at all. The only signal was a gap where a row should have been.
-    try:
-        for announcement in announcements:
-            defaults = classify_announcement(announcement)
-            report, _created = CodalReport.objects.get_or_create(
-                announcement=announcement,
-                defaults={**defaults, "parser_version": settings.CODAL_PARSER_VERSION},
-            )
-            report.status = CodalReport.Status.FETCHING
-            report.error_code = ""
-            report.save(update_fields=["status", "error_code", "updated_at"])
-            report_ids.append(report.pk)
-        for report_id in report_ids:
-            process_codal_report.delay(report_id)
-    except Exception as err:
-        # Hand the stranded reports back so the next tick retries them, rather
-        # than waiting an hour for the stale-FETCHING sweep to notice.
-        CodalReport.objects.filter(
-            pk__in=report_ids, status=CodalReport.Status.FETCHING
-        ).update(status=CodalReport.Status.PENDING)
-        outcome.finish(
-            WorkflowRun.Outcome.FAILED,
-            error_code=type(err).__name__,
-            rows_received=len(announcements),
-            metadata={"reason": str(err)[:300], "released": len(report_ids)},
-        )
-        logger.exception("Codal enqueue failed correlation_id=%s", outcome.correlation_id)
-        raise
-    outcome.finish(
-        WorkflowRun.Outcome.SUCCESS,
-        rows_received=len(announcements),
-        rows_accepted=len(report_ids),
-    )
 
 
 @shared_task(ignore_result=True)
 def catalog_sync(limit: int = None):
-    result = sync_provider_catalog(limit=limit)
-    ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
-    logger.info("catalog_sync: %d seen, %d eligible", result["seen"], result["eligible"])
+    outcome = _ledgered("catalog_sync", destination_table="MarketInstrument")
+    try:
+        result = sync_provider_catalog(limit=limit)
+        ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
+        logger.info("catalog_sync: %d seen, %d eligible", result["seen"], result["eligible"])
+        _finish_ok(outcome, rows_received=result["seen"], rows_accepted=result["eligible"])
+        return result
+    except Exception as err:
+        _finish_fail(outcome, err)
+        raise
 
 
 @shared_task(ignore_result=True)
@@ -674,6 +610,10 @@ def aggregate_daily_gold_currency_history(date_str: str = None):
     if created_count:
         _invalidate_returns()
     logger.info("aggregate_daily_gold_currency_history: processed %d symbols for %s", created_count, today_jalali)
+    _finish_ok(
+        _ledgered("aggregate_daily_gold_currency_history", destination_table="GoldCurrencyHistory"),
+        rows_accepted=created_count,
+    )
 
 
 @shared_task(ignore_result=True)
@@ -739,6 +679,10 @@ def aggregate_daily_stock_history(date_str: str = None):
     if created_count:
         _invalidate_returns()
     logger.info("aggregate_daily_stock_history: processed %d stock symbols for %s", created_count, today_jalali)
+    _finish_ok(
+        _ledgered("aggregate_daily_stock_history", destination_table="MarketCandle"),
+        rows_accepted=created_count,
+    )
 
 
 @shared_task(ignore_result=True)
@@ -749,10 +693,33 @@ def nightly_data_integrity():
     point is that a fresh unit regression shows up in the log the night it
     appears, instead of surfacing months later inside somebody's valuation.
     """
-    from marketdata.integrity import update_all_symbols_integrity
+    from marketdata.archive import reopen_states_with_gaps
+    from marketdata.integrity import market_outage_windows, update_all_symbols_integrity
     logger.info("Starting nightly data integrity checks...")
     results = update_all_symbols_integrity()
     logger.info("Nightly data integrity checks completed for %d symbols.", len(results))
+
+    outages = market_outage_windows()
+    if outages:
+        # Market-wide, so every symbol is short the same sessions and the
+        # per-symbol gate cannot see it. Reopen the lot.
+        reopened = reopen_states_with_gaps(None)
+        logger.error(
+            "[INGEST_OUTAGE] %d gap(s) in the session calendar; longest %s to %s. "
+            "Reopened %d archive state(s) to refetch.",
+            len(outages), outages[0][0], outages[0][1], reopened,
+        )
+    else:
+        gapped = [
+            row.symbol for row in results
+            if "low_coverage" in row.reason or "price_gap_exceeded" in row.reason
+        ]
+        reopened = reopen_states_with_gaps(gapped)
+        if reopened:
+            logger.info(
+                "Reopened %d archive state(s) across %d symbol(s) with missing sessions.",
+                reopened, len(gapped),
+            )
 
     try:
         from marketdata.management.commands.audit_warehouse import Command as Audit
@@ -781,6 +748,10 @@ def nightly_data_integrity():
             logger.info("[UNIT_AUDIT] No mis-scaled rows found.")
     except Exception:  # never let a report-only check break the integrity run
         logger.exception("[UNIT_AUDIT] Audit failed; integrity results still stand.")
+    _finish_ok(
+        _ledgered("nightly_data_integrity", destination_table="SymbolIntegrity"),
+        rows_accepted=len(results),
+    )
 
 
 @shared_task(ignore_result=True)
@@ -1025,7 +996,7 @@ def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
         rejected_count,
     )
     
-    return {
+    result = {
         "tse_symbols_examined": len(symbols),
         "corporate_action_candidates": corporate_action_candidates,
         "actions_created": actions_created_count,
@@ -1033,6 +1004,13 @@ def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
         "proposed_rejections": proposed_rejections,
         "spikes_rejected": rejected_count,
     }
+    _finish_ok(
+        _ledgered("nightly_series_validation", destination_table="RejectedRecord"),
+        rows_accepted=actions_created_count,
+        rows_rejected=rejected_count,
+        metadata=result,
+    )
+    return result
 @shared_task(ignore_result=True)
 def nightly_asset_metrics(window_days=365):
     import numpy as np
@@ -1106,3 +1084,7 @@ def nightly_asset_metrics(window_days=365):
         )
         written += 1
     logger.info("nightly_asset_metrics: wrote %d snapshots", written)
+    _finish_ok(
+        _ledgered("nightly_asset_metrics", destination_table="AssetMetricSnapshot"),
+        rows_accepted=written,
+    )

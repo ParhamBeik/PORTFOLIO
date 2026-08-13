@@ -78,11 +78,9 @@ class Command(BaseCommand):
         user, created = User.objects.get_or_create(
             email=SAMPLE_EMAIL,
             defaults={"first_name": "Admin", "last_name": "User",
-                      "tier": User.Tier.PRO,
                       "is_staff": True,
                       "is_superuser": True,
-                      "email_verified_at": tz.now(),
-                      "is_active": True},
+                            "is_active": True},
         )
         if created:
             user.set_password(SAMPLE_PASSWORD)

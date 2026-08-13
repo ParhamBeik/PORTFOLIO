@@ -16,8 +16,6 @@ import pytest
 from marketdata import ingest
 from marketdata.models import (
     CodalAnnouncement,
-    CommodityHistory,
-    CryptoHistory,
     DailyStockHistory,
     GoldCurrencyHistory,
     ShareholderRecord,
@@ -118,31 +116,6 @@ def test_codal_stores_joinable_ascii_dates():
     assert row.date_publish == "1405-05-03"
     assert row.time_publish == "13:48:54"
     assert row.code == "ن-26"
-
-
-def test_crypto_keeps_every_coin_apart():
-    created, _ = ingest.ingest_crypto_history("CRYPTO", CRYPTO_PAYLOAD)
-    assert created == 2
-    assert set(CryptoHistory.objects.values_list("symbol", flat=True)) == {
-        "Bitcoin",
-        "Ethereum",
-    }
-    btc = CryptoHistory.objects.get(symbol="Bitcoin")
-    assert btc.date == "1405-05-04"
-    assert float(btc.close_price_usd) == 64545.0
-    assert btc.market_cap == 837148080052
-
-
-def test_commodity_reads_the_nested_category_lists():
-    created, _ = ingest.ingest_commodity_history("COMMODITIES", COMMODITY_PAYLOAD)
-    assert created == 4
-    assert set(CommodityHistory.objects.values_list("symbol", flat=True)) == {
-        "XAUUSD",
-        "XAGUSD",
-        "Cu",
-        "BRENT",
-    }
-    assert CommodityHistory.objects.get(symbol="BRENT").date == "1405-05-04"
 
 
 def test_shareholder_rows_get_a_date_when_the_caller_omits_one():
