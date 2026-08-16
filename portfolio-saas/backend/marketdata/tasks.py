@@ -22,7 +22,7 @@ from celery import group, shared_task
 from django.conf import settings
 from django.utils import timezone
 
-from . import ingest
+from . import ingest, jalali
 from .archive import (
     claim_archive_batch,
     claim_archive_maintenance,
@@ -35,6 +35,52 @@ from .catalog import sync_provider_catalog
 from .fetchers import (
     fetch_symbol_data,
 )
+
+
+@shared_task
+def capture_derivative_snapshots():
+    """Collect live contracts now; analytics waits for real accumulated history."""
+    from .fetchers import fetch_derivatives
+
+    results = {}
+    for kind, endpoint_key in (
+        ("tse_option", "option_contracts"),
+        ("ime_future", "ime_futures"),
+        ("ime_option", "ime_options"),
+    ):
+        payload = fetch_derivatives(settings.TSETMC_API_KEY, endpoint_key)
+        results[kind] = ingest.ingest_derivative_snapshots(kind, payload)
+    return results
+
+
+@shared_task
+def extract_codal_report(announcement_id):
+    from .codal_extract import extract
+
+    return extract(announcement_id)
+
+
+@shared_task
+def queue_codal_extractions():
+    """Fan out a bounded batch so document work never occupies archive workers."""
+    from django.db.models import Q
+
+    from .models import CodalAnnouncement, CodalReport
+
+    ids = list(
+        CodalAnnouncement.objects.filter(report__isnull=True)
+        .filter(
+            Q(link_excel__gt="")
+            | Q(link_pdf__gt="")
+            | Q(link__gt="")
+            | Q(link_attachment__gt="")
+        )
+        .order_by("-date_publish", "-time_publish")
+        .values_list("id", flat=True)[:settings.CODAL_EXTRACT_BATCH_SIZE]
+    )
+    for announcement_id in ids:
+        extract_codal_report.delay(announcement_id)
+    return len(ids)
 
 
 @shared_task(ignore_result=True)
@@ -694,6 +740,7 @@ def aggregate_daily_stock_history(date_str: str = None):
             symbol=symbol,
             timeframe=MarketCandle.AGGREGATE,
             date_time=today_jalali,
+            ts=jalali.to_datetime(today_jalali),
             defaults={
                 "open_price": open_p,
                 "high_price": high_p,

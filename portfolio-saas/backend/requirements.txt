@@ -20,6 +20,11 @@ scipy==1.13.1
 cvxpy==1.5.2
 scikit-learn==1.5.0
 jdatetime==5.2.0
+pymongo==4.10.1
+openpyxl==3.1.5
+beautifulsoup4==4.12.3
+lxml==5.3.0
+pypdf==5.1.0
 # Codal document *extraction* (Excel/PDF/OCR parsing) is deferred: the ingest path
 # stores BrsApi's announcement fields only. openpyxl / beautifulsoup4 / lxml /
 # pypdf / pytesseract / Pillow were dropped when the pipeline was removed — re-add

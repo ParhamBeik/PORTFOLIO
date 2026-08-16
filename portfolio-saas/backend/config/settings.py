@@ -265,6 +265,9 @@ MARKETDATA_TICK_VOLUME_TOLERANCE = float(
 # still reported verified. Bound the target to the newest N pages per symbol so
 # the state can honestly converge; raise it when the backlog is otherwise idle.
 MARKETDATA_CODAL_MAX_PAGES = int(os.getenv("MARKETDATA_CODAL_MAX_PAGES", "5"))
+MONGO_URI = os.getenv("MONGO_URI", "")
+MONGO_DATABASE = os.getenv("MONGO_DATABASE", "portfolio")
+CODAL_EXTRACT_BATCH_SIZE = int(os.getenv("CODAL_EXTRACT_BATCH_SIZE", "20"))
 
 WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "30"))
 

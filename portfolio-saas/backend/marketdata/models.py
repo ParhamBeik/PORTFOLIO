@@ -14,6 +14,52 @@ re-running a backfill is free (`bulk_create(ignore_conflicts=True)`).
 from django.db import models
 
 
+class JalaliDerivedDateTime(models.DateTimeField):
+    """timestamptz derived from a sibling Jalali column at write time.
+
+    TimescaleDB cannot range-partition a varchar, so every hypertable here needs
+    a real timestamp beside its Jalali domain key. Making that column NOT NULL
+    means every writer has to fill it, and there are many: the ingest paths, the
+    nightly aggregators, the repair commands, and every test that seeds a row.
+    Patching each one leaves the next writer to rediscover the constraint.
+
+    `pre_save` is the single point Django routes ALL ORM writes through --
+    `save()`, `bulk_create()`, `update_or_create()` alike -- so deriving the
+    value here means no caller ever has to know this column exists. An explicit
+    value is always respected; this only fills a blank.
+    """
+
+    def __init__(self, *args, date_field="date", time_field=None, **kwargs):
+        self.date_field = date_field
+        self.time_field = time_field
+        super().__init__(*args, **kwargs)
+
+    def deconstruct(self):
+        name, path, args, kwargs = super().deconstruct()
+        kwargs["date_field"] = self.date_field
+        if self.time_field is not None:
+            kwargs["time_field"] = self.time_field
+        return name, path, args, kwargs
+
+    def pre_save(self, model_instance, add):
+        existing = getattr(model_instance, self.attname, None)
+        if existing is not None:
+            return existing
+        from . import jalali
+
+        raw_date = getattr(model_instance, self.date_field, "") or ""
+        # MarketCandle.date_time has historically carried "<date> <time>"; keep
+        # only the date portion, matching what the ingest path stores.
+        date_value = str(raw_date).split()[0] if raw_date else ""
+        time_value = (
+            getattr(model_instance, self.time_field, "") or ""
+            if self.time_field
+            else ""
+        )
+        derived = jalali.to_datetime(date_value, time_value)
+        setattr(model_instance, self.attname, derived)
+        return derived
+
 class ApiRequestQuota(models.Model):
     """Persistent provider-call counter shared by every worker and endpoint."""
 
@@ -207,12 +253,20 @@ class DailyStockHistory(models.Model):
     buy_n_value = models.BigIntegerField(null=True, blank=True)
     sell_i_value = models.BigIntegerField(null=True, blank=True)
     sell_n_value = models.BigIntegerField(null=True, blank=True)
+    # Partition dimension ONLY -- see migration 0031. The Jalali `date` above stays
+    # the domain key: it is what the provider speaks and what every unique
+    # constraint and reader uses, so nothing in portfolio/services changes.
+    # TimescaleDB cannot range-partition a varchar, hence this second column.
+    # Date only, matching migration 0031: this table's 4M backfilled rows sit at
+    # midnight Tehran, and a `time` column carrying the day's last trade would
+    # silently give new rows a different meaning from old ones.
+    ts = JalaliDerivedDateTime(blank=True, date_field="date")
 
     class Meta:
         ordering = ["-date"]
         constraints = [
             models.UniqueConstraint(
-                fields=["symbol", "date", "is_adjusted"],
+                fields=["symbol", "date", "is_adjusted", "ts"],
                 name="uniq_stock_history_symbol_date_adj",
             )
         ]
@@ -298,12 +352,17 @@ class MarketCandle(models.Model):
     ingested_at = models.DateTimeField(null=True, blank=True)
     # Lineage breadcrumb; both its indexes recorded ~0 scans. See DailyStockHistory.
     last_correlation_id = models.CharField(max_length=64, blank=True, default="")
+    # Partition dimension ONLY -- see migration 0031. The Jalali `date_time` above stays
+    # the domain key: it is what the provider speaks and what every unique
+    # constraint and reader uses, so nothing in portfolio/services changes.
+    # TimescaleDB cannot range-partition a varchar, hence this second column.
+    ts = JalaliDerivedDateTime(blank=True, date_field="date_time")
 
     class Meta:
         ordering = ["-date_time"]
         constraints = [
             models.UniqueConstraint(
-                fields=["symbol", "timeframe", "date_time"],
+                fields=["symbol", "timeframe", "date_time", "ts"],
                 name="uniq_market_candle_symbol_tf_dt",
             )
         ]
@@ -331,6 +390,11 @@ class StockTransactionTick(models.Model):
     price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     volume = models.BigIntegerField(default=0)
     canceled = models.BooleanField(default=False)
+    # Partition dimension ONLY -- see migration 0031. The Jalali `date`/`time` above stays
+    # the domain key: it is what the provider speaks and what every unique
+    # constraint and reader uses, so nothing in portfolio/services changes.
+    # TimescaleDB cannot range-partition a varchar, hence this second column.
+    ts = JalaliDerivedDateTime(blank=True, date_field="date", time_field="time")
 
     class Meta:
         ordering = ["date", "row"]
@@ -344,7 +408,7 @@ class StockTransactionTick(models.Model):
             # dropped ~8% of every busy day (937 of 11,652 on one sample) and
             # left it arbitrary which of the twins survived.
             models.UniqueConstraint(
-                fields=["symbol", "date", "row", "time"],
+                fields=["symbol", "date", "row", "time", "ts"],
                 name="uniq_stock_tick_symbol_date_row_time",
             )
         ]
@@ -423,6 +487,50 @@ class CodalAnnouncement(models.Model):
         indexes = [
             models.Index(fields=["symbol", "tier"], name="codal_symbol_tier_idx"),
         ]
+
+
+class DerivativeContract(models.Model):
+    """Current metadata for a provider-listed option or futures contract."""
+
+    class Kind(models.TextChoices):
+        TSE_OPTION = "tse_option", "TSE option"
+        IME_OPTION = "ime_option", "IME option"
+        IME_FUTURE = "ime_future", "IME future"
+
+    kind = models.CharField(max_length=16, choices=Kind.choices)
+    contract_code = models.CharField(max_length=96)
+    underlying_code = models.CharField(max_length=96, blank=True, default="")
+    expiry_date = models.CharField(max_length=10, blank=True, default="")
+    contract_size = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
+    active = models.BooleanField(default=True)
+    provider_payload = models.JSONField(default=dict)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["kind", "contract_code"], name="uniq_derivative_contract_kind_code"
+            )
+        ]
+        indexes = [models.Index(fields=["kind", "expiry_date"], name="marketdata__kind_0a4bd7_idx")]
+
+
+class DerivativeSnapshot(models.Model):
+    """Append-only live quote captured for a derivative contract."""
+
+    contract = models.ForeignKey(
+        DerivativeContract, on_delete=models.CASCADE, related_name="snapshots"
+    )
+    observed_at = models.DateTimeField(db_index=True)
+    last_price = models.DecimalField(max_digits=24, decimal_places=4, null=True, blank=True)
+    bid_price = models.DecimalField(max_digits=24, decimal_places=4, null=True, blank=True)
+    ask_price = models.DecimalField(max_digits=24, decimal_places=4, null=True, blank=True)
+    volume = models.BigIntegerField(null=True, blank=True)
+    open_interest = models.BigIntegerField(null=True, blank=True)
+    provider_payload = models.JSONField(default=dict)
+
+    class Meta:
+        indexes = [models.Index(fields=["contract", "-observed_at"], name="marketdata__contrac_1eb881_idx")]
 
 
 class CodalReport(models.Model):

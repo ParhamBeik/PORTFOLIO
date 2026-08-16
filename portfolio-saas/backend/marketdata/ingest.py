@@ -23,6 +23,8 @@ from .currency import canonical_symbol, gold_history_storage_unit, to_toman
 from .models import (
     CodalAnnouncement,
     DailyStockHistory,
+    DerivativeContract,
+    DerivativeSnapshot,
     GoldCurrencyHistory,
     MarketCandle,
     MarketIndexData,
@@ -269,7 +271,7 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
             "buy_n_value", "sell_i_value", "sell_n_value",
             "ingested_at", "last_correlation_id",
         ),
-        unique_fields=("symbol", "date", "is_adjusted"),
+        unique_fields=("symbol", "date", "is_adjusted", "ts"),
         recent_field="date",
     )
     return created, conflicts + bad
@@ -367,7 +369,7 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
     created, conflicts = _bulk(
         MarketCandle, rows, scope={"symbol": symbol, "timeframe": timeframe},
         update_fields=("open_price", "high_price", "low_price", "close_price", "volume", "ingested_at", "last_correlation_id"),
-        unique_fields=("symbol", "timeframe", "date_time"),
+        unique_fields=("symbol", "timeframe", "date_time", "ts"),
         recent_field="date_time",
     )
     return created, conflicts + bad
@@ -510,6 +512,54 @@ def ingest_codal(payload) -> tuple[int, int]:
     return created, conflicts + bad
 
 
+def _number(value):
+    try:
+        return Decimal(str(value)) if value not in (None, "") else None
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+
+
+def ingest_derivative_snapshots(kind, payload) -> tuple[int, int]:
+    """Persist provider snapshots without pretending they are historical data."""
+    from django.utils import timezone
+
+    rows = flatten_records(payload)
+    observed_at = timezone.now()
+    created = skipped = 0
+    for row in rows:
+        code = str(
+            row.get("contract_code") or row.get("code") or row.get("l18") or row.get("symbol") or ""
+        ).strip()
+        if not code:
+            skipped += 1
+            continue
+        contract, _ = DerivativeContract.objects.update_or_create(
+            kind=kind,
+            contract_code=code,
+            defaults={
+                "underlying_code": str(
+                    row.get("underlying_code") or row.get("underlying") or row.get("symbol_underlying") or ""
+                ).strip(),
+                "expiry_date": normalize_jalali(
+                    row.get("date_end") or row.get("expiry_date") or ""
+                ),
+                "contract_size": _number(row.get("contract_size") or row.get("size")),
+                "active": True,
+                "provider_payload": row,
+            },
+        )
+        DerivativeSnapshot.objects.create(
+            contract=contract,
+            observed_at=observed_at,
+            last_price=_number(row.get("last_price") or row.get("price") or row.get("pl")),
+            bid_price=_number(row.get("bid_price") or row.get("best_demand_price")),
+            ask_price=_number(row.get("ask_price") or row.get("best_supply_price")),
+            volume=row.get("volume") or row.get("tvol") or None,
+            open_interest=row.get("open_interest") or row.get("openinterest") or None,
+            provider_payload=row,
+        )
+        created += 1
+    return created, skipped
 # The provider answers a `USDT` request with rows that belong under `USDT_IRT`
 # (Tether quoted in Rial). Callers that verify a fetch must read back on the
 # symbol the ingest wrote, not the one they asked for, or the state can never

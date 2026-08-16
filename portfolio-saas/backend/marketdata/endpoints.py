@@ -122,6 +122,20 @@ REGISTRY = {
             rows_per_request=200,
         ),
         Endpoint(
+            key="ime_futures",
+            path="Ime/Futures.php",
+            nature=Nature.LIVE,
+            bucket=LIVE,
+            rows_per_request=200,
+        ),
+        Endpoint(
+            key="ime_options",
+            path="Ime/Option.php",
+            nature=Nature.LIVE,
+            bucket=LIVE,
+            rows_per_request=200,
+        ),
+        Endpoint(
             key="symbol",
             path="Tsetmc/Symbol.php",
             nature=Nature.LIVE,

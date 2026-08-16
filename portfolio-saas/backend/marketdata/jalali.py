@@ -9,7 +9,9 @@ provider payloads. `is_jalali` validates the ones we send out. Both live here so
 that `ingest` (which writes) and `validation` (which screens) agree on what a
 date is without importing each other.
 """
+import datetime
 import re
+from zoneinfo import ZoneInfo
 
 import jdatetime
 
@@ -99,3 +101,40 @@ def recent_days(count):
         (start - jdatetime.timedelta(days=offset)).strftime("%Y-%m-%d")
         for offset in range(count)
     ]
+
+
+TEHRAN = ZoneInfo("Asia/Tehran")
+
+
+def to_gregorian(value):
+    """Jalali "1405-05-24" -> datetime.date, or None if it is not a Jalali date.
+
+    The inverse of what the rest of this module does. Every warehouse table
+    stores the provider's Jalali string as its domain key, so this exists for
+    the one thing a string cannot be: a range-partition dimension.
+    """
+    if not is_jalali(value):
+        return None
+    year, month, day = (int(part) for part in value.split("-"))
+    return jdatetime.date(year, month, day).togregorian()
+
+
+def to_datetime(date_value, time_value=""):
+    """Jalali date (+ optional "HH:MM:SS") -> aware UTC datetime, or None.
+
+    Times are read as Tehran local, which is what the provider quotes, and
+    returned aware so Postgres stores an unambiguous instant rather than a
+    wall-clock reading that shifts twice a year.
+    """
+    gregorian = to_gregorian(date_value)
+    if gregorian is None:
+        return None
+    parts = fold_digits(time_value).split(":") if time_value else []
+    try:
+        hour, minute, second = (int(parts[i]) if i < len(parts) else 0 for i in range(3))
+    except (TypeError, ValueError):
+        hour = minute = second = 0
+    return datetime.datetime(
+        gregorian.year, gregorian.month, gregorian.day, hour, minute, second,
+        tzinfo=TEHRAN,
+    ).astimezone(datetime.timezone.utc)

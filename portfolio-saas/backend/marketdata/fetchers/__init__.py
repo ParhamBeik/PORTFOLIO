@@ -7,6 +7,7 @@ from .base import fetch_json  # noqa: F401
 from .catalog import fetch_all_symbols  # noqa: F401
 from .candlestick import fetch_candlesticks  # noqa: F401
 from .codal import fetch_codal_announcements  # noqa: F401
+from .derivatives import fetch_derivatives  # noqa: F401
 from .gold_currency import (  # noqa: F401
     fetch_gold_currency_free,
     fetch_gold_currency_pro,

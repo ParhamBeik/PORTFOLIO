@@ -26,6 +26,8 @@ x-backend-env: &backend-env
   BRS_URL: ${BRS_URL:-https://Api.BrsApi.ir/Market/Gold_Currency.php}
   TSETMC_API_KEY: ${TSETMC_API_KEY:-}
   TSETMC_URL: ${TSETMC_URL:-https://Api.BrsApi.ir/Tsetmc/AllSymbols.php}
+  MONGO_URI: ${MONGO_URI:-mongodb://mongo:27017}
+  MONGO_DATABASE: ${MONGO_DATABASE:-portfolio}
 
 x-json-logging: &json-logging
   driver: json-file
@@ -35,7 +37,12 @@ x-json-logging: &json-logging
 
 services:
   db:
-    image: postgres:16.4-alpine
+    # TimescaleDB, not stock Postgres: the tick table grows ~744k rows/day and
+    # native columnar compression is the reason for the swap (see migration
+    # 0030). Alpine/musl on purpose -- the cluster is en_US.utf8 on musl, and a
+    # glibc image gives that collation different sort semantics, silently
+    # corrupting every varchar btree in a warehouse whose keys are all varchar.
+    image: timescale/timescaledb:2.17.2-pg16
     restart: unless-stopped
     logging: *json-logging
     environment:
@@ -53,6 +60,8 @@ services:
     shm_size: 256mb
     command:
       - postgres
+      - -c
+      - shared_preload_libraries=timescaledb
       - -c
       - shared_buffers=256MB
       - -c
@@ -83,6 +92,24 @@ services:
         limits:
           cpus: "0.5"
           memory: 256m
+
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    logging: *json-logging
+    command: ["mongod", "--wiredTigerCacheSizeGB", "1"]
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 1280m
 
   migrate:
     build: ./backend
@@ -197,6 +224,29 @@ services:
           cpus: "1"
           memory: 1536m
 
+  celery_worker_codal:
+    build: ./backend
+    restart: unless-stopped
+    logging: *json-logging
+    entrypoint: []
+    depends_on:
+      backend:
+        condition: service_started
+      mongo:
+        condition: service_healthy
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: celery_worker_codal
+    volumes:
+      - ./backend:/app
+    command: celery -A config worker -l info --concurrency=1 -Q codal -n codal@%h --max-memory-per-child=600000
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d codal@$$HOSTNAME"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 40s
+
   celery_beat:
     build: ./backend
     restart: unless-stopped
@@ -249,3 +299,4 @@ services:
 
 volumes:
   pgdata:
+  mongodata:

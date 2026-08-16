@@ -49,6 +49,9 @@ app.conf.update(
         "marketdata.tasks.recent_history_refresh": {"queue": "live"},
         "marketdata.tasks.archive_maintenance": {"queue": "live"},
         "marketdata.tasks.capture_operational_metrics": {"queue": "live"},
+        "marketdata.tasks.capture_derivative_snapshots": {"queue": "live"},
+        "marketdata.tasks.extract_codal_report": {"queue": "codal"},
+        "marketdata.tasks.queue_codal_extractions": {"queue": "live"},
         "marketdata.tasks.*": {"queue": "archive"},
         "portfolio.tasks.*": {"queue": "live"},
     },
@@ -84,6 +87,14 @@ app.conf.beat_schedule = {
     "marketdata-daily-catalog": {
         "task": "marketdata.tasks.catalog_sync",
         "schedule": crontab(hour=3, minute=40),
+    },
+    "capture-derivative-snapshots": {
+        "task": "marketdata.tasks.capture_derivative_snapshots",
+        "schedule": 300.0,
+    },
+    "queue-codal-extractions": {
+        "task": "marketdata.tasks.queue_codal_extractions",
+        "schedule": crontab(hour=3, minute=55),
     },
     # 24/7 Gold/Currency/Crypto midnight EOD aggregation.
     "aggregate-gold-currency-daily-2359": {

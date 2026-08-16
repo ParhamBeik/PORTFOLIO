@@ -7,7 +7,7 @@ dates are stored dash-normalized.
 """
 import pytest
 
-from marketdata import ingest
+from marketdata import ingest, jalali
 from marketdata.models import (
     CodalAnnouncement,
     DailyStockHistory,
@@ -67,6 +67,7 @@ def test_ingest_daily_history_maps_fields_and_normalizes_dates():
     row = DailyStockHistory.objects.get(symbol="فملی", date="1403-10-19")
     # Storage unit is Rial; provider values are stored undivided.
     assert row.pl == 8500 and row.buy_count_i == 2416 and row.is_adjusted is False
+    assert row.ts is not None
     # Slash-separated input date stored dash-normalized.
     assert DailyStockHistory.objects.filter(date="1403-10-20").exists()
     assert not DailyStockHistory.objects.filter(date__contains="/").exists()
@@ -93,6 +94,7 @@ def test_ingest_candles_timeframe_mapping_and_idempotency():
     assert created == 2
     assert MarketCandle.objects.filter(timeframe="1d_adj").count() == 2
     assert MarketCandle.objects.filter(date_time="1404-02-25").exists()
+    assert MarketCandle.objects.exclude(ts__isnull=True).count() == 2
     created, skipped = ingest.ingest_candles("فملی", 3, CANDLE_PAYLOAD)
     assert created == 0 and skipped == 2
 
@@ -181,3 +183,47 @@ def test_codal_symbol_padding_is_stripped_on_ingest(db):
     stored = CodalAnnouncement.objects.get(code="1")
     assert stored.symbol == "زقیام"
     assert stored.company_name == "شرکت قیام"
+
+
+@pytest.mark.django_db
+class TestJalaliPartitionColumn:
+    """`ts` is Timescale's partition key and NOT NULL, so every ORM write path
+    must fill it -- including bulk_create, which never calls Model.save()."""
+
+    def test_bulk_create_fills_ts_from_the_jalali_key(self):
+        from marketdata.models import MarketCandle
+
+        MarketCandle.objects.bulk_create([
+            MarketCandle(symbol="SYM", timeframe=MarketCandle.ADJUSTED,
+                         date_time="1405-05-24", close_price=100, volume=1),
+        ])
+        row = MarketCandle.objects.get(symbol="SYM")
+        assert row.ts is not None
+        # Jalali 1405-05-24 is Gregorian 2026-08-15, and a date-only table
+        # anchors at midnight TEHRAN -- which is 20:30 the previous day in UTC.
+        # Asserting row.ts.date() would read the 14th and look like an off-by-one
+        # when it is just the stored instant being timezone-correct.
+        assert row.ts.isoformat() == "2026-08-14T20:30:00+00:00"
+        assert row.ts.astimezone(jalali.TEHRAN).date().isoformat() == "2026-08-15"
+
+    def test_tick_ts_carries_time_of_day(self):
+        from marketdata.models import StockTransactionTick
+
+        StockTransactionTick.objects.bulk_create([
+            StockTransactionTick(symbol="SYM", date="1405-05-24", time="09:00:00",
+                                 row=1, price=10, volume=5),
+        ])
+        row = StockTransactionTick.objects.get(symbol="SYM")
+        # 09:00 Tehran is 05:30 UTC; a naive read would store the wall clock.
+        assert row.ts.isoformat() == "2026-08-15T05:30:00+00:00"
+
+    def test_an_explicit_value_is_never_overwritten(self):
+        import datetime
+        from marketdata.models import MarketCandle
+
+        pinned = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+        MarketCandle.objects.bulk_create([
+            MarketCandle(symbol="PIN", timeframe=MarketCandle.ADJUSTED,
+                         date_time="1405-05-24", close_price=1, volume=0, ts=pinned),
+        ])
+        assert MarketCandle.objects.get(symbol="PIN").ts == pinned
