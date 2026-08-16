@@ -9,7 +9,14 @@ import jdatetime
 
 from marketdata.candles import candle_close_qs
 from marketdata.currency import tse_close_to_toman
-from marketdata.models import MarketInstrument, SymbolIntegrity, GoldCurrencyHistory
+from django.core.cache import cache
+
+from marketdata.models import (
+    GoldCurrencyHistory,
+    MarketCandle,
+    MarketInstrument,
+    SymbolIntegrity,
+)
 from portfolio.services.returns import normalize_as_of, to_jalali_str
 
 # Tunable thresholds
@@ -23,7 +30,58 @@ MIN_DAILY_RETURNS = 30
 # a 45-row shared window and a Sharpe of 16.
 MAX_UNIVERSE_SIZE = 50
 
+UNIVERSE_CACHE_TTL = 600
+
+
+def _universe_fingerprint() -> str:
+    """Monotonic fingerprint of the four tables this screen reads.
+
+    Same idea as the returns matrix's price-version key: a new candle ingest, an
+    integrity-gate flip, or a change in provider eligibility must rotate the
+    cache rather than wait out a TTL. Deliberately NOT the returns fingerprint --
+    this screen never reads Price, so a live tick should not invalidate it.
+    """
+    def _max_id(model):
+        return model.objects.order_by("-id").values_list("id", flat=True).first() or 0
+
+    return "{}:{}:{}:{}".format(
+        _max_id(MarketInstrument),
+        _max_id(SymbolIntegrity),
+        _max_id(MarketCandle),
+        _max_id(GoldCurrencyHistory),
+    )
+
+
 def get_candidate_universe(
+    as_of=None,
+    history_days: int = 180,
+    max_size: int = MAX_UNIVERSE_SIZE,
+) -> tuple[list[str], list[dict]]:
+    """Cached wrapper over the market screen.
+
+    The screen scans every eligible instrument's full candle history and took
+    ~27s on production data. Four call sites pay that -- BestOverallView, the
+    `market` universe mode, the nightly best-overall task, and the diversifier
+    ranking -- and it is a market-wide screen whose inputs change when the
+    warehouse does, not per request.
+    """
+    key = "universe:candidates:{}:{}:{}:v{}".format(
+        to_jalali_str(normalize_as_of(as_of) or timezone.now()),
+        history_days,
+        max_size,
+        _universe_fingerprint(),
+    )
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    result = _compute_candidate_universe(
+        as_of=as_of, history_days=history_days, max_size=max_size
+    )
+    cache.set(key, result, timeout=UNIVERSE_CACHE_TTL)
+    return result
+
+
+def _compute_candidate_universe(
     as_of=None,
     history_days: int = 180,
     max_size: int = MAX_UNIVERSE_SIZE,
