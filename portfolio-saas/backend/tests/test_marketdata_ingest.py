@@ -119,6 +119,20 @@ def test_ingest_gold_currency_history_idempotent():
 
 
 @pytest.mark.django_db
+def test_ingest_gold_currency_history_deduplicates_upsert_batch():
+    duplicate = {**GOLD_PAYLOAD["history_daily"][0], "close": 73385001}
+    created, skipped = ingest.ingest_gold_currency_history({
+        **GOLD_PAYLOAD,
+        "history_daily": [*GOLD_PAYLOAD["history_daily"], duplicate],
+    })
+
+    assert created == 2 and skipped == 1
+    assert GoldCurrencyHistory.objects.get(
+        symbol="IR_COIN_EMAMI", date="1404-03-21"
+    ).close_price == 73385001
+
+
+@pytest.mark.django_db
 def test_ingest_symbol_metadata_updates_in_place():
     payload = {"id": 65883838195688438, "l18": "خودرو", "l30": "ایران‌ خودرو",
                "m": "بورس", "cs": "خودرو", "z": 100, "bvol": 5, "mv": 1000,
@@ -137,3 +151,33 @@ def test_ingest_handles_none_payload():
     assert ingest.ingest_daily_history("x", None, is_adjusted=False) == (0, 0)
     assert ingest.ingest_codal(None) == (0, 0)
     assert ingest.ingest_gold_currency_history(None) == (0, 0)
+
+
+def test_codal_symbol_padding_is_stripped_on_ingest(db):
+    """The provider pads some symbols with a trailing space.
+
+    Storing "زقیام " verbatim silently broke every join to MarketInstrument and
+    Asset, so two real companies read as having zero disclosures while 200 rows
+    sat in the table. The symbol is the join key; it must be canonical on write.
+    """
+    payload = {
+        "announcement": [
+            {
+                "l18": "زقیام ",           # provider-padded
+                "l30": " شرکت قیام  ",     # padded both ends
+                "title": "صورت‌های مالی سال مالی منتهی به ۱۴۰۴/۱۲/۲۹",
+                "code": "1",
+                "date_title": "1405-01-01",
+                "date_send": "1405-01-01",
+                "time_send": "10:00:00",
+                "date_publish": "1405-01-01",
+                "time_publish": "10:00:00",
+            }
+        ]
+    }
+
+    ingest.ingest_codal(payload)
+
+    stored = CodalAnnouncement.objects.get(code="1")
+    assert stored.symbol == "زقیام"
+    assert stored.company_name == "شرکت قیام"

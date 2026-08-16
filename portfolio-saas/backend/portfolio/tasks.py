@@ -1,11 +1,14 @@
 """Celery tasks for the real-time price loop.
 
 `fetch_and_publish` is the single heartbeat: fetch global prices, persist them,
-snapshot every user's valuation, bust the cache, then broadcast the new price map
-over Redis pub/sub. The fetch_prices management command calls the same body so
-GitHub Actions (the dead-man's switch) and Celery beat stay in lockstep.
+snapshot every user's valuation, and bust the cache. The fetch_prices management
+command calls the same body so GitHub Actions (the dead-man's switch) and Celery
+beat stay in lockstep.
+
+The task keeps its historical name: it once also broadcast the price map over Redis
+pub/sub for SSE clients, but nothing ever subscribed, so that half was removed.
+Clients read `/api/valuation/` on a poll instead.
 """
-import json
 import logging
 import uuid
 from decimal import Decimal
@@ -19,13 +22,36 @@ from portfolio.services import asset_value, invalidate_prices_cache
 from portfolio.services.valuation import guard_price_map
 from portfolio.live.extractor import extract_standard_prices
 from portfolio.live.fetcher import api_settings_from_django, fetch_all_markets
-from portfolio.live.pubsub import CHANNEL, get_redis
+from portfolio.live.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
 
 
-def run_price_fetch(*, dry_run=False, publish=True):
-    """Fetch, persist, and (optionally) broadcast the latest price map.
+def _overlay_usdt_irt_from_warehouse(prices: dict) -> dict:
+    """Use archived USDT/IRT when the free feed only echoed the USD peg."""
+    from decimal import Decimal
+    from marketdata.models import GoldCurrencyHistory
+
+    usd = Decimal(str(prices.get("usd_cash") or 0))
+    current = Decimal(str(prices.get("usdt_irt") or 0))
+    if current > 0 and usd > 0 and current != usd:
+        return prices
+
+    close = (
+        GoldCurrencyHistory.objects.filter(symbol="USDT_IRT", close_price__gt=0)
+        .order_by("-date")
+        .values_list("close_price", flat=True)
+        .first()
+    )
+    if close:
+        warehouse = Decimal(str(close))
+        if warehouse > 0 and warehouse != usd:
+            prices["usdt_irt"] = warehouse
+    return prices
+
+
+def run_price_fetch(*, dry_run=False):
+    """Fetch and persist the latest price map.
 
     Network I/O and extraction stay OUTSIDE the transaction (C2 fix): only the
     writes are atomic, so a slow market API never holds an open DB connection.
@@ -45,6 +71,7 @@ def run_price_fetch(*, dry_run=False, publish=True):
     try:
         raw = fetch_all_markets(api_settings_from_django())
         prices = extract_standard_prices(raw)
+        prices = _overlay_usdt_irt_from_warehouse(prices)
         active_keys = set(
             Asset.objects.filter(is_active=True, is_house=False).values_list("key", flat=True)
         )
@@ -79,8 +106,6 @@ def run_price_fetch(*, dry_run=False, publish=True):
             # purpose — cache deletes are not transactional.
             from portfolio.services.returns import invalidate_returns_cache
             invalidate_returns_cache()
-            if publish:
-                publish_prices(public_priced)
             written = True
         return {"priced": public_priced, "written": written}
     finally:
@@ -228,15 +253,6 @@ def _flush_user_snapshots(users: list, prices: dict, gap_timestamps: list) -> in
 
 
 
-def publish_prices(priced: dict) -> None:
-    """Broadcast the price map to SSE subscribers. No-op without Redis."""
-    client = get_redis()
-    if client is None:
-        return
-    client.publish(CHANNEL, json.dumps(priced))
-    logger.info("Published %d prices to %s.", len(priced), CHANNEL)
-
-
 @shared_task(
     ignore_result=True,
     autoretry_for=(Exception,),
@@ -283,7 +299,7 @@ def fetch_and_publish():
             return {"priced": {}, "written": False, "skipped": True}
 
     try:
-        result = run_price_fetch(publish=True)
+        result = run_price_fetch()
     except Exception as err:
         outcome.finish(
             WorkflowRun.Outcome.FAILED,

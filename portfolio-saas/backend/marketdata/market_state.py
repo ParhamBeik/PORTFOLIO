@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 import jdatetime
 from django.conf import settings
 
-from portfolio.live.pubsub import get_redis
+from portfolio.live.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
 

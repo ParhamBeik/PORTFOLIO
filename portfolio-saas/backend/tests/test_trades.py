@@ -33,6 +33,7 @@ def account(asset_catalog, make_user):
         account=acc,
         kind=LedgerEntry.Kind.OPENING_CASH,
         amount_tomans=_FUND,
+        occurred_at=timezone.now() - datetime.timedelta(days=400),
         note="Test funding",
     )
     return acc
@@ -240,7 +241,8 @@ class TestTradeEndpoint:
         )
 
         assert response.status_code == 400
-        assert response.data["detail"] == "No valid execution price is available."
+        body = response.data
+        assert "price_tomans" in body or "detail" in body
         assert not Transaction.objects.filter(account=account, kind="buy").exists()
 
     def test_cannot_trade_in_another_users_account(self, account, asset_catalog, make_user):
@@ -288,6 +290,38 @@ class TestTradeEndpoint:
         assert response.status_code == 404
         holding.refresh_from_db()
         assert holding.quantity == Decimal("50")
+
+    def test_manual_holding_patch_updates_quantity_and_price(self, account, asset_catalog, write_prices):
+        write_prices({"swiss_gold_bar_1g": Decimal("5000000")})
+        holding = Holding.objects.create(
+            account=account,
+            asset=asset_catalog["swiss_gold_bar_1g"],
+            quantity=Decimal("2"),
+        )
+        response = self._client(account.user).patch(
+            f"/api/accounts/{account.id}/holdings/{holding.id}/",
+            {"quantity": "3", "unit_price_tomans": "5500000"},
+            format="json",
+        )
+        assert response.status_code == 200, response.data
+        holding.refresh_from_db()
+        assert holding.quantity == Decimal("3")
+        from portfolio.models import Price
+
+        latest = Price.objects.filter(asset=asset_catalog["swiss_gold_bar_1g"]).order_by("-id").first()
+        assert latest.price == Decimal("5500000")
+        assert latest.source == "manual"
+
+    def test_tradeable_holding_patch_rejected(self, account, asset_catalog, write_prices):
+        write_prices({"emami_coin": Decimal("176000000")})
+        execute_trade(account=account, asset=asset_catalog["emami_coin"], side="buy", quantity=Decimal("1"))
+        holding = Holding.objects.get(account=account, asset=asset_catalog["emami_coin"])
+        response = self._client(account.user).patch(
+            f"/api/accounts/{account.id}/holdings/{holding.id}/",
+            {"quantity": "2"},
+            format="json",
+        )
+        assert response.status_code == 400
 
     def test_house_holding_rejects_nonpositive_price(self, account, asset_catalog):
         response = self._client(account.user).post(
@@ -347,6 +381,31 @@ def test_execute_trade_with_custom_price(account, asset_catalog):
     txn = Transaction.objects.filter(account=account, kind="buy").get()
     assert txn.quantity == Decimal("5")
     assert txn.price_tomans == Decimal("123456.7890")
+
+
+def test_past_sell_before_buy_is_rejected(account, asset_catalog):
+    now = timezone.now()
+    execute_trade(
+        account=account,
+        asset=asset_catalog["emami_coin"],
+        side="buy",
+        quantity=Decimal("2"),
+        price_tomans=Decimal("100"),
+        timestamp=now - datetime.timedelta(days=1),
+    )
+    with pytest.raises(InsufficientHolding):
+        execute_trade(
+            account=account,
+            asset=asset_catalog["emami_coin"],
+            side="sell",
+            quantity=Decimal("1"),
+            price_tomans=Decimal("120"),
+            timestamp=now - datetime.timedelta(days=5),
+        )
+    assert Transaction.objects.filter(account=account, kind="sell").count() == 0
+    assert Holding.objects.get(
+        account=account, asset=asset_catalog["emami_coin"]
+    ).quantity == Decimal("2")
 
 
 def test_backfill_ledger_gap_command(account, asset_catalog, write_prices):

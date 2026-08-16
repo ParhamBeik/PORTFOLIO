@@ -1,8 +1,9 @@
-"""All portfolio endpoints: CRUD, live valuation, prices, and Pro analytics.
+"""All portfolio endpoints: CRUD, live valuation, prices, and analytics.
 
 Valuation is computed live on read (holdings x latest prices) and the heavy
 part (latest prices) is cached, so these endpoints stay cheap at scale.
-Pro endpoints (insights/analytics/optimization) are gated by
+Every endpoint requires authentication only — the FREE/PRO tier gating these
+docs used to describe was removed along with the subscription model.
 """
 from datetime import timedelta
 from decimal import Decimal
@@ -27,6 +28,7 @@ from .serializers import (
     AssetSerializer,
     HoldingSerializer,
     LedgerEntryInputSerializer,
+    LedgerEntryPatchSerializer,
     LedgerEntrySerializer,
     TradeInputSerializer,
     TransactionSerializer,
@@ -38,7 +40,17 @@ from .services.valuation import (
     compute_dynamic_net_worth_series,
 )
 from .services.trades import TradeError
-from .services.ledger import LedgerError, create_ledger_entry, reverse_ledger_entry
+from .services.ledger import (
+    LedgerError,
+    create_ledger_entry,
+    delete_ledger_entry,
+    delete_orphan_holding,
+    entry_pnl_map,
+    reverse_ledger_entry,
+    set_orphan_holding,
+    synthetic_position_rows,
+    update_ledger_entry,
+)
 from .services.imports import (
     LedgerImportError,
     commit_ledger_import,
@@ -133,23 +145,39 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
         )
 
     def perform_update(self, serializer):
-        from .services.ledger import house_ledger_entry, replace_ledger_entry
+        from .services.ledger import record_house_mark, update_manual_holding
 
-        if not serializer.instance.asset.is_house:
+        asset = serializer.instance.asset
+        data = serializer.validated_data
+        if asset.is_manual and not asset.is_house:
+            update_manual_holding(
+                serializer.instance,
+                quantity=data.get("quantity", serializer.instance.quantity),
+                unit_price_tomans=data.get("unit_price_tomans"),
+            )
+            serializer.instance = Holding.objects.get(
+                account_id=self.kwargs["account_id"],
+                asset_id=serializer.instance.asset_id,
+            )
+            return
+        if not asset.is_house:
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Tradeable assets must be changed through the buy/sell endpoint.")
-        entry = house_ledger_entry(serializer.instance)
-        data = serializer.validated_data
-        replace_ledger_entry(
+        # Append a dated mark rather than rewriting the opening entry, so the
+        # house's history shows what it was worth at the time instead of being
+        # retro-priced at today's figure. `occurred_at` lets the client date a
+        # revaluation it is entering after the fact.
+        record_house_mark(
             user=self.request.user,
             account_id=serializer.instance.account_id,
-            entry_id=entry.pk,
+            asset=serializer.instance.asset,
             quantity=data.get("quantity", serializer.instance.quantity),
             area_sqm=data.get("area_sqm", serializer.instance.area_sqm),
             mortgage_deduction_tomans=data.get(
                 "mortgage_deduction_tomans",
                 serializer.instance.mortgage_deduction_tomans,
             ),
+            occurred_at=self.request.data.get("occurred_at") or None,
         )
         serializer.instance = Holding.objects.get(
             account_id=self.kwargs["account_id"],
@@ -170,6 +198,28 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
         )
 
 
+def _ledger_payload(user, account=None):
+    accounts = user.accounts.all()
+    if account is not None:
+        accounts = accounts.filter(pk=account.pk)
+    rows = list(
+        LedgerEntry.objects.filter(
+            account__in=accounts,
+            reversal_of__isnull=True,
+            reversed_by__isnull=True,
+        )
+        .select_related("asset", "account")
+        .order_by("-timestamp", "-pk")
+    )
+    data = list(
+        LedgerEntrySerializer(
+            rows, many=True, context={"pnl": entry_pnl_map(rows, get_latest_prices())}
+        ).data
+    )
+    data.extend(synthetic_position_rows(accounts, rows))
+    return data
+
+
 class LedgerListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -181,8 +231,7 @@ class LedgerListCreateView(APIView):
 
     def get(self, request, account_id):
         account = self._account(request, account_id)
-        rows = LedgerEntry.objects.filter(account=account).select_related("asset")
-        return Response(LedgerEntrySerializer(rows, many=True).data)
+        return Response(_ledger_payload(request.user, account=account))
 
     def post(self, request, account_id):
         account = self._account(request, account_id)
@@ -229,6 +278,71 @@ class LedgerReverseView(APIView):
         except LedgerError as exc:
             return Response({"detail": str(exc)}, status=400)
         return Response(LedgerEntrySerializer(reversal).data, status=201)
+
+
+class LedgerIndexView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(_ledger_payload(request.user))
+
+
+class LedgerEntryDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, account_id, entry_id):
+        form = LedgerEntryPatchSerializer(data=request.data)
+        form.is_valid(raise_exception=True)
+        try:
+            entry = update_ledger_entry(
+                user=request.user, account_id=account_id, entry_id=entry_id,
+                **form.validated_data,
+            )
+        except LedgerEntry.DoesNotExist:
+            return Response({"detail": "Ledger entry not found."}, status=404)
+        except LedgerError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(LedgerEntrySerializer(entry).data)
+
+    def delete(self, request, account_id, entry_id):
+        try:
+            delete_ledger_entry(
+                user=request.user, account_id=account_id, entry_id=entry_id
+            )
+        except LedgerEntry.DoesNotExist:
+            return Response({"detail": "Ledger entry not found."}, status=404)
+        except LedgerError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(status=204)
+
+
+class LedgerPositionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, account_id, holding_id):
+        account = request.user.accounts.filter(pk=account_id).first()
+        if account is None:
+            raise NotFound("Account not found.")
+        holding = Holding.objects.filter(pk=holding_id, account=account).first()
+        if holding is None:
+            return Response({"detail": "Holding not found."}, status=404)
+        quantity = request.data.get("quantity")
+        try:
+            set_orphan_holding(account=account, asset=holding.asset, quantity=quantity)
+        except LedgerError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(_ledger_payload(request.user, account=account))
+
+    def delete(self, request, account_id, holding_id):
+        try:
+            delete_orphan_holding(
+                user=request.user, account_id=account_id, holding_id=holding_id
+            )
+        except Holding.DoesNotExist:
+            return Response({"detail": "Holding not found."}, status=404)
+        except LedgerError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(status=204)
 
 
 class LedgerImportView(APIView):
@@ -763,7 +877,25 @@ class SnapshotListView(APIView):
             }
             for t in trades
         ]
-        if basis == "real_toman":
+        if basis in ("usd_denominated", "usdt_denominated"):
+            from portfolio.services.deflator import normalize_basis
+            basis = normalize_basis(basis)
+            if basis == "usdt_denominated":
+                fx_rate = Decimal(prices.get("usdt_irt", 0) or 0)
+                conversion_source = "USDT"
+                if fx_rate <= 0:
+                    fx_rate = usd_rate
+                    conversion_source = "USD"
+            else:
+                fx_rate = usd_rate
+                conversion_source = "USD"
+            if fx_rate > 0:
+                for row in series:
+                    if row.get("total") is not None:
+                        row["total"] = float(Decimal(str(row["total"])) / fx_rate)
+                    if row.get("total_usd") is not None:
+                        row["total_usd"] = float(Decimal(str(row["total_usd"])) / fx_rate)
+        elif basis == "real_toman":
             from django.conf import settings
             from portfolio.services.deflator import cpi_for_date
             for row in series:
@@ -812,7 +944,7 @@ class PriceHistoryView(APIView):
 
 
 class InsightsView(APIView):
-    """financial insights. Free users get a 403 here."""
+    """Rule-based financial insights for the requested scope."""
 
     permission_classes = [IsAuthenticated]
 
@@ -820,23 +952,31 @@ class InsightsView(APIView):
         return Response(build_insights(request.user, _scope(request)))
 
 
-def _current_weights_and_total(user, account=None) -> tuple[dict[str, float], Decimal]:
-    """Liquid weights + liquid total (real estate excluded).
+def _current_weights_and_total(
+    user, account=None
+) -> tuple[dict[str, float], Decimal, dict]:
+    """Liquid weights + liquid total + the valuation they came from.
 
     `account=None` analyzes the whole-user portfolio; passing an account scopes
     weights to that single portfolio.
+
+    The valuation is returned rather than recomputed by each caller:
+    `portfolio_diagnostics` derives its `held_keys` from it (see
+    `diagnostics._aggregate_holdings`), and calling it without one silently
+    yields an EMPTY held set, which puts the user's own holdings back under the
+    market-universe screening gates.
     """
     valuation = value_account(account) if account is not None else value_user(user)
     items = _liquid_items(valuation)
     total = _total(items)
     if total <= 0:
-        return {}, Decimal("0")
+        return {}, Decimal("0"), valuation
     weights = {
         i["key"]: float(i["value"] / total)
         for i in items
         if i["value"] > 0
     }
-    return weights, total
+    return weights, total, valuation
 
 
 class AnalyticsView(APIView):
@@ -845,9 +985,32 @@ class AnalyticsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        weights, total = _current_weights_and_total(request.user, _scope(request))
+        from portfolio.services.deflator import normalize_basis
+        from portfolio.services import value_account, value_user
+
+        account = _scope(request)
+        basis = request.query_params.get("basis") or "nominal_toman"
+        try:
+            window = int(request.query_params.get("window") or 180)
+        except (TypeError, ValueError):
+            return Response({"detail": "window must be an integer."}, status=400)
+        if window not in (90, 180, 365):
+            return Response({"detail": "window must be 90, 180, or 365."}, status=400)
+        try:
+            normalize_basis(basis)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        weights, total, valuation = _current_weights_and_total(request.user, account)
         return Response(
-            portfolio_diagnostics(weights, total, user=request.user)
+            portfolio_diagnostics(
+                weights,
+                total,
+                user=request.user,
+                history_days=window,
+                basis=basis,
+                valuation=valuation,
+            )
         )
 
 
@@ -864,7 +1027,7 @@ class OptimizationView(APIView):
                 status=400,
             )
         constraints = request.data.get("constraints")
-        weights, total = _current_weights_and_total(request.user, _scope(request))
+        weights, total, _valuation = _current_weights_and_total(request.user, _scope(request))
         try:
             payload = optimize(
                 scenario=scenario,
@@ -910,9 +1073,28 @@ class FrontierView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        weights, total = _current_weights_and_total(request.user, _scope(request))
+        from .services.returns import get_universe_by_mode
+
+        account = _scope(request)
+        weights, total, _valuation = _current_weights_and_total(request.user, account)
         try:
-            frontier = _efficient_frontier(n_points=30)
+            window = int(request.query_params.get("window") or 180)
+        except (TypeError, ValueError):
+            return Response({"detail": "window must be an integer."}, status=400)
+        window = max(30, min(window, 3650))
+        # Scope to the user's own book. Without a universe this drew the frontier
+        # over the entire active catalog while the chart caption promised "the
+        # assets you already hold" -- the line and the Max-Sharpe marker described
+        # a portfolio the user cannot build.
+        universe = get_universe_by_mode("held", user=request.user, account=account)
+        held_keys = frozenset(weights)
+        try:
+            frontier = _efficient_frontier(
+                n_points=30,
+                history_days=window,
+                universe=universe,
+                held_keys=held_keys,
+            )
         except MixedUnitUniverseBlocked as exc:
             return Response(
                 {
@@ -923,8 +1105,17 @@ class FrontierView(APIView):
                 },
                 status=409,
             )
-        # Inject the current portfolio point.
-        returns, _ = daily_returns_matrix()
+        # Inject the current portfolio point, on the SAME panel and the SAME
+        # annualization the frontier used -- a default-window, whole-catalog
+        # matrix put the user's dot on a chart built from different data.
+        returns, _ = daily_returns_matrix(
+            history_days=window, universe=universe, held_keys=held_keys
+        )
+        frequency = float(
+            frontier.get("periods_per_year")
+            or returns.attrs.get("periods_per_year")
+            or 252
+        )
         current_point = None
         cloud = []
         if weights and not returns.empty:
@@ -936,8 +1127,8 @@ class FrontierView(APIView):
                     w = w / w.sum()
                     port = pd.Series(sub @ w, index=returns.index)
                     if port.std(ddof=1) > 0:
-                        ann_ret = float(port.mean() * 252)
-                        ann_vol = float(port.std(ddof=1) * np.sqrt(252))
+                        ann_ret = float(port.mean() * frequency)
+                        ann_vol = float(port.std(ddof=1) * np.sqrt(frequency))
                         current_point = {
                             "return": _finite(ann_ret),
                             "volatility": _finite(ann_vol),
@@ -951,8 +1142,8 @@ class FrontierView(APIView):
                     rng = np.random.default_rng()
                     draws = rng.dirichlet(np.ones(len(cols)), size=400)
                     port_returns = sub @ draws.T
-                    means = port_returns.mean(axis=0) * 252
-                    stds = port_returns.std(axis=0, ddof=1) * np.sqrt(252)
+                    means = port_returns.mean(axis=0) * frequency
+                    stds = port_returns.std(axis=0, ddof=1) * np.sqrt(frequency)
                     cloud = [
                         {"return": _finite(float(r)), "volatility": _finite(float(v))}
                         for r, v in zip(means, stds)
@@ -1000,52 +1191,159 @@ class MyOptimalView(APIView):
     WINDOWS = (("1Y", 365), ("3Y", 1095), ("5Y", 1825), ("Lifetime", None))
 
     def get(self, request):
+        from .services.deflator import CpiUnavailable, normalize_basis
         from .services.returns import get_universe_by_mode
 
         account = _scope(request)
-        weights, total = _current_weights_and_total(request.user, account)
+        weights, total, valuation = _current_weights_and_total(request.user, account)
         if not weights:
             return Response({"detail": "No priced holdings to optimize yet."}, status=400)
         universe = get_universe_by_mode("held", user=request.user, account=account)
+        # These are the user's OWN assets, so they must not be screened as
+        # optimizer candidates. `held_keys` relaxes the universe gates, merges
+        # proxied holdings, floors the policy caps to what this book already
+        # holds, and freezes anything unmeasurable at its current weight instead
+        # of zeroing it (which the rebalance table rendered as a SELL).
+        held_keys = frozenset(weights)
         lifetime_days = _lifetime_days(request.user, account)
+
+        # Nominal Toman returns are dominated by rial devaluation, a factor every
+        # asset shares. That single common factor inflates every pairwise
+        # correlation and every expected return, so a nominal panel makes a
+        # portfolio look far less diversified than it is and hands the optimizer
+        # a covariance matrix that is mostly inflation. Measuring in real terms
+        # strips it and shows genuine relative diversification.
+        requested_basis = request.query_params.get("basis") or "real_toman"
+        try:
+            requested_basis = normalize_basis(requested_basis)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        def _solve(scenario, window_days, basis):
+            """One scenario, degrading the basis rather than the answer.
+
+            A real-terms panel needs CPI for every Jalali year it spans. When
+            that is missing the request must not silently become a nominal one:
+            it falls back, but the basis actually used is reported back so the
+            client never mistakes an inflation-contaminated number for a real one.
+            """
+            try:
+                return optimize(
+                    scenario=scenario, current_weights=weights,
+                    total_value_tomans=total, user=request.user,
+                    history_days=window_days, universe=universe,
+                    held_keys=held_keys, basis=basis,
+                ), basis
+            except CpiUnavailable:
+                if basis == "nominal_toman":
+                    raise
+                return optimize(
+                    scenario=scenario, current_weights=weights,
+                    total_value_tomans=total, user=request.user,
+                    history_days=window_days, universe=universe,
+                    held_keys=held_keys, basis="nominal_toman",
+                ), "nominal_toman"
 
         windows = []
         for label, fixed_days in self.WINDOWS:
             window_days = fixed_days or lifetime_days
             entry = {"label": label, "window_days": window_days}
+            # min_volatility leads: it needs no return forecast, so it is the
+            # scenario whose weights survive the fact that we cannot predict
+            # returns. max_sharpe is kept but is no longer the only answer.
             try:
-                entry["max_sharpe"] = optimize(
-                    scenario="max_sharpe", current_weights=weights, total_value_tomans=total,
-                    user=request.user, history_days=window_days, universe=universe,
-                )
-            except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate, MixedUnitUniverseBlocked) as exc:
+                payload, basis_used = _solve("min_volatility", window_days, requested_basis)
+                entry["min_volatility"] = payload
+                entry["basis"] = basis_used
+            except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate,
+                    MixedUnitUniverseBlocked, CpiUnavailable) as exc:
                 entry["status"] = "insufficient_history"
                 entry["detail"] = str(exc)
                 windows.append(entry)
                 continue
-            try:
-                entry["min_volatility"] = optimize(
-                    scenario="min_volatility", current_weights=weights, total_value_tomans=total,
-                    user=request.user, history_days=window_days, universe=universe,
-                )
-            except (UniverseTooSmall, SolverError, MixedUnitUniverseBlocked):
-                entry["min_volatility"] = None
+            basis_used = entry["basis"]
+            # The remaining scenarios are best-effort: one failing must not blank
+            # the window, since each answers a different question about risk.
+            for scenario in ("max_sharpe", "risk_parity", "hrp", "min_cvar"):
+                try:
+                    entry[scenario], _ = _solve(scenario, window_days, basis_used)
+                except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate,
+                        MixedUnitUniverseBlocked, CpiUnavailable):
+                    entry[scenario] = None
+            # `valuation` is what supplies diagnostics' own held_keys; without it
+            # the "Actual" column falls back to the strict screen and is measured
+            # over a different asset set than the target it sits beside.
             entry["actual"] = portfolio_diagnostics(
-                weights, total, user=request.user, history_days=window_days, universe=universe,
+                weights, total, user=request.user, history_days=window_days,
+                universe=universe, valuation=valuation, basis=basis_used,
             )
             # Historical drawdown for the hypothetical scenarios: "if you had
             # held these target weights fixed for the whole window" -- the same
             # portfolio_diagnostics() computation, just fed the target weights.
-            for scenario_key in ("max_sharpe", "min_volatility"):
+            for scenario_key in ("max_sharpe", "min_volatility", "risk_parity", "hrp", "min_cvar"):
                 scenario_payload = entry.get(scenario_key)
                 if scenario_payload:
                     scenario_payload["diagnostics"] = portfolio_diagnostics(
                         scenario_payload["target_weights"], total,
-                        user=request.user, history_days=window_days, universe=universe,
+                        user=request.user, history_days=window_days,
+                        universe=universe, valuation=valuation, basis=basis_used,
                     )
             entry["status"] = "ok"
             windows.append(entry)
-        return Response({"windows": windows})
+        return Response({"windows": windows, "basis_requested": requested_basis})
+
+
+class RobustnessView(APIView):
+    """"how much of this allocation is signal?" -- bootstrap bands for ONE
+    scenario and window.
+
+    Separate from `my-optimal` because ~200 re-solves cannot run inside a page
+    load that already does eight. The client requests this for the tab the user
+    is actually looking at; the result is cached with the rest of the payload.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .services.returns import get_universe_by_mode
+
+        scenario = request.query_params.get("scenario") or "min_volatility"
+        if scenario not in SCENARIOS:
+            return Response(
+                {"detail": f"scenario must be one of {list(SCENARIOS)}."}, status=400
+            )
+        try:
+            window = int(request.query_params.get("window") or 365)
+        except (TypeError, ValueError):
+            return Response({"detail": "window must be an integer."}, status=400)
+        window = max(30, min(window, 3650))
+
+        account = _scope(request)
+        weights, total, _valuation = _current_weights_and_total(request.user, account)
+        if not weights:
+            return Response({"detail": "No priced holdings to optimize yet."}, status=400)
+        universe = get_universe_by_mode("held", user=request.user, account=account)
+        try:
+            payload = optimize(
+                scenario=scenario,
+                current_weights=weights,
+                total_value_tomans=total,
+                user=request.user,
+                history_days=window,
+                universe=universe,
+                held_keys=frozenset(weights),
+                include_robustness=True,
+            )
+        except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate, MixedUnitUniverseBlocked) as exc:
+            return Response({"detail": str(exc)}, status=503)
+        return Response({
+            "scenario": scenario,
+            "window_days": window,
+            "robustness": payload.get("robustness"),
+            "target_weights": payload.get("target_weights"),
+            "diversification": payload.get("diversification"),
+            "forecast_free": payload.get("forecast_free"),
+        })
 
 
 class AssetReturnsView(APIView):

@@ -9,7 +9,7 @@ from rest_framework.exceptions import ValidationError
 from portfolio.models import Account, Asset, Holding, Transaction
 from portfolio.services.trades import execute_trade, undo_trade
 from portfolio.serializers import TradeInputSerializer
-from portfolio.services.timeline import holdings_as_of, twr, xirr, asset_metrics
+from portfolio.services.timeline import holdings_as_of
 from marketdata.models import MarketCandle, GoldCurrencyHistory
 
 @pytest.mark.django_db

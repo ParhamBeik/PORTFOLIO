@@ -7,7 +7,7 @@ import logging
 from decimal import Decimal
 
 from django.conf import settings
-from marketdata.currency import canonical_symbol, to_toman
+from marketdata.currency import IRR_QUOTE_UNITS, FOREIGN_QUOTE_UNITS, canonical_symbol, to_toman
 from marketdata.symbols import find_symbol_record
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,68 @@ def _price_from_tsetmc_record(record):
     return Decimal("0")
 
 
+def _lookup_usdt_toman(lookup, usd_rate, history_payload=None):
+    """Resolve USDT/IRT in Tomans.
+
+    Prefer the provider's IRR/Toman quote (history or live row). Only when the
+    feed quotes tether near 1 USD with no local unit do we scale by `usd_rate`.
+    """
+    if history_payload:
+        from_history = _usdt_toman_from_history(history_payload, usd_rate)
+        if from_history > 0:
+            return from_history
+
+    rate = Decimal(str(usd_rate or 0))
+    for symbol in ["USDT_IRT", "USDTIRT", "USDT", "TETHER", "Tether", "تتر"]:
+        item = lookup.get(str(symbol).strip().casefold())
+        if not isinstance(item, dict):
+            continue
+        try:
+            price = Decimal(str(item.get("price") or 0))
+        except (ArithmeticError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        unit = str(item.get("unit") or "").strip().casefold()
+        if unit in IRR_QUOTE_UNITS or (not unit and price >= 10):
+            value = to_toman(
+                canonical_symbol(item.get("symbol") or symbol),
+                price,
+                unit or "تومان",
+            )
+            if value > 0:
+                return value.quantize(Decimal("1"))
+        if unit in FOREIGN_QUOTE_UNITS or price < 10:
+            if rate > 0:
+                return (price * rate).quantize(Decimal("1"))
+        return price.quantize(Decimal("1"))
+    return Decimal("0")
+
+
+def _usdt_toman_from_history(payload, usd_rate):
+    """Latest USDT close from Gold_Currency_Pro history=1/2 payload."""
+    if not isinstance(payload, dict):
+        return Decimal("0")
+    rows = payload.get("history_daily") or payload.get("history") or []
+    if not isinstance(rows, list) or not rows:
+        return Decimal("0")
+    latest = rows[-1]
+    if not isinstance(latest, dict):
+        return Decimal("0")
+    close = latest.get("close")
+    if close is None:
+        close = latest.get("price")
+    if close is None:
+        return Decimal("0")
+    unit = str(payload.get("unit") or "").strip()
+    return to_toman(
+        canonical_symbol(payload.get("symbol") or "USDT"),
+        close,
+        unit,
+        usd_rate=usd_rate,
+    ).quantize(Decimal("1"))
+
+
 def _lookup_toman(lookup, symbols, *, usd_rate=None):
     for symbol in symbols:
         item = lookup.get(str(symbol).strip().casefold())
@@ -128,10 +190,10 @@ def extract_standard_prices(raw_data, last_prices=None):
     prices["bitcoin_usd"] = _lookup_price(
         lookup, ["BTC", "BTCUSDT", "BITCOIN", "Bitcoin", "بیتکوین", "بیت کوین"]
     )
-    prices["usdt_irt"] = _lookup_toman(
+    prices["usdt_irt"] = _lookup_usdt_toman(
         lookup,
-        ["USDT_IRT", "USDTIRT", "USDT", "TETHER", "Tether", "تتر"],
-        usd_rate=prices.get("usd_cash"),
+        prices.get("usd_cash"),
+        history_payload=raw_data.get("usdt_irt_quote"),
     )
     prices["euro_cash"] = _lookup_toman(lookup, ["EUR", "EURO", "Euro", "یورو"])
     prices["gold_ounce_usd"] = _lookup_price(

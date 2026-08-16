@@ -50,7 +50,7 @@ def test_returns_exclude_prices_with_a_gap_longer_than_five_sessions():
     )
     panel.loc[index[12:18], "long_gap"] = np.nan
 
-    returns, excluded = _build_returns_matrix(panel)
+    returns, excluded, _warnings = _build_returns_matrix(panel)
 
     assert "complete" in returns.columns
     assert "long_gap" not in returns.columns

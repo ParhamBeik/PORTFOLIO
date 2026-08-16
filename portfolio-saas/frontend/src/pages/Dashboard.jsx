@@ -10,8 +10,9 @@ import {
   removeHolding,
   listAssets,
   adminAssetEvidence,
+  analytics,
 } from "../api.js";
-import { num, toman, pct, signedToman, humanize, assetLabel } from "../format.js";
+import { num, toman, pct, signedToman, humanize, assetLabel, perfLabel, PERF_UNLOCK_HINT } from "../format.js";
 import { AreaTrend, Donut } from "../components/charts.jsx";
 import {
   Card,
@@ -133,13 +134,53 @@ function AllocationCard({ state }) {
   );
 }
 
-function PerformanceCard({ activeId, basis }) {
-  const state = useApi(() => getPerformance(activeId, basis), [activeId, basis], { enabled: activeId != null });
+// Performance is account-scoped on the API. When the top bar is on "All
+// portfolios", use the sole account or every ledger-complete account.
+function performanceTargets(activeId, accounts) {
+  if (activeId != null) return { mode: "single", ids: [activeId] };
+  if (accounts.length === 1) return { mode: "single", ids: [accounts[0].id] };
+  const ready = accounts.filter((a) => a.ledger_complete).map((a) => a.id);
+  if (ready.length) return { mode: "multi", ids: ready };
+  if (accounts.length) return { mode: "single", ids: [accounts[0].id] };
+  return { mode: "none", ids: [] };
+}
 
-  if (activeId == null) {
+async function fetchPerformance(targets, accounts, basis) {
+  if (targets.mode === "multi") {
+    const rows = await Promise.all(
+      targets.ids.map(async (id) => {
+        const perf = await getPerformance(id, basis);
+        const acct = accounts.find((a) => a.id === id);
+        return { id, name: acct?.name || `Account ${id}`, ...perf };
+      })
+    );
+    return { aggregate: true, accounts: rows };
+  }
+  return getPerformance(targets.ids[0], basis);
+}
+
+function PerformanceMetrics({ data }) {
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:max-w-md">
+      <StatTile label={perfLabel.twr} value={pct(data.twr)} valueTone={toneFor(data.twr)} testId="dashboard-performance-twr" />
+      <StatTile label={perfLabel.xirr} value={pct(data.xirr)} valueTone={toneFor(data.xirr)} testId="dashboard-performance-xirr" />
+    </div>
+  );
+}
+
+function PerformanceCard({ activeId, basis, accounts }) {
+  const targets = performanceTargets(activeId, accounts);
+  const accountKey = accounts.map((a) => `${a.id}:${a.ledger_complete}`).join("|");
+  const state = useApi(
+    () => fetchPerformance(targets, accounts, basis),
+    [activeId, basis, accountKey, targets.ids.join(",")],
+    { enabled: targets.ids.length > 0 }
+  );
+
+  if (targets.ids.length === 0) {
     return (
       <Card title="Performance" testId="dashboard-performance">
-        <Empty testId="dashboard-performance-empty">Select a portfolio to see TWR/XIRR.</Empty>
+        <Empty testId="dashboard-performance-empty">Add a portfolio to track performance.</Empty>
       </Card>
     );
   }
@@ -148,26 +189,64 @@ function PerformanceCard({ activeId, basis }) {
     <Card title="Performance" testId="dashboard-performance">
       <Async {...state} testId="dashboard-performance-body">
         {(data) => {
+          if (data.aggregate) {
+            const ready = data.accounts.filter((row) => row.performance_available);
+            if (!ready.length) {
+              return (
+                <Empty testId="dashboard-performance-empty">
+                  {data.accounts[0]?.detail || PERF_UNLOCK_HINT}
+                </Empty>
+              );
+            }
+            return (
+              <>
+                {activeId == null && accounts.length > 1 && (
+                  <p className="mb-3 text-xs text-muted">All portfolios with a completed opening baseline.</p>
+                )}
+                <Table
+                  testId="dashboard-performance-table"
+                  rowKey={(r) => r.id}
+                  rows={data.accounts}
+                  columns={[
+                    { key: "name", header: "Portfolio", render: (r) => r.name },
+                    {
+                      key: "twr",
+                      header: perfLabel.twr,
+                      align: "right",
+                      render: (r) => (r.performance_available ? pct(r.twr) : "—"),
+                    },
+                    {
+                      key: "xirr",
+                      header: perfLabel.xirr,
+                      align: "right",
+                      render: (r) => (r.performance_available ? pct(r.xirr) : "—"),
+                    },
+                    {
+                      key: "status",
+                      header: "Status",
+                      render: (r) =>
+                        r.performance_available ? (
+                          <Badge variant="good">Ready</Badge>
+                        ) : (
+                          <span className="text-xs text-muted">{r.detail || "Needs ledger"}</span>
+                        ),
+                    },
+                  ]}
+                />
+              </>
+            );
+          }
           if (!data.performance_available) {
-            return <Empty testId="dashboard-performance-empty">{data.detail || "Record opening balances on the Ledger page to unlock TWR and XIRR."}</Empty>;
+            return (
+              <Empty testId="dashboard-performance-empty">
+                {data.detail || PERF_UNLOCK_HINT}
+              </Empty>
+            );
           }
           const rows = Object.entries(data.assets || {}).map(([key, v]) => ({ key, ...v }));
           return (
             <>
-              <div className="grid grid-cols-2 gap-3 sm:max-w-md">
-                <StatTile
-                  label="TWR"
-                  value={pct(data.twr)}
-                  valueTone={toneFor(data.twr)}
-                  testId="dashboard-performance-twr"
-                />
-                <StatTile
-                  label="XIRR"
-                  value={pct(data.xirr)}
-                  valueTone={toneFor(data.xirr)}
-                  testId="dashboard-performance-xirr"
-                />
-              </div>
+              <PerformanceMetrics data={data} />
               <div className="mt-4">
                 <Table
                   testId="dashboard-performance-table"
@@ -241,9 +320,51 @@ function AddHoldingRow({ activeId, onDone }) {
   );
 }
 
+function holdingsByAccountAsset(accounts) {
+  const map = new Map();
+  for (const account of accounts) {
+    for (const holding of account.holdings || []) {
+      map.set(`${account.id}:${holding.asset_key}`, holding);
+    }
+  }
+  return map;
+}
+
+function holdingsRowKey(row) {
+  return row.account_id != null ? `${row.account_id}:${row.key}` : row.key;
+}
+
+function isManualPriceEditable(row) {
+  return !row.is_house && (
+    row.is_manual || row.quality_status === "manual" || row.source === "manual_valuation"
+  );
+}
+
+function isInlineEditable(row) {
+  return row.is_house || isManualPriceEditable(row);
+}
+
+function draftForRow(row, drafts) {
+  const key = holdingsRowKey(row);
+  return drafts[key] ?? {
+    qty: String(row.quantity ?? ""),
+    price: row.unit_price != null && row.unit_price !== "" ? String(row.unit_price) : "",
+  };
+}
+
+function hasDraftChanges(row, draft) {
+  const origQty = String(row.quantity ?? "");
+  const origPrice = row.unit_price != null && row.unit_price !== "" ? String(row.unit_price) : "";
+  if (draft.qty.trim() !== origQty) return true;
+  return isManualPriceEditable(row) && draft.price.trim() !== origPrice;
+}
+
+const inlineInputClass = "w-full min-w-[5rem] rounded-md border border-border bg-panel px-2 py-1 text-right text-sm tabular";
+
 function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
-  const [editId, setEditId] = useState(null);
-  const [editQty, setEditQty] = useState("");
+  const [manageMode, setManageMode] = useState(null);
+  const [drafts, setDrafts] = useState({});
+  const [savingKey, setSavingKey] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [whyKey, setWhyKey] = useState(null);
 
@@ -252,33 +373,92 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
     portfolio.reload();
   };
 
-  const account = activeId != null ? portfolio.accounts.find((a) => a.id === activeId) : null;
-  const holdingsByKey = new Map((account?.holdings || []).map((h) => [h.asset_key, h]));
+  const holdingsMap = holdingsByAccountAsset(portfolio.accounts);
 
-  const saveEdit = async (holding) => {
+  const resolveHolding = (row) => {
+    const accountId = row.account_id ?? activeId;
+    if (accountId == null) return null;
+    return holdingsMap.get(`${accountId}:${row.key}`) ?? null;
+  };
+
+  const toggleManageMode = (mode) => {
+    setManageMode((current) => {
+      const next = current === mode ? null : mode;
+      if (next === "edit") portfolio.reload();
+      return next;
+    });
+    setDrafts({});
+    setActionError(null);
+  };
+
+  const setDraftField = (row, field, value) => {
+    const key = holdingsRowKey(row);
+    setDrafts((cur) => ({
+      ...cur,
+      [key]: { ...draftForRow(row, cur), [field]: value },
+    }));
+  };
+
+  const saveInline = async (row, holding) => {
+    const accountId = row.account_id ?? activeId;
+    if (!holding || accountId == null) return;
+    const draft = draftForRow(row, drafts);
+    const qty = draft.qty.trim();
+    if (!qty) return;
+    if (!hasDraftChanges(row, draft)) return;
+    const key = holdingsRowKey(row);
+    setSavingKey(key);
     setActionError(null);
     try {
-      await updateHolding(activeId, holding.id, editQty);
-      setEditId(null);
+      await updateHolding(accountId, holding.id, {
+        quantity: qty,
+        unitPriceTomans: isManualPriceEditable(row) ? draft.price : undefined,
+      });
+      setDrafts((cur) => {
+        const next = { ...cur };
+        delete next[key];
+        return next;
+      });
       reloadAll();
     } catch (e) {
       setActionError(e);
+    } finally {
+      setSavingKey(null);
     }
   };
 
-  const handleDelete = async (holding) => {
+  const handleDelete = async (holding, accountId) => {
     if (!window.confirm("Remove this holding?")) return;
     setActionError(null);
     try {
-      await removeHolding(activeId, holding.id);
+      await removeHolding(accountId, holding.id);
       reloadAll();
     } catch (e) {
       setActionError(e);
     }
   };
 
+  const cardActions = (
+    <div className="flex gap-2">
+      <Button
+        variant={manageMode === "edit" ? "primary" : "ghost"}
+        onClick={() => toggleManageMode("edit")}
+        data-testid="dashboard-holdings-manage-edit"
+      >
+        Edit
+      </Button>
+      <Button
+        variant={manageMode === "delete" ? "danger" : "ghost"}
+        onClick={() => toggleManageMode("delete")}
+        data-testid="dashboard-holdings-manage-delete"
+      >
+        Delete
+      </Button>
+    </div>
+  );
+
   return (
-    <Card title="Holdings" testId="dashboard-holdings">
+    <Card title="Holdings" testId="dashboard-holdings" actions={cardActions}>
       <Async {...valuationState} testId="dashboard-holdings-body">
         {(data) => {
           const total = Number(data.total) || 1;
@@ -287,8 +467,57 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
           const columns = [
             { key: "asset", header: "Asset", render: (r) => r.name_fa || r.asset },
             { key: "class", header: "Class", render: (r) => humanize(r.class) },
-            { key: "qty", header: "Quantity", align: "right", render: (r) => num(r.quantity, 4) },
-            { key: "price", header: "Unit price", align: "right", render: (r) => toman(r.unit_price) },
+            {
+              key: "qty",
+              header: "Quantity",
+              align: "right",
+              render: (r) => {
+                const holding = resolveHolding(r);
+                if (manageMode === "edit" && isInlineEditable(r) && holding) {
+                  const draft = draftForRow(r, drafts);
+                  const rk = holdingsRowKey(r);
+                  return (
+                    <input
+                      type="number"
+                      step="any"
+                      className={inlineInputClass}
+                      value={draft.qty}
+                      aria-label={`Quantity for ${r.asset}`}
+                      data-testid="dashboard-holdings-edit-qty"
+                      disabled={savingKey === rk}
+                      onChange={(e) => setDraftField(r, "qty", e.target.value)}
+                    />
+                  );
+                }
+                return num(r.quantity, 4);
+              },
+            },
+            {
+              key: "price",
+              header: "Unit price",
+              align: "right",
+              render: (r) => {
+                const holding = resolveHolding(r);
+                if (r.is_house) return "—";
+                if (manageMode === "edit" && isManualPriceEditable(r) && holding) {
+                  const draft = draftForRow(r, drafts);
+                  const rk = holdingsRowKey(r);
+                  return (
+                    <input
+                      type="number"
+                      step="any"
+                      className={inlineInputClass}
+                      value={draft.price}
+                      aria-label={`Unit price for ${r.asset}`}
+                      data-testid="dashboard-holdings-edit-price"
+                      disabled={savingKey === rk}
+                      onChange={(e) => setDraftField(r, "price", e.target.value)}
+                    />
+                  );
+                }
+                return toman(r.unit_price);
+              },
+            },
             { key: "value", header: "Value", align: "right", render: (r) => toman(r.value) },
             { key: "weight", header: "Weight", align: "right", render: (r) => pct(Number(r.value) / total) },
             {
@@ -305,6 +534,14 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
             { key: "priced_at", header: "As of", render: (r) => r.priced_at ? `${r.age_seconds}s` : (r.archive_record?.date || "—") },
           ];
 
+          if (activeId == null) {
+            columns.splice(1, 0, {
+              key: "portfolio",
+              header: "Portfolio",
+              render: (r) => r.account_name || "—",
+            });
+          }
+
           if (staff) {
             columns.push({
               key: "why",
@@ -315,50 +552,45 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
             });
           }
 
-          if (activeId != null) {
+          if (manageMode === "edit") {
             columns.push({
               key: "actions",
               header: "",
               align: "right",
               render: (r) => {
-                const holding = holdingsByKey.get(r.key);
-                if (!holding) return null;
-                if (editId === holding.id) {
-                  return (
-                    <div className="flex justify-end gap-1">
-                      <Input
-                        label="New quantity"
-                        type="number"
-                        value={editQty}
-                        onChange={(e) => setEditQty(e.target.value)}
-                        className="w-24"
-                        data-testid="dashboard-holdings-edit-input"
-                      />
-                      <Button variant="primary" onClick={() => saveEdit(holding)} data-testid="dashboard-holdings-save">
-                        Save
-                      </Button>
-                      <Button variant="ghost" onClick={() => setEditId(null)}>
-                        Cancel
-                      </Button>
-                    </div>
-                  );
-                }
+                if (!isInlineEditable(r)) return null;
+                const holding = resolveHolding(r);
+                if (!holding) return <span className="text-xs text-muted">—</span>;
+                const draft = draftForRow(r, drafts);
+                const rk = holdingsRowKey(r);
+                const changed = hasDraftChanges(r, draft);
                 return (
-                  <div className="flex justify-end gap-1">
-                    <Button
-                      variant="ghost"
-                      onClick={() => {
-                        setEditId(holding.id);
-                        setEditQty(String(holding.quantity));
-                      }}
-                      data-testid="dashboard-holdings-edit-toggle"
-                    >
-                      Edit
-                    </Button>
-                    <Button variant="danger" onClick={() => handleDelete(holding)} data-testid="dashboard-holdings-delete">
-                      Delete
-                    </Button>
-                  </div>
+                  <Button
+                    variant="success"
+                    disabled={!changed || !draft.qty.trim() || savingKey === rk}
+                    onClick={() => saveInline(r, holding)}
+                    data-testid="dashboard-holdings-save"
+                  >
+                    {savingKey === rk ? "Saving…" : "Save"}
+                  </Button>
+                );
+              },
+            });
+          }
+
+          if (manageMode === "delete") {
+            columns.push({
+              key: "actions",
+              header: "",
+              align: "right",
+              render: (r) => {
+                const holding = resolveHolding(r);
+                if (!holding) return null;
+                const accountId = r.account_id ?? activeId;
+                return (
+                  <Button variant="danger" onClick={() => handleDelete(holding, accountId)} data-testid="dashboard-holdings-delete">
+                    Delete
+                  </Button>
                 );
               },
             });
@@ -366,23 +598,335 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
 
           return (
             <>
-              <Table testId="dashboard-holdings-table" rowKey={(r) => r.account_id != null ? `${r.account_id}:${r.key}` : r.key} rows={items} columns={columns} empty="No holdings priced yet." />
+              {manageMode === "edit" && (
+                <p className="mb-3 text-xs text-muted">
+                  Manual holdings: edit quantity and unit price, then click Save on each row. Real estate: edit quantity (price per sqm, millions T), then Save.
+                </p>
+              )}
+              <Table testId="dashboard-holdings-table" rowKey={holdingsRowKey} rows={items} columns={columns} empty="No holdings priced yet." />
               {actionError && (
                 <div className="mt-2">
                   <ErrorState error={actionError} testId="dashboard-holdings-error" />
                 </div>
               )}
-              {activeId == null ? (
-                <p className="mt-3 text-xs text-muted" data-testid="dashboard-holdings-readonly-hint">
-                  Select a portfolio to edit or add holdings.
-                </p>
-              ) : (
-                <AddHoldingRow activeId={activeId} onDone={reloadAll} />
-              )}
+              {activeId != null && <AddHoldingRow activeId={activeId} onDone={reloadAll} />}
               {staff && whyKey && <WhyDrawer assetKey={whyKey} onClose={() => setWhyKey(null)} />}
             </>
           );
         }}
+      </Async>
+    </Card>
+  );
+}
+
+
+
+const RISK_WINDOWS = [
+  { value: "90", label: "90d" },
+  { value: "180", label: "180d" },
+  { value: "365", label: "365d" },
+];
+
+const RISK_VIEWS = [
+  { value: "portfolio", label: "Portfolio" },
+  { value: "class", label: "By class" },
+  { value: "asset", label: "By asset" },
+];
+
+const RISK_STATUS_BADGE = {
+  ready: "good",
+  partial: "warn",
+  excluded: "critical",
+  insufficient: "warn",
+  not_applicable: "neutral",
+};
+
+// `proxied` says the series came from a stand-in asset (a Swiss bar priced off
+// gold); everything else says the underlying data is thinner than it looks.
+const RISK_WARNING_TONE = { proxied: "neutral" };
+
+function RiskWarnings({ row }) {
+  const warnings = row.warnings || [];
+  if (!warnings.length) return null;
+  return (
+    <div className="mt-1 flex flex-wrap gap-1" data-testid={`dashboard-risk-warnings-${row.key}`}>
+      {warnings.map((w) => (
+        <Badge key={w} variant={RISK_WARNING_TONE[w] || "warn"}>
+          {w === "proxied" && row.proxied_from ? `Proxied via ${row.proxied_from}` : humanize(w)}
+        </Badge>
+      ))}
+    </div>
+  );
+}
+
+function calmarValue(metrics) {
+  if (!metrics) return "—";
+  if (metrics.calmar != null) return num(metrics.calmar);
+  const months = Math.floor((metrics.calmar_window_days || 0) / 30);
+  return `needs 36 months (have ${months})`;
+}
+
+function riskHealthLabel(health) {
+  if (health === "healthy") return "Healthy";
+  if (health === "degraded") return "Degraded";
+  return "Unhealthy";
+}
+
+function riskHealthTone(health) {
+  if (health === "healthy") return "good";
+  if (health === "degraded") return "warn";
+  return "critical";
+}
+
+function BenchmarkTiles({ metrics }) {
+  if (!metrics || metrics.benchmark_status === "unavailable") {
+    return (
+      <StatTile
+        label="Beta / alpha vs. benchmark"
+        value="Unavailable"
+        sub={humanize(metrics?.benchmark_status_reason) || "No benchmark index history"}
+        testId="dashboard-risk-benchmark"
+      />
+    );
+  }
+  return (
+    <>
+      <StatTile label="Beta" value={num(metrics.beta)} testId="dashboard-risk-beta" />
+      <StatTile label="Alpha (annualized)" value={pct(metrics.alpha)} valueTone={toneFor(metrics.alpha)} testId="dashboard-risk-alpha" />
+      <StatTile label="Tracking error" value={pct(metrics.tracking_error)} testId="dashboard-risk-tracking-error" />
+      <StatTile label="Information ratio" value={num(metrics.information_ratio)} valueTone={toneFor(metrics.information_ratio)} testId="dashboard-risk-info-ratio" />
+    </>
+  );
+}
+
+function RiskMetricsGrid({ metrics, prefix = "dashboard-risk" }) {
+  if (!metrics) {
+    return <p className="text-sm text-muted">Not enough price history for this slice.</p>;
+  }
+  const hasCvar = metrics.historical_cvar_95_daily != null;
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+      <StatTile label="Annualized volatility" value={pct(metrics.annualized_volatility)} testId={`${prefix}-volatility`} />
+      <StatTile
+        label="Max drawdown"
+        value={pct(metrics.max_drawdown)}
+        valueTone={toneFor(metrics.max_drawdown)}
+        sub={`${metrics.days_under_water ?? 0} days under water`}
+        testId={`${prefix}-max-drawdown`}
+      />
+      <StatTile label="Sharpe" value={num(metrics.sharpe)} valueTone={toneFor(metrics.sharpe)} testId={`${prefix}-sharpe`} />
+      <StatTile label="Sortino" value={num(metrics.sortino)} valueTone={toneFor(metrics.sortino)} testId={`${prefix}-sortino`} />
+      <StatTile label="Calmar" value={calmarValue(metrics)} testId={`${prefix}-calmar`} />
+      <StatTile label="Diversification ratio" value={`${num(metrics.diversification_ratio)}×`} testId={`${prefix}-diversification`} />
+      <StatTile label="VaR 95% (daily)" value={pct(metrics.historical_var_95_daily)} valueTone={toneFor(metrics.historical_var_95_daily)} testId={`${prefix}-var`} />
+      <StatTile
+        label="CVaR 95% (daily)"
+        value={hasCvar ? pct(metrics.historical_cvar_95_daily) : "Unavailable"}
+        valueTone={hasCvar ? toneFor(metrics.historical_cvar_95_daily) : "muted"}
+        sub={hasCvar ? undefined : "fewer than 5 tail observations"}
+        testId={`${prefix}-cvar`}
+      />
+      <BenchmarkTiles metrics={metrics} />
+    </div>
+  );
+}
+
+function RiskSummary({ data }) {
+  const coverage = data.coverage || {};
+  const full = data.portfolio_full || {};
+  const health = coverage.health || "degraded";
+  return (
+    <div className="space-y-3" data-testid="dashboard-risk-summary">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Badge variant={riskHealthTone(health)} testId="dashboard-risk-health">{riskHealthLabel(health)}</Badge>
+        <span className="text-xs text-muted">
+          {data.history_days || 180}d window · {Math.round(data.periods_per_year || 252)} obs/yr · {humanize(data.basis || "nominal_toman")}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <StatTile
+          label="Holdings covered"
+          value={`${coverage.analyzable_holdings ?? 0}/${coverage.total_holdings ?? 0}`}
+          sub={`${pct(coverage.value_analyzable_pct)} of value analyzable`}
+          testId="dashboard-risk-coverage"
+        />
+        <StatTile
+          label="Analyzed weight"
+          value={pct(coverage.analyzed_weight_pct)}
+          sub="Share of the book these metrics describe"
+          valueTone={(coverage.analyzed_weight_pct || 0) >= 0.9 ? "good" : "warn"}
+          testId="dashboard-risk-analyzed-weight"
+        />
+        <StatTile label="Excluded" value={num(coverage.excluded_holdings)} sub="Missing history or failed gates" valueTone={(coverage.excluded_holdings || 0) > 0 ? "warn" : "good"} />
+        <StatTile label="Full portfolio HHI" value={num(full.concentration_hhi)} sub="Concentration across all priced holdings" testId="dashboard-risk-hhi" />
+      </div>
+      {(coverage.analyzed_weight_pct ?? 1) < 0.999 && (
+        <p className="text-sm text-muted" data-testid="dashboard-risk-scope-note">
+          Portfolio metrics cover {pct(coverage.analyzed_weight_pct)} of the book, reweighted to 100%. The rest has no daily
+          return history — real estate is valued from marks, not prices.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function RiskPortfolioView({ data }) {
+  return (
+    <div className="space-y-4" data-testid="dashboard-risk-portfolio-view">
+      <RiskMetricsGrid metrics={data.metrics} />
+      {(data.excluded_assets || []).length > 0 && (
+        <div className="rounded-lg border border-border bg-panel-2 p-3 text-sm" data-testid="dashboard-risk-excluded-list">
+          <p className="font-medium">Excluded from analyzable portfolio metrics</p>
+          <ul className="mt-2 space-y-1 text-xs text-muted">
+            {(data.excluded_assets || []).map((e) => (
+              <li key={`${e.key}-${e.reason}`}>{e.key} — {humanize(e.reason)}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RiskClassView({ data }) {
+  const rows = data.by_asset_class || [];
+  if (!rows.length) return <Empty>No asset classes in this portfolio.</Empty>;
+  return (
+    <div className="space-y-4" data-testid="dashboard-risk-class-view">
+      {rows.map((row) => (
+        <div key={row.asset_class} className="rounded-lg border border-border bg-panel-2 p-4" data-testid={`dashboard-risk-class-${row.asset_class}`}>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="font-medium">{row.asset_class}</p>
+              <p className="text-xs text-muted">
+                {pct(row.weight_in_portfolio)} of portfolio · {row.analyzable_count}/{row.held_count} assets analyzable
+              </p>
+            </div>
+            <Badge variant={RISK_STATUS_BADGE[row.status] || "neutral"}>{humanize(row.status)}</Badge>
+          </div>
+          {row.status === "not_applicable" ? (
+            <p className="text-sm text-muted">Real estate is valued from marks, not daily return history.</p>
+          ) : (
+            <RiskMetricsGrid metrics={row.metrics} prefix={`dashboard-risk-class-${row.asset_class}`} />
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RiskAssetView({ data }) {
+  const rows = data.by_asset || [];
+  if (!rows.length) return <Empty>No holdings to analyze.</Empty>;
+  return (
+    <Table
+      testId="dashboard-risk-asset-table"
+      rows={rows}
+      rowKey={(r) => r.key}
+      empty="No holdings."
+      columns={[
+        {
+          key: "asset",
+          header: "Asset",
+          render: (r) => (
+            <div>
+              <div>{assetLabel({ name: r.name, key: r.key })}</div>
+              <div className="text-xs text-muted">
+                {humanize(r.asset_class)}
+                {r.observations ? ` · ${r.observations} obs` : ""}
+              </div>
+            </div>
+          ),
+        },
+        {
+          key: "status",
+          header: "Status",
+          render: (r) => (
+            <div>
+              <Badge variant={RISK_STATUS_BADGE[r.status] || "neutral"} title={humanize(r.status_reason)}>
+                {humanize(r.status)}
+              </Badge>
+              <RiskWarnings row={r} />
+            </div>
+          ),
+        },
+        { key: "weight", header: "Weight", align: "right", render: (r) => pct(r.weight_in_portfolio) },
+        {
+          key: "vol",
+          header: "Vol",
+          align: "right",
+          render: (r) => (r.metrics ? pct(r.metrics.annualized_volatility) : "—"),
+        },
+        {
+          key: "sharpe",
+          header: "Sharpe",
+          align: "right",
+          render: (r) => (r.metrics ? num(r.metrics.sharpe) : "—"),
+        },
+        {
+          key: "mdd",
+          header: "Max DD",
+          align: "right",
+          render: (r) => (r.metrics ? pct(r.metrics.max_drawdown) : "—"),
+        },
+        {
+          key: "var",
+          header: "VaR 95%",
+          align: "right",
+          render: (r) => (r.metrics ? pct(r.metrics.historical_var_95_daily) : "—"),
+        },
+        {
+          key: "reason",
+          header: "Note",
+          render: (r) => {
+            if (r.status_reason) return humanize(r.status_reason);
+            if (r.proxied_from) return `Priced off ${r.proxied_from}`;
+            return "—";
+          },
+        },
+      ]}
+    />
+  );
+}
+
+function RiskCard({ activeId, basis }) {
+  const [window, setWindow] = useState("180");
+  const [view, setView] = useState("asset");
+  const state = useApi(
+    () => analytics(activeId, { basis, window: Number(window) }),
+    [activeId, basis, window]
+  );
+
+  return (
+    <Card
+      title="Risk"
+      testId="dashboard-risk"
+      actions={(
+        <Tabs
+          options={RISK_WINDOWS}
+          value={window}
+          onChange={setWindow}
+          label="Window"
+          testId="dashboard-risk-window"
+        />
+      )}
+    >
+      <Async {...state} testId="dashboard-risk-body">
+        {(data) => (
+          <div className="space-y-4">
+            <RiskSummary data={data} />
+            <Tabs
+              label="Risk breakdown"
+              testId="dashboard-risk-view"
+              value={view}
+              onChange={setView}
+              options={RISK_VIEWS}
+            />
+            {view === "portfolio" && <RiskPortfolioView data={data} />}
+            {view === "class" && <RiskClassView data={data} />}
+            {view === "asset" && <RiskAssetView data={data} />}
+          </div>
+        )}
       </Async>
     </Card>
   );
@@ -444,9 +988,10 @@ export default function Dashboard({ user }) {
         <HeroRow state={valuationState} />
         <TrendCard activeId={activeId} basis={basis} />
         <AllocationCard state={valuationState} />
-        <PerformanceCard activeId={activeId} basis={basis} />
+        <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
         <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} staff={!!user?.is_staff} />
         <ExcludedDisclosure valuationState={valuationState} />
+        <RiskCard activeId={activeId} basis={basis} />
       </div>
     </div>
   );

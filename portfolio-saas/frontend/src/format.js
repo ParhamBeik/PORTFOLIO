@@ -10,6 +10,15 @@
 //
 // Money is Toman. The backend serializes Decimals as strings — Number() them.
 
+/** User-facing performance metric names (API fields remain twr / xirr). */
+export const perfLabel = {
+  twr: "Portfolio return",
+  xirr: "Personal return",
+};
+
+export const PERF_UNLOCK_HINT =
+  "Record opening balances on the Ledger page to unlock return metrics.";
+
 const nf = (max) => ({ maximumFractionDigits: max });
 const bad = (n) => n === null || n === undefined || n === "" || isNaN(Number(n));
 
@@ -72,6 +81,21 @@ export const dateTick = (iso, long = false) => {
 };
 
 /** Reason codes and enum values arrive snake_case; render them readably. */
+/** Time-series charts: show time when the span is short, month when long. */
+export function trendAxisTick(iso, spanMs) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return "";
+  const twoDays = 2 * 86400000;
+  const sixtyDays = 60 * 86400000;
+  if (spanMs <= twoDays) {
+    return dtf({ month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
+  }
+  if (spanMs <= sixtyDays) {
+    return dtf({ month: "short", day: "2-digit" }).format(d);
+  }
+  return dtf({ year: "numeric", month: "short" }).format(d);
+}
+
 export const humanize = (code) =>
   !code ? "" : String(code).replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
 

@@ -153,6 +153,9 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
+    # Translates domain errors (currently CpiUnavailable) that any
+    # basis-accepting endpoint can raise into honest responses instead of 500s.
+    "EXCEPTION_HANDLER": "config.exception_handlers.handle",
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
@@ -419,7 +422,30 @@ LOGGING = {
     },
 }
 
-# Risk-free rate for analytics
+class CpiUnavailable(Exception):
+    """No configured CPI value for a Jalali year — never a stale clamp.
+
+    Raised by `cpi_for()` for any year outside the table (except extrapolation
+    below the earliest known year, which is intentional). `jalali_year` is what
+    was asked for; `last_verified_year` is the newest year the table covers.
+    Add missing years via CPI_BY_JALALI_YEAR_EXTRA rather than guessing.
+    """
+
+    def __init__(self, jalali_year, last_verified_year):
+        self.jalali_year = jalali_year
+        self.last_verified_year = last_verified_year
+        super().__init__(
+            f"CPI unavailable for Jalali year {jalali_year}: table verified "
+            f"only through {last_verified_year}. Set CPI_BY_JALALI_YEAR_EXTRA "
+            f"(JSON, e.g. '{{\"{jalali_year}\": 950.0}}') once the real figure "
+            f"is published."
+        )
+
+
+# Risk-free rate for analytics. This is a hand-maintained ASSUMPTION (CBI
+# deposit/bond-rate estimate), not a measured market yield — see
+# RISK_FREE_RATE_SOURCE, which callers should surface alongside any Sharpe
+# or risk-adjusted number computed with it.
 RISK_FREE_RATE_ANNUAL = 0.30
 RISK_FREE_RATE_BY_JALALI_YEAR = {
     1399: 0.18,
@@ -430,7 +456,10 @@ RISK_FREE_RATE_BY_JALALI_YEAR = {
     1404: 0.30,
     1405: 0.30,
 }
-RISK_FREE_RATE_SOURCE = "CBI annual deposit/bond-rate assumptions; manually reviewed"
+RISK_FREE_RATE_SOURCE = (
+    "Assumption, not a measured yield: CBI annual deposit/bond-rate estimate; "
+    "manually reviewed through 1405"
+)
 
 # Cumulative annual CPI index derived from SCI annual CPI releases, base 1398=100.
 CPI_BY_JALALI_YEAR = {
@@ -442,7 +471,16 @@ CPI_BY_JALALI_YEAR = {
     1403: 519.8,
     1404: 680.9,
 }
-CPI_SOURCE = "Statistical Center of Iran annual CPI releases; manually reviewed"
+# Extend without a code deploy once a new year's figure is published, e.g.
+# CPI_BY_JALALI_YEAR_EXTRA='{"1405": 950.0}'. Keys may be str or int.
+_cpi_extra_raw = os.environ.get("CPI_BY_JALALI_YEAR_EXTRA", "")
+if _cpi_extra_raw:
+    import json as _json
+
+    CPI_BY_JALALI_YEAR.update(
+        {int(year): float(value) for year, value in _json.loads(_cpi_extra_raw).items()}
+    )
+CPI_SOURCE = "Statistical Center of Iran annual CPI releases; manually reviewed through 1404"
 
 
 def rate_for(jalali_year):
@@ -452,12 +490,19 @@ def rate_for(jalali_year):
 
 
 def cpi_for(jalali_year):
+    """CPI index for a Jalali year, or raise CpiUnavailable — never a silent clamp.
+
+    Extrapolating backward below the earliest known year is intentional (the
+    index is defined as flat before its base year). Anything at or above the
+    newest known year, or any interior gap left by a partial override, is a
+    real unknown and must fail loud rather than reuse the last known number.
+    """
     years = sorted(CPI_BY_JALALI_YEAR)
-    if jalali_year <= years[0]:
+    if jalali_year in CPI_BY_JALALI_YEAR:
+        return float(CPI_BY_JALALI_YEAR[jalali_year])
+    if jalali_year < years[0]:
         return float(CPI_BY_JALALI_YEAR[years[0]])
-    if jalali_year >= years[-1]:
-        return float(CPI_BY_JALALI_YEAR[years[-1]])
-    return float(CPI_BY_JALALI_YEAR[jalali_year])
+    raise CpiUnavailable(jalali_year, years[-1])
 
 
 # Django only exposes uppercase names through django.conf.settings.

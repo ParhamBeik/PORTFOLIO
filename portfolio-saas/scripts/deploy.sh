@@ -22,6 +22,5 @@ fi
 curl -fsS --retry 12 --retry-delay 5 "https://${domain}/api/health/ready/"
 "${compose[@]}" exec -T celery_worker_live celery -A config inspect ping
 "${compose[@]}" exec -T celery_worker_archive celery -A config inspect ping
-"${compose[@]}" exec -T celery_worker_codal celery -A config inspect ping
 curl -fsS "https://${domain}/api/health/"
 curl -fsS "https://${domain}/api/health/prices/"

@@ -10,6 +10,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from marketdata.admin_telemetry import get_ops_overview, invalidate_ops_cache
+from marketdata.coverage_report import list_ops_assets
 from marketdata.evidence import assemble_asset_evidence
 from marketdata.models import ArchiveFetchState, SystemLogEvent, WorkflowRun
 from marketdata.quota import get_quota_status
@@ -31,6 +32,8 @@ class AdminOverviewView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
+        if request.query_params.get("refresh") in ("1", "true", "yes"):
+            invalidate_ops_cache()
         return Response(get_ops_overview())
 
 
@@ -293,6 +296,65 @@ class AdminArchiveRetryView(APIView):
         except RetryBlocked as err:
             return Response({"detail": err.detail}, status=err.status)
         return Response(result)
+
+
+class AdminAssetListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    ORDERING = {
+        "name",
+        "-name",
+        "key",
+        "-key",
+        "asset_class",
+        "-asset_class",
+        "live_status",
+        "-live_status",
+        "age_seconds",
+        "-age_seconds",
+        "integrity_status",
+        "-integrity_status",
+    }
+
+    def get(self, request):
+        ordering = request.query_params.get("ordering", "name")
+        if ordering not in self.ORDERING:
+            ordering = "name"
+        payload = list_ops_assets(
+            asset_class=request.query_params.get("asset_class"),
+            search=request.query_params.get("search"),
+            live_status=request.query_params.get("live_status"),
+            held_only=request.query_params.get("held_only") == "true",
+            integrity=request.query_params.get("integrity"),
+            ordering=ordering,
+        )
+        try:
+            page_size = min(int(request.query_params.get("page_size", 50)), 200)
+        except (TypeError, ValueError):
+            page_size = 50
+        try:
+            page = max(1, int(request.query_params.get("page", 1)))
+        except (TypeError, ValueError):
+            page = 1
+        rows = payload["results"]
+        count = len(rows)
+        start = (page - 1) * page_size
+        end = start + page_size
+        base = request.build_absolute_uri(request.path)
+        qs = request.GET.copy()
+
+        def page_link(page_num):
+            qs["page"] = str(page_num)
+            return f"{base}?{qs.urlencode()}"
+
+        return Response({
+            "count": count,
+            "generated_at": payload["generated_at"],
+            "asset_classes": payload["asset_classes"],
+            "next": page_link(page + 1) if end < count else None,
+            "previous": page_link(page - 1) if page > 1 else None,
+            "results": rows[start:end],
+        })
 
 
 class AdminAssetEvidenceView(APIView):

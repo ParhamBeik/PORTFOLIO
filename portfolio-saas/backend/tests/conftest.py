@@ -115,7 +115,7 @@ def clear_caches():
     from marketdata.quota import _LOCAL_WINDOWS
     _LOCAL_WINDOWS.clear()
     try:
-        from portfolio.live.pubsub import get_redis
+        from portfolio.live.redis_client import get_redis
         r = get_redis()
         r.delete("lock:price_fetch")
     except Exception:

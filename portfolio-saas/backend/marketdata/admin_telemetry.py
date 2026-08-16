@@ -37,6 +37,7 @@ from .models import (
     SystemLogEvent,
     WorkflowRun,
 )
+from .coverage_report import build_coverage_report
 from .quota import get_quota_status
 
 
@@ -236,7 +237,10 @@ def _queues():
         from redis import Redis
 
         broker = Redis.from_url(settings.CELERY_BROKER_URL)
-        depths = {queue: broker.llen(queue) for queue in ("live", "archive", "codal")}
+        # Only queues a worker actually consumes -- see the same list in
+        # marketdata/tasks.py:operational_health_check. `codal` outlived the
+        # pipeline that used it and always read 0.
+        depths = {queue: broker.llen(queue) for queue in ("live", "archive")}
         status = "degraded" if max(depths.values(), default=0) > settings.QUEUE_BACKLOG_THRESHOLD else "healthy"
         return {"status": status, "depths": depths, "message": ""}
     except Exception as exc:
@@ -646,6 +650,7 @@ def get_ops_overview():
         "rejected": ctx["rejected"],
         "workflows_24h": _workflows_24h(),
     }
+    body["coverage"] = build_coverage_report(database_rows=body["database_rows"])
     cache.set(OVERVIEW_CACHE_KEY, body, OVERVIEW_CACHE_TTL)
     return body
 

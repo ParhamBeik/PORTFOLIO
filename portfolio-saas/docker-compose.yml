@@ -26,10 +26,6 @@ x-backend-env: &backend-env
   BRS_URL: ${BRS_URL:-https://Api.BrsApi.ir/Market/Gold_Currency.php}
   TSETMC_API_KEY: ${TSETMC_API_KEY:-}
   TSETMC_URL: ${TSETMC_URL:-https://Api.BrsApi.ir/Tsetmc/AllSymbols.php}
-  CODAL_EXTRACTION_ENABLED: "0"
-  # Local Docker cannot reach Codal.ir. Production compose hard-enables extraction.
-  CODAL_HTTP_PROXY: ${CODAL_HTTP_PROXY:-}
-  CODAL_STORAGE_DIR: ${CODAL_STORAGE_DIR:-/var/lib/codal}
 
 x-json-logging: &json-logging
   driver: json-file
@@ -50,6 +46,21 @@ services:
       - pgdata:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    # Docker's default 64 MB /dev/shm is too small for Postgres' parallel-query
+    # and parallel-vacuum state once the warehouse is large; VACUUM (ANALYZE) on
+    # the tick table fails without this. Smaller than prod because a dev laptop
+    # gives the whole Docker VM only a few GB.
+    shm_size: 256mb
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=128MB
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-portfolio}"]
       interval: 5s
@@ -59,7 +70,7 @@ services:
       resources:
         limits:
           cpus: "1"
-          memory: 768m
+          memory: 1g
 
   redis:
     image: redis:7.2-alpine
@@ -105,8 +116,6 @@ services:
     command: gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --workers 1 --reload
     volumes:
       - ./backend:/app
-      # Read-only here: the backend only ever serves these, the codal worker writes.
-      - codal_documents:/var/lib/codal:ro
     ports:
       - "8000:8000"
     healthcheck:
@@ -188,38 +197,6 @@ services:
           cpus: "1"
           memory: 1536m
 
-  celery_worker_codal:
-    build: ./backend
-    restart: unless-stopped
-    logging: *json-logging
-    entrypoint: []
-    depends_on:
-      backend:
-        condition: service_started
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: celery_worker_codal
-    volumes:
-      - ./backend:/app
-      - codal_documents:/var/lib/codal
-    command: celery -A config worker -l info --concurrency=1 -Q codal -n codal@%h --max-memory-per-child=500000
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A config inspect ping -d codal@$$HOSTNAME"]
-      interval: 60s
-      timeout: 15s
-      retries: 3
-      start_period: 40s
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
-          memory: 1g
-
-
   celery_beat:
     build: ./backend
     restart: unless-stopped
@@ -230,10 +207,6 @@ services:
         condition: service_healthy
       celery_worker_archive:
         condition: service_healthy
-      # Codal ships disabled and is optional. Waiting on its health would let a
-      # dead optional feature stop beat, and with it live prices and archive.
-      celery_worker_codal:
-        condition: service_started
     environment:
       <<: *backend-env
       SERVICE_NAME: celery_beat
@@ -276,6 +249,3 @@ services:
 
 volumes:
   pgdata:
-  # Codal documents, content-addressed by SHA-256. The worker writes them; the
-  # backend serves them through the authenticated download view.
-  codal_documents:

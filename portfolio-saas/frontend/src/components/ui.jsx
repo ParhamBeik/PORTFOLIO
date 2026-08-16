@@ -82,6 +82,7 @@ export function Badge({ children, variant = "neutral", title, testId }) {
 export function Button({ variant = "ghost", className = "", ...props }) {
   const styles = {
     primary: "bg-accent text-white hover:opacity-90 border-transparent",
+    success: "bg-[var(--c-good)] text-white hover:opacity-90 border-transparent",
     ghost: "bg-panel-2 text-text hover:bg-border border-border",
     danger: "bg-transparent text-[var(--c-critical)] hover:bg-[var(--c-critical)]/10 border-transparent",
     link: "bg-transparent text-accent underline underline-offset-2 border-transparent px-1 py-0",

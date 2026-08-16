@@ -24,11 +24,11 @@ def test_run_price_fetch_concurrency_lock(asset_catalog, raw_market_sample, monk
     monkeypatch.setattr(mod, "get_redis", lambda: mock_redis)
 
     # First fetch succeeds
-    res1 = run_price_fetch(publish=False)
+    res1 = run_price_fetch()
     assert res1["written"] is True
 
     # Second concurrent fetch gets blocked by lock and does not write
-    res2 = run_price_fetch(publish=False)
+    res2 = run_price_fetch()
     assert res2["written"] is False
     assert res2["priced"] == {}
     mock_redis.eval.assert_called_once()
@@ -53,7 +53,7 @@ def test_run_price_fetch_downtime_gap_tagging(asset_catalog, raw_market_sample, 
     Snapshot.objects.filter(id__in=[snap1.id, snap2.id]).update(timestamp=old_time)
 
     # Execute fetch (will detect gap and backfill missing intervals)
-    res = run_price_fetch(publish=False)
+    res = run_price_fetch()
     assert res["written"] is True
 
     # Check that the backfilled snapshots are marked as estimated

@@ -38,13 +38,9 @@ RUN rm -rf /opt/venv/bin/pip* /opt/venv/lib/python*/site-packages/pip* \
     && rm -f /usr/local/bin/pip*
 
 COPY . /app/
-# /var/lib/codal must exist and be owned here, before the named volume is first
-# mounted: Docker seeds an empty volume from the image path and inherits its
-# ownership, but creates it root-owned if the path is absent -- which leaves the
-# unprivileged worker unable to write a single document.
 RUN useradd -m -u 1000 appuser \
-    && mkdir -p /app/staticfiles /var/lib/codal \
-    && chown -R appuser:appuser /app /var/lib/codal \
+    && mkdir -p /app/staticfiles \
+    && chown -R appuser:appuser /app \
     && chmod +x /app/entrypoint.sh
 
 USER appuser

@@ -147,8 +147,13 @@ def _bulk(
     landed = qs.count() - before
     if update_fields:
         recent_values = sorted({getattr(row, recent_field) for row in rows})[-recent_limit:]
+        recent_rows = {
+            tuple(getattr(row, field) for field in unique_fields): row
+            for row in rows
+            if getattr(row, recent_field) in recent_values
+        }.values()
         model.objects.bulk_create(
-            [row for row in rows if getattr(row, recent_field) in recent_values],
+            recent_rows,
             batch_size=500,
             update_conflicts=True,
             update_fields=update_fields,
@@ -472,8 +477,12 @@ def ingest_codal(payload) -> tuple[int, int]:
         try:
             cat_val = rec.get("category")
             rows.append(CodalAnnouncement(
-                symbol=rec.get("l18", "") or "",
-                company_name=rec.get("l30", "") or "",
+                # Strip: the provider pads some symbols with a trailing space
+                # ("زقیام " vs "زقیام"). Storing it verbatim silently broke every
+                # join to MarketInstrument/Asset for those symbols, so they read
+                # as having no disclosures at all while 100 rows sat in the table.
+                symbol=(rec.get("l18") or "").strip(),
+                company_name=(rec.get("l30") or "").strip(),
                 title=rec["title"],
                 # Already ASCII-folded above, before validation.
                 code=rec["code"],

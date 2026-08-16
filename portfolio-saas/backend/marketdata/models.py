@@ -106,6 +106,17 @@ class ArchiveFetchState(models.Model):
     target_window_days = models.PositiveSmallIntegerField(default=90)
     archive_cursor = models.PositiveIntegerField(default=1)
 
+    # Suspension (see marketdata/suspension.py): a symbol whose failures are
+    # a peer-relative outlier on its endpoint is pulled out of normal claiming
+    # without ever deleting the row. `blacklisted` is a separate operator flag
+    # ("never coming back") from `suspended_at` ("currently parked") so a probe
+    # can clear the latter while the former stays sticky until someone unsets it.
+    suspended_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    suspension_reason = models.CharField(max_length=32, blank=True, default="")
+    suspension_evidence = models.JSONField(default=dict, blank=True)
+    blacklisted = models.BooleanField(default=False, db_index=True)
+    last_probe_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         ordering = ["verified_complete", "-missing_rows", "last_attempt_at"]
         constraints = [
@@ -113,6 +124,12 @@ class ArchiveFetchState(models.Model):
                 fields=["endpoint", "symbol"],
                 name="uniq_archive_endpoint_symbol",
             )
+        ]
+        indexes = [
+            models.Index(
+                fields=["blacklisted", "suspended_at", "last_probe_at"],
+                name="archive_probe_due_idx",
+            ),
         ]
 
 
@@ -152,8 +169,11 @@ class StockSymbolMetadata(models.Model):
 class DailyStockHistory(models.Model):
     """Daily price history & Real/Legal (حقیقی/حقوقی) trade participant breakdown."""
 
-    symbol = models.CharField(max_length=64, db_index=True)
-    date = models.CharField(max_length=10, db_index=True)  # Jalali format YYYY-MM-DD
+    # See StockTransactionTick for why db_index is off here: the LIKE twins these
+    # produced were never scanned. `symbol` is covered by the unique constraint
+    # below, which leads with it; `date` keeps a plain btree via Meta.indexes.
+    symbol = models.CharField(max_length=64)
+    date = models.CharField(max_length=10)  # Jalali format YYYY-MM-DD
     time = models.CharField(max_length=8, blank=True, default="")
     tno = models.IntegerField(default=0)
     tvol = models.BigIntegerField(default=0)
@@ -170,7 +190,9 @@ class DailyStockHistory(models.Model):
     pcp = models.FloatField(default=0.0)
     is_adjusted = models.BooleanField(default=False)
     ingested_at = models.DateTimeField(null=True, blank=True)
-    last_correlation_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    # Lineage breadcrumb, written on every row and read only when tracing one
+    # ingest by hand. Both indexes it carried recorded ~0 scans across 4M rows.
+    last_correlation_id = models.CharField(max_length=64, blank=True, default="")
 
     # Real / Legal participant distribution (حقیقی / حقوقی)
     buy_count_i = models.IntegerField(null=True, blank=True)
@@ -195,18 +217,23 @@ class DailyStockHistory(models.Model):
             )
         ]
         indexes = [
-            models.Index(
-                fields=["symbol", "date"],
-                name="marketdata__symbol_7ee44e_idx",
-            )
+            # (symbol, date) used to live here as a 307 MB index that took 5
+            # scans, because `uniq_stock_history_symbol_date_adj` above is
+            # (symbol, date, is_adjusted) and already serves every query with a
+            # symbol -- it took 13.8M scans over the same period. A date-only
+            # btree is the one access path the unique constraint cannot serve.
+            models.Index(fields=["date"], name="stock_history_date_idx"),
         ]
 
 
 class RealLegalHistory(models.Model):
     """Daily real/legal participation, independent of price-history coverage."""
 
-    symbol = models.CharField(max_length=64, db_index=True)
-    date = models.CharField(max_length=10, db_index=True)
+    # 1.6M rows whose only reader is the archive verifier counting its own
+    # writes; every index on this table recorded 0-2 scans. `symbol`+`date` are
+    # covered by the unique constraint below.
+    symbol = models.CharField(max_length=64)
+    date = models.CharField(max_length=10)
     buy_count_i = models.IntegerField(null=True, blank=True)
     buy_count_n = models.IntegerField(null=True, blank=True)
     sell_count_i = models.IntegerField(null=True, blank=True)
@@ -219,7 +246,7 @@ class RealLegalHistory(models.Model):
     buy_n_value = models.BigIntegerField(null=True, blank=True)
     sell_i_value = models.BigIntegerField(null=True, blank=True)
     sell_n_value = models.BigIntegerField(null=True, blank=True)
-    quality = models.CharField(max_length=24, default="validated", db_index=True)
+    quality = models.CharField(max_length=24, default="validated")
     reconciliation_error = models.DecimalField(
         max_digits=8, decimal_places=6, null=True, blank=True
     )
@@ -255,7 +282,12 @@ class MarketCandle(models.Model):
     ADJUSTED = "1d_adj"
     AGGREGATE = "1d_agg"
 
-    symbol = models.CharField(max_length=64, db_index=True)
+    # `symbol` is covered by the unique constraint below, which leads with it,
+    # and its own two indexes took 23 and 75 scans. `timeframe` and `date_time`
+    # KEEP db_index: unlike everywhere else in this module their LIKE twins are
+    # genuinely hot (11,851 and 2,970 scans), so something really does prefix-
+    # match them and dropping those would be a regression.
+    symbol = models.CharField(max_length=64)
     timeframe = models.CharField(max_length=16, db_index=True)  # e.g., 1m, 5m, 15m, 30m, 60m, 1d_adj, 1d_unadj, 1d_agg
     date_time = models.CharField(max_length=32, db_index=True)
     open_price = models.DecimalField(max_digits=20, decimal_places=4, default=0, null=True, blank=True)
@@ -264,7 +296,8 @@ class MarketCandle(models.Model):
     close_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     volume = models.BigIntegerField(default=0)
     ingested_at = models.DateTimeField(null=True, blank=True)
-    last_correlation_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    # Lineage breadcrumb; both its indexes recorded ~0 scans. See DailyStockHistory.
+    last_correlation_id = models.CharField(max_length=64, blank=True, default="")
 
     class Meta:
         ordering = ["-date_time"]
@@ -280,10 +313,19 @@ class MarketCandle(models.Model):
 
 
 class StockTransactionTick(models.Model):
-    """Intraday trade transaction tick records."""
+    """Intraday trade transaction tick records.
 
-    symbol = models.CharField(max_length=64, db_index=True)
-    date = models.CharField(max_length=10, db_index=True)
+    Indexing note: `db_index=True` on a CharField makes Django build TWO indexes,
+    a plain btree and a `varchar_pattern_ops` twin for LIKE. On 41.6M rows each
+    twin cost 271 MB and `pg_stat_user_indexes` recorded ZERO scans for both of
+    them -- nothing here is ever prefix-matched. `symbol` is dropped outright
+    because the unique constraint below already leads with it; `date` keeps a
+    plain btree (it had real traffic) declared as an explicit `Index`, which
+    produces the btree WITHOUT the LIKE twin.
+    """
+
+    symbol = models.CharField(max_length=64)
+    date = models.CharField(max_length=10)
     time = models.CharField(max_length=8)
     row = models.IntegerField(default=0)
     price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
@@ -292,6 +334,9 @@ class StockTransactionTick(models.Model):
 
     class Meta:
         ordering = ["date", "row"]
+        indexes = [
+            models.Index(fields=["date"], name="tick_date_idx"),
+        ]
         constraints = [
             # `time` is part of the key because Transaction.php reuses a row
             # number for a cancelled trade: the same row appears once at the
@@ -359,6 +404,14 @@ class CodalAnnouncement(models.Model):
     link_excel = models.URLField(max_length=1024, blank=True, default="")
     link_attachment = models.URLField(max_length=1024, blank=True, default="")
 
+    # Title-based classification (marketdata.codal_classification.classify), filled
+    # retroactively by `classify_codal_announcements`. `tier` is null until that
+    # command has run on a row -- never defaulted to Tier 3 -- so "not yet
+    # classified" stays distinguishable from a real Tier 3 verdict.
+    doc_type = models.CharField(max_length=32, blank=True, default="", db_index=True)
+    tier = models.PositiveSmallIntegerField(null=True, blank=True, db_index=True)
+    classified_by = models.CharField(max_length=16, blank=True, default="")
+
     class Meta:
         ordering = ["-date_publish", "-time_publish"]
         constraints = [
@@ -366,6 +419,9 @@ class CodalAnnouncement(models.Model):
                 fields=["symbol", "code", "date_publish", "time_publish"],
                 name="uniq_codal_symbol_code_publish",
             )
+        ]
+        indexes = [
+            models.Index(fields=["symbol", "tier"], name="codal_symbol_tier_idx"),
         ]
 
 

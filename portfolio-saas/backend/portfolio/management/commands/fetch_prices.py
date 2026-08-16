@@ -20,7 +20,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, dry_run=False, **options):
-        result = run_price_fetch(dry_run=dry_run, publish=True)
+        result = run_price_fetch(dry_run=dry_run)
         priced = result["priced"]
         self.stdout.write(f"Fetched {len(priced)} positive prices: {sorted(priced)}")
 

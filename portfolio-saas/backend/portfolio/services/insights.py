@@ -22,7 +22,17 @@ def _liquid_items(valuation: dict) -> list:
     # and whole-user scopes.
     accounts = valuation.get("accounts") or [{"items": valuation.get("items", [])}]
     items = [i for acct in accounts for i in acct["items"]]
-    return [i for i in items if i["class"] != "Real Estate"]
+    # An unpriced holding carries value=None (valuation.py sets this with
+    # quality_status="unavailable" and an `excluded` entry giving the reason).
+    # It must be dropped HERE rather than in each caller: every consumer of this
+    # helper -- allocation_breakdown, concentration_risk, and views._liquid_weights
+    # -- goes on to sum(), compare, or max() these values, so a single None used
+    # to raise TypeError and 500 four endpoints at once. The omission stays
+    # visible to the client through the valuation payload's `excluded` list.
+    return [
+        i for i in items
+        if i["class"] != "Real Estate" and i.get("value") is not None
+    ]
 
 
 def _total(items: list) -> Decimal:

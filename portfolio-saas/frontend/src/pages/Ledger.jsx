@@ -1,72 +1,131 @@
 import { useState } from "react";
 import {
   createLedgerEntry,
+  deleteLedgerEntry,
+  deleteLedgerHolding,
   listAssets,
   listLedger,
-  reverseLedgerEntry,
+  trade,
+  updateLedgerEntry,
+  updateLedgerHolding,
 } from "../api.js";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import {
   Async,
+  Badge,
   Button,
   Card,
+  Delta,
   Empty,
   Input,
   PageHeader,
   Select,
   Table,
+  Tabs,
 } from "../components/ui.jsx";
-import { assetLabel, dateTime, num, toman } from "../format.js";
+import { assetLabel, dateTime, humanize, signedToman, toman } from "../format.js";
 import { useApi } from "../useApi.js";
 
-const KINDS = [
-  ["opening_position", "Opening position"],
-  ["opening_cash", "Opening cash"],
-  ["deposit", "Deposit"],
-  ["withdrawal", "Withdrawal"],
+const TRADE_SIDES = [
   ["buy", "Buy"],
   ["sell", "Sell"],
-  ["dividend", "Dividend"],
-  ["fee", "Fee"],
+];
+const CASH_KINDS = [
+  ["deposit", "Deposit"],
+  ["withdrawal", "Withdrawal"],
+];
+const OPENING_KINDS = [
+  ["opening_cash", "Opening cash"],
+  ["opening_position", "Opening position"],
 ];
 
-const NEEDS_ASSET = new Set(["opening_position", "buy", "sell", "dividend"]);
-const NEEDS_QTY = new Set(["opening_position", "buy", "sell"]);
-const NEEDS_PRICE = new Set(["buy", "sell"]);
-const NEEDS_AMOUNT = new Set(["opening_cash", "deposit", "withdrawal", "dividend", "fee"]);
+const qtyInputClass = "w-24 rounded-md border border-border bg-panel px-2 py-1 text-right text-sm tabular";
+
+function PlusIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function kindBadge(row) {
+  if (row.kind === "buy") return <Badge variant="good">Buy</Badge>;
+  if (row.kind === "sell") return <Badge variant="critical">Sell</Badge>;
+  if (row.kind === "position") return <Badge variant="neutral">Holding</Badge>;
+  return <Badge variant="neutral">{humanize(row.kind)}</Badge>;
+}
+
+function toIso(local) {
+  if (!local) return null;
+  const d = new Date(local);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
 
 export default function Ledger() {
-  const { accounts, activeId, setActive, reload } = usePortfolio();
-  const accountId = activeId ?? accounts[0]?.id ?? null;
+  const { accounts, activeId, reload } = usePortfolio();
+  const accountId = activeId ?? null;
   const assets = useApi(listAssets, []);
-  const ledger = useApi(() => listLedger(accountId), [accountId], { enabled: accountId != null });
+  const ledger = useApi(() => listLedger(accountId), [accountId], { enabled: accounts.length > 0 });
 
-  const [kind, setKind] = useState("opening_position");
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState("trade");
+  const [kind, setKind] = useState("buy");
+  const [formAccount, setFormAccount] = useState("");
   const [assetKey, setAssetKey] = useState("");
   const [quantity, setQuantity] = useState("");
-  const [unitPrice, setUnitPrice] = useState("");
   const [amount, setAmount] = useState("");
+  const [when, setWhen] = useState("");
   const [note, setNote] = useState("");
+  const [drafts, setDrafts] = useState({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  const targetAccountId = accountId ?? (formAccount ? Number(formAccount) : null);
+
+  const resetForm = () => {
+    setQuantity("");
+    setAmount("");
+    setWhen("");
+    setNote("");
+    setError("");
+  };
+
+  const switchTab = (next) => {
+    setTab(next);
+    setKind(next === "trade" ? "buy" : next === "cash" ? "deposit" : "opening_cash");
+    resetForm();
+  };
+
+  const refresh = () => Promise.all([ledger.reload?.() ?? Promise.resolve(), reload()]);
+
   const submit = async (e) => {
     e.preventDefault();
-    if (!accountId || busy) return;
+    if (!targetAccountId || busy) return;
     setBusy(true);
     setError("");
+    const occurredAt = toIso(when);
     try {
-      const body = { kind, note };
-      if (NEEDS_ASSET.has(kind)) body.asset_key = assetKey;
-      if (NEEDS_QTY.has(kind)) body.quantity = quantity;
-      if (NEEDS_PRICE.has(kind)) body.unit_price_tomans = unitPrice;
-      if (NEEDS_AMOUNT.has(kind)) body.amount_tomans = amount;
-      await createLedgerEntry(accountId, body);
-      await Promise.all([ledger.reload?.() ?? Promise.resolve(), reload()]);
-      setQuantity("");
-      setUnitPrice("");
-      setAmount("");
-      setNote("");
+      if (tab === "trade") {
+        await trade(targetAccountId, {
+          assetKey,
+          side: kind,
+          quantity,
+          note,
+          timestamp: occurredAt,
+        });
+      } else if (tab === "cash" || kind === "opening_cash") {
+        const body = { kind, amount_tomans: amount, note };
+        if (occurredAt) body.occurred_at = occurredAt;
+        await createLedgerEntry(targetAccountId, body);
+      } else {
+        const body = { kind, asset_key: assetKey, quantity, note };
+        if (occurredAt) body.occurred_at = occurredAt;
+        await createLedgerEntry(targetAccountId, body);
+      }
+      await refresh();
+      resetForm();
+      setOpen(false);
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -74,13 +133,41 @@ export default function Ledger() {
     }
   };
 
-  const reverse = async (id) => {
-    if (!accountId) return;
+  const saveRow = async (row) => {
+    const qty = (drafts[row.id] ?? row.quantity ?? "").toString().trim();
+    if (!qty || busy) return;
     setBusy(true);
     setError("");
     try {
-      await reverseLedgerEntry(accountId, id);
-      await Promise.all([ledger.reload?.() ?? Promise.resolve(), reload()]);
+      if (row.is_synthetic) {
+        await updateLedgerHolding(row.account_id, row.holding_id, qty);
+      } else {
+        await updateLedgerEntry(row.account_id, row.id, { quantity: qty });
+      }
+      setDrafts((cur) => {
+        const next = { ...cur };
+        delete next[row.id];
+        return next;
+      });
+      await refresh();
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeRow = async (row) => {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (row.is_synthetic) {
+        await deleteLedgerHolding(row.account_id, row.holding_id);
+      } else {
+        await deleteLedgerEntry(row.account_id, row.id);
+      }
+      await refresh();
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -92,37 +179,162 @@ export default function Ledger() {
     return <Empty testId="ledger-empty">Create a portfolio first.</Empty>;
   }
 
+  const needsAsset = tab === "trade" || (tab === "opening" && kind === "opening_position");
+  const needsQty = tab === "trade" || (tab === "opening" && kind === "opening_position");
+  const needsAmount = tab === "cash" || (tab === "opening" && kind === "opening_cash");
+  const kindOptions = tab === "trade" ? TRADE_SIDES : tab === "cash" ? CASH_KINDS : OPENING_KINDS;
+  const showPortfolio = accountId == null;
+
+  const columns = [
+    { key: "when", header: "When", render: (r) => dateTime(r.occurred_at) },
+    { key: "kind", header: "Side", render: kindBadge },
+    {
+      key: "asset",
+      header: "Asset",
+      render: (r) => (r.asset_key ? assetLabel({
+        name_fa: r.asset_name_fa, name: r.asset_name, key: r.asset_key,
+      }) : "—"),
+    },
+    {
+      key: "qty",
+      header: "Qty",
+      align: "right",
+      render: (r) => (
+        r.quantity == null ? "—" : (
+          <input
+            type="number"
+            step="any"
+            className={qtyInputClass}
+            aria-label={`Quantity for ${r.asset_key || r.kind}`}
+            data-testid="ledger-edit-qty"
+            disabled={busy}
+            value={drafts[r.id] ?? r.quantity}
+            onChange={(e) => setDrafts((cur) => ({ ...cur, [r.id]: e.target.value }))}
+          />
+        )
+      ),
+    },
+    {
+      key: "price",
+      header: "Price",
+      align: "right",
+      render: (r) => toman(r.unit_price_tomans),
+    },
+    { key: "amt", header: "Amount", align: "right", render: (r) => toman(r.amount_tomans) },
+    {
+      key: "pnl",
+      header: "P/L",
+      align: "right",
+      render: (r) => (
+        <span data-testid="ledger-pnl">
+          <Delta value={r.pnl_tomans == null ? null : Number(r.pnl_tomans)} format={signedToman} />
+        </span>
+      ),
+    },
+    {
+      key: "actions",
+      header: "",
+      align: "right",
+      render: (r) => (
+        <div className="flex justify-end gap-2">
+          {r.quantity != null && (
+            <Button
+              variant="ghost"
+              disabled={busy || drafts[r.id] == null || drafts[r.id] === String(r.quantity)}
+              onClick={() => saveRow(r)}
+              data-testid="ledger-save"
+            >
+              Save
+            </Button>
+          )}
+          <Button
+            variant="danger"
+            disabled={busy}
+            onClick={() => removeRow(r)}
+            data-testid="ledger-delete"
+          >
+            Delete
+          </Button>
+        </div>
+      ),
+    },
+  ];
+
+  if (showPortfolio) {
+    columns.splice(2, 0, {
+      key: "portfolio",
+      header: "Portfolio",
+      render: (r) => r.account_name || "—",
+    });
+  }
+
   return (
     <div>
       <PageHeader
         title="Ledger"
-        subtitle="Opening cash and positions unlock TWR, XIRR, cost basis, and P&L. Corrections append a reversal."
+        subtitle="Add, edit, or delete buys and sells. Holdings with no trade history still appear so you can set their quantity. A sell cannot leave holdings negative at any point on the timeline."
+        actions={
+          <Button
+            type="button"
+            variant="primary"
+            onClick={() => { setOpen((v) => !v); setError(""); }}
+            data-testid="ledger-add"
+            className="inline-flex items-center gap-1.5"
+            aria-expanded={open}
+            aria-label="Add transaction"
+          >
+            <PlusIcon />
+            Add
+          </Button>
+        }
       />
-      <div className="mb-4 max-w-sm">
-        <Select
-          label="Portfolio"
-          data-testid="ledger-account"
-          value={accountId ?? ""}
-          onChange={(e) => setActive(Number(e.target.value))}
-        >
-          {accounts.map((a) => (
-            <option key={a.id} value={a.id}>{a.name}</option>
-          ))}
-        </Select>
-      </div>
 
-      <div className="grid gap-5 lg:grid-cols-2">
-        <Card title="Add entry" testId="ledger-form-card">
+      {error && !open && (
+        <p role="alert" className="mb-3 text-sm text-[var(--c-critical)]">{error}</p>
+      )}
+
+      {open && (
+        <Card title="Add transaction" testId="ledger-form-card" className="mb-5">
           <form className="space-y-3" onSubmit={submit} data-testid="ledger-form">
             {error && (
               <p role="alert" className="text-sm text-[var(--c-critical)]">{error}</p>
             )}
-            <Select label="Kind" data-testid="ledger-kind" value={kind} onChange={(e) => setKind(e.target.value)}>
-              {KINDS.map(([value, label]) => (
+            {accountId == null && (
+              <Select
+                label="Portfolio"
+                data-testid="ledger-account"
+                value={formAccount}
+                onChange={(e) => setFormAccount(e.target.value)}
+                required
+              >
+                <option value="">Select a portfolio…</option>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>{a.name}</option>
+                ))}
+              </Select>
+            )}
+            <Tabs
+              label="Entry type"
+              testId="ledger-tabs"
+              value={tab}
+              onChange={switchTab}
+              options={[
+                { value: "trade", label: "Buy / Sell" },
+                { value: "cash", label: "Cash" },
+                { value: "opening", label: "Opening" },
+              ]}
+            />
+            <Select
+              label="Kind"
+              data-testid="ledger-kind"
+              value={kind}
+              onChange={(e) => setKind(e.target.value)}
+            >
+              {kindOptions.map(([value, label]) => (
                 <option key={value} value={value}>{label}</option>
               ))}
             </Select>
-            {NEEDS_ASSET.has(kind) && (
+            {needsAsset && (
               <Async {...assets} testId="ledger-assets">
                 {(list) => (
                   <Select
@@ -133,14 +345,14 @@ export default function Ledger() {
                     required
                   >
                     <option value="">Select an asset…</option>
-                    {list.map((a) => (
+                    {list.filter((a) => !a.is_house).map((a) => (
                       <option key={a.key} value={a.key}>{assetLabel(a)}</option>
                     ))}
                   </Select>
                 )}
               </Async>
             )}
-            {NEEDS_QTY.has(kind) && (
+            {needsQty && (
               <Input
                 label="Quantity"
                 type="number"
@@ -151,18 +363,7 @@ export default function Ledger() {
                 onChange={(e) => setQuantity(e.target.value)}
               />
             )}
-            {NEEDS_PRICE.has(kind) && (
-              <Input
-                label="Unit price (Toman)"
-                type="number"
-                step="any"
-                required
-                data-testid="ledger-price"
-                value={unitPrice}
-                onChange={(e) => setUnitPrice(e.target.value)}
-              />
-            )}
-            {NEEDS_AMOUNT.has(kind) && (
+            {needsAmount && (
               <Input
                 label="Amount (Toman)"
                 type="number"
@@ -174,47 +375,42 @@ export default function Ledger() {
               />
             )}
             <Input
+              label="Date (optional)"
+              type="datetime-local"
+              data-testid="ledger-when"
+              value={when}
+              onChange={(e) => setWhen(e.target.value)}
+            />
+            <Input
               label="Note"
               data-testid="ledger-note"
               value={note}
               onChange={(e) => setNote(e.target.value)}
             />
-            <Button type="submit" variant="primary" disabled={busy} data-testid="ledger-submit">
-              {busy ? "Saving…" : "Record entry"}
-            </Button>
+            <div className="flex gap-2">
+              <Button type="submit" variant="primary" disabled={busy} data-testid="ledger-submit">
+                {busy ? "Saving…" : "Record"}
+              </Button>
+              <Button type="button" disabled={busy} onClick={() => { setOpen(false); resetForm(); }}>
+                Cancel
+              </Button>
+            </div>
           </form>
         </Card>
+      )}
 
-        <Card title="History" testId="ledger-history-card">
-          <Async {...ledger} testId="ledger-history" empty="No entries yet.">
-            {(rows) => (
-              <Table
-                testId="ledger-table"
-                rowKey={(r) => r.id}
-                rows={rows}
-                columns={[
-                  { key: "when", header: "When", render: (r) => dateTime(r.occurred_at) },
-                  { key: "kind", header: "Kind", render: (r) => r.kind },
-                  { key: "asset", header: "Asset", render: (r) => r.asset_key || "—" },
-                  { key: "qty", header: "Qty", align: "right", render: (r) => num(r.quantity, 4) },
-                  { key: "amt", header: "Amount", align: "right", render: (r) => toman(r.amount_tomans) },
-                  {
-                    key: "rev",
-                    header: "",
-                    align: "right",
-                    render: (r) =>
-                      r.reversal_of ? null : (
-                        <Button variant="ghost" disabled={busy} onClick={() => reverse(r.id)} data-testid="ledger-reverse">
-                          Reverse
-                        </Button>
-                      ),
-                  },
-                ]}
-              />
-            )}
-          </Async>
-        </Card>
-      </div>
+      <Card title="History" testId="ledger-history-card">
+        <Async {...ledger} testId="ledger-history" empty="No entries or holdings yet. Use + to add a buy or sell.">
+          {(rows) => (
+            <Table
+              testId="ledger-table"
+              rowKey={(r) => r.id}
+              rows={rows}
+              columns={columns}
+            />
+          )}
+        </Async>
+      </Card>
     </div>
   );
 }

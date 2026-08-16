@@ -22,7 +22,6 @@ Unit/price policy: see [`docs/F1_POLICY.md`](docs/F1_POLICY.md).
 
 - Frontend: http://localhost:5173
 - API: http://localhost:8000/api/
-- SSE stream: http://localhost:8000/api/prices/stream/
 
 Demo users seeded on first boot (DEBUG only): **demopro@portfolio.local / demopro12345**, **demofree@portfolio.local / demofree12345**, **admin@portfolio.local / admin12345**.
 
@@ -62,15 +61,18 @@ not O(users).
 - **Write rate is bounded** by schedule frequency: each fetch writes one net-worth
   `Snapshot` per user (`bulk_create`), independent of how often prices move.
 
-## Real-time
+## Price loop
 
-Celery beat ticks `fetch_and_publish` **every 2 minutes** → fetch → atomic write
-of `Price` + per-user `Snapshot` rows → bust the `prices:latest` + returns caches
-→ publish the price map once to the Redis pub/sub channel `prices:update`. The
-API streams that single channel to every connected client over **SSE**
-(`/api/prices/stream/`); each client recomputes its own portfolio value from the
-pushed prices (push stays O(1) in user count). The frontend SSE client falls back
-to 15s polling of `/api/prices/latest/` after 3 failures.
+Celery beat ticks `fetch_and_publish` → fetch → atomic write of `Price` +
+per-user `Snapshot` rows → bust the `prices:latest` + returns caches. The task
+enforces its own cadence based on whether the TSE is open (see
+`marketdata/market_state.py`), so it runs far more often during a session than
+overnight. The frontend polls `/api/valuation/` every 60s.
+
+The task keeps the `fetch_and_publish` name for beat-schedule stability; it no
+longer publishes. It once broadcast the price map over a Redis pub/sub channel
+for SSE clients, but the frontend never subscribed, so the SSE view, the channel
+fan-out and `/api/prices/stream/` were removed.
 
 The `fetch_prices` management command calls the same body for manual runs.
 Staleness is watched at `/api/health/prices/` (503 when the freshest price is
@@ -78,25 +80,12 @@ older than 15 min): an on-VPS cron restarts Celery on failure, and the hourly
 GitHub Actions probe (`.github/workflows/fetch-prices.yml`) catches the site
 being dark from outside. See `scripts/deploy.sh`.
 
-## Accounts & subscriptions
+## Accounts
 
-- **Free tier:** real-time portfolio tracking — accounts, holdings, live net worth,
-  net-worth history, global prices.
-- **Pro tier:** portfolio **optimization** — risk diagnostics (volatility, Sharpe,
-  Sortino, max drawdown, Calmar, VaR, CVaR, diversification ratio, correlation),
-  optimization scenarios (Max Sharpe, Min Volatility, Risk Parity, HRP),
-  rebalancing trades, and the efficient frontier. Plus the original rule-based
-  insights.
-
-`User.tier` (`FREE`/`PRO`) + `User.pro_expires_at` are the source of truth; Pro
-endpoints are gated by `RequiresFeature`/`IsPro`. Tiers are set administratively
-(the `set_tier` command / Django admin) — the former Zarinpal payment
-integration has been removed, so there is no in-app checkout.
-
-**Authentication required:** every API request needs a JWT (email/password or
-Google sign-in). Tokenless requests get 401. The seeded `demopro@portfolio.local`
-account is still available for manual login in dev/staging, but there is no
-silent fallback — sign in normally to use it.
+**Authentication required:** every API request needs a JWT. Tokenless requests
+get 401. There are no subscription tiers — `User.tier`, `pro_expires_at`,
+`IsPro`/`RequiresFeature` and the payment integration were all removed, and every
+endpoint is available to any authenticated user.
 
 ### "Account" = a named portfolio group
 
@@ -108,31 +97,28 @@ equivalent, so v1 uses named groups with manual or imported holdings.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/api/auth/register/` | – | creates account; email verification required |
-| POST | `/api/auth/login/` | – | JWT pair |
+Every path below needs a JWT unless marked `–`. The `/api/market/*` read surface
+was removed with commit `2ea22be`; the warehouse is now read only through the
+analytics and optimization services.
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| POST | `/api/auth/register/` · `/api/auth/login/` | – | create account / JWT pair |
 | POST | `/api/token/refresh/` | refresh | new access token |
-| GET | `/api/auth/me/` | JWT | current user + tier |
+| GET | `/api/auth/me/` | JWT | current user |
 | GET | `/api/assets/` | JWT | asset catalog |
 | GET/POST | `/api/accounts/` | JWT | list / create accounts |
-| GET/DELETE | `/api/accounts/<id>/` | JWT | account detail |
+| GET/PATCH/DELETE | `/api/accounts/<id>/` | JWT | account detail |
 | GET/POST | `/api/accounts/<id>/holdings/` | JWT | list / add holding |
 | GET/PATCH/DELETE | `/api/accounts/<id>/holdings/<id>/` | JWT | edit / remove holding |
-| GET | `/api/accounts/<id>/valuation/` | JWT | account valuation |
+| GET/POST | `/api/accounts/<id>/ledger/` | JWT | ledger entries |
+| POST | `/api/accounts/<id>/trades/` | JWT | buy / sell |
+| GET | `/api/accounts/<id>/performance/?basis=` | JWT | TWR / XIRR / cost basis |
 | GET | `/api/valuation/` | JWT | live net worth across accounts |
 | GET | `/api/snapshots/?days=` | JWT | net-worth history (for charts) |
-| GET | `/api/prices/latest/` | JWT | global price map |
-| GET | `/api/prices/history/?asset=` | JWT | per-asset series |
-| GET | `/api/prices/stream/` | JWT | SSE live prices (`?token=`) |
-| GET | `/api/insights/` | JWT + **Pro** | rule-based insights |
-| GET | `/api/analytics/` | JWT + **Pro** | risk diagnostics + correlation |
-| POST | `/api/optimization/` | JWT + **Pro** | `{scenario, constraints?}` → target weights + trades |
-| GET | `/api/optimization/frontier/` | JWT + **Pro** | efficient frontier |
-| GET | `/api/assets/returns/?days=` | JWT + **Pro** | return series + correlation |
-| GET | `/api/market/history/?symbol=` | JWT | daily TSE close series (warehouse) |
-| GET | `/api/market/candles/?symbol=&timeframe=` | JWT | OHLCV candles |
-| GET | `/api/market/index/` · `/api/market/symbols/` | JWT | TSE index series / symbol metadata |
-| GET | `/api/market/announcements/?symbol=` | JWT + **Pro** | Codal disclosures |
-| GET | `/api/market/shareholders/?symbol=` | JWT + **Pro** | latest shareholder roster |
+| GET | `/api/analytics/` | JWT | risk diagnostics + correlation |
+| GET | `/api/optimization/my-optimal/` · `/frontier/` · `/best-overall/` | JWT | optimizer surfaces |
+| GET/POST | `/api/admin/*` | staff | Ops console (overview, workflows, archive states, asset evidence) |
 | GET | `/api/health/` · `/api/health/ready/` · `/api/health/prices/` | – | liveness / readiness / feed staleness |
 
 ## Layout
@@ -144,18 +130,19 @@ portfolio-saas/
 ├── .github/workflows/fetch-prices.yml   # hourly dead-man's switch
 ├── backend/
 │   ├── config/                   # Django project (settings, urls, celery, health)
-│   ├── accounts/                 # User + tier + pro expiry, JWT auth, IsPro
+│   ├── accounts/                 # User model + JWT auth
 │   ├── portfolio/                # the user-portfolio domain:
-│   │   ├── models.py             #   Asset, Account, Holding, Price, Snapshot
-│   │   ├── services/             #   valuation + Pro analytics (returns, diagnostics, optimization, insights)
-│   │   ├── live/                 #   2-min price loop (fetcher, extractor, pubsub, SSE)
+│   │   ├── models.py             #   Asset, Account, Holding, Price, Snapshot, LedgerEntry
+│   │   ├── services/             #   valuation, ledger, performance, returns, diagnostics, optimization
+│   │   ├── live/                 #   price loop (fetcher, extractor, redis_client)
 │   │   └── tasks.py              #   Celery heartbeat fetch_and_publish
 │   └── marketdata/               # the market-history warehouse (separate bounded context):
-│       ├── models.py             #   market-history tables (stocks, gold/FX, crypto,
-│       │                         #   commodities, options, ETF NAV, index), symbol-keyed, no user FKs
+│       ├── models.py             #   market-history tables (stocks, gold/FX, index, Codal
+│       │                         #   announcements), symbol-keyed, no user FKs
 │       ├── fetchers/             #   BrsApi endpoint clients (history, candles, codal, ...)
 │       ├── ingest.py + tasks.py  #   payload->rows + daily/weekly sync schedule
-│       └── views.py              #   read-only /api/market/* endpoints
+│       ├── archive.py + quota.py #   gap-driven backfill under a provider request budget
+│       └── admin_api.py          #   staff-only /api/admin/* Ops console backend
 └── frontend/
     └── src/                      # React (auth, dashboard, analytics, optimization, market)
 ```

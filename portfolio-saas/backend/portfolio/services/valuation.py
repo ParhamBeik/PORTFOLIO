@@ -36,6 +36,14 @@ def get_latest_prices() -> dict:
 
     Uses Postgres DISTINCT ON to fetch the newest price for every asset in a
     single query, so this is O(1) regardless of how many assets or users exist.
+
+    The archive cross-check below is deliberately on the READ path as well as the
+    write path (`guard_price_map`). Guarding only writes assumes every row in the
+    table arrived through the fetch loop, and a single bad row that got in by any
+    other route -- a direct edit, a row predating the guard, a future writer that
+    forgets to call it -- is otherwise trusted forever by every valuation. The
+    blast radius is total rather than partial: one `price=1` row values the whole
+    holding at one Toman. The extra queries are amortised by the 120s cache.
     """
     cached = cache.get(_LATEST_PRICES_CACHE_KEY)
     if cached is not None:
@@ -48,6 +56,14 @@ def get_latest_prices() -> dict:
         .distinct("asset_id")
     )
     prices = {row.asset.key: _q(row.price) for row in latest}
+    # Replace only what is already priced. Filling assets that have no Price row
+    # at all is the write path's job; doing it here would turn "unpriced" into a
+    # silent archive value and hide the gap the valuation layer reports.
+    prices.update({
+        key: value
+        for key, value in _archive_replacements(prices).items()
+        if key in prices
+    })
     cache.set(_LATEST_PRICES_CACHE_KEY, prices, timeout=120)
     return prices
 
@@ -310,8 +326,11 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
             price_unit_status = "unverified"
         item = {
             "asset": holding.asset.name,
+            "name_fa": holding.asset.name_fa or "",
             "key": holding.asset.key,
             "class": holding.asset.asset_class,
+            "is_manual": holding.asset.is_manual,
+            "is_house": holding.asset.is_house,
             "quantity": holding.quantity,
             "unit_price": unit_price,
             "value": value,
@@ -612,10 +631,21 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
             price = Decimal("0")
             if asset.is_house:
                 holding = Holding.objects.filter(account=acc, asset=asset).first()
-                if holding is None:
-                    excluded.append({"asset_key": key, "reason": "missing_house_terms"})
-                    continue
-                val = _house_value(qty, area_sqm=holding.area_sqm)
+                # The area belongs to the mark in force on this date, not to the
+                # holding's current value: `qty` above is already the historical
+                # price-per-sqm, so pairing it with today's area would mix two
+                # different points in time.
+                from portfolio.services.timeline import house_area_as_of
+
+                area = house_area_as_of(acc, as_of_dt).get(key)
+                if area is None:
+                    if holding is None:
+                        excluded.append(
+                            {"asset_key": key, "reason": "missing_house_terms"}
+                        )
+                        continue
+                    area = holding.area_sqm
+                val = _house_value(qty, area_sqm=area)
                 price = val / qty if qty else Decimal("0")
             else:
                 stale_sessions = 0

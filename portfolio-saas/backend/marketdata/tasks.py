@@ -55,8 +55,12 @@ def operational_health_check():
 
     try:
         broker = Redis.from_url(settings.CELERY_BROKER_URL)
+        # Only queues a worker actually consumes. `codal` was left here after the
+        # Codal pipeline was removed: no task routes to it and no compose file
+        # defines a worker for it, so it reported a permanent depth of 0 and made
+        # the backlog check look broader than it was.
         backlog = {
-            queue: broker.llen(queue) for queue in ("live", "archive", "codal")
+            queue: broker.llen(queue) for queue in ("live", "archive")
         }
         if max(backlog.values(), default=0) > settings.QUEUE_BACKLOG_THRESHOLD:
             alerts.append(("queue-backlog", backlog))
@@ -145,7 +149,7 @@ def retry_archive_job_task(state_id):
     from .archive import run_archive_state
     run_archive_state(state_id)
 from .quota import QuotaExhausted
-from portfolio.live.pubsub import get_redis
+from portfolio.live.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -519,10 +523,34 @@ def archive_maintenance():
             outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "queue_full", "queue_depth": depth})
             return
         state_ids = claim_archive_maintenance(limit=min(2, slots))
-        if state_ids:
-            group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
-        logger.info("archive_maintenance: enqueued %d archive states", len(state_ids))
-        _finish_ok(outcome, rows_accepted=len(state_ids))
+
+        # Peer-relative suspension sweep: flag symbols failing far more than
+        # their peers on the same endpoint, so quota stops being spent on them.
+        # Cheap (one query per endpoint) and it refuses to act during a
+        # provider-wide outage, when every symbol fails at once.
+        from . import suspension
+
+        suspended = suspension.suspend_outliers()
+
+        # Weekly probe of already-suspended states, at the back of the queue so
+        # it can never crowd out real archive work. A probe is an ordinary fetch
+        # through run_archive_state; try_recover clears the flag if it comes
+        # back clean.
+        probe_ids = suspension.claim_probe_batch(
+            limit=max(0, min(2, slots - len(state_ids)))
+        )
+
+        for state_id in list(state_ids) + list(probe_ids):
+            run_archive_state.si(state_id).apply_async()
+        logger.info(
+            "archive_maintenance: enqueued %d states, %d probes, suspended %d",
+            len(state_ids), len(probe_ids), len(suspended),
+        )
+        _finish_ok(
+            outcome,
+            rows_accepted=len(state_ids) + len(probe_ids),
+            metadata={"suspended": len(suspended), "probes": len(probe_ids)},
+        )
     except Exception as err:
         _finish_fail(outcome, err)
         raise
@@ -1039,8 +1067,11 @@ def nightly_asset_metrics(window_days=365):
         annualized_return = float(series.mean() * 252)
         volatility = float(series.std(ddof=1) * np.sqrt(252))
         risk_free = settings.RATE_FOR(int(as_of[:4]))
-        downside = (series - risk_free / 252).clip(upper=0)
-        downside_deviation = float(np.sqrt(np.mean(downside ** 2)))
+        # Geometric daily rf (matches the compounding return side); simple
+        # rf/252 division understates the daily rate by ~13% at rf=0.30.
+        rf_daily = (1.0 + risk_free) ** (1.0 / 252) - 1.0
+        downside = (series - rf_daily).clip(upper=0)
+        downside_deviation = float(np.sqrt(np.mean(downside ** 2))) * np.sqrt(252)
         wealth = (1 + series).cumprod()
         max_drawdown = float((wealth / wealth.cummax() - 1).min())
         beta = None

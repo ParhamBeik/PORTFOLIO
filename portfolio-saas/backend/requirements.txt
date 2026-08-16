@@ -20,14 +20,8 @@ scipy==1.13.1
 cvxpy==1.5.2
 scikit-learn==1.5.0
 jdatetime==5.2.0
-# Lossless Codal warehouse. Documents are stored on a local volume, so there is
-# no object-store client here; untrusted input is bounded by the size, magic-byte
-# and zip-expansion limits in codal_pipeline.py.
-openpyxl==3.1.5
-beautifulsoup4==4.15.0
-lxml==6.1.1
-pypdf>=6.0,<7
-pytesseract==0.3.13
-# Imported directly by codal_parsers for OCR page images; pinned rather than
-# relied on as a transitive dependency of pytesseract.
-Pillow==12.3.0
+# Codal document *extraction* (Excel/PDF/OCR parsing) is deferred: the ingest path
+# stores BrsApi's announcement fields only. openpyxl / beautifulsoup4 / lxml /
+# pypdf / pytesseract / Pillow were dropped when the pipeline was removed — re-add
+# them here when extraction returns rather than carrying unused wheels (and a
+# system tesseract binary) in every image build.

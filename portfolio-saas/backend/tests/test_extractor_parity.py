@@ -42,11 +42,25 @@ def test_extract_matches_legacy_for_every_key(raw_market_sample, legacy_engine):
 
 
 def test_usdt_low_quote_is_converted_to_tomans(raw_market_sample):
-    """H1 regression: a sub-10 USD tether quote becomes its Toman equivalent."""
+    """When only the ~1 USD peg quote exists, USDT falls back to USD Tomans."""
     prices = extract_standard_prices(raw_market_sample)
-    # USDT quoted at 1.0 USD, USD at 63200 Toman -> 63200 Toman (whole number).
     assert prices["usdt_irt"] == Decimal("63200")
     assert prices["usd_cash"] == Decimal("63200")
+
+
+def test_usdt_history_irt_quote_differs_from_usd_pegged_feed(raw_market_sample):
+    prices = extract_standard_prices({
+        **raw_market_sample,
+        "usdt_irt_quote": {
+            "symbol": "USDT",
+            "unit": "ریال",
+            "history_daily": [
+                {"date": "1405-05-04", "close": 1880000},
+            ],
+        },
+    })
+    assert prices["usd_cash"] == Decimal("63200")
+    assert prices["usdt_irt"] == Decimal("188000")
 
 
 def test_btc_high_quote_is_left_in_usd(raw_market_sample):

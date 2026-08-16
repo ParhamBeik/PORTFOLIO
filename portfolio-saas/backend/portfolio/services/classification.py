@@ -5,6 +5,15 @@ from portfolio.models import Asset
 
 POLICY_VERSION = "balanced-v1"
 
+# Gold and Cash/FX are one economic sleeve in Iran (IRR hedge), even when
+# daily return correlation sits below the statistical cluster threshold.
+HARD_ASSET_SLEEVE = {
+    "id": "hard_asset",
+    "label": "Gold + Cash/FX",
+    "classes": ("Gold", "Cash"),
+    "max_weight": 0.50,
+}
+
 BALANCED_CONSTRAINTS = {
     "long_only": True,
     "max_weight_per_asset": 0.25,

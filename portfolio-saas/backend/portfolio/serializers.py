@@ -3,10 +3,11 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from .models import Account, Asset, Holding, LedgerEntry, Transaction, Liability
-from marketdata.models import MarketCandle, GoldCurrencyHistory
-from marketdata.currency import to_toman
-from marketdata.jalali import normalize_jalali
-import jdatetime
+from .services.ledger import (
+    PriceResolutionError,
+    assert_not_before_history,
+    resolve_historical_price,
+)
 
 
 class AssetSerializer(serializers.ModelSerializer):
@@ -29,11 +30,19 @@ class HoldingSerializer(serializers.ModelSerializer):
     asset_name_fa = serializers.CharField(source="asset.name_fa", read_only=True)
     asset_class = serializers.CharField(source="asset.asset_class", read_only=True)
     is_house = serializers.BooleanField(source="asset.is_house", read_only=True)
+    is_manual = serializers.BooleanField(source="asset.is_manual", read_only=True)
+    unit_price_tomans = serializers.DecimalField(
+        max_digits=20,
+        decimal_places=4,
+        min_value=Decimal("0.0001"),
+        required=False,
+        write_only=True,
+    )
 
     class Meta:
         model = Holding
-        fields = ("id", "asset_key", "asset_name", "asset_name_fa", "asset_class", "is_house",
-                  "quantity", "area_sqm", "mortgage_deduction_tomans",
+        fields = ("id", "asset_key", "asset_name", "asset_name_fa", "asset_class", "is_house", "is_manual",
+                  "quantity", "unit_price_tomans", "area_sqm", "mortgage_deduction_tomans",
                   "created_at", "updated_at")
         read_only_fields = ("id", "created_at", "updated_at")
 
@@ -84,20 +93,60 @@ class LedgerEntryInputSerializer(serializers.Serializer):
 
 class LedgerEntrySerializer(serializers.ModelSerializer):
     asset_key = serializers.CharField(source="asset.key", allow_null=True, read_only=True)
+    asset_name = serializers.CharField(source="asset.name", allow_null=True, read_only=True)
+    asset_name_fa = serializers.CharField(source="asset.name_fa", allow_null=True, read_only=True)
     occurred_at = serializers.DateTimeField(source="timestamp", read_only=True)
     unit_price_tomans = serializers.DecimalField(
         source="price_tomans", max_digits=20, decimal_places=4, allow_null=True, read_only=True
     )
+    pnl_tomans = serializers.SerializerMethodField()
+    pnl_kind = serializers.SerializerMethodField()
+    account_id = serializers.IntegerField(source="account.id", read_only=True)
+    account_name = serializers.CharField(source="account.name", read_only=True)
+    is_synthetic = serializers.SerializerMethodField()
 
     class Meta:
         model = LedgerEntry
         fields = (
-            "id", "kind", "asset_key", "quantity", "unit_price_tomans",
+            "id", "kind", "asset_key", "asset_name", "asset_name_fa",
+            "quantity", "unit_price_tomans",
             "amount_tomans", "area_sqm", "mortgage_deduction_tomans",
             "occurred_at", "source", "note", "external_id", "reversal_of",
-            "created_at",
+            "created_at", "pnl_tomans", "pnl_kind",
+            "account_id", "account_name", "is_synthetic",
         )
         read_only_fields = fields
+
+    def _pnl(self, obj):
+        return (self.context.get("pnl") or {}).get(obj.pk) or {}
+
+    def get_pnl_tomans(self, obj):
+        return self._pnl(obj).get("pnl_tomans")
+
+    def get_pnl_kind(self, obj):
+        return self._pnl(obj).get("pnl_kind")
+
+    def get_is_synthetic(self, obj):
+        return False
+
+
+class LedgerEntryPatchSerializer(serializers.Serializer):
+    quantity = serializers.DecimalField(
+        max_digits=20, decimal_places=6, min_value=Decimal("0.000001"), required=False
+    )
+    unit_price_tomans = serializers.DecimalField(
+        max_digits=20, decimal_places=4, min_value=Decimal("0.0001"), required=False
+    )
+    amount_tomans = serializers.DecimalField(
+        max_digits=24, decimal_places=4, min_value=Decimal("0.0001"), required=False
+    )
+    occurred_at = serializers.DateTimeField(required=False)
+    note = serializers.CharField(max_length=200, required=False, allow_blank=True)
+
+    def validate_occurred_at(self, value):
+        if value > timezone.now():
+            raise serializers.ValidationError("Cannot be in the future.")
+        return value
 
 
 class TradeInputSerializer(serializers.Serializer):
@@ -124,72 +173,15 @@ class TradeInputSerializer(serializers.Serializer):
             asset = Asset.objects.get(key=asset_key, is_active=True)
         except Asset.DoesNotExist:
             raise serializers.ValidationError({"asset_key": "Invalid or inactive asset."})
-        
-        # If timestamp is provided, we need to check bounds and possibly resolve price
-        # Get Jalali date for the timestamp
-        dt_date = timestamp.date()
+
         try:
-            j_date_str = jdatetime.date.fromgregorian(date=dt_date).strftime("%Y-%m-%d")
-        except Exception:
-            raise serializers.ValidationError({"timestamp": "Could not convert to Jalali date."})
-            
-        if not asset.is_manual and not asset.is_house:
-            # Check earliest available price
-            if asset.asset_class == Asset.AssetClass.STOCK and asset.tse_symbol:
-                # Trade backfill deliberately uses the unadjusted historical quote:
-                # that is the price the broker actually executed, not a later
-                # corporate-action-rescaled valuation series.
-                first_record = MarketCandle.objects.filter(symbol=asset.tse_symbol, timeframe="1d_unadj").order_by("date_time").first()
-                if first_record and j_date_str < first_record.date_time.split(" ")[0]:
-                    raise serializers.ValidationError({"timestamp": f"Date is before the earliest available price date ({first_record.date_time})."})
-            elif asset.asset_class in (Asset.AssetClass.GOLD, Asset.AssetClass.CASH, Asset.AssetClass.CRYPTO) and asset.brs_symbol:
-                first_record = GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol).order_by("date").first()
-                if first_record and j_date_str < first_record.date:
-                    raise serializers.ValidationError({"timestamp": f"Date is before the earliest available price date ({first_record.date})."})
-            
-            # Resolve price if omitted or 0
+            assert_not_before_history(asset, timestamp)
             if not price_tomans:
-                if asset.asset_class == Asset.AssetClass.STOCK and asset.tse_symbol:
-                    candle = MarketCandle.objects.filter(symbol=asset.tse_symbol, timeframe="1d_unadj", date_time__startswith=j_date_str).first()
-                    if not candle:
-                        candle = MarketCandle.objects.filter(symbol=asset.tse_symbol, timeframe="1d_unadj", date_time__lte=j_date_str + " 23:59:59").order_by("-date_time").first()
-                    if candle:
-                        # TSE portfolio quotes are Rial (qty hack); ledger column
-                        # stores that same number under price_tomans.
-                        attrs['price_tomans'] = candle.close_price
-                    else:
-                        latest_price = Price.objects.filter(asset=asset).order_by("-fetched_at").first()
-                        if latest_price:
-                            attrs['price_tomans'] = latest_price.price
-                        else:
-                            raise serializers.ValidationError({"price_tomans": "Price omitted and no historical price found for this date."})
-                elif asset.asset_class in (Asset.AssetClass.GOLD, Asset.AssetClass.CASH, Asset.AssetClass.CRYPTO) and asset.brs_symbol:
-                    history = GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol, date=j_date_str).first()
-                    if not history:
-                        history = GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol, date__lte=j_date_str).order_by("-date").first()
-                    if history:
-                        # GoldCurrencyHistory is Toman only for IRR-quoted
-                        # symbols; BTC is stored in تتر and XAUUSD in دلار. The
-                        # ledger column is Toman, so route the row through the
-                        # declared-unit rule rather than assuming, using that
-                        # date's USD rate for the foreign-quoted ones.
-                        usd_row = GoldCurrencyHistory.objects.filter(
-                            symbol="USD", date__lte=history.date, close_price__gt=0
-                        ).order_by("-date").first()
-                        attrs['price_tomans'] = to_toman(
-                            asset.brs_symbol, history.close_price, history.unit,
-                            usd_rate=usd_row.close_price if usd_row else None,
-                        )
-                    else:
-                        latest_price = Price.objects.filter(asset=asset).order_by("-fetched_at").first()
-                        if latest_price:
-                            attrs['price_tomans'] = latest_price.price
-                        else:
-                            raise serializers.ValidationError({"price_tomans": "Price omitted and no historical price found for this date."})
+                attrs["price_tomans"] = resolve_historical_price(asset, timestamp)
+        except PriceResolutionError as exc:
+            raise serializers.ValidationError({exc.field: str(exc)}) from exc
 
-        # Make sure timestamp is in attrs
-        attrs['timestamp'] = timestamp
-
+        attrs["timestamp"] = timestamp
         return attrs
 
 

@@ -27,7 +27,9 @@ from portfolio.models import Account, Asset, Holding, Price
 from portfolio.services.diagnostics import portfolio_diagnostics
 from portfolio.services.optimization import (
     UniverseTooSmall,
+    _correlation_clusters,
     _efficient_frontier,
+    _enforce_caps,
     _rebalance_trades,
     optimize,
 )
@@ -139,7 +141,12 @@ def correlated_gold_panel(asset_catalog, db):
     42 days of noisy compounding.
     """
     rng = np.random.default_rng(42)
-    days = 42
+    # 5 assets x MIN_OBSERVATIONS_PER_ASSET(10) = 50 shared observations required
+    # before the optimizer will solve. At 42 days this fixture tripped the
+    # fallback instead, which dropped usd_cash -- and without its 0.80 Cash cap
+    # the surviving gold cluster (0.50) plus crypto (0.30) cannot reach 1.0.
+    # This test is about HRP clustering, so give it enough history to get there.
+    days = 60
     # `base` is the per-day shared driver (a return, not a multiplier).
     base = rng.normal(0, 0.005, days)
     now = timezone.now()
@@ -431,7 +438,17 @@ def test_diagnostics_metrics_finite(synthetic_history):
     diag = portfolio_diagnostics(weights, Decimal("1000000000"), user=user)
     metrics = diag["metrics"]
     for k, v in metrics.items():
+        # None = the metric honestly refused to answer (e.g. calmar needs 36
+        # months); strings are status markers like benchmark_status. Neither is
+        # a number, but anything that IS a number must still be finite.
+        if v is None or isinstance(v, str):
+            continue
         assert np.isfinite(v), f"{k} not finite: {v}"
+    # A refusal must say why it refused, not just go missing.
+    if metrics.get("calmar") is None:
+        assert "calmar_window_days" in metrics
+    # >= 1.0 holds mathematically for any non-degenerate covariance. It is now a
+    # real check: the artificial floor that used to mask a broken matrix is gone.
     assert metrics["diversification_ratio"] >= 1.0
     assert diag["eligible_assets"]
     assert isinstance(diag["total_value_tomans"], str)
@@ -497,9 +514,139 @@ def test_optimization_cache_isolated_by_portfolio_state(synthetic_history):
     assert second["current_weights"]["usd_cash"] == 0.5
 
 
-def test_infeasible_caps_are_rejected():
-    from portfolio.services.optimization import _enforce_caps
+def test_correlation_cluster_cap_enforced(asset_catalog, db):
+    """USD + gold moving together cannot exceed the cluster cap in target weights."""
+    rng = np.random.default_rng(7)
+    days = 42
+    base = rng.normal(0.002, 0.003, days)
+    now = timezone.now()
+    rows = []
+    timestamps = []
+    prices = {
+        "emami_coin": Decimal("4000.0"),
+        "usd_cash": Decimal("63000.0"),
+        "kama_stock": Decimal("5000.0"),
+        "bitcoin_usd": Decimal("60000.0"),
+    }
+    for d in range(days):
+        ts = now - timedelta(days=days - 1 - d)
+        prices["emami_coin"] = (
+            prices["emami_coin"] * Decimal(str(1.0 + base[d] + rng.normal(0, 0.0005)))
+        ).quantize(Decimal("0.0001"))
+        prices["usd_cash"] = (
+            prices["usd_cash"] * Decimal(str(1.0 + base[d] + rng.normal(0, 0.0005)))
+        ).quantize(Decimal("0.0001"))
+        prices["kama_stock"] = (
+            prices["kama_stock"] * Decimal(str(1.0 + rng.normal(0.001, 0.008)))
+        ).quantize(Decimal("0.0001"))
+        prices["bitcoin_usd"] = (
+            prices["bitcoin_usd"]
+            * (Decimal("1.025") if d % 2 == 0 else (Decimal("1") / Decimal("1.02")))
+        ).quantize(Decimal("0.0001"))
+        for key, p in prices.items():
+            rows.append(Price(asset=asset_catalog[key], price=p, fetched_at=ts, source="TEST"))
+            timestamps.append(ts)
+    Price.objects.bulk_create(rows)
+    _backfill_fetched_at(rows, timestamps)
+    cache.delete("prices:latest")
+    invalidate_returns_cache()
 
+    universe = ["emami_coin", "usd_cash", "kama_stock", "bitcoin_usd"]
+    df, _ = daily_returns_matrix(universe=universe)
+    clusters = _correlation_clusters(df, 0.65)
+    usd_gold = next(
+        (c for c in clusters if "usd_cash" in c and "emami_coin" in c),
+        None,
+    )
+    assert usd_gold is not None, "fixture should produce a USD+gold correlation cluster"
+
+    user = User.objects.create_user(email="corr@t.t", password="Sup3rSecret!")
+    result = optimize(
+        scenario="min_volatility",
+        current_weights={"emami_coin": 0.2, "usd_cash": 0.2, "kama_stock": 0.6},
+        total_value_tomans=Decimal("1000000000"),
+        user=user,
+        universe=universe,
+    )
+    cap = result["constraints_applied"]["max_weight_per_correlation_cluster"]
+    combined = sum(result["target_weights"].get(k, 0.0) for k in usd_gold)
+    assert combined <= cap + 1e-6, f"cluster total {combined} exceeds cap {cap}"
+    assert result["correlation_clusters"]
+
+
+def test_hard_asset_sleeve_caps_uncorrelated_usd_and_gold(asset_catalog, db):
+    """USD + 18k gold stay under the sleeve cap even when daily ρ < 0.65."""
+    rng = np.random.default_rng(11)
+    days = 80
+    now = timezone.now()
+    rows = []
+    timestamps = []
+    prices = {
+        "gold_18k_gram": Decimal("3500.0"),
+        "usd_cash": Decimal("63000.0"),
+        "kama_stock": Decimal("5000.0"),
+        "bitcoin_usd": Decimal("60000.0"),
+    }
+    gold_ret = rng.normal(0.003, 0.012, days)
+    usd_ret = rng.normal(0.003, 0.012, days)
+    stock_ret = rng.normal(0.0004, 0.016, days)
+    btc_ret = rng.normal(0.0002, 0.03, days)
+    for d in range(days):
+        ts = now - timedelta(days=days - 1 - d)
+        prices["gold_18k_gram"] = (
+            prices["gold_18k_gram"] * Decimal(str(1.0 + float(gold_ret[d])))
+        ).quantize(Decimal("0.0001"))
+        prices["usd_cash"] = (
+            prices["usd_cash"] * Decimal(str(1.0 + float(usd_ret[d])))
+        ).quantize(Decimal("0.0001"))
+        prices["kama_stock"] = (
+            prices["kama_stock"] * Decimal(str(1.0 + float(stock_ret[d])))
+        ).quantize(Decimal("0.0001"))
+        prices["bitcoin_usd"] = (
+            prices["bitcoin_usd"] * Decimal(str(1.0 + float(btc_ret[d])))
+        ).quantize(Decimal("0.0001"))
+        for key, p in prices.items():
+            rows.append(Price(asset=asset_catalog[key], price=p, fetched_at=ts, source="TEST"))
+            timestamps.append(ts)
+    Price.objects.bulk_create(rows)
+    _backfill_fetched_at(rows, timestamps)
+    cache.delete("prices:latest")
+    invalidate_returns_cache()
+
+    universe = ["gold_18k_gram", "usd_cash", "kama_stock", "bitcoin_usd"]
+    df, _ = daily_returns_matrix(universe=universe)
+    corr = df[["gold_18k_gram", "usd_cash"]].corr().iloc[0, 1]
+    assert corr < 0.65, f"fixture must stay below the cluster threshold, got {corr}"
+
+    user = User.objects.create_user(email="sleeve@t.t", password="Sup3rSecret!")
+    result = optimize(
+        scenario="max_sharpe",
+        current_weights={
+            "gold_18k_gram": 0.2,
+            "usd_cash": 0.2,
+            "kama_stock": 0.5,
+            "bitcoin_usd": 0.1,
+        },
+        total_value_tomans=Decimal("1000000000"),
+        user=user,
+        universe=universe,
+    )
+    w = result["target_weights"]
+    hard = w.get("gold_18k_gram", 0.0) + w.get("usd_cash", 0.0)
+    assert hard <= 0.50 + 1e-6, f"sleeve total {hard} exceeds 0.50"
+    leftover = 1.0 - hard
+    assert leftover >= 0.50 - 1e-6
+    assert w.get("kama_stock", 0.0) > 0.0
+    usd_gold_clustered = any(
+        {"usd_cash", "gold_18k_gram"} <= set(c.get("assets") or [])
+        for c in (result.get("correlation_clusters") or [])
+    )
+    assert not usd_gold_clustered
+    assert result.get("sleeves")
+    assert "hard_asset_sleeve_relaxed" not in (result.get("degraded") or [])
+
+
+def test_infeasible_caps_are_rejected():
     constrained = _enforce_caps(
         {"gold_a": 0.5, "gold_b": 0.3, "gold_c": 0.2},
         max_weight_per_asset=0.4,
@@ -593,3 +740,548 @@ def test_frontier_endpoint_includes_cloud(synthetic_history, make_user):
     for point in body["cloud"]:
         assert "return" in point and "volatility" in point
         assert point["volatility"] >= 0
+
+
+# ---------- 18. held-book handling: freeze, proxy-merge, cap flooring --------
+#
+# These cover the "Optimal version of my portfolio" path, which differs from the
+# market path (Best Overall) in that its universe is assets the user already
+# owns. Screening those as optimizer *candidates* deleted them from the answer,
+# and a deleted holding read as target=0, which the rebalance table rendered as
+# "SELL ALL" -- a data-coverage verdict presented as investment advice.
+
+
+def test_frozen_sleeve_keeps_unmeasurable_holdings_and_emits_no_trade():
+    """Unit: a holding the solver could not measure keeps its weight, not a SELL."""
+    from portfolio.services.optimization import _apply_frozen_sleeve
+
+    current = {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.2, "kama_stock": 0.1}
+    solved = {"emami_coin": 0.45, "bitcoin_usd": 0.30, "usd_cash": 0.25}
+
+    target, frozen, solved_share = _apply_frozen_sleeve(
+        solved, current, set(solved)
+    )
+
+    assert frozen == {"kama_stock": 0.1}
+    assert solved_share == pytest.approx(0.9)
+    # Frozen weight is preserved exactly; the solved sleeve is scaled into what
+    # is left, so the target still spans the whole portfolio.
+    assert target["kama_stock"] == pytest.approx(0.1)
+    assert target["emami_coin"] == pytest.approx(0.45 * 0.9)
+    assert sum(target.values()) == pytest.approx(1.0)
+
+    # The regression this exists to prevent: no trade for the frozen asset.
+    trades = _rebalance_trades(current, target, Decimal("1000000"))
+    assert all(t["key"] != "kama_stock" for t in trades)
+
+
+def test_frozen_sleeve_is_noop_when_everything_is_measurable():
+    from portfolio.services.optimization import _apply_frozen_sleeve
+
+    current = {"a": 0.5, "b": 0.5}
+    solved = {"a": 0.7, "b": 0.3}
+    target, frozen, share = _apply_frozen_sleeve(solved, current, {"a", "b"})
+    assert frozen == {}
+    assert share == pytest.approx(1.0)
+    assert target == pytest.approx(solved)
+
+
+def test_proxy_group_collapse_and_expand_round_trip():
+    """Unit: proxied holdings solve as ONE column and expand back pro-rata.
+
+    Two Swiss bars priced off the same gold series are not two bets. Handing the
+    solver duplicate columns makes the covariance singular and the split between
+    them arbitrary.
+    """
+    from portfolio.services.optimization import (
+        _collapse_onto_proxies,
+        _expand_from_proxies,
+    )
+
+    groups = {"gold_18k_gram": ["swiss_gold_bar_1g", "swiss_gold_bar_2_5g"]}
+    current = {"swiss_gold_bar_1g": 0.2, "swiss_gold_bar_2_5g": 0.6, "usd_cash": 0.2}
+
+    collapsed = _collapse_onto_proxies(current, groups)
+    assert collapsed == {"gold_18k_gram": pytest.approx(0.8), "usd_cash": pytest.approx(0.2)}
+
+    expanded = _expand_from_proxies(
+        {"gold_18k_gram": 0.5, "usd_cash": 0.5}, groups, current
+    )
+    # 0.5 split 1:3 by current weight (0.2 : 0.6).
+    assert expanded["swiss_gold_bar_1g"] == pytest.approx(0.125)
+    assert expanded["swiss_gold_bar_2_5g"] == pytest.approx(0.375)
+    assert expanded["usd_cash"] == pytest.approx(0.5)
+    assert sum(expanded.values()) == pytest.approx(1.0)
+
+
+def test_proxy_expand_splits_evenly_when_group_has_no_current_weight():
+    from portfolio.services.optimization import _expand_from_proxies
+
+    groups = {"gold_18k_gram": ["swiss_gold_bar_1g", "swiss_gold_bar_2_5g"]}
+    expanded = _expand_from_proxies({"gold_18k_gram": 0.4}, groups, {})
+    assert expanded["swiss_gold_bar_1g"] == pytest.approx(0.2)
+    assert expanded["swiss_gold_bar_2_5g"] == pytest.approx(0.2)
+
+
+def test_caps_are_floored_to_what_the_book_already_holds():
+    """Unit: a book breaching policy must still produce a target, not an error.
+
+    A 68% Gold+Cash book breaches HARD_ASSET_SLEEVE (50%) on day one. Before
+    this, that made full investment infeasible -> SolverError -> the page said
+    "insufficient history", which is not what happened.
+    """
+    import copy as _copy
+    from portfolio.services.optimization import (
+        DEFAULT_CONSTRAINTS,
+        _floor_constraints_for_book,
+    )
+
+    constraints = _copy.deepcopy(DEFAULT_CONSTRAINTS)
+    current = {"emami_coin": 0.58, "usd_cash": 0.10, "bitcoin_usd": 0.32}
+    class_map = {"emami_coin": "Gold", "usd_cash": "Cash", "bitcoin_usd": "Crypto"}
+
+    floored = _floor_constraints_for_book(
+        constraints, current, class_map, list(current), []
+    )
+
+    names = {f["cap"] for f in floored}
+    assert "sleeve.hard_asset" in names          # 0.68 held vs 0.50 policy
+    assert "max_weight_per_asset" in names       # 0.58 held vs 0.40 policy
+    assert "max_weight_per_class.Crypto" in names  # 0.32 held vs 0.30 policy
+    sleeve = next(f for f in floored if f["cap"] == "sleeve.hard_asset")
+    assert sleeve["policy"] == pytest.approx(0.50)
+    assert sleeve["floored_to"] == pytest.approx(0.68)
+    # And the constraints dict itself was raised, so the solve is feasible.
+    assert constraints["sleeves"][0]["max_weight"] == pytest.approx(0.68)
+    assert constraints["max_weight_per_asset"] == pytest.approx(0.58)
+
+
+def test_cap_flooring_leaves_a_compliant_book_untouched():
+    import copy as _copy
+    from portfolio.services.optimization import (
+        DEFAULT_CONSTRAINTS,
+        _floor_constraints_for_book,
+    )
+
+    constraints = _copy.deepcopy(DEFAULT_CONSTRAINTS)
+    before = _copy.deepcopy(constraints)
+    current = {"emami_coin": 0.2, "usd_cash": 0.2, "bitcoin_usd": 0.2, "kama_stock": 0.4}
+    class_map = {
+        "emami_coin": "Gold", "usd_cash": "Cash",
+        "bitcoin_usd": "Crypto", "kama_stock": "Stock",
+    }
+    floored = _floor_constraints_for_book(
+        constraints, current, class_map, list(current), []
+    )
+    assert floored == []
+    assert constraints["max_weight_per_asset"] == before["max_weight_per_asset"]
+
+
+def test_correlation_clusters_use_complete_linkage():
+    """Unit: A~B and B~C must not merge A and C when A and C are uncorrelated.
+
+    The previous union-find was transitive. On a rial-denominated book almost
+    every pair clears the threshold through the shared devaluation factor, so
+    that collapsed the whole universe into one cluster capped at 50% --
+    infeasible at full investment by construction.
+    """
+    rng = np.random.default_rng(7)
+    n = 300
+    a = rng.normal(0, 1, n)
+    c = rng.normal(0, 1, n)
+    # b correlates ~0.9 with a and ~0.9 with c; a and c stay near zero.
+    b = 0.7 * a + 0.7 * c
+    df = pd.DataFrame({"a": a, "b": b, "c": c})
+
+    corr = df.corr()
+    assert corr.loc["a", "b"] >= 0.6
+    assert corr.loc["b", "c"] >= 0.6
+    assert abs(corr.loc["a", "c"]) < 0.3
+
+    clusters = _correlation_clusters(df, 0.6)
+    # No cluster may contain both a and c: their pairwise correlation is ~0.
+    assert not any({"a", "c"} <= set(group) for group in clusters)
+
+
+def test_my_optimal_freezes_short_history_holding_instead_of_selling_it(
+    kama_short_history, make_user
+):
+    """Integration: the regression that motivated this work.
+
+    kama_stock has 10 days of history (< MIN_DAILY_RETURNS), so the optimizer
+    cannot measure it. It must keep its current weight and produce NO trade --
+    not a SELL for the full position.
+    """
+    pro = make_user(email="frozen@t.t")
+    acct = _make_portfolio(
+        pro,
+        kama_short_history,
+        {"emami_coin": 1, "bitcoin_usd": 1, "usd_cash": 1000, "kama_stock": 100},
+    )
+
+    resp = _client(pro).get(f"/api/optimization/my-optimal/?account={acct.id}")
+    assert resp.status_code == 200
+    ok = [w for w in resp.json()["windows"] if w["status"] == "ok"]
+    assert ok, "expected at least one solvable window"
+
+    for window in ok:
+        opt = window["max_sharpe"]
+        # The target spans the whole book.
+        assert sum(opt["target_weights"].values()) == pytest.approx(1.0, abs=1e-4)
+        # Every held asset is accounted for -- in the target or explicitly frozen.
+        for key in opt["current_weights"]:
+            assert key in opt["target_weights"] or key in opt["frozen_weights"], key
+        # A frozen holding keeps its weight and is never traded. `frozen_weights`
+        # rounds to 6dp for display, `target_weights` does not, hence abs=1e-6.
+        for key, info in opt["frozen_weights"].items():
+            assert opt["target_weights"][key] == pytest.approx(info["weight"], abs=1e-6)
+            assert opt["current_weights"][key] == pytest.approx(info["weight"], abs=1e-6)
+            assert all(t["key"] != key for t in opt["rebalance_trades"])
+            assert info["reason"]
+
+
+def test_my_optimal_reports_asset_class_targets(synthetic_history, make_user):
+    """Integration: the class roll-up the page is meant to answer."""
+    pro = make_user(email="classes@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 1, "bitcoin_usd": 1, "usd_cash": 1000},
+    )
+    resp = _client(pro).get(f"/api/optimization/my-optimal/?account={acct.id}")
+    assert resp.status_code == 200
+    ok = [w for w in resp.json()["windows"] if w["status"] == "ok"]
+    assert ok
+
+    opt = ok[0]["max_sharpe"]
+    current_c = opt["current_class_weights"]
+    target_c = opt["target_class_weights"]
+    assert current_c and target_c
+    assert sum(current_c.values()) == pytest.approx(1.0, abs=1e-3)
+    assert sum(target_c.values()) == pytest.approx(1.0, abs=1e-3)
+    # Classes are named, not asset keys.
+    assert set(target_c) <= {"Gold", "Cash", "Crypto", "Stock", "Real Estate", "Other"}
+    # And the current column is comparable with the target on the same panel.
+    assert "current_metrics" in opt
+    assert "expected_return_annual" in opt["current_metrics"]
+
+
+def test_frontier_is_scoped_to_held_assets(synthetic_history, make_user):
+    """Integration: the frontier must cover the user's book, not the catalog.
+
+    The chart caption promises "the assets you already hold"; without a universe
+    the line and the Max-Sharpe marker described a portfolio the user cannot build.
+    """
+    pro = make_user(email="frontier_scope@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 1, "bitcoin_usd": 1, "usd_cash": 1000},
+    )
+    held = set(
+        Holding.objects.filter(account=acct).values_list("asset__key", flat=True)
+    )
+
+    resp = _client(pro).get(f"/api/optimization/frontier/?account={acct.id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    if body.get("max_sharpe"):
+        assert set(body["max_sharpe"]["weights"]) <= held
+
+
+def test_optimize_annualizes_at_the_panels_measured_frequency(synthetic_history):
+    """The panel's own sampling frequency, not a hardcoded 252.
+
+    A gold/crypto book quotes 7 days a week; annualizing it at 252 understates
+    volatility by sqrt(365/252) ~= 1.20x and changes which portfolio wins.
+    """
+    weights = {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3}
+    payload = optimize(
+        scenario="min_volatility",
+        current_weights=weights,
+        total_value_tomans=Decimal("1000000"),
+        held_keys=frozenset(weights),
+    )
+    frequency = payload["periods_per_year"]
+    # This fixture writes one observation per calendar day.
+    assert frequency == pytest.approx(365.25, rel=0.05)
+    # The same measured frequency must reach the expected-return estimator, not
+    # just the volatility scaling.
+    assert payload["expected_return_provenance"]["periods_per_year"] == pytest.approx(
+        frequency, rel=0.01
+    )
+
+
+def test_measured_asset_the_optimizer_exits_is_still_sold(synthetic_history, make_user):
+    """A deliberate exit is not a freeze.
+
+    Freezing must key off what REACHED the solver, not what came back holding
+    weight. Keying off surviving weights would freeze every asset the optimizer
+    measured and chose to exit, suppressing legitimate SELLs -- the mirror image
+    of the bug the frozen sleeve exists to fix.
+    """
+    pro = make_user(email="exited@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 1, "bitcoin_usd": 1, "usd_cash": 1000, "kama_stock": 100},
+    )
+    resp = _client(pro).get(f"/api/optimization/my-optimal/?account={acct.id}")
+    assert resp.status_code == 200
+    ok = [w for w in resp.json()["windows"] if w["status"] == "ok"]
+    assert ok
+
+    for window in ok:
+        opt = window["max_sharpe"]
+        eligible = set(opt["eligible_assets"])
+        frozen = set(opt["frozen_weights"])
+        # Nothing that reached the solver may be reported as frozen.
+        assert not (eligible & frozen), (eligible & frozen)
+        # An eligible asset dropped to zero weight must produce a SELL.
+        sold = {t["key"] for t in opt["rebalance_trades"] if t["action"] == "sell"}
+        for key in eligible:
+            if key in opt["current_weights"] and key not in opt["target_weights"]:
+                assert key in sold, f"{key} was exited but no SELL was emitted"
+
+
+# ---------- 19. Phase 2: diversification, robustness, estimators ------------
+#
+# The theme: diversification and downside are estimable from this much data;
+# expected returns are not. These tests pin the parts that do not depend on
+# forecasting, plus the honesty of the parts that do.
+
+
+def _cov(frame):
+    from portfolio.services.optimization import _shrunk_covariance
+    return _shrunk_covariance(frame) * 365.0
+
+
+def test_risk_contributions_sum_to_one_and_expose_the_weight_risk_gap():
+    """A small position in a volatile asset can dominate portfolio risk."""
+    from portfolio.services.diversification import (
+        concentration_gap,
+        risk_contributions,
+    )
+
+    rng = np.random.default_rng(3)
+    n = 400
+    frame = pd.DataFrame({
+        "calm_a": rng.normal(0, 0.002, n),
+        "calm_b": rng.normal(0, 0.002, n),
+        "wild": rng.normal(0, 0.05, n),      # 25x the volatility
+    })
+    cov = _cov(frame)
+    weights = {"calm_a": 0.45, "calm_b": 0.45, "wild": 0.10}
+
+    contributions = risk_contributions(weights, cov)
+    assert sum(contributions.values()) == pytest.approx(1.0, abs=1e-6)
+    # 10% of the money, but the overwhelming majority of the risk.
+    assert contributions["wild"] > 0.8
+
+    gap = concentration_gap(weights, cov)
+    assert gap[0]["key"] == "wild"
+    assert gap[0]["risk_share"] > gap[0]["weight_share"]
+
+
+def test_effective_bets_sees_through_correlated_duplicates():
+    """Ten gold coins are one bet, not ten. Weight-based counting cannot tell."""
+    from portfolio.services.diversification import effective_bets, effective_holdings
+
+    rng = np.random.default_rng(11)
+    n = 400
+    driver = rng.normal(0, 0.01, n)
+    # Five near-identical assets: same driver, trivial idiosyncratic noise.
+    clones = pd.DataFrame({
+        f"clone_{i}": driver + rng.normal(0, 0.0004, n) for i in range(5)
+    })
+    independent = pd.DataFrame({
+        f"indep_{i}": rng.normal(0, 0.01, n) for i in range(5)
+    })
+
+    equal_clone = {c: 0.2 for c in clones.columns}
+    equal_indep = {c: 0.2 for c in independent.columns}
+
+    # Weight-based counting cannot tell these apart -- both look like 5 holdings.
+    assert effective_holdings(equal_clone) == pytest.approx(5.0)
+    assert effective_holdings(equal_indep) == pytest.approx(5.0)
+
+    # Risk-based counting can: the clones collapse toward a single bet.
+    clone_bets = effective_bets(equal_clone, _cov(clones))
+    indep_bets = effective_bets(equal_indep, _cov(independent))
+    assert clone_bets == pytest.approx(5.0, abs=0.5)  # RC are equal by symmetry...
+    assert indep_bets == pytest.approx(5.0, abs=0.5)
+    # ...so the DIVERSIFICATION RATIO is what separates them: correlated assets
+    # cancel nothing, independent ones cancel a lot.
+    from portfolio.services.diversification import diversification_ratio
+    assert diversification_ratio(equal_clone, _cov(clones)) < 1.15
+    assert diversification_ratio(equal_indep, _cov(independent)) > 1.8
+
+
+def test_diversification_report_is_returned_for_current_and_target(
+    synthetic_history, make_user
+):
+    pro = make_user(email="divers@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 1, "bitcoin_usd": 1, "usd_cash": 1000},
+    )
+    resp = _client(pro).get(f"/api/optimization/my-optimal/?account={acct.id}")
+    assert resp.status_code == 200
+    ok = [w for w in resp.json()["windows"] if w["status"] == "ok"]
+    assert ok
+
+    opt = ok[0]["min_volatility"]
+    div = opt["diversification"]
+    for side in ("current", "target"):
+        report = div[side]
+        assert sum(report["risk_contributions"].values()) == pytest.approx(1.0, abs=1e-4)
+        assert report["effective_bets"] > 0
+        assert report["diversification_ratio"] >= 1.0 - 1e-9
+        assert "risk_by_class" in report
+    # The target should not be LESS diversified than the current book -- that is
+    # the entire point of running a min-variance optimizer.
+    assert div["target"]["diversification_ratio"] >= div["current"]["diversification_ratio"] - 0.05
+
+
+def test_shrinkage_pulls_expected_returns_toward_the_grand_mean():
+    """Unit: the estimator must reduce cross-sectional spread, not preserve it."""
+    from portfolio.services.expected_returns import sample_mean, shrunk
+
+    rng = np.random.default_rng(5)
+    n = 250
+    # Same true mean, wildly different realized means -- exactly the situation
+    # where the sample mean misleads and shrinkage helps.
+    frame = pd.DataFrame({
+        "lucky": rng.normal(0.004, 0.02, n),
+        "unlucky": rng.normal(-0.003, 0.02, n),
+        "flat": rng.normal(0.0, 0.02, n),
+    })
+    cov = _cov(frame)
+    raw = sample_mean(frame, 365.0)
+    pulled = shrunk(frame, 365.0, cov)
+
+    assert pulled.std() < raw.std()
+    assert 0.0 <= pulled.attrs["shrinkage_intensity"] <= 1.0
+    # Order is preserved -- shrinkage moderates, it does not invert.
+    assert pulled["lucky"] > pulled["unlucky"]
+
+
+def test_black_litterman_equal_prior_is_risk_based_not_history_based():
+    """BL with an equal-weight prior must rank by risk contribution, not by
+    whichever asset happened to run up in the window."""
+    from portfolio.services.expected_returns import black_litterman, sample_mean
+
+    rng = np.random.default_rng(9)
+    n = 300
+    frame = pd.DataFrame({
+        # Big realized return, small risk -- the sample mean loves this one.
+        "lucky_calm": rng.normal(0.01, 0.002, n),
+        # Negative realized return, large risk.
+        "sad_wild": rng.normal(-0.002, 0.04, n),
+    })
+    cov = _cov(frame)
+    raw = sample_mean(frame, 365.0)
+    bl = black_litterman(frame, 365.0, cov)
+
+    assert raw["lucky_calm"] > raw["sad_wild"]
+    # BL reverse-optimizes from the covariance: the riskier asset must carry the
+    # higher expected return, which is the opposite of the sample-mean ranking.
+    assert bl["sad_wild"] > bl["lucky_calm"]
+
+
+def test_estimate_mu_reports_the_standard_error_of_the_mean():
+    """The error bar is the point: a mean you cannot measure must say so."""
+    from portfolio.services.expected_returns import estimate_mu
+
+    rng = np.random.default_rng(13)
+    n = 365  # one year
+    frame = pd.DataFrame({
+        "a": rng.normal(0.0, 0.02, n),
+        "b": rng.normal(0.0, 0.02, n),
+        "c": rng.normal(0.0, 0.02, n),
+    })
+    cov = _cov(frame)
+    _mu, provenance = estimate_mu(frame, 365.0, cov, method="shrunk")
+
+    assert provenance["method"] == "shrunk"
+    assert provenance["sample_years"] == pytest.approx(1.0, abs=0.05)
+    # ~38% annualized vol over 1 year => SE of the mean is ~38%/yr. Enormous,
+    # and larger than any return difference the optimizer would rank on.
+    assert provenance["mean_standard_error"] > 0.2
+
+
+def test_forecast_free_scenarios_are_flagged_as_such(synthetic_history):
+    """min_volatility needs no mu; max_sharpe is entirely a bet on it."""
+    weights = {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3}
+    common = dict(
+        current_weights=weights,
+        total_value_tomans=Decimal("1000000"),
+        held_keys=frozenset(weights),
+    )
+    assert optimize(scenario="min_volatility", **common)["forecast_free"] is True
+    assert optimize(scenario="max_sharpe", **common)["forecast_free"] is False
+
+
+def test_resampling_reports_weight_bands(synthetic_history):
+    """Robustness: the band is the deliverable, not the point estimate."""
+    weights = {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3}
+    payload = optimize(
+        scenario="min_volatility",
+        current_weights=weights,
+        total_value_tomans=Decimal("1000000"),
+        held_keys=frozenset(weights),
+        include_robustness=True,
+    )
+    rb = payload["robustness"]
+    assert rb["converged"] > 0
+    assert sum(rb["weights"].values()) == pytest.approx(1.0, abs=0.02)
+    for key, band in rb["bands"].items():
+        assert band["p05"] <= band["p95"]
+        assert band["width"] == pytest.approx(band["p95"] - band["p05"], abs=1e-5)
+    assert rb["max_band_width"] >= 0
+
+
+def test_resampling_is_deterministic(synthetic_history):
+    """A refresh must not move the allocation for no reason."""
+    weights = {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3}
+    kwargs = dict(
+        scenario="min_volatility",
+        current_weights=weights,
+        total_value_tomans=Decimal("1000000"),
+        held_keys=frozenset(weights),
+        include_robustness=True,
+    )
+    first = optimize(**kwargs)["robustness"]["weights"]
+    cache.clear()
+    second = optimize(**kwargs)["robustness"]["weights"]
+    assert first == second
+
+
+def test_min_cvar_scenario_solves_and_respects_caps(synthetic_history):
+    """Downside-focused allocation: variance punishes upside too, CVaR does not."""
+    weights = {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3}
+    payload = optimize(
+        scenario="min_cvar",
+        current_weights=weights,
+        total_value_tomans=Decimal("1000000"),
+        held_keys=frozenset(weights),
+    )
+    target = payload["target_weights"]
+    assert sum(target.values()) == pytest.approx(1.0, abs=1e-4)
+    assert payload["forecast_free"] is True
+    for key, w in target.items():
+        assert w <= payload["constraints_applied"]["max_weight_per_asset"] + 1e-6
+
+
+def test_robustness_endpoint_returns_bands(synthetic_history, make_user):
+    pro = make_user(email="robust@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 1, "bitcoin_usd": 1, "usd_cash": 1000},
+    )
+    resp = _client(pro).get(
+        f"/api/optimization/robustness/?account={acct.id}&scenario=min_volatility&window=365"
+    )
+    assert resp.status_code in (200, 503)
+    if resp.status_code == 200:
+        body = resp.json()
+        assert body["scenario"] == "min_volatility"
+        assert body["forecast_free"] is True
+        assert body["robustness"]["converged"] >= 0

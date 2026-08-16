@@ -19,7 +19,7 @@ export default function Legal({ kind }) {
         {privacy ? (
           <>
             <h2 className="text-xl font-semibold text-text">Data We Use</h2>
-            <p>We use account, portfolio, ledger, import, payment, and diagnostic data to operate Lattice.</p>
+            <p>We use account, portfolio, ledger, import, payment, and diagnostic data to operate Holdings.</p>
             <h2 className="text-xl font-semibold text-text">Your Rights</h2>
             <p>You can export your account data, revoke sessions, or delete your account from Profile.</p>
             <h2 className="text-xl font-semibold text-text">Retention</h2>
@@ -28,7 +28,7 @@ export default function Legal({ kind }) {
         ) : (
           <>
             <h2 className="text-xl font-semibold text-text">Informational Use</h2>
-            <p>Lattice provides informational analytics, not investment, tax, or legal advice.</p>
+            <p>Holdings provides informational analytics, not investment, tax, or legal advice.</p>
             <h2 className="text-xl font-semibold text-text">Data Quality</h2>
             <p>Figures may be delayed, incomplete, estimated, or excluded; trust labels and provenance remain part of the result.</p>
             <h2 className="text-xl font-semibold text-text">Closed Beta</h2>

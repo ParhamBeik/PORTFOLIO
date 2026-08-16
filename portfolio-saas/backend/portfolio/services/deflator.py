@@ -3,6 +3,10 @@ import pandas as pd
 import jdatetime
 from django.conf import settings
 
+from config.settings import CpiUnavailable  # re-exported: callers catch this here
+
+__all__ = ["CpiUnavailable", "normalize_basis", "cpi_for_date", "to_basis"]
+
 _BASIS_ALIASES = {
     None: "nominal_toman",
     "nominal": "nominal_toman",
@@ -25,7 +29,16 @@ def normalize_basis(basis: str | None) -> str:
 
 
 def cpi_for_date(value) -> float:
-    """Linearly interpolate the configured annual CPI index within a Jalali year."""
+    """Linearly interpolate the configured annual CPI index within a Jalali year.
+
+    Raises CpiUnavailable when the date's own Jalali year has no CPI value at
+    all (e.g. the current year before it's been added to the table) — this
+    must never fall back to a stale number. If only the *next* year's anchor
+    is missing (the normal case for the newest year in the table, since next
+    year's index isn't published yet), degrade to a flat rate for the rest of
+    the current year rather than guessing — this is not the same failure as
+    not knowing the current year's own value.
+    """
     if isinstance(value, str):
         value = dt.date.fromisoformat(value[:10])
     if isinstance(value, pd.Timestamp):
@@ -34,7 +47,13 @@ def cpi_for_date(value) -> float:
         value = value.date()
     jdate = jdatetime.date.fromgregorian(date=value)
     start = settings.CPI_FOR(jdate.year)
-    end = settings.CPI_FOR(jdate.year + 1)
+    try:
+        end = settings.CPI_FOR(jdate.year + 1)
+    except CpiUnavailable:
+        # ponytail: no anchor for next year yet; flat through year-end instead
+        # of extrapolating. Upgrade automatically once next year's CPI lands
+        # in CPI_BY_JALALI_YEAR_EXTRA.
+        end = start
     days = 366 if jdatetime.date(jdate.year, 12, 29).isleap() else 365
     elapsed = (jdate - jdatetime.date(jdate.year, 1, 1)).days
     return start + (end - start) * elapsed / days

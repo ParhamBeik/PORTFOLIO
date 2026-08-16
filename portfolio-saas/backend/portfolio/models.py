@@ -66,6 +66,12 @@ class Asset(models.Model):
     # (e.g. "IR_COIN_EMAMI"). Blank = no history source for this asset.
     tse_symbol = models.CharField(max_length=64, blank=True, default="")
     brs_symbol = models.CharField(max_length=64, blank=True, default="")
+    # Physical-underlying proxy for manual assets that have no provider symbol: a
+    # Swiss gold bar IS gold, so its risk is measured from `gold_18k_gram`'s series
+    # rather than from the handful of live ticks its manual valuation produced.
+    # Used by the risk breakdown only (see returns.resolve_universe) -- never by
+    # the optimizer, where duplicate columns would make the covariance singular.
+    proxy_key = models.SlugField(max_length=64, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -256,6 +262,15 @@ class LedgerEntry(models.Model):
         SELL = "sell", "Sell"
         DIVIDEND = "dividend", "Dividend"
         FEE = "fee", "Fee"
+        # Real estate has no market feed, so its worth is an operator mark. Each
+        # mark is a dated event rather than an edit of the previous one: before
+        # this existed the house carried a single price across all of history,
+        # which hid every rial of appreciation from the net-worth chart and
+        # baked today's price into the opening balance, understating TWR.
+        # `quantity` holds price-per-sqm in millions, matching the house
+        # convention used by Holding.quantity; `area_sqm` travels with it.
+        # Marks REPLACE rather than accumulate -- see timeline.house_marks_as_of.
+        VALUATION_MARK = "valuation_mark", "Valuation mark"
 
     account = models.ForeignKey(
         Account, on_delete=models.CASCADE, related_name="transactions"
@@ -324,7 +339,11 @@ class LedgerEntry(models.Model):
         constraints = [
             models.CheckConstraint(
                 condition=(
-                    ~models.Q(kind__in=["opening_position", "buy", "sell"])
+                    ~models.Q(
+                        kind__in=[
+                            "opening_position", "buy", "sell", "valuation_mark",
+                        ]
+                    )
                     | (
                         models.Q(asset__isnull=False)
                         & models.Q(quantity__isnull=False)

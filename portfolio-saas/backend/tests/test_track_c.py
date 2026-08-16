@@ -109,7 +109,7 @@ class TestTrackC:
         cache.clear()
         
         # Load panel as of today
-        panel, excluded = _load_price_panel(history_days=180, as_of=timezone.now(), universe=["kama_stock", "fars_stock"])
+        panel, excluded, _warnings = _load_price_panel(history_days=180, as_of=timezone.now(), universe=["kama_stock", "fars_stock"])
         
         assert "kama_stock" in panel.columns
         assert "fars_stock" not in panel.columns  # Fars failed survivorship guard

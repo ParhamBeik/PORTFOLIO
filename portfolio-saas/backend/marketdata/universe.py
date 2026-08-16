@@ -3,6 +3,7 @@ from decimal import Decimal
 import numpy as np
 import pandas as pd
 from django.conf import settings
+from django.db.models import Count
 from django.utils import timezone
 import jdatetime
 
@@ -15,7 +16,12 @@ from portfolio.services.returns import normalize_as_of, to_jalali_str
 MIN_MEDIAN_DAILY_VOLUME = float(getattr(settings, "MIN_MEDIAN_DAILY_VOLUME", 1000))
 MIN_MEDIAN_DAILY_TURNOVER_TOMANS = float(getattr(settings, "MIN_MEDIAN_DAILY_TURNOVER_TOMANS", 50000000))
 MIN_DAILY_RETURNS = 30
-MAX_UNIVERSE_SIZE = 200
+# Capped small on purpose: the optimizer's covariance is only well-conditioned
+# when the shared observation window is a large multiple of the asset count
+# (see optimization.MIN_OBSERVATIONS_PER_ASSET). ~50 deep-history names
+# sharing ~2000+ sessions gives a 40x ratio; 200 shallow-liquidity names gave
+# a 45-row shared window and a Sharpe of 16.
+MAX_UNIVERSE_SIZE = 50
 
 def get_candidate_universe(
     as_of=None,
@@ -46,7 +52,19 @@ def get_candidate_universe(
 
     # 3. Query all stock candles in bulk to calculate liquidity and survivorship
     tse_symbols = [sym for sym, mi in instruments.items() if mi.source == MarketInstrument.Source.TSETMC]
-    
+
+    # Full-history depth per symbol (unbounded by the liquidity window above):
+    # this is what lets a 50-name, multi-year universe stay well-conditioned.
+    # `candle_close_qs` with no `as_of` returns every adjusted session on file.
+    tse_depth: dict[str, int] = {}
+    if tse_symbols:
+        tse_depth = dict(
+            candle_close_qs(tse_symbols)
+            .values("symbol")
+            .annotate(n=Count("id"))
+            .values_list("symbol", "n")
+        )
+
     # We query candles for active candidates
     candles_qs = candle_close_qs(tse_symbols, as_of=as_of_jalali).filter(
         date_time__gte=cutoff_jalali,
@@ -62,6 +80,14 @@ def get_candidate_universe(
 
     # Query all gold/currency histories in bulk for BRS
     brs_symbols = [sym for sym, mi in instruments.items() if mi.source == MarketInstrument.Source.BRS]
+    brs_depth: dict[str, int] = {}
+    if brs_symbols:
+        brs_depth = dict(
+            GoldCurrencyHistory.objects.filter(symbol__in=brs_symbols, close_price__gt=0)
+            .values("symbol")
+            .annotate(n=Count("id"))
+            .values_list("symbol", "n")
+        )
     brs_qs = GoldCurrencyHistory.objects.filter(
         symbol__in=brs_symbols,
         date__gte=cutoff_jalali,
@@ -143,6 +169,7 @@ def get_candidate_universe(
             candidates.append({
                 "key": sym,
                 "score": med_turnover,
+                "history_depth": tse_depth.get(sym, 0),
                 "source": "tse"
             })
 
@@ -178,11 +205,14 @@ def get_candidate_universe(
             candidates.append({
                 "key": sym,
                 "score": float("inf"),
+                "history_depth": brs_depth.get(sym, 0),
                 "source": "brs"
             })
 
-    # Sort candidates by score descending (high liquidity first)
-    candidates.sort(key=lambda x: x["score"], reverse=True)
+    # Rank by history depth first -- the point of the cap is a universe that
+    # shares a deep multi-year window, not just today's most liquid names --
+    # falling back to liquidity/macro score as a tiebreaker within that.
+    candidates.sort(key=lambda x: (x["history_depth"], x["score"]), reverse=True)
 
     selected_keys = [c["key"] for c in candidates[:max_size]]
     

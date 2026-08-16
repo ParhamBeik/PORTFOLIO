@@ -450,7 +450,12 @@ def test_series_spike_is_suppressed_by_corporate_action():
         ("USD", 63200, "", None, Decimal("63200")),  # undeclared unit passes through
         ("USD", 632000, "IRR", None, Decimal("63200")),  # Rial-declared: divide by 10 to Toman
         ("USDT", 632000, "ریال", None, Decimal("63200")),  # Rial-declared: divide by 10 to Toman
-        ("USDT", 1, "", 63200, Decimal("63200")),  # USD-declared (via UNIT_OVERRIDES) x usd_rate
+        # Provider-verified 2026-08-14: BrsApi declares USDT_IRT as تومان across all
+        # 1,016 warehouse rows (50,050-196,088 Toman), and no row in the 130k-row
+        # gold/currency table has a blank unit. The old UNIT_OVERRIDES entry forced
+        # USD onto this symbol and was simply wrong; the declared unit is the rule.
+        ("USDT", 63200, "تومان", None, Decimal("63200")),  # Toman-declared: identity
+        ("USDT", 1, "USD", 63200, Decimal("63200")),  # USD-declared: x usd_rate
     ],
 )
 def test_currency_conversion_has_one_unit_driven_rule(
@@ -549,7 +554,8 @@ def test_dividend_does_not_create_a_twr_boundary(
     from portfolio.services import performance
 
     ledger_account.ledger_complete = True
-    ledger_account.tracking_started_at = timezone.now() - datetime.timedelta(days=10)
+    # >= 90 days so the dividend/TWR-boundary assertion is reached at all.
+    ledger_account.tracking_started_at = timezone.now() - datetime.timedelta(days=200)
     ledger_account.cash_balance_tomans = 1000
     ledger_account.save()
     LedgerEntry.objects.create(

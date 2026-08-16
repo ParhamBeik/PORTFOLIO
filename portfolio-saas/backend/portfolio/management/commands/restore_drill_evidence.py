@@ -19,7 +19,9 @@ class Command(BaseCommand):
         if options["seed"]:
             self._seed()
         tables = {
-            "users": User.objects.order_by("id").values_list("email", "tier"),
+            # `tier` was dropped with the subscription tiers (accounts migration 0005);
+            # is_active is the field a restore actually has to preserve.
+            "users": User.objects.order_by("id").values_list("email", "is_active"),
             "accounts": Account.objects.order_by("id").values_list(
                 "user__email", "name", "cash_balance_tomans"
             ),

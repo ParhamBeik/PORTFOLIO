@@ -6,7 +6,6 @@ prices (including the SSE stream), then the Pro analytics endpoints.
 import importlib
 from django.urls import path
 
-from .live.sse import PriceStreamView
 from .views import (
     AccountDetailView,
     AccountListCreateView,
@@ -23,6 +22,9 @@ from .views import (
     LiabilityListCreateView,
     LedgerListCreateView,
     LedgerReverseView,
+    LedgerIndexView,
+    LedgerEntryDetailView,
+    LedgerPositionView,
     LedgerImportView,
     LedgerImportCommitView,
     AccountPerformanceView,
@@ -30,6 +32,7 @@ from .views import (
     InsightsView,
     LatestPricesView,
     MyOptimalView,
+    RobustnessView,
     OptimizationView,
     PriceHistoryView,
     SnapshotListView,
@@ -55,10 +58,15 @@ urlpatterns = [
          name="liability-list"),
     path("accounts/<int:account_id>/liabilities/<int:pk>/", LiabilityDetailView.as_view(),
          name="liability-detail"),
+    path("ledger/", LedgerIndexView.as_view(), name="ledger-index"),
     path("accounts/<int:account_id>/ledger/", LedgerListCreateView.as_view(),
          name="ledger-list"),
+    path("accounts/<int:account_id>/ledger/holdings/<int:holding_id>/",
+         LedgerPositionView.as_view(), name="ledger-position"),
     path("accounts/<int:account_id>/ledger/<int:entry_id>/reverse/",
          LedgerReverseView.as_view(), name="ledger-reverse"),
+    path("accounts/<int:account_id>/ledger/<int:entry_id>/",
+         LedgerEntryDetailView.as_view(), name="ledger-detail"),
     path("accounts/<int:account_id>/imports/preview/",
          LedgerImportView.as_view(), name="ledger-import-preview"),
     path("accounts/<int:account_id>/imports/commit/",
@@ -78,7 +86,6 @@ urlpatterns = [
     path("snapshots/", SnapshotListView.as_view(), name="snapshot-list"),
     # Live prices (FREE)
     path("prices/latest/", LatestPricesView.as_view(), name="prices-latest"),
-    path("prices/stream/", PriceStreamView.as_view(), name="prices-stream"),
     path("prices/history/", PriceHistoryView.as_view(), name="prices-history"),
     # Pro analytics
     path("insights/", InsightsView.as_view(), name="insights"),
@@ -87,6 +94,7 @@ urlpatterns = [
     path("optimization/", OptimizationView.as_view(), name="optimization"),
     path("optimization/frontier/", FrontierView.as_view(), name="optimization-frontier"),
     path("optimization/my-optimal/", MyOptimalView.as_view(), name="optimization-my-optimal"),
+    path("optimization/robustness/", RobustnessView.as_view(), name="optimization-robustness"),
     path("assets/returns/", AssetReturnsView.as_view(), name="assets-returns"),
     path("optimization/best-overall/", BestOverallView.as_view(), name="optimization-best-overall"),
     path("performance/", PerformanceView.as_view(), name="performance"),

@@ -44,6 +44,38 @@ def test_admin_overview_requires_staff(free_user, staff_user):
     assert "checks" in body
 
 
+def test_admin_overview_refresh_bypasses_cache(staff_user, monkeypatch):
+    from django.core.cache import cache
+    from marketdata.admin_telemetry import OVERVIEW_CACHE_KEY
+
+    cache.clear()
+    calls = {"n": 0}
+    # Count the EXPENSIVE build, not the wrapper. AdminOverviewView calls
+    # get_ops_overview() on every request by design -- the caching lives inside
+    # it -- so patching the wrapper counts requests and can never show a cache
+    # hit. get_admin_telemetry_context is what a cache miss actually runs.
+    import marketdata.admin_telemetry as telemetry
+
+    real = telemetry.get_admin_telemetry_context
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(telemetry, "get_admin_telemetry_context", counting)
+    client = _auth(APIClient(), staff_user)
+    res1 = client.get("/api/admin/overview/")
+    assert res1.status_code == 200
+    assert calls["n"] == 1
+    assert cache.get(OVERVIEW_CACHE_KEY) is not None
+    res2 = client.get("/api/admin/overview/")
+    assert res2.status_code == 200
+    assert calls["n"] == 1
+    res3 = client.get("/api/admin/overview/?refresh=1")
+    assert res3.status_code == 200
+    assert calls["n"] == 2
+
+
 def test_admin_workflows_filter_and_pagination(staff_user):
     WorkflowRun.objects.create(workflow="archive", outcome="success", endpoint="stock_candle_adjusted")
     WorkflowRun.objects.create(workflow="archive", outcome="failed", endpoint="stock_transaction_ticks")
@@ -164,6 +196,10 @@ def test_admin_overview_includes_fill_completeness_disk(staff_user, monkeypatch)
     dests = {row["destination_table"] for row in body["workflow_15m"]["by_destination"]}
     assert "MarketCandle" in dests
     assert body["workers"]["summary"]["online"] == 1
+    assert "coverage" in body
+    assert "live" in body["coverage"]
+    assert "warehouse" in body["coverage"]
+    assert set(body["coverage"]["warehouse"]["counts"].keys()) == {"complete", "partial", "failed", "not_tried"}
 
 
 def test_pipelines_write_workflow_runs(settings, monkeypatch):
@@ -228,3 +264,18 @@ def test_fake_ingest_visible_on_overview_without_logs(staff_user, monkeypatch):
         for row in body["workflow_15m"]["by_destination"]
     )
     assert body["last_success"].get("archive_state")
+
+
+def test_admin_assets_list_filter_and_search(staff_user):
+    from portfolio.models import Asset
+
+    Asset.objects.create(key="kama_stock", name="Kama", name_fa="کاما", asset_class="Stock", tse_symbol="کاما", is_manual=True)
+    Asset.objects.create(key="emami_coin", name="Emami", asset_class="Gold", brs_symbol="IR_COIN_EMAMI", is_manual=True)
+    client = _auth(APIClient(), staff_user)
+    res = client.get("/api/admin/assets/?asset_class=Stock&search=کاما")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["count"] == 1
+    assert body["results"][0]["key"] == "kama_stock"
+    assert body["results"][0]["tse_symbol"] == "کاما"
+    assert "asset_classes" in body

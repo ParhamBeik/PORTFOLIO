@@ -145,10 +145,18 @@ def test_admin_endpoints(auth_client, db):
     req.user = user
     
     from unittest.mock import patch
-    with patch("django.contrib.messages.add_message") as mock_add:
+    # settings_test sets CELERY_TASK_ALWAYS_EAGER, so .delay() runs the retry
+    # inline; with no provider reachable it fails and re-increments
+    # consecutive_failures to 1 before this assertion runs. That is correct
+    # behaviour, not a bug -- production dispatches asynchronously and the reset
+    # stands. Mock the hand-off so this tests the contract enqueue_archive_retries
+    # actually owns: clear the failure count, then enqueue exactly once.
+    with patch("marketdata.tasks.retry_archive_job_task.delay") as mock_delay, \
+         patch("django.contrib.messages.add_message") as mock_add:
         admin_instance.retry_selected_jobs(req, ArchiveFetchState.objects.filter(id=state.id))
         mock_add.assert_called_once()
-    
+    mock_delay.assert_called_once_with(state.id)
+
     # Check that failures were reset
     state.refresh_from_db()
     assert state.consecutive_failures == 0

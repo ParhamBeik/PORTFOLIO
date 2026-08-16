@@ -41,7 +41,8 @@ class User(AbstractUser):
     # Email is the login identifier.
     username = None
     email = models.EmailField(unique=True)
-    # Gateway customer reference (kept for audit; Zarinpal keys on Payment.authority).
+    # Dead: the payment integration and its Payment model are gone, and nothing has
+    # ever written this. Dropped in the Phase 3 schema migration.
     customer_id = models.CharField(max_length=64, blank=True, default="")
 
     objects = UserManager()

@@ -11,7 +11,18 @@ from marketdata.quota import ARCHIVE
 pytestmark = pytest.mark.django_db
 
 
-def test_batch_reserves_two_non_tick_and_uses_ten_tick_slots():
+def test_batch_fills_full_history_first_then_gives_the_rest_to_ticks():
+    """Cost ordering: the cheap class drains first, ticks take what is left.
+
+    One History.php request returns ~4,600 rows; one Transaction.php request
+    buys a single calendar day. So full history is claimed first and ticks fill
+    the remaining slots -- see test_claim_fills_historical_full_before_ticks in
+    test_archive_scheduling.py, which pins the same rule with no ticks eligible.
+
+    This used to assert a flat reservation of 2 non-tick slots, which was the
+    policy before the claim path was reordered by cost class; the assertion
+    outlived the behaviour it described.
+    """
     from django.core.cache import cache
 
     from marketdata import jalali
@@ -52,10 +63,12 @@ def test_batch_reserves_two_non_tick_and_uses_ten_tick_slots():
 
     claimed = claim_archive_batch(limit=12)
 
-    assert len(set(claimed) & {row.pk for row in non_ticks}) == 2
-    assert len(set(claimed) & {row.pk for row in ticks}) == 10
-    claimed_ticks = [row.pk for row in ticks[:10]]
-    assert set(claimed_ticks).issubset(claimed)
+    assert len(claimed) == 12
+    # All 3 full-history states go first because they are the cheap class...
+    assert {row.pk for row in non_ticks}.issubset(claimed)
+    # ...and ticks fill the 9 slots that remain, lowest stored_rows first.
+    assert len(set(claimed) & {row.pk for row in ticks}) == 9
+    assert {row.pk for row in ticks[:9]}.issubset(claimed)
 
 
 def test_claim_skips_ticks_without_candles():

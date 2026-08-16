@@ -6,9 +6,12 @@ import {
   CartesianGrid,
   Cell,
   Legend,
+  Line,
+  LineChart,
   Pie,
   PieChart,
   ReferenceDot,
+  ReferenceLine,
   ResponsiveContainer,
   Scatter,
   ScatterChart,
@@ -17,7 +20,7 @@ import {
   YAxis,
   ZAxis,
 } from "recharts";
-import { date, dateTick, pct, toman, tomanCompact } from "../format.js";
+import { date, dateTime, dateTick, pct, toman, tomanCompact, trendAxisTick } from "../format.js";
 
 // Themed recharts wrappers. Pages never import recharts and never write a hex —
 // the old code scattered #4c9aff/#3fb950/#f85149 across three files, so a theme
@@ -74,6 +77,24 @@ export function moneyTrendDomain(dataMin, dataMax) {
   return [paddedMin < 0 && lo >= 0 ? 0 : paddedMin, hi + pad];
 }
 
+/** Stacked-share Y domain: symmetric around 50% so the even-split line stays centered. */
+export function shareTrendDomain(data, seriesKeys) {
+  if (!data?.length || !seriesKeys?.length || seriesKeys.length <= 1) return [0, 1];
+
+  let reach = 0;
+  for (const row of data) {
+    let cum = 0;
+    for (let i = 0; i < seriesKeys.length - 1; i += 1) {
+      const v = Number(row[seriesKeys[i]]);
+      if (Number.isFinite(v)) cum += v;
+      reach = Math.max(reach, Math.abs(cum - 0.5));
+    }
+  }
+  const pad = reach > 0 ? reach * 0.08 : 0;
+  const radius = Math.min(0.5, Math.max(reach + pad, 0.02));
+  return [0.5 - radius, 0.5 + radius];
+}
+
 /**
  * Net-worth over time. One series, so no legend — the panel title names it.
  * `data` is [{ x: ISO date, y: number }].
@@ -111,6 +132,111 @@ export function AreaTrend({ data, height = 260, label = "Portfolio value over ti
           dot={false}
           activeDot={{ r: 4, stroke: SURFACE, strokeWidth: 2 }}
           isAnimationActive={false}
+        />
+      </AreaChart>
+    </Frame>
+  );
+}
+
+/**
+ * Several portfolio net-worth series on one axis.
+ * `series` = [{ key, name }], `data` = [{ x, [key]: number }].
+ */
+export function MultiLineTrend({
+  series,
+  data,
+  height = 280,
+  label = "Portfolio values over time",
+  longTicks,
+}) {
+  return (
+    <Frame height={height} label={label}>
+      <LineChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+        <CartesianGrid stroke={GRID} />
+        <XAxis dataKey="x" {...axis} tickLine minTickGap={40} tickFormatter={(v) => dateTick(v, longTicks)} />
+        <YAxis
+          {...axis}
+          width={56}
+          tickFormatter={tomanCompact}
+          domain={([dataMin, dataMax]) => moneyTrendDomain(dataMin, dataMax)}
+          allowDataOverflow={false}
+        />
+        <Tooltip
+          {...tooltipProps}
+          labelFormatter={date}
+          formatter={(v, name) => [toman(v), name]}
+        />
+        <Legend {...legendProps} />
+        {series.map((s, i) => (
+          <Line
+            key={s.key}
+            type="monotone"
+            dataKey={s.key}
+            name={s.name}
+            stroke={SERIES[i % SERIES.length]}
+            strokeWidth={2}
+            dot={false}
+            activeDot={{ r: 4, stroke: SURFACE, strokeWidth: 2 }}
+            isAnimationActive={false}
+          />
+        ))}
+      </LineChart>
+    </Frame>
+  );
+}
+
+/**
+ * Stacked share-of-total (fractions summing to ~1). `series` / `data` same shape as MultiLineTrend.
+ */
+export function StackedShareTrend({
+  series,
+  data,
+  height = 280,
+  label = "Share of combined portfolio over time",
+  longTicks,
+}) {
+  const keys = series.map((s) => s.key);
+  const yDomain = shareTrendDomain(data, keys);
+  const yDecimals = yDomain[1] - yDomain[0] < 0.2 ? 1 : 0;
+
+  return (
+    <Frame height={height} label={label}>
+      <AreaChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+        <CartesianGrid stroke={GRID} />
+        <XAxis dataKey="x" {...axis} tickLine minTickGap={40} tickFormatter={(v) => dateTick(v, longTicks)} />
+        <YAxis
+          {...axis}
+          width={48}
+          tickFormatter={(v) => pct(v, yDecimals)}
+          domain={yDomain}
+          allowDataOverflow
+        />
+        <Tooltip
+          {...tooltipProps}
+          labelFormatter={date}
+          formatter={(v, name) => [pct(v), name]}
+        />
+        <Legend {...legendProps} />
+        {series.map((s, i) => (
+          <Area
+            key={s.key}
+            type="monotone"
+            dataKey={s.key}
+            name={s.name}
+            stackId="share"
+            stroke={SERIES[i % SERIES.length]}
+            strokeWidth={2}
+            fill={SERIES[i % SERIES.length]}
+            fillOpacity={0.55}
+            isAnimationActive={false}
+          />
+        ))}
+        <ReferenceLine
+          y={0.5}
+          stroke={INK}
+          strokeDasharray="4 4"
+          strokeWidth={1}
+          ifOverflow="visible"
         />
       </AreaChart>
     </Frame>
@@ -245,14 +371,46 @@ export function RiskScatter({ frontier = [], cloud = [], points = [], height = 3
   );
 }
 
+function trimLeadingZeroPoints(data) {
+  const rows = (data || []).map((p) => ({ x: p.x, y: Number(p.y) }));
+  let start = 0;
+  while (start < rows.length - 1 && rows[start].y === 0) start += 1;
+  return rows.slice(start);
+}
+
+function seriesSpanMs(rows) {
+  const times = rows.map((r) => new Date(r.x).getTime()).filter((t) => !Number.isNaN(t));
+  if (times.length < 2) return 0;
+  return Math.max(...times) - Math.min(...times);
+}
+
 export function CountTrend({ data, height = 180, label = "Count over time", color = "var(--c-s1)" }) {
+  const series = trimLeadingZeroPoints(data);
+  const spanMs = seriesSpanMs(series);
+  const shortSpan = spanMs > 0 && spanMs <= 2 * 86400000;
+
   return (
     <Frame height={height} label={label}>
-      <AreaChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+      <AreaChart data={series} margin={{ top: 8, right: 8, left: 0, bottom: shortSpan ? 16 : 8 }}>
         <CartesianGrid stroke={GRID} vertical={false} />
-        <XAxis dataKey="x" {...axis} minTickGap={32} tickFormatter={(v) => dateTick(v)} />
-        <YAxis {...axis} width={48} tickFormatter={numFmt} />
-        <Tooltip {...tooltipProps} labelFormatter={date} formatter={(v) => [numFmt(v), ""]} />
+        <XAxis
+          dataKey="x"
+          {...axis}
+          minTickGap={shortSpan ? 48 : 32}
+          tickFormatter={(v) => trendAxisTick(v, spanMs)}
+        />
+        <YAxis
+          {...axis}
+          width={52}
+          tickFormatter={numFmt}
+          domain={([dataMin, dataMax]) => moneyTrendDomain(dataMin, dataMax)}
+          allowDataOverflow={false}
+        />
+        <Tooltip
+          {...tooltipProps}
+          labelFormatter={(v) => (shortSpan ? dateTime(v) : date(v))}
+          formatter={(v) => [numFmt(v), ""]}
+        />
         <Area
           type="monotone"
           dataKey="y"
@@ -283,3 +441,53 @@ export const STATUS_COLOR = {
   serious: "var(--c-serious)",
   critical: "var(--c-critical)",
 };
+
+export const COVERAGE_COLORS = {
+  complete: "var(--c-good)",
+  fresh: "var(--c-good)",
+  partial: "var(--c-warn)",
+  stale: "var(--c-warn)",
+  failed: "var(--c-critical)",
+  missing: "var(--c-critical)",
+  not_tried: "var(--c-muted)",
+  manual: "var(--c-s4)",
+  formula: "var(--c-s5)",
+  no_source: "var(--c-axis)",
+};
+
+/** Stacked counts per category — e.g. complete / partial / failed / not_tried per endpoint. */
+export function StackedStatusBar({
+  data,
+  series,
+  height = 320,
+  label = "Status breakdown",
+  testId,
+}) {
+  return (
+    <div data-testid={testId}>
+      <Frame height={height} label={label}>
+        <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 8 }} stackOffset="expand">
+          <CartesianGrid stroke={GRID} vertical={false} />
+          <XAxis dataKey="name" {...axis} interval={0} angle={-20} textAnchor="end" height={72} />
+          <YAxis {...axis} width={48} tickFormatter={(v) => `${Math.round(v * 100)}%`} />
+          <Tooltip
+            {...tooltipProps}
+            formatter={(v, name) => [String(Math.round(Number(v))), name]}
+          />
+          <Legend {...legendProps} />
+          {series.map((s) => (
+            <Bar
+              key={s.key}
+              dataKey={s.key}
+              name={s.name}
+              stackId="status"
+              fill={s.color || COVERAGE_COLORS[s.key] || SERIES[0]}
+              isAnimationActive={false}
+            />
+          ))}
+        </BarChart>
+      </Frame>
+    </div>
+  );
+}
+

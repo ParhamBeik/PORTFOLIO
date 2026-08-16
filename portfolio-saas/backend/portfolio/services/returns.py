@@ -42,6 +42,10 @@ from .deflator import normalize_basis, to_basis
 DEFAULT_HISTORY_DAYS = 180
 # Drop an asset entirely if it has fewer non-NaN return rows than this.
 MIN_DAILY_RETURNS = 30
+# Fallback annualization factor. Prefer `periods_per_year(index)`, which reads the
+# panel's actual sampling frequency; this is only used when the index is too short
+# to measure one.
+TRADING_DAYS_PER_YEAR = 252
 # Cache key template — versioned by max(Price.id) so it auto-rotates on writes.
 RETURNS_CACHE_KEY = "returns:daily:{history_days}d:v{version}"
 RETURNS_CACHE_TTL = 600
@@ -51,29 +55,45 @@ USD_QUOTED_KEYS = ("bitcoin_usd", "gold_ounce_usd")
 _HISTORY_BUFFER_DAYS = 7
 # The session calendar is derived from the warehouse itself, so a stretch where
 # nothing was ingested looks identical to a stretch where the market was shut.
-# Nowruz is the longest genuine closure at ~14 days; past this it is an ingest
-# hole and must not be spliced across.
+# Past this many calendar days a break is investigated rather than spliced.
+#
+# It is NOT true that "Nowruz is the longest genuine closure at ~14 days": the
+# exchange was shut for 83 days across 1404-1405, and there are 74 market-wide
+# closure days spread over 12 Jalali years. Length alone therefore cannot tell a
+# closure from an ingest hole -- `_closure_explained()` asks the data instead.
 MAX_OUTAGE_CALENDAR_DAYS = 21
 
 
 def _price_version_fingerprint() -> str:
     """Monotonic fingerprint of every table feeding the panel.
 
-    Combines max(id) of Price with max(id) of the two warehouse history tables,
-    so both the 2-min live fetch and the nightly marketdata sync rotate the
-    returns cache. Lazy import: portfolio -> marketdata is the allowed
-    dependency direction (marketdata never imports portfolio's domain).
+    Combines max(id) of Price with max(id) of every warehouse table that can
+    change what the returns matrix contains, so the 2-min live fetch, the
+    nightly marketdata sync, a new spike rejection, an integrity-gate flip, or
+    a listing-eligibility change all rotate the returns cache. Lazy import:
+    portfolio -> marketdata is the allowed dependency direction (marketdata
+    never imports portfolio's domain).
     """
-    from marketdata.models import DailyStockHistory, GoldCurrencyHistory, MarketCandle
+    from marketdata.models import (
+        DailyStockHistory,
+        GoldCurrencyHistory,
+        InstrumentListingHistory,
+        MarketCandle,
+        RejectedRecord,
+        SymbolIntegrity,
+    )
 
     def _max_id(qs):
         return qs.order_by("-id").values_list("id", flat=True).first() or 0
 
-    return "{}:{}:{}:{}".format(
+    return "{}:{}:{}:{}:{}:{}:{}".format(
         hex(_max_id(Price.objects))[2:],
         hex(_max_id(DailyStockHistory.objects))[2:],
         hex(_max_id(GoldCurrencyHistory.objects))[2:],
         hex(_max_id(MarketCandle.objects))[2:],
+        hex(_max_id(RejectedRecord.objects))[2:],
+        hex(_max_id(SymbolIntegrity.objects))[2:],
+        hex(_max_id(InstrumentListingHistory.objects))[2:],
     )
 
 
@@ -127,6 +147,31 @@ def _align_to_trading_sessions(panel: pd.DataFrame) -> pd.DataFrame:
     return panel.reindex(panel.index.intersection(sessions))
 
 
+def _closure_explained(left: pd.Timestamp, right: pd.Timestamp) -> bool:
+    """True when every missing session between two dates was an exchange closure.
+
+    A warehouse hole and a shut exchange look identical from the session index
+    alone, because that index is derived from the same rows that are missing.
+    They are told apart by trading activity: on a closed day the provider still
+    emits a row per symbol carrying the previous price with zero volume and zero
+    trades, so the market-wide totals are zero.
+    """
+    from marketdata.candles import market_closure_days
+
+    closures = market_closure_days(
+        start=to_jalali_str(left), end=to_jalali_str(right)
+    )
+    if not closures:
+        return False
+    # Every calendar day strictly between the two observed sessions must be
+    # either a closure day or a non-session (weekend/holiday with no row at
+    # all). A single genuinely-missing trading day means this is an ingest hole.
+    missing = _trading_session_index(
+        left + pd.Timedelta(days=1), right - pd.Timedelta(days=1)
+    )
+    return all(to_jalali_str(day) in closures for day in missing)
+
+
 def _trim_to_contiguous(panel: pd.DataFrame) -> pd.DataFrame:
     """Drop everything before the most recent ingest outage.
 
@@ -134,15 +179,46 @@ def _trim_to_contiguous(panel: pd.DataFrame) -> pd.DataFrame:
     the session calendar, because that calendar is built from the same rows.
     Splicing across it would turn three missing months into one enormous daily
     return, so the window starts after the break instead.
+
+    An exchange closure is NOT such a hole: no data is missing, the market was
+    shut. Trimming there discarded a decade of history over the 83-day 1404-1405
+    closure, which is why every lookback window used to return the same ~55
+    sessions. Closure-explained breaks are kept; `_mask_closure_returns` removes
+    the one distorted return that spans them.
     """
     index = panel.index
     if len(index) < 2:
         return panel
     spans = (index[1:] - index[:-1]).days
-    breaks = [i for i, days in enumerate(spans) if days > MAX_OUTAGE_CALENDAR_DAYS]
+    breaks = [
+        i for i, days in enumerate(spans)
+        if days > MAX_OUTAGE_CALENDAR_DAYS
+        and not _closure_explained(index[i], index[i + 1])
+    ]
     if not breaks:
         return panel
     return panel.iloc[breaks[-1] + 1:]
+
+
+def _mask_closure_returns(returns: pd.DataFrame, panel_index: pd.Index) -> pd.DataFrame:
+    """NaN the single return that spans an exchange closure.
+
+    Reopening after 83 shut days produces one row holding nearly three months of
+    price movement. It is a real move, but it is not a daily return, and feeding
+    it to an annualized volatility or a covariance estimate corrupts both. The
+    history either side stays; only the bridging observation is dropped.
+    """
+    if returns.empty or len(panel_index) < 2:
+        return returns
+    spans = (panel_index[1:] - panel_index[:-1]).days
+    bridging = [
+        panel_index[i + 1] for i, days in enumerate(spans)
+        if days > MAX_OUTAGE_CALENDAR_DAYS
+    ]
+    for day in bridging:
+        if day in returns.index:
+            returns.loc[day] = np.nan
+    return returns
 
 
 def normalize_as_of(as_of) -> dt.datetime | None:
@@ -179,6 +255,7 @@ def resolve_universe(
     universe: list[str] | None = None,
     *,
     as_of=None,
+    held_keys: frozenset[str] = frozenset(),
 ) -> list[dict]:
     """Resolve universe items to dicts with key, symbol, and source.
 
@@ -187,6 +264,15 @@ def resolve_universe(
       * 'symbol': the warehouse symbol ('کاما', 'USD', etc.)
       * 'source': 'tse' or 'brs'
       * 'asset': Asset object if exists
+      * 'proxied_from': the asset key whose series was borrowed, when this asset
+        has no provider symbol of its own (set only for `held_keys`)
+
+    `held_keys` enables proxy resolution: a manual asset with no symbol but with
+    `Asset.proxy_key` set borrows the proxy's symbol, so a Swiss gold bar is
+    measured against gold instead of against the handful of live ticks its manual
+    valuation produced. This is deliberately opt-in -- resolving proxies for the
+    optimizer's candidate universe would hand it two identical columns to choose
+    between, which is a singular covariance and an arbitrary allocation.
     """
     from marketdata.models import InstrumentListingHistory, MarketInstrument
 
@@ -198,24 +284,35 @@ def resolve_universe(
         if sym:
             asset_by_symbol[sym] = a
 
+    def _entry(a: Asset) -> dict:
+        """Universe entry for a catalog asset, following its proxy when held."""
+        symbol = a.tse_symbol or a.brs_symbol or ""
+        if symbol:
+            return {
+                "key": a.key,
+                "symbol": symbol,
+                "source": "tse" if a.tse_symbol else "brs",
+                "asset": a,
+            }
+        proxy = assets.get(a.proxy_key) if a.key in held_keys else None
+        proxy_symbol = (proxy.tse_symbol or proxy.brs_symbol or "") if proxy else ""
+        if not proxy_symbol:
+            return {"key": a.key, "symbol": "", "source": "brs", "asset": a}
+        return {
+            "key": a.key,
+            "symbol": proxy_symbol,
+            "source": "tse" if proxy.tse_symbol else "brs",
+            "asset": a,
+            "proxied_from": proxy.key,
+        }
+
     if universe is None:
         for a in assets.values():
-            resolved.append({
-                "key": a.key,
-                "symbol": a.tse_symbol or a.brs_symbol or "",
-                "source": "tse" if a.tse_symbol else "brs",
-                "asset": a
-            })
+            resolved.append(_entry(a))
     else:
         for item in universe:
             if item in assets:
-                a = assets[item]
-                resolved.append({
-                    "key": a.key,
-                    "symbol": a.tse_symbol or a.brs_symbol or "",
-                    "source": "tse" if a.tse_symbol else "brs",
-                    "asset": a
-                })
+                resolved.append(_entry(assets[item]))
             elif item in asset_by_symbol:
                 a = asset_by_symbol[item]
                 resolved.append({
@@ -282,7 +379,7 @@ def get_universe_by_mode(mode: str, user=None, account=None) -> list[str] | None
 
     active_assets = list(Asset.objects.filter(is_active=True).exclude(is_house=True).values_list("key", flat=True))
 
-    if mode in ("held", "watchlist"):
+    if mode == "held":
         res = []
         if account is not None:
             res = list(account.holdings.values_list("asset__key", flat=True))
@@ -305,7 +402,14 @@ def get_universe_by_mode(mode: str, user=None, account=None) -> list[str] | None
     return None
 
 
-def _returns_cache_key(history_days: int, as_of: dt.datetime | None, universe: list[str] | None, basis: str, version: str) -> str:
+def _returns_cache_key(
+    history_days: int,
+    as_of: dt.datetime | None,
+    universe: list[str] | None,
+    basis: str,
+    version: str,
+    held_keys: frozenset[str] = frozenset(),
+) -> str:
     import hashlib
     basis = normalize_basis(basis)
     if universe is None:
@@ -316,99 +420,41 @@ def _returns_cache_key(history_days: int, as_of: dt.datetime | None, universe: l
             ",".join(sorted_univ).encode("utf-8"), usedforsecurity=False
         ).hexdigest()[:16]
 
+    # held_keys changes which columns survive the gates, so it must version the
+    # cache -- otherwise the optimizer's strict matrix and the risk card's
+    # relaxed one collide on the same key.
+    if held_keys:
+        held_str = hashlib.md5(
+            ",".join(sorted(held_keys)).encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:16]
+    else:
+        held_str = "none"
+
     as_of_str = "latest" if as_of is None else as_of.date().isoformat()
-    return f"returns:daily:{history_days}d:as_of:{as_of_str}:univ:{univ_str}:basis:{basis}:v{version}"
-
-
-
-def _warehouse_series(
-    symbol: str,
-    source: str,
-    cutoff: dt.datetime,
-    as_of: dt.datetime | None = None,
-) -> pd.Series | None:
-    """Daily close series for one asset from the warehouse, or None.
-
-    DailyStockHistory (unadjusted `pl` close) for TSE assets, GoldCurrencyHistory
-    for gold/currency/crypto. Returns None unless the series has at least
-    MIN_DAILY_RETURNS rows inside the window.
-    """
-    from marketdata.candles import candle_close_qs
-    from marketdata.models import GoldCurrencyHistory
-
-    as_of_jalali = None
-    if as_of is not None:
-        as_of_jalali = to_jalali_str(as_of)
-
-    from marketdata.models import RejectedRecord
-    if source == "tse":
-        rejections = set(
-            RejectedRecord.objects.filter(
-                symbol=symbol,
-                endpoint__in=[
-                    "stock_candle_adjusted", "stock_candle_unadjusted",
-                    "stock_history_adjusted", "stock_history_unadjusted",
-                    "series:1d_adj", "series:1d_unadj"
-                ]
-            ).values_list("date", flat=True)
-        )
-    elif source == "brs":
-        rejections = set(
-            RejectedRecord.objects.filter(
-                symbol=symbol,
-                endpoint__in=[
-                    "gold_daily", "crypto_daily", "commodity_daily",
-                    "market_index_daily", "etf_nav_daily", "option_contract_daily"
-                ]
-            ).values_list("date", flat=True)
-        )
-    else:
-        rejections = set()
-
-    if source == "tse":
-        qs = candle_close_qs(symbol, as_of=as_of_jalali)
-        rows = qs.order_by("date_time").values_list("date_time", "close_price")
-        # Raw Rial -> Toman so a TSE column is comparable with a BRS one.
-        rows = [
-            (r[0], tse_close_to_toman(r[1]))
-            for r in rows
-            if r[0].split()[0] not in rejections
-        ]
-    elif source == "brs":
-        qs = GoldCurrencyHistory.objects.filter(symbol=symbol, close_price__gt=0)
-        if as_of_jalali is not None:
-            qs = qs.filter(date__lte=as_of_jalali)
-        rows = qs.order_by("date").values_list("date", "close_price")
-        rows = [r for r in rows if r[0] not in rejections]
-    else:
-        return None
-
-    if not rows:
-        return None
-
-    dates, closes = zip(*rows)
-    series = pd.Series(
-        pd.to_numeric(pd.Series(closes), errors="coerce").values,
-        index=_jalali_to_gregorian_index(pd.Series(dates)),
+    return (
+        f"returns:daily:{history_days}d:as_of:{as_of_str}:univ:{univ_str}"
+        f":basis:{basis}:held:{held_str}:v{version}"
     )
-    series = series[series.index.notna()]
-    series = series[series > 0]
-    series = series[series.index >= cutoff]
-    if len(series) < MIN_DAILY_RETURNS:
-        return None
-    # Collapse duplicate days: keep last.
-    return series.groupby(series.index).last()
+
 
 
 def _load_price_panel(
     history_days: int,
     as_of: dt.datetime | None = None,
     universe: list[str] | None = None,
-) -> tuple[pd.DataFrame, list[dict]]:
+    held_keys: frozenset[str] = frozenset(),
+) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Per-asset daily close panel: warehouse series preferred, Price fallback.
 
     Columns are asset keys, indexed by (Gregorian) date. NaN where an asset had
     no row that day.
+
+    Returns `(panel, excluded, warnings)`. Keys in `held_keys` are never dropped
+    by the `SymbolIntegrity` gate: that gate screens ~1000 instruments for
+    *investability* over a fixed trailing 180-day window, which is the wrong
+    question to ask about something the user already owns. For a held asset the
+    verdict is downgraded to a warning and the column is kept, so the risk card
+    reports a number with a caveat instead of reporting nothing.
     """
     as_of_dt = normalize_as_of(as_of)
     if as_of_dt is not None:
@@ -428,7 +474,7 @@ def _load_price_panel(
     }
 
     # Resolve universe items
-    resolved_univ = resolve_universe(universe, as_of=as_of_dt)
+    resolved_univ = resolve_universe(universe, as_of=as_of_dt, held_keys=held_keys)
 
     # We must ensure usd_cash is loaded in the panel for currency conversion and basis conversion
     usd_cash_in_univ = any(x["key"] == "usd_cash" for x in resolved_univ)
@@ -503,22 +549,34 @@ def _load_price_panel(
         brs_data.setdefault(sym, []).append((d_str, close))
 
     warehouse_cols: dict[str, pd.Series] = {}
+    short_warehouse_cols: dict[str, pd.Series] = {}
     fallback_keys: list[str] = []
     gate_excluded = []
+    warnings: list[dict] = []
 
     for item in resolved_univ:
         key = item["key"]
         symbol = item["symbol"]
         source = item["source"]
 
+        if item.get("proxied_from"):
+            warnings.append({
+                "key": key,
+                "reason": "proxied",
+                "detail": item["proxied_from"],
+            })
+
         # Check data integrity gate
         if symbol in failed_symbols:
-            gate_excluded.append({
+            record = {
                 "key": key,
                 "reason": "integrity_gate_failed",
-                "detail": failed_symbols[symbol]
-            })
-            continue
+                "detail": failed_symbols[symbol],
+            }
+            if key not in held_keys:
+                gate_excluded.append(record)
+                continue
+            warnings.append(record)
 
         # Extract rows from bulk data
         rows_data = tse_data.get(symbol, []) if source == "tse" else brs_data.get(symbol, [])
@@ -548,6 +606,11 @@ def _load_price_panel(
 
         if len(series) < MIN_DAILY_RETURNS:
             fallback_keys.append(key)
+            # A held asset must not lose its only history to a threshold whose
+            # job is picking optimizer candidates. Keep the short series aside
+            # and use it below if the live-tick fallback turns up nothing better.
+            if key in held_keys and not series.empty:
+                short_warehouse_cols[key] = series.groupby(series.index).last()
             continue
 
         series = series.groupby(series.index).last()
@@ -555,12 +618,21 @@ def _load_price_panel(
 
     fallback_panel = _load_live_price_panel(cutoff, as_of_dt, fallback_keys)
     for key in fallback_keys:
-        if key not in fallback_panel.columns:
-            gate_excluded.append({
+        if key in fallback_panel.columns:
+            continue
+        if key in short_warehouse_cols:
+            warehouse_cols[key] = short_warehouse_cols[key]
+            warnings.append({
                 "key": key,
-                "reason": "no_price_history",
-                "detail": "No trustworthy price observations in the requested window",
+                "reason": "short_history",
+                "detail": f"{len(short_warehouse_cols[key])} warehouse observations",
             })
+            continue
+        gate_excluded.append({
+            "key": key,
+            "reason": "no_price_history",
+            "detail": "No trustworthy price observations in the requested window",
+        })
 
     tse_keys = {item["key"] for item in resolved_univ if item["source"] == "tse"}
     if not warehouse_cols:
@@ -575,7 +647,7 @@ def _load_price_panel(
     # panel is legitimately daily and should keep its weekend observations.
     if tse_keys.intersection(panel.columns):
         panel = _align_to_trading_sessions(panel)
-    return _trim_to_contiguous(panel), gate_excluded
+    return _trim_to_contiguous(panel), gate_excluded, warnings
 
 
 def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys: list[str]) -> pd.DataFrame:
@@ -698,54 +770,133 @@ def _convert_usd_to_toman(panel: pd.DataFrame) -> pd.DataFrame:
     return panel
 
 
-def _build_returns_matrix(panel: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
-    """Price panel -> (daily simple returns, excluded list).
+def _gap_profile(observed: np.ndarray) -> tuple[int, int]:
+    """(leading_gap, interior_gap) for a boolean 'has an observation' array.
+
+    The leading run of missing days -- everything before an asset's FIRST
+    observation -- is not a gap in its history, it is the absence of history:
+    the asset was listed, bought, or first tracked partway into the window.
+    Counting it as a gap accused every recently-added holding of
+    `price_gap_exceeded`, a data-corruption verdict, when nothing was wrong with
+    the data. Only the interior runs describe a hole in a series that exists.
+    Trailing runs stay in the interior count: a series that stops mid-window IS
+    a hole (a stale or delisted asset), and forward-filling it is exactly what
+    MAX_FORWARD_FILL_SESSIONS is there to bound.
+    """
+    present = np.flatnonzero(observed)
+    if present.size == 0:
+        return len(observed), 0
+    leading = int(present[0])
+    interior = current = 0
+    for is_present in observed[leading:]:
+        current = 0 if is_present else current + 1
+        interior = max(interior, current)
+    return leading, interior
+
+
+def _build_returns_matrix(
+    panel: pd.DataFrame, held_keys: frozenset[str] = frozenset()
+) -> tuple[pd.DataFrame, list[dict], list[dict]]:
+    """Price panel -> (daily simple returns, excluded, warnings).
 
     Excludes any asset with fewer than MIN_DAILY_RETURNS non-NaN return rows.
     Gaps are counted in trading sessions, matching `marketdata.integrity`, and
     separately in calendar days to catch ingest outages that the session
     calendar cannot see because it is derived from the same warehouse.
+
+    Keys in `held_keys` clear a lower bar. MIN_DAILY_RETURNS and MIN_COVERAGE
+    decide whether an asset is a usable *optimizer candidate*; an asset the user
+    already owns is reported on with whatever history it has (>= 2 returns) and
+    the shortfall is returned as a warning instead. A real interior gap still
+    excludes it either way -- forward-filling past MAX_FORWARD_FILL_SESSIONS
+    invents prices, and a made-up return is worse than a missing one.
     """
     from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS, MIN_COVERAGE
 
     if panel.empty:
-        return pd.DataFrame(), []
+        return pd.DataFrame(), [], []
 
     filled = panel.ffill(limit=MAX_FORWARD_FILL_SESSIONS)
     returns = filled.pct_change(fill_method=None)
+    # History either side of an exchange closure is kept (see _trim_to_contiguous),
+    # so the one row bridging it holds months of movement. Drop just that row.
+    returns = _mask_closure_returns(returns, panel.index)
     excluded: list[dict] = []
+    warnings: list[dict] = []
     keep: list[str] = []
     for key in returns.columns:
-        missing = panel[key].isna().to_numpy()
-        longest_gap = current_gap = 0
-        for is_missing in missing:
-            current_gap = current_gap + 1 if is_missing else 0
-            longest_gap = max(longest_gap, current_gap)
+        held = key in held_keys
+        leading_gap, interior_gap = _gap_profile(panel[key].notna().to_numpy())
         non_nan = int(returns[key].notna().sum())
-        expected = max(len(returns.index) - 1, 0)
+        expected = max(len(returns.index) - 1 - leading_gap, 0)
         coverage = non_nan / expected if expected else 0.0
-        if longest_gap > MAX_FORWARD_FILL_SESSIONS:
+        if interior_gap > MAX_FORWARD_FILL_SESSIONS:
             excluded.append({
                 "key": key,
                 "reason": "price_gap_exceeded",
-                "max_gap_sessions": longest_gap,
+                "max_gap_sessions": interior_gap,
             })
         elif non_nan < MIN_DAILY_RETURNS:
-            excluded.append(
-                {"key": key, "reason": "insufficient_history", "days": non_nan}
-            )
+            record = {"key": key, "reason": "insufficient_history", "days": non_nan}
+            if not held or non_nan < 2:
+                excluded.append(record)
+            else:
+                warnings.append({**record, "reason": "short_history"})
+                keep.append(key)
         elif coverage < MIN_COVERAGE:
-            excluded.append({
+            record = {
                 "key": key,
                 "reason": "insufficient_coverage",
                 "observations": non_nan,
                 "expected_sessions": expected,
                 "coverage": coverage,
-            })
+            }
+            if held:
+                warnings.append({**record, "reason": "low_coverage"})
+                keep.append(key)
+            else:
+                excluded.append(record)
         else:
             keep.append(key)
+            # Only a leading gap big enough to matter is worth a badge: nearly
+            # every series starts a session or two into the window simply
+            # because of where the cutoff falls.
+            if leading_gap > MAX_FORWARD_FILL_SESSIONS:
+                warnings.append({
+                    "key": key,
+                    "reason": "short_history",
+                    "days": non_nan,
+                    "detail": f"series starts {leading_gap} sessions into the window",
+                })
     returns = returns[keep] if keep else pd.DataFrame(index=returns.index)
-    return returns, excluded
+    return returns, excluded, warnings
+
+
+def periods_per_year(index: pd.Index) -> float:
+    """Observations per year implied by the index's average spacing.
+
+    ~252 on the TSE session calendar (Sat-Wed), ~365 on an all-gold panel, which
+    quotes seven days a week. Annualizing a 7-day series with a hardcoded 252
+    overstates volatility by sqrt(365/252) ~= 1.20x and understates Sharpe by the
+    same factor, so the figure has to come from the data rather than a constant.
+
+    Uses the MEAN spacing, not the median: a Sat-Wed calendar spaces its
+    observations 1,1,1,1,3 days apart, whose median is 1 and would report a
+    five-day-a-week series as if it traded daily. Spacings longer than
+    MAX_OUTAGE_CALENDAR_DAYS are dropped first -- an exchange closure is not the
+    series' cadence, and the 83-day shutdown of 1404-1405 would otherwise drag a
+    252-session year down to ~190.
+    """
+    if index is None or len(index) < 3:
+        return float(TRADING_DAYS_PER_YEAR)
+    gaps = np.diff(np.asarray(index, dtype="datetime64[D]")).astype(float)
+    gaps = gaps[(gaps > 0) & (gaps <= MAX_OUTAGE_CALENDAR_DAYS)]
+    if gaps.size == 0:
+        return float(TRADING_DAYS_PER_YEAR)
+    mean_spacing = float(gaps.mean())
+    if not np.isfinite(mean_spacing) or mean_spacing <= 0:
+        return float(TRADING_DAYS_PER_YEAR)
+    return 365.25 / mean_spacing
 
 
 def daily_returns_matrix(
@@ -753,7 +904,8 @@ def daily_returns_matrix(
     history_days: int = DEFAULT_HISTORY_DAYS,
     as_of=None,
     universe: list[str] | None = None,
-    basis: str = "nominal_toman"
+    basis: str = "nominal_toman",
+    held_keys: frozenset[str] = frozenset(),
 ) -> tuple[pd.DataFrame, list[dict]]:
     """Return `(daily_returns_df, excluded)` for the eligible universe.
 
@@ -761,11 +913,21 @@ def daily_returns_matrix(
     from one bounded Price query and stores it serialized under the versioned
     key (TTL 600s). The df is indexed by date, columns are asset keys, values
     are daily simple returns (float).
+
+    `held_keys` marks assets the caller actually owns. They bypass the
+    universe-screening gates (integrity, coverage, minimum history) and their
+    shortfalls come back on `df.attrs["warnings"]` instead of removing the
+    column -- see `_load_price_panel` and `_build_returns_matrix`. Default empty
+    reproduces the strict screening every other caller relies on.
+
+    `df.attrs` also carries `periods_per_year`, the panel's measured sampling
+    frequency, which any annualizing consumer must use in place of a constant.
     """
     as_of_dt = normalize_as_of(as_of)
     basis = normalize_basis(basis)
+    held_keys = frozenset(held_keys)
     version = _price_version_fingerprint()
-    key = _returns_cache_key(history_days, as_of_dt, universe, basis, version)
+    key = _returns_cache_key(history_days, as_of_dt, universe, basis, version, held_keys)
     cached = cache.get(key)
     if cached is not None:
         df = pd.DataFrame(
@@ -773,12 +935,21 @@ def daily_returns_matrix(
             index=pd.to_datetime(cached["index"], utc=True),
             columns=cached["columns"],
         )
+        df.attrs["warnings"] = cached.get("warnings", [])
+        df.attrs["periods_per_year"] = cached.get(
+            "periods_per_year", float(TRADING_DAYS_PER_YEAR)
+        )
         return df, cached["excluded"]
 
-    panel, gate_excluded = _load_price_panel(history_days, as_of=as_of_dt, universe=universe)
+    panel, gate_excluded, panel_warnings = _load_price_panel(
+        history_days, as_of=as_of_dt, universe=universe, held_keys=held_keys
+    )
     panel = _convert_usd_to_toman(panel)
 
-    # Apply basis conversion
+    # Apply basis conversion. real_toman raises deflator.CpiUnavailable (see
+    # config/settings.py) when the window reaches a Jalali year with no
+    # configured CPI — that must propagate, not fall back to nominal, so a
+    # caller never mistakes an unpriced basis for a real number.
     if basis == "usd_denominated" and "usd_cash" in panel.columns:
         usd_series = panel["usd_cash"]
         for col in panel.columns:
@@ -790,19 +961,28 @@ def daily_returns_matrix(
         if series_to_use is not None:
             for col in panel.columns:
                 panel[col] = to_basis(panel[col], basis, usd_series=series_to_use)
+    elif basis == "real_toman":
+        for col in panel.columns:
+            panel[col] = to_basis(panel[col], basis)
 
-    returns, excluded = _build_returns_matrix(panel)
+    # Frequency is a property of the price panel, not of the surviving columns:
+    # measure it before the gates can thin the index.
+    frequency = periods_per_year(panel.index)
+
+    returns, excluded, matrix_warnings = _build_returns_matrix(panel, held_keys)
     excluded.extend(gate_excluded)
+    warnings = panel_warnings + matrix_warnings
 
     # Filter columns to only include the requested universe
-    resolved_univ = resolve_universe(universe)
+    resolved_univ = resolve_universe(universe, held_keys=held_keys)
     requested_keys = [item["key"] for item in resolved_univ]
     keep = [k for k in requested_keys if k in returns.columns]
     returns = returns[keep] if keep else pd.DataFrame(index=returns.index)
 
-    # Filter excluded list to only include requested universe keys
+    # Filter excluded/warning lists to only include requested universe keys
     requested_keys_set = set(requested_keys)
     excluded = [e for e in excluded if e.get("key") in requested_keys_set]
+    warnings = [w for w in warnings if w.get("key") in requested_keys_set]
 
     if returns.empty:
         payload = {"columns": [], "index": [], "data": []}
@@ -816,7 +996,18 @@ def daily_returns_matrix(
                 for row in returns.to_numpy()
             ],
         }
-    cache.set(key, {**payload, "excluded": excluded}, timeout=RETURNS_CACHE_TTL)
+    returns.attrs["warnings"] = warnings
+    returns.attrs["periods_per_year"] = frequency
+    cache.set(
+        key,
+        {
+            **payload,
+            "excluded": excluded,
+            "warnings": warnings,
+            "periods_per_year": frequency,
+        },
+        timeout=RETURNS_CACHE_TTL,
+    )
     return returns, excluded
 
 
@@ -860,6 +1051,26 @@ def invalidate_returns_cache() -> None:
                 cache.delete(key)
     except Exception:  # cache is best-effort; never crash a fetch on it
         pass
+
+
+def risk_free_rate_info(as_of=None) -> dict:
+    """The annual risk-free rate actually used for `as_of`, plus its provenance.
+
+    `RISK_FREE_RATE_BY_JALALI_YEAR` (config/settings.py) is a hand-maintained
+    ASSUMPTION, not a measured yield — every consumer of a Sharpe ratio or
+    other risk-adjusted metric built on it should surface this alongside the
+    number so nobody mistakes it for observed data.
+    """
+    from django.conf import settings
+
+    as_of_dt = normalize_as_of(as_of) or dt.datetime.now(tz=dt.timezone.utc)
+    jalali_year = jdatetime.date.fromgregorian(date=as_of_dt.date()).year
+    return {
+        "annual_rate": settings.RATE_FOR(jalali_year),
+        "jalali_year": jalali_year,
+        "is_assumption": True,
+        "source": settings.RISK_FREE_RATE_SOURCE,
+    }
 
 
 def eligible_universe_keys() -> list[str]:

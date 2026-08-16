@@ -10,7 +10,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from portfolio.live.pubsub import get_redis
+from portfolio.live.redis_client import get_redis
 from .models import ApiRequestQuota
 
 logger = logging.getLogger(__name__)

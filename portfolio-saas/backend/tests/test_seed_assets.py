@@ -19,6 +19,10 @@ def test_seed_assets_includes_formula_valued_house(db):
             "IR_COIN_1G",
             "IR_GOLD_18K",
             "USD",
+            # Asset.clean() requires an eligible catalog row for every active,
+            # non-manual asset, so the fixture has to cover the whole seeded set.
+            "USDT_IRT",
+            "EUR",
         )
     ] + [
         MarketInstrument(

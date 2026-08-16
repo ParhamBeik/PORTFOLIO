@@ -144,16 +144,18 @@ export const listAssets = () => api("/api/assets/");
 export const listAccounts = () => api("/api/accounts/");
 export const createAccount = (name, broker = "") =>
   api("/api/accounts/", { method: "POST", body: { name, broker } });
-export const accountValuation = (id) => api(`/api/accounts/${id}/valuation/`);
 export const addHolding = (accountId, assetKey, quantity) =>
   api(`/api/accounts/${accountId}/holdings/`, {
     method: "POST",
     body: { asset_key: assetKey, quantity: Number(quantity) },
   });
-export const updateHolding = (accountId, id, quantity) =>
+export const updateHolding = (accountId, id, { quantity, unitPriceTomans } = {}) =>
   api(`/api/accounts/${accountId}/holdings/${id}/`, {
     method: "PATCH",
-    body: { quantity: Number(quantity) },
+    body: {
+      quantity: Number(quantity),
+      ...(unitPriceTomans != null && unitPriceTomans !== "" ? { unit_price_tomans: Number(unitPriceTomans) } : {}),
+    },
   });
 export const removeHolding = (accountId, id) =>
   api(`/api/accounts/${accountId}/holdings/${id}/`, { method: "DELETE" });
@@ -165,21 +167,26 @@ export const trade = (accountId, { assetKey, side, quantity, note = "", timestam
     method: "POST",
     body: { asset_key: assetKey, side, quantity: Number(quantity), note, ...(timestamp ? { timestamp } : {}) },
   });
-// Trade history (all accounts, or one via ?account=). Newest first.
-export const transactions = (days = 90, accountId = null) =>
-  api(`/api/transactions/?days=${days}` + (accountId ? `&account=${accountId}` : ""));
-export const deleteTransaction = (id) =>
-  api(`/api/transactions/${id}/`, { method: "DELETE" });
 export const getPerformance = (accountId, basis = "nominal_toman") =>
   api(`/api/accounts/${accountId}/performance/?basis=${basis}`);
 
-// The account ledger: the immutable event log behind holdings and cash.
-// Corrections append a reversal — nothing is ever edited or deleted.
-export const listLedger = (accountId) => api(`/api/accounts/${accountId}/ledger/`);
+// The account ledger: add, edit, and delete trades. Holdings without history
+// appear as position rows. accountId null = every portfolio.
+export const listLedger = (accountId) =>
+  accountId ? api(`/api/accounts/${accountId}/ledger/`) : api("/api/ledger/");
 export const createLedgerEntry = (accountId, entry) =>
   api(`/api/accounts/${accountId}/ledger/`, { method: "POST", body: entry });
-export const reverseLedgerEntry = (accountId, entryId) =>
-  api(`/api/accounts/${accountId}/ledger/${entryId}/reverse/`, { method: "POST" });
+export const updateLedgerEntry = (accountId, entryId, body) =>
+  api(`/api/accounts/${accountId}/ledger/${entryId}/`, { method: "PATCH", body });
+export const deleteLedgerEntry = (accountId, entryId) =>
+  api(`/api/accounts/${accountId}/ledger/${entryId}/`, { method: "DELETE" });
+export const updateLedgerHolding = (accountId, holdingId, quantity) =>
+  api(`/api/accounts/${accountId}/ledger/holdings/${holdingId}/`, {
+    method: "PATCH",
+    body: { quantity: Number(quantity) },
+  });
+export const deleteLedgerHolding = (accountId, holdingId) =>
+  api(`/api/accounts/${accountId}/ledger/holdings/${holdingId}/`, { method: "DELETE" });
 
 // Valuation & pricing
 //
@@ -207,12 +214,21 @@ export const snapshots = (days = 30, account = null, basis = null) => {
 };
 
 // Analytics & optimization, scoped to the active portfolio via ?account=.
-export const analytics = (account = null) =>
-  api(`/api/analytics/${accountParam(account) ? "?" + accountParam(account) : ""}`);
-export const frontier = (account = null) =>
-  api(
-    `/api/optimization/frontier/${accountParam(account) ? "?" + accountParam(account) : ""}`
-  );
+export const analytics = (account = null, { basis, window } = {}) => {
+  const params = new URLSearchParams();
+  if (account) params.set("account", account);
+  if (basis) params.set("basis", basis);
+  if (window != null) params.set("window", String(window));
+  const qs = params.toString();
+  return api(`/api/analytics/${qs ? `?${qs}` : ""}`);
+};
+export const frontier = (account = null, { window } = {}) => {
+  const params = new URLSearchParams();
+  if (account) params.set("account", account);
+  if (window != null) params.set("window", String(window));
+  const qs = params.toString();
+  return api(`/api/optimization/frontier/${qs ? `?${qs}` : ""}`);
+};
 export const myOptimal = (account = null) =>
   api(
     `/api/optimization/my-optimal/${accountParam(account) ? "?" + accountParam(account) : ""}`
@@ -228,11 +244,12 @@ function qs(params) {
   return s ? `?${s}` : "";
 }
 
-export const adminOverview = () => api("/api/admin/overview/");
+export const adminOverview = (params) => api(`/api/admin/overview/${qs(params)}`);
 export const adminWorkflows = (params) => api(`/api/admin/workflows/${qs(params)}`);
 export const adminArchiveStates = (params) => api(`/api/admin/archive-states/${qs(params)}`);
 export const adminArchiveRetry = (ids) =>
   api("/api/admin/archive-states/retry/", { method: "POST", body: { ids, confirm: true } });
+export const adminAssets = (params) => api(`/api/admin/assets/${qs(params)}`);
 export const adminAssetEvidence = (key) =>
   api(`/api/admin/assets/${encodeURIComponent(key)}/evidence/`);
 export const adminAssetRetry = (key) =>

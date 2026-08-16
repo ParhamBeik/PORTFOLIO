@@ -832,6 +832,12 @@ def run_archive_state(state_id):
         )
         logger.debug("Archive state incomplete for %s (%s): stored=%d expected=%d missing=%d.", state.symbol, state.endpoint, state.stored_rows, state.expected_rows, state.missing_rows)
     state.save()
+    # A suspended state only reaches here via the weekly probe. If the fetch
+    # came back clean, lift the suspension so it rejoins normal scheduling.
+    if state.suspended_at is not None:
+        from . import suspension
+
+        suspension.try_recover(state)
     return state
 
 
@@ -974,8 +980,12 @@ def claim_archive_batch(limit=None):
     deferred_pks = set()
     tick_endpoint = ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS
     with transaction.atomic():
+        # Suspended states are excluded here or suspension does nothing: they
+        # would keep being claimed by the normal path and keep burning quota on
+        # a symbol already proven to return bad data. They come back only via
+        # the weekly probe (claim_probe_batch) or an operator force_retry.
         base = ArchiveFetchState.objects.select_for_update(skip_locked=True).filter(
-            due, verified_complete=False
+            due, verified_complete=False, suspended_at__isnull=True
         )
         states = []
 

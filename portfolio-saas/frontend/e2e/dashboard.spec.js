@@ -35,7 +35,7 @@ test.describe("dashboard", () => {
     }
   });
 
-  test("all-portfolios shows read-only holdings hint", async ({ page }) => {
+  test("all-portfolios exposes edit and delete controls from card header", async ({ page }) => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }
@@ -43,9 +43,16 @@ test.describe("dashboard", () => {
     const scope = page.getByTestId("scope-account");
     await expect(scope).toBeVisible({ timeout: 15000 });
     await scope.selectOption("");
-    await expect
-      .soft(page.getByTestId("dashboard-holdings-readonly-hint"))
-      .toBeVisible({ timeout: 15000 });
+
+    await expect.soft(page.getByTestId("dashboard-holdings-manage-edit")).toBeVisible({ timeout: 15000 });
+    await expect.soft(page.getByTestId("dashboard-holdings-manage-delete")).toBeVisible();
+
+    await page.getByTestId("dashboard-holdings-manage-edit").click();
+    const qtyEdit = page.getByTestId("dashboard-holdings-edit-qty").first();
+    if (await qtyEdit.count()) {
+      await expect.soft(qtyEdit).toBeVisible();
+      await expect.soft(page.getByTestId("dashboard-holdings-save").first()).toBeVisible();
+    }
   });
 
   test("basis switch if present", async ({ page }) => {
@@ -78,11 +85,23 @@ test.describe("dashboard", () => {
     await expect.soft(page.getByTestId("dashboard-add-quantity")).toBeVisible();
     await expect.soft(page.getByTestId("dashboard-add-button")).toBeVisible();
 
-    // Edit/delete toggles only appear when holdings table has rows with actions.
-    const edit = page.getByTestId("dashboard-holdings-edit-toggle").first();
-    if (await edit.count()) {
-      await expect.soft(edit).toBeVisible();
-      await expect.soft(page.getByTestId("dashboard-holdings-delete").first()).toBeVisible();
+    await expect.soft(page.getByTestId("dashboard-holdings-manage-edit")).toBeVisible();
+    await page.getByTestId("dashboard-holdings-manage-edit").click();
+    const qtyEdit = page.getByTestId("dashboard-holdings-edit-qty").first();
+    const priceEdit = page.getByTestId("dashboard-holdings-edit-price").first();
+    const saveBtn = page.getByTestId("dashboard-holdings-save").first();
+    if (await qtyEdit.count()) {
+      await expect.soft(qtyEdit).toBeVisible();
+      await expect.soft(saveBtn).toBeVisible();
+      await expect.soft(saveBtn).toBeDisabled();
+    }
+    if (await priceEdit.count()) {
+      await expect.soft(priceEdit).toBeVisible();
+    }
+    await page.getByTestId("dashboard-holdings-manage-delete").click();
+    const del = page.getByTestId("dashboard-holdings-delete").first();
+    if (await del.count()) {
+      await expect.soft(del).toBeVisible();
     }
   });
 });

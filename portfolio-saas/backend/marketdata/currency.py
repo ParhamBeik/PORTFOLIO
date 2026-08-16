@@ -48,9 +48,6 @@ SYMBOL_ALIASES = {
     "USDT": "USDT_IRT",
     "USDTIRT": "USDT_IRT",
 }
-UNIT_OVERRIDES = {
-    "USDT_IRT": "USD",
-}
 
 # VERIFIED 2026-08-06 against the provider: Candlestick.php returned کاما
 # close=3610 for 1405-05-14, matching the operator-confirmed TSETMC screen
@@ -109,7 +106,7 @@ def to_toman(symbol, price, unit="", *, usd_rate=None):
     if value <= 0:
         return Decimal("0")
     symbol = canonical_symbol(symbol)
-    unit = str(unit or UNIT_OVERRIDES.get(symbol, "")).strip().casefold()
+    unit = str(unit or "").strip().casefold()
     if unit in {"ریال".casefold(), "rial", "irr"}:
         return value / Decimal("10")
     if unit in {"usd", "dollar"} and usd_rate:

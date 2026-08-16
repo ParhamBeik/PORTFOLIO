@@ -32,6 +32,7 @@ graphify-out/
 .DS_Store
 .idea/
 .vscode/
+.cursor/
 
 # --- Database backups ---
 *.sql.gz

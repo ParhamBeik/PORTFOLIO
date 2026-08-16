@@ -173,8 +173,3 @@ def restore_request_id(task=None, **kwargs):
         import sentry_sdk
 
         sentry_sdk.set_tag("request_id", request_id)
-
-
-@app.task(bind=True, ignore_result=True)
-def debug_task(self):
-    print(f"Celery request: {self.request!r}")

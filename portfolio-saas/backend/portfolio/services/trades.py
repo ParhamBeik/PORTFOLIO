@@ -12,7 +12,13 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..models import Account, Asset, Holding, LedgerEntry, Snapshot, Transaction
-from .ledger import LedgerError, create_ledger_entry, reverse_ledger_entry
+from .ledger import (
+    LedgerError,
+    PriceResolutionError,
+    create_ledger_entry,
+    resolve_historical_price,
+    reverse_ledger_entry,
+)
 from .valuation import get_latest_prices, value_account, value_user
 
 
@@ -160,22 +166,15 @@ def execute_trade(
         raise TradeError("Invalid transaction source.")
     ledger_source = _SOURCE_MAP[source]
 
-    if side == Transaction.Side.SELL:
-        holding = Holding.objects.filter(account=account, asset=asset).first()
-        held_qty = holding.quantity if holding else Decimal("0")
-        import logging
-        logging.getLogger("django").warning(f"DEBUG TRADES: qty={qty} ({type(qty)}), held_qty={held_qty} ({type(held_qty)}), qty > held_qty={qty > held_qty}")
-        if qty > held_qty:
-            raise InsufficientHolding(
-                f"Cannot sell {format(qty.normalize(), 'f')}; only {format(held_qty.normalize(), 'f')} is held"
-            )
-
     if price_tomans is not None:
         price = _q(price_tomans)
         if price <= 0:
             raise TradeError("Price must be positive.")
     else:
-        price = _q(get_latest_prices().get(asset.key, 0))
+        try:
+            price = resolve_historical_price(asset, occurred_at)
+        except PriceResolutionError as exc:
+            raise TradeError("No valid execution price is available.") from exc
         if price <= 0:
             raise TradeError("No valid execution price is available.")
 

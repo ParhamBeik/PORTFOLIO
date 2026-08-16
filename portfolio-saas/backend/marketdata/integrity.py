@@ -6,7 +6,11 @@ from typing import Any
 import jdatetime
 from django.utils import timezone
 
-from .candles import actual_trading_days, candle_close_qs
+from .candles import (
+    actual_trading_days,
+    candle_close_qs,
+    gold_currency_quoting_days,
+)
 from .models import (
     GoldCurrencyHistory,
     MarketCandle,
@@ -18,9 +22,11 @@ from .models import (
 MAX_FORWARD_FILL_SESSIONS = 5
 MIN_COVERAGE = 0.90
 MAX_REJECTION_RATIO = 0.01
-# Longest genuine market closure is Nowruz at roughly two weeks. A quiet
-# stretch longer than this is the warehouse missing data, not the exchange
-# being shut.
+# A quiet stretch longer than this is investigated rather than assumed benign.
+# NOT a reliable closure test on its own: the exchange was shut for 83 days
+# across 1404-1405, and there are 74 market-wide closure days over 12 Jalali
+# years. `marketdata.candles.market_closure_days()` is the actual discriminator
+# (market-wide zero volume AND zero trades).
 MAX_OUTAGE_CALENDAR_DAYS = 21
 
 
@@ -100,7 +106,20 @@ def compute_symbol_integrity(
         if not sessions:
             sessions = _expected_sessions(start_date, end_date, tse_calendar=True)
     else:
-        sessions = _expected_sessions(start_date, end_date, tse_calendar=False)
+        # Gold/FX symbols do not all quote seven days a week: USD/gold/USDT do,
+        # EUR/GBP/CHF/CAD skip Fridays and holidays. Expecting every calendar
+        # day failed the six-day symbols at 0.833 coverage and dropped them from
+        # the universe. Use the days the feed itself broadly published.
+        quoting = gold_currency_quoting_days(
+            start=_jalali_text(start_date), end=_jalali_text(end_date)
+        )
+        sessions = sorted(
+            day for value in quoting
+            if (day := _stored_date(value)) is not None
+            and start_date <= day <= end_date
+        )
+        if not sessions:
+            sessions = _expected_sessions(start_date, end_date, tse_calendar=False)
     expected = set(sessions)
 
     if instrument.source == MarketInstrument.Source.TSETMC:

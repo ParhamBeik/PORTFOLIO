@@ -99,7 +99,7 @@ export default function Auth({ onAuthed }) {
         <div className="mb-6">
           <h1 className="flex items-center gap-2 text-xl font-semibold text-text">
             <Logo size={36} />
-            <span>Lattice</span>
+            <span>Holdings</span>
           </h1>
           <p className="mt-1 text-sm text-muted">
             {registering

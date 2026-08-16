@@ -54,6 +54,21 @@ test.describe("optimal", () => {
     await expect.soft(content.first()).toBeVisible({ timeout: 15000 });
   });
 
+  test("asset-class roll-up present when a scenario solved", async ({ page }) => {
+    if (await page.getByTestId("optimal-insufficient").isVisible().catch(() => false)) {
+      test.skip(true, "no solved scenario to roll up");
+    }
+    if (!(await page.getByTestId("optimal-window-tabs").isVisible().catch(() => false))) {
+      test.skip(true, "no optimal body to inspect");
+    }
+    // Class chart, or the explicit empty — either is a known state.
+    const classes = page
+      .getByTestId("optimal-class-chart")
+      .or(page.getByTestId("optimal-class-empty"))
+      .or(page.getByTestId("optimal-class-card"));
+    await expect.soft(classes.first()).toBeVisible({ timeout: 15000 });
+  });
+
   test("frontier panel soft-present", async ({ page }) => {
     if (!(await page.getByTestId("optimal-window-tabs").isVisible().catch(() => false))) {
       test.skip(true, "no optimal body (frontier only loads with windows)");

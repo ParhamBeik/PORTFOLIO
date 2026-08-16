@@ -115,7 +115,17 @@ FETCH_TIMEOUT = 90
 
 
 def _brs_job(brs_url, brs_key):
-    return {"brsapi": fetch_brsapi(brs_url, brs_key)}
+    result = {"brsapi": fetch_brsapi(brs_url, brs_key)}
+    if brs_key:
+        try:
+            from marketdata.fetchers.gold_currency import fetch_gold_currency_pro_history_24h
+
+            usdt_quote = fetch_gold_currency_pro_history_24h(brs_key, "USDT")
+            if usdt_quote:
+                result["usdt_irt_quote"] = usdt_quote
+        except Exception as exc:
+            logger.warning("[USDT_IRT_FETCH_ERROR] Could not fetch USDT/IRT quote: %s", exc)
+    return result
 
 
 def _tsetmc_job(tsetmc_url, tsetmc_key, tsetmc_symbol_url):
