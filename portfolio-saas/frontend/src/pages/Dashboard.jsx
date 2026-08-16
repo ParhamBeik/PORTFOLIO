@@ -13,7 +13,7 @@ import {
   analytics,
 } from "../api.js";
 import { num, toman, pct, signedToman, humanize, assetLabel, perfLabel, PERF_UNLOCK_HINT } from "../format.js";
-import { AreaTrend, Donut } from "../components/charts.jsx";
+import { AreaTrend, CorrelationHeatmap, Donut, MoneyVsRisk } from "../components/charts.jsx";
 import {
   Card,
   StatTile,
@@ -628,6 +628,7 @@ const RISK_WINDOWS = [
 ];
 
 const RISK_VIEWS = [
+  { value: "sources", label: "Where risk comes from" },
   { value: "portfolio", label: "Portfolio" },
   { value: "class", label: "By class" },
   { value: "asset", label: "By asset" },
@@ -770,6 +771,78 @@ function RiskSummary({ data }) {
   );
 }
 
+/**
+ * Where the risk actually comes from — the question the weight split cannot
+ * answer. Reads `diversification` and `correlation` off /api/analytics/.
+ */
+function RiskSourcesView({ data }) {
+  const div = data.diversification;
+  const gaps = div?.concentration_gap || [];
+  const corr = data.correlation || {};
+  const covered = Number(div?.mean_weight_covered ?? 1);
+
+  if (!gaps.length) {
+    return (
+      <Empty>
+        {div?.unavailable_reason
+          ? `Risk cannot be split yet: ${div.unavailable_reason}.`
+          : "No priced holdings to decompose."}
+      </Empty>
+    );
+  }
+
+  const worst = gaps[0];
+  return (
+    <div className="space-y-6" data-testid="dashboard-risk-sources-view">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <StatTile
+          label="Independent bets"
+          value={num(div.effective_bets)}
+          testId="risk-effective-bets"
+        />
+        <StatTile label="Holdings" value={num(div.effective_holdings)} />
+        <StatTile label="Diversification ratio" value={`${num(div.diversification_ratio)}×`} />
+      </div>
+      <p className="text-xs text-muted">
+        {num(div.effective_bets)} independent bets across {num(div.effective_holdings)} holdings:
+        anything the two numbers disagree about is risk you are paying for twice.
+      </p>
+
+      <div>
+        <h3 className="mb-1 text-sm font-medium">Share of money versus share of risk</h3>
+        <p className="mb-3 text-xs text-muted">
+          {worst.gap > 0
+            ? `${assetLabel(worst.key)} is ${pct(worst.weight_share)} of the money but ${pct(worst.risk_share)} of the risk.`
+            : "No holding carries materially more risk than its size."}
+        </p>
+        <MoneyVsRisk rows={gaps} testId="risk-money-vs-risk" />
+      </div>
+
+      {(corr.assets || []).length > 1 && (
+        <div>
+          <h3 className="mb-1 text-sm font-medium">How the holdings move together</h3>
+          <p className="mb-3 text-xs text-muted">
+            Blocks of warm cells are assets that rise and fall as one — they are
+            fewer bets than they look.
+          </p>
+          <CorrelationHeatmap
+            assets={corr.assets}
+            matrix={corr.matrix}
+            testId="risk-correlation"
+          />
+        </div>
+      )}
+
+      {covered < 0.999 && (
+        <p className="text-xs text-muted" data-testid="risk-coverage-caveat">
+          Measured over {pct(covered)} of the portfolio by weight; the rest lacks
+          usable history and is excluded from this decomposition.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function RiskPortfolioView({ data }) {
   return (
     <div className="space-y-4" data-testid="dashboard-risk-portfolio-view">
@@ -891,7 +964,7 @@ function RiskAssetView({ data }) {
 
 function RiskCard({ activeId, basis }) {
   const [window, setWindow] = useState("180");
-  const [view, setView] = useState("asset");
+  const [view, setView] = useState("sources");
   const state = useApi(
     () => analytics(activeId, { basis, window: Number(window) }),
     [activeId, basis, window]
@@ -922,6 +995,7 @@ function RiskCard({ activeId, basis }) {
               onChange={setView}
               options={RISK_VIEWS}
             />
+            {view === "sources" && <RiskSourcesView data={data} />}
             {view === "portfolio" && <RiskPortfolioView data={data} />}
             {view === "class" && <RiskClassView data={data} />}
             {view === "asset" && <RiskAssetView data={data} />}

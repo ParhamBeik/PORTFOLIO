@@ -776,3 +776,193 @@ export function StackedStatusBar({
     </div>
   );
 }
+
+/**
+ * Share of money against share of RISK, one row per holding.
+ *
+ * A dumbbell rather than paired bars: the finding here is the GAP, and a
+ * connecting segment encodes it as length directly instead of asking the eye to
+ * difference two bar heights. Both endpoints stay visible because level matters
+ * too — a 12-point gap on a 38% position is a different problem from the same
+ * gap on a 2% position.
+ *
+ * Horizontal because the category labels are asset keys ("one_gram_coin"), which
+ * a vertical axis would rotate to 25 degrees and clip.
+ *
+ * `rows` is the API's `diversification.concentration_gap`:
+ * [{ key, weight_share, risk_share, gap }], already sorted worst-first.
+ */
+export function MoneyVsRisk({ rows = [], height, label = "Share of money versus share of risk", testId }) {
+  const t = useChartTokens();
+  // Worst offender on top: ECharts category axes build upward, so reverse.
+  const ordered = useMemo(() => [...rows].reverse(), [rows]);
+  const option = useMemo(() => {
+    if (!t || !ordered.length) return null;
+    const c = chrome(t);
+    const money = t.series[0];
+    const risk = t.series[1];
+    return {
+      ...c,
+      grid: { top: 8, right: 64, bottom: 28, left: 8, containLabel: true },
+      tooltip: {
+        trigger: "axis",
+        ...c.tooltipBase,
+        axisPointer: { type: "shadow" },
+        formatter: (p) => {
+          const row = ordered[p[0].dataIndex];
+          const sign = row.gap >= 0 ? "+" : "";
+          return header(row.key, t) + tipRows(p, t, (v) => pct(v)) +
+            `<div style="margin-top:4px;color:${t.muted}">Gap ${sign}${pct(row.gap)}</div>`;
+        },
+      },
+      legend: c.legend(),
+      xAxis: {
+        type: "value", ...c.valueAxis,
+        axisLabel: { ...c.valueAxis.axisLabel, formatter: (v) => pct(v, 0) },
+      },
+      yAxis: {
+        type: "category",
+        data: ordered.map((r) => r.key),
+        ...c.categoryAxis,
+        splitLine: { show: false },
+      },
+      series: [
+        {
+          // The connector carries the gap. Drawn first so the dots sit on top.
+          type: "bar",
+          name: "Gap",
+          silent: true,
+          barWidth: 2,
+          stack: "connector",
+          itemStyle: { color: "transparent" },
+          data: ordered.map((r) => Math.min(r.weight_share, r.risk_share)),
+          legendHoverLink: false,
+          tooltip: { show: false },
+        },
+        {
+          type: "bar",
+          name: "Gap",
+          barWidth: 2,
+          stack: "connector",
+          itemStyle: { color: t.muted, opacity: 0.55 },
+          data: ordered.map((r) => Math.abs(r.risk_share - r.weight_share)),
+          tooltip: { show: false },
+          // Direct-label the gap at the end of the row: the number people quote.
+          label: {
+            show: true,
+            position: "right",
+            distance: 12,
+            color: t.muted,
+            fontSize: 11,
+            formatter: (p) => {
+              const row = ordered[p.dataIndex];
+              return `${row.gap >= 0 ? "+" : "−"}${pct(Math.abs(row.gap), 0)}`;
+            },
+          },
+        },
+        {
+          type: "scatter", name: "Share of money", symbolSize: 11,
+          data: ordered.map((r, i) => [r.weight_share, i]),
+          itemStyle: { color: money, borderColor: t.surface, borderWidth: 2 },
+          z: 5,
+        },
+        {
+          type: "scatter", name: "Share of risk", symbolSize: 11,
+          data: ordered.map((r, i) => [r.risk_share, i]),
+          itemStyle: { color: risk, borderColor: t.surface, borderWidth: 2 },
+          z: 5,
+        },
+      ],
+      animation: false,
+    };
+  }, [ordered, t]);
+
+  const rowHeight = 34;
+  return (
+    <EChart
+      option={option}
+      height={height || Math.max(160, ordered.length * rowHeight + 70)}
+      label={label}
+      testId={testId}
+    />
+  );
+}
+
+/**
+ * Correlation heatmap. `assets` are labels, `matrix` is the square payload from
+ * /api/analytics/ .correlation.
+ *
+ * Diverging, because correlation has a meaningful zero: two hues with a NEUTRAL
+ * grey midpoint, never a rainbow, and the scale is pinned to [-1, 1] so colour
+ * means the same thing on every render. A per-render domain would make a book of
+ * mildly-correlated assets look as alarming as one that moves in lockstep.
+ */
+export function CorrelationHeatmap({ assets = [], matrix = [], height, label = "Correlation between holdings", testId }) {
+  const t = useChartTokens();
+  const option = useMemo(() => {
+    if (!t || !assets.length) return null;
+    const c = chrome(t);
+    const cells = [];
+    for (let i = 0; i < matrix.length; i += 1) {
+      for (let j = 0; j < (matrix[i] || []).length; j += 1) {
+        cells.push([j, i, Number(matrix[i][j])]);
+      }
+    }
+    return {
+      ...c,
+      grid: { top: 8, right: 8, bottom: 64, left: 8, containLabel: true },
+      tooltip: {
+        ...c.tooltipBase,
+        formatter: (p) => {
+          const [x, y, v] = p.value;
+          return header(`${assets[y]} vs ${assets[x]}`, t) +
+            `<div style="color:${t.text};font-variant-numeric:tabular-nums">${v.toFixed(2)}</div>`;
+        },
+      },
+      xAxis: {
+        type: "category", data: assets, ...c.categoryAxis,
+        splitArea: { show: false },
+        axisLabel: { ...c.categoryAxis.axisLabel, interval: 0, rotate: 35 },
+      },
+      yAxis: {
+        type: "category", data: assets, ...c.categoryAxis,
+        // Category axes build upward, which runs the self-correlation diagonal
+        // bottom-left to top-right -- the opposite of how a correlation matrix
+        // is read anywhere else.
+        inverse: true,
+        splitArea: { show: false },
+      },
+      visualMap: {
+        min: -1, max: 1, calculable: true, orient: "horizontal",
+        left: "center", bottom: 0, itemHeight: 90,
+        precision: 2,
+        textStyle: { color: t.muted, fontSize: 11 },
+        inRange: {
+          // Cool -> neutral grey -> warm. The midpoint must not be a hue, and
+          // must not be the surface either: --c-grid is within a few points of
+          // the panel in dark mode, so a zero-correlation cell read as a hole
+          // in the chart rather than as "these two do not move together".
+          color: [t.series[0], t.muted, t.series[1]],
+        },
+      },
+      series: [{
+        type: "heatmap",
+        data: cells,
+        // 2px surface gap between cells, per the mark spec.
+        itemStyle: { borderColor: t.surface, borderWidth: 2 },
+        emphasis: { itemStyle: { borderColor: t.text, borderWidth: 2 } },
+      }],
+      animation: false,
+    };
+  }, [assets, matrix, t]);
+
+  const cell = 34;
+  return (
+    <EChart
+      option={option}
+      height={height || Math.max(220, assets.length * cell + 150)}
+      label={label}
+      testId={testId}
+    />
+  );
+}
