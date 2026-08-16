@@ -237,10 +237,7 @@ def _queues():
         from redis import Redis
 
         broker = Redis.from_url(settings.CELERY_BROKER_URL)
-        # Only queues a worker actually consumes -- see the same list in
-        # marketdata/tasks.py:operational_health_check. `codal` outlived the
-        # pipeline that used it and always read 0.
-        depths = {queue: broker.llen(queue) for queue in ("live", "archive")}
+        depths = {queue: broker.llen(queue) for queue in ("live", "archive", "codal")}
         status = "degraded" if max(depths.values(), default=0) > settings.QUEUE_BACKLOG_THRESHOLD else "healthy"
         return {"status": status, "depths": depths, "message": ""}
     except Exception as exc:

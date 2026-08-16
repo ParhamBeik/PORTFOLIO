@@ -1562,6 +1562,7 @@ def optimize(
         "credibility": credibility,
         "coverage": {key: coverage[key] for key in returns.columns},
         "risk_free_rate_annual": risk_free_annual,
+        "risk_free_rate_source": getattr(settings, "RISK_FREE_RATE_SOURCE", ""),
         "risk_free_rate_jalali_year": jalali_year,
         "periods_per_year": frequency,
         "degraded": degraded,

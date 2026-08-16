@@ -110,8 +110,16 @@ def actual_trading_days(*, start=None, end=None, window_days=None):
     return result
 
 
-def candle_close_qs(symbol, *, as_of=None):
-    """Daily candles with provider-adjusted rows preferred per symbol and day."""
+def candle_close_qs(symbol, *, as_of=None, since=None):
+    """Daily candles with provider-adjusted rows preferred per symbol and day.
+
+    `since` is a Jalali lower bound. Passing it also adds the equivalent bound on
+    `ts`, which is what lets a partitioned table skip chunks: every predicate here
+    is on the Jalali varchar, and a range scan over a string cannot be used for
+    partition pruning. Harmless on a plain table -- `ts` is a pure function of the
+    date -- and the difference between planning one chunk and planning all of
+    them once measured 106 seconds.
+    """
     adjusted = MarketCandle.objects.filter(
         symbol=OuterRef("symbol"),
         date_time=OuterRef("date_time"),
@@ -136,4 +144,11 @@ def candle_close_qs(symbol, *, as_of=None):
         # String comparison: "1405-05-09 00:00:00" > "1405-05-09" lexicographically,
         # so we extend the bound to end-of-day to capture both formats.
         queryset = queryset.filter(date_time__lte=as_of + " 23:59:59")
+    if since is not None:
+        queryset = queryset.filter(date_time__gte=since)
+        from . import jalali
+
+        floor = jalali.to_datetime(since)
+        if floor is not None:
+            queryset = queryset.filter(ts__gte=floor)
     return queryset

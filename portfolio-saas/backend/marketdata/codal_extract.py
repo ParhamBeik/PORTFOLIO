@@ -1,4 +1,5 @@
 """Bounded Codal artifact extraction into MongoDB."""
+import functools
 import hashlib
 from io import BytesIO
 
@@ -7,18 +8,28 @@ from django.conf import settings
 from django.utils import timezone
 
 from .models import CodalAnnouncement, CodalReport
+from .quota import ARCHIVE, reserve_request
 
 PARSER_VERSION = "text-v1"
 
 
-def _document_collection():
+@functools.lru_cache(maxsize=1)
+def _client():
+    """One pooled MongoClient for the worker process.
+
+    MongoClient owns a connection pool and is designed to be created once; a new
+    one per extraction opened a fresh pool for a single document and left the
+    old one to be garbage-collected.
+    """
     if not settings.MONGO_URI:
         raise RuntimeError("MongoDB is not configured.")
     from pymongo import MongoClient
 
-    return MongoClient(settings.MONGO_URI, serverSelectionTimeoutMS=5000)[
-        settings.MONGO_DATABASE
-    ]["codal_documents"]
+    return MongoClient(settings.MONGO_URI, serverSelectionTimeoutMS=5000)
+
+
+def _document_collection():
+    return _client()[settings.MONGO_DATABASE]["codal_documents"]
 
 
 def _artifact(announcement):
@@ -66,6 +77,12 @@ def extract(announcement_id):
     report.status = CodalReport.Status.FETCHING
     report.save(update_fields=["status", "updated_at"])
     try:
+        # Codal artifacts are megabyte-scale downloads from the same provider
+        # the live price loop depends on. Going through the shared quota keeps a
+        # backlog of documents from spending the budget live prices need; the
+        # archive bucket is the right one because this is bulk backfill, not a
+        # customer-facing read.
+        reserve_request(ARCHIVE)
         response = requests.get(url, timeout=(10, 60))
         response.raise_for_status()
         text = _text(kind, response.content)

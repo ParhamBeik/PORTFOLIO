@@ -923,6 +923,12 @@ function RiskSourcesView({ data }) {
         {num(div.effective_bets)} independent bets across {num(div.effective_holdings)} holdings:
         anything the two numbers disagree about is risk you are paying for twice.
       </p>
+      {data.risk_free_rate_source && (
+        <p className="text-xs text-muted" data-testid="risk-rf-source">
+          Sharpe and Sortino below use a {pct(data.risk_free_rate_annual)} risk-free
+          rate — {data.risk_free_rate_source}.
+        </p>
+      )}
 
       <div>
         <h3 className="mb-1 text-sm font-medium">Share of money versus share of risk</h3>

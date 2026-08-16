@@ -42,22 +42,56 @@ def capture_derivative_snapshots():
     """Collect live contracts now; analytics waits for real accumulated history."""
     from .fetchers import fetch_derivatives
 
+    outcome = _ledgered(
+        "capture_derivative_snapshots", destination_table="DerivativeSnapshot"
+    )
     results = {}
-    for kind, endpoint_key in (
-        ("tse_option", "option_contracts"),
-        ("ime_future", "ime_futures"),
-        ("ime_option", "ime_options"),
-    ):
-        payload = fetch_derivatives(settings.TSETMC_API_KEY, endpoint_key)
-        results[kind] = ingest.ingest_derivative_snapshots(kind, payload)
+    created = 0
+    try:
+        for kind, endpoint_key in (
+            ("tse_option", "option_contracts"),
+            ("ime_future", "ime_futures"),
+            ("ime_option", "ime_options"),
+        ):
+            payload = fetch_derivatives(settings.TSETMC_API_KEY, endpoint_key)
+            results[kind] = ingest.ingest_derivative_snapshots(kind, payload)
+            created += (results[kind] or (0, 0))[0]
+    except Exception as err:
+        _finish_fail(outcome, err)
+        raise
+    _finish_ok(outcome, rows_created=created, metadata=results)
     return results
 
 
 @shared_task
 def extract_codal_report(announcement_id):
     from .codal_extract import extract
+    from .models import CodalReport, WorkflowRun
 
-    return extract(announcement_id)
+    outcome = _ledgered(
+        "extract_codal_report",
+        endpoint="codal_announcements",
+        destination_table="mongo:codal_documents",
+    )
+    try:
+        result = extract(announcement_id)
+    except QuotaExhausted as err:
+        # Not a failure: the day's provider budget is spent and the next run
+        # picks this up. Recording it as FAILED would make a healthy backlog
+        # look like a broken pipeline.
+        outcome.finish(
+            WorkflowRun.Outcome.SKIPPED, metadata={"reason": str(err)[:200]}
+        )
+        return {"status": "skipped"}
+    except Exception as err:
+        _finish_fail(outcome, err)
+        raise
+    _finish_ok(
+        outcome,
+        rows_created=1 if result.get("status") == CodalReport.Status.PARSED else 0,
+        metadata=result,
+    )
+    return result
 
 
 @shared_task
@@ -101,12 +135,8 @@ def operational_health_check():
 
     try:
         broker = Redis.from_url(settings.CELERY_BROKER_URL)
-        # Only queues a worker actually consumes. `codal` was left here after the
-        # Codal pipeline was removed: no task routes to it and no compose file
-        # defines a worker for it, so it reported a permanent depth of 0 and made
-        # the backlog check look broader than it was.
         backlog = {
-            queue: broker.llen(queue) for queue in ("live", "archive")
+            queue: broker.llen(queue) for queue in ("live", "archive", "codal")
         }
         if max(backlog.values(), default=0) > settings.QUEUE_BACKLOG_THRESHOLD:
             alerts.append(("queue-backlog", backlog))

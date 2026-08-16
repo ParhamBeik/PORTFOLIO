@@ -343,10 +343,12 @@ function MyOptimalBody({ data, frontierState, label, windowLabel, setWindowLabel
                 rowKey={(r) => r.m}
                 testId="optimal-diversification"
               />
-              <p className="mt-3 text-xs text-muted">
-                Effective bets counts positions after correlation: assets that move together
-                collapse into one. A diversification ratio of 1.0 means nothing cancels out.
-              </p>
+              <Disclosure summary="How to read these" testId="optimal-diversification-help">
+                <p className="text-sm">
+                  Effective bets counts positions after correlation: assets that move together
+                  collapse into one. A diversification ratio of 1.0 means nothing cancels out.
+                </p>
+              </Disclosure>
             </Card>
           )}
 
@@ -378,6 +380,9 @@ function MyOptimalBody({ data, frontierState, label, windowLabel, setWindowLabel
               <p>
                 {date(opt.data_window?.start)} – {date(opt.data_window?.end)} · {opt.observations} observations ·
                 risk-free {pct(opt.risk_free_rate_annual)} · {humanize(opt.expected_return_method)}
+                {opt.risk_free_rate_source ? (
+                  <span className="block text-muted">Risk-free rate: {opt.risk_free_rate_source}</span>
+                ) : null}
                 {opt.basis ? <> · {humanize(opt.basis)}</> : null}
               </p>
               {opt.expected_return_provenance?.mean_standard_error != null && (
@@ -504,10 +509,12 @@ function MyOptimalBody({ data, frontierState, label, windowLabel, setWindowLabel
                   </span>
                 )}
               </div>
-              <p className="mt-2 text-xs text-muted">
-                The grey cloud is random reweightings of the assets you already hold — it traces the risk/return
-                range achievable without adding new assets.
-              </p>
+              <Disclosure summary="What the cloud shows" testId="optimal-frontier-help">
+                <p className="text-sm">
+                  The grey cloud is random reweightings of the assets you already hold — it traces the risk/return
+                  range achievable without adding new assets.
+                </p>
+              </Disclosure>
             </Card>
           ) : null
         }

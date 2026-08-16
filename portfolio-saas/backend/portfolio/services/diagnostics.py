@@ -899,6 +899,10 @@ def portfolio_diagnostics(
         "history_days": history_days,
         "risk_free_rate_annual": risk_free_annual,
         "risk_free_rate_jalali_year": rate_year,
+        # settings.py describes this rate as "an ASSUMPTION, not a measured
+        # yield" and says callers should surface that alongside any Sharpe. No
+        # caller did, so a hand-maintained estimate was reading as a fact.
+        "risk_free_rate_source": getattr(settings, "RISK_FREE_RATE_SOURCE", ""),
         "analysis_type": "hypothetical_fixed_weight_exposure",
         "current_weights": current_weights,
         "weights_used": weights_used,
