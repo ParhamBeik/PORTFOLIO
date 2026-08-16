@@ -110,3 +110,113 @@ def test_portfolio_metrics_unchanged_for_single_asset():
 
     assert payload["metrics"]["sharpe"] != 0
     assert payload["by_asset"] == []
+
+
+def test_diversification_block_risk_contributions_sum_to_one():
+    """Euler's theorem: risk contributions of a homogeneous-degree-1 vol
+    function sum to exactly 1, so they read as percentages with no fudge.
+
+    This is the number the household view is for -- "this holding is X% of my
+    risk" -- and it was computed in services/diversification.py but never
+    reached /api/analytics/ until it was wired into portfolio_diagnostics.
+    """
+    rng = np.random.default_rng(7)
+    dates = _dates(200)
+    # Deliberately unequal volatility and a correlated pair, so the risk split
+    # cannot coincidentally equal the money split.
+    quiet = rng.normal(0.0, 0.002, 200)
+    loud = rng.normal(0.0, 0.030, 200)
+    returns = pd.DataFrame(
+        {"quiet": quiet, "twin": quiet * 0.98, "loud": loud}, index=dates
+    )
+    valuation = _valuation([
+        {"key": "quiet", "asset": "Quiet", "class": "Cash", "value": 500,
+         "is_house": False, "is_manual": False},
+        {"key": "twin", "asset": "Twin", "class": "Cash", "value": 400,
+         "is_house": False, "is_manual": False},
+        {"key": "loud", "asset": "Loud", "class": "Crypto", "value": 100,
+         "is_house": False, "is_manual": False},
+    ])
+    weights = {"quiet": 0.5, "twin": 0.4, "loud": 0.1}
+
+    with patch.object(diag_mod, "daily_returns_matrix", return_value=(returns, [])), \
+         patch.object(diag_mod, "_load_index_returns", return_value=None):
+        payload = portfolio_diagnostics(weights, Decimal("1000"), valuation=valuation)
+
+    block = payload["diversification"]
+    contributions = block["risk_contributions"]
+    assert set(contributions) == {"quiet", "twin", "loud"}
+    assert sum(contributions.values()) == pytest.approx(1.0, abs=1e-6)
+
+    # The 10% crypto sleeve is ~15x the volatility of the rest, so it must carry
+    # far more risk than money. If these ever match, the decomposition is not
+    # doing anything and the chart built on it would be decorative.
+    assert contributions["loud"] > weights["loud"] * 2
+
+    # Two of the three assets are 98% correlated, so they are ~one bet, not two.
+    assert block["effective_bets"] < 3.0
+    assert block["effective_holdings"] == pytest.approx(1 / sum(w**2 for w in weights.values()), abs=1e-3)
+
+    gaps = {row["key"]: row for row in block["concentration_gap"]}
+    assert gaps["loud"]["gap"] == pytest.approx(
+        contributions["loud"] - weights["loud"], abs=1e-6
+    )
+    # Sorted worst-first so the UI can lead with the offender.
+    assert block["concentration_gap"][0]["key"] == "loud"
+    # A partially-covered book must not read as a fully-covered one.
+    assert "mean_weight_covered" in block
+
+
+def test_correlation_payload_is_square_and_unit_diagonal():
+    """The heatmap's source. Reuses the panel diagnostics already built rather
+    than triggering a second daily_returns_matrix pass."""
+    rng = np.random.default_rng(11)
+    dates = _dates(200)
+    returns = pd.DataFrame(
+        {
+            "a": rng.normal(0.0, 0.01, 200),
+            "b": rng.normal(0.0, 0.01, 200),
+        },
+        index=dates,
+    )
+    valuation = _valuation([
+        {"key": "a", "asset": "A", "class": "Stock", "value": 500,
+         "is_house": False, "is_manual": False},
+        {"key": "b", "asset": "B", "class": "Stock", "value": 500,
+         "is_house": False, "is_manual": False},
+    ])
+
+    with patch.object(diag_mod, "daily_returns_matrix", return_value=(returns, [])), \
+         patch.object(diag_mod, "_load_index_returns", return_value=None):
+        payload = portfolio_diagnostics(
+            {"a": 0.5, "b": 0.5}, Decimal("1000"), valuation=valuation
+        )
+
+    corr = payload["correlation"]
+    assets, matrix = corr["assets"], corr["matrix"]
+    assert assets == ["a", "b"]
+    assert len(matrix) == len(assets)
+    for i, row in enumerate(matrix):
+        assert len(row) == len(assets)
+        assert row[i] == pytest.approx(1.0, abs=1e-9)
+        for j, value in enumerate(row):
+            assert matrix[j][i] == pytest.approx(value, abs=1e-9)
+
+
+def test_diversification_degrades_honestly_on_a_single_asset():
+    """One asset has no covariance structure. It must say so rather than
+    reporting a confident 1.0 diversification ratio as if it were measured."""
+    dates = _dates(120)
+    returns = pd.DataFrame({"only": np.full(120, 0.001)}, index=dates)
+    valuation = _valuation([
+        {"key": "only", "asset": "Only", "class": "Gold", "value": 100,
+         "is_house": False, "is_manual": False},
+    ])
+
+    with patch.object(diag_mod, "daily_returns_matrix", return_value=(returns, [])), \
+         patch.object(diag_mod, "_load_index_returns", return_value=None):
+        payload = portfolio_diagnostics({"only": 1.0}, Decimal("100"), valuation=valuation)
+
+    block = payload["diversification"]
+    assert block["risk_contributions"] == {}
+    assert block["unavailable_reason"]

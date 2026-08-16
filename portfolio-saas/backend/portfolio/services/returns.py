@@ -1016,19 +1016,28 @@ def correlation_matrix(
     history_days: int = DEFAULT_HISTORY_DAYS,
     as_of=None,
     universe: list[str] | None = None,
-    basis: str = "nominal_toman"
+    basis: str = "nominal_toman",
+    returns_df=None,
 ) -> dict:
     """Correlation payload for the eligible universe from the returns df.
 
     NaN correlations (assets with no overlap) become 0 so the matrix is dense
     and JSON-serializable.
+
+    `returns_df` lets a caller that has already built the panel -- notably
+    `portfolio_diagnostics`, which builds it with its own `held_keys` gating --
+    reuse that exact matrix instead of paying for a second
+    `daily_returns_matrix` pass whose different arguments would also miss the
+    cache and could disagree about which assets are eligible.
     """
-    df, _ = daily_returns_matrix(
-        history_days=history_days,
-        as_of=as_of,
-        universe=universe,
-        basis=basis
-    )
+    df = returns_df
+    if df is None:
+        df, _ = daily_returns_matrix(
+            history_days=history_days,
+            as_of=as_of,
+            universe=universe,
+            basis=basis
+        )
     if df.empty:
         return {"assets": [], "matrix": []}
     eligible = [column for column in df if df[column].std(ddof=0) > 0]

@@ -17,8 +17,9 @@ import pandas as pd
 from sklearn.covariance import LedoitWolf
 
 from portfolio.services import value_user
+from . import diversification
 from .deflator import normalize_basis
-from .returns import TRADING_DAYS_PER_YEAR, daily_returns_matrix
+from .returns import TRADING_DAYS_PER_YEAR, correlation_matrix, daily_returns_matrix
 
 # Iran TSE risk-free proxy (Bahar Azadi bond yield ~30%). Annualized.
 from django.conf import settings
@@ -309,34 +310,46 @@ def _historical_var_cvar(port_series: pd.Series, alpha: float = 0.95) -> tuple[f
     return var, cvar
 
 
+def annualized_cov(
+    returns: pd.DataFrame,
+    weights: dict[str, float],
+    periods_per_year: float = TRADING_DAYS_PER_YEAR,
+) -> pd.DataFrame | None:
+    """Shrunk annualized covariance over the weighted assets, or None.
+
+    Ledoit-Wolf shrinkage is the same estimator the optimizer solves on, so
+    every diversification number derived from this matrix reconciles with the
+    volatility reported beside it instead of coming from a second,
+    independently-built panel.
+    """
+    cols = [key for key in weights if key in returns.columns]
+    if len(cols) < 2:
+        return None
+    sub = returns[cols].dropna(how="any")
+    if len(sub.index) < 2:
+        return None
+    try:
+        cov = LedoitWolf().fit(sub.to_numpy()).covariance_ * periods_per_year
+    except Exception:
+        return None
+    return pd.DataFrame(cov, index=cols, columns=cols)
+
+
 def _diversification_ratio(
     returns: pd.DataFrame,
     weights: dict[str, float],
     periods_per_year: float = TRADING_DAYS_PER_YEAR,
 ) -> float:
-    """Weighted avg asset vol / portfolio vol, using shrunk annualized covariance."""
-    cols = [k for k in weights if k in returns.columns]
-    if len(cols) < 2:
+    """Weighted avg asset vol / portfolio vol, using shrunk annualized covariance.
+
+    Delegates to `portfolio.services.diversification`, which owns this formula.
+    This module used to carry a second, independently written copy of it -- two
+    definitions of one published number is a disagreement waiting to surface.
+    """
+    cov = annualized_cov(returns, weights, periods_per_year)
+    if cov is None:
         return 1.0
-    w = np.array([weights[k] for k in cols], dtype=float)
-    if w.sum() <= 0:
-        return 1.0
-    w = w / w.sum()
-    sub = returns[cols].dropna(how="any")
-    if len(sub.index) < 2:
-        return 1.0
-    try:
-        lw = LedoitWolf().fit(sub.to_numpy())
-        cov = lw.covariance_ * periods_per_year
-    except Exception:
-        return 1.0
-    asset_vols = np.sqrt(np.diag(cov))
-    weighted_avg_vol = float(np.sum(w * asset_vols))
-    port_var = float(w @ cov @ w)
-    port_vol = np.sqrt(max(port_var, 0.0))
-    if port_vol == 0:
-        return 1.0
-    return _finite(weighted_avg_vol / port_vol)
+    return _finite(diversification.diversification_ratio(weights, cov), 1.0)
 
 
 def _load_index_returns(target_index: pd.Index, as_of: dt.datetime | None = None) -> pd.Series | None:
@@ -826,6 +839,44 @@ def portfolio_diagnostics(
     )
     coverage = _build_coverage(by_asset, holdings, full_total)
 
+    # Where the risk actually comes from, for the CURRENT book. `optimize()`
+    # reports the same block for its target, but that endpoint answers "what
+    # should I hold?"; this one answers "what am I carrying right now?", which is
+    # the question the household view asks and could not previously answer.
+    #
+    # `risk_contributions` is the payload's most actionable number and rarely
+    # matches the weight split: a small, volatile, uncorrelated sleeve and a
+    # large one that moves with everything else can carry identical risk, and
+    # only this decomposition separates them. `mean_weight_covered` travels with
+    # it deliberately -- a decomposition over 60% of the book must not be read as
+    # if it covered all of it.
+    cov_annual = annualized_cov(returns, weights_used, frequency)
+    class_map = {h["key"]: h["asset_class"] for h in holdings}
+    diversification_block = (
+        diversification.diversification_report(weights_used, cov_annual, class_map)
+        if cov_annual is not None
+        else {
+            "effective_bets": 0.0,
+            "effective_holdings": _finite(
+                diversification.effective_holdings(weights_used)
+            ),
+            "diversification_ratio": 1.0,
+            "risk_contributions": {},
+            "concentration_gap": [],
+            "n_assets": len([v for v in weights_used.values() if float(v) > 0]),
+            "unavailable_reason": "need 2+ assets with overlapping history",
+        }
+    )
+    diversification_block["mean_weight_covered"] = metrics.get(
+        "mean_weight_covered", 0.0
+    )
+
+    # The correlation structure behind the numbers above. Diversification is a
+    # scalar summary of this matrix, so shipping both lets the UI show WHY the
+    # effective-bet count is what it is -- a block of assets that all move
+    # together reads instantly here and not at all from a single ratio.
+    correlation = correlation_matrix(returns_df=returns)
+
     real_estate: dict = {"value_tomans": "0", "share_of_total": 0.0}
     if user is not None:
         re_value = _user_real_estate_value(user)
@@ -873,4 +924,6 @@ def portfolio_diagnostics(
         "coverage": coverage,
         "portfolio_full": portfolio_full,
         "concentration_hhi": hhi,
+        "diversification": diversification_block,
+        "correlation": correlation,
     }
