@@ -1504,6 +1504,102 @@ class AssetRankingView(APIView):
         ])
 
 
+class DiversifierCandidatesView(APIView):
+    """"What should I buy next?" ranked by diversification, not past returns.
+
+    Scores every screened market candidate by how much portfolio volatility it
+    would REMOVE if it entered the book at a small weight. Ranking by return
+    picks whatever already went up; ranking by this picks what does not move
+    with the book, which is the one risk reduction that costs no expected
+    return. Both are returned so the frontend can plot the tradeoff rather than
+    hide it.
+
+    Advisory only: this proposes nothing and writes nothing.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from portfolio.services.deflator import CpiUnavailable, normalize_basis
+        from portfolio.services.diagnostics import _portfolio_returns
+        from portfolio.services.diversification import diversifier_candidates
+        from portfolio.services.returns import (
+            TRADING_DAYS_PER_YEAR,
+            daily_returns_matrix,
+            get_universe_by_mode,
+        )
+
+        account = _scope(request)
+        weights, _total, valuation = _current_weights_and_total(request.user, account)
+        if not weights:
+            return Response({"detail": "No priced holdings to diversify yet."}, status=400)
+
+        try:
+            window = int(request.query_params.get("window") or 365)
+        except (TypeError, ValueError):
+            return Response({"detail": "window must be an integer."}, status=400)
+        if window not in (90, 180, 365):
+            return Response({"detail": "window must be 90, 180, or 365."}, status=400)
+        try:
+            basis = normalize_basis(request.query_params.get("basis") or "real_toman")
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        held = frozenset(weights)
+        candidates = get_universe_by_mode("market", user=request.user, account=account) or []
+        # One panel over held + candidates: the held columns build the portfolio
+        # series, the rest are scored against it. `held_keys` keeps the user's
+        # own holdings out of the market-universe screening gates, which would
+        # otherwise delete the very columns the portfolio is made of.
+        universe = sorted(held.union(candidates))
+        # A real-terms panel needs CPI for every Jalali year it spans, and the
+        # table is only verified through the last published figure. Degrade the
+        # BASIS rather than the answer -- same rule as MyOptimalView -- and
+        # report the basis actually used, so an inflation-contaminated number is
+        # never mistaken for a real one.
+        basis_requested = basis
+        try:
+            returns, _excluded = daily_returns_matrix(
+                history_days=window, universe=universe, basis=basis, held_keys=held,
+            )
+        except CpiUnavailable:
+            if basis == "nominal_toman":
+                raise
+            basis = "nominal_toman"
+            returns, _excluded = daily_returns_matrix(
+                history_days=window, universe=universe, basis=basis, held_keys=held,
+            )
+        if returns.empty:
+            return Response({
+                "basis": basis, "basis_requested": basis_requested,
+                "window": window, "candidates": [], "held": [],
+            })
+
+        frequency = float(returns.attrs.get("periods_per_year", TRADING_DAYS_PER_YEAR))
+        port_series = _portfolio_returns(returns, weights)
+        candidate_cols = [c for c in returns.columns if c not in held]
+        rows = diversifier_candidates(
+            port_series,
+            returns[candidate_cols],
+            periods_per_year=frequency,
+        )
+        return Response({
+            "basis": basis,
+            "basis_requested": basis_requested,
+            "window": window,
+            "entry_weight": 0.05,
+            "periods_per_year": frequency,
+            # The current book on the same axes, so the scatter can show where
+            # the holdings already sit rather than plotting candidates in a void.
+            "held": diversifier_candidates(
+                port_series,
+                returns[[c for c in returns.columns if c in held]],
+                periods_per_year=frequency,
+            ),
+            "candidates": rows,
+        })
+
+
 class PerformanceView(APIView):
     """One-release compatibility wrapper for account-scoped performance."""
 

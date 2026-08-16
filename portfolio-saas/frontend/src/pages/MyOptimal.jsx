@@ -16,7 +16,7 @@ import {
   Table,
   Tabs,
 } from "../components/ui.jsx";
-import { GroupedBar, RiskScatter, STATUS_COLOR } from "../components/charts.jsx";
+import { DriftBars, GroupedBar, MoneyVsRisk, RiskScatter, STATUS_COLOR } from "../components/charts.jsx";
 
 const SCENARIO_LABEL = {
   min_volatility: "Min Volatility",
@@ -221,16 +221,6 @@ function MyOptimalBody({ data, frontierState, label, windowLabel, setWindowLabel
     ...r,
     name: label(r.key),
   }));
-  const riskColumns = [
-    { key: "asset", header: "Asset", render: (r) => r.name },
-    { key: "w", header: "% of money", align: "right", render: (r) => pct(r.weight_share) },
-    { key: "r", header: "% of risk", align: "right", render: (r) => pct(r.risk_share) },
-    {
-      key: "gap", header: "Gap", align: "right",
-      render: (r) => <Delta value={r.gap} format={signedPct} />,
-    },
-  ];
-
   const tradeColumns = [
     { key: "asset", header: "Asset", render: (t) => label(t.key) },
     {
@@ -295,7 +285,12 @@ function MyOptimalBody({ data, frontierState, label, windowLabel, setWindowLabel
             testId="optimal-allocation-card"
           >
             {barData.length ? (
-              <div data-testid="optimal-allocation-chart">
+              <div data-testid="optimal-allocation-chart" className="space-y-6">
+                <DriftBars
+                  rows={barData.map((r) => ({ key: r.name, current: r.a, target: r.b }))}
+                  label="Drift from target weight"
+                  testId="optimal-drift"
+                />
                 <GroupedBar data={barData} labels={["Current", "Target"]} label="Current vs target allocation" />
               </div>
             ) : (
@@ -361,10 +356,8 @@ function MyOptimalBody({ data, frontierState, label, windowLabel, setWindowLabel
               subtitle="Share of portfolio risk vs. share of money. A large gap is a position doing more than it looks."
               testId="optimal-risk-card"
             >
-              <Table
-                columns={riskColumns}
-                rows={riskRows}
-                rowKey={(r) => r.key}
+              <MoneyVsRisk
+                rows={div.current.concentration_gap}
                 testId="optimal-risk-contributions"
               />
             </Card>

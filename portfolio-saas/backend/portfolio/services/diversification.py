@@ -168,3 +168,80 @@ def diversification_report(
         report["risk_by_class"] = class_totals(contributions, class_map)
         report["weight_by_class"] = class_totals(weights, class_map)
     return report
+
+
+def diversifier_candidates(
+    portfolio_series: pd.Series,
+    candidate_returns: pd.DataFrame,
+    *,
+    entry_weight: float = 0.05,
+    periods_per_year: float = 252.0,
+    min_observations: int = 60,
+) -> list[dict]:
+    """Rank candidates by how much portfolio volatility each would REMOVE.
+
+    "What should I buy next?" answered as a diversification question rather than
+    a past-returns one. Sorting candidates by return picks the things that
+    already went up; sorting by this picks the things that do not move with what
+    you already own, which is the only risk reduction that costs no expected
+    return.
+
+    Adding one candidate at weight `w` gives a two-asset problem against the
+    book as a whole:
+
+        sigma_new^2 = (1-w)^2 sigma_p^2 + w^2 sigma_c^2
+                      + 2 w (1-w) sigma_p sigma_c rho
+
+    Only `rho` and `sigma_c` vary per candidate, so this is O(n) in the number
+    of candidates. Building a (held + candidates) covariance matrix instead
+    would be 296x296 estimated from ~365 observations -- singular, and slower to
+    get a worse answer.
+
+    `vol_reduction` is positive when the candidate lowers portfolio volatility.
+    Returns are reported alongside but never used for ranking; the caller plots
+    both so the tradeoff stays visible.
+    """
+    if portfolio_series is None or portfolio_series.empty or candidate_returns.empty:
+        return []
+    scale = float(np.sqrt(periods_per_year))
+    port_vol_daily = float(portfolio_series.std(ddof=1))
+    if not np.isfinite(port_vol_daily) or port_vol_daily <= 0:
+        return []
+
+    w = float(entry_weight)
+    rows = []
+    for key in candidate_returns.columns:
+        pair = pd.concat(
+            [portfolio_series.rename("_p"), candidate_returns[key].rename("_c")],
+            axis=1,
+        ).dropna(how="any")
+        if len(pair.index) < min_observations:
+            continue
+        cand_vol_daily = float(pair["_c"].std(ddof=1))
+        if not np.isfinite(cand_vol_daily) or cand_vol_daily <= 0:
+            continue
+        # Recompute the portfolio's own vol on the OVERLAP, not the full series:
+        # comparing a candidate measured on 90 shared days against a portfolio
+        # measured on 365 would credit it for a quieter stretch it never saw.
+        port_vol_overlap = float(pair["_p"].std(ddof=1))
+        if not np.isfinite(port_vol_overlap) or port_vol_overlap <= 0:
+            continue
+        rho = float(pair["_p"].corr(pair["_c"]))
+        if not np.isfinite(rho):
+            continue
+        blended_var = (
+            (1 - w) ** 2 * port_vol_overlap**2
+            + w**2 * cand_vol_daily**2
+            + 2 * w * (1 - w) * port_vol_overlap * cand_vol_daily * rho
+        )
+        blended_vol = float(np.sqrt(max(blended_var, 0.0)))
+        rows.append({
+            "key": key,
+            "correlation": round(rho, 4),
+            "volatility": round(cand_vol_daily * scale, 6),
+            "total_return": round(float((1.0 + pair["_c"]).prod() - 1.0), 6),
+            "vol_reduction": round((port_vol_overlap - blended_vol) * scale, 6),
+            "observations": int(len(pair.index)),
+        })
+    rows.sort(key=lambda r: r["vol_reduction"], reverse=True)
+    return rows

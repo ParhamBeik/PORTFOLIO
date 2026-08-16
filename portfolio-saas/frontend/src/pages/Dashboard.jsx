@@ -11,9 +11,17 @@ import {
   listAssets,
   adminAssetEvidence,
   analytics,
+  diversifiers,
 } from "../api.js";
 import { num, toman, pct, signedToman, humanize, assetLabel, perfLabel, PERF_UNLOCK_HINT } from "../format.js";
-import { AreaTrend, CorrelationHeatmap, Donut, MoneyVsRisk } from "../components/charts.jsx";
+import {
+  AreaTrend,
+  CorrelationHeatmap,
+  DiversifierScatter,
+  Donut,
+  MoneyVsRisk,
+  MultiLineTrend,
+} from "../components/charts.jsx";
 import {
   Card,
   StatTile,
@@ -37,6 +45,11 @@ const RANGES = [
   { value: "90", label: "90d" },
   { value: "365", label: "1y" },
   { value: "all", label: "All" },
+];
+
+const INFLATION_VIEWS = [
+  { value: "nominal", label: "Nominal" },
+  { value: "real", label: "vs inflation" },
 ];
 
 const QUALITY_BADGE = { complete: "good", manual: "warn", partial: "warn", unavailable: "critical" };
@@ -92,21 +105,79 @@ function HeroRow({ state }) {
 
 function TrendCard({ activeId, basis }) {
   const [range, setRange] = useState("30");
+  const [vsInflation, setVsInflation] = useState(false);
   const days = range === "all" ? "all" : Number(range);
   const state = useApi(() => snapshots(days, activeId, basis), [days, activeId, basis]);
+  // The same net worth measured in constant Tomans. Fetched only when asked,
+  // because it needs a CPI figure for every Jalali year the window spans and
+  // fails loudly rather than silently reusing last year's index.
+  const realState = useApi(
+    () => snapshots(days, activeId, "real_toman"),
+    [days, activeId],
+    { enabled: vsInflation }
+  );
+
   return (
     <Card
       title="Net worth"
       testId="dashboard-trend"
-      actions={<Tabs options={RANGES} value={range} onChange={setRange} label="Range" testId="dashboard-trend-tabs" />}
+      actions={(
+        <div className="flex items-center gap-2">
+          <Tabs
+            options={INFLATION_VIEWS}
+            value={vsInflation ? "real" : "nominal"}
+            onChange={(v) => setVsInflation(v === "real")}
+            label="Inflation basis"
+            testId="dashboard-trend-basis"
+          />
+          <Tabs options={RANGES} value={range} onChange={setRange} label="Range" testId="dashboard-trend-tabs" />
+        </div>
+      )}
     >
       <Async {...state} testId="dashboard-trend-body" empty="No history yet.">
         {(data) => {
           const points = (data.series || []).map((s) => ({ x: s.date, y: Number(s.total) }));
           const hasEstimated = (data.series || []).some((s) => s.is_estimated);
+          const longTicks = range === "365" || range === "all";
+
+          if (vsInflation && realState.data?.series?.length) {
+            const real = new Map(
+              realState.data.series.map((s) => [s.date, Number(s.total)])
+            );
+            const merged = points.map((p) => ({ x: p.x, nominal: p.y, real: real.get(p.x) ?? null }));
+            const first = merged.find((m) => m.real != null);
+            const last = [...merged].reverse().find((m) => m.real != null);
+            const realGrowth = first && last && first.real ? last.real / first.real - 1 : null;
+            return (
+              <>
+                <MultiLineTrend
+                  series={[
+                    { key: "nominal", name: "Nominal" },
+                    { key: "real", name: "After inflation" },
+                  ]}
+                  data={merged}
+                  longTicks={longTicks}
+                  label="Net worth, nominal versus after inflation"
+                />
+                {realGrowth != null && (
+                  <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-real-note">
+                    In constant Tomans your net worth is {realGrowth >= 0 ? "up" : "down"}{" "}
+                    {pct(Math.abs(realGrowth))} over this window. The gap between the two
+                    lines is inflation, not performance.
+                  </p>
+                )}
+              </>
+            );
+          }
+
           return (
             <>
-              <AreaTrend data={points} longTicks={range === "365" || range === "all"} />
+              <AreaTrend data={points} longTicks={longTicks} />
+              {vsInflation && realState.error && (
+                <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-real-error">
+                  No inflation-adjusted series for this window: {realState.error.message}
+                </p>
+              )}
               {hasEstimated && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-note">
                   Some points are estimated where a daily snapshot was missing.
@@ -629,6 +700,7 @@ const RISK_WINDOWS = [
 
 const RISK_VIEWS = [
   { value: "sources", label: "Where risk comes from" },
+  { value: "add", label: "What to add" },
   { value: "portfolio", label: "Portfolio" },
   { value: "class", label: "By class" },
   { value: "asset", label: "By asset" },
@@ -768,6 +840,50 @@ function RiskSummary({ data }) {
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * "What should I buy next?" as a diversification question. The x axis is what
+ * an asset would do to portfolio volatility; return is plotted but never used
+ * to rank, because ranking by return on a concentrated book recommends more of
+ * what is already concentrated.
+ */
+function RiskAddView({ activeId, basis, window }) {
+  const state = useApi(
+    () => diversifiers(activeId, { basis, window: Number(window) }),
+    [activeId, basis, window]
+  );
+  return (
+    <Async {...state} testId="dashboard-risk-add-body">
+      {(data) => {
+        if (!data.candidates?.length) {
+          return <Empty>No candidate has enough overlapping history to score yet.</Empty>;
+        }
+        const best = data.candidates[0];
+        return (
+          <div className="space-y-3" data-testid="dashboard-risk-add-view">
+            <p className="text-xs text-muted">
+              Best diversifier is {assetLabel(best.key)}: correlation{" "}
+              {best.correlation.toFixed(2)} to your book, so a 5% position removes{" "}
+              {pct(best.vol_reduction, 2)} of portfolio volatility. Anything left of
+              the dashed line would add risk instead.
+            </p>
+            <DiversifierScatter
+              candidates={data.candidates}
+              held={data.held}
+              testId="risk-diversifier-scatter"
+            />
+            {data.basis !== data.basis_requested && (
+              <p className="text-xs text-muted">
+                Measured in nominal Toman: the real-terms basis needs a CPI figure
+                that has not been published for this year yet.
+              </p>
+            )}
+          </div>
+        );
+      }}
+    </Async>
   );
 }
 
@@ -996,6 +1112,7 @@ function RiskCard({ activeId, basis }) {
               options={RISK_VIEWS}
             />
             {view === "sources" && <RiskSourcesView data={data} />}
+            {view === "add" && <RiskAddView activeId={activeId} basis={basis} window={window} />}
             {view === "portfolio" && <RiskPortfolioView data={data} />}
             {view === "class" && <RiskClassView data={data} />}
             {view === "asset" && <RiskAssetView data={data} />}

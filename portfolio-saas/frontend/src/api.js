@@ -213,6 +213,16 @@ export const snapshots = (days = 30, account = null, basis = null) => {
   return api(url);
 };
 
+// Candidates ranked by what they would do to portfolio RISK, not by past return.
+export const diversifiers = (account = null, { basis, window } = {}) => {
+  const params = new URLSearchParams();
+  if (account) params.set("account", account);
+  if (basis) params.set("basis", basis);
+  if (window != null) params.set("window", String(window));
+  const qs = params.toString();
+  return api(`/api/analytics/diversifiers/${qs ? `?${qs}` : ""}`);
+};
+
 // Analytics & optimization, scoped to the active portfolio via ?account=.
 export const analytics = (account = null, { basis, window } = {}) => {
   const params = new URLSearchParams();

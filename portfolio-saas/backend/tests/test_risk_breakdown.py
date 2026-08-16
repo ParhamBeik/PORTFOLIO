@@ -220,3 +220,59 @@ def test_diversification_degrades_honestly_on_a_single_asset():
     block = payload["diversification"]
     assert block["risk_contributions"] == {}
     assert block["unavailable_reason"]
+
+
+def test_diversifier_ranking_prefers_uncorrelated_over_high_return():
+    """Ranking must answer a diversification question, not a returns one.
+
+    The trap this guards: sorting candidates by past return recommends whatever
+    already went up, which on a gold-heavy book means more gold. A candidate that
+    moves with what you already own must rank BELOW one that does not, even when
+    its return is far better.
+    """
+    from portfolio.services.diversification import diversifier_candidates
+
+    rng = np.random.default_rng(3)
+    dates = _dates(300)
+    portfolio = pd.Series(rng.normal(0.0, 0.02, 300), index=dates)
+
+    candidates = pd.DataFrame({
+        # Moves in lockstep with the book and is MORE volatile, and had a great
+        # year. (A perfect twin of equal volatility would score exactly 0: at any
+        # weight, (1-w)s + ws == s. Only extra volatility makes it actively worse.)
+        "twin_high_return": portfolio.to_numpy() * 1.5 + 0.004,
+        # Moves against the book, and had a mediocre year.
+        "hedge_low_return": -portfolio.to_numpy() * 0.9 + 0.0001,
+    }, index=dates)
+
+    rows = diversifier_candidates(portfolio, candidates, entry_weight=0.05)
+    ranked = [r["key"] for r in rows]
+    assert ranked[0] == "hedge_low_return", (
+        "a negatively-correlated candidate must outrank a perfectly-correlated "
+        "one regardless of return"
+    )
+
+    by_key = {r["key"]: r for r in rows}
+    assert by_key["twin_high_return"]["total_return"] > by_key["hedge_low_return"]["total_return"]
+    # Adding more of what you already own increases volatility: the benefit is
+    # negative, not merely small.
+    assert by_key["twin_high_return"]["vol_reduction"] < 0
+    assert by_key["hedge_low_return"]["vol_reduction"] > 0
+    assert by_key["hedge_low_return"]["correlation"] < -0.9
+    assert by_key["twin_high_return"]["correlation"] > 0.9
+
+
+def test_diversifier_skips_candidates_without_enough_overlap():
+    """A candidate sharing 10 days with the book cannot be scored honestly."""
+    from portfolio.services.diversification import diversifier_candidates
+
+    rng = np.random.default_rng(5)
+    dates = _dates(300)
+    portfolio = pd.Series(rng.normal(0.0, 0.02, 300), index=dates)
+    short = pd.Series(rng.normal(0.0, 0.02, 300), index=dates)
+    short.iloc[:290] = np.nan
+
+    rows = diversifier_candidates(
+        portfolio, pd.DataFrame({"barely_listed": short}), min_observations=60
+    )
+    assert rows == []

@@ -966,3 +966,181 @@ export function CorrelationHeatmap({ assets = [], matrix = [], height, label = "
     />
   );
 }
+
+/**
+ * Drift: how far each holding sits from its target weight.
+ *
+ * Diverging bars around a zero line, sorted by absolute drift, because the
+ * question is directional -- overweight and underweight need opposite
+ * treatments -- and a paired current/target bar chart buries that sign in the
+ * comparison. Two hues with the zero line as the neutral midpoint.
+ *
+ * Advisory only. This proposes no trades and sizes nothing; `rows` is
+ * [{ key, current, target }] as fractions.
+ */
+export function DriftBars({ rows = [], height, label = "Drift from target weight", testId }) {
+  const t = useChartTokens();
+  const ordered = useMemo(
+    () => [...rows]
+      .map((r) => ({ ...r, drift: Number(r.current) - Number(r.target) }))
+      .sort((a, b) => Math.abs(a.drift) - Math.abs(b.drift)),
+    [rows]
+  );
+  const option = useMemo(() => {
+    if (!t || !ordered.length) return null;
+    const c = chrome(t);
+    const reach = Math.max(...ordered.map((r) => Math.abs(r.drift)), 0.01);
+    return {
+      ...c,
+      grid: { top: 8, right: 56, bottom: 28, left: 8, containLabel: true },
+      tooltip: {
+        trigger: "axis",
+        ...c.tooltipBase,
+        axisPointer: { type: "shadow" },
+        formatter: (p) => {
+          const row = ordered[p[0].dataIndex];
+          return header(row.key, t) +
+            `<div style="color:${t.text}">Now ${pct(row.current)} · Target ${pct(row.target)}</div>` +
+            `<div style="color:${t.muted};margin-top:2px">` +
+            `${row.drift >= 0 ? "Overweight" : "Underweight"} by ${pct(Math.abs(row.drift))}</div>`;
+        },
+      },
+      xAxis: {
+        type: "value", min: -reach * 1.15, max: reach * 1.15, ...c.valueAxis,
+        axisLabel: { ...c.valueAxis.axisLabel, formatter: (v) => pct(v, 0) },
+      },
+      yAxis: {
+        type: "category", data: ordered.map((r) => r.key),
+        ...c.categoryAxis, splitLine: { show: false },
+      },
+      // Two series rather than one with per-item colours, because ECharts does
+      // not accept a FUNCTION for label.position: a single series had to pick
+      // one side, which parked every label at the bar origin instead of its
+      // end. Each row is non-null in exactly one of these.
+      series: [
+        {
+          type: "bar", name: "Overweight", barWidth: "55%", barGap: "-100%",
+          data: ordered.map((r) => (r.drift >= 0 ? r.drift : null)),
+          itemStyle: { color: t.series[1], borderRadius: [0, 4, 4, 0] },
+          label: {
+            show: true, position: "right", distance: 8,
+            color: t.muted, fontSize: 11,
+            formatter: (p) => (p.value == null ? "" : `+${pct(p.value, 0)}`),
+          },
+        },
+        {
+          type: "bar", name: "Underweight", barWidth: "55%", barGap: "-100%",
+          data: ordered.map((r) => (r.drift < 0 ? r.drift : null)),
+          itemStyle: { color: t.series[0], borderRadius: [4, 0, 0, 4] },
+          label: {
+            show: true, position: "left", distance: 8,
+            color: t.muted, fontSize: 11,
+            formatter: (p) => (p.value == null ? "" : `\u2212${pct(Math.abs(p.value), 0)}`),
+          },
+          markLine: {
+            silent: true, symbol: "none", label: { show: false },
+            lineStyle: { color: t.axis, width: 1 },
+            data: [{ xAxis: 0 }],
+          },
+        },
+      ],
+      animation: false,
+    };
+  }, [ordered, t]);
+
+  const rowHeight = 30;
+  return (
+    <EChart
+      option={option}
+      height={height || Math.max(160, ordered.length * rowHeight + 60)}
+      label={label}
+      testId={testId}
+    />
+  );
+}
+
+/**
+ * Candidate scatter: what a new holding would do to portfolio RISK (x) against
+ * what it returned (y), with the current book overlaid for contrast.
+ *
+ * The x axis is the point. Ranking candidates by return recommends whatever
+ * already went up, which on a concentrated book means more of the same thing;
+ * `vol_reduction` asks the different question of whether an asset moves with
+ * what you already own. Plotting both keeps the tradeoff visible instead of
+ * asserting one answer.
+ *
+ * `candidates` / `held` are rows from /api/analytics/diversifiers/.
+ */
+export function DiversifierScatter({
+  candidates = [], held = [], height = 380,
+  label = "Diversification benefit versus return", testId,
+}) {
+  const t = useChartTokens();
+  const option = useMemo(() => {
+    if (!t || !candidates.length) return null;
+    const c = chrome(t);
+    const axisName = { color: t.muted, fontSize: 11 };
+    const point = (r) => ({
+      value: [r.vol_reduction, r.total_return],
+      name: r.key,
+      rho: r.correlation,
+    });
+    return {
+      ...c,
+      grid: { top: 16, right: 24, bottom: 52, left: 12, containLabel: true },
+      tooltip: {
+        trigger: "item",
+        ...c.tooltipBase,
+        formatter: (p) => {
+          const [x, y] = p.value;
+          return header(p.data.name, t) +
+            `<div style="color:${t.text}">Removes ${pct(x, 2)} of volatility</div>` +
+            `<div style="color:${t.text}">Return ${pct(y)}</div>` +
+            `<div style="color:${t.muted};margin-top:2px">Correlation ${p.data.rho.toFixed(2)}</div>`;
+        },
+      },
+      legend: c.legend(),
+      xAxis: {
+        type: "value", ...c.valueAxis, scale: true,
+        name: "Volatility removed at a 5% position", nameLocation: "middle",
+        nameGap: 30, nameTextStyle: axisName,
+        axisLabel: { ...c.valueAxis.axisLabel, formatter: (v) => pct(v, 1) },
+      },
+      yAxis: {
+        type: "value", ...c.valueAxis, scale: true,
+        name: "Return over the window", nameLocation: "middle",
+        nameGap: 52, nameTextStyle: axisName,
+        axisLabel: { ...c.valueAxis.axisLabel, formatter: (v) => pct(v, 0) },
+      },
+      series: [
+        {
+          type: "scatter", name: "Candidates", symbolSize: 10,
+          data: candidates.map(point),
+          itemStyle: { color: t.series[0], opacity: 0.75, borderColor: t.surface, borderWidth: 2 },
+        },
+        {
+          type: "scatter", name: "You already hold", symbolSize: 13,
+          data: held.map(point),
+          itemStyle: { color: t.series[1], borderColor: t.surface, borderWidth: 2 },
+          z: 6,
+        },
+        {
+          // Left of this line an asset ADDS volatility to the book.
+          type: "scatter", name: "", data: [], silent: true,
+          markLine: {
+            silent: true, symbol: "none",
+            // No label: ECharts renders text on a vertical markLine rotated
+            // and cramped, and the caption beside the chart already says which
+            // side is which.
+            label: { show: false },
+            lineStyle: { color: t.axis, type: "dashed", width: 1 },
+            data: [{ xAxis: 0 }],
+          },
+        },
+      ],
+      animation: false,
+    };
+  }, [candidates, held, t]);
+
+  return <EChart option={option} height={height} label={label} testId={testId} />;
+}
