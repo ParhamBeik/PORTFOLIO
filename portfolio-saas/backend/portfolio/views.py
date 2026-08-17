@@ -1600,6 +1600,105 @@ class DiversifierCandidatesView(APIView):
         })
 
 
+class BenchmarkSeriesView(APIView):
+    """Your portfolio against the things you could have held instead.
+
+    Everything is indexed to 100 at the window's first shared date, because the
+    question is relative growth and the levels are not comparable -- a gold gram
+    and a whole portfolio have no common scale.
+
+    The TSE index is deliberately absent: the provider exposes it as a LIVE
+    snapshot only (see marketdata/endpoints.py, "there is no index history
+    here"), and MarketIndexData holds ~2 weeks of rows. Plotting a benchmark
+    from that would be inventing a comparison, so it is reported as unavailable
+    with the reason instead.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    # Asset keys standing in for "what else could I have held".
+    BENCHMARKS = (("gold_18k_gram", "Gold (18k gram)"), ("usd_cash", "US dollar"))
+
+    def get(self, request):
+        from portfolio.services.deflator import CpiUnavailable, normalize_basis
+        from portfolio.services.diagnostics import _portfolio_returns
+        from portfolio.services.returns import daily_returns_matrix
+
+        account = _scope(request)
+        weights, _total, _valuation = _current_weights_and_total(request.user, account)
+        if not weights:
+            return Response({"detail": "No priced holdings to compare yet."}, status=400)
+
+        try:
+            window = int(request.query_params.get("window") or 365)
+        except (TypeError, ValueError):
+            return Response({"detail": "window must be an integer."}, status=400)
+        if window not in (90, 180, 365):
+            return Response({"detail": "window must be 90, 180, or 365."}, status=400)
+        try:
+            basis = normalize_basis(request.query_params.get("basis") or "nominal_toman")
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        held = frozenset(weights)
+        wanted = [key for key, _label in self.BENCHMARKS]
+        basis_requested = basis
+        try:
+            returns, _excluded = daily_returns_matrix(
+                history_days=window, universe=sorted(held.union(wanted)),
+                basis=basis, held_keys=held,
+            )
+        except CpiUnavailable:
+            if basis == "nominal_toman":
+                raise
+            basis = "nominal_toman"
+            returns, _excluded = daily_returns_matrix(
+                history_days=window, universe=sorted(held.union(wanted)),
+                basis=basis, held_keys=held,
+            )
+
+        port = _portfolio_returns(returns, weights)
+        if port.empty:
+            return Response({"basis": basis, "window": window, "series": [], "unavailable": []})
+
+        def indexed(series):
+            """Cumulative growth from 100. NaN-safe: a benchmark that starts
+            later joins the chart at its own first observation rather than
+            dragging the whole series to null."""
+            return (100.0 * (1.0 + series.fillna(0.0)).cumprod()).round(4)
+
+        columns = {"portfolio": indexed(port)}
+        unavailable = []
+        for key, label in self.BENCHMARKS:
+            if key in returns.columns:
+                columns[key] = indexed(returns[key].reindex(port.index))
+            else:
+                unavailable.append({"key": key, "label": label,
+                                    "reason": "no overlapping history in this window"})
+        unavailable.append({
+            "key": "tse_index", "label": "TSE index",
+            "reason": "provider publishes the index as a live snapshot only; no history to compare against",
+        })
+
+        rows = []
+        for stamp in port.index:
+            row = {"x": stamp.isoformat()}
+            for name, series in columns.items():
+                value = series.get(stamp)
+                row[name] = None if value is None or pd.isna(value) else float(value)
+            rows.append(row)
+
+        return Response({
+            "basis": basis,
+            "basis_requested": basis_requested,
+            "window": window,
+            "series": rows,
+            "labels": {"portfolio": "Your portfolio",
+                       **{k: v for k, v in self.BENCHMARKS if k in columns}},
+            "unavailable": unavailable,
+        })
+
+
 class PerformanceView(APIView):
     """One-release compatibility wrapper for account-scoped performance."""
 

@@ -213,6 +213,16 @@ export const snapshots = (days = 30, account = null, basis = null) => {
   return api(url);
 };
 
+// Portfolio against what you could have held instead, indexed to 100.
+export const benchmarks = (account = null, { basis, window } = {}) => {
+  const params = new URLSearchParams();
+  if (account) params.set("account", account);
+  if (basis) params.set("basis", basis);
+  if (window != null) params.set("window", String(window));
+  const qs = params.toString();
+  return api(`/api/analytics/benchmarks/${qs ? `?${qs}` : ""}`);
+};
+
 // Candidates ranked by what they would do to portfolio RISK, not by past return.
 export const diversifiers = (account = null, { basis, window } = {}) => {
   const params = new URLSearchParams();

@@ -449,7 +449,7 @@ class CpiUnavailable(Exception):
 # deposit/bond-rate estimate), not a measured market yield — see
 # RISK_FREE_RATE_SOURCE, which callers should surface alongside any Sharpe
 # or risk-adjusted number computed with it.
-RISK_FREE_RATE_ANNUAL = 0.30
+RISK_FREE_RATE_ANNUAL = 0.38
 RISK_FREE_RATE_BY_JALALI_YEAR = {
     1399: 0.18,
     1400: 0.20,
@@ -457,11 +457,11 @@ RISK_FREE_RATE_BY_JALALI_YEAR = {
     1402: 0.30,
     1403: 0.30,
     1404: 0.30,
-    1405: 0.30,
+    1405: 0.38,
 }
 RISK_FREE_RATE_SOURCE = (
-    "Assumption, not a measured yield: CBI annual deposit/bond-rate estimate; "
-    "manually reviewed through 1405"
+    "CBI annual deposit/bond rate; operator-confirmed 38% for 1405. Earlier "
+    "years remain the prior hand-maintained estimates"
 )
 
 # Cumulative annual CPI index derived from SCI annual CPI releases, base 1398=100.

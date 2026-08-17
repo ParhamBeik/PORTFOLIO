@@ -12,6 +12,7 @@ import {
   adminAssetEvidence,
   analytics,
   diversifiers,
+  benchmarks,
 } from "../api.js";
 import { num, toman, pct, signedToman, humanize, assetLabel, perfLabel, PERF_UNLOCK_HINT } from "../format.js";
 import {
@@ -50,6 +51,15 @@ const RANGES = [
 const INFLATION_VIEWS = [
   { value: "nominal", label: "Nominal" },
   { value: "real", label: "vs inflation" },
+  { value: "benchmarks", label: "vs gold & USD" },
+];
+
+// The benchmark endpoint only accepts 90/180/365-day windows, so the comparison
+// offers exactly those. Mapping "30d" onto a 90-day request made the selected
+// button say 30d while the axis showed three months.
+const BENCH_RANGES = [
+  { value: "90", label: "90d" },
+  { value: "365", label: "1y" },
 ];
 
 const QUALITY_BADGE = { complete: "good", manual: "warn", partial: "warn", unavailable: "critical" };
@@ -105,7 +115,7 @@ function HeroRow({ state }) {
 
 function TrendCard({ activeId, basis }) {
   const [range, setRange] = useState("30");
-  const [vsInflation, setVsInflation] = useState(false);
+  const [mode, setMode] = useState("nominal");
   const days = range === "all" ? "all" : Number(range);
   const state = useApi(() => snapshots(days, activeId, basis), [days, activeId, basis]);
   // The same net worth measured in constant Tomans. Fetched only when asked,
@@ -114,7 +124,18 @@ function TrendCard({ activeId, basis }) {
   const realState = useApi(
     () => snapshots(days, activeId, "real_toman"),
     [days, activeId],
-    { enabled: vsInflation }
+    { enabled: mode === "real" }
+  );
+  // Ranges differ per mode, so a range the current mode cannot honour falls back
+  // rather than silently showing a different window than the one selected.
+  const rangeOptions = mode === "benchmarks" ? BENCH_RANGES : RANGES;
+  const effectiveRange = rangeOptions.some((r) => r.value === range)
+    ? range
+    : rangeOptions[0].value;
+  const benchState = useApi(
+    () => benchmarks(activeId, { window: Number(effectiveRange) }),
+    [activeId, effectiveRange],
+    { enabled: mode === "benchmarks" }
   );
 
   return (
@@ -125,12 +146,18 @@ function TrendCard({ activeId, basis }) {
         <div className="flex items-center gap-2">
           <Tabs
             options={INFLATION_VIEWS}
-            value={vsInflation ? "real" : "nominal"}
-            onChange={(v) => setVsInflation(v === "real")}
-            label="Inflation basis"
+            value={mode}
+            onChange={setMode}
+            label="Comparison"
             testId="dashboard-trend-basis"
           />
-          <Tabs options={RANGES} value={range} onChange={setRange} label="Range" testId="dashboard-trend-tabs" />
+          <Tabs
+            options={rangeOptions}
+            value={effectiveRange}
+            onChange={setRange}
+            label="Range"
+            testId="dashboard-trend-tabs"
+          />
         </div>
       )}
     >
@@ -140,7 +167,32 @@ function TrendCard({ activeId, basis }) {
           const hasEstimated = (data.series || []).some((s) => s.is_estimated);
           const longTicks = range === "365" || range === "all";
 
-          if (vsInflation && realState.data?.series?.length) {
+          if (mode === "benchmarks" && benchState.data?.series?.length) {
+            const bench = benchState.data;
+            const keys = Object.keys(bench.labels);
+            const last = bench.series[bench.series.length - 1];
+            return (
+              <>
+                <MultiLineTrend
+                  series={keys.map((k) => ({ key: k, name: bench.labels[k] }))}
+                  data={bench.series}
+                  longTicks={longTicks}
+                  label="Your portfolio against gold and the dollar, indexed to 100"
+                />
+                <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-bench-note">
+                  Each line starts at 100, so the gap is relative growth over the
+                  window — not the amount of money in each.
+                </p>
+                {(bench.unavailable || []).map((u) => (
+                  <p key={u.key} className="mt-1 text-xs text-muted">
+                    {u.label} not shown: {u.reason}.
+                  </p>
+                ))}
+              </>
+            );
+          }
+
+          if (mode === "real" && realState.data?.series?.length) {
             const real = new Map(
               realState.data.series.map((s) => [s.date, Number(s.total)])
             );
@@ -173,7 +225,7 @@ function TrendCard({ activeId, basis }) {
           return (
             <>
               <AreaTrend data={points} longTicks={longTicks} />
-              {vsInflation && realState.error && (
+              {mode === "real" && realState.error && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-real-error">
                   No inflation-adjusted series for this window: {realState.error.message}
                 </p>
@@ -534,6 +586,11 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
         {(data) => {
           const total = Number(data.total) || 1;
           const items = data.items || [];
+          // `data.total` is the NET figure (liabilities and real estate netted
+          // off), while these rows are gross holding values. Dividing by it gave
+          // a 945M holding a 109.7% weight. Weight is a share of what is listed.
+          const weightBase =
+            items.reduce((sum, i) => sum + Number(i.value || 0), 0) || 1;
 
           const columns = [
             { key: "asset", header: "Asset", render: (r) => r.name_fa || r.asset },
@@ -590,7 +647,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
               },
             },
             { key: "value", header: "Value", align: "right", render: (r) => toman(r.value) },
-            { key: "weight", header: "Weight", align: "right", render: (r) => pct(Number(r.value) / total) },
+            { key: "weight", header: "Weight", align: "right", render: (r) => pct(Number(r.value) / weightBase) },
             {
               key: "status",
               header: "Status",
@@ -891,7 +948,7 @@ function RiskAddView({ activeId, basis, window }) {
  * Where the risk actually comes from — the question the weight split cannot
  * answer. Reads `diversification` and `correlation` off /api/analytics/.
  */
-function RiskSourcesView({ data }) {
+function RiskSourcesView({ data, labelFor = (k) => k }) {
   const div = data.diversification;
   const gaps = div?.concentration_gap || [];
   const corr = data.correlation || {};
@@ -934,10 +991,13 @@ function RiskSourcesView({ data }) {
         <h3 className="mb-1 text-sm font-medium">Share of money versus share of risk</h3>
         <p className="mb-3 text-xs text-muted">
           {worst.gap > 0
-            ? `${assetLabel(worst.key)} is ${pct(worst.weight_share)} of the money but ${pct(worst.risk_share)} of the risk.`
+            ? `${labelFor(worst.key)} is ${pct(worst.weight_share)} of the money but ${pct(worst.risk_share)} of the risk.`
             : "No holding carries materially more risk than its size."}
         </p>
-        <MoneyVsRisk rows={gaps} testId="risk-money-vs-risk" />
+        <MoneyVsRisk
+          rows={gaps.map((r) => ({ ...r, key: labelFor(r.key) }))}
+          testId="risk-money-vs-risk"
+        />
       </div>
 
       {(corr.assets || []).length > 1 && (
@@ -948,7 +1008,7 @@ function RiskSourcesView({ data }) {
             fewer bets than they look.
           </p>
           <CorrelationHeatmap
-            assets={corr.assets}
+            assets={corr.assets.map(labelFor)}
             matrix={corr.matrix}
             testId="risk-correlation"
           />
@@ -1084,13 +1144,19 @@ function RiskAssetView({ data }) {
   );
 }
 
-function RiskCard({ activeId, basis }) {
+function RiskCard({ activeId, basis, valuationState }) {
   const [window, setWindow] = useState("180");
   const [view, setView] = useState("sources");
   const state = useApi(
     () => analytics(activeId, { basis, window: Number(window) }),
     [activeId, basis, window]
   );
+  // Charts must name assets the way the tables beside them do. The valuation
+  // payload already carries the display names, so no extra request is needed.
+  const labelFor = (key) => {
+    const item = (valuationState?.data?.items || []).find((i) => i.key === key);
+    return item ? item.name_fa || item.asset || key : key;
+  };
 
   return (
     <Card
@@ -1117,7 +1183,9 @@ function RiskCard({ activeId, basis }) {
               onChange={setView}
               options={RISK_VIEWS}
             />
-            {view === "sources" && <RiskSourcesView data={data} />}
+            {view === "sources" && (
+              <RiskSourcesView data={data} labelFor={labelFor} />
+            )}
             {view === "add" && <RiskAddView activeId={activeId} basis={basis} window={window} />}
             {view === "portfolio" && <RiskPortfolioView data={data} />}
             {view === "class" && <RiskClassView data={data} />}
@@ -1188,7 +1256,7 @@ export default function Dashboard({ user }) {
         <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
         <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} staff={!!user?.is_staff} />
         <ExcludedDisclosure valuationState={valuationState} />
-        <RiskCard activeId={activeId} basis={basis} />
+        <RiskCard activeId={activeId} basis={basis} valuationState={valuationState} />
       </div>
     </div>
   );
