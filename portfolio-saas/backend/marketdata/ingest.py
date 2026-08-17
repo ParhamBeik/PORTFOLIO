@@ -81,7 +81,7 @@ def screen(kind, records, endpoint, symbol="", date_key="date", default_date="")
                 occurrences=row.occurrences + 1, payload=_jsonable(rejection.record)
             )
     if field_rejections or rejections:
-        logger.warning(
+        (logger.warning if rejections else logger.debug)(
             "%s(%s): rejected %d row(s), salvaged %d field(s) from %d records (%s)",
             endpoint, symbol, len(rejections), len(field_rejections), len(records),
             ", ".join(sorted({r.reason for r in [*field_rejections, *rejections]})),
@@ -195,8 +195,8 @@ def ingest_symbol_metadata(payload) -> tuple[int, int]:
             },
         )
         return (1, 0) if created else (0, 1)
-    except Exception:
-        logger.warning("symbol metadata ingest failed for id=%s", payload.get("id"), exc_info=True)
+    except Exception as exc:
+        logger.warning("symbol metadata ingest failed for id=%s: %s", payload.get("id"), exc)
         return 0, 1
 
 
@@ -208,6 +208,8 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
     accepted, bad = screen("daily_history", payload, endpoint, symbol)
 
     rows = []
+    malformed = 0
+    malformed_reasons = set()
     for rec in accepted:
         try:
             pmin_val = rec.get("pmin") if "pmin" in rec else 0
@@ -258,9 +260,15 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
                 sell_n_value=int(float(sell_n_val)) if sell_n_val is not None else None,
                 **_lineage(),
             ))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as exc:
             bad += 1
-            logger.warning("skipping malformed history record for %s: %r", symbol, rec)
+            malformed += 1
+            malformed_reasons.add(type(exc).__name__)
+    if malformed:
+        logger.warning(
+            "ingest_daily_history(%s): skipped %d malformed record(s) (%s)",
+            symbol, malformed, ", ".join(sorted(malformed_reasons)),
+        )
     created, conflicts = _bulk(
         DailyStockHistory, rows, scope={"symbol": symbol, "is_adjusted": is_adjusted},
         update_fields=(
@@ -346,6 +354,8 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
     accepted, bad = screen("candle", records, endpoint, symbol)
 
     rows = []
+    malformed = 0
+    malformed_reasons = set()
     for rec in accepted:
         try:
             dt_str = normalize_jalali(rec["date"]) if "date" in rec else str(rec["datetime"])
@@ -363,9 +373,15 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
                 volume=rec.get("volume") or 0,
                 **_lineage(),
             ))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as exc:
             bad += 1
-            logger.warning("skipping malformed candle for %s: %r", symbol, rec)
+            malformed += 1
+            malformed_reasons.add(type(exc).__name__)
+    if malformed:
+        logger.warning(
+            "ingest_candles(%s): skipped %d malformed record(s) (%s)",
+            symbol, malformed, ", ".join(sorted(malformed_reasons)),
+        )
     created, conflicts = _bulk(
         MarketCandle, rows, scope={"symbol": symbol, "timeframe": timeframe},
         update_fields=("open_price", "high_price", "low_price", "close_price", "volume", "ingested_at", "last_correlation_id"),
@@ -390,6 +406,8 @@ def ingest_transactions(
     )
     if require_all_valid and bad:
         return 0, bad
+    malformed = 0
+    malformed_reasons = set()
     for rec in accepted:
         try:
             rows.append(StockTransactionTick(
@@ -401,9 +419,15 @@ def ingest_transactions(
                 volume=rec.get("volume") or 0,
                 canceled=bool(rec.get("canceled")),
             ))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as exc:
             bad += 1
-            logger.warning("skipping malformed tick for %s %s: %r", symbol, day, rec)
+            malformed += 1
+            malformed_reasons.add(type(exc).__name__)
+    if malformed:
+        logger.warning(
+            "ingest_transactions(%s, %s): skipped %d malformed record(s) (%s)",
+            symbol, day, malformed, ", ".join(sorted(malformed_reasons)),
+        )
     from django.db import transaction
 
     with transaction.atomic():
@@ -430,6 +454,8 @@ def ingest_shareholders(symbol: str, payload, date: str = "") -> tuple[int, int]
     accepted, bad = screen(
         "shareholder", payload, "shareholder_records", symbol, default_date=day
     )
+    malformed = 0
+    malformed_reasons = set()
     for rec in accepted:
         try:
             rows.append(ShareholderRecord(
@@ -441,9 +467,15 @@ def ingest_shareholders(symbol: str, payload, date: str = "") -> tuple[int, int]
                 percent=rec.get("percent") or 0.0,
                 change=rec.get("change") or 0,
             ))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as exc:
             bad += 1
-            logger.warning("skipping malformed shareholder for %s: %r", symbol, rec)
+            malformed += 1
+            malformed_reasons.add(type(exc).__name__)
+    if malformed:
+        logger.warning(
+            "ingest_shareholders(%s): skipped %d malformed record(s) (%s)",
+            symbol, malformed, ", ".join(sorted(malformed_reasons)),
+        )
     created, conflicts = _bulk(
         ShareholderRecord, rows, scope={"symbol": symbol, "date": day}
     )
@@ -475,6 +507,8 @@ def ingest_codal(payload) -> tuple[int, int]:
         "codal", folded, "codal_announcements", date_key="date_publish"
     )
     rows, bad = [], len(records) - len(folded) + rejected
+    malformed = 0
+    malformed_reasons = set()
     for rec in accepted:
         try:
             cat_val = rec.get("category")
@@ -501,9 +535,15 @@ def ingest_codal(payload) -> tuple[int, int]:
                 link_excel=rec.get("link_excel", "") or "",
                 link_attachment=rec.get("link_attachment", "") or "",
             ))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as exc:
             bad += 1
-            logger.warning("skipping malformed codal record: %r", rec)
+            malformed += 1
+            malformed_reasons.add(type(exc).__name__)
+    if malformed:
+        logger.warning(
+            "ingest_codal: skipped %d malformed record(s) (%s)",
+            malformed, ", ".join(sorted(malformed_reasons)),
+        )
     # One payload spans several issuers, so the count is scoped to the symbols
     # this batch actually touches rather than the whole (growing) table.
     created, conflicts = _bulk(
@@ -631,6 +671,9 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
     rolling_closes = []
 
     rows = []
+    outliers = 0
+    malformed = 0
+    malformed_reasons = set()
     for rec in accepted_sorted:
         try:
             c = to_storage(float(rec["close"]))
@@ -663,10 +706,7 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
                                 occurrences=row_rej.occurrences + 1,
                                 payload={"close": c, "median": median, "record": rec}
                             )
-                        logger.warning(
-                            "gold_daily(%s): rejected close %.2f (median %.2f) at %s due to outlier deviation",
-                            symbol, c, median, day_str
-                        )
+                        outliers += 1
                         continue
 
             # Update rolling closes with verified price
@@ -686,9 +726,17 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
                 source=GoldCurrencyHistory.Source.PROVIDER,
                 **_lineage(),
             ))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as exc:
             bad += 1
-            logger.warning("skipping malformed gold/currency record for %s: %r", symbol, rec)
+            malformed += 1
+            malformed_reasons.add(type(exc).__name__)
+    if outliers:
+        logger.warning("gold_daily(%s): rejected %d outlier close(s)", symbol, outliers)
+    if malformed:
+        logger.warning(
+            "ingest_gold_currency_history(%s): skipped %d malformed record(s) (%s)",
+            symbol, malformed, ", ".join(sorted(malformed_reasons)),
+        )
     created, conflicts = _bulk(
         GoldCurrencyHistory, rows, scope={"symbol": symbol},
         update_fields=(

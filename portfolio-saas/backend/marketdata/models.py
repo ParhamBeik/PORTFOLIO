@@ -316,20 +316,18 @@ class RealLegalHistory(models.Model):
 
 
 class MarketCandle(models.Model):
-    """OHLCV candlestick time series data.
+    """OHLCV candlestick time series data, purely provider-sourced.
 
-    Daily timeframes, in descending order of authority:
+    `ADJUSTED` / `UNADJUSTED` come from the provider (Candlestick.php type 3
+    and 2) and are written append-only with `bulk_create(ignore_conflicts=True)`.
 
-    * `ADJUSTED` / `UNADJUSTED` come from the provider (Candlestick.php type 3
-      and 2) and are written append-only with `bulk_create(ignore_conflicts=True)`.
-    * `AGGREGATE` is derived from intraday ticks by the nightly aggregators so
-      the current session has a close before the provider publishes one.
-
-    `AGGREGATE` must never be written into the `ADJUSTED` slot. The archive
-    ingest path cannot overwrite an existing row, so a tick-derived
-    approximation parked on `(symbol, ADJUSTED, date)` would permanently
-    displace the provider's real close for that day -- in the exact series
-    every valuation, returns and integrity path reads.
+    `AGGREGATE` is retired: nightly tasks no longer derive a tick-based candle
+    from intraday `Price` rows into this table -- that duplicated the shape of
+    real historical OHLC with lower-quality live-tick data. The live domain's
+    own daily rollup now lives in `portfolio.models.DailyPriceAverage` (one
+    averaged price per asset per day, not an OHLC candle). The constant is kept
+    only so any surviving `AGGREGATE`-tagged row remains a valid choice until
+    the retirement data migration removes them.
     """
 
     UNADJUSTED = "1d_unadj"
@@ -718,11 +716,15 @@ class CorporateAction(models.Model):
 
 
 class GoldCurrencyHistory(models.Model):
-    """Gold, Fiat Currency, and Crypto daily and 24h price history."""
+    """Gold, Fiat Currency, and Crypto daily price history, purely provider-sourced."""
 
     class Source(models.TextChoices):
         PROVIDER = "provider", "Provider"
-        AGGREGATE = "aggregate", "Live-price aggregate"
+        # Retired: nightly tasks no longer derive an OHLC row from intraday
+        # `Price` ticks into this table. See `portfolio.models.DailyPriceAverage`
+        # for the live domain's own daily rollup. Kept only so a surviving
+        # AGGREGATE-tagged row remains valid until the retirement data migration.
+        AGGREGATE = "aggregate", "Live-price aggregate (retired)"
 
     symbol = models.CharField(max_length=64, db_index=True)
     name = models.CharField(max_length=120, blank=True, default="")
@@ -915,3 +917,55 @@ class AssetMetricSnapshot(models.Model):
                 name="uniq_asset_metric_symbol_asof_window",
             )
         ]
+
+
+class AssetSignalSnapshot(models.Model):
+    """Nightly technical reading per symbol, computed by `nightly_asset_signals`.
+
+    Sibling of AssetMetricSnapshot: same natural key shape, written by the same
+    batch layer, read the same way.
+
+    `passes_integrity` is stored on the row rather than joined at read time, and
+    that is the point. 1,072 of 1,346 symbols currently fail the integrity gate
+    while the archive backfills, and a stance computed from a series with holes
+    in it must never be presented as actionable. Persisting the verdict means the
+    caveat travels with the number instead of depending on every reader
+    remembering to re-check SymbolIntegrity.
+    """
+
+    class Stance(models.TextChoices):
+        BULLISH = "bullish", "Bullish"
+        BEARISH = "bearish", "Bearish"
+        NEUTRAL = "neutral", "Neutral"
+
+    symbol = models.CharField(max_length=64, db_index=True)
+    asset_class = models.CharField(max_length=16, blank=True, default="")
+    as_of = models.CharField(max_length=10, db_index=True)
+    window_days = models.PositiveSmallIntegerField(default=365)
+
+    rsi = models.FloatField(null=True, blank=True)
+    macd_histogram = models.FloatField(null=True, blank=True)
+    above_trend = models.BooleanField(default=False)
+    # Which moving average `above_trend` was measured against: 200 sessions where
+    # the history allows it, 50 otherwise. Without this the flag would silently
+    # mean different things for different symbols.
+    trend_window = models.PositiveSmallIntegerField(default=0)
+    overbought = models.BooleanField(default=False)
+    oversold = models.BooleanField(default=False)
+    stance = models.CharField(
+        max_length=8, choices=Stance.choices, default=Stance.NEUTRAL, db_index=True
+    )
+    observations = models.PositiveIntegerField(default=0)
+    passes_integrity = models.BooleanField(default=False, db_index=True)
+
+    class Meta:
+        ordering = ["-as_of", "symbol"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "as_of", "window_days"],
+                name="uniq_asset_signal_symbol_asof_window",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.symbol} {self.as_of}: {self.stance}"

@@ -45,7 +45,7 @@ def prune_snapshots():
 
     if not settings.SNAPSHOT_PRUNE_ENABLED:
         logger.info(
-            "[SNAPSHOT_PRUNE_DRY_RUN] Would collapse %d stale rows into %d daily "
+            "Would collapse %d stale rows into %d daily "
             "rows (cutoff=%s). Set SNAPSHOT_PRUNE_ENABLED=1 to actually run this.",
             stale_row_count, len(groups), cutoff.isoformat(),
         )
@@ -72,7 +72,7 @@ def prune_snapshots():
             )
             written += 1
     logger.info(
-        "[SNAPSHOT_PRUNE] Collapsed %d day-groups (%d stale rows) into %d rows.",
+        "Collapsed %d day-groups (%d stale rows) into %d rows.",
         written, stale_row_count, written,
     )
     result = {"enabled": True, "groups_collapsed": written, "stale_rows_seen": stale_row_count}
@@ -88,7 +88,7 @@ def prune_prices():
     stale_count = stale.count()
     if not settings.PRICE_PRUNE_ENABLED:
         logger.info(
-            "[PRICE_PRUNE_DRY_RUN] Would delete %d price rows older than %s. "
+            "Would delete %d price rows older than %s. "
             "Set PRICE_PRUNE_ENABLED=1 to run.",
             stale_count, cutoff.isoformat(),
         )
@@ -102,7 +102,7 @@ def prune_prices():
         .values_list("id", flat=True)
     )
     deleted, _ = stale.exclude(id__in=latest_ids).delete()
-    logger.info("[PRICE_PRUNE] Deleted %d stale price rows (kept latest per asset).", deleted)
+    logger.info("Deleted %d stale price rows (kept latest per asset).", deleted)
     result = {"enabled": True, "deleted": deleted, "kept_latest": len(latest_ids)}
     _ledger_prune("prune_prices", "Price", result)
     return result

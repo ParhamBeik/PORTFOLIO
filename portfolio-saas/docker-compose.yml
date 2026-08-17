@@ -101,7 +101,9 @@ services:
     volumes:
       - mongodata:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      # `mongosh` pings open several server-side connections and dominate Compose
+      # logs. PID 1 is the mongod process; Docker restart policy handles a dead one.
+      test: ["CMD-SHELL", "test \"$$(cat /proc/1/comm)\" = mongod"]
       interval: 10s
       timeout: 5s
       retries: 10

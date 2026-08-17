@@ -108,7 +108,18 @@ class WorkflowOutcome:
             "metadata": redact(values.pop("metadata", values)),
         }
         safe = redact(payload)
-        logger.info(json.dumps(safe, ensure_ascii=False, separators=(",", ":"), default=str))
+        reason = safe["metadata"].get("reason", "") if isinstance(safe["metadata"], dict) else ""
+        reason = str(reason).replace("\n", " ").strip()
+        summary = (
+            f"workflow={safe['workflow']} outcome={safe['outcome']} "
+            f"endpoint={safe['endpoint'] or '-'} symbol={safe['symbol'] or '-'} "
+            f"rows={safe['rows_received']}/{safe['rows_accepted']} "
+            f"created={safe['rows_created']} updated={safe['rows_updated']} "
+            f"rejected={safe['rows_rejected']} "
+            f"attempts={safe['http_attempts']}/{safe['quota_attempts']} "
+            f"duration_ms={safe['duration_ms']} error={safe['error_code'] or '-'}"
+        )
+        logger.info(f"{summary} reason={reason[:160]}" if reason else summary)
         try:
             return WorkflowRun.objects.create(**safe)
         except Exception:

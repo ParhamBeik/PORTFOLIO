@@ -371,7 +371,6 @@ def weekly_metadata_sync():
             ingest.ingest_symbol_metadata(fetch_symbol_data(key, symbol))
             _pause()
             count += 1
-        logger.info("weekly_metadata_sync: done")
         _finish_ok(outcome, rows_accepted=count)
     except Exception as err:
         _finish_fail(outcome, err)
@@ -426,8 +425,9 @@ def run_archive_state(state_id):
             error_code=type(err).__name__,
             metadata={"reason": str(err)},
         )
-        logger.exception(
-            "Unhandled archive failure correlation_id=%s", outcome.correlation_id
+        logger.error(
+            "archive_state failed correlation_id=%s error=%s",
+            outcome.correlation_id, type(err).__name__,
         )
         raise
     terminal = (
@@ -511,7 +511,10 @@ def archive_tick():
             error_code=type(err).__name__,
             metadata={"reason": str(err)},
         )
-        logger.exception("Unhandled archive tick failure correlation_id=%s", outcome.correlation_id)
+        logger.error(
+            "archive_tick failed correlation_id=%s error=%s",
+            outcome.correlation_id, type(err).__name__,
+        )
         raise
     finally:
         if redis_client:
@@ -537,7 +540,6 @@ def recent_history_refresh():
         state_ids = claim_recent_refresh(limit=slots)
         if state_ids:
             group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
-        logger.info("recent_history_refresh: enqueued %d archive states", len(state_ids))
         _finish_ok(outcome, rows_accepted=len(state_ids))
     except Exception as err:
         _finish_fail(outcome, err)
@@ -557,7 +559,6 @@ def weekly_warehouse_audit():
         )
         os.makedirs(settings.WAREHOUSE_AUDIT_DIR, exist_ok=True)
         call_command("audit_warehouse", manifest_path=path)
-        logger.info("weekly_warehouse_audit: manifest written to %s", path)
         _finish_ok(outcome, metadata={"path": path})
         return path
     except Exception as err:
@@ -645,10 +646,6 @@ def archive_maintenance():
 
         for state_id in list(state_ids) + list(probe_ids):
             run_archive_state.si(state_id).apply_async()
-        logger.info(
-            "archive_maintenance: enqueued %d states, %d probes, suspended %d",
-            len(state_ids), len(probe_ids), len(suspended),
-        )
         _finish_ok(
             outcome,
             rows_accepted=len(state_ids) + len(probe_ids),
@@ -665,156 +662,11 @@ def catalog_sync(limit: int = None):
     try:
         result = sync_provider_catalog(limit=limit)
         ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
-        logger.info("catalog_sync: %d seen, %d eligible", result["seen"], result["eligible"])
         _finish_ok(outcome, rows_received=result["seen"], rows_accepted=result["eligible"])
         return result
     except Exception as err:
         _finish_fail(outcome, err)
         raise
-
-
-@shared_task(ignore_result=True)
-def aggregate_daily_gold_currency_history(date_str: str = None):
-    """Aggregate 24-hour (00:00 to 23:59) price ticks for Gold/Currency/Crypto at 23:59 daily."""
-    from datetime import timedelta
-    import jdatetime
-    from django.db.models import Max, Min
-    from django.utils import timezone
-    from portfolio.models import Asset, Price
-    from .models import GoldCurrencyHistory
-
-    today_jalali = date_str or jdatetime.date.today().strftime("%Y-%m-%d")
-    now = timezone.now()
-    since = now - timedelta(hours=24)
-
-    assets = Asset.objects.filter(
-        asset_class__in=(Asset.AssetClass.GOLD, Asset.AssetClass.CASH)
-    ).exclude(brs_symbol="")
-
-    created_count = 0
-    for asset in assets:
-        symbol = asset.brs_symbol
-        ticks = Price.objects.filter(asset=asset, fetched_at__gte=since).order_by("fetched_at")
-        if not ticks.exists():
-            continue
-
-        open_p = ticks.first().price
-        close_p = ticks.last().price
-        stats = ticks.aggregate(high=Max("price"), low=Min("price"))
-        high_p = stats["high"] or close_p
-        low_p = stats["low"] or close_p
-
-        # Price is Toman-denominated for BRS gold/currency assets
-        # (extract_standard_prices routes every source through to_toman());
-        # match the unit label the rest of this table uses for these rows.
-        row, created = GoldCurrencyHistory.objects.get_or_create(
-            symbol=symbol,
-            date=today_jalali,
-            defaults={
-                "name": asset.name,
-                "unit": "تومان",
-                "open_price": open_p,
-                "high_price": high_p,
-                "low_price": low_p,
-                "close_price": close_p,
-                "source": GoldCurrencyHistory.Source.AGGREGATE,
-            },
-        )
-        if not created and row.source == GoldCurrencyHistory.Source.AGGREGATE:
-            row.name = asset.name
-            row.unit = "تومان"
-            row.open_price = open_p
-            row.high_price = high_p
-            row.low_price = low_p
-            row.close_price = close_p
-            row.save(update_fields=[
-                "name", "unit", "open_price", "high_price", "low_price",
-                "close_price",
-            ])
-        # No MarketCandle row: that table is Rial-denominated TSE data, and these
-        # are Toman BRS quotes. Writing them here made candle_close_qs(symbol)
-        # match for gold/FX, which sent PerformanceView down the stock branch and
-        # exposed every tse_close_to_toman() reader to a 10x error. The row was
-        # redundant anyway -- GoldCurrencyHistory above is the series of record.
-        created_count += 1
-
-    if created_count:
-        _invalidate_returns()
-    logger.info("aggregate_daily_gold_currency_history: processed %d symbols for %s", created_count, today_jalali)
-    _finish_ok(
-        _ledgered("aggregate_daily_gold_currency_history", destination_table="GoldCurrencyHistory"),
-        rows_accepted=created_count,
-    )
-
-
-@shared_task(ignore_result=True)
-def aggregate_daily_stock_history(date_str: str = None):
-    """Aggregate trading session price ticks for stocks at market close (17:00 Tehran time)."""
-    from datetime import timedelta
-    import jdatetime
-    from django.db.models import Max, Min, Sum
-    from django.utils import timezone
-    from portfolio.models import Asset, Price
-    from .models import MarketCandle, StockTransactionTick
-
-    today_jalali = date_str or jdatetime.date.today().strftime("%Y-%m-%d")
-    now = timezone.now()
-    since = now - timedelta(hours=12)
-
-    assets = Asset.objects.filter(
-        asset_class=Asset.AssetClass.STOCK
-    ).exclude(tse_symbol="")
-
-    created_count = 0
-    for asset in assets:
-        symbol = asset.tse_symbol
-        ticks = StockTransactionTick.objects.filter(symbol=symbol, date=today_jalali).order_by("row")
-        if ticks.exists():
-            open_p = ticks.first().price
-            close_p = ticks.last().price
-            stats = ticks.aggregate(high=Max("price"), low=Min("price"), vol=Sum("volume"))
-            high_p = stats["high"] or close_p
-            low_p = stats["low"] or close_p
-            vol = stats["vol"] or 0
-        else:
-            p_ticks = Price.objects.filter(asset=asset, fetched_at__gte=since).order_by("fetched_at")
-            if not p_ticks.exists():
-                continue
-            # `Price` for TSE stocks is Rial (same unit as MarketCandle).
-            open_p = p_ticks.first().price
-            close_p = p_ticks.last().price
-            stats = p_ticks.aggregate(high=Max("price"), low=Min("price"))
-            high_p = stats["high"] or close_p
-            low_p = stats["low"] or close_p
-            vol = 0
-
-        # No DailyStockHistory write: this aggregate is tick-derived and would
-        # occupy the (symbol, date) slot the provider's authoritative History.php
-        # row needs, and bulk_create(ignore_conflicts=True) would then never
-        # replace it. MarketCandle.ADJUSTED has exactly the same hazard, so this
-        # lands in AGGREGATE and readers prefer ADJUSTED over it.
-        MarketCandle.objects.update_or_create(
-            symbol=symbol,
-            timeframe=MarketCandle.AGGREGATE,
-            date_time=today_jalali,
-            ts=jalali.to_datetime(today_jalali),
-            defaults={
-                "open_price": open_p,
-                "high_price": high_p,
-                "low_price": low_p,
-                "close_price": close_p,
-                "volume": vol,
-            },
-        )
-        created_count += 1
-
-    if created_count:
-        _invalidate_returns()
-    logger.info("aggregate_daily_stock_history: processed %d stock symbols for %s", created_count, today_jalali)
-    _finish_ok(
-        _ledgered("aggregate_daily_stock_history", destination_table="MarketCandle"),
-        rows_accepted=created_count,
-    )
 
 
 @shared_task(ignore_result=True)
@@ -827,9 +679,7 @@ def nightly_data_integrity():
     """
     from marketdata.archive import reopen_states_with_gaps
     from marketdata.integrity import market_outage_windows, update_all_symbols_integrity
-    logger.info("Starting nightly data integrity checks...")
     results = update_all_symbols_integrity()
-    logger.info("Nightly data integrity checks completed for %d symbols.", len(results))
 
     outages = market_outage_windows()
     if outages:
@@ -837,8 +687,8 @@ def nightly_data_integrity():
         # per-symbol gate cannot see it. Reopen the lot.
         reopened = reopen_states_with_gaps(None)
         logger.error(
-            "[INGEST_OUTAGE] %d gap(s) in the session calendar; longest %s to %s. "
-            "Reopened %d archive state(s) to refetch.",
+            "market outage: %d gap(s) in the session calendar; longest %s to %s; "
+            "reopened %d archive state(s) to refetch",
             len(outages), outages[0][0], outages[0][1], reopened,
         )
     else:
@@ -872,14 +722,12 @@ def nightly_data_integrity():
         ]
         if errors:
             logger.error(
-                "[UNIT_AUDIT] %d mis-scaled row(s) across %d symbol(s). "
-                "Run `manage.py audit_warehouse` for the manifest. First: %s",
+                "unit_audit: %d mis-scaled row(s) across %d symbol(s); "
+                "run `manage.py audit_warehouse` for the manifest; first: %s",
                 len(errors), len({f["symbol"] for f in errors}), errors[0]["evidence"],
             )
-        else:
-            logger.info("[UNIT_AUDIT] No mis-scaled rows found.")
     except Exception:  # never let a report-only check break the integrity run
-        logger.exception("[UNIT_AUDIT] Audit failed; integrity results still stand.")
+        logger.exception("unit_audit failed; integrity results still stand")
     _finish_ok(
         _ledgered("nightly_data_integrity", destination_table="SymbolIntegrity"),
         rows_accepted=len(results),
@@ -1122,12 +970,6 @@ def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
             else:
                 rejected_count += 1
 
-    logger.info(
-        "nightly_series_validation: %d actions created, %d spikes rejected",
-        actions_created_count,
-        rejected_count,
-    )
-    
     result = {
         "tse_symbols_examined": len(symbols),
         "corporate_action_candidates": corporate_action_candidates,
@@ -1218,8 +1060,91 @@ def nightly_asset_metrics(window_days=365):
             },
         )
         written += 1
-    logger.info("nightly_asset_metrics: wrote %d snapshots", written)
     _finish_ok(
         _ledgered("nightly_asset_metrics", destination_table="AssetMetricSnapshot"),
         rows_accepted=written,
     )
+
+
+@shared_task(ignore_result=True)
+def nightly_asset_signals(window_days=365):
+    """Technical stance per eligible symbol, written to AssetSignalSnapshot.
+
+    Sits beside nightly_asset_metrics in the batch layer and reads the same panel,
+    so the indicators describe exactly the series every other number on the site
+    describes. Runs after it in the beat schedule for that reason.
+
+    Symbols failing the integrity gate are still COMPUTED and stored, with
+    `passes_integrity=False` recorded on the row. Skipping them would leave the
+    reader unable to distinguish "no signal" from "signal we chose not to show",
+    and the flag is what lets the UI refuse to present a stance drawn from a
+    series with holes in it as actionable.
+    """
+    from portfolio.services import signals as signal_math
+    from portfolio.services.returns import daily_returns_matrix
+    from . import jalali
+    from .models import AssetSignalSnapshot, MarketInstrument, SymbolIntegrity
+
+    outcome = _ledgered(
+        "nightly_asset_signals", destination_table="AssetSignalSnapshot"
+    )
+    try:
+        instruments = {
+            row.symbol: row for row in MarketInstrument.objects.filter(eligible=True)
+        }
+        if not instruments:
+            _finish_ok(outcome, metadata={"reason": "no_eligible_instruments"})
+            return {"written": 0}
+
+        returns, _excluded = daily_returns_matrix(
+            history_days=window_days, universe=list(instruments)
+        )
+        if returns.empty:
+            _finish_ok(outcome, metadata={"reason": "empty_returns_panel"})
+            return {"written": 0}
+
+        gates = dict(
+            SymbolIntegrity.objects.values_list("symbol", "passes_gate")
+        )
+        as_of = jalali.today()
+        written = skipped = 0
+        stances = {}
+        for symbol in returns.columns:
+            prices = signal_math.price_index_from_returns(returns[symbol])
+            reading = signal_math.describe(prices)
+            if reading is None:
+                # Too little history for the indicators to mean anything; a
+                # stance from 20 sessions of RSI would be noise wearing a verdict.
+                skipped += 1
+                continue
+            instrument = instruments.get(symbol)
+            AssetSignalSnapshot.objects.update_or_create(
+                symbol=symbol,
+                as_of=as_of,
+                window_days=window_days,
+                defaults={
+                    "asset_class": instrument.category if instrument else "",
+                    "rsi": reading["rsi"],
+                    "macd_histogram": reading["macd_histogram"],
+                    "above_trend": reading["above_trend"],
+                    "trend_window": reading["trend_window"],
+                    "overbought": reading["overbought"],
+                    "oversold": reading["oversold"],
+                    "stance": reading["stance"],
+                    "observations": reading["observations"],
+                    "passes_integrity": bool(gates.get(symbol, False)),
+                },
+            )
+            written += 1
+            stances[reading["stance"]] = stances.get(reading["stance"], 0) + 1
+    except Exception as err:
+        _finish_fail(outcome, err)
+        raise
+
+    _finish_ok(
+        outcome,
+        rows_accepted=written,
+        rows_rejected=skipped,
+        metadata={"as_of": as_of, "stances": stances},
+    )
+    return {"written": written, "skipped": skipped, "stances": stances}

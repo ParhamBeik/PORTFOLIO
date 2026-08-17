@@ -96,15 +96,10 @@ app.conf.beat_schedule = {
         "task": "marketdata.tasks.queue_codal_extractions",
         "schedule": crontab(hour=3, minute=55),
     },
-    # 24/7 Gold/Currency/Crypto midnight EOD aggregation.
-    "aggregate-gold-currency-daily-2359": {
-        "task": "marketdata.tasks.aggregate_daily_gold_currency_history",
+    # Roll the day's live Price ticks into one DailyPriceAverage row per asset.
+    "aggregate-daily-price-averages": {
+        "task": "portfolio.tasks.aggregate_daily_price_averages",
         "schedule": crontab(hour=23, minute=59),
-    },
-    # Stock session market-close aggregation.
-    "aggregate-stock-daily-market-close": {
-        "task": "marketdata.tasks.aggregate_daily_stock_history",
-        "schedule": crontab(hour=17, minute=0),
     },
     # Nightly data integrity gate checks at Tehran midnight.
     "nightly-data-integrity": {
@@ -118,6 +113,13 @@ app.conf.beat_schedule = {
     "nightly-asset-metrics": {
         "task": "marketdata.tasks.nightly_asset_metrics",
         "schedule": crontab(hour=1, minute=0),
+    },
+    # Reads the same returns panel as nightly-asset-metrics, so it runs after it:
+    # the panel is cached, and the two should describe the same series rather
+    # than straddle a mid-run warehouse write.
+    "nightly-asset-signals": {
+        "task": "marketdata.tasks.nightly_asset_signals",
+        "schedule": crontab(hour=1, minute=20),
     },
     "operational-health-every-15-minutes": {
         "task": "marketdata.tasks.operational_health_check",

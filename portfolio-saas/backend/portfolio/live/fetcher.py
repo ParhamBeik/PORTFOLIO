@@ -57,13 +57,13 @@ def fetch_brsapi(brs_url, brs_api_key):
             headers=HEADERS,
             quota_bucket=LIVE,
         )
-        logger.info("[BRS_FETCH_OK] Successfully fetched gold/currency payload from %s", brs_url)
+        logger.info("Successfully fetched gold/currency payload from %s", brs_url)
         return data
     except MarketDataFetchError as exc:
-        logger.error("[BRS_FETCH_ERROR] Failed to fetch BRS data from %s: %s", brs_url, exc)
+        logger.error("Failed to fetch BRS data from %s: %s", brs_url, exc)
         return None
     except Exception as exc:
-        logger.error("[BRS_FETCH_UNEXPECTED] Unexpected error fetching BRS data: %s", exc)
+        logger.error("Unexpected error fetching BRS data: %s", exc)
         return None
 
 
@@ -75,13 +75,13 @@ def fetch_tsetmc(tsetmc_url, tsetmc_api_key):
             headers=HEADERS,
             quota_bucket=LIVE,
         )
-        logger.info("[TSETMC_FETCH_OK] Successfully fetched stock payload from %s", tsetmc_url)
+        logger.info("Successfully fetched stock payload from %s", tsetmc_url)
         return data
     except MarketDataFetchError as exc:
-        logger.error("[TSETMC_FETCH_ERROR] Failed to fetch TSETMC data from %s: %s", tsetmc_url, exc)
+        logger.error("Failed to fetch TSETMC data from %s: %s", tsetmc_url, exc)
         return None
     except Exception as exc:
-        logger.error("[TSETMC_FETCH_UNEXPECTED] Unexpected error fetching TSETMC data: %s", exc)
+        logger.error("Unexpected error fetching TSETMC data: %s", exc)
         return None
 
 
@@ -93,16 +93,16 @@ def fetch_tsetmc_symbol(tsetmc_symbol_url, tsetmc_api_key, symbol):
             headers=HEADERS,
             quota_bucket=LIVE,
         )
-        logger.info("[TSETMC_SYMBOL_FETCH_OK] Fetched symbol %s from %s", symbol, tsetmc_symbol_url)
+        logger.info("Fetched symbol %s from %s", symbol, tsetmc_symbol_url)
         return data
     except QuotaExhausted as exc:
-        logger.warning("[TSETMC_SYMBOL_QUOTA_EXHAUSTED] Quota exhausted for symbol fetch %s: %s", symbol, exc)
+        logger.warning("Quota exhausted for symbol fetch %s: %s", symbol, exc)
         return None
     except MarketDataFetchError as exc:
-        logger.error("[TSETMC_SYMBOL_FETCH_ERROR] Failed symbol fetch for %s: %s", symbol, exc)
+        logger.error("Failed symbol fetch for %s: %s", symbol, exc)
         return None
     except Exception as exc:
-        logger.error("[TSETMC_SYMBOL_FETCH_UNEXPECTED] Unexpected error fetching symbol %s: %s", symbol, exc)
+        logger.error("Unexpected error fetching symbol %s: %s", symbol, exc)
         return None
 
 
@@ -124,7 +124,7 @@ def _brs_job(brs_url, brs_key):
             if usdt_quote:
                 result["usdt_irt_quote"] = usdt_quote
         except Exception as exc:
-            logger.warning("[USDT_IRT_FETCH_ERROR] Could not fetch USDT/IRT quote: %s", exc)
+            logger.warning("Could not fetch USDT/IRT quote: %s", exc)
     return result
 
 
@@ -196,7 +196,7 @@ def fetch_all_markets(api_settings):
                 raw_data["market_index"] = index_payload
         except Exception as exc:
             release_provider_state_probe()
-            logger.warning("[MARKET_STATE_PROBE_ERROR] Index probe failed: %s", exc)
+            logger.warning("Index probe failed: %s", exc)
 
     current_state = market_state()
     planned = set(live_job_keys(
@@ -212,28 +212,28 @@ def fetch_all_markets(api_settings):
         if "gold_currency" in planned:
             jobs.append(executor.submit(_brs_job, brs_url, brs_key))
         else:
-            logger.info("[FETCH_SKIP] Domestic gold & currency market closed overnight. Skipping.")
+            logger.info("Domestic gold & currency market closed overnight. Skipping.")
     else:
-        logger.warning("[FETCH_SKIP] BRS API URL or Key missing in Django settings.")
+        logger.warning("BRS API URL or Key missing in Django settings.")
 
     if tsetmc_url and tsetmc_key:
         if "tsetmc" in planned:
             tsetmc_symbol_url = api_settings.get("tsetmc_symbol_url", settings.TSETMC_SYMBOL_URL)
             jobs.append(executor.submit(_tsetmc_job, tsetmc_url, tsetmc_key, tsetmc_symbol_url))
         else:
-            logger.info("[FETCH_SKIP] Tehran Stock Exchange (TSE) is closed. Skipping stocks.")
+            logger.info("Tehran Stock Exchange (TSE) is closed. Skipping stocks.")
     else:
-        logger.warning("[FETCH_SKIP] TSETMC URL or Key missing in Django settings.")
+        logger.warning("TSETMC URL or Key missing in Django settings.")
 
     if jobs:
         done, not_done = wait(jobs, timeout=FETCH_TIMEOUT)
         for job in not_done:
-            logger.error("[FETCH_ALL_MARKETS_JOB_TIMEOUT] Provider job did not finish within %ss.", FETCH_TIMEOUT)
+            logger.error("Provider job did not finish within %ss.", FETCH_TIMEOUT)
         for job in done:
             try:
                 raw_data.update(job.result())
             except Exception as exc:
-                logger.error("[FETCH_ALL_MARKETS_JOB_ERROR] Provider job raised: %s", exc)
+                logger.error("Provider job raised: %s", exc)
     executor.shutdown(wait=False)
 
     return raw_data

@@ -30,8 +30,6 @@ def sync_provider_catalog(limit=None):
 
     Optimized to query all date ranges and existing listings in batch to avoid N+1 queries.
     """
-    logger.info("Starting provider catalog sync (limit=%s)...", limit)
-
     previous = {
         (row.source, row.symbol): row.eligible
         for row in MarketInstrument.objects.all()
@@ -45,8 +43,7 @@ def sync_provider_catalog(limit=None):
     if limit is not None:
         if isinstance(stock_payload, list):
             stock_payload = stock_payload[:limit]
-            logger.info("Bounded test mode: sliced stock_payload to %d items", len(stock_payload))
-            
+
     rows = []
 
     for record in stock_payload if isinstance(stock_payload, list) else []:
@@ -83,7 +80,6 @@ def sync_provider_catalog(limit=None):
 
     if limit is not None:
         gold_items = gold_items[:limit]
-        logger.info("Bounded test mode: sliced gold_items to %d items", len(gold_items))
 
     for symbol, record, provider_group, eligible in gold_items:
         rows.append(MarketInstrument(
@@ -99,11 +95,9 @@ def sync_provider_catalog(limit=None):
         ))
 
     if not rows:
-        logger.info("No instruments found to sync.")
         return {"seen": 0, "eligible": 0}
 
     # Bulk create or update MarketInstrument
-    logger.info("Bulk creating/updating %d MarketInstrument records...", len(rows))
     MarketInstrument.objects.bulk_create(
         rows,
         update_conflicts=True,
@@ -114,18 +108,16 @@ def sync_provider_catalog(limit=None):
     )
 
     # Batch fetch bounds to avoid N+1 queries
-    logger.info("Fetching stock candle date bounds...")
     stock_bounds = {
         row["symbol"]: (row["first"], row["last"])
         for row in MarketCandle.objects.filter(
-            timeframe__in=(MarketCandle.ADJUSTED, MarketCandle.AGGREGATE),
+            timeframe=MarketCandle.ADJUSTED,
             close_price__gt=0,
         )
         .values("symbol")
         .annotate(first=Min("date_time"), last=Max("date_time"))
     }
 
-    logger.info("Fetching gold/currency date bounds...")
     gold_bounds = {
         row["symbol"]: (row["first"], row["last"])
         for row in GoldCurrencyHistory.objects.filter(close_price__gt=0)
@@ -134,7 +126,6 @@ def sync_provider_catalog(limit=None):
     }
 
     # Batch fetch existing InstrumentListingHistory
-    logger.info("Fetching existing InstrumentListingHistory mapping...")
     existing_histories = {
         h.symbol: h for h in InstrumentListingHistory.objects.all()
     }
@@ -143,12 +134,7 @@ def sync_provider_catalog(limit=None):
     histories_to_update = []
     histories_to_create = []
 
-    logger.info("Calculating listing history updates...")
-    for idx, row in enumerate(rows):
-        # Progress logging
-        if (idx + 1) % 200 == 0 or (idx + 1) == len(rows):
-            logger.info("Calculating bounds progress: %d/%d instruments", idx + 1, len(rows))
-
+    for row in rows:
         if row.source == MarketInstrument.Source.TSETMC:
             first, last = stock_bounds.get(row.symbol, (None, None))
         else:
@@ -183,20 +169,15 @@ def sync_provider_catalog(limit=None):
         else:
             histories_to_update.append(history)
 
-    # Bulk create new histories
     if histories_to_create:
-        logger.info("Bulk creating %d new InstrumentListingHistory records...", len(histories_to_create))
         InstrumentListingHistory.objects.bulk_create(histories_to_create)
 
-    # Bulk update existing histories
     if histories_to_update:
-        logger.info("Bulk updating %d existing InstrumentListingHistory records...", len(histories_to_update))
         InstrumentListingHistory.objects.bulk_update(
             histories_to_update,
             fields=["first_seen", "last_seen", "eligible_from", "eligible_to"]
         )
 
-    logger.info("Catalog sync completed successfully.")
     return {
         "seen": len(rows),
         "eligible": sum(row.eligible for row in rows),

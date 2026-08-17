@@ -1,4 +1,4 @@
-from django.db.models import Count, Exists, F, OuterRef, Q, Sum
+from django.db.models import Count, Sum
 from django.core.cache import cache
 
 from .models import DailyStockHistory, MarketCandle
@@ -111,7 +111,7 @@ def actual_trading_days(*, start=None, end=None, window_days=None):
 
 
 def candle_close_qs(symbol, *, as_of=None, since=None):
-    """Daily candles with provider-adjusted rows preferred per symbol and day.
+    """Provider-adjusted daily candles for a symbol.
 
     `since` is a Jalali lower bound. Passing it also adds the equivalent bound on
     `ts`, which is what lets a partitioned table skip chunks: every predicate here
@@ -119,21 +119,14 @@ def candle_close_qs(symbol, *, as_of=None, since=None):
     partition pruning. Harmless on a plain table -- `ts` is a pure function of the
     date -- and the difference between planning one chunk and planning all of
     them once measured 106 seconds.
+
+    Only ADJUSTED rows: this is the historical-warehouse read path (archive
+    fallback / point-in-time valuation), and it must never blend in same-day
+    live-tick-derived data. Live rollups live in `portfolio.models.DailyPriceAverage`.
     """
-    adjusted = MarketCandle.objects.filter(
-        symbol=OuterRef("symbol"),
-        date_time=OuterRef("date_time"),
-        timeframe=MarketCandle.ADJUSTED,
-    )
     queryset = MarketCandle.objects.filter(
-        timeframe__in=(MarketCandle.ADJUSTED, MarketCandle.AGGREGATE),
+        timeframe=MarketCandle.ADJUSTED,
         close_price__gt=0,
-    ).annotate(
-        has_adjusted=Exists(adjusted),
-        candle_source=F("timeframe"),
-    ).filter(
-        Q(timeframe=MarketCandle.ADJUSTED)
-        | Q(timeframe=MarketCandle.AGGREGATE, has_adjusted=False)
     )
     if isinstance(symbol, str):
         queryset = queryset.filter(symbol=symbol)

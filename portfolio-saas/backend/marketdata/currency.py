@@ -28,8 +28,8 @@ Non-monetary conventions that bite just as hard:
   * `MarketCandle.date_time` is stored BOTH bare ("1405-05-09") and suffixed
     ("1405-05-09 00:00:00"). String-compared bounds must allow for both;
     `candle_close_qs` does, ad-hoc readers often do not.
-  * `1d_agg` rows are tick-derived, NOT provider-verbatim, so "provider-verbatim"
-    above holds only for `1d_adj`/`1d_unadj`.
+  * `1d_agg` (tick-derived, NOT provider-verbatim) is retired -- nothing writes
+    it any more; see `portfolio.models.DailyPriceAverage` for the live rollup.
   * A BRS symbol must never appear in marketdata_marketcandle: that table is
     Rial TSE data and BRS quotes are Toman. Guarded by a test in
     tests/test_raw_storage.py.

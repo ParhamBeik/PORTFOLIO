@@ -131,7 +131,7 @@ def test_rejected_record_excludes_returns_panel(asset_catalog):
 def test_stale_live_price_excluded_from_optimization_inputs(asset_catalog):
     """Proves that stale live prices are excluded from returns/optimization inputs."""
     asset = asset_catalog["emami_coin"]
-    
+
     # Seed a stale live price (older than settings.PRICE_STALE_THRESHOLD_SECONDS)
     stale_time = timezone.now() - dt.timedelta(seconds=settings.PRICE_STALE_THRESHOLD_SECONDS + 10)
     p = Price.objects.create(asset=asset, price=Decimal("500000"), source="API")
@@ -150,7 +150,7 @@ def test_stale_live_price_excluded_from_optimization_inputs(asset_catalog):
 def test_fresh_live_price_remains_usable(asset_catalog):
     """Proves that fresh live prices remain usable."""
     asset = asset_catalog["emami_coin"]
-    
+
     # Seed a fresh live price
     fresh_time = timezone.now() - dt.timedelta(minutes=2)
     Price.objects.create(asset=asset, price=Decimal("500000"), fetched_at=fresh_time, source="API")
@@ -162,6 +162,29 @@ def test_fresh_live_price_remains_usable(asset_catalog):
     )
     assert asset.key in panel.columns
     assert not panel[asset.key].isna().all()
+
+
+def test_live_panel_averages_same_day_ticks_instead_of_last(asset_catalog):
+    """A day with several live ticks reports their mean, not just the final one.
+
+    A single stale-looking outlier tick should not define the whole day's price
+    when several other fetches that day landed near the true level.
+    """
+    asset = asset_catalog["emami_coin"]
+    now = timezone.now()
+    for offset_minutes, price in ((10, "100"), (5, "200"), (0, "300")):
+        p = Price.objects.create(asset=asset, price=Decimal(price), source="API")
+        Price.objects.filter(pk=p.pk).update(
+            fetched_at=now - dt.timedelta(minutes=offset_minutes)
+        )
+
+    panel = _load_live_price_panel(
+        cutoff=timezone.now() - dt.timedelta(days=10),
+        as_of=None,
+        keys=[asset.key],
+    )
+    day_value = panel[asset.key].dropna().iloc[-1]
+    assert day_value == pytest.approx(200.0), "expected the mean of 100/200/300, not the last tick (300)"
 
 
 def test_rial_to_toman_conversion():
@@ -313,15 +336,15 @@ def test_stale_prices_label_in_current_valuation(asset_catalog, make_user):
     assert item["quality_status"] == "stale"
 
 
-def test_unadjusted_price_used_when_adjusted_absent(asset_catalog):
-    """Proves unadjusted closes are used when adjusted closes are absent."""
+def test_no_fallback_when_adjusted_absent(asset_catalog):
+    """Proves there is no tick-derived fallback: only ADJUSTED rows are ever picked."""
     symbol = "کاما"
     date_str = "1405-04-31"
 
-    # Write aggregate/unadjusted candle ONLY
+    # A non-ADJUSTED candle for the day must never be picked as a substitute.
     MarketCandle.objects.create(
         symbol=symbol,
-        timeframe=MarketCandle.AGGREGATE,
+        timeframe=MarketCandle.UNADJUSTED,
         date_time=date_str,
         open_price=Decimal("100"),
         high_price=Decimal("100"),
@@ -333,19 +356,17 @@ def test_unadjusted_price_used_when_adjusted_absent(asset_catalog):
     from marketdata.candles import candle_close_qs
     qs = candle_close_qs(symbol)
     candle = qs.filter(date_time=date_str).first()
-    assert candle is not None
-    assert candle.close_price == Decimal("150")
+    assert candle is None
 
 
 def test_invalid_data_blocked_through_fallback(asset_catalog):
-    """Proves unadjusted closes with zero/negative close prices are blocked."""
+    """Proves adjusted closes with zero/negative close prices are blocked."""
     symbol = "کاما"
     date_str = "1405-04-31"
 
-    # Write aggregate/unadjusted candle with zero close price
     MarketCandle.objects.create(
         symbol=symbol,
-        timeframe=MarketCandle.AGGREGATE,
+        timeframe=MarketCandle.ADJUSTED,
         date_time=date_str,
         open_price=Decimal("100"),
         high_price=Decimal("100"),

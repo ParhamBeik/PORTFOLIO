@@ -215,6 +215,44 @@ class Price(models.Model):
         ]
 
 
+class DailyPriceAverage(models.Model):
+    """One averaged live price per asset per calendar day, with its sample size.
+
+    Not a substitute for `Price` (still the freshest tick for current
+    valuation) and not a substitute for marketdata's historical warehouse
+    (still the source of truth for real OHLC history). This is the live
+    domain's own durable daily record -- written nightly by
+    `portfolio.tasks.aggregate_daily_price_averages` from that day's
+    source="API" Price ticks -- for anyone who wants "what was the average
+    live price on day X, from how many observations" without rescanning raw
+    ticks. `portfolio.services.returns._load_live_price_panel` computes its
+    own per-day mean directly from `Price` instead of reading this table, so
+    the returns matrix keeps full historical depth for assets (e.g. crypto)
+    that have no warehouse coverage at all and would otherwise be capped at
+    however far back the nightly rollup has been running.
+    """
+
+    asset = models.ForeignKey(
+        Asset, on_delete=models.CASCADE, related_name="daily_price_averages"
+    )
+    # Jalali YYYY-MM-DD, matching the date keys warehouse tables use.
+    date = models.CharField(max_length=10, db_index=True)
+    avg_price = models.DecimalField(max_digits=20, decimal_places=4)
+    sample_count = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-date"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["asset", "date"], name="uniq_daily_price_average_asset_date"
+            )
+        ]
+        indexes = [
+            models.Index(fields=["asset", "-date"], name="daily_price_avg_asset_date_idx"),
+        ]
+
+
 class ImportBatch(models.Model):
     """Idempotency record for one committed CSV ledger import."""
 

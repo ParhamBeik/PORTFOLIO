@@ -36,7 +36,7 @@ def run_best_overall_snapshots():
 
     universe, _ = get_candidate_universe()
     if len(universe) < 3:
-        logger.warning("[BEST_OVERALL] Candidate universe too small (%d); skipping.", len(universe))
+        logger.warning("Candidate universe too small (%d); skipping.", len(universe))
         return {"ok": False, "reason": "universe_too_small"}
 
     written = []
@@ -54,7 +54,7 @@ def run_best_overall_snapshots():
                 )
             except (UniverseTooSmall, SolverError, MixedUnitUniverseBlocked) as exc:
                 logger.info(
-                    "[BEST_OVERALL] %s/%dd not solvable yet: %s", scenario, window_days, exc
+                    "%s/%dd not solvable yet: %s", scenario, window_days, exc
                 )
                 continue
             snap = OptimizationSnapshot.objects.create(
@@ -65,5 +65,5 @@ def run_best_overall_snapshots():
                 price_version=payload.get("price_version", ""),
             )
             written.append(snap.id)
-    logger.info("[BEST_OVERALL] Wrote %d snapshots.", len(written))
+    logger.info("Wrote %d snapshots.", len(written))
     return {"ok": True, "snapshot_ids": written}

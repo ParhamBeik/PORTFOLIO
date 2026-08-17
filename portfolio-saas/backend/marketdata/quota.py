@@ -116,7 +116,7 @@ def _check_and_record_window(bucket=OTHER):
         except QuotaExhausted:
             raise
         except Exception:
-            logger.warning("[QUOTA] Redis window limiter unavailable for bucket %s.", bucket)
+            logger.warning("redis window limiter unavailable for bucket %s", bucket)
 
     if bucket == ARCHIVE and getattr(settings, "MARKETDATA_REQUIRE_SHARED_WINDOW", True):
         # A per-process window multiplies the real allowance by the number of
@@ -274,8 +274,7 @@ def reconcile_account(account):
         if usage > row.used:
             drift = usage - row.used
             logger.info(
-                "[QUOTA] Reconciled day usage from %d to provider-reported %d "
-                "(%d unattributed request(s)).",
+                "quota reconciled day_usage %d->%d unattributed=%d",
                 row.used,
                 usage,
                 drift,

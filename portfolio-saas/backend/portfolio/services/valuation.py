@@ -68,12 +68,20 @@ def get_latest_prices() -> dict:
     return prices
 
 
-def guard_price_map(prices: dict, *, fill_missing=True) -> dict:
+def guard_price_map(prices: dict, *, fill_missing=True, archive_replacements=None) -> dict:
     """Replace missing or broken live prices with previous prices or archive closes."""
     supplied_keys = set(prices)
     guarded = {key: _q(value) for key, value in prices.items()}
-    
-    # 1. Fetch latest recorded valid prices from DB for comparison
+
+    # 1. The warehouse close is more authoritative than an older live row.
+    replacements = archive_replacements if archive_replacements is not None else _archive_replacements(guarded)
+    guarded.update(
+        replacements if fill_missing else {
+            key: value for key, value in replacements.items() if key in supplied_keys
+        }
+    )
+
+    # 2. Forward-fill only when neither live nor archive data is available.
     latest_db_rows = (
         Price.objects.select_related("asset")
         .filter(asset__is_active=True, price__gt=0)
@@ -89,18 +97,11 @@ def guard_price_map(prices: dict, *, fill_missing=True) -> dict:
         if prev_price and prev_price > 0:
             if live_price <= 0:
                 logger.info(
-                    "[LIVE_PRICE_FORWARD_FILL] Key='%s' missing or zero live price. Forward-filling previous price %s.",
+                    "Key='%s' missing or zero live price. Forward-filling previous price %s.",
                     key, prev_price
                 )
                 guarded[key] = prev_price
 
-    # 3. Apply archive fallback for zero/missing or massive historical deviations.
-    replacements = _archive_replacements(guarded)
-    guarded.update(
-        replacements if fill_missing else {
-            key: value for key, value in replacements.items() if key in supplied_keys
-        }
-    )
     return guarded
 
 
@@ -165,11 +166,11 @@ def _archive_replacements(prices: dict) -> dict:
     for key, archive_price in archive_prices.items():
         live_price = _q(prices.get(key))
         if live_price <= 0:
-            logger.warning("[PRICE_FALLBACK_ARCHIVE] Key='%s' Live=0. Using archive price %s", key, archive_price)
+            logger.warning("Key='%s' Live=0. Using archive price %s", key, archive_price)
             replacements[key] = archive_price
         elif live_price < archive_price * _ARCHIVE_DROP_FLOOR or live_price > archive_price * _ARCHIVE_SPIKE_CEILING:
             logger.warning(
-                "[PRICE_DEVIATION_ARCHIVE] Key='%s' Live=%s Archive=%s outside range [%s, %s]. Using archive price.",
+                "Key='%s' Live=%s Archive=%s outside range [%s, %s]. Using archive price.",
                 key, live_price, archive_price, archive_price * _ARCHIVE_DROP_FLOOR, archive_price * _ARCHIVE_SPIKE_CEILING
             )
             replacements[key] = archive_price

@@ -163,27 +163,6 @@ def test_provider_history_replaces_a_recent_live_aggregate():
     assert row.source == GoldCurrencyHistory.Source.PROVIDER
 
 
-def test_nightly_aggregate_never_overwrites_provider_history():
-    from marketdata.models import GoldCurrencyHistory
-    from marketdata.tasks import aggregate_daily_gold_currency_history
-    from portfolio.models import Asset, Price
-
-    asset = Asset.objects.create(
-        key="provider_coin", name="Provider Coin", asset_class=Asset.AssetClass.GOLD,
-        brs_symbol="IR_COIN_PROVIDER",
-    )
-    Price.objects.create(asset=asset, price=999)
-    GoldCurrencyHistory.objects.create(
-        symbol=asset.brs_symbol,
-        date="1404-03-21",
-        unit="تومان",
-        close_price=105,
-        source=GoldCurrencyHistory.Source.PROVIDER,
-    )
-    aggregate_daily_gold_currency_history("1404-03-21")
-    assert GoldCurrencyHistory.objects.get().close_price == Decimal("105")
-
-
 def test_salvage_repair_preserves_close_and_nulls_only_bad_open(tmp_path):
     from marketdata.models import MarketCandle, RejectedRecord
 
@@ -328,31 +307,6 @@ def test_gold_ingest_still_accepts_declared_foreign_units():
     assert created == 1
     row = GoldCurrencyHistory.objects.get(symbol="XAUUSD_TEST", date="1404-03-21")
     assert row.close_price == Decimal("4310") and row.unit == "دلار"
-
-
-def test_no_brs_symbol_is_ever_written_into_the_rial_candle_table():
-    """MarketCandle is Rial TSE data; BRS gold/FX quotes are Toman.
-
-    A Toman row here makes candle_close_qs(symbol) match for a gold asset, which
-    routes readers down the TSE path and exposes them to tse_close_to_toman()'s
-    divide-by-ten. Guards the aggregate_daily_gold_currency_history regression.
-    """
-    from marketdata.models import GoldCurrencyHistory, MarketCandle
-    from marketdata.tasks import aggregate_daily_gold_currency_history
-    from portfolio.models import Asset, Price
-
-    asset = Asset.objects.create(
-        key="guard_coin", name="Guard Coin", asset_class=Asset.AssetClass.GOLD,
-        brs_symbol="IR_COIN_GUARD",
-    )
-    Price.objects.create(asset=asset, price=Decimal("182500000"))
-
-    aggregate_daily_gold_currency_history("1404-03-21")
-
-    # The Toman series of record is written...
-    assert GoldCurrencyHistory.objects.filter(symbol="IR_COIN_GUARD").exists()
-    # ...but nothing lands in the Rial candle table.
-    assert not MarketCandle.objects.filter(symbol="IR_COIN_GUARD").exists()
 
 
 def test_usd_quoted_keys_are_never_stamped_as_verified_toman():

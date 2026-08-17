@@ -410,7 +410,8 @@ LOGGING = {
         },
         "workflow": {
             "class": "logging.StreamHandler",
-            "formatter": "raw",
+            "formatter": "console",
+            "filters": ["request_id"],
         },
     },
     "root": {"handlers": ["console"], "level": "INFO"},

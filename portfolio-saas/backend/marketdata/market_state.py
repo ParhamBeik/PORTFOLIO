@@ -83,8 +83,8 @@ def remember_provider_state(payload, *, now=None):
     if client is not None:
         try:
             client.set(_STATE_KEY, state, ex=ttl)
-        except Exception:
-            logger.warning("Could not cache market state", exc_info=True)
+        except Exception as exc:
+            logger.warning("could not cache market state: %s", exc)
     return state
 
 
@@ -98,8 +98,8 @@ def claim_provider_state_probe(now=None):
         return True
     try:
         return bool(client.set(_PROBE_KEY, "1", ex=_STATE_TTL_OPEN, nx=True))
-    except Exception:
-        logger.warning("Could not claim market-state probe", exc_info=True)
+    except Exception as exc:
+        logger.warning("could not claim market-state probe: %s", exc)
         return True
 
 
@@ -109,8 +109,8 @@ def release_provider_state_probe():
     if client is not None:
         try:
             client.delete(_PROBE_KEY)
-        except Exception:
-            logger.warning("Could not release market-state probe", exc_info=True)
+        except Exception as exc:
+            logger.warning("could not release market-state probe: %s", exc)
 
 
 def _provider_says_closed():

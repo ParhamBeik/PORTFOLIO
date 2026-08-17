@@ -12,7 +12,7 @@ from django.core.cache import cache
 from django.core.management import call_command
 
 from accounts.models import User
-from marketdata.models import GoldCurrencyHistory
+from marketdata.models import GoldCurrencyHistory, MarketCandle
 from portfolio.models import Account, Price, Snapshot
 
 pytestmark = pytest.mark.django_db
@@ -54,18 +54,30 @@ def test_fetch_dry_run_writes_nothing(asset_catalog, raw_market_sample, monkeypa
     assert Snapshot.objects.count() == 0
 
 
-def test_fetch_kama_falls_back_to_last_price(asset_catalog, monkeypatch):
-    """TSETMC omitting KAMA keeps the stored price without stamping it fresh."""
+def test_fetch_persists_archive_replacement_for_missing_live_price(asset_catalog, monkeypatch):
+    """Any asset can replace a missing live quote with its verified archive close."""
     cache.delete("prices:latest")
-    Price.objects.create(asset=asset_catalog["kama_stock"], price=Decimal("7777"), source="SEED")
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "ARCHIVE_STOCK"
+    stock.save(update_fields=["tse_symbol"])
+    Price.objects.create(asset=stock, price=Decimal("7777"), source="SEED")
+    MarketCandle.objects.create(
+        symbol="ARCHIVE_STOCK",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time="1405-05-26",
+        close_price=Decimal("8888"),
+    )
 
     _patch_fetch(monkeypatch, {"brsapi": {"items": [{"symbol": "USD", "price": 63200}]}, "tsetmc": []})
 
     out = StringIO()
     call_command("fetch_prices", stdout=out)
-    latest = Price.objects.filter(asset__key="kama_stock").order_by("-id").first()
-    assert latest is not None and latest.price == Decimal("7777")
-    assert Price.objects.filter(asset__key="kama_stock").count() == 1
+    latest = Price.objects.filter(asset=stock).order_by("-id").first()
+    assert latest is not None and latest.price == Decimal("8888")
+    assert latest.source == "ARCHIVE"
+
+    call_command("fetch_prices", stdout=StringIO())
+    assert Price.objects.filter(asset=stock).count() == 2
 
 
 def test_fetch_snapshots_use_archive_guard_for_bad_latest_price(asset_catalog, monkeypatch):

@@ -333,53 +333,10 @@ def test_real_estate_correction_appends_reversal_and_replacement(
     assert holding.mortgage_deduction_tomans == 300_000_000
 
 
-def test_daily_aggregate_never_shadows_the_authoritative_adjusted_candle(asset_catalog):
-    """The nightly aggregate and the provider once wrote the same natural key.
-
-    The archive ingests with bulk_create(ignore_conflicts=True), so whatever
-    already occupies (symbol, ADJUSTED, date) is permanent. A tick-derived
-    aggregate parked there silently displaces the provider's real close for
-    that day -- in the one series every valuation and return path reads.
+def test_candle_close_qs_only_returns_adjusted_candles(asset_catalog):
+    """Live-tick-derived AGGREGATE candles are retired; only the provider's
+    ADJUSTED close is ever a valid archive/fallback price.
     """
-    from marketdata.ingest import ingest_candles
-    from marketdata.models import MarketCandle
-    from marketdata.tasks import aggregate_daily_stock_history
-    from portfolio.models import Price
-
-    day = "1403-10-19"
-    symbol = "کاما"
-    asset = Asset.objects.get(key="kama_stock")
-    asset.tse_symbol = symbol
-    asset.save(update_fields=["tse_symbol"])
-
-    # The aggregator runs first, deriving a close from intraday ticks.
-    Price.objects.create(asset=asset, price=Decimal("1000"))
-    aggregate_daily_stock_history(date_str=day)
-
-    # The provider then publishes the real adjusted close for the same day.
-    created, _ = ingest_candles(
-        symbol,
-        3,
-        {
-            "candle_daily_adjusted": [
-                {"date": day, "open": 900, "high": 950, "low": 890, "close": 920, "volume": 5}
-            ]
-        },
-    )
-
-    assert created == 1, "the tick aggregate blocked the provider's candle"
-    authoritative = MarketCandle.objects.get(
-        symbol=symbol, timeframe=MarketCandle.ADJUSTED, date_time=day
-    )
-    # Storage unit is Rial; the candle ingest stores the provider close undivided.
-    assert authoritative.close_price == Decimal("920.0000")
-    assert MarketCandle.objects.filter(
-        symbol=symbol, timeframe=MarketCandle.AGGREGATE, date_time=day
-    ).exists(), "the aggregate must still be recorded, just not in the ADJUSTED slot"
-
-
-def test_valuation_prefers_the_authoritative_candle_over_the_aggregate(asset_catalog):
-    """Both timeframes may hold a day; the provider wins, the aggregate fills gaps."""
     from marketdata.candles import candle_close_qs
     from marketdata.models import MarketCandle
 
@@ -387,29 +344,18 @@ def test_valuation_prefers_the_authoritative_candle_over_the_aggregate(asset_cat
     symbol = "کاما"
     MarketCandle.objects.create(
         symbol=symbol,
-        timeframe=MarketCandle.AGGREGATE,
-        date_time=day,
-        close_price=Decimal("1000"),
-    )
-    MarketCandle.objects.create(
-        symbol=symbol,
         timeframe=MarketCandle.ADJUSTED,
         date_time=day,
         close_price=Decimal("920"),
     )
 
-    def _picked():
-        return (
-            candle_close_qs(symbol, as_of=day)
-            .order_by("-date_time")
-            .first()
-        )
+    picked = candle_close_qs(symbol, as_of=day).order_by("-date_time").first()
+    assert picked.close_price == Decimal("920.0000")
 
-    assert _picked().close_price == Decimal("920.0000")
-
-    # With no provider row for the day, the aggregate is still a usable answer.
+    # With no ADJUSTED row for the day, there is no fallback candle at all --
+    # unlike the retired AGGREGATE mechanism, nothing tick-derived fills the gap.
     MarketCandle.objects.filter(timeframe=MarketCandle.ADJUSTED).delete()
-    assert _picked().close_price == Decimal("1000.0000")
+    assert candle_close_qs(symbol, as_of=day).order_by("-date_time").first() is None
 
 
 def test_factor_ratio_detector_finds_only_material_steps():
@@ -840,27 +786,3 @@ def test_candle_close_qs_adjusted_preference_preserved(asset_catalog):
     assert picked.timeframe == MarketCandle.ADJUSTED
 
 
-def test_candle_close_qs_unadjusted_fallback_preserved(asset_catalog):
-    """F5: unadjusted fallback must still work when no adjusted row exists."""
-    from marketdata.candles import candle_close_qs
-    from marketdata.models import MarketCandle
-    from decimal import Decimal
-
-    symbol = "کاما"
-
-    # Create only aggregate (no adjusted row for this day)
-    MarketCandle.objects.create(
-        symbol=symbol,
-        timeframe=MarketCandle.AGGREGATE,
-        date_time="1405-05-09",
-        close_price=Decimal("500"),
-        open_price=Decimal("500"),
-        high_price=Decimal("500"),
-        low_price=Decimal("500"),
-        volume=100,
-    )
-
-    # Should fall back to aggregate
-    picked = candle_close_qs(symbol, as_of="1405-05-09").order_by("-date_time").first()
-    assert picked.close_price == Decimal("500.0000")
-    assert picked.timeframe == MarketCandle.AGGREGATE

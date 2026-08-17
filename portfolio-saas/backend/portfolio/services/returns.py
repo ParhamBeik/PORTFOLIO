@@ -651,10 +651,15 @@ def _load_price_panel(
 
 
 def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys: list[str]) -> pd.DataFrame:
-    """The original Price-table loader, restricted to the given asset keys and cutoff/as_of."""
+    """The original Price-table loader, restricted to the given asset keys and cutoff/as_of.
+
+    Each day is the mean of that day's ticks, not the last one -- a single
+    stale-looking outlier tick should not define the whole day's price when
+    dozens of other fetches that day landed near the true level.
+    """
     if not keys:
         return pd.DataFrame()
-    
+
     qs = Price.objects.filter(
         asset__is_active=True, asset__key__in=keys, fetched_at__gte=cutoff, price__gt=0
     ).exclude(asset__is_house=True)
@@ -741,10 +746,10 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
             index="fetched_at",
             columns="asset__key",
             values="price",
-            aggfunc="last",
+            aggfunc="mean",
         )
         .resample("1D")
-        .last()
+        .mean()
     )
     panel.index = panel.index.normalize()
     return panel

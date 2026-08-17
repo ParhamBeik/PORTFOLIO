@@ -459,8 +459,6 @@ class TradeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, account_id):
-        import logging
-        logging.getLogger("django").warning(f"DEBUG VIEWS: TradeView request data: {request.data}")
         account = request.user.accounts.filter(pk=account_id).first()
         if account is None:
             return Response({"detail": "Account not found."}, status=status.HTTP_404_NOT_FOUND)

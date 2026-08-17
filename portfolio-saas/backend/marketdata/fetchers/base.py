@@ -127,7 +127,7 @@ def fetch_json(
                     "Provider rate-limited (HTTP 429) after retries.",
                     status_code=429,
                 )
-            logger.info("[QUOTA] HTTP 429; backing off %.1fs.", wait)
+            logger.info("http_429 backing_off=%.1fs", wait)
             time.sleep(wait)
             continue
 

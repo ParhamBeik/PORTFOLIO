@@ -2,6 +2,12 @@
 
 Request paths never COUNT(*) warehouse tables. Row counts come from pg_class
 reltuples; bytes from pg_total_relation_size; history from OperationalMetricSnapshot.
+
+A TimescaleDB hypertable is the exception on both counts: its parent relation is
+an empty shell and the rows live in per-chunk children, so those two lookups
+report 0 rows and ~32 kB for a table holding tens of millions of rows. See
+`_hypertables()` -- partitioned tables are measured with `approximate_row_count`
+and `hypertable_size` instead, which are still estimates rather than COUNT(*).
 """
 from __future__ import annotations
 
@@ -10,7 +16,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Count, Max, Min, Q, Sum
 from django.db.models.functions import TruncDate
 from django.utils import timezone
@@ -68,19 +74,65 @@ def _iso(value):
     return value
 
 
+def _hypertables():
+    """Names of tables that are TimescaleDB hypertables, or an empty set.
+
+    A hypertable's parent relation holds NO rows and almost no bytes: the data
+    lives in per-chunk child tables under _timescaledb_internal. So `reltuples`
+    and `pg_total_relation_size` on the parent -- which is what this module used
+    to read for every table -- report 0 rows and ~32 kB for a table holding 41.6M
+    rows and 2.8 GB. The Ops page showed exactly that after the tick table was
+    partitioned: the data was intact, the measurement was looking in the wrong
+    place.
+    """
+    cache_key = "admin_hypertable_names"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return set(cached)
+    names = set()
+    try:
+        # A savepoint, not a bare cursor: on plain Postgres (no timescaledb
+        # extension) this SELECT fails, and an unguarded failure inside an
+        # outer atomic block (e.g. a test's transaction) poisons every query
+        # after it with InFailedSqlTransaction, not just this one. atomic()
+        # rolls back to the savepoint on error, containing the damage here.
+        with transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT hypertable_name FROM timescaledb_information.hypertables"
+                )
+                names = {row[0] for row in cursor.fetchall()}
+    except Exception:
+        # No timescaledb extension here (plain Postgres, CI): every table is a
+        # normal relation and the plain lookups below are already correct.
+        names = set()
+    cache.set(cache_key, sorted(names), 300)
+    return names
+
+
 def get_cached_db_counts():
     cached = cache.get("db_counts_diagnostics")
     if cached is not None:
         return cached
 
+    hypertables = _hypertables()
     counts = {}
     with connection.cursor() as cursor:
         for key, (_label, model) in DATABASE_MODELS.items():
             table_name = model._meta.db_table
             try:
-                cursor.execute("SELECT reltuples FROM pg_class WHERE relname = %s", [table_name])
+                if table_name in hypertables:
+                    # Timescale's own estimator walks the chunks. Summing chunk
+                    # reltuples by hand is NOT equivalent: a compressed chunk
+                    # reports its compressed row count, which undercounts by
+                    # roughly the compression ratio (9.6M vs the real 41.6M here).
+                    cursor.execute("SELECT approximate_row_count(%s)", [table_name])
+                else:
+                    cursor.execute(
+                        "SELECT reltuples FROM pg_class WHERE relname = %s", [table_name]
+                    )
                 row = cursor.fetchone()
-                counts[key] = int(row[0]) if row and row[0] >= 0 else model.objects.count()
+                counts[key] = int(row[0]) if row and row[0] is not None and row[0] >= 0 else model.objects.count()
             except Exception:
                 counts[key] = model.objects.count()
 
@@ -93,12 +145,18 @@ def get_cached_table_bytes():
     if cached is not None:
         return cached
 
+    hypertables = _hypertables()
     sizes = {}
     with connection.cursor() as cursor:
         for key, (_label, model) in DATABASE_MODELS.items():
             table_name = model._meta.db_table
             try:
-                cursor.execute("SELECT pg_total_relation_size(%s)", [table_name])
+                if table_name in hypertables:
+                    # Includes every chunk plus its indexes; the parent alone is
+                    # an empty shell.
+                    cursor.execute("SELECT hypertable_size(%s)", [table_name])
+                else:
+                    cursor.execute("SELECT pg_total_relation_size(%s)", [table_name])
                 row = cursor.fetchone()
                 sizes[key] = int(row[0]) if row and row[0] is not None else 0
             except Exception:

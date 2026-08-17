@@ -17,9 +17,9 @@ from celery import shared_task
 from django.db import transaction
 
 from accounts.models import User
-from portfolio.models import Asset, Price, Snapshot
+from portfolio.models import Asset, DailyPriceAverage, Price, Snapshot
 from portfolio.services import asset_value, invalidate_prices_cache
-from portfolio.services.valuation import guard_price_map
+from portfolio.services.valuation import _archive_replacements, guard_price_map
 from portfolio.live.extractor import extract_standard_prices
 from portfolio.live.fetcher import api_settings_from_django, fetch_all_markets
 from portfolio.live.redis_client import get_redis
@@ -50,6 +50,19 @@ def _overlay_usdt_irt_from_warehouse(prices: dict) -> dict:
     return prices
 
 
+def _persistable_prices(live_prices, resolved_prices, archive_replacements):
+    """Return fresh provider/archive observations, excluding forward-filled values."""
+    priced = {
+        key: value
+        for key, value in resolved_prices.items()
+        if value > 0 and (Decimal(str(live_prices[key])) > 0 or key in archive_replacements)
+    }
+    return priced, {
+        key: "ARCHIVE" if key in archive_replacements else "API"
+        for key in priced
+    }
+
+
 def run_price_fetch(*, dry_run=False):
     """Fetch and persist the latest price map.
 
@@ -75,31 +88,28 @@ def run_price_fetch(*, dry_run=False):
         active_keys = set(
             Asset.objects.filter(is_active=True, is_house=False).values_list("key", flat=True)
         )
-        priced = guard_price_map({
-            key: value
-            for key, value in prices.items()
-            if key in active_keys and float(value) > 0
-        }, fill_missing=False)
-        snapshot_prices = guard_price_map({
+        live_prices = {
             key: prices.get(key, 0)
             for key in active_keys
-        })
+        }
+        archive_replacements = _archive_replacements(live_prices)
+        resolved_prices = guard_price_map(
+            live_prices, archive_replacements=archive_replacements
+        )
+        # Persist provider prices and verified archive replacements. Do not stamp
+        # a forward-filled prior price as if it were a fresh market observation.
+        priced, sources = _persistable_prices(
+            live_prices, resolved_prices, archive_replacements
+        )
+        snapshot_prices = resolved_prices
         public_priced = {key: float(value) for key, value in priced.items()}
 
         written = False
         if priced and not dry_run:
             with transaction.atomic():
-                _write_prices(priced)
+                _write_prices(priced, sources=sources)
                 _write_snapshots(snapshot_prices)
             invalidate_prices_cache()
-
-            # Continuous organic history: save live bulk payloads to historical tables
-            from marketdata import ingest
-            try:
-                if raw.get("brsapi"):
-                    ingest.ingest_gold_currency_history(raw["brsapi"])
-            except Exception as exc:
-                logger.error("[LIVE_INGEST_HISTORICAL_ERROR] Error ingesting bulk live data: %s", exc)
 
             # LAZY import: avoids a circular `portfolio.tasks -> portfolio.services.returns ->
             # portfolio.models` chain at module load. Outside the transaction on
@@ -119,14 +129,25 @@ def run_price_fetch(*, dry_run=False):
             )
 
 
-def _write_prices(priced: dict) -> None:
+def _write_prices(priced: dict, *, sources: dict | None = None) -> None:
+    sources = sources or {}
     assets = {
         a.key: a
         for a in Asset.objects.filter(key__in=priced.keys(), is_active=True)
     }
+    latest_prices = {
+        row.asset.key: Decimal(str(row.price))
+        for row in Price.objects.select_related("asset")
+        .filter(asset__key__in=priced.keys(), price__gt=0)
+        .order_by("asset_id", "-fetched_at", "-id")
+        .distinct("asset_id")
+    }
     rows = []
     for key, value in priced.items():
         if key not in assets:
+            continue
+        source = sources.get(key, "API")
+        if source == "ARCHIVE" and latest_prices.get(key) == value:
             continue
         asset = assets[key]
         # BRS gold/FX and manuals are Toman. TSE stocks are stored as **Rial**
@@ -150,7 +171,7 @@ def _write_prices(priced: dict) -> None:
             Price(
                 asset=asset,
                 price=value,
-                source="API",
+                source=source,
                 price_unit=unit,
                 price_unit_verified=verified,
             )
@@ -325,6 +346,43 @@ def fetch_and_publish():
         metadata={"market_state": state, "written": result["written"]},
     )
     return result
+
+
+@shared_task(ignore_result=True)
+def aggregate_daily_price_averages(date_str: str | None = None):
+    """Roll today's live Price ticks into one DailyPriceAverage row per asset.
+
+    Only averages source="API" ticks -- ARCHIVE-tagged rows (guard_price_map's
+    fallback-to-warehouse writes, see _persistable_prices) are not a live
+    observation and must not inflate sample_count or skew the average.
+    """
+    import jdatetime
+    from datetime import timedelta
+    from django.db.models import Avg, Count
+    from django.utils import timezone
+    from marketdata.models import WorkflowRun
+    from marketdata.workflows import WorkflowOutcome
+
+    outcome = WorkflowOutcome(
+        "aggregate_daily_price_averages", destination_table="DailyPriceAverage"
+    )
+    today_jalali = date_str or jdatetime.date.today().strftime("%Y-%m-%d")
+    since = timezone.now() - timedelta(hours=24)
+
+    written = 0
+    for asset in Asset.objects.filter(is_active=True, is_house=False):
+        stats = Price.objects.filter(
+            asset=asset, source="API", fetched_at__gte=since,
+        ).aggregate(avg=Avg("price"), n=Count("id"))
+        if not stats["n"]:
+            continue
+        DailyPriceAverage.objects.update_or_create(
+            asset=asset, date=today_jalali,
+            defaults={"avg_price": stats["avg"], "sample_count": stats["n"]},
+        )
+        written += 1
+    outcome.finish(WorkflowRun.Outcome.SUCCESS, rows_accepted=written)
+    return written
 
 
 # -----------------------------------------------------------------------------
