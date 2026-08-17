@@ -96,21 +96,48 @@ def extract_codal_report(announcement_id):
 
 @shared_task
 def queue_codal_extractions():
-    """Fan out a bounded batch so document work never occupies archive workers."""
+    """Fan out a bounded batch so document work never occupies archive workers.
+
+    Picks up never-attempted announcements AND stranded ones. The original
+    filter was `report__isnull=True`, which meant a report that died mid-flight
+    could never be retried: `extract` sets status=FETCHING before the download,
+    so a worker restart, a hung socket or an unreachable provider left the row
+    in FETCHING permanently and the next run skipped it for having a report at
+    all. Production had 630 rows stuck in FETCHING for eight days, plus 912 in
+    blocked_network, none of them reachable again.
+
+    UNSUPPORTED and PARSED are terminal on purpose -- a missing artifact URL or a
+    successful extraction should not be retried every night.
+    """
     from django.db.models import Q
 
     from .models import CodalAnnouncement, CodalReport
 
+    has_artifact = (
+        Q(link_excel__gt="")
+        | Q(link_pdf__gt="")
+        | Q(link__gt="")
+        | Q(link_attachment__gt="")
+    )
+    limit = settings.CODAL_EXTRACT_BATCH_SIZE
+
+    # A FETCHING row younger than this may still be in flight on a live worker.
+    stale_before = timezone.now() - timedelta(
+        seconds=settings.CODAL_FETCHING_STALE_SECONDS
+    )
+    retryable = (
+        Q(report__status=CodalReport.Status.FETCHING, report__updated_at__lt=stale_before)
+        | Q(report__status__in=(
+            CodalReport.Status.BLOCKED_NETWORK,
+            CodalReport.Status.BLOCKED_STORAGE,
+            CodalReport.Status.FAILED,
+        ))
+    )
     ids = list(
-        CodalAnnouncement.objects.filter(report__isnull=True)
-        .filter(
-            Q(link_excel__gt="")
-            | Q(link_pdf__gt="")
-            | Q(link__gt="")
-            | Q(link_attachment__gt="")
-        )
+        CodalAnnouncement.objects.filter(has_artifact)
+        .filter(Q(report__isnull=True) | retryable)
         .order_by("-date_publish", "-time_publish")
-        .values_list("id", flat=True)[:settings.CODAL_EXTRACT_BATCH_SIZE]
+        .values_list("id", flat=True)[:limit]
     )
     for announcement_id in ids:
         extract_codal_report.delay(announcement_id)

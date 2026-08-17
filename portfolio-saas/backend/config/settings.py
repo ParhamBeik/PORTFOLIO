@@ -268,6 +268,10 @@ MARKETDATA_CODAL_MAX_PAGES = int(os.getenv("MARKETDATA_CODAL_MAX_PAGES", "5"))
 MONGO_URI = os.getenv("MONGO_URI", "")
 MONGO_DATABASE = os.getenv("MONGO_DATABASE", "portfolio")
 CODAL_EXTRACT_BATCH_SIZE = int(os.getenv("CODAL_EXTRACT_BATCH_SIZE", "20"))
+# A Codal report sits in FETCHING while its artifact downloads. Past this age it
+# is not in flight, it is stranded -- a dead worker or a hung socket -- and is
+# eligible to be queued again.
+CODAL_FETCHING_STALE_SECONDS = int(os.getenv("CODAL_FETCHING_STALE_SECONDS", "1800"))
 
 WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "30"))
 
