@@ -1188,6 +1188,31 @@ class MyOptimalView(APIView):
 
     WINDOWS = (("1Y", 365), ("3Y", 1095), ("5Y", 1825), ("Lifetime", None))
 
+    # ~40 `optimize()` solves per request (4 windows x up to 6 scenarios plus
+    # diagnostics) is expensive enough to time out the request under a single
+    # worker (see docker-compose.yml comment). Cache the whole response body
+    # per (user, account, basis); the key rotates on any price update via
+    # `_price_version_fingerprint()` and on any trade/holding edit via the
+    # ledger/holding fingerprint below, so a cache hit can never serve a
+    # result computed from stale weights or stale prices.
+    CACHE_TTL = 300
+
+    @staticmethod
+    def _cache_key(user, account, basis):
+        from django.core.cache import cache as _cache  # local import mirrors module style
+        from .services.returns import _price_version_fingerprint
+
+        ledger_q = LedgerEntry.objects.filter(account__user=user)
+        holding_q = Holding.objects.filter(account__user=user)
+        if account is not None:
+            ledger_q = ledger_q.filter(account=account)
+            holding_q = holding_q.filter(account=account)
+        max_ledger_id = ledger_q.order_by("-id").values_list("id", flat=True).first() or 0
+        max_holding_id = holding_q.order_by("-id").values_list("id", flat=True).first() or 0
+        fingerprint = f"{_price_version_fingerprint()}:{max_ledger_id}:{max_holding_id}"
+        account_key = account.id if account is not None else "all"
+        return f"my_optimal:{user.id}:{account_key}:{basis}:{fingerprint}", _cache
+
     def get(self, request):
         from .services.deflator import CpiUnavailable, normalize_basis
         from .services.returns import get_universe_by_mode
@@ -1216,6 +1241,11 @@ class MyOptimalView(APIView):
             requested_basis = normalize_basis(requested_basis)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=400)
+
+        cache_key, cache = self._cache_key(request.user, account, requested_basis)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
 
         def _solve(scenario, window_days, basis):
             """One scenario, degrading the basis rather than the answer.
@@ -1288,7 +1318,9 @@ class MyOptimalView(APIView):
                     )
             entry["status"] = "ok"
             windows.append(entry)
-        return Response({"windows": windows, "basis_requested": requested_basis})
+        body = {"windows": windows, "basis_requested": requested_basis}
+        cache.set(cache_key, body, self.CACHE_TTL)
+        return Response(body)
 
 
 class RobustnessView(APIView):
