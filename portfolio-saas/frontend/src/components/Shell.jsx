@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { logoutSession } from "../api.js";
 import Logo from "./Logo.jsx";
@@ -21,12 +22,25 @@ const BASES = [
   ["usdt_denominated", "USDT"],
 ];
 
-function NavItem({ to, end, testId, children }) {
+function MenuIcon({ open }) {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      {open ? (
+        <path d="M5 5l10 10M15 5L5 15" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+      ) : (
+        <path d="M3 6h14M3 10h14M3 14h14" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+      )}
+    </svg>
+  );
+}
+
+function NavItem({ to, end, testId, children, onClick }) {
   return (
     <NavLink
       to={to}
       end={end}
       data-testid={testId}
+      onClick={onClick}
       className={({ isActive }) => `app-nav-link${isActive ? " is-active" : ""}`}
     >
       {children}
@@ -36,6 +50,7 @@ function NavItem({ to, end, testId, children }) {
 
 export default function Shell({ user, onLogout }) {
   const { accounts, activeId, setActive, basis, setBasis, error, reload } = usePortfolio();
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   const doLogout = async () => {
     await logoutSession();
@@ -43,6 +58,7 @@ export default function Shell({ user, onLogout }) {
   };
 
   const initial = (user?.email || "?").charAt(0).toUpperCase();
+  const closeMobile = () => setMobileOpen(false);
 
   return (
     <div className="flex min-h-full flex-col">
@@ -70,24 +86,31 @@ export default function Shell({ user, onLogout }) {
             </span>
           </NavLink>
 
-          <nav aria-label="Primary" className="app-nav-rail" data-testid="nav">
-            {PAGES.map((p) => (
-              <NavItem
-                key={p.to}
-                to={p.to}
-                end={p.end}
-                testId={`nav-${p.label.toLowerCase().replace(/\s+/g, "-")}`}
-              >
-                {p.label}
-              </NavItem>
-            ))}
-            {user?.is_staff && (
-              <NavItem to="/ops" testId="nav-ops">Ops</NavItem>
-            )}
-          </nav>
+          {/* Below `lg` this row wraps to a new line only when opened — the nav
+              rail and toolbar are wide enough (6 tabs + 2 selects) that showing
+              them inline always eats most of the viewport on a phone. */}
+          <div
+            id="app-nav-panel"
+            className={`${mobileOpen ? "flex" : "hidden"} w-full flex-col gap-3 lg:contents`}
+          >
+            <nav aria-label="Primary" className="app-nav-rail" data-testid="nav">
+              {PAGES.map((p) => (
+                <NavItem
+                  key={p.to}
+                  to={p.to}
+                  end={p.end}
+                  testId={`nav-${p.label.toLowerCase().replace(/\s+/g, "-")}`}
+                  onClick={closeMobile}
+                >
+                  {p.label}
+                </NavItem>
+              ))}
+              {user?.is_staff && (
+                <NavItem to="/ops" testId="nav-ops" onClick={closeMobile}>Ops</NavItem>
+              )}
+            </nav>
 
-          <div className="ml-auto flex flex-wrap items-center gap-2 sm:gap-3">
-            <div className="app-toolbar" data-testid="header-toolbar">
+            <div className="app-toolbar lg:ml-auto" data-testid="header-toolbar">
               <label className="app-toolbar-label">
                 <span className="app-toolbar-caption">Portfolio</span>
                 <Select
@@ -123,6 +146,13 @@ export default function Shell({ user, onLogout }) {
               </label>
             </div>
 
+            <div className="app-user-chip flex md:hidden" data-testid="user-email-mobile">
+              <span className="app-user-avatar" aria-hidden="true">{initial}</span>
+              <span className="max-w-[11rem] truncate text-sm text-muted">{user.email}</span>
+            </div>
+          </div>
+
+          <div className="ml-auto flex items-center gap-2 sm:gap-3">
             <div className="app-user-chip hidden md:flex" data-testid="user-email">
               <span className="app-user-avatar" aria-hidden="true">{initial}</span>
               <span className="max-w-[11rem] truncate text-sm text-muted">{user.email}</span>
@@ -131,6 +161,18 @@ export default function Shell({ user, onLogout }) {
             <Button variant="ghost" className="app-header-btn" onClick={doLogout} data-testid="logout">
               Log out
             </Button>
+
+            <button
+              type="button"
+              className="app-header-btn inline-flex items-center justify-center rounded-md border border-border bg-panel-2 p-2 text-text lg:hidden"
+              aria-label={mobileOpen ? "Close menu" : "Open menu"}
+              aria-expanded={mobileOpen}
+              aria-controls="app-nav-panel"
+              data-testid="nav-toggle"
+              onClick={() => setMobileOpen((v) => !v)}
+            >
+              <MenuIcon open={mobileOpen} />
+            </button>
           </div>
         </div>
       </header>
