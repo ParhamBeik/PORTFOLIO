@@ -644,7 +644,6 @@ def test_ingest_real_legal_rejection_uses_distinct_endpoint():
     DailyStockHistory.objects.update_or_create(
         symbol=symbol,
         date="1403-01-01",
-        is_adjusted=False,
         defaults={"pc": 1000, "pl": 1000, "pmin": 990, "pmax": 1010, "tvol": 100000, "tval": 100000000},
     )
 
@@ -663,7 +662,7 @@ def test_ingest_real_legal_rejection_uses_distinct_endpoint():
     assert not stock_rejections.exists(), "real/legal rejection must not be recorded as a price rejection"
 
     # The price row should still exist and be accessible
-    price = DailyStockHistory.objects.get(symbol=symbol, date="1403-01-01", is_adjusted=False)
+    price = DailyStockHistory.objects.get(symbol=symbol, date="1403-01-01")
     assert price.pc == 1000
 
 

@@ -136,7 +136,7 @@ def _series_span(symbols: list[str]) -> dict:
     candles = MarketCandle.objects.filter(symbol__in=symbols, timeframe=MarketCandle.ADJUSTED).aggregate(
         first=Min("date_time"), last=Max("date_time"), n=Count("id")
     )
-    history = DailyStockHistory.objects.filter(symbol__in=symbols, is_adjusted=False).aggregate(
+    history = DailyStockHistory.objects.filter(symbol__in=symbols).aggregate(
         first=Min("date"), last=Max("date"), n=Count("id")
     )
     gold = GoldCurrencyHistory.objects.filter(symbol__in=symbols).aggregate(

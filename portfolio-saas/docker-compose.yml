@@ -28,6 +28,12 @@ x-backend-env: &backend-env
   TSETMC_URL: ${TSETMC_URL:-https://Api.BrsApi.ir/Tsetmc/AllSymbols.php}
   MONGO_URI: ${MONGO_URI:-mongodb://mongo:27017}
   MONGO_DATABASE: ${MONGO_DATABASE:-portfolio}
+  CODAL_S3_ENDPOINT_URL: ${CODAL_S3_ENDPOINT_URL:-http://minio:9000}
+  CODAL_S3_BUCKET: ${CODAL_S3_BUCKET:-codal-artifacts}
+  CODAL_S3_ACCESS_KEY: ${CODAL_S3_ACCESS_KEY:-codal}
+  CODAL_S3_SECRET_KEY: ${CODAL_S3_SECRET_KEY:-codal-secret-change-me}
+  CODAL_S3_REGION: ${CODAL_S3_REGION:-us-east-1}
+  CODAL_HTTP_PROXY: ${CODAL_HTTP_PROXY:-}
 
 x-json-logging: &json-logging
   driver: json-file
@@ -112,6 +118,22 @@ services:
         limits:
           cpus: "0.5"
           memory: 1280m
+
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    restart: unless-stopped
+    logging: *json-logging
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${CODAL_S3_ACCESS_KEY:-codal}
+      MINIO_ROOT_PASSWORD: ${CODAL_S3_SECRET_KEY:-codal-secret-change-me}
+    volumes:
+      - codaldata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   migrate:
     build: ./backend
@@ -236,6 +258,8 @@ services:
         condition: service_started
       mongo:
         condition: service_healthy
+      minio:
+        condition: service_healthy
     environment:
       <<: *backend-env
       SERVICE_NAME: celery_worker_codal
@@ -302,3 +326,4 @@ services:
 volumes:
   pgdata:
   mongodata:
+  codaldata:

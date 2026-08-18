@@ -25,8 +25,9 @@ openpyxl==3.1.5
 beautifulsoup4==4.12.3
 lxml==5.3.0
 pypdf==5.1.0
-# Codal document *extraction* (Excel/PDF/OCR parsing) is deferred: the ingest path
-# stores BrsApi's announcement fields only. openpyxl / beautifulsoup4 / lxml /
-# pypdf / pytesseract / Pillow were dropped when the pipeline was removed — re-add
-# them here when extraction returns rather than carrying unused wheels (and a
-# system tesseract binary) in every image build.
+boto3==1.35.36
+# openpyxl / beautifulsoup4 / lxml / pypdf: Codal Excel/HTML/PDF text extraction
+# (marketdata/codal_extract.py, codal_parsers.py). boto3: S3/MinIO-backed
+# artifact storage (marketdata/codal_storage.py). pytesseract / Pillow (OCR for
+# scanned PDFs) are deliberately still not added — re-add with a system
+# tesseract binary when OCR support returns.

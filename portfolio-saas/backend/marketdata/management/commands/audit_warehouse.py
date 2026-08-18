@@ -91,7 +91,8 @@ class Command(BaseCommand):
         parser.add_argument(
             "--check", action="append",
             help="Run only named checks (repeatable): units, crosstable, gold, "
-                 "collision, candletable, salvage, dates, ledger, census",
+                 "collision, candletable, salvage, dates, ledger, "
+                 "rejections, retiredaggregate, census",
         )
 
     def handle(self, *args, **opts):
@@ -106,6 +107,8 @@ class Command(BaseCommand):
             ("salvage", self.check_salvageable_rejections),
             ("dates", self.check_date_conformance),
             ("ledger", self.check_ledger_drift),
+            ("rejections", self.check_rejection_backlog),
+            ("retiredaggregate", self.check_retired_aggregate_rows),
             ("census", self.census),
         ):
             if only and name not in only:
@@ -572,6 +575,57 @@ class Command(BaseCommand):
                 "date": "", "value": r["amt"], "verdict": "suspect",
                 "evidence": "approaching Decimal(20,4) ceiling; siblings are (24,4)",
             })
+        return out
+
+    def check_rejection_backlog(self):
+        """Census of `RejectedRecord` by (endpoint, reason): the full backlog
+        `check_salvageable_rejections` only samples the candle/history slice
+        of. A count concentrated in one (endpoint, reason) pair points at a
+        validator bug worth fixing once; a flat spread across many reasons
+        looks more like genuinely bad provider rows.
+        """
+        rows = _rows(
+            "SELECT endpoint, reason, count(*) n, sum(occurrences) total_occurrences "
+            "FROM marketdata_rejectedrecord GROUP BY endpoint, reason "
+            "ORDER BY n DESC LIMIT 50"
+        )
+        return [{
+            "check": "rejections", "table": "marketdata_rejectedrecord",
+            "symbol": "", "date": "", "value": r["n"],
+            "verdict": "rejection_backlog",
+            "evidence": (
+                f"endpoint={r['endpoint']} reason={r['reason']} "
+                f"distinct_keys={r['n']} total_occurrences={r['total_occurrences']}"
+            ),
+        } for r in rows]
+
+    def check_retired_aggregate_rows(self):
+        """Confirm migration 0038 (AGGREGATE-row deletion) actually landed.
+
+        `MarketCandle.AGGREGATE` ('1d_agg') and
+        `GoldCurrencyHistory.Source.AGGREGATE` ('aggregate') are retired: the
+        new live->historical mechanism (MarketSnapshot/MarketDailyBar, see
+        marketdata.ingest.aggregate_market_daily_bars) must never overlap with
+        rows the old mechanism left behind. A non-zero count here means 0038
+        did not fully apply, or something re-wrote AGGREGATE rows since.
+        """
+        out = []
+        candle_n = _rows(
+            "SELECT count(*) n FROM marketdata_marketcandle WHERE timeframe='1d_agg'"
+        )[0]["n"]
+        gold_n = _rows(
+            "SELECT count(*) n FROM marketdata_goldcurrencyhistory WHERE source='aggregate'"
+        )[0]["n"]
+        for table, n, evidence in (
+            ("marketdata_marketcandle", candle_n, "timeframe='1d_agg' rows remain"),
+            ("marketdata_goldcurrencyhistory", gold_n, "source='aggregate' rows remain"),
+        ):
+            if n:
+                out.append({
+                    "check": "retiredaggregate", "table": table, "symbol": "",
+                    "date": "", "value": n, "verdict": "migration_incomplete",
+                    "evidence": f"{n} {evidence}; migration 0038 did not fully apply",
+                })
         return out
 
     def census(self):

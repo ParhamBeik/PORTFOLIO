@@ -29,7 +29,7 @@ from .archive import (
     claim_recent_refresh,
     ensure_archive_states,
     run_archive_state as process_archive_state,
-    promote_priority_tick_windows,
+    grow_tick_windows,
 )
 from .catalog import sync_provider_catalog
 from .fetchers import (
@@ -39,42 +39,137 @@ from .fetchers import (
 
 @shared_task
 def capture_derivative_snapshots():
-    """Collect live contracts now; analytics waits for real accumulated history."""
+    """Collect live contracts now; analytics waits for real accumulated history.
+
+    Each kind is its own provider endpoint and its own failure domain: one
+    endpoint timing out must not mask or abort the others' results. Before
+    this split, `ime_futures`/`ime_options` (evaluated after `tse_option`)
+    repeatedly timed out and re-raised, so `tse_option`'s already-ingested
+    rows were the only ones ever reflected in the ledger and the ime kinds
+    never got an independent success/failure signal of their own.
+    """
     from .fetchers import fetch_derivatives
 
-    outcome = _ledgered(
-        "capture_derivative_snapshots", destination_table="DerivativeSnapshot"
-    )
     results = {}
-    created = 0
-    try:
-        for kind, endpoint_key in (
-            ("tse_option", "option_contracts"),
-            ("ime_future", "ime_futures"),
-            ("ime_option", "ime_options"),
-        ):
+    for kind, endpoint_key in (
+        ("tse_option", "option_contracts"),
+        ("ime_future", "ime_futures"),
+        ("ime_option", "ime_options"),
+    ):
+        outcome = _ledgered(
+            f"capture_derivative_snapshots:{kind}",
+            endpoint=endpoint_key,
+            destination_table="DerivativeSnapshot",
+        )
+        try:
             payload = fetch_derivatives(settings.TSETMC_API_KEY, endpoint_key)
-            results[kind] = ingest.ingest_derivative_snapshots(kind, payload)
-            created += (results[kind] or (0, 0))[0]
-    except Exception as err:
-        _finish_fail(outcome, err)
-        raise
-    _finish_ok(outcome, rows_created=created, metadata=results)
+            created, rejected = ingest.ingest_derivative_snapshots(kind, payload) or (0, 0)
+            results[kind] = (created, rejected)
+            _finish_ok(outcome, rows_created=created, rows_rejected=rejected)
+        except Exception as err:
+            results[kind] = err
+            _finish_fail(outcome, err)
     return results
 
 
 @shared_task
+def capture_market_snapshots():
+    """Poll the three live endpoints that are registered but never called:
+    crypto, commodity, ETF NAV. Each returns its whole universe in one
+    request, so this doubles as catalog discovery and price capture.
+
+    Same failure-domain-per-endpoint shape as `capture_derivative_snapshots`.
+    `Market/*` paths (crypto, commodity) use `BRS_API_KEY`; `Tsetmc/*` paths
+    (etf_nav) use `TSETMC_API_KEY` -- same split the existing gold/currency
+    vs. index/option fetchers already follow.
+    """
+    from .fetchers import fetch_derivatives
+
+    results = {}
+    for asset_class, endpoint_key, api_key in (
+        ("crypto", "crypto", settings.BRS_API_KEY),
+        ("commodity", "commodity", settings.BRS_API_KEY),
+        ("etf_nav", "etf_nav", settings.TSETMC_API_KEY),
+    ):
+        outcome = _ledgered(
+            f"capture_market_snapshots:{asset_class}",
+            endpoint=endpoint_key,
+            destination_table="MarketSnapshot",
+        )
+        try:
+            payload = fetch_derivatives(api_key, endpoint_key)
+            created, skipped = ingest.ingest_market_snapshots(asset_class, payload) or (0, 0)
+            results[asset_class] = (created, skipped)
+            _finish_ok(outcome, rows_created=created, rows_rejected=skipped)
+        except Exception as err:
+            results[asset_class] = err
+            _finish_fail(outcome, err)
+    return results
+
+
+@shared_task(ignore_result=True)
+def aggregate_market_daily_bars_task(jalali_date=None):
+    """Distill today's live snapshots into `MarketDailyBar` OHLC rows -- one
+    call per asset class covered by the unified live->historical mechanism.
+    `MarketDailyBar`'s own row-existence is the completeness signal for these
+    classes, so this must run once per day, after the day's snapshots exist.
+    """
+    target_date = jalali_date or jalali.today()
+    results = {}
+    for asset_class in (
+        "crypto", "commodity", "etf_nav", "index",
+        "tse_option", "ime_future", "ime_option",
+    ):
+        outcome = _ledgered(
+            f"aggregate_market_daily_bars:{asset_class}",
+            endpoint=asset_class,
+            destination_table="MarketDailyBar",
+        )
+        try:
+            created, skipped = ingest.aggregate_market_daily_bars(asset_class, target_date)
+            results[asset_class] = (created, skipped)
+            _finish_ok(outcome, rows_created=created, rows_rejected=skipped)
+        except Exception as err:
+            results[asset_class] = err
+            _finish_fail(outcome, err)
+    return results
+
+
+#: CodalReport.status -> the WorkflowRun outcome that best describes it, so
+#: the ops dashboard's blocked_network/blocked_storage rates (admin_telemetry
+#: ._codal_status) reflect what actually happened instead of a blanket
+#: SUCCESS/FAILED. See codal_pipeline.py's module docstring for the retry
+#: policy each status implies.
+_CODAL_STATUS_OUTCOME = {}
+
+
+def _codal_status_outcome():
+    if not _CODAL_STATUS_OUTCOME:
+        from .models import CodalReport, WorkflowRun
+
+        _CODAL_STATUS_OUTCOME.update({
+            CodalReport.Status.PARSED: WorkflowRun.Outcome.SUCCESS,
+            CodalReport.Status.NEEDS_REVIEW: WorkflowRun.Outcome.PARTIAL,
+            CodalReport.Status.BLOCKED_NETWORK: WorkflowRun.Outcome.BLOCKED_NETWORK,
+            CodalReport.Status.BLOCKED_STORAGE: WorkflowRun.Outcome.BLOCKED_STORAGE,
+            CodalReport.Status.FAILED: WorkflowRun.Outcome.RETRY,
+            CodalReport.Status.UNSUPPORTED: WorkflowRun.Outcome.SKIPPED,
+        })
+    return _CODAL_STATUS_OUTCOME
+
+
+@shared_task
 def extract_codal_report(announcement_id):
-    from .codal_extract import extract
-    from .models import CodalReport, WorkflowRun
+    from .codal_pipeline import extract_report
+    from .models import WorkflowRun
 
     outcome = _ledgered(
         "extract_codal_report",
         endpoint="codal_announcements",
-        destination_table="mongo:codal_documents",
+        destination_table="s3:codal-artifacts",
     )
     try:
-        result = extract(announcement_id)
+        report, result = extract_report(announcement_id)
     except QuotaExhausted as err:
         # Not a failure: the day's provider budget is spent and the next run
         # picks this up. Recording it as FAILED would make a healthy backlog
@@ -86,9 +181,9 @@ def extract_codal_report(announcement_id):
     except Exception as err:
         _finish_fail(outcome, err)
         raise
-    _finish_ok(
-        outcome,
-        rows_created=1 if result.get("status") == CodalReport.Status.PARSED else 0,
+    outcome.finish(
+        _codal_status_outcome().get(report.status, WorkflowRun.Outcome.PARTIAL),
+        rows_created=result.get("fact_count", 0),
         metadata=result,
     )
     return result
@@ -493,7 +588,7 @@ def archive_tick():
             return
         if not ArchiveFetchState.objects.exists():
             ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
-        promote_priority_tick_windows()
+        grow_tick_windows()
         claim_limit = min(settings.MARKETDATA_ARCHIVE_BATCH_SIZE, slots)
         batch = claim_archive_batch(limit=claim_limit)
         if not batch:

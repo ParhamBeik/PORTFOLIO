@@ -267,11 +267,30 @@ MARKETDATA_TICK_VOLUME_TOLERANCE = float(
 MARKETDATA_CODAL_MAX_PAGES = int(os.getenv("MARKETDATA_CODAL_MAX_PAGES", "5"))
 MONGO_URI = os.getenv("MONGO_URI", "")
 MONGO_DATABASE = os.getenv("MONGO_DATABASE", "portfolio")
-CODAL_EXTRACT_BATCH_SIZE = int(os.getenv("CODAL_EXTRACT_BATCH_SIZE", "20"))
+# 20/day left 96.7% of the 76,868-row backlog (74,303 rows) never even attempted
+# -- at 20/day it clears in ~10 years. Raised alongside the beat schedule itself
+# running every 6h instead of once/day (config/celery.py); still bounded well
+# under the shared ARCHIVE quota's daily budget.
+CODAL_EXTRACT_BATCH_SIZE = int(os.getenv("CODAL_EXTRACT_BATCH_SIZE", "200"))
 # A Codal report sits in FETCHING while its artifact downloads. Past this age it
 # is not in flight, it is stranded -- a dead worker or a hung socket -- and is
 # eligible to be queued again.
 CODAL_FETCHING_STALE_SECONDS = int(os.getenv("CODAL_FETCHING_STALE_SECONDS", "1800"))
+
+# Artifact download+storage (marketdata/codal_storage.py). No proxy required by
+# default -- unset means connect to codal.ir directly, correct on any host that
+# can already reach it.
+CODAL_HTTP_PROXY = os.getenv("CODAL_HTTP_PROXY", "")
+CODAL_MAX_ARTIFACT_BYTES = int(os.getenv("CODAL_MAX_ARTIFACT_BYTES", str(50 * 1024 * 1024)))
+CODAL_S3_ENDPOINT_URL = os.getenv("CODAL_S3_ENDPOINT_URL", "http://minio:9000")
+CODAL_S3_BUCKET = os.getenv("CODAL_S3_BUCKET", "codal-artifacts")
+CODAL_S3_ACCESS_KEY = os.getenv("CODAL_S3_ACCESS_KEY", "")
+CODAL_S3_SECRET_KEY = os.getenv("CODAL_S3_SECRET_KEY", "")
+CODAL_S3_REGION = os.getenv("CODAL_S3_REGION", "us-east-1")
+# Bump to force every report through a fresh extract_report() pass regardless
+# of its current status -- not wired to any auto-reprocessing yet, just the
+# version stamp CodalReport/CodalParsedTable/CodalFact rows carry.
+CODAL_PARSER_VERSION = os.getenv("CODAL_PARSER_VERSION", "2")
 
 WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "30"))
 

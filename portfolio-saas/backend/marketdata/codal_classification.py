@@ -147,6 +147,103 @@ def classify(
     return Classification("other", TIER_3, "default")
 
 
+# --- Structural metadata for CodalReport (period_end, audited/consolidated/
+# correction flags, letter_type) -- a different concern from classify()'s
+# doc_type/tier above, so it lives alongside rather than merged into it: this
+# feeds CodalReport fields the pipeline needs to group revisions and gate
+# publication, not the coverage-report doc_type bucket. Restored from the
+# pipeline stripped in commit 2ea22be.
+from .models import CodalAnnouncement as _CodalAnnouncement
+
+_LETTER_CATEGORY = {
+    "let6": _CodalAnnouncement.Category.STATEMENTS,
+    "let8": _CodalAnnouncement.Category.PORTFOLIO,
+    "let11": _CodalAnnouncement.Category.GENERAL,
+    "let16": _CodalAnnouncement.Category.ASSEMBLY_DECISION,
+    "let17": _CodalAnnouncement.Category.ASSEMBLY_DECISION,
+    "let18": _CodalAnnouncement.Category.ASSEMBLY_DECISION,
+    "let19": _CodalAnnouncement.Category.GOVERNANCE,
+    "let20": _CodalAnnouncement.Category.ASSEMBLY_DECISION,
+    "let21": _CodalAnnouncement.Category.ASSEMBLY_DECISION,
+    "let22": _CodalAnnouncement.Category.ASSEMBLY_DECISION,
+    "let28": _CodalAnnouncement.Category.CAPITAL_INCREASE,
+    "let55": _CodalAnnouncement.Category.CAPITAL_INCREASE,
+    "let56": _CodalAnnouncement.Category.AUDITOR_REPORT,
+    "let58": _CodalAnnouncement.Category.PRODUCTION_SALES,
+    "let60": _CodalAnnouncement.Category.GOVERNANCE,
+    "let90": _CodalAnnouncement.Category.AUDITOR_REPORT,
+    "let128": _CodalAnnouncement.Category.GENERAL,
+    "let174": _CodalAnnouncement.Category.STATEMENTS,
+    "let248": _CodalAnnouncement.Category.GOVERNANCE,
+    "let260": _CodalAnnouncement.Category.GOVERNANCE,
+    "let2020": _CodalAnnouncement.Category.ASSEMBLY_DECISION,
+}
+
+_TITLE_CATEGORY = (
+    (("امیدنامه", "پذیره نویسی", "عرضه عمومی"), _CodalAnnouncement.Category.PROSPECTUS),
+    (("شرکت فرعی", "تلفیقی", "زیرمجموعه"), _CodalAnnouncement.Category.SUBSIDIARIES),
+    (("حسابرسی", "حسابرس", "اظهارنظر"), _CodalAnnouncement.Category.AUDITOR_REPORT),
+    (("افزایش سرمایه", "ثبت سرمایه"), _CodalAnnouncement.Category.CAPITAL_INCREASE),
+    (("مجمع", "تقسیم سود"), _CodalAnnouncement.Category.ASSEMBLY_DECISION),
+    (("حاکمیت شرکتی", "کمیته", "کنترل داخلی"), _CodalAnnouncement.Category.GOVERNANCE),
+    (("فعالیت هیئت مدیره", "گزارش هیئت"), _CodalAnnouncement.Category.BOARD_REPORT),
+    (("پرتفوی", "سرمایه گذاری"), _CodalAnnouncement.Category.PORTFOLIO),
+    (("تولید و فروش", "فعالیت ماهانه"), _CodalAnnouncement.Category.PRODUCTION_SALES),
+    (("صورت مالی", "صورت سود", "ترازنامه", "جریان وجوه"), _CodalAnnouncement.Category.STATEMENTS),
+    (("افشای اطلاعات", "شفاف سازی", "شفاف‌سازی"), _CodalAnnouncement.Category.GENERAL),
+)
+
+
+def _letter_type(announcement):
+    match = re.search(r"let\d+", f"{announcement.code} {announcement.link}", re.I)
+    return match.group(0).lower() if match else ""
+
+
+def _period(title, fallback=""):
+    matches = re.findall(r"1[34]\d{2}[-/]\d{1,2}[-/]\d{1,2}", title or "")
+    if matches:
+        return matches[-1].replace("/", "-")
+    return fallback[:10]
+
+
+def classify_announcement(announcement, parsed_text=""):
+    """Structural metadata for one CodalReport: category, period, revision flags.
+
+    `category` here is the provider's numeric Category (1-11), derived from
+    the letter-code in the announcement's URL/code when present (ground
+    truth) and title keywords otherwise -- independent of `classify()`'s
+    doc_type/tier above, which serves a different consumer (coverage report).
+    """
+    title = f"{announcement.title or ''} {parsed_text[:4000]}"
+    letter_type = _letter_type(announcement)
+    category = _LETTER_CATEGORY.get(letter_type)
+    # let58 covers both operating issuers and investment companies.
+    if letter_type == "let58" and any(word in title for word in ("پرتفوی", "سرمایه گذاری")):
+        category = _CodalAnnouncement.Category.PORTFOLIO
+    if not category:
+        category = next(
+            (candidate for words, candidate in _TITLE_CATEGORY if any(word in title for word in words)),
+            None,
+        )
+    is_correction = any(word in title for word in ("اصلاحیه", "اصلاح", "جایگزین"))
+    is_consolidated = any(word in title for word in ("تلفیقی", "گروه و شرکت"))
+    audited = announcement.is_audited
+    if audited is None:
+        if "حسابرسی نشده" in title:
+            audited = False
+        elif any(word in title for word in ("حسابرسی شده", "گزارش حسابرس", "اظهارنظر حسابرس")):
+            audited = True
+    return {
+        "category": category,
+        "report_type": _CodalAnnouncement.Category(category).label if category else "unknown",
+        "letter_type": letter_type,
+        "period_end": _period(title, announcement.date_title),
+        "is_audited": audited,
+        "is_consolidated": is_consolidated,
+        "is_correction": is_correction,
+    }
+
+
 if __name__ == "__main__":
     # ponytail: smallest runnable check for a pure-function module -- the real
     # coverage lives in tests/test_codal_classification.py.

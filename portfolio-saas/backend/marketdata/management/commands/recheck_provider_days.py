@@ -140,7 +140,7 @@ class Command(BaseCommand):
                 .values_list("date_time", flat=True)
             )
             history = set(
-                DailyStockHistory.objects.filter(symbol=symbol, is_adjusted=False)
+                DailyStockHistory.objects.filter(symbol=symbol)
                 .values_list("date", flat=True)
             )
             disputes[symbol].update(
@@ -162,7 +162,7 @@ class Command(BaseCommand):
         stored_history = {
             day[:10]: value
             for day, value in DailyStockHistory.objects.filter(
-                symbol=symbol, is_adjusted=False
+                symbol=symbol
             ).values_list("date", "pl")
         }
 

@@ -137,9 +137,10 @@ def _archive_replacements(prices: dict) -> dict:
     )
 
     archive_prices = {}
-    # Adjusted closes live in MarketCandle.ADJUSTED. DailyStockHistory(is_adjusted=True)
-    # was never adjusted prices at all -- History.php?type=1 is the Real/Legal
-    # breakdown -- so every row there had pl=0 and this fallback silently matched
+    # Adjusted closes live in MarketCandle.ADJUSTED. History.php?type=1 (once
+    # tagged is_adjusted=True on DailyStockHistory, since removed -- see
+    # marketdata.ingest.ingest_real_legal) was never adjusted prices at all,
+    # it is the Real/Legal breakdown, so that fallback used to silently match
     # nothing.
     stock_rows = (
         candle_close_qs(stock_symbols)

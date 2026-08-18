@@ -165,7 +165,7 @@ class Command(BaseCommand):
     def _rewrite_daily_history(row):
         factor = Decimal(row["corrected"].removeprefix("factor:"))
         queryset = DailyStockHistory.objects.filter(
-            symbol=row["symbol"], date=row["date"], is_adjusted=False,
+            symbol=row["symbol"], date=row["date"],
             pl=Decimal(row["value"]),
         )
         price_fields = ("pmin", "pmax", "py", "pf", "pl", "plc", "pc", "pcc")
@@ -184,9 +184,9 @@ class Command(BaseCommand):
             if rejected is None:
                 continue
             if row["table"] == "stock_history_unadjusted":
-                ingest.ingest_daily_history(row["symbol"], [rejected.payload], False)
+                ingest.ingest_daily_history(row["symbol"], [rejected.payload])
                 landed = DailyStockHistory.objects.filter(
-                    symbol=row["symbol"], date=row["date"], is_adjusted=False
+                    symbol=row["symbol"], date=row["date"]
                 ).exists()
             else:
                 candle_type = 3 if row["table"] == "stock_candle_adjusted" else 2

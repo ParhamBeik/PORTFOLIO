@@ -382,11 +382,14 @@ def _codal_status():
         .first()
     )
     since = timezone.now() - timedelta(hours=24)
-    recent = WorkflowRun.objects.filter(workflow="codal_extract", created_at__gte=since)
+    # "extract_codal_report" is the workflow name _ledgered() actually records
+    # (marketdata/tasks.py) -- this used to read "codal_extract", a name
+    # nothing ever wrote, so this panel silently reported zero runs forever.
+    recent = WorkflowRun.objects.filter(workflow="extract_codal_report", created_at__gte=since)
     recent_total = recent.count()
     blocked = recent.filter(outcome=WorkflowRun.Outcome.BLOCKED_NETWORK).count()
     return {
-        "enabled": False,
+        "enabled": True,
         "status_counts": counts,
         "last_success": _iso(last_success),
         "blocked_network_24h": blocked,

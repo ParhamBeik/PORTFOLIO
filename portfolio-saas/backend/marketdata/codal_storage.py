@@ -1,0 +1,213 @@
+"""Secure Codal artifact download and content-addressed S3/MinIO storage.
+
+Ported from the pipeline stripped in commit 2ea22be, with local-disk storage
+swapped for S3/MinIO (`CodalArtifact.s3_key` was already named for it). The
+download-side SSRF/size/content protections are unchanged -- they have no
+storage dependency.
+"""
+import functools
+import hashlib
+import io
+import mimetypes
+import zipfile
+from urllib.parse import urljoin, urlsplit
+
+import requests
+from django.conf import settings
+
+ALLOWED_HOSTS = frozenset({"codal.ir", "www.codal.ir", "excel.codal.ir"})
+ALLOWED_TYPES = {
+    "html": ("text/html", "application/xhtml+xml"),
+    "excel": (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+        "application/octet-stream",
+    ),
+    "pdf": ("application/pdf", "application/octet-stream"),
+    "attachment": (
+        "application/pdf",
+        "application/zip",
+        "application/octet-stream",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ),
+}
+
+
+class CodalBlockedNetwork(RuntimeError):
+    pass
+
+
+class CodalBlockedStorage(RuntimeError):
+    pass
+
+
+class CodalArtifactRejected(RuntimeError):
+    pass
+
+
+def _absolute_url(value):
+    return urljoin("https://codal.ir/", value or "")
+
+
+def _validate_url(url):
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in ALLOWED_HOSTS:
+        raise CodalArtifactRejected("disallowed_url")
+
+
+def _valid_magic(kind, content):
+    if kind == "pdf":
+        return content.startswith(b"%PDF-")
+    if kind == "excel":
+        return content.startswith(b"PK\x03\x04") or content.startswith(b"\xd0\xcf\x11\xe0")
+    if kind == "html":
+        sample = content[:2048].lstrip().lower()
+        return b"<html" in sample or b"<!doctype html" in sample or b"<table" in sample
+    return bool(content)
+
+
+def _check_archive(content):
+    if not content.startswith(b"PK\x03\x04"):
+        return
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            total = sum(item.file_size for item in archive.infolist())
+            compressed = max(1, sum(item.compress_size for item in archive.infolist()))
+            if total > settings.CODAL_MAX_ARTIFACT_BYTES * 5 or total / compressed > 100:
+                raise CodalArtifactRejected("decompression_bomb")
+    except zipfile.BadZipFile as exc:
+        raise CodalArtifactRejected("invalid_zip") from exc
+
+
+def download_artifact(url, kind):
+    """Fetch one Codal artifact, refusing anything that isn't what it claims to be.
+
+    Host-allowlisted, redirect chains re-validated at every hop, streamed under
+    a size cap, and checked against its own declared content-type and magic
+    bytes -- codal.ir is an external, untrusted origin even though the URL
+    itself came from a provider payload we otherwise trust.
+    """
+    proxy = settings.CODAL_HTTP_PROXY
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    session = requests.Session()
+    current = _absolute_url(url)
+    headers = {"User-Agent": "Portfolio-Codal-Warehouse/1.0"}
+    try:
+        for _redirect in range(6):
+            _validate_url(current)
+            from .workflows import record_http_attempt
+
+            record_http_attempt()
+            response = session.get(
+                current,
+                headers=headers,
+                proxies=proxies,
+                timeout=(10, 30),
+                stream=True,
+                allow_redirects=False,
+            )
+            if response.is_redirect or response.is_permanent_redirect:
+                location = response.headers.get("Location")
+                response.close()
+                if not location:
+                    raise CodalArtifactRejected("redirect_without_location")
+                current = urljoin(current, location)
+                continue
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+            if content_type not in ALLOWED_TYPES[kind]:
+                raise CodalArtifactRejected("invalid_content_type")
+            try:
+                declared = int(response.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                declared = 0
+            if declared > settings.CODAL_MAX_ARTIFACT_BYTES:
+                raise CodalArtifactRejected("artifact_too_large")
+            chunks, size = [], 0
+            for chunk in response.iter_content(1024 * 1024):
+                size += len(chunk)
+                if size > settings.CODAL_MAX_ARTIFACT_BYTES:
+                    raise CodalArtifactRejected("artifact_too_large")
+                chunks.append(chunk)
+            content = b"".join(chunks)
+            if not _valid_magic(kind, content):
+                raise CodalArtifactRejected("invalid_content_signature")
+            _check_archive(content)
+            return current, content_type, content
+        raise CodalArtifactRejected("too_many_redirects")
+    except CodalArtifactRejected:
+        raise
+    except requests.RequestException as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        label = f"HTTP{status}" if status else type(exc).__name__
+        raise CodalBlockedNetwork(f"{label}@{urlsplit(current).hostname or '?'}") from exc
+    finally:
+        session.close()
+
+
+@functools.lru_cache(maxsize=1)
+def _client():
+    """One pooled boto3 S3 client for the worker process, MinIO-compatible."""
+    import boto3
+
+    return boto3.client(
+        "s3",
+        endpoint_url=settings.CODAL_S3_ENDPOINT_URL,
+        aws_access_key_id=settings.CODAL_S3_ACCESS_KEY,
+        aws_secret_access_key=settings.CODAL_S3_SECRET_KEY,
+        region_name=settings.CODAL_S3_REGION,
+    )
+
+
+def _ensure_bucket():
+    from botocore.exceptions import ClientError
+
+    client = _client()
+    try:
+        client.head_bucket(Bucket=settings.CODAL_S3_BUCKET)
+    except ClientError:
+        client.create_bucket(Bucket=settings.CODAL_S3_BUCKET)
+
+
+def store_artifact(content, content_type, kind):
+    """Write one immutable, content-addressed artifact to S3/MinIO.
+
+    The key is a pure function of the bytes (`codal/sha256/aa/<hash>.<ext>`),
+    so re-storing the same document is a cheap no-op `put_object` rather than a
+    duplicate. `head_object` before `put_object` skips a redundant upload of a
+    document already stored under this checksum.
+    """
+    checksum = hashlib.sha256(content).hexdigest()
+    extension = {"excel": "xlsx", "html": "html", "pdf": "pdf"}.get(kind)
+    extension = extension or (mimetypes.guess_extension(content_type) or ".bin").lstrip(".")
+    key = f"codal/sha256/{checksum[:2]}/{checksum}.{extension}"
+    try:
+        client = _client()
+        try:
+            client.head_object(Bucket=settings.CODAL_S3_BUCKET, Key=key)
+        except Exception:
+            _ensure_bucket()
+            client.put_object(
+                Bucket=settings.CODAL_S3_BUCKET,
+                Key=key,
+                Body=content,
+                ContentType=content_type or "application/octet-stream",
+            )
+    except CodalBlockedStorage:
+        raise
+    except Exception as exc:
+        raise CodalBlockedStorage(type(exc).__name__) from exc
+    return key, checksum
+
+
+def artifact_download_url(artifact, expires_in=3600):
+    """A short-lived presigned URL for one stored artifact, or None if unstored."""
+    from .models import CodalArtifact
+
+    if artifact.fetch_status != CodalArtifact.FetchStatus.STORED or not artifact.s3_key:
+        return None
+    return _client().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": settings.CODAL_S3_BUCKET, "Key": artifact.s3_key},
+        ExpiresIn=expires_in,
+    )

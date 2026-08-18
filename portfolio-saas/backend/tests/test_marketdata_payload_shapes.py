@@ -127,16 +127,16 @@ def test_shareholder_rows_get_a_date_when_the_caller_omits_one():
 
 def test_real_legal_lands_on_the_existing_price_row():
     DailyStockHistory.objects.create(
-        symbol="فملی", date="1405-04-29", is_adjusted=False, pl=20470
+        symbol="فملی", date="1405-04-29", pl=20470
     )
     updated, skipped = ingest.ingest_real_legal("فملی", REAL_LEGAL_PAYLOAD)
     assert (updated, skipped) == (1, 0)
-    row = DailyStockHistory.objects.get(symbol="فملی", is_adjusted=False)
+    row = DailyStockHistory.objects.get(symbol="فملی")
     assert row.buy_count_i == 5970
     assert row.sell_n_value == 9184407654490
-    # The price it was carrying is untouched, and no phantom adjusted row appears.
+    # The price it was carrying is untouched, and no phantom second row appears.
     assert row.pl == 20470
-    assert not DailyStockHistory.objects.filter(is_adjusted=True).exists()
+    assert DailyStockHistory.objects.filter(symbol="فملی").count() == 1
 
 
 def test_real_legal_skips_days_with_no_price_row_yet():

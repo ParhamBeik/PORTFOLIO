@@ -85,6 +85,9 @@ class MarketInstrument(models.Model):
     class Category(models.TextChoices):
         STOCK = "stock", "Stock"
         GOLD = "gold", "Gold"
+        CRYPTO = "crypto", "Crypto"
+        COMMODITY = "commodity", "Commodity"
+        ETF = "etf", "ETF"
         EXCLUDED = "excluded", "Excluded"
 
     source = models.CharField(max_length=8, choices=Source.choices)
@@ -234,7 +237,6 @@ class DailyStockHistory(models.Model):
     pc = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     pcc = models.DecimalField(max_digits=20, decimal_places=4, default=0)
     pcp = models.FloatField(default=0.0)
-    is_adjusted = models.BooleanField(default=False)
     ingested_at = models.DateTimeField(null=True, blank=True)
     # Lineage breadcrumb, written on every row and read only when tracing one
     # ingest by hand. Both indexes it carried recorded ~0 scans across 4M rows.
@@ -266,16 +268,16 @@ class DailyStockHistory(models.Model):
         ordering = ["-date"]
         constraints = [
             models.UniqueConstraint(
-                fields=["symbol", "date", "is_adjusted", "ts"],
+                fields=["symbol", "date", "ts"],
                 name="uniq_stock_history_symbol_date_adj",
             )
         ]
         indexes = [
             # (symbol, date) used to live here as a 307 MB index that took 5
             # scans, because `uniq_stock_history_symbol_date_adj` above is
-            # (symbol, date, is_adjusted) and already serves every query with a
-            # symbol -- it took 13.8M scans over the same period. A date-only
-            # btree is the one access path the unique constraint cannot serve.
+            # (symbol, date) and already serves every query with a symbol --
+            # it took 13.8M scans over the same period. A date-only btree is
+            # the one access path the unique constraint cannot serve.
             models.Index(fields=["date"], name="stock_history_date_idx"),
         ]
 
@@ -969,3 +971,84 @@ class AssetSignalSnapshot(models.Model):
 
     def __str__(self) -> str:
         return f"{self.symbol} {self.as_of}: {self.stance}"
+
+
+class MarketSnapshot(models.Model):
+    """Generic append-only live capture for asset classes with no historical
+    archive endpoint at all: crypto, commodity, ETF NAV, market index.
+
+    Options/futures keep using `DerivativeSnapshot` (its FK to
+    `DerivativeContract` carries expiry/contract-size fields that don't
+    generalize here) -- this table only covers the four asset classes that
+    were newly wired up to a live poll. `MarketDailyBar` is the one daily-bar
+    shape shared by all six live-only asset classes, fed from either this
+    table or `DerivativeSnapshot` depending on `asset_class`.
+    """
+
+    class AssetClass(models.TextChoices):
+        CRYPTO = "crypto", "Crypto"
+        COMMODITY = "commodity", "Commodity"
+        ETF_NAV = "etf_nav", "ETF NAV"
+        # No INDEX here: MarketIndexData already captures every index live tick
+        # via the existing fetch_all_markets path (ingest_market_index) --
+        # duplicating that capture into a second table would be two raw
+        # sources for the same signal. aggregate_market_daily_bars reads
+        # MarketIndexData directly for asset_class="index" instead.
+
+    asset_class = models.CharField(max_length=16, choices=AssetClass.choices, db_index=True)
+    symbol = models.CharField(max_length=64, db_index=True)
+    observed_at = models.DateTimeField(db_index=True)
+    last_price = models.DecimalField(max_digits=24, decimal_places=4, null=True, blank=True)
+    bid_price = models.DecimalField(max_digits=24, decimal_places=4, null=True, blank=True)
+    ask_price = models.DecimalField(max_digits=24, decimal_places=4, null=True, blank=True)
+    volume = models.BigIntegerField(null=True, blank=True)
+    provider_payload = models.JSONField(default=dict)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["asset_class", "symbol", "-observed_at"]),
+        ]
+
+
+class MarketDailyBar(models.Model):
+    """Daily OHLC distilled from live snapshots, for asset classes that have
+    no provider historical endpoint (crypto, commodity, ETF NAV, market index,
+    TSE options, IME futures/options).
+
+    This table IS the completeness ledger for these six asset classes -- no
+    parallel `ArchiveFetchState`-style tracker is needed, since LIVE-nature
+    endpoints never get an `ArchiveFetchState` row (there is no backfill to
+    converge on) and a missing `(asset_class, symbol, date)` row already says
+    everything a tracker would: either legitimately explained by
+    `calendars.is_closure_day()`, or a real gap.
+    """
+
+    class AssetClass(models.TextChoices):
+        CRYPTO = "crypto", "Crypto"
+        COMMODITY = "commodity", "Commodity"
+        ETF_NAV = "etf_nav", "ETF NAV"
+        INDEX = "index", "Market index"
+        TSE_OPTION = "tse_option", "TSE option"
+        IME_FUTURE = "ime_future", "IME future"
+        IME_OPTION = "ime_option", "IME option"
+
+    asset_class = models.CharField(max_length=16, choices=AssetClass.choices, db_index=True)
+    symbol = models.CharField(max_length=64, db_index=True)
+    date = models.CharField(max_length=10)  # Jalali YYYY-MM-DD, matches the rest of the warehouse
+    open_price = models.DecimalField(max_digits=24, decimal_places=4, null=True, blank=True)
+    high_price = models.DecimalField(max_digits=24, decimal_places=4, null=True, blank=True)
+    low_price = models.DecimalField(max_digits=24, decimal_places=4, null=True, blank=True)
+    close_price = models.DecimalField(max_digits=24, decimal_places=4, null=True, blank=True)
+    volume = models.BigIntegerField(null=True, blank=True)
+    # Only meaningful for tse_option/ime_future/ime_option rows; null elsewhere.
+    open_interest = models.BigIntegerField(null=True, blank=True)
+    sample_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-date"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["asset_class", "symbol", "date"],
+                name="uniq_market_daily_bar",
+            )
+        ]

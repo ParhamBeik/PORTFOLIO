@@ -176,7 +176,7 @@ class Command(BaseCommand):
         stored = {
             day[:10]: pl
             for day, pl in DailyStockHistory.objects.filter(
-                symbol=symbol, is_adjusted=False
+                symbol=symbol
             ).values_list("date", "pl")
         }
         rewrite = [
@@ -245,12 +245,12 @@ class Command(BaseCommand):
             stored = {
                 day[:10]: pl
                 for day, pl in DailyStockHistory.objects.filter(
-                    symbol=symbol, is_adjusted=False
+                    symbol=symbol
                 ).values_list("date", "pl")
             }
             wrong = [day for day in stored
                      if day in fresh and _differs(stored[day], fresh[day].get("pl"))]
             DailyStockHistory.objects.filter(
-                symbol=symbol, is_adjusted=False, date__in=wrong
+                symbol=symbol, date__in=wrong
             ).delete()
-        ingest.ingest_daily_history(symbol, payload, is_adjusted=False)
+        ingest.ingest_daily_history(symbol, payload)

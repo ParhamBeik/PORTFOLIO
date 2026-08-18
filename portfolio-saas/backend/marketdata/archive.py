@@ -218,10 +218,10 @@ def _fetch_and_ingest(state):
         increment_historical_full_used()
     if endpoint == ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED:
         payload = fetch_daily_history(settings.TSETMC_API_KEY, symbol, history_type=0)
-        result = ingest.ingest_daily_history(symbol, payload, is_adjusted=False)
+        result = ingest.ingest_daily_history(symbol, payload)
         expected = _record_dates(payload)
         stored = set(DailyStockHistory.objects.filter(
-            symbol=symbol, is_adjusted=False, date__in=expected
+            symbol=symbol, date__in=expected
         ).values_list("date", flat=True))
     elif endpoint == ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED:
         # Misnamed enum kept for DB compatibility: type=1 is the Real/Legal
@@ -241,7 +241,7 @@ def _fetch_and_ingest(state):
         # that prices landed at all, which is what the intersection was really
         # guarding against (a payload that stores nothing reporting complete).
         if not DailyStockHistory.objects.filter(
-            symbol=symbol, is_adjusted=False, date__in=expected,
+            symbol=symbol, date__in=expected,
         ).exists():
             raise MarketDataFetchError(
                 "Real/legal payload has no matching daily price rows; the "
@@ -896,9 +896,7 @@ def _archive_prereqs_ready(state):
     if state.endpoint == ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS:
         return bool(_tick_trading_days(state.symbol, state.target_window_days))
     if state.endpoint == ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED:
-        return DailyStockHistory.objects.filter(
-            symbol=state.symbol, is_adjusted=False,
-        ).exists()
+        return DailyStockHistory.objects.filter(symbol=state.symbol).exists()
     return True
 
 
@@ -1014,6 +1012,28 @@ def claim_archive_batch(limit=None):
                 ),
                 remaining,
             )
+        # Recency-gap tier: verified_complete states whose next post-close
+        # refresh came due. Excluded from `base` above (that queryset only
+        # ever sees verified_complete=False), so without this tier a state
+        # stays frozen the instant it first completes -- the "moving forward
+        # in time reopens a gap between last_date and today" problem. Ticks
+        # are excluded: their own reopening is grow_tick_windows's job, since
+        # growing the window and refreshing the same window are different
+        # operations. Ordered oldest-`last_date`-first as a proxy for gap
+        # size (no per-row trading-day count needed: for the same endpoint, an
+        # older last_date is strictly a bigger gap).
+        remaining = batch_size - len(states)
+        if remaining > 0:
+            take(
+                list(
+                    ArchiveFetchState.objects.select_for_update(skip_locked=True)
+                    .filter(due, verified_complete=True, suspended_at__isnull=True)
+                    .exclude(endpoint=tick_endpoint)
+                    .exclude(pk__in=deferred_pks)
+                    .order_by("last_date", _LAST_ATTEMPT_FIRST)[: remaining + 8]
+                ),
+                remaining,
+            )
         remaining = batch_size - len(states)
         if remaining > 0:
             take(
@@ -1091,42 +1111,56 @@ def claim_recent_refresh(limit=None):
     return [state.pk for state in ordered]
 
 
-def promote_priority_tick_windows(liquid_limit=100):
-    """Begin the 365-day phase only after every 90-day tick state completes."""
+def grow_tick_windows(step_days=90):
+    """Widen every fully-backfilled tick window by another `step_days` --
+    "go further back over time, without a fixed limit" for the one endpoint
+    class whose window is capped (STOCK_TRANSACTION_TICKS, one request per
+    symbol per day, so a window must stay bounded per pass).
+
+    Previously a one-time 90->365 jump, gated to held+liquid-100 symbols only,
+    frozen after that. Now recurring and universal: a state grows again the
+    moment it reports `verified_complete`, floored at the symbol's own listing
+    date (`InstrumentListingHistory.first_seen`) so it stops once the window
+    already reaches back to when the symbol started trading, and symbols with
+    no listing record on file grow indefinitely (missing metadata is not a
+    reason to stop backfilling).
+
+    Growth strictly increases `target_window_days`, and `claim_archive_batch`'s
+    tick branch already orders by `target_window_days` ascending -- a state
+    that just widened always sorts behind any state still on a smaller
+    window, so coverage-first ordering holds with no extra priority field.
+    """
+    from .models import InstrumentListingHistory
+
     tick_endpoint = ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS
-    phase_one = ArchiveFetchState.objects.filter(
-        endpoint=tick_endpoint, target_window_days=90
+    done = list(
+        ArchiveFetchState.objects.filter(
+            endpoint=tick_endpoint, verified_complete=True
+        ).values_list("symbol", "target_window_days")
     )
-    if not phase_one.exists() or phase_one.filter(verified_complete=False).exists():
+    if not done:
         return 0
 
-    from portfolio.models import Holding
-
-    held = list(
-        Holding.objects.filter(quantity__gt=0)
-        .exclude(asset__tse_symbol="")
-        .values_list("asset__tse_symbol", flat=True)
-        .distinct()
+    first_seen = dict(
+        InstrumentListingHistory.objects.filter(
+            symbol__in=[symbol for symbol, _ in done]
+        ).values_list("symbol", "first_seen")
     )
-    latest_day = MarketCandle.objects.filter(
-        timeframe=MarketCandle.UNADJUSTED, volume__gt=0
-    ).aggregate(day=Max("date_time"))["day"]
-    liquid = list(
-        MarketCandle.objects.filter(
-            timeframe=MarketCandle.UNADJUSTED,
-            date_time=latest_day,
-            volume__gt=0,
-        )
-        .order_by("-volume")
-        .values_list("symbol", flat=True)[:liquid_limit]
-    ) if latest_day else []
-    symbols = list(dict.fromkeys([*held, *liquid]))
-    if not symbols:
+    today = jalali.to_gregorian(jalali.today())
+    to_grow = []
+    for symbol, window in done:
+        listed = first_seen.get(symbol)
+        if listed:
+            span_to_listing = (today - jalali.to_gregorian(listed)).days
+            if window >= span_to_listing:
+                continue  # already backfilled to this symbol's own listing date
+        to_grow.append(symbol)
+    if not to_grow:
         return 0
     return ArchiveFetchState.objects.filter(
-        endpoint=tick_endpoint, symbol__in=symbols, target_window_days=90
+        endpoint=tick_endpoint, symbol__in=to_grow, verified_complete=True
     ).update(
-        target_window_days=365,
+        target_window_days=F("target_window_days") + step_days,
         verified_complete=False,
         next_attempt_at=timezone.now(),
     )

@@ -244,8 +244,8 @@ class StockSymbolMetadataAdmin(admin.ModelAdmin):
 
 @admin.register(DailyStockHistory)
 class DailyStockHistoryAdmin(admin.ModelAdmin):
-    list_display = ("symbol", "date", "pl", "pc", "tvol", "plp", "is_adjusted")
-    list_filter = ("symbol", "is_adjusted")
+    list_display = ("symbol", "date", "pl", "pc", "tvol", "plp")
+    list_filter = ("symbol",)
     search_fields = ("symbol",)
 
 

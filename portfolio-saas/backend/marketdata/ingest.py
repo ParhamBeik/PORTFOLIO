@@ -27,7 +27,9 @@ from .models import (
     DerivativeSnapshot,
     GoldCurrencyHistory,
     MarketCandle,
+    MarketDailyBar,
     MarketIndexData,
+    MarketSnapshot,
     RealLegalHistory,
     RejectedRecord,
     ShareholderRecord,
@@ -200,12 +202,15 @@ def ingest_symbol_metadata(payload) -> tuple[int, int]:
         return 0, 1
 
 
-def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, int]:
-    """History.php payload (list of day records) -> DailyStockHistory rows."""
+def ingest_daily_history(symbol: str, payload) -> tuple[int, int]:
+    """History.php?type=0 payload (list of day records) -> DailyStockHistory rows.
+
+    type=1 (misleadingly named "adjusted" in the endpoint registry) is the
+    Real/Legal participant breakdown, not price data -- see `ingest_real_legal`.
+    """
     if not isinstance(payload, list):
         return 0, 0 if payload is None else 1
-    endpoint = "stock_history_adjusted" if is_adjusted else "stock_history_unadjusted"
-    accepted, bad = screen("daily_history", payload, endpoint, symbol)
+    accepted, bad = screen("daily_history", payload, "stock_history_unadjusted", symbol)
 
     rows = []
     malformed = 0
@@ -244,7 +249,6 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
                 pc=Decimal(str(pc_val)),
                 pcc=Decimal(str(pcc_val)),
                 pcp=rec.get("pcp") or 0.0,
-                is_adjusted=is_adjusted,
                 # Real/Legal breakdown only exists on unadjusted (type=0) payloads.
                 buy_count_i=rec.get("Buy_CountI"),
                 buy_count_n=rec.get("Buy_CountN"),
@@ -270,7 +274,7 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
             symbol, malformed, ", ".join(sorted(malformed_reasons)),
         )
     created, conflicts = _bulk(
-        DailyStockHistory, rows, scope={"symbol": symbol, "is_adjusted": is_adjusted},
+        DailyStockHistory, rows, scope={"symbol": symbol},
         update_fields=(
             "time", "tno", "tvol", "tval", "pmin", "pmax", "py", "pf",
             "pl", "plc", "plp", "pc", "pcc", "pcp", "buy_count_i",
@@ -279,7 +283,7 @@ def ingest_daily_history(symbol: str, payload, is_adjusted: bool) -> tuple[int, 
             "buy_n_value", "sell_i_value", "sell_n_value",
             "ingested_at", "last_correlation_id",
         ),
-        unique_fields=("symbol", "date", "is_adjusted", "ts"),
+        unique_fields=("symbol", "date", "ts"),
         recent_field="date",
     )
     return created, conflicts + bad
@@ -326,7 +330,7 @@ def ingest_real_legal(symbol: str, payload) -> tuple[int, int]:
         fields_to_update = {field: rec.get(key) for field, key in _REAL_LEGAL_FIELDS.items()}
 
         updated_rows = DailyStockHistory.objects.filter(
-            symbol=symbol, date=date_val, is_adjusted=False
+            symbol=symbol, date=date_val,
         ).update(**fields_to_update)
         updated_daily += int(updated_rows > 0)
         skipped_daily += int(updated_rows == 0)
@@ -772,3 +776,141 @@ def ingest_market_index(payload) -> tuple[int, int]:
     ]
     created, conflicts = _bulk(MarketIndexData, rows)
     return created, conflicts + rejected
+
+
+def ingest_market_snapshots(asset_class, payload) -> tuple[int, int]:
+    """Persist a live poll of crypto/commodity/etf_nav as raw snapshots.
+
+    Index is deliberately not one of these: `MarketIndexData` already
+    captures every index live tick via the existing `ingest_market_index`
+    path, and `aggregate_market_daily_bars` reads that table directly for
+    `asset_class="index"` instead of a second raw-capture table.
+
+    Same shape as `ingest_derivative_snapshots`: append-only, no pretense of
+    being historical data on its own -- `aggregate_market_daily_bars` is what
+    turns repeated snapshots into a proper daily series. Field names are
+    defensive across both BrsApi payload families seen elsewhere in this
+    module: `symbol`/`price` (Market/* endpoints, e.g. gold/currency/crypto)
+    and `l18`/`pl`/`pc` (Tsetmc/* endpoints, e.g. ETF NAV).
+    """
+    from django.utils import timezone
+
+    rows = flatten_records(payload)
+    observed_at = timezone.now()
+    created = skipped = 0
+    for row in rows:
+        symbol = str(
+            row.get("symbol") or row.get("l18") or row.get("code") or ""
+        ).strip()
+        if not symbol:
+            skipped += 1
+            continue
+        price = _number(
+            row.get("price") or row.get("pl") or row.get("pc") or row.get("last_price")
+        )
+        rows_out = MarketSnapshot.objects.create(
+            asset_class=asset_class,
+            symbol=canonical_symbol(symbol) if asset_class in ("crypto", "commodity") else symbol[:64],
+            observed_at=observed_at,
+            last_price=price,
+            bid_price=_number(row.get("bid_price") or row.get("pd") or row.get("best_demand_price")),
+            ask_price=_number(row.get("ask_price") or row.get("po") or row.get("best_supply_price")),
+            volume=row.get("volume") or row.get("tvol") or None,
+            provider_payload=row,
+        )
+        created += 1 if rows_out else 0
+    return created, skipped
+
+
+def aggregate_market_daily_bars(asset_class, jalali_date, *, symbols=None) -> tuple[int, int]:
+    """Distill one Jalali day's `MarketSnapshot`/`DerivativeSnapshot` rows into
+    `MarketDailyBar` OHLC rows, for one asset class.
+
+    Options/futures (`tse_option`/`ime_future`/`ime_option`) read from the
+    existing `DerivativeSnapshot` table (kept as-is, see MarketSnapshot's
+    docstring); the four newly-wired classes read from `MarketSnapshot`.
+    Skips symbols where `calendars.is_closure_day`/`is_contract_expired` says
+    there was nothing to fetch, so a legitimate no-data day never shows up as
+    a gap in `MarketDailyBar`'s own row-existence completeness signal.
+    """
+    from datetime import timedelta
+
+    from . import calendars
+    from . import jalali as jalali_mod
+
+    start = jalali_mod.to_datetime(jalali_date)
+    end = start + timedelta(days=1)
+
+    if asset_class in ("tse_option", "ime_future", "ime_option"):
+        snapshot_qs = DerivativeSnapshot.objects.filter(
+            contract__kind=asset_class, observed_at__gte=start, observed_at__lt=end
+        ).select_related("contract").order_by("contract__contract_code", "observed_at")
+        grouped: dict[str, list] = {}
+        for snap in snapshot_qs:
+            grouped.setdefault(snap.contract.contract_code, []).append(snap)
+    elif asset_class == "index":
+        # No dedicated MarketSnapshot rows: MarketIndexData already captures
+        # every live tick (existing ingest_market_index path), so read that
+        # directly instead of dual-writing the same signal into two tables.
+        from types import SimpleNamespace
+
+        index_rows = MarketIndexData.objects.filter(date=jalali_date).order_by("time")
+        grouped = {"overall": [], "equal_weight": []}
+        for row in index_rows:
+            grouped["overall"].append(
+                SimpleNamespace(last_price=row.index_overall, volume=row.trade_volume)
+            )
+            grouped["equal_weight"].append(
+                SimpleNamespace(last_price=row.index_equal_weight, volume=row.trade_volume)
+            )
+    else:
+        snapshot_qs = MarketSnapshot.objects.filter(
+            asset_class=asset_class, observed_at__gte=start, observed_at__lt=end
+        ).order_by("symbol", "observed_at")
+        grouped = {}
+        for snap in snapshot_qs:
+            grouped.setdefault(snap.symbol, []).append(snap)
+
+    target_symbols = set(symbols) if symbols else set(grouped)
+    rows = []
+    skipped_closed = 0
+    for symbol in target_symbols:
+        snaps = grouped.get(symbol, [])
+        if not snaps:
+            if asset_class in ("tse_option", "ime_future", "ime_option"):
+                expired = calendars.is_contract_expired(asset_class, symbol, jalali_date)
+            else:
+                expired = False
+            if expired or calendars.is_closure_day(asset_class, symbol, jalali_date):
+                skipped_closed += 1
+            continue
+        prices = [s.last_price for s in snaps if s.last_price is not None]
+        if not prices:
+            continue
+        volumes = [s.volume for s in snaps if s.volume is not None]
+        rows.append(MarketDailyBar(
+            asset_class=asset_class,
+            symbol=symbol,
+            date=jalali_date,
+            open_price=prices[0],
+            high_price=max(prices),
+            low_price=min(prices),
+            close_price=prices[-1],
+            volume=sum(volumes) if volumes else None,
+            open_interest=next(
+                (s.open_interest for s in reversed(snaps) if getattr(s, "open_interest", None) is not None),
+                None,
+            ),
+            sample_count=len(snaps),
+        ))
+    created, conflicts = _bulk(
+        MarketDailyBar, rows,
+        scope={"asset_class": asset_class, "date": jalali_date},
+        update_fields=(
+            "open_price", "high_price", "low_price", "close_price",
+            "volume", "open_interest", "sample_count",
+        ),
+        unique_fields=("asset_class", "symbol", "date"),
+        recent_field="date",
+    )
+    return created, conflicts + skipped_closed

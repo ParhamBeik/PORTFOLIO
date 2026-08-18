@@ -112,7 +112,7 @@ def test_a_timeframe_the_provider_does_not_publish_is_left_alone():
 def test_daily_history_is_brought_up_to_the_provider():
     _run(apply=True)
 
-    rows = DailyStockHistory.objects.filter(symbol="کاما", is_adjusted=False)
+    rows = DailyStockHistory.objects.filter(symbol="کاما")
     assert set(rows.values_list("date", flat=True)) == {"1405-05-11", "1405-05-12"}
 
 

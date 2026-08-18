@@ -64,7 +64,7 @@ def test_ingest_daily_history_stores_provider_value_verbatim():
         "date": "1403-10-19", "pmin": 8490, "pmax": 8680, "py": 8430, "pf": 8570,
         "pl": 8500, "plc": 70, "pc": 8570, "pcc": 140, "tval": 1108829664180,
     }]
-    created, skipped = ingest.ingest_daily_history("تست", payload, is_adjusted=False)
+    created, skipped = ingest.ingest_daily_history("تست", payload)
     assert created == 1 and skipped == 0
     row = DailyStockHistory.objects.get(symbol="تست", date="1403-10-19")
     assert row.pl == 8500
@@ -232,7 +232,7 @@ def test_cross_table_consensus_repairs_only_scaled_daily_history(tmp_path):
             close_price=1000, volume=20,
         )
     history = DailyStockHistory.objects.create(
-        symbol="CONSENSUS", date=day, is_adjusted=False, tvol=20, tval=2000,
+        symbol="CONSENSUS", date=day, tvol=20, tval=2000,
         pmin=100, pmax=100, py=100, pf=100, pl=100, plc=2,
         pc=100, pcc=2,
     )
@@ -340,3 +340,46 @@ def test_usd_quoted_keys_are_never_stamped_as_verified_toman():
     irt_row = Price.objects.filter(asset__key="toman_coin").latest("fetched_at")
     assert irt_row.price_unit == Price.Unit.IRT
     assert irt_row.price_unit_verified is True
+
+
+def test_rejection_backlog_groups_by_endpoint_and_reason(tmp_path):
+    from marketdata.models import RejectedRecord
+
+    RejectedRecord.objects.create(
+        endpoint="stock_candle_adjusted", symbol="X", date="1404-01-01",
+        reason="open_outside_range", occurrences=5,
+    )
+    RejectedRecord.objects.create(
+        endpoint="stock_candle_adjusted", symbol="Y", date="1404-01-02",
+        reason="open_outside_range", occurrences=3,
+    )
+    manifest = tmp_path / "rejections.csv"
+    call_command("audit_warehouse", "--check", "rejections", manifest_path=manifest)
+    with manifest.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows[0]["verdict"] == "rejection_backlog"
+    assert rows[0]["value"] == "2"
+    assert "open_outside_range" in rows[0]["evidence"]
+
+
+def test_retired_aggregate_check_flags_survivors(tmp_path):
+    from marketdata.models import MarketCandle
+
+    MarketCandle.objects.create(
+        symbol="LEFTOVER", timeframe=MarketCandle.AGGREGATE, date_time="1404-01-01",
+        close_price=100,
+    )
+    manifest = tmp_path / "retired.csv"
+    call_command("audit_warehouse", "--check", "retiredaggregate", manifest_path=manifest)
+    with manifest.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [row["verdict"] for row in rows] == ["migration_incomplete"]
+    assert rows[0]["table"] == "marketdata_marketcandle"
+
+
+def test_retired_aggregate_check_is_clean_when_none_remain(tmp_path):
+    manifest = tmp_path / "retired.csv"
+    call_command("audit_warehouse", "--check", "retiredaggregate", manifest_path=manifest)
+    with manifest.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows == []

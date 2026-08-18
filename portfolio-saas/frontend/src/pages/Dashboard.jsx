@@ -89,8 +89,15 @@ function HeroRow({ state }) {
       {(data) => {
         const hasUsd = data.total_usd !== undefined && data.total_usd !== null;
         return (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3" data-testid="dashboard-hero">
-            <StatTile label="Total value" value={toman(Number(data.total))} testId="dashboard-total" />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4" data-testid="dashboard-hero">
+            <div className="sm:col-span-2">
+              <StatTile
+                label="Total value"
+                value={toman(Number(data.total))}
+                size="lg"
+                testId="dashboard-total"
+              />
+            </div>
             <StatTile
               label="USD equivalent"
               value={hasUsd ? "$" + num(Number(data.total_usd)) : "—"}
@@ -1249,10 +1256,14 @@ export default function Dashboard({ user }) {
   return (
     <div>
       <PageHeader title="Portfolio" subtitle="Live = every holding priced ≤5 min ago. Manual = house/bars updated within 90 days. Mixed includes stale or archive fallback. Real Toman uses SCI CPI through 1404." />
-      <div className="space-y-5">
+      <div className="space-y-6">
         <HeroRow state={valuationState} />
-        <TrendCard activeId={activeId} basis={basis} />
-        <AllocationCard state={valuationState} />
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
+          <div className="lg:col-span-2">
+            <TrendCard activeId={activeId} basis={basis} />
+          </div>
+          <AllocationCard state={valuationState} />
+        </div>
         <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
         <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} staff={!!user?.is_staff} />
         <ExcludedDisclosure valuationState={valuationState} />

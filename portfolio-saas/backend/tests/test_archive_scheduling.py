@@ -53,7 +53,7 @@ def test_claim_order_is_coverage_first():
     never = _state("never_fetched")
     for symbol in ("has_data_small_gap", "fetched_but_empty", "never_fetched"):
         DailyStockHistory.objects.create(
-            symbol=symbol, date="1405-01-01", is_adjusted=False, pl=100,
+            symbol=symbol, date="1405-01-01", pl=100,
         )
 
     batch = claim_archive_batch(limit=3)
@@ -61,6 +61,48 @@ def test_claim_order_is_coverage_first():
     assert batch.index(never.pk) < batch.index(empty.pk) < batch.index(full.pk), (
         "coverage must outrank gap size: never-fetched, then empty, then top-ups"
     )
+
+
+def test_recency_gap_tier_reopens_verified_complete_states(monkeypatch):
+    """A verified_complete state whose post-close reverify came due must be
+    claimable again -- without this tier it is permanently invisible to
+    claim_archive_batch (its `base` queryset only ever sees
+    verified_complete=False), so the gap between last_date and today never
+    closes on its own."""
+    monkeypatch.setattr("marketdata.archive._archive_prereqs_ready", lambda state: True)
+    now = timezone.now()
+    stale = _state(
+        "already_complete", Endpoint.STOCK_HISTORY_UNADJUSTED,
+        verified_complete=True, last_date="1404-01-01",
+        next_attempt_at=now - timedelta(hours=1),
+    )
+    growing_tick = _state(
+        "tick_symbol", Endpoint.STOCK_TRANSACTION_TICKS,
+        target_window_days=90, stored_rows=10,
+    )
+
+    batch = claim_archive_batch(limit=1)
+
+    assert batch == [stale.pk], (
+        "the recency tier sits between the general coverage tier and tick "
+        "depth growth, so a due reverify claims ahead of a fresh tick state"
+    )
+    assert growing_tick.pk not in batch
+
+
+def test_recency_gap_tier_never_reopens_ticks():
+    """Ticks reopen only through grow_tick_windows (which also widens the
+    window); the general recency tier must leave verified_complete tick
+    states alone or the two mechanisms would fight over the same rows."""
+    now = timezone.now()
+    done_tick = _state(
+        "finished_tick", Endpoint.STOCK_TRANSACTION_TICKS,
+        verified_complete=True, next_attempt_at=now - timedelta(hours=1),
+    )
+
+    batch = claim_archive_batch(limit=5)
+
+    assert done_tick.pk not in batch
 
 
 def test_rejected_rows_under_the_writer_label_are_forgiven():
@@ -184,3 +226,47 @@ def test_quota_exhausted_defers_to_tehran_day_rollover_not_one_minute():
     assert abs((state.next_attempt_at - rollover).total_seconds()) < 2
     assert sibling.next_attempt_at >= rollover - timedelta(seconds=2)
     assert sibling.last_error == "Daily quota unavailable."
+
+
+def test_grow_tick_windows_widens_completed_states_without_limit():
+    from marketdata.archive import grow_tick_windows
+
+    done = _state(
+        "grown_symbol", Endpoint.STOCK_TRANSACTION_TICKS,
+        verified_complete=True, target_window_days=90,
+    )
+    not_done = _state(
+        "still_working", Endpoint.STOCK_TRANSACTION_TICKS,
+        verified_complete=False, target_window_days=90,
+    )
+
+    updated = grow_tick_windows(step_days=90)
+
+    assert updated == 1
+    done.refresh_from_db()
+    not_done.refresh_from_db()
+    assert done.target_window_days == 180
+    assert done.verified_complete is False
+    assert not_done.target_window_days == 90, "an incomplete state is not this function's job"
+
+
+def test_grow_tick_windows_stops_at_the_symbol_listing_date():
+    from marketdata.archive import grow_tick_windows
+    from marketdata.models import InstrumentListingHistory
+
+    InstrumentListingHistory.objects.create(
+        symbol="old_symbol", first_seen="1404-01-01", last_seen="1405-01-01",
+    )
+    already_at_listing = _state(
+        "old_symbol", Endpoint.STOCK_TRANSACTION_TICKS,
+        verified_complete=True, target_window_days=3650,
+    )
+
+    updated = grow_tick_windows(step_days=90)
+
+    assert updated == 0
+    already_at_listing.refresh_from_db()
+    assert already_at_listing.target_window_days == 3650
+    assert already_at_listing.verified_complete is True, (
+        "already backfilled to the symbol's own listing date -- stays done"
+    )

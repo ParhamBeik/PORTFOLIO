@@ -47,11 +47,17 @@ export function Card({ title, subtitle, actions, children, testId, className = "
   );
 }
 
-export function StatTile({ label, value, sub, valueTone = "neutral", testId }) {
+/** `size="lg"` gives one hero number more visual weight — same tokens, bigger type. */
+export function StatTile({ label, value, sub, valueTone = "neutral", size = "md", testId }) {
   return (
-    <div data-testid={testId} className="rounded-lg border border-border bg-panel-2 px-4 py-3">
+    <div
+      data-testid={testId}
+      className={`rounded-lg border border-border bg-panel-2 px-4 ${size === "lg" ? "py-4" : "py-3"}`}
+    >
       <div className="text-xs font-medium tracking-wide text-muted uppercase">{label}</div>
-      <div className={`mt-1 text-2xl font-semibold ${tone[valueTone]}`}>{value}</div>
+      <div className={`mt-1 font-semibold ${size === "lg" ? "text-4xl" : "text-2xl"} ${tone[valueTone]}`}>
+        {value}
+      </div>
       {sub && <div className="mt-0.5 text-xs text-muted">{sub}</div>}
     </div>
   );

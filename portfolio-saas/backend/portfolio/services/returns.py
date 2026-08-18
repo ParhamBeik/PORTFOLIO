@@ -34,6 +34,7 @@ import pandas as pd
 from django.core.cache import cache
 
 from marketdata.currency import tse_close_to_toman
+from marketdata.integrity import MAX_OUTAGE_CALENDAR_DAYS
 from portfolio.models import Asset, Price
 from .deflator import normalize_basis, to_basis
 
@@ -53,15 +54,10 @@ RETURNS_CACHE_TTL = 600
 USD_QUOTED_KEYS = ("bitcoin_usd", "gold_ounce_usd")
 # Extra days we fetch upstream of the window so resampling keeps the first row.
 _HISTORY_BUFFER_DAYS = 7
-# The session calendar is derived from the warehouse itself, so a stretch where
-# nothing was ingested looks identical to a stretch where the market was shut.
-# Past this many calendar days a break is investigated rather than spliced.
-#
-# It is NOT true that "Nowruz is the longest genuine closure at ~14 days": the
-# exchange was shut for 83 days across 1404-1405, and there are 74 market-wide
-# closure days spread over 12 Jalali years. Length alone therefore cannot tell a
-# closure from an ingest hole -- `_closure_explained()` asks the data instead.
-MAX_OUTAGE_CALENDAR_DAYS = 21
+# MAX_OUTAGE_CALENDAR_DAYS lives in marketdata.integrity (imported above) --
+# it used to be redefined here too, and the two copies could only drift out of
+# sync by hand. See that module for why length alone cannot tell a closure
+# from an ingest hole; `_closure_explained()` below asks the data instead.
 
 
 def _price_version_fingerprint() -> str:

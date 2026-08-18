@@ -62,11 +62,11 @@ GOLD_PAYLOAD = {
 
 @pytest.mark.django_db
 def test_ingest_daily_history_maps_fields_and_normalizes_dates():
-    created, skipped = ingest.ingest_daily_history("فملی", HISTORY_PAYLOAD, is_adjusted=False)
+    created, skipped = ingest.ingest_daily_history("فملی", HISTORY_PAYLOAD)
     assert created == 2 and skipped == 0
     row = DailyStockHistory.objects.get(symbol="فملی", date="1403-10-19")
     # Storage unit is Rial; provider values are stored undivided.
-    assert row.pl == 8500 and row.buy_count_i == 2416 and row.is_adjusted is False
+    assert row.pl == 8500 and row.buy_count_i == 2416
     assert row.ts is not None
     # Slash-separated input date stored dash-normalized.
     assert DailyStockHistory.objects.filter(date="1403-10-20").exists()
@@ -75,8 +75,8 @@ def test_ingest_daily_history_maps_fields_and_normalizes_dates():
 
 @pytest.mark.django_db
 def test_ingest_daily_history_rerun_is_idempotent():
-    ingest.ingest_daily_history("فملی", HISTORY_PAYLOAD, is_adjusted=False)
-    created, skipped = ingest.ingest_daily_history("فملی", HISTORY_PAYLOAD, is_adjusted=False)
+    ingest.ingest_daily_history("فملی", HISTORY_PAYLOAD)
+    created, skipped = ingest.ingest_daily_history("فملی", HISTORY_PAYLOAD)
     assert created == 0 and skipped == 2
     assert DailyStockHistory.objects.count() == 2
 
@@ -84,7 +84,7 @@ def test_ingest_daily_history_rerun_is_idempotent():
 @pytest.mark.django_db
 def test_ingest_daily_history_skips_malformed_record_keeps_rest():
     payload = HISTORY_PAYLOAD + [{"time": "no-date-key"}]
-    created, skipped = ingest.ingest_daily_history("فملی", payload, is_adjusted=False)
+    created, skipped = ingest.ingest_daily_history("فملی", payload)
     assert created == 2 and skipped == 1
 
 
@@ -150,7 +150,7 @@ def test_ingest_symbol_metadata_updates_in_place():
 
 @pytest.mark.django_db
 def test_ingest_handles_none_payload():
-    assert ingest.ingest_daily_history("x", None, is_adjusted=False) == (0, 0)
+    assert ingest.ingest_daily_history("x", None) == (0, 0)
     assert ingest.ingest_codal(None) == (0, 0)
     assert ingest.ingest_gold_currency_history(None) == (0, 0)
 

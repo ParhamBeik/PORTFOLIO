@@ -31,7 +31,7 @@ def test_archive_tick_claims_only_free_queue_slots(monkeypatch):
     client.set.return_value = True
     monkeypatch.setattr(tasks, "get_redis", lambda: client)
     monkeypatch.setattr(tasks, "_queue_slots", lambda *_args: (3, 1))
-    monkeypatch.setattr(tasks, "promote_priority_tick_windows", mock.Mock())
+    monkeypatch.setattr(tasks, "grow_tick_windows", mock.Mock())
     claim = mock.Mock(return_value=[])
     monkeypatch.setattr(tasks, "claim_archive_batch", claim)
 

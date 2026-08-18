@@ -50,6 +50,7 @@ app.conf.update(
         "marketdata.tasks.archive_maintenance": {"queue": "live"},
         "marketdata.tasks.capture_operational_metrics": {"queue": "live"},
         "marketdata.tasks.capture_derivative_snapshots": {"queue": "live"},
+        "marketdata.tasks.capture_market_snapshots": {"queue": "live"},
         "marketdata.tasks.extract_codal_report": {"queue": "codal"},
         "marketdata.tasks.queue_codal_extractions": {"queue": "live"},
         "marketdata.tasks.*": {"queue": "archive"},
@@ -92,9 +93,21 @@ app.conf.beat_schedule = {
         "task": "marketdata.tasks.capture_derivative_snapshots",
         "schedule": 300.0,
     },
+    # Crypto/commodity/ETF NAV: previously-registered, never-called endpoints.
+    # Every few minutes is enough -- these feed a daily OHLC bar, not the
+    # 2-minute held-asset price loop.
+    "capture-market-snapshots": {
+        "task": "marketdata.tasks.capture_market_snapshots",
+        "schedule": 300.0,
+    },
+    # After the day's snapshots exist, distill them into MarketDailyBar rows.
+    "aggregate-market-daily-bars": {
+        "task": "marketdata.tasks.aggregate_market_daily_bars_task",
+        "schedule": crontab(hour=1, minute=40),
+    },
     "queue-codal-extractions": {
         "task": "marketdata.tasks.queue_codal_extractions",
-        "schedule": crontab(hour=3, minute=55),
+        "schedule": crontab(minute=55, hour="*/6"),
     },
     # Roll the day's live Price ticks into one DailyPriceAverage row per asset.
     "aggregate-daily-price-averages": {

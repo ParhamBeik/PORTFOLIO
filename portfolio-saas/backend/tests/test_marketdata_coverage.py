@@ -304,6 +304,17 @@ class TestIngestOutageDetection:
         assert market_outage_windows(start="1404-12-01", end="1405-01-20") == []
 
     def test_reopening_puts_completed_states_back_in_the_queue(self):
+        """reopen_states_with_gaps is the *urgent* path: it bypasses the normal
+        schedule for a state an integrity check found a real gap in, even
+        before its next routine reverify comes due. That is distinct from the
+        recency-gap tier in claim_archive_batch, which only claims states that
+        are already due -- so this state must start out not-yet-due to
+        actually exercise reopen_states_with_gaps rather than the routine
+        tier."""
+        from datetime import timedelta
+
+        from django.utils import timezone
+
         from marketdata.archive import claim_archive_batch, reopen_states_with_gaps
         from marketdata.models import ArchiveFetchState
 
@@ -311,6 +322,7 @@ class TestIngestOutageDetection:
             endpoint=ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
             symbol="SYM0",
             verified_complete=True,
+            next_attempt_at=timezone.now() + timedelta(days=1),
         )
         assert state.pk not in claim_archive_batch(limit=5)
 

@@ -90,7 +90,7 @@ class Command(BaseCommand):
                     if not dry:
                         record("history", (
                             ingest.ingest_real_legal(symbol, payload)
-                            if adjusted else ingest.ingest_daily_history(symbol, payload, is_adjusted=False)
+                            if adjusted else ingest.ingest_daily_history(symbol, payload)
                         ))
                     pause()
             if "candles" in kinds:

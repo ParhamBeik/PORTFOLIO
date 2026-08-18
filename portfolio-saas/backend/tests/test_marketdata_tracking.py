@@ -155,6 +155,7 @@ def test_catalog_accepts_all_provider_currencies(settings):
             ],
             "crypto": [{"symbol": "BTC", "name": "Bitcoin"}],
         }),
+        patch("marketdata.catalog.fetch_derivatives", return_value=[]),
     ):
         sync_provider_catalog()
 
@@ -176,7 +177,7 @@ REAL_LEGAL_PAYLOAD = [
 def _seed_price_days(symbol="TEST"):
     for date in ("1404-01-01", "1404-01-02"):
         DailyStockHistory.objects.create(
-            symbol=symbol, date=date, is_adjusted=False, pl=100
+            symbol=symbol, date=date, pl=100
         )
 
 
@@ -194,7 +195,7 @@ def test_archive_state_is_complete_only_after_rows_exist(settings):
     assert state.missing_rows == 0
     assert (
         DailyStockHistory.objects.filter(
-            symbol="TEST", is_adjusted=False, buy_count_i__isnull=False
+            symbol="TEST", buy_count_i__isnull=False
         ).count()
         == 2
     )
@@ -231,7 +232,7 @@ def test_real_legal_verifies_despite_individually_rejected_price_days(settings):
     # REAL_LEGAL_PAYLOAD carries two days; only the first gets a price row --
     # the second stands in for a day the price validator rejected.
     DailyStockHistory.objects.create(
-        symbol="TEST", date=REAL_LEGAL_PAYLOAD[0]["date"], is_adjusted=False, pl=100
+        symbol="TEST", date=REAL_LEGAL_PAYLOAD[0]["date"], pl=100
     )
     state = ArchiveFetchState.objects.create(
         endpoint=ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
