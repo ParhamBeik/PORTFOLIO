@@ -99,5 +99,21 @@ export function trendAxisTick(iso, spanMs) {
 export const humanize = (code) =>
   !code ? "" : String(code).replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
 
+/** Relative-age label for a freshness timestamp measured in seconds, e.g. "1h 44m ago". */
+export function ago(seconds) {
+  if (bad(seconds)) return "—";
+  const s = Math.max(0, Math.round(Number(seconds)));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) {
+    const remM = m % 60;
+    return remM ? `${h}h ${remM}m ago` : `${h}h ago`;
+  }
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
 /** Prefer the Persian name — that is how TSE symbols are recognized. */
 export const assetLabel = (a) => a?.name_fa || a?.name || a?.key || "—";

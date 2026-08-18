@@ -14,7 +14,7 @@ import {
   diversifiers,
   benchmarks,
 } from "../api.js";
-import { num, toman, pct, signedToman, humanize, assetLabel, perfLabel, PERF_UNLOCK_HINT } from "../format.js";
+import { num, toman, pct, signedToman, humanize, assetLabel, perfLabel, PERF_UNLOCK_HINT, ago } from "../format.js";
 import {
   AreaTrend,
   CorrelationHeatmap,
@@ -150,7 +150,7 @@ function TrendCard({ activeId, basis }) {
       title="Net worth"
       testId="dashboard-trend"
       actions={(
-        <div className="flex items-center gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <Tabs
             options={INFLATION_VIEWS}
             value={mode}
@@ -491,6 +491,19 @@ function hasDraftChanges(row, draft) {
 
 const inlineInputClass = "w-full min-w-[5rem] rounded-md border border-border bg-panel px-2 py-1 text-right text-sm tabular";
 
+function PricingGlossaryDisclosure() {
+  return (
+    <Disclosure summary="What do Live / Manual / Mixed mean?" testId="dashboard-pricing-glossary">
+      <ul className="space-y-1">
+        <li><strong className="text-text">Live</strong> — every holding priced within the last 5 minutes.</li>
+        <li><strong className="text-text">Manual</strong> — house or real-estate marks updated within the last 90 days.</li>
+        <li><strong className="text-text">Mixed</strong> — some holdings are stale or falling back to an archived price.</li>
+        <li><strong className="text-text">Real Toman</strong> — inflation-adjusted using SCI's CPI series through 1404.</li>
+      </ul>
+    </Disclosure>
+  );
+}
+
 function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
   const [manageMode, setManageMode] = useState(null);
   const [drafts, setDrafts] = useState({});
@@ -598,6 +611,8 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
           // a 945M holding a 109.7% weight. Weight is a share of what is listed.
           const weightBase =
             items.reduce((sum, i) => sum + Number(i.value || 0), 0) || 1;
+          const staleCount = items.filter((i) => i.quality_status && i.quality_status !== "live").length;
+          const showStaleBanner = items.length > 0 && staleCount / items.length >= 0.5;
 
           const columns = [
             { key: "asset", header: "Asset", render: (r) => r.name_fa || r.asset },
@@ -666,7 +681,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
               ),
             },
             { key: "source", header: "Source", render: (r) => r.source || "—" },
-            { key: "priced_at", header: "As of", render: (r) => r.priced_at ? `${r.age_seconds}s` : (r.archive_record?.date || "—") },
+            { key: "priced_at", header: "As of", render: (r) => r.priced_at ? ago(r.age_seconds) : (r.archive_record?.date || "—") },
           ];
 
           if (activeId == null) {
@@ -733,12 +748,22 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
 
           return (
             <>
+              {showStaleBanner && (
+                <div
+                  role="status"
+                  data-testid="dashboard-stale-banner"
+                  className="mb-3 rounded-lg border border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 px-4 py-3 text-sm"
+                >
+                  Live pricing unavailable for {staleCount} of {items.length} holdings — showing archived or manual prices instead.
+                </div>
+              )}
               {manageMode === "edit" && (
                 <p className="mb-3 text-xs text-muted">
                   Manual holdings: edit quantity and unit price, then click Save on each row. Real estate: edit quantity (price per sqm, millions T), then Save.
                 </p>
               )}
               <Table testId="dashboard-holdings-table" rowKey={holdingsRowKey} rows={items} columns={columns} empty="No holdings priced yet." />
+              <PricingGlossaryDisclosure />
               {actionError && (
                 <div className="mt-2">
                   <ErrorState error={actionError} testId="dashboard-holdings-error" />
@@ -988,10 +1013,12 @@ function RiskSourcesView({ data, labelFor = (k) => k }) {
         anything the two numbers disagree about is risk you are paying for twice.
       </p>
       {data.risk_free_rate_source && (
-        <p className="text-xs text-muted" data-testid="risk-rf-source">
-          Sharpe and Sortino below use a {pct(data.risk_free_rate_annual)} risk-free
-          rate — {data.risk_free_rate_source}.
-        </p>
+        <Disclosure summary="About the risk-free rate" testId="risk-rf-source">
+          <p>
+            Sharpe and Sortino below use a {pct(data.risk_free_rate_annual)} risk-free
+            rate — {data.risk_free_rate_source}.
+          </p>
+        </Disclosure>
       )}
 
       <div>
@@ -1255,7 +1282,7 @@ export default function Dashboard({ user }) {
 
   return (
     <div>
-      <PageHeader title="Portfolio" subtitle="Live = every holding priced ≤5 min ago. Manual = house/bars updated within 90 days. Mixed includes stale or archive fallback. Real Toman uses SCI CPI through 1404." />
+      <PageHeader title="Portfolio" subtitle="Your holdings, valued live, with performance and risk alongside." />
       <div className="space-y-6">
         <HeroRow state={valuationState} />
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
