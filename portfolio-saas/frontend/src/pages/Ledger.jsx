@@ -18,6 +18,7 @@ import {
   Delta,
   Empty,
   Input,
+  Loading,
   PageHeader,
   Select,
   Table,
@@ -63,7 +64,7 @@ function toIso(local) {
 }
 
 export default function Ledger() {
-  const { accounts, activeId, reload } = usePortfolio();
+  const { accounts, activeId, reload, loading: accountsLoading } = usePortfolio();
   const accountId = activeId ?? null;
   const assets = useApi(listAssets, []);
   const ledger = useApi(() => listLedger(accountId), [accountId], { enabled: accounts.length > 0 });
@@ -175,6 +176,13 @@ export default function Ledger() {
     }
   };
 
+  // Accounts start as [] while the list is still in flight (PortfolioContext),
+  // so this must wait for `loading` to clear before deciding there really is
+  // no portfolio -- otherwise every navigation here flashes the wrong empty
+  // state for however long the account list takes to arrive.
+  if (accountsLoading) {
+    return <Loading testId="ledger-loading" />;
+  }
   if (!accounts.length) {
     return <Empty testId="ledger-empty">Create a portfolio first.</Empty>;
   }
@@ -208,7 +216,12 @@ export default function Ledger() {
             aria-label={`Quantity for ${r.asset_key || r.kind}`}
             data-testid="ledger-edit-qty"
             disabled={busy}
-            value={drafts[r.id] ?? r.quantity}
+            // The backend serializes quantities at each asset class's own
+            // decimal precision ("100000.0" for shares, "4.000000" for
+            // coins) -- round-tripping through Number() strips the
+            // inconsistent trailing zeros for display without touching the
+            // value the user is actively editing.
+            value={drafts[r.id] ?? Number(r.quantity)}
             onChange={(e) => setDrafts((cur) => ({ ...cur, [r.id]: e.target.value }))}
           />
         )

@@ -9,7 +9,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 //
 // `pollMs` refetches on an interval without flashing the loading state, for the
 // dashboard's live valuation. Polling pauses while the tab is hidden.
-export function useApi(fn, deps = [], { enabled = true, pollMs = 0, pauseWhenHidden = true } = {}) {
+//
+// `timeoutMs` bounds how long a request may sit in `loading` with nothing to
+// show: some backend views can take far longer than a user should ever stare
+// at a spinner (or, worst case, drop the connection without a clean HTTP
+// error). Past the deadline this surfaces a retryable error instead of
+// hanging forever; if the original request eventually does resolve, its
+// result still lands normally and replaces the timeout error.
+const DEFAULT_TIMEOUT_MS = 25000;
+
+export function useApi(
+  fn,
+  deps = [],
+  { enabled = true, pollMs = 0, pauseWhenHidden = true, timeoutMs = DEFAULT_TIMEOUT_MS } = {}
+) {
   const [state, setState] = useState({ data: null, error: null, loading: enabled });
   const [nonce, setNonce] = useState(0);
   const fnRef = useRef(fn);
@@ -25,15 +38,38 @@ export function useApi(fn, deps = [], { enabled = true, pollMs = 0, pauseWhenHid
     let live = true;
     setState((s) => ({ ...s, loading: true, error: null }));
 
-    const run = (quiet = false) =>
-      fnRef.current()
-        .then((data) => live && setState({ data, error: null, loading: false }))
+    const run = (quiet = false) => {
+      let settled = false;
+      const timer = timeoutMs
+        ? setTimeout(() => {
+            if (!live || settled) return;
+            setState((s) =>
+              quiet && s.data
+                ? s
+                : {
+                    data: null,
+                    error: new Error("This is taking longer than expected."),
+                    loading: false,
+                  }
+            );
+          }, timeoutMs)
+        : null;
+
+      return fnRef.current()
+        .then((data) => {
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (live) setState({ data, error: null, loading: false });
+        })
         .catch((error) => {
+          settled = true;
+          if (timer) clearTimeout(timer);
           if (!live) return;
           setState((s) =>
             quiet && s.data ? s : { data: null, error, loading: false }
           );
         });
+    };
 
     run();
     if (!pollMs) return () => { live = false; };
@@ -47,7 +83,7 @@ export function useApi(fn, deps = [], { enabled = true, pollMs = 0, pauseWhenHid
       clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, enabled, pollMs, pauseWhenHidden, nonce]);
+  }, [...deps, enabled, pollMs, pauseWhenHidden, timeoutMs, nonce]);
 
   return { ...state, reload };
 }
