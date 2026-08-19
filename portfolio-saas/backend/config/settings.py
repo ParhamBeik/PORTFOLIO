@@ -342,6 +342,13 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True  # survive a broker restart
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 QUEUE_BACKLOG_THRESHOLD = int(os.getenv("QUEUE_BACKLOG_THRESHOLD", "100"))
+# ETFs fetched per capture_market_snapshots tick (every 5 min, ~417 known ETFs,
+# marketdata/tasks.py:_capture_etf_nav_batch). Tsetmc/Nav.php is one request per
+# ETF with no batch form; kept small because it shares the TSETMC daily quota
+# with every other endpoint this app calls, and ETF NAV only feeds a daily bar
+# so does not need every symbol fresh every tick -- 5/tick completes a full
+# rotation in ~7 hours (417 / 5 * 5min).
+ETF_NAV_BATCH_SIZE = int(os.getenv("ETF_NAV_BATCH_SIZE", "5"))
 APPLICATION_ERROR_THRESHOLD = int(os.getenv("APPLICATION_ERROR_THRESHOLD", "20"))
 WORKFLOW_FAILURE_RATE_THRESHOLD = float(os.getenv("WORKFLOW_FAILURE_RATE_THRESHOLD", "0.10"))
 # Today 1,072 of 1,346 symbols (0.80) fail the integrity gate purely because the

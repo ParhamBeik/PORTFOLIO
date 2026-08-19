@@ -6,6 +6,7 @@ Two scale levers live here:
   2. valuation is pure arithmetic over a preloaded holding set.
 """
 import logging
+from datetime import timedelta
 from decimal import Decimal
 
 from django.core.cache import cache
@@ -18,6 +19,11 @@ logger = logging.getLogger(__name__)
 _LATEST_PRICES_CACHE_KEY = "prices:latest"
 _ARCHIVE_DROP_FLOOR = Decimal("0.50")
 _ARCHIVE_SPIKE_CEILING = Decimal("2.00")
+
+# Shared by every price-resolution path in this module (guard_price_map,
+# compute_dynamic_net_worth_series, value_as_of's _stale_sessions): forward-fill
+# past this many sessions invents a price rather than reports one.
+MAX_FORWARD_FILL_SESSIONS = 5
 
 
 def _q(value) -> Decimal:
@@ -81,26 +87,43 @@ def guard_price_map(prices: dict, *, fill_missing=True, archive_replacements=Non
         }
     )
 
-    # 2. Forward-fill only when neither live nor archive data is available.
+    # 2. Forward-fill only when neither live nor archive data is available, and
+    # only within MAX_FORWARD_FILL_SESSIONS days. The forward-filled value is
+    # never persisted as a new Price row (see _persistable_prices), so without
+    # this bound a delisted/broken asset's `fetched_at` never advances and this
+    # keeps re-forward-filling the same ancient price forever -- the same
+    # invariant value_as_of enforces via _stale_sessions.
+    now = timezone.now()
+    max_age = timedelta(days=MAX_FORWARD_FILL_SESSIONS)
     latest_db_rows = (
         Price.objects.select_related("asset")
         .filter(asset__is_active=True, price__gt=0)
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     )
-    prev_prices = {row.asset.key: _q(row.price) for row in latest_db_rows}
+    prev_prices = {row.asset.key: (_q(row.price), row.fetched_at) for row in latest_db_rows}
 
-    # 2. Forward-fill missing prices. Large positive moves remain observable;
-    # archive corroboration below rejects only catastrophic deviations.
+    # Large positive moves remain observable; archive corroboration above
+    # rejects only catastrophic deviations.
     for key, live_price in list(guarded.items()):
-        prev_price = prev_prices.get(key)
-        if prev_price and prev_price > 0:
-            if live_price <= 0:
-                logger.info(
-                    "Key='%s' missing or zero live price. Forward-filling previous price %s.",
-                    key, prev_price
-                )
-                guarded[key] = prev_price
+        prev = prev_prices.get(key)
+        if not prev or live_price > 0:
+            continue
+        prev_price, prev_fetched_at = prev
+        if prev_price <= 0:
+            continue
+        if now - prev_fetched_at > max_age:
+            logger.warning(
+                "Key='%s' missing or zero live price and last price is older than "
+                "%s days (fetched_at=%s). Not forward-filling.",
+                key, MAX_FORWARD_FILL_SESSIONS, prev_fetched_at,
+            )
+            continue
+        logger.info(
+            "Key='%s' missing or zero live price. Forward-filling previous price %s.",
+            key, prev_price
+        )
+        guarded[key] = prev_price
 
     return guarded
 
@@ -492,8 +515,14 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     latest_prices = get_latest_prices()
     usd_rate = Decimal(latest_prices.get("usd_cash", 0) or 0)
 
-    # Track last known price for each asset to seamlessly fill non-trading days
+    # Track last known price for each asset to seamlessly fill non-trading days.
     last_known_prices = {key: _q(latest_prices.get(key, 0)) for key in assets}
+    # Day index (loop's `i`, i.e. days-ago) of the last REAL close used per
+    # asset. Once an asset stops printing real closes, last_known_prices must
+    # not be trusted past MAX_FORWARD_FILL_SESSIONS days from that day, or a
+    # delisted/broken asset flat-lines the rest of the window at a made-up
+    # price -- same invariant value_as_of enforces via _stale_sessions.
+    last_priced_day_index = {}
 
     liabilities = Liability.objects.filter(account__in=accounts)
     total_liabilities = sum(l.amount_tomans for l in liabilities)
@@ -526,7 +555,11 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
                     p = gold_closes.get(jalali_str, {}).get(key)
                 if p is not None:
                     last_known_prices[key] = p
+                    last_priced_day_index[key] = i
                 else:
+                    last_real_day = last_priced_day_index.get(key)
+                    if last_real_day is not None and (last_real_day - i) > MAX_FORWARD_FILL_SESSIONS:
+                        continue  # gap exceeded: exclude rather than invent a price
                     p = last_known_prices.get(key, _q(latest_prices.get(key, 0)))
                 total += qty * p
 
@@ -541,9 +574,6 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
         })
 
     return series
-
-
-MAX_FORWARD_FILL_SESSIONS = 5
 
 
 def _stale_sessions(queryset, date_field: str, last_date: str, as_of_jalali: str) -> int:

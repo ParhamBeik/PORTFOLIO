@@ -705,7 +705,7 @@ def next_quota_day_start(now=None):
 def run_archive_state(state_id):
     state = ArchiveFetchState.objects.get(pk=state_id)
     now = timezone.now()
-    logger.debug("Processing archive state %s (%s).", state.symbol, state.endpoint)
+    logger.info("Processing archive state %s (%s).", state.symbol, state.endpoint)
     try:
         (created, _), expected, stored = _fetch_and_ingest(state)
     except QuotaExhausted as exc:
@@ -724,7 +724,7 @@ def run_archive_state(state_id):
             next_attempt_at=rollover,
             last_error="Daily quota unavailable.",
         )
-        logger.debug("Archive quota unavailable for %s (%s): %s", state.symbol, state.endpoint, exc)
+        logger.info("Archive quota unavailable for %s (%s): %s", state.symbol, state.endpoint, exc)
         raise
     except MarketDataFetchError as exc:
         from .fetchers.base import TransientMarketDataError
@@ -741,7 +741,7 @@ def run_archive_state(state_id):
             state.save(update_fields=[
                 "last_attempt_at", "next_attempt_at", "last_error", "verified_complete",
             ])
-            logger.debug(
+            logger.info(
                 "Archive prereq defer for %s (%s): %s",
                 state.symbol, state.endpoint, exc,
             )
@@ -760,7 +760,7 @@ def run_archive_state(state_id):
             state.save(update_fields=[
                 "consecutive_failures", "last_attempt_at", "next_attempt_at", "last_error",
             ])
-            logger.debug("Archive request retry scheduled for %s (%s) in %dm: %s", state.symbol, state.endpoint, delay, exc)
+            logger.info("Archive request retry scheduled for %s (%s) in %dm: %s", state.symbol, state.endpoint, delay, exc)
             return state
 
         failures = state.consecutive_failures + 1
@@ -773,7 +773,7 @@ def run_archive_state(state_id):
             "consecutive_failures", "last_attempt_at", "next_attempt_at",
             "last_error", "verified_complete",
         ])
-        logger.debug("Archive fetch retry scheduled for %s (%s): %s", state.symbol, state.endpoint, exc)
+        logger.info("Archive fetch retry scheduled for %s (%s): %s", state.symbol, state.endpoint, exc)
         return state
 
     previous_missing = state.missing_rows
@@ -811,7 +811,7 @@ def run_archive_state(state_id):
 
     if state.verified_complete:
         state.consecutive_failures = 0
-        logger.debug(
+        logger.info(
             "Archive state complete for %s (%s): stored=%d known_gaps=%d.",
             state.symbol, state.endpoint, state.stored_rows, state.known_gap_rows,
         )
@@ -830,7 +830,7 @@ def run_archive_state(state_id):
             previous_missing=previous_missing,
             now=now,
         )
-        logger.debug("Archive state incomplete for %s (%s): stored=%d expected=%d missing=%d.", state.symbol, state.endpoint, state.stored_rows, state.expected_rows, state.missing_rows)
+        logger.info("Archive state incomplete for %s (%s): stored=%d expected=%d missing=%d.", state.symbol, state.endpoint, state.stored_rows, state.expected_rows, state.missing_rows)
     state.save()
     # A suspended state only reaches here via the weekly probe. If the fetch
     # came back clean, lift the suspension so it rejoins normal scheduling.

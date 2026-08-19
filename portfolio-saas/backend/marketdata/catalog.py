@@ -53,17 +53,30 @@ def sync_provider_catalog(limit=None):
         symbol = str(record.get("l18", "")).strip()
         if not symbol:
             continue
-        eligible = is_ordinary_stock(record)
+        isin = str(record.get("isin", "") or "")
+        # IRT-prefixed ISINs are exchange-traded funds (the `all_symbols`
+        # endpoint's own registry note already said so: "ETFs have IRT
+        # ISINs"), confirmed live -- all 417 rows whose `cs` sector reads
+        # "صندوق سرمایه‌گذاری قابل معامله" carry an IRT isin. They used to fall
+        # through to EXCLUDED here, which is why MarketInstrument had zero ETF
+        # rows and etf_nav's "discovery" call (a separate, broken batch fetch
+        # against Tsetmc/Nav.php -- see capture_market_snapshots) never found
+        # anything to iterate even after being fixed to require `l18`.
+        is_etf = isin.startswith("IRT")
+        ordinary = is_ordinary_stock(record)
+        eligible = ordinary or is_etf
+        category = (
+            MarketInstrument.Category.STOCK if ordinary
+            else MarketInstrument.Category.ETF if is_etf
+            else MarketInstrument.Category.EXCLUDED
+        )
         rows.append(MarketInstrument(
             source=MarketInstrument.Source.TSETMC,
             symbol=symbol,
             name=str(record.get("l30", "") or ""),
-            category=(
-                MarketInstrument.Category.STOCK
-                if eligible else MarketInstrument.Category.EXCLUDED
-            ),
+            category=category,
             provider_group=str(record.get("cs", "") or ""),
-            isin=str(record.get("isin", "") or ""),
+            isin=isin,
             eligible=eligible,
         ))
 
@@ -97,14 +110,19 @@ def sync_provider_catalog(limit=None):
             eligible=eligible,
         ))
 
-    # Crypto/commodity/ETF NAV: previously dead endpoints, now the live-poll
-    # source for MarketSnapshot too. Each returns its whole universe in one
-    # call, so catalog discovery and the live capture task share a payload
-    # shape (see flatten_records) -- no separate discovery endpoint needed.
+    # Crypto/commodity: dead-until-recently endpoints, now the live-poll source
+    # for MarketSnapshot too. Each returns its whole universe in one call, so
+    # catalog discovery and the live capture task share a payload shape (see
+    # flatten_records) -- no separate discovery endpoint needed.
+    #
+    # ETF NAV is NOT in this loop (unlike before): Tsetmc/Nav.php requires a
+    # per-symbol `l18` and 400s on a bare batch call, so it can never double as
+    # a discovery source. ETF instruments are discovered above instead, from
+    # the IRT-ISIN rows already present in the `all_symbols` stock payload
+    # this function fetches regardless -- zero extra requests.
     for asset_class, endpoint_key, api_key, category in (
         ("crypto", "crypto", settings.BRS_API_KEY, MarketInstrument.Category.CRYPTO),
         ("commodity", "commodity", settings.BRS_API_KEY, MarketInstrument.Category.COMMODITY),
-        ("etf_nav", "etf_nav", settings.TSETMC_API_KEY, MarketInstrument.Category.ETF),
     ):
         payload = fetch_derivatives(api_key, endpoint_key)
         records = flatten_records(payload)

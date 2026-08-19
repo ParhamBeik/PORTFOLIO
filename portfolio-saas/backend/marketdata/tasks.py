@@ -74,9 +74,9 @@ def capture_derivative_snapshots():
 
 @shared_task
 def capture_market_snapshots():
-    """Poll the three live endpoints that are registered but never called:
-    crypto, commodity, ETF NAV. Each returns its whole universe in one
-    request, so this doubles as catalog discovery and price capture.
+    """Poll the live endpoints that are registered but were never called until
+    recently: crypto, commodity (batch, one call each) and ETF NAV (per-symbol,
+    see _capture_etf_nav_batch below -- Tsetmc/Nav.php has no batch form).
 
     Same failure-domain-per-endpoint shape as `capture_derivative_snapshots`.
     `Market/*` paths (crypto, commodity) use `BRS_API_KEY`; `Tsetmc/*` paths
@@ -89,7 +89,6 @@ def capture_market_snapshots():
     for asset_class, endpoint_key, api_key in (
         ("crypto", "crypto", settings.BRS_API_KEY),
         ("commodity", "commodity", settings.BRS_API_KEY),
-        ("etf_nav", "etf_nav", settings.TSETMC_API_KEY),
     ):
         outcome = _ledgered(
             f"capture_market_snapshots:{asset_class}",
@@ -104,7 +103,85 @@ def capture_market_snapshots():
         except Exception as err:
             results[asset_class] = err
             _finish_fail(outcome, err)
+
+    results["etf_nav"] = _capture_etf_nav_batch()
     return results
+
+
+_ETF_NAV_CURSOR_CACHE_KEY = "marketdata:etf_nav:cursor"
+
+
+def _capture_etf_nav_batch():
+    """Fetch NAV for a bounded, rotating slice of known ETFs.
+
+    Nav.php is one request per ETF (see fetch_etf_nav), and there are ~417 of
+    them (marketdata.catalog's IRT-ISIN discovery) -- fetching all of them
+    every 5-minute tick (this task's schedule, config/celery.py) would burn
+    roughly 12x that per hour against a 10,000/day account-wide quota shared
+    with every other endpoint this app calls. ETF NAV only ever feeds a daily
+    OHLC bar (aggregate_market_daily_bars), not the 2-minute held-asset price
+    loop, so it does not need every symbol fresh every tick -- a bounded slice
+    per tick, rotating through the full set via a cache-held cursor, is
+    sufficient and keeps steady-state cost to
+    settings.ETF_NAV_BATCH_SIZE requests per 5 minutes.
+    """
+    from django.core.cache import cache
+
+    from .fetchers import fetch_etf_nav
+    from .fetchers.base import PermanentMarketDataError, TransientMarketDataError
+    from .models import MarketInstrument
+
+    outcome = _ledgered(
+        "capture_market_snapshots:etf_nav",
+        endpoint="etf_nav",
+        destination_table="MarketSnapshot",
+    )
+    symbols = list(
+        MarketInstrument.objects.filter(
+            category=MarketInstrument.Category.ETF, eligible=True,
+        ).order_by("symbol").values_list("symbol", flat=True)
+    )
+    if not symbols:
+        # Expected before the first catalog sync of the day (sync_provider_catalog
+        # is what populates category=ETF rows); not an error.
+        _finish_ok(outcome, rows_created=0, metadata={"reason": "no_etf_instruments_yet"})
+        logger.info("capture_market_snapshots(etf_nav): no ETF instruments in catalog yet")
+        return (0, 0)
+
+    batch_size = max(1, getattr(settings, "ETF_NAV_BATCH_SIZE", 5))
+    cursor = cache.get(_ETF_NAV_CURSOR_CACHE_KEY, 0) % len(symbols)
+    batch = [symbols[(cursor + i) % len(symbols)] for i in range(min(batch_size, len(symbols)))]
+    cache.set(_ETF_NAV_CURSOR_CACHE_KEY, (cursor + len(batch)) % len(symbols), None)
+
+    created = failed = 0
+    permanent_failures = []
+    for symbol in batch:
+        try:
+            payload = fetch_etf_nav(settings.TSETMC_API_KEY, symbol)
+            if ingest.ingest_etf_nav_snapshot(symbol, payload):
+                created += 1
+            else:
+                failed += 1
+        except PermanentMarketDataError as exc:
+            # A specific symbol rejected (e.g. delisted, per endpoints.py's
+            # "non-ETF symbol returns 502" note) must not abort the rest of
+            # the batch -- log it and keep going, same as the other per-item
+            # loops in this module (ingest_market_snapshots et al).
+            failed += 1
+            permanent_failures.append(symbol)
+            logger.warning("capture_market_snapshots(etf_nav): %s permanently failed: %s", symbol, exc)
+        except TransientMarketDataError as exc:
+            failed += 1
+            logger.warning("capture_market_snapshots(etf_nav): %s transient failure: %s", symbol, exc)
+
+    logger.info(
+        "capture_market_snapshots(etf_nav): created %d, failed %d of %d fetched "
+        "(cursor now %d/%d, permanent_failures=%s)",
+        created, failed, len(batch), cache.get(_ETF_NAV_CURSOR_CACHE_KEY, 0), len(symbols),
+        permanent_failures or None,
+    )
+    _finish_ok(outcome, rows_created=created, rows_rejected=failed)
+    return (created, failed)
 
 
 @shared_task(ignore_result=True)
@@ -1093,7 +1170,7 @@ def nightly_asset_metrics(window_days=365):
         row.symbol: row
         for row in MarketInstrument.objects.filter(eligible=True)
     }
-    returns, _ = daily_returns_matrix(
+    returns, excluded = daily_returns_matrix(
         history_days=window_days,
         universe=list(instruments),
     )
@@ -1155,9 +1232,17 @@ def nightly_asset_metrics(window_days=365):
             },
         )
         written += 1
+    # `excluded` was previously discarded here -- price_gap_exceeded/
+    # insufficient_history/insufficient_coverage assets silently dropped out of
+    # the panel with no trace outside a manual DB query. Surface counts by
+    # reason so a sudden jump (e.g. a provider outage excluding half the
+    # universe) is visible in logs, not just in a lower `written` count.
+    reason_counts = Counter(row.get("reason", "unknown") for row in excluded)
     _finish_ok(
         _ledgered("nightly_asset_metrics", destination_table="AssetMetricSnapshot"),
         rows_accepted=written,
+        rows_rejected=len(excluded),
+        metadata={"excluded_reasons": dict(reason_counts.most_common(10))} if excluded else {},
     )
 
 
@@ -1191,7 +1276,7 @@ def nightly_asset_signals(window_days=365):
             _finish_ok(outcome, metadata={"reason": "no_eligible_instruments"})
             return {"written": 0}
 
-        returns, _excluded = daily_returns_matrix(
+        returns, excluded = daily_returns_matrix(
             history_days=window_days, universe=list(instruments)
         )
         if returns.empty:
@@ -1236,10 +1321,15 @@ def nightly_asset_signals(window_days=365):
         _finish_fail(outcome, err)
         raise
 
+    excluded_reasons = Counter(row.get("reason", "unknown") for row in excluded)
     _finish_ok(
         outcome,
         rows_accepted=written,
-        rows_rejected=skipped,
-        metadata={"as_of": as_of, "stances": stances},
+        rows_rejected=skipped + len(excluded),
+        metadata={
+            "as_of": as_of,
+            "stances": stances,
+            "excluded_reasons": dict(excluded_reasons.most_common(10)),
+        },
     )
     return {"written": written, "skipped": skipped, "stances": stances}

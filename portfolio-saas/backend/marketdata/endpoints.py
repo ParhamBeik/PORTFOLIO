@@ -6,9 +6,14 @@ does one request buy?". Before this module the answer was spread across
 the beat schedule, and the three disagreed.
 
 The classification below was established by probing the provider directly, not by
-reading the code. Notably: `Nav.php` with no symbol returns every ETF in one
-response, `Gold_Currency_Pro.php?history=2` returns ~15 years in one request, and
-`Transaction.php` is strictly one request per calendar day.
+reading the code. Notably: `Gold_Currency_Pro.php?history=2` returns ~15 years in
+one request, and `Transaction.php` is strictly one request per calendar day.
+
+`Nav.php` does NOT return every ETF in one response -- an earlier version of this
+docstring claimed it did, which is why `etf_nav` shipped for months with no
+`required_params` and 400'd on every call ("Required parameter 'l18' was not
+sent", confirmed live 2026-08-19). It is one ETF's NAV per request, same as
+`symbol`'s per-share Symbol.php. See https://brsapi.ir/bourse-api-etf-funds-nav-webservice/
 """
 from dataclasses import dataclass, field
 
@@ -92,11 +97,12 @@ REGISTRY = {
             path="Tsetmc/Nav.php",
             nature=Nature.LIVE,
             bucket=LIVE,
-            rows_per_request=240,
+            required_params=("l18",),
+            rows_per_request=1,
             notes=(
-                "NOT EtfNav.php -- that path returns 404. With no l18 it returns "
-                "every ETF in one response, so never fan this out per symbol. "
-                "Passing a non-ETF symbol returns 502."
+                "NOT EtfNav.php -- that path returns 404. One ETF per request; "
+                "l18 is required (400 without it). Passing a non-ETF symbol "
+                "returns 502."
             ),
         ),
         Endpoint(
@@ -123,14 +129,19 @@ REGISTRY = {
         ),
         Endpoint(
             key="ime_futures",
-            path="Ime/Futures.php",
+            # Capital IME, not Ime -- BrsApi's routing is case-sensitive and the
+            # lowercase path 404s (confirmed live 2026-08-19). Docs:
+            # https://brsapi.ir/ime-api-futures-webservice/
+            path="IME/Futures.php",
             nature=Nature.LIVE,
             bucket=LIVE,
             rows_per_request=200,
         ),
         Endpoint(
             key="ime_options",
-            path="Ime/Option.php",
+            # Capital IME, not Ime -- same case-sensitive routing 404 (confirmed
+            # live 2026-08-19). Docs: https://brsapi.ir/ime-api-option-webservice/
+            path="IME/Option.php",
             nature=Nature.LIVE,
             bucket=LIVE,
             rows_per_request=200,

@@ -5,6 +5,7 @@ services:
     environment:
       BAMA_DOMAIN: ${BAMA_DOMAIN:?set BAMA_DOMAIN}
       PORTFOLIO_DOMAIN: ${PORTFOLIO_DOMAIN:?set PORTFOLIO_DOMAIN}
+      TWITTER_DOMAIN: ${TWITTER_DOMAIN:?set TWITTER_DOMAIN}
       LE_EMAIL: ${LE_EMAIL:?set LE_EMAIL}
     ports:
       - "80:80"

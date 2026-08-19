@@ -175,3 +175,23 @@ def test_guard_price_map_forward_fills_missing_or_zero_prices(asset_catalog, wri
     # Live price fails / returns 0
     guarded = guard_price_map({"emami_coin": Decimal("0")})
     assert guarded["emami_coin"] == Decimal("500000000")  # Forward-fills previous price (flat-line)
+
+
+def test_guard_price_map_does_not_forward_fill_past_max_sessions(asset_catalog, write_prices):
+    """A price older than MAX_FORWARD_FILL_SESSIONS days must not be carried
+    forward forever -- it is never re-persisted (see _persistable_prices), so
+    its `fetched_at` never advances on its own.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from portfolio.models import Price
+    from portfolio.services.valuation import MAX_FORWARD_FILL_SESSIONS, guard_price_map
+
+    write_prices({"emami_coin": Decimal("500000000")})
+    stale_at = timezone.now() - timedelta(days=MAX_FORWARD_FILL_SESSIONS + 1)
+    Price.objects.filter(asset__key="emami_coin").update(fetched_at=stale_at)
+
+    guarded = guard_price_map({"emami_coin": Decimal("0")})
+    assert guarded["emami_coin"] == Decimal("0")

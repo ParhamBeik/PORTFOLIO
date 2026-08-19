@@ -164,6 +164,32 @@ def test_catalog_accepts_all_provider_currencies(settings):
     assert MarketInstrument.objects.filter(source="brs", symbol="BTC", eligible=True).exists()
 
 
+def test_catalog_classifies_irt_isin_rows_as_etf_not_excluded(settings):
+    """IRT-prefixed ISINs (funds) used to fall through to EXCLUDED here, which
+    is why MarketInstrument had zero ETF rows and the (now-fixed) per-symbol
+    etf_nav fetch had nothing to iterate. This is the only place ETF
+    instruments are discovered -- Tsetmc/Nav.php requires `l18` and cannot
+    enumerate its own universe (see marketdata/endpoints.py)."""
+    settings.TSETMC_API_KEY = "test-key"
+    settings.BRS_API_KEY = "test-key"
+    with (
+        patch("marketdata.catalog.fetch_all_symbols", return_value=[
+            {"l18": "اهرم", "l30": "صندوق س سهامی کاریزما- اهرمی", "isin": "IRT1TEST0001", "cs": "صندوق سرمایه‌گذاری قابل معامله"},
+            {"l18": "فملی", "l30": "ملی صنایع مس ایران", "isin": "IRO1MSMI0001", "cs": "فلزات اساسی"},
+        ]),
+        patch("marketdata.catalog.fetch_gold_currency_free", return_value={}),
+        patch("marketdata.catalog.fetch_derivatives", return_value=[]),
+    ):
+        sync_provider_catalog()
+
+    etf = MarketInstrument.objects.get(source="tsetmc", symbol="اهرم")
+    assert etf.category == MarketInstrument.Category.ETF
+    assert etf.eligible is True
+
+    stock = MarketInstrument.objects.get(source="tsetmc", symbol="فملی")
+    assert stock.category == MarketInstrument.Category.STOCK
+
+
 # STOCK_HISTORY_ADJUSTED is History.php?type=1, which returns the Real/Legal
 # participant breakdown and no price fields at all. These fixtures use that real
 # shape; a price-shaped fixture used to pass while production stored 1.3M

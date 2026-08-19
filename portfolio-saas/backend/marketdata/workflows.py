@@ -108,8 +108,6 @@ class WorkflowOutcome:
             "metadata": redact(values.pop("metadata", values)),
         }
         safe = redact(payload)
-        reason = safe["metadata"].get("reason", "") if isinstance(safe["metadata"], dict) else ""
-        reason = str(reason).replace("\n", " ").strip()
         summary = (
             f"workflow={safe['workflow']} outcome={safe['outcome']} "
             f"endpoint={safe['endpoint'] or '-'} symbol={safe['symbol'] or '-'} "
@@ -119,7 +117,16 @@ class WorkflowOutcome:
             f"attempts={safe['http_attempts']}/{safe['quota_attempts']} "
             f"duration_ms={safe['duration_ms']} error={safe['error_code'] or '-'}"
         )
-        logger.info(f"{summary} reason={reason[:160]}" if reason else summary)
+        # Previously only metadata["reason"] was printed, so Codal ingest failures
+        # (which never set "reason", only error_code/artifacts/parse_errors) and
+        # returns-matrix exclusion callers logged no per-stage/per-asset detail at
+        # all -- that detail existed only in the WorkflowRun DB row. Print the
+        # whole thing (bounded) so it's visible from `docker compose logs` too.
+        if safe["metadata"]:
+            metadata_json = json.dumps(safe["metadata"], sort_keys=True, default=str)[:500]
+            logger.info(f"{summary} metadata={metadata_json}")
+        else:
+            logger.info(summary)
         try:
             return WorkflowRun.objects.create(**safe)
         except Exception:

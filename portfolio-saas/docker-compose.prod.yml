@@ -27,6 +27,12 @@ x-backend-env: &backend-env
   TSETMC_URL: ${TSETMC_URL:-https://Api.BrsApi.ir/Tsetmc/AllSymbols.php}
   MONGO_URI: ${MONGO_URI:-mongodb://mongo:27017}
   MONGO_DATABASE: ${MONGO_DATABASE:-portfolio}
+  CODAL_S3_ENDPOINT_URL: ${CODAL_S3_ENDPOINT_URL:-http://minio:9000}
+  CODAL_S3_BUCKET: ${CODAL_S3_BUCKET:-codal-artifacts}
+  CODAL_S3_ACCESS_KEY: ${CODAL_S3_ACCESS_KEY:?set CODAL_S3_ACCESS_KEY}
+  CODAL_S3_SECRET_KEY: ${CODAL_S3_SECRET_KEY:?set CODAL_S3_SECRET_KEY}
+  CODAL_S3_REGION: ${CODAL_S3_REGION:-us-east-1}
+  CODAL_HTTP_PROXY: ${CODAL_HTTP_PROXY:-}
   SNAPSHOT_PRUNE_ENABLED: "1"
   PRICE_PRUNE_ENABLED: "1"
   VPS_DISK_BUDGET_GB: "250"
@@ -137,6 +143,27 @@ services:
           cpus: "0.5"
           memory: 1280m
 
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    restart: unless-stopped
+    logging: *logging
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${CODAL_S3_ACCESS_KEY:?set CODAL_S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${CODAL_S3_SECRET_KEY:?set CODAL_S3_SECRET_KEY}
+    volumes:
+      - codaldata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256m
+
   migrate:
     build: ./backend
     restart: "no"
@@ -239,6 +266,8 @@ services:
         condition: service_healthy
       mongo:
         condition: service_healthy
+      minio:
+        condition: service_healthy
     environment: *backend-env
     command: celery -A config worker -l info --concurrency=1 -Q codal -n codal@%h --max-memory-per-child=600000
     healthcheck:
@@ -296,6 +325,7 @@ volumes:
   pgdata:
   redisdata:
   mongodata:
+  codaldata:
   staticfiles:
 
 networks:

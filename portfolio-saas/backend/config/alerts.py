@@ -29,10 +29,15 @@ def _redact(value):
 
 
 def notify(event: str, details: dict, *, dedupe_seconds=900) -> bool:
+    safe_details = _redact(details)
+    # Always hit stdout, regardless of webhook config: operational_health_check's
+    # detections (wedged archive states, stale prices, backlog) route only
+    # through this function, so without this line an unconfigured
+    # ALERT_WEBHOOK_URL made the whole mechanism produce zero observable output.
+    logger.warning("alert:%s %s", event, json.dumps(safe_details, sort_keys=True, default=str)[:500])
     url = getattr(settings, "ALERT_WEBHOOK_URL", "")
     if not url:
         return False
-    safe_details = _redact(details)
     digest = hashlib.sha256(
         json.dumps([event, safe_details], sort_keys=True, default=str).encode()
     ).hexdigest()

@@ -24,3 +24,12 @@
 	import security_headers
 	reverse_proxy bama-frontend:80
 }
+
+{$TWITTER_DOMAIN} {
+	tls {$LE_EMAIL}
+	encode gzip zstd
+	import security_headers
+	reverse_proxy twitter-frontend:80 {
+		flush_interval -1
+	}
+}
