@@ -20,6 +20,22 @@ _LATEST_PRICES_CACHE_KEY = "prices:latest"
 _ARCHIVE_DROP_FLOOR = Decimal("0.50")
 _ARCHIVE_SPIKE_CEILING = Decimal("2.00")
 
+_FRESH_SECONDS = 300
+# The live loop only fetches TSE prices while the market session is OPEN, and
+# gold/currency/crypto prices during OPEN or CLOSED_DAYTIME, pausing only
+# OVERNIGHT (marketdata.market_state.live_job_keys). Outside those windows the
+# last price IS the current price -- flagging it "stale" by a flat clock
+# threshold marked every held stock stale every evening and every Thursday/
+# Friday (the Iranian weekend), for data that was never wrong.
+#
+# ponytail: these are calendar-day grace bounds, not a real trading-session
+# calendar (see MAX_FORWARD_FILL_SESSIONS below for that). Good enough to
+# cover the Thu/Fri weekend without a session lookup on every valuation call;
+# upgrade to a session-count bound (like _stale_sessions) if a genuine
+# multi-day outage needs finer detection than "older than the grace window".
+_CLOSED_TSE_GRACE_SECONDS = 4 * 24 * 3600
+_CLOSED_BRS_GRACE_SECONDS = 24 * 3600
+
 # Shared by every price-resolution path in this module (guard_price_map,
 # compute_dynamic_net_worth_series, value_as_of's _stale_sessions): forward-fill
 # past this many sessions invents a price rather than reports one.
@@ -201,6 +217,27 @@ def _archive_replacements(prices: dict) -> dict:
     return replacements
 
 
+def _live_quality_status(asset, age_seconds: int, state: str) -> str:
+    """"live" vs "stale" for a fresh Price row, aware of whether the asset's
+    market/desk is even open right now.
+
+    A price older than `_FRESH_SECONDS` is only "stale" if a fresher one
+    should have arrived by now — i.e. the relevant market is open. If it's
+    closed, the last price is still the correct current price; only flag it
+    once it's older than the grace window (missed a whole session, a real
+    problem) rather than every evening/weekend by design.
+    """
+    from marketdata.market_state import OPEN, OVERNIGHT
+
+    if age_seconds <= _FRESH_SECONDS:
+        return "live"
+    if asset.tse_symbol and state != OPEN:
+        return "live" if age_seconds <= _CLOSED_TSE_GRACE_SECONDS else "stale"
+    if asset.brs_symbol and state == OVERNIGHT:
+        return "live" if age_seconds <= _CLOSED_BRS_GRACE_SECONDS else "stale"
+    return "stale"
+
+
 def invalidate_prices_cache() -> None:
     """Called after a fresh fetch so reads immediately see new prices."""
     cache.delete(_LATEST_PRICES_CACHE_KEY)
@@ -306,6 +343,9 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
     now = timezone.now()
     priced_assets = 0
     from marketdata.currency import TSE_PRICE_UNIT, tse_unit_verified
+    from marketdata.market_state import market_state as _current_market_state
+
+    market_state_now = _current_market_state()
     for holding in holdings:
         # None when the asset has no price yet — distinguishable from a real 0 (M2).
         unit_price = prices.get(holding.asset.key)
@@ -336,7 +376,7 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
                 source = row.source
                 priced_at = row.fetched_at
                 age_seconds = max(0, int((now - row.fetched_at).total_seconds()))
-                quality_status = "live" if age_seconds <= 300 else "stale"
+                quality_status = _live_quality_status(holding.asset, age_seconds, market_state_now)
             else:
                 source = "archive"
                 priced_at = None

@@ -75,6 +75,7 @@ def _price_version_fingerprint() -> str:
         GoldCurrencyHistory,
         InstrumentListingHistory,
         MarketCandle,
+        MarketDailyBar,
         RejectedRecord,
         SymbolIntegrity,
     )
@@ -82,11 +83,12 @@ def _price_version_fingerprint() -> str:
     def _max_id(qs):
         return qs.order_by("-id").values_list("id", flat=True).first() or 0
 
-    return "{}:{}:{}:{}:{}:{}:{}".format(
+    return "{}:{}:{}:{}:{}:{}:{}:{}".format(
         hex(_max_id(Price.objects))[2:],
         hex(_max_id(DailyStockHistory.objects))[2:],
         hex(_max_id(GoldCurrencyHistory.objects))[2:],
         hex(_max_id(MarketCandle.objects))[2:],
+        hex(_max_id(MarketDailyBar.objects))[2:],
         hex(_max_id(RejectedRecord.objects))[2:],
         hex(_max_id(SymbolIntegrity.objects))[2:],
         hex(_max_id(InstrumentListingHistory.objects))[2:],
@@ -517,6 +519,40 @@ def _load_price_panel(
             qs_brs = qs_brs.filter(date__lte=as_of_jalali)
         brs_rows = list(qs_brs.order_by("symbol", "date").values_list("symbol", "date", "close_price"))
 
+        # Crypto/commodity/ETF NAV have no GoldCurrencyHistory rows -- BRS never
+        # offers a historical endpoint for them (see endpoints.py's Nature.LIVE
+        # entries). MarketDailyBar is their real close, distilled nightly from
+        # live snapshots (marketdata.ingest.aggregate_market_daily_bars: open =
+        # first snapshot, close = last, not an average). Before this, every
+        # symbol in these classes fell straight to _load_live_price_panel's
+        # mean-of-ticks fallback, silently mixing an intraday-mean return series
+        # into the same covariance matrix as every close-based column.
+        from marketdata.models import MarketDailyBar, MarketInstrument
+
+        bar_class_by_category = {
+            MarketInstrument.Category.CRYPTO: MarketDailyBar.AssetClass.CRYPTO,
+            MarketInstrument.Category.COMMODITY: MarketDailyBar.AssetClass.COMMODITY,
+            MarketInstrument.Category.ETF: MarketDailyBar.AssetClass.ETF_NAV,
+        }
+        symbols_by_asset_class: dict[str, list[str]] = {}
+        for mi in MarketInstrument.objects.filter(
+            source=MarketInstrument.Source.BRS,
+            symbol__in=brs_symbols,
+            category__in=bar_class_by_category,
+        ):
+            asset_class = bar_class_by_category[mi.category]
+            symbols_by_asset_class.setdefault(asset_class, []).append(mi.symbol)
+
+        for asset_class, symbols in symbols_by_asset_class.items():
+            qs_bars = MarketDailyBar.objects.filter(
+                asset_class=asset_class, symbol__in=symbols, close_price__gt=0,
+            )
+            if as_of_jalali is not None:
+                qs_bars = qs_bars.filter(date__lte=as_of_jalali)
+            brs_rows.extend(
+                qs_bars.order_by("symbol", "date").values_list("symbol", "date", "close_price")
+            )
+
     cutoff_jalali = to_jalali_str(cutoff)
     rejections = set(
         RejectedRecord.objects.filter(
@@ -649,9 +685,13 @@ def _load_price_panel(
 def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys: list[str]) -> pd.DataFrame:
     """The original Price-table loader, restricted to the given asset keys and cutoff/as_of.
 
-    Each day is the mean of that day's ticks, not the last one -- a single
-    stale-looking outlier tick should not define the whole day's price when
-    dozens of other fetches that day landed near the true level.
+    Reserved for the handful of assets with no warehouse/MarketDailyBar close at
+    all (kama_stock, bitcoin_usd, and similar) -- see `_load_price_panel`, which
+    now sources crypto/commodity/ETF NAV from MarketDailyBar first. Each day is
+    the LAST tick, matching the close-to-close definition every other column in
+    the panel uses; averaging that day's ticks would mix a smoothed intraday-mean
+    series into the same covariance matrix as true close-based series next to it,
+    which is exactly the bug this replaced.
     """
     if not keys:
         return pd.DataFrame()
@@ -742,10 +782,10 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
             index="fetched_at",
             columns="asset__key",
             values="price",
-            aggfunc="mean",
+            aggfunc="last",
         )
         .resample("1D")
-        .mean()
+        .last()
     )
     panel.index = panel.index.normalize()
     return panel

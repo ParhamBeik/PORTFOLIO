@@ -195,3 +195,62 @@ def test_guard_price_map_does_not_forward_fill_past_max_sessions(asset_catalog, 
 
     guarded = guard_price_map({"emami_coin": Decimal("0")})
     assert guarded["emami_coin"] == Decimal("0")
+
+
+def test_quality_status_not_stale_when_tse_closed(asset_catalog, write_prices, make_user, monkeypatch):
+    """A TSE stock's last price must not be flagged 'stale' just because the
+    session closed hours ago -- the tsetmc live job only runs while state ==
+    OPEN, so an old price during CLOSED_DAYTIME/OVERNIGHT is still correct.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from portfolio.models import Price
+
+    kama = asset_catalog["kama_stock"]
+    kama.tse_symbol = "کاما"
+    kama.save(update_fields=["tse_symbol"])
+
+    write_prices({"kama_stock": Decimal("5230")})
+    old_at = timezone.now() - timedelta(hours=8)
+    Price.objects.filter(asset__key="kama_stock").update(fetched_at=old_at)
+
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
+    user = make_user(email="tse-closed@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    Holding.objects.create(account=account, asset=kama, quantity=Decimal("1"))
+
+    result = value_account(account)
+    item = next(i for i in result["items"] if i["key"] == "kama_stock")
+    assert item["quality_status"] == "live"
+
+
+def test_quality_status_stale_when_tse_open_and_price_did_not_refresh(
+    asset_catalog, write_prices, make_user, monkeypatch
+):
+    """The same old price IS a real problem while the market is open -- the
+    live job should have refreshed it, so this must still show 'stale'.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from portfolio.models import Price
+
+    kama = asset_catalog["kama_stock"]
+    kama.tse_symbol = "کاما"
+    kama.save(update_fields=["tse_symbol"])
+
+    write_prices({"kama_stock": Decimal("5230")})
+    old_at = timezone.now() - timedelta(minutes=20)
+    Price.objects.filter(asset__key="kama_stock").update(fetched_at=old_at)
+
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "open")
+    user = make_user(email="tse-open@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    Holding.objects.create(account=account, asset=kama, quantity=Decimal("1"))
+
+    result = value_account(account)
+    item = next(i for i in result["items"] if i["key"] == "kama_stock")
+    assert item["quality_status"] == "stale"

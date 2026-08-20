@@ -164,11 +164,13 @@ def test_fresh_live_price_remains_usable(asset_catalog):
     assert not panel[asset.key].isna().all()
 
 
-def test_live_panel_averages_same_day_ticks_instead_of_last(asset_catalog):
-    """A day with several live ticks reports their mean, not just the final one.
+def test_live_panel_uses_last_tick_not_mean_of_same_day_ticks(asset_catalog):
+    """A day with several live ticks reports the LAST one, not their mean.
 
-    A single stale-looking outlier tick should not define the whole day's price
-    when several other fetches that day landed near the true level.
+    Averaging silently swapped the return definition away from the
+    close-to-close basis every warehouse-backed column in the same panel uses
+    (see _load_price_panel), which is what this fallback is reserved for now
+    that MarketDailyBar covers crypto/commodity/ETF NAV directly.
     """
     asset = asset_catalog["emami_coin"]
     now = timezone.now()
@@ -184,7 +186,7 @@ def test_live_panel_averages_same_day_ticks_instead_of_last(asset_catalog):
         keys=[asset.key],
     )
     day_value = panel[asset.key].dropna().iloc[-1]
-    assert day_value == pytest.approx(200.0), "expected the mean of 100/200/300, not the last tick (300)"
+    assert day_value == pytest.approx(300.0), "expected the last tick (300), not the mean of 100/200/300"
 
 
 def test_rial_to_toman_conversion():
