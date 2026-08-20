@@ -49,3 +49,15 @@ def test_fresh_price_is_reported_fresh_regardless_of_state(asset_catalog, write_
     response = _get(RequestFactory())
     assert response.status_code == 200
     assert response.data["status"] == "fresh"
+
+
+def test_no_price_ever_written_is_stale_even_overnight(asset_catalog, monkeypatch):
+    """A Price table with zero rows (fresh deploy, catastrophic data loss) must
+    never read as 'fresh' -- expects_live_prices() excuses an old-but-real
+    price during a designed pause, not a total absence of data.
+    """
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "overnight")
+
+    response = _get(RequestFactory())
+    assert response.status_code == 503
+    assert response.data["status"] == "stale"

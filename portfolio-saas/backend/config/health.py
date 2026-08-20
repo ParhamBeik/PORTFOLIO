@@ -76,7 +76,10 @@ class PriceFeedView(APIView):
             "fetched_at", flat=True
         ).first()
         age = None if latest is None else timezone.now() - latest
-        stale = (age is None or age > PRICE_STALE_AFTER) and expects_live_prices()
+        # A table that has NEVER had a Price row is always stale, regardless of
+        # market hours -- expects_live_prices() only excuses an old-but-real
+        # price during a designed pause, not a total absence of data.
+        stale = age is None or (age > PRICE_STALE_AFTER and expects_live_prices())
         return Response(
             {
                 "status": "stale" if stale else "fresh",
