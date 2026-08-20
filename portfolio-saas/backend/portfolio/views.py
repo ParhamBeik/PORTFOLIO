@@ -10,6 +10,7 @@ from decimal import Decimal
 
 import numpy as np
 import pandas as pd
+from django.conf import settings
 from django.db.models import F, Window
 from django.db.models.functions import RowNumber
 from django.db.models.functions import TruncDate
@@ -56,6 +57,7 @@ from .services.imports import (
     commit_ledger_import,
     preview_ledger_import,
 )
+from .services.deflator import cpi_for_date, normalize_basis
 from .services.performance import account_performance
 from .services.diagnostics import portfolio_diagnostics
 from .services.insights import _liquid_items, _total, build_insights
@@ -546,11 +548,7 @@ class TransactionListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        try:
-            days = int(request.query_params.get("days", "90"))
-        except (TypeError, ValueError):
-            days = 90
-        days = max(1, min(days, 3650))
+        days, _ = _int_param(request, "days", 90, clamp=(1, 3650), strict=False)
         since = timezone.now() - timedelta(days=days)
         rows = Transaction.objects.filter(
             account__user=request.user, timestamp__gte=since,
@@ -664,73 +662,86 @@ def _with_usd(valuation: dict) -> dict:
     return valuation
 
 
-def _express_usd_real(valuation: dict, basis: str = "usd_denominated") -> dict:
-    """Re-express a live toman valuation in USD or USDT using the live rate."""
-    prices = valuation.get("prices", {})
-    from portfolio.services.deflator import normalize_basis
-    basis = normalize_basis(basis)
-    
-    rate_key = "usdt_irt" if basis == "usdt_denominated" else "usd_cash"
-    rate = Decimal(prices.get(rate_key, 0) or 0)
-    conversion_source = "USDT" if basis == "usdt_denominated" else "USD"
-    
-    if basis == "usdt_denominated" and rate <= 0:
-        # Fallback to USD
-        rate = Decimal(prices.get("usd_cash", 0) or 0)
-        conversion_source = "USD"
-        
-    if rate <= 0:
-        valuation["basis"] = basis
-        valuation["conversion_source"] = conversion_source
-        return valuation
+def _int_param(request, name, default, *, clamp=None, allowed=None, strict=True):
+    """Read one integer query param; returns `(value, error_response_or_None)`.
 
-    def _scale_items(items):
+    Nine views hand-rolled this and had already drifted apart -- `except
+    ValueError` in one place and `except (TypeError, ValueError)` in the next,
+    a silent fallback here and a 400 there. `strict=False` keeps the two
+    endpoints that deliberately fall back to their default instead of failing.
+    """
+    try:
+        value = int(request.query_params.get(name) or default)
+    except (TypeError, ValueError):
+        if strict:
+            return None, Response({"detail": f"{name} must be an integer."}, status=400)
+        value = default
+    if allowed is not None and value not in allowed:
+        options = ", ".join(str(a) for a in allowed[:-1])
+        return None, Response(
+            {"detail": f"{name} must be {options}, or {allowed[-1]}."}, status=400
+        )
+    if clamp:
+        value = max(clamp[0], min(value, clamp[1]))
+    return value, None
+
+
+def _fx_rate(prices, basis):
+    """The Toman-per-unit rate for a denominated basis, and which currency it was.
+
+    USDT falls back to USD rather than refusing: a USDT-denominated view with no
+    USDT quote is still answerable, and naming the rate actually used matters
+    more than the request failing.
+    """
+    if basis == "usdt_denominated":
+        rate = Decimal(prices.get("usdt_irt", 0) or 0)
+        if rate > 0:
+            return rate, "USDT"
+    return Decimal(prices.get("usd_cash", 0) or 0), "USD"
+
+
+def _rescale(valuation, factor):
+    """Divide every monetary field of a valuation payload by `factor`, in place.
+
+    One walk for both re-expressions below (FX and CPI) -- they differ only in
+    where the divisor comes from, and a second copy of this traversal is how a
+    newly added money field ends up deflated on one basis but not the other.
+    """
+    def scale_items(items):
         for item in items or []:
-            if item.get("value") is not None:
-                item["value"] = float(Decimal(str(item["value"])) / rate)
-            if item.get("unit_price") is not None:
-                item["unit_price"] = float(Decimal(str(item["unit_price"])) / rate)
-
-    total = Decimal(str(valuation.get("total", 0) or 0)) / rate
-    valuation["total"] = total
-    valuation["total_usd"] = total
-    _scale_items(valuation.get("items"))
-    for account in valuation.get("accounts", []) or []:
-        if account.get("total") is not None:
-            account["total"] = Decimal(str(account["total"])) / rate
-        _scale_items(account.get("items"))
-    valuation["basis"] = basis
-    valuation["conversion_source"] = conversion_source
-    return valuation
-
-
-
-def _express_real_toman(valuation: dict) -> dict:
-    """Deflate a live Toman valuation by the last published SCI CPI vintage."""
-    from django.conf import settings
-    from portfolio.services.deflator import cpi_for_date
-
-    cpi = Decimal(str(cpi_for_date(timezone.now())))
-    factor = cpi / Decimal("100")
-    vintage = max(settings.CPI_BY_JALALI_YEAR)
-
-    def _scale_items(items):
-        for item in items or []:
-            if item.get("value") is not None:
-                item["value"] = float(Decimal(str(item["value"])) / factor)
-            if item.get("unit_price") is not None:
-                item["unit_price"] = float(Decimal(str(item["unit_price"])) / factor)
+            for field in ("value", "unit_price"):
+                if item.get(field) is not None:
+                    item[field] = float(Decimal(str(item[field])) / factor)
 
     valuation["total"] = Decimal(str(valuation.get("total", 0) or 0)) / factor
     if valuation.get("total_usd") is not None:
         valuation["total_usd"] = Decimal(str(valuation["total_usd"])) / factor
-    _scale_items(valuation.get("items"))
-    for account in valuation.get("accounts", []) or []:
+    scale_items(valuation.get("items"))
+    for account in valuation.get("accounts") or []:
         if account.get("total") is not None:
             account["total"] = Decimal(str(account["total"])) / factor
-        _scale_items(account.get("items"))
+        scale_items(account.get("items"))
+    return valuation
+
+
+def _express_usd_real(valuation: dict, basis: str = "usd_denominated") -> dict:
+    """Re-express a live Toman valuation in USD or USDT using the live rate."""
+    basis = normalize_basis(basis)
+    rate, source = _fx_rate(valuation.get("prices", {}), basis)
+    if rate > 0:
+        _rescale(valuation, rate)
+        # Past this point the total *is* the USD/USDT figure.
+        valuation["total_usd"] = valuation["total"]
+    valuation["basis"] = basis
+    valuation["conversion_source"] = source
+    return valuation
+
+
+def _express_real_toman(valuation: dict) -> dict:
+    """Deflate a live Toman valuation by the last published SCI CPI vintage."""
+    _rescale(valuation, Decimal(str(cpi_for_date(timezone.now()))) / Decimal("100"))
     valuation["basis"] = "real_toman"
-    valuation["cpi_vintage_year"] = vintage
+    valuation["cpi_vintage_year"] = max(settings.CPI_BY_JALALI_YEAR)
     valuation["cpi_source"] = settings.CPI_SOURCE
     return valuation
 
@@ -888,34 +899,23 @@ class SnapshotListView(APIView):
             }
             for t in trades
         ]
+        # A denominated basis divides every point by one live rate; `real_toman`
+        # divides each point by the CPI *of its own day*, which is the whole
+        # point of a real series -- hence a per-row divisor rather than one.
         if basis in ("usd_denominated", "usdt_denominated"):
-            from portfolio.services.deflator import normalize_basis
-            basis = normalize_basis(basis)
-            if basis == "usdt_denominated":
-                fx_rate = Decimal(prices.get("usdt_irt", 0) or 0)
-                conversion_source = "USDT"
-                if fx_rate <= 0:
-                    fx_rate = usd_rate
-                    conversion_source = "USD"
-            else:
-                fx_rate = usd_rate
-                conversion_source = "USD"
-            if fx_rate > 0:
-                for row in series:
-                    if row.get("total") is not None:
-                        row["total"] = float(Decimal(str(row["total"])) / fx_rate)
-                    if row.get("total_usd") is not None:
-                        row["total_usd"] = float(Decimal(str(row["total_usd"])) / fx_rate)
+            fx_rate, _source = _fx_rate(prices, normalize_basis(basis))
+            divisor = (lambda row: fx_rate) if fx_rate > 0 else None
         elif basis == "real_toman":
-            from django.conf import settings
-            from portfolio.services.deflator import cpi_for_date
+            divisor = lambda row: Decimal(  # noqa: E731
+                str(cpi_for_date(row.get("date") or row.get("timestamp")))
+            ) / Decimal("100")
+        else:
+            divisor = None
+        if divisor:
             for row in series:
-                day = row.get("date") or row.get("timestamp")
-                cpi = Decimal(str(cpi_for_date(day))) / Decimal("100")
-                if row.get("total") is not None:
-                    row["total"] = float(Decimal(str(row["total"])) / cpi)
-                if row.get("total_usd") is not None:
-                    row["total_usd"] = float(Decimal(str(row["total_usd"])) / cpi)
+                for field in ("total", "total_usd"):
+                    if row.get(field) is not None:
+                        row[field] = float(Decimal(str(row[field])) / divisor(row))
         return Response({"series": series, "trades": markers})
 
 
@@ -939,11 +939,9 @@ class PriceHistoryView(APIView):
         if not asset_key:
             return Response({"detail": "asset query param required."}, status=400)
         # Cap the window (H6): an unbounded ?limit= could pull the whole series.
-        try:
-            limit = int(request.query_params.get("limit", "100"))
-        except (TypeError, ValueError):
-            return Response({"detail": "limit must be an integer."}, status=400)
-        limit = min(max(limit, 1), 500)
+        limit, error = _int_param(request, "limit", 100, clamp=(1, 500))
+        if error:
+            return error
         rows = (
             Price.objects.filter(asset__key=asset_key)
             .order_by("-fetched_at")[:limit]
@@ -1001,12 +999,9 @@ class AnalyticsView(APIView):
 
         account = _scope(request)
         basis = request.query_params.get("basis") or "nominal_toman"
-        try:
-            window = int(request.query_params.get("window") or 180)
-        except (TypeError, ValueError):
-            return Response({"detail": "window must be an integer."}, status=400)
-        if window not in (90, 180, 365):
-            return Response({"detail": "window must be 90, 180, or 365."}, status=400)
+        window, error = _int_param(request, "window", 180, allowed=(90, 180, 365))
+        if error:
+            return error
         try:
             normalize_basis(basis)
         except ValueError as exc:
@@ -1088,11 +1083,9 @@ class FrontierView(APIView):
 
         account = _scope(request)
         weights, total, _valuation = _current_weights_and_total(request.user, account)
-        try:
-            window = int(request.query_params.get("window") or 180)
-        except (TypeError, ValueError):
-            return Response({"detail": "window must be an integer."}, status=400)
-        window = max(30, min(window, 3650))
+        window, error = _int_param(request, "window", 180, clamp=(30, 3650))
+        if error:
+            return error
         # Scope to the user's own book. Without a universe this drew the frontier
         # over the entire active catalog while the chart caption promised "the
         # assets you already hold" -- the line and the Max-Sharpe marker described
@@ -1355,11 +1348,9 @@ class RobustnessView(APIView):
             return Response(
                 {"detail": f"scenario must be one of {list(SCENARIOS)}."}, status=400
             )
-        try:
-            window = int(request.query_params.get("window") or 365)
-        except (TypeError, ValueError):
-            return Response({"detail": "window must be an integer."}, status=400)
-        window = max(30, min(window, 3650))
+        window, error = _int_param(request, "window", 365, clamp=(30, 3650))
+        if error:
+            return error
 
         account = _scope(request)
         weights, total, _valuation = _current_weights_and_total(request.user, account)
@@ -1395,11 +1386,7 @@ class AssetReturnsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        try:
-            days = int(request.query_params.get("days", "180"))
-        except ValueError:
-            days = 180
-        days = max(1, min(days, 365))
+        days, _ = _int_param(request, "days", 180, clamp=(1, 365), strict=False)
         df, excluded = daily_returns_matrix(history_days=days)
         if df.empty:
             return Response({
@@ -1577,12 +1564,9 @@ class DiversifierCandidatesView(APIView):
         if not weights:
             return Response({"detail": "No priced holdings to diversify yet."}, status=400)
 
-        try:
-            window = int(request.query_params.get("window") or 365)
-        except (TypeError, ValueError):
-            return Response({"detail": "window must be an integer."}, status=400)
-        if window not in (90, 180, 365):
-            return Response({"detail": "window must be 90, 180, or 365."}, status=400)
+        window, error = _int_param(request, "window", 365, allowed=(90, 180, 365))
+        if error:
+            return error
         try:
             basis = normalize_basis(request.query_params.get("basis") or "real_toman")
         except ValueError as exc:
@@ -1672,12 +1656,9 @@ class BenchmarkSeriesView(APIView):
         if not weights:
             return Response({"detail": "No priced holdings to compare yet."}, status=400)
 
-        try:
-            window = int(request.query_params.get("window") or 365)
-        except (TypeError, ValueError):
-            return Response({"detail": "window must be an integer."}, status=400)
-        if window not in (90, 180, 365):
-            return Response({"detail": "window must be 90, 180, or 365."}, status=400)
+        window, error = _int_param(request, "window", 365, allowed=(90, 180, 365))
+        if error:
+            return error
         try:
             basis = normalize_basis(request.query_params.get("basis") or "nominal_toman")
         except ValueError as exc:

@@ -4,6 +4,8 @@ parse_pdf degrades to an empty ParsedDocument rather than crashing or OCR'ing
 when there is no text layer."""
 from decimal import Decimal
 
+import pytest
+
 from marketdata import codal_parsers
 
 
@@ -46,7 +48,10 @@ def test_category_reconciles_is_false_without_facts():
 
 def test_parse_pdf_with_no_text_layer_yields_empty_document_not_a_crash():
     from io import BytesIO
-    from pypdf import PdfWriter
+
+    # pypdf ships in requirements.txt (the Codal worker needs it) but is not
+    # required to run the rest of the suite on a bare local venv.
+    PdfWriter = pytest.importorskip("pypdf").PdfWriter
 
     buffer = BytesIO()
     writer = PdfWriter()

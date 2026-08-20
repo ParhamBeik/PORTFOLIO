@@ -55,6 +55,19 @@ def redact(value):
     return value
 
 
+def _flatten(metadata, limit=500):
+    """Render a metadata dict as one line of `key=value` pairs, bounded."""
+    if not isinstance(metadata, dict) or not metadata:
+        return json.dumps(metadata, sort_keys=True, default=str)[:limit] if metadata else ""
+    pairs = []
+    for key in sorted(metadata):
+        value = metadata[key]
+        if not isinstance(value, (str, int, float, bool)) and value is not None:
+            value = json.dumps(value, sort_keys=True, default=str)
+        pairs.append(f"{key}={' '.join(str(value).split())}")
+    return " ".join(pairs)[:limit]
+
+
 def _task_id():
     request = getattr(current_task, "request", None)
     return getattr(request, "id", "") or ""
@@ -103,7 +116,10 @@ class WorkflowOutcome:
             "rows_rejected": int(values.pop("rows_rejected", 0) or 0),
             "http_attempts": int(values.pop("http_attempts", http_attempt_var.get() - self._http_start) or 0),
             "quota_attempts": int(values.pop("quota_attempts", quota_attempt_var.get() - self._quota_start) or 0),
-            "duration_ms": round((time.monotonic() - self.started) * 1000),
+            "duration_ms": int(
+                values.pop("duration_ms", None)
+                or round((time.monotonic() - self.started) * 1000)
+            ),
             "error_code": str(values.pop("error_code", "") or "")[:80],
             "metadata": redact(values.pop("metadata", values)),
         }
@@ -117,16 +133,13 @@ class WorkflowOutcome:
             f"attempts={safe['http_attempts']}/{safe['quota_attempts']} "
             f"duration_ms={safe['duration_ms']} error={safe['error_code'] or '-'}"
         )
-        # Previously only metadata["reason"] was printed, so Codal ingest failures
-        # (which never set "reason", only error_code/artifacts/parse_errors) and
-        # returns-matrix exclusion callers logged no per-stage/per-asset detail at
-        # all -- that detail existed only in the WorkflowRun DB row. Print the
-        # whole thing (bounded) so it's visible from `docker compose logs` too.
-        if safe["metadata"]:
-            metadata_json = json.dumps(safe["metadata"], sort_keys=True, default=str)[:500]
-            logger.info(f"{summary} metadata={metadata_json}")
-        else:
-            logger.info(summary)
+        # Every metadata key is printed, not just "reason": Codal ingest failures
+        # set error_code/artifacts/parse_errors and no reason at all, and used to
+        # log no per-stage detail whatsoever -- it existed only in the WorkflowRun
+        # row. Rendered as flat `key=value` pairs on the same line, with newlines
+        # collapsed, so one workflow is one greppable log line rather than a JSON
+        # blob a human has to unpick in `docker compose logs`.
+        logger.info(" ".join(filter(None, (summary, _flatten(safe["metadata"])))))
         try:
             return WorkflowRun.objects.create(**safe)
         except Exception:

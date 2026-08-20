@@ -150,9 +150,13 @@ def test_admin_endpoints(auth_client, db):
     # consecutive_failures to 1 before this assertion runs. That is correct
     # behaviour, not a bug -- production dispatches asynchronously and the reset
     # stands. Mock the hand-off so this tests the contract enqueue_archive_retries
-    # actually owns: clear the failure count, then enqueue exactly once.
+    # actually owns: clear the failure count, then enqueue exactly once. The
+    # broker ping is mocked for the same reason -- refusing to enqueue when Redis
+    # is down is correct production behaviour and is not what this asserts.
     with patch("marketdata.tasks.retry_archive_job_task.delay") as mock_delay, \
+         patch("redis.Redis.from_url") as mock_redis, \
          patch("django.contrib.messages.add_message") as mock_add:
+        mock_redis.return_value.ping.return_value = True
         admin_instance.retry_selected_jobs(req, ArchiveFetchState.objects.filter(id=state.id))
         mock_add.assert_called_once()
     mock_delay.assert_called_once_with(state.id)
