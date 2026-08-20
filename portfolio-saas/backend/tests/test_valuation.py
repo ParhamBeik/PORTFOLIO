@@ -162,6 +162,49 @@ def test_compute_dynamic_respects_buy_sell_timeline(asset_catalog, write_prices,
     assert float(series[-1]["total"]) > 0
 
 
+def test_archive_replaces_a_live_price_the_live_loop_left_behind(asset_catalog, write_prices):
+    """A live price stuck on yesterday's session must be replaced by a newer
+    archive close even when it's not a magnitude spike -- regression for a
+    41-hour live-loop outage that left kama_stock frozen at Tuesday's close
+    (4490) while the separate archive backfill had already converged on
+    Wednesday's real close (4620), which passed the spike-sanity band (not
+    an outlier) and so was silently never surfacing on the dashboard.
+    """
+    from datetime import timedelta
+
+    import jdatetime
+    from django.utils import timezone
+
+    from marketdata.models import MarketCandle
+    from portfolio.models import Price
+
+    kama = asset_catalog["kama_stock"]
+    kama.tse_symbol = "کاما"
+    kama.save(update_fields=["tse_symbol"])
+
+    write_prices({"kama_stock": Decimal("4490")})
+    stale_at = timezone.now() - timedelta(days=1, hours=14)
+    Price.objects.filter(asset__key="kama_stock").update(fetched_at=stale_at)
+    stale_session = jdatetime.date.fromgregorian(date=stale_at.date())
+    stale_date_str = f"{stale_session.year:04d}-{stale_session.month:02d}-{stale_session.day:02d}"
+
+    newer_session = jdatetime.date.fromgregorian(date=timezone.now().date())
+    newer_date_str = f"{newer_session.year:04d}-{newer_session.month:02d}-{newer_session.day:02d}"
+    MarketCandle.objects.create(
+        symbol="کاما", timeframe=MarketCandle.ADJUSTED, date_time=stale_date_str,
+        open_price=4490, high_price=4490, low_price=4490, close_price=4490, volume=1000,
+    )
+    MarketCandle.objects.create(
+        symbol="کاما", timeframe=MarketCandle.ADJUSTED, date_time=newer_date_str,
+        open_price=4620, high_price=4620, low_price=4620, close_price=4620, volume=1000,
+    )
+
+    from portfolio.services.valuation import get_latest_prices
+
+    prices = get_latest_prices()
+    assert prices["kama_stock"] == Decimal("4620")
+
+
 def test_guard_price_map_accepts_legitimate_large_moves(asset_catalog, write_prices):
     from portfolio.services.valuation import guard_price_map
     write_prices({"emami_coin": Decimal("500000000")})

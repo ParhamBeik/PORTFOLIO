@@ -77,13 +77,15 @@ def get_latest_prices() -> dict:
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     )
+    latest = list(latest)
     prices = {row.asset.key: _q(row.price) for row in latest}
+    fetched_at = {row.asset.key: row.fetched_at for row in latest}
     # Replace only what is already priced. Filling assets that have no Price row
     # at all is the write path's job; doing it here would turn "unpriced" into a
     # silent archive value and hide the gap the valuation layer reports.
     prices.update({
         key: value
-        for key, value in _archive_replacements(prices).items()
+        for key, value in _archive_replacements(prices, live_fetched_at=fetched_at).items()
         if key in prices
     })
     cache.set(_LATEST_PRICES_CACHE_KEY, prices, timeout=120)
@@ -144,10 +146,20 @@ def guard_price_map(prices: dict, *, fill_missing=True, archive_replacements=Non
     return guarded
 
 
-def _archive_replacements(prices: dict) -> dict:
-    """Return archive-backed replacements for missing or obviously broken live prices."""
+def _archive_replacements(prices: dict, *, live_fetched_at: dict | None = None) -> dict:
+    """Return archive-backed replacements for missing, broken, or outrun live prices.
+
+    `live_fetched_at`, when given, also catches a live price that passes the
+    magnitude sanity band below but is simply behind: the live loop can miss
+    an entire trading session outright (an outage), while the warehouse's own
+    archive backfill -- a separate pipeline, unaffected by a live-loop outage
+    -- keeps converging on real closes. A live price from session N-1 sitting
+    next to an archive close already at session N is not a spike, it is stale
+    data that happens to still be in a plausible range.
+    """
     from marketdata.candles import candle_close_qs
     from marketdata.models import GoldCurrencyHistory, RejectedRecord
+    from portfolio.services.returns import to_jalali_str
 
     assets = Asset.objects.filter(is_active=True).exclude(is_house=True)
     stock_symbols = {
@@ -176,6 +188,7 @@ def _archive_replacements(prices: dict) -> dict:
     )
 
     archive_prices = {}
+    archive_dates = {}
     # Adjusted closes live in MarketCandle.ADJUSTED. History.php?type=1 (once
     # tagged is_adjusted=True on DailyStockHistory, since removed -- see
     # marketdata.ingest.ingest_real_legal) was never adjusted prices at all,
@@ -189,9 +202,9 @@ def _archive_replacements(prices: dict) -> dict:
     for row in stock_rows:
         dt_str = row["date_time"].split()[0]
         if (row["symbol"], dt_str) not in rejections:
-            archive_prices.setdefault(
-                stock_symbols[row["symbol"]], _q(row["close_price"])
-            )
+            key = stock_symbols[row["symbol"]]
+            archive_prices.setdefault(key, _q(row["close_price"]))
+            archive_dates.setdefault(key, dt_str)
 
     brs_rows = (
         GoldCurrencyHistory.objects.filter(symbol__in=brs_symbols, close_price__gt=0)
@@ -200,7 +213,9 @@ def _archive_replacements(prices: dict) -> dict:
     )
     for row in brs_rows:
         if (row["symbol"], row["date"]) not in rejections:
-            archive_prices.setdefault(brs_symbols[row["symbol"]], _q(row["close_price"]))
+            key = brs_symbols[row["symbol"]]
+            archive_prices.setdefault(key, _q(row["close_price"]))
+            archive_dates.setdefault(key, row["date"])
 
     replacements = {}
     for key, archive_price in archive_prices.items():
@@ -214,6 +229,16 @@ def _archive_replacements(prices: dict) -> dict:
                 key, live_price, archive_price, archive_price * _ARCHIVE_DROP_FLOOR, archive_price * _ARCHIVE_SPIKE_CEILING
             )
             replacements[key] = archive_price
+        elif live_fetched_at and key in live_fetched_at:
+            live_session = to_jalali_str(live_fetched_at[key])
+            if archive_dates[key] > live_session:
+                logger.warning(
+                    "Key='%s' live price is from session %s but the archive already "
+                    "has session %s (%s) -- the live loop missed a session, using "
+                    "the newer archive close.",
+                    key, live_session, archive_dates[key], archive_price,
+                )
+                replacements[key] = archive_price
     return replacements
 
 
