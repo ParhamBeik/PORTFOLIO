@@ -508,6 +508,49 @@ def _load_price_panel(
             )
         ]
 
+        # ETF NAV has no MarketCandle rows -- Tsetmc/Nav.php is a live-only
+        # endpoint (endpoints.py Nature.LIVE) with no historical form. It's
+        # catalogued source=TSETMC (same l18-param convention as ordinary
+        # stocks, see catalog.py's IRT-ISIN classification), so it belongs in
+        # THIS block, not the BRS one below -- ETF rows never carry
+        # source=BRS. MarketDailyBar.close_price is its real close (distilled
+        # from live snapshots: open=first snapshot, close=last, not an
+        # average -- marketdata.ingest.aggregate_market_daily_bars), stored
+        # Rial per ingest_etf_nav_snapshot's documented policy, so it needs
+        # the same tse_close_to_toman() conversion as every other row here.
+        #
+        # ponytail: crypto/commodity have the identical no-history problem
+        # but are deliberately NOT wired in here -- their ingest path
+        # (ingest_market_snapshots) never captures the provider's per-row unit
+        # string, so their MarketDailyBar closes are of genuinely unverified
+        # currency (could be USD, Toman, or Rial depending on the row) and
+        # wiring them in would be guessing magnitude, which this project
+        # explicitly never does (see marketdata/currency.py:to_toman). Fix at
+        # the ingest layer (store the payload's unit field) before adding them.
+        from marketdata.models import MarketDailyBar, MarketInstrument
+
+        etf_symbols = list(
+            MarketInstrument.objects.filter(
+                source=MarketInstrument.Source.TSETMC,
+                symbol__in=tse_symbols,
+                category=MarketInstrument.Category.ETF,
+            ).values_list("symbol", flat=True)
+        )
+        if etf_symbols:
+            qs_etf_bars = MarketDailyBar.objects.filter(
+                asset_class=MarketDailyBar.AssetClass.ETF_NAV,
+                symbol__in=etf_symbols,
+                close_price__gt=0,
+            )
+            if as_of_jalali is not None:
+                qs_etf_bars = qs_etf_bars.filter(date__lte=as_of_jalali)
+            tse_rows.extend(
+                (sym, date, tse_close_to_toman(close))
+                for sym, date, close in qs_etf_bars.order_by("symbol", "date").values_list(
+                    "symbol", "date", "close_price"
+                )
+            )
+
     # Bulk query GoldCurrencyHistory (BRS)
     brs_rows = []
     if brs_symbols:
@@ -518,40 +561,6 @@ def _load_price_panel(
         if as_of_jalali is not None:
             qs_brs = qs_brs.filter(date__lte=as_of_jalali)
         brs_rows = list(qs_brs.order_by("symbol", "date").values_list("symbol", "date", "close_price"))
-
-        # Crypto/commodity/ETF NAV have no GoldCurrencyHistory rows -- BRS never
-        # offers a historical endpoint for them (see endpoints.py's Nature.LIVE
-        # entries). MarketDailyBar is their real close, distilled nightly from
-        # live snapshots (marketdata.ingest.aggregate_market_daily_bars: open =
-        # first snapshot, close = last, not an average). Before this, every
-        # symbol in these classes fell straight to _load_live_price_panel's
-        # mean-of-ticks fallback, silently mixing an intraday-mean return series
-        # into the same covariance matrix as every close-based column.
-        from marketdata.models import MarketDailyBar, MarketInstrument
-
-        bar_class_by_category = {
-            MarketInstrument.Category.CRYPTO: MarketDailyBar.AssetClass.CRYPTO,
-            MarketInstrument.Category.COMMODITY: MarketDailyBar.AssetClass.COMMODITY,
-            MarketInstrument.Category.ETF: MarketDailyBar.AssetClass.ETF_NAV,
-        }
-        symbols_by_asset_class: dict[str, list[str]] = {}
-        for mi in MarketInstrument.objects.filter(
-            source=MarketInstrument.Source.BRS,
-            symbol__in=brs_symbols,
-            category__in=bar_class_by_category,
-        ):
-            asset_class = bar_class_by_category[mi.category]
-            symbols_by_asset_class.setdefault(asset_class, []).append(mi.symbol)
-
-        for asset_class, symbols in symbols_by_asset_class.items():
-            qs_bars = MarketDailyBar.objects.filter(
-                asset_class=asset_class, symbol__in=symbols, close_price__gt=0,
-            )
-            if as_of_jalali is not None:
-                qs_bars = qs_bars.filter(date__lte=as_of_jalali)
-            brs_rows.extend(
-                qs_bars.order_by("symbol", "date").values_list("symbol", "date", "close_price")
-            )
 
     cutoff_jalali = to_jalali_str(cutoff)
     rejections = set(
@@ -685,13 +694,19 @@ def _load_price_panel(
 def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys: list[str]) -> pd.DataFrame:
     """The original Price-table loader, restricted to the given asset keys and cutoff/as_of.
 
-    Reserved for the handful of assets with no warehouse/MarketDailyBar close at
-    all (kama_stock, bitcoin_usd, and similar) -- see `_load_price_panel`, which
-    now sources crypto/commodity/ETF NAV from MarketDailyBar first. Each day is
-    the LAST tick, matching the close-to-close definition every other column in
-    the panel uses; averaging that day's ticks would mix a smoothed intraday-mean
-    series into the same covariance matrix as true close-based series next to it,
-    which is exactly the bug this replaced.
+    Reached for two cases: an asset with genuinely no provider symbol at all
+    (bitcoin_usd, swiss_gold_bar_*), and a warehouse/ETF-NAV-backed asset whose
+    warehouse series is too shallow yet (see `_load_price_panel`'s
+    MIN_DAILY_RETURNS gate -- e.g. kama_stock right after being newly tracked).
+
+    Each day is the median of that day's last up to 3 ticks: close enough to
+    the close-to-close definition every warehouse-backed column in the panel
+    uses (a full-day mean would smear an intraday move into a return that
+    never happened), but resistant to one glitched final tick deciding the
+    whole day's return on its own -- the exact bug a prior mean-based version
+    of this function existed to fix (see `c199d17`), before the crypto/
+    commodity/ETF-NAV warehouse gap this fallback used to cover was closed and
+    the outlier-tick case became the dominant remaining risk here instead.
     """
     if not keys:
         return pd.DataFrame()
@@ -776,18 +791,14 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
     df["fetched_at"] = pd.to_datetime(df["fetched_at"], utc=True)
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
     df = df.dropna(subset=["price"])
+    df["day"] = df["fetched_at"].dt.normalize()
 
-    panel = (
-        df.pivot_table(
-            index="fetched_at",
-            columns="asset__key",
-            values="price",
-            aggfunc="last",
-        )
-        .resample("1D")
-        .last()
+    daily = (
+        df.sort_values("fetched_at")
+        .groupby(["asset__key", "day"])["price"]
+        .apply(lambda ticks: ticks.tail(3).median())
     )
-    panel.index = panel.index.normalize()
+    panel = daily.unstack("asset__key")
     return panel
 
 

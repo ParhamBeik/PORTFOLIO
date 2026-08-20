@@ -164,6 +164,18 @@ def is_market_open():
     return market_state() == OPEN
 
 
+def expects_live_prices():
+    """Whether some live job should be running right now.
+
+    Every OVERNIGHT hour has zero jobs by design (see `live_job_keys`: BRS
+    needs OPEN/CLOSED_DAYTIME, TSE needs OPEN) -- a stale Price row overnight
+    is not a fault. `config.health.PriceFeedView` (the dead-man's switch the
+    on-VPS watchdog and the GitHub Actions probe both poll) uses this so it
+    doesn't page/restart on a nightly pause that isn't a problem.
+    """
+    return market_state() != OVERNIGHT
+
+
 # Daily series only gain a new row after the session closes, so a state that
 # verifies at midday and defers a flat 20h wakes up before the next close and
 # verifies the same stale history again. Half the tracked universe sat one

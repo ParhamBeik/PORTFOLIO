@@ -4,9 +4,12 @@
 healthcheck hits this. `/api/health/ready/` (readiness) adds a DB SELECT 1 and a
 cache roundtrip so a load balancer can stop routing traffic when the app is up
 but can't actually serve (DB down, cache gone). `/api/health/prices/` is the
-dead-man's switch: 503 when the freshest Price row is older than the threshold,
-meaning Celery beat has stopped feeding the system. The on-VPS cron and the
-GitHub Actions probe both watch this endpoint.
+dead-man's switch: 503 when the freshest Price row is older than the threshold
+AND some live job should be running right now (`marketdata.market_state.
+expects_live_prices` -- OVERNIGHT has zero live jobs by design, so a stale row
+then is not a fault). The on-VPS cron and the GitHub Actions probe both watch
+this endpoint; before this it went stale-by-design every night, which either
+paged on nothing or trained whoever watches it to ignore the alert.
 
 All are public (permission_classes = []): healthchecks carry no auth token.
 """
@@ -66,13 +69,14 @@ class PriceFeedView(APIView):
     permission_classes = []
 
     def get(self, request):
+        from marketdata.market_state import expects_live_prices
         from portfolio.models import Price
 
         latest = Price.objects.order_by("-fetched_at").values_list(
             "fetched_at", flat=True
         ).first()
         age = None if latest is None else timezone.now() - latest
-        stale = age is None or age > PRICE_STALE_AFTER
+        stale = (age is None or age > PRICE_STALE_AFTER) and expects_live_prices()
         return Response(
             {
                 "status": "stale" if stale else "fresh",

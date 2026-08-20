@@ -164,17 +164,23 @@ def test_fresh_live_price_remains_usable(asset_catalog):
     assert not panel[asset.key].isna().all()
 
 
-def test_live_panel_uses_last_tick_not_mean_of_same_day_ticks(asset_catalog):
-    """A day with several live ticks reports the LAST one, not their mean.
+def test_live_panel_resists_a_glitched_final_tick(asset_catalog):
+    """A day's value is the median of its last 3 ticks, not a flat average of
+    every tick and not the single last tick either.
 
     Averaging silently swapped the return definition away from the
     close-to-close basis every warehouse-backed column in the same panel uses
     (see _load_price_panel), which is what this fallback is reserved for now
-    that MarketDailyBar covers crypto/commodity/ETF NAV directly.
+    that MarketDailyBar covers ETF NAV directly. But the naive fix -- just
+    take the single last tick -- reopens the exact bug a prior mean-based
+    version of this function existed to fix: one glitched final-tick price
+    would singlehandedly define the whole day's return. Median-of-last-3
+    tracks the close-to-close basis on a normal day while still rejecting a
+    lone bad tick.
     """
     asset = asset_catalog["emami_coin"]
     now = timezone.now()
-    for offset_minutes, price in ((10, "100"), (5, "200"), (0, "300")):
+    for offset_minutes, price in ((15, "100"), (10, "100"), (5, "100"), (0, "9999")):
         p = Price.objects.create(asset=asset, price=Decimal(price), source="API")
         Price.objects.filter(pk=p.pk).update(
             fetched_at=now - dt.timedelta(minutes=offset_minutes)
@@ -186,7 +192,10 @@ def test_live_panel_uses_last_tick_not_mean_of_same_day_ticks(asset_catalog):
         keys=[asset.key],
     )
     day_value = panel[asset.key].dropna().iloc[-1]
-    assert day_value == pytest.approx(300.0), "expected the last tick (300), not the mean of 100/200/300"
+    assert day_value == pytest.approx(100.0), (
+        "expected the median of the last 3 ticks (100/100/9999 -> 100), "
+        "not the glitched last tick (9999) or the mean of all 4 ticks (~2574.75)"
+    )
 
 
 def test_rial_to_toman_conversion():

@@ -18,11 +18,15 @@ project_dir="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 env_file="${ENV_FILE:-${project_dir}/.env.production}"
 compose=(docker compose -f "${project_dir}/docker-compose.prod.yml" --env-file "${env_file}")
 domain="$(awk -F= '$1=="PORTFOLIO_DOMAIN"{print $2; exit}' "${env_file}")"
+[[ -n "${domain}" ]] || { echo "PORTFOLIO_DOMAIN is missing from ${env_file}" >&2; exit 1; }
 cooldown_file="/var/run/portfolio-watchdog.last_restart"
 cooldown_seconds="${WATCHDOG_COOLDOWN_SECONDS:-900}"
 
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') watchdog_prices: $*"; }
 
+# /api/health/prices/ is itself market-hours-aware (config/health.py) -- it
+# reports fresh overnight even with no new Price rows, since no live job runs
+# then by design. A 503 here means a job that SHOULD be running isn't.
 if curl -fsS --max-time 10 "https://${domain}/api/health/prices/" >/dev/null 2>&1; then
     exit 0
 fi
@@ -36,7 +40,11 @@ if (( now - last < cooldown_seconds )); then
     exit 0
 fi
 
+# Write the cooldown BEFORE attempting the restart: if `compose restart`
+# itself fails (bad env, renamed service, daemon hiccup), the cooldown must
+# still hold -- otherwise every subsequent cron tick retries immediately,
+# with zero throttling, in exactly the failure case the cooldown exists for.
+echo "${now}" > "${cooldown_file}"
 log "restarting celery_worker_live and celery_beat"
 "${compose[@]}" restart celery_worker_live celery_beat
-echo "${now}" > "${cooldown_file}"
 log "restart issued"
