@@ -240,6 +240,57 @@ def test_guard_price_map_does_not_forward_fill_past_max_sessions(asset_catalog, 
     assert guarded["emami_coin"] == Decimal("0")
 
 
+def test_closed_tse_valuation_uses_latest_archive_close(asset_catalog, write_prices, monkeypatch):
+    from django.core.cache import cache
+    from django.utils import timezone
+    from marketdata.models import MarketCandle
+    from portfolio.services.returns import to_jalali_str
+    from portfolio.services.valuation import get_latest_prices
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    write_prices({"kama_stock": Decimal("100")})
+    MarketCandle.objects.create(
+        symbol="کاما",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=to_jalali_str(timezone.now()),
+        close_price=Decimal("200"),
+    )
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
+    cache.delete("prices:latest")
+
+    assert get_latest_prices()["kama_stock"] == Decimal("200")
+
+
+def test_closed_tse_keeps_live_price_until_archive_reaches_current_session(
+    asset_catalog, write_prices, monkeypatch
+):
+    from datetime import timedelta
+
+    from django.core.cache import cache
+    from django.utils import timezone
+    from marketdata.models import MarketCandle
+    from portfolio.services.returns import to_jalali_str
+    from portfolio.services.valuation import get_latest_prices
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    write_prices({"kama_stock": Decimal("5230")})
+    yesterday = to_jalali_str(timezone.now() - timedelta(days=1))
+    MarketCandle.objects.create(
+        symbol="کاما",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=yesterday,
+        close_price=Decimal("5200"),
+    )
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
+    cache.delete("prices:latest")
+
+    assert get_latest_prices()["kama_stock"] == Decimal("5230")
+
+
 def test_quality_status_not_stale_when_tse_closed(asset_catalog, write_prices, make_user, monkeypatch):
     """A TSE stock's last price must not be flagged 'stale' just because the
     session closed hours ago -- the tsetmc live job only runs while state ==

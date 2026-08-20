@@ -470,13 +470,17 @@ class Snapshot(models.Model):
         default=False,
         help_text="True for downtime-gap backfilled rows (fabricated from recovery-time prices, not real history).",
     )
+    is_session_close = models.BooleanField(
+        default=False,
+        help_text="True when every held TSE asset used the verified close for its completed session.",
+    )
 
     class Meta:
         ordering = ["-timestamp"]
         indexes = [
             models.Index(fields=["user", "-timestamp"], name="idx_snapshot_user_time"),
-            # Backs the daily-average GROUP BY in SnapshotListView, which always
-            # filters on user + account together before grouping by day.
+            # Backs the daily history grouping in SnapshotListView, which always
+            # filters on user + account together before partitioning by day.
             models.Index(fields=["user", "account", "timestamp"], name="idx_snapshot_user_acct_time"),
         ]
 

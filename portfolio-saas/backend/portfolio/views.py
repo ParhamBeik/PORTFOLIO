@@ -10,8 +10,8 @@ from decimal import Decimal
 
 import numpy as np
 import pandas as pd
-from django.contrib.postgres.aggregates import BoolOr
-from django.db.models import Avg, Count, Q
+from django.db.models import F, Window
+from django.db.models.functions import RowNumber
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
@@ -738,9 +738,10 @@ def _express_real_toman(valuation: dict) -> dict:
 class SnapshotListView(APIView):
     """Per-user net-worth history for the FREE trend chart, plus trade markers.
 
-    One point per calendar day: the average of every fetch snapshotted that day
-    (fetches run every 2 minutes, so "today" is the running average of today's
-    fetches so far). `?days=all` returns the full history. `trades` carries the
+    One point per calendar day: the verified session-close snapshot when one
+    exists, otherwise the latest non-estimated snapshot, or the latest estimated
+    gap-fill when no live snapshot exists. `?days=all`
+    returns the full history. `trades` carries the
     buy/sell events in the same window so the chart can annotate the exact
     points where holdings changed.
 
@@ -779,18 +780,30 @@ class SnapshotListView(APIView):
         prices = get_latest_prices()
         usd_rate = Decimal(prices.get("usd_cash", 0) or 0)
 
-        # Prefer live (non-estimated) rows when a day has both. Downtime gap-fills
-        # reuse the *current* price map stamped onto past slots; a bad price map
-        # then floods the day and pulls Avg() off a cliff.
+        # Use one representative observation per day. Averaging intraday
+        # snapshots makes a closed-market chart disagree with the authoritative
+        # session close and can turn a large final-price move into a misleading
+        # portfolio cliff.
         daily = list(
             snapshots
             .annotate(day=TruncDate("timestamp"))
-            .values("day")
             .annotate(
-                live_avg=Avg("total_value_tomans", filter=Q(is_estimated=False)),
-                live_n=Count("id", filter=Q(is_estimated=False)),
-                all_avg=Avg("total_value_tomans"),
-                any_estimated=BoolOr("is_estimated"),
+                row_number=Window(
+                    expression=RowNumber(),
+                    partition_by=[TruncDate("timestamp")],
+                    order_by=[
+                        F("is_session_close").desc(),
+                        F("is_estimated").asc(),
+                        F("timestamp").desc(),
+                    ],
+                )
+            )
+            .filter(row_number=1)
+            .values(
+                "day",
+                "total_value_tomans",
+                "is_estimated",
+                "is_session_close",
             )
             .order_by("day")
         )
@@ -821,6 +834,7 @@ class SnapshotListView(APIView):
                     "total": row["total"],
                     "total_usd": row["total_usd"],
                     "is_estimated": True,
+                    "is_session_close": False,
                 }
                 for row in dynamic
             ]
@@ -831,16 +845,14 @@ class SnapshotListView(APIView):
                 if fallback_val > 0:
                     daily = [{
                         "day": now.date(),
-                        "live_avg": fallback_val,
-                        "live_n": 1,
-                        "all_avg": fallback_val,
-                        "any_estimated": False,
+                        "total_value_tomans": fallback_val,
+                        "is_estimated": False,
+                        "is_session_close": False,
                     }]
 
             series = []
             for row in daily:
-                use_live = (row.get("live_n") or 0) > 0
-                total = Decimal((row["live_avg"] if use_live else row["all_avg"]) or 0)
+                total = Decimal(row["total_value_tomans"] or 0)
                 val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
                 day_str = row["day"].strftime("%Y-%m-%d")
                 series.append({
@@ -848,7 +860,8 @@ class SnapshotListView(APIView):
                     "date": day_str,
                     "total": str(total),
                     "total_usd": val_usd,
-                    "is_estimated": False if use_live else bool(row["any_estimated"]),
+                    "is_estimated": bool(row["is_estimated"]),
+                    "is_session_close": bool(row["is_session_close"]),
                 })
 
         trades = (

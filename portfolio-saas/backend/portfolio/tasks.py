@@ -19,7 +19,12 @@ from django.db import transaction
 from accounts.models import User
 from portfolio.models import Asset, DailyPriceAverage, Price, Snapshot
 from portfolio.services import asset_value, invalidate_prices_cache
-from portfolio.services.valuation import _archive_replacements, guard_price_map
+from portfolio.services.valuation import (
+    _archive_replacements,
+    current_market_state,
+    guard_price_map,
+    tse_market_is_closed,
+)
 from portfolio.live.extractor import extract_standard_prices
 from portfolio.live.fetcher import api_settings_from_django, fetch_all_markets
 from portfolio.live.redis_client import get_redis
@@ -92,7 +97,13 @@ def run_price_fetch(*, dry_run=False):
             key: prices.get(key, 0)
             for key in active_keys
         }
-        archive_replacements = _archive_replacements(live_prices)
+        current_state = current_market_state()
+        verified_close_keys = set()
+        archive_replacements = _archive_replacements(
+            live_prices,
+            prefer_closed_tse=tse_market_is_closed(current_state),
+            verified_close_keys=verified_close_keys,
+        )
         resolved_prices = guard_price_map(
             live_prices, archive_replacements=archive_replacements
         )
@@ -108,7 +119,10 @@ def run_price_fetch(*, dry_run=False):
         if priced and not dry_run:
             with transaction.atomic():
                 _write_prices(priced, sources=sources)
-                _write_snapshots(snapshot_prices)
+                _write_snapshots(
+                    snapshot_prices,
+                    session_close_keys=verified_close_keys,
+                )
             invalidate_prices_cache()
 
             # LAZY import: avoids a circular `portfolio.tasks -> portfolio.services.returns ->
@@ -185,10 +199,15 @@ from datetime import timedelta
 from django.utils import timezone
 
 
-def _write_snapshots(priced: dict) -> None:
+def _write_snapshots(
+    priced: dict,
+    *,
+    session_close_keys: set[str] | None = None,
+) -> None:
     """Snapshot each active user's net worth in bulk and fill downtime gaps safely."""
     guarded_priced = guard_price_map(priced)
     prices = {k: Decimal(str(v)) for k, v in guarded_priced.items()}
+    session_close_keys = session_close_keys or set()
     now = timezone.now()
 
     # 1. Detect downtime gaps (> 4 minutes since last snapshot), capped to 60 intervals (2 hours) per run
@@ -224,16 +243,25 @@ def _write_snapshots(priced: dict) -> None:
     for user in active_users_qs.iterator(chunk_size=chunk_size):
         user_batch.append(user)
         if len(user_batch) >= chunk_size:
-            total_written += _flush_user_snapshots(user_batch, prices, gap_timestamps)
+            total_written += _flush_user_snapshots(
+                user_batch, prices, gap_timestamps, session_close_keys
+            )
             user_batch = []
 
     if user_batch:
-        total_written += _flush_user_snapshots(user_batch, prices, gap_timestamps)
+        total_written += _flush_user_snapshots(
+            user_batch, prices, gap_timestamps, session_close_keys
+        )
 
     logger.info("Wrote %d net-worth snapshots total.", total_written)
 
 
-def _flush_user_snapshots(users: list, prices: dict, gap_timestamps: list) -> int:
+def _flush_user_snapshots(
+    users: list,
+    prices: dict,
+    gap_timestamps: list,
+    session_close_keys: set[str],
+) -> int:
     """Generate and bulk_create snapshots for a small batch of users."""
     snapshots = []
 
@@ -242,8 +270,21 @@ def _flush_user_snapshots(users: list, prices: dict, gap_timestamps: list) -> in
         is_est = True if ts is not None else False
         for user in users:
             user_total = Decimal("0")
+            account_close_flags = []
             for account in user.accounts.all():
                 account_total = Decimal("0")
+                held_tse_keys = {
+                    holding.asset.key
+                    for holding in account.holdings.all()
+                    if holding.asset.tse_symbol
+                }
+                is_close = (
+                    not is_est
+                    and bool(held_tse_keys)
+                    and held_tse_keys <= session_close_keys
+                )
+                if held_tse_keys:
+                    account_close_flags.append(is_close)
                 for holding in account.holdings.all():
                     unit_price = prices.get(holding.asset.key)
                     value = asset_value(holding, unit_price)
@@ -252,11 +293,27 @@ def _flush_user_snapshots(users: list, prices: dict, gap_timestamps: list) -> in
                 for liability in account.liabilities.all():
                     account_total -= liability.amount_tomans
                 user_total += account_total
-                snap = Snapshot(user=user, account=account, total_value_tomans=account_total, is_estimated=is_est)
+                snap = Snapshot(
+                    user=user,
+                    account=account,
+                    total_value_tomans=account_total,
+                    is_estimated=is_est,
+                    is_session_close=is_close,
+                )
                 if ts:
                     snap.timestamp = ts
                 batch_snaps.append(snap)
-            snap = Snapshot(user=user, account=None, total_value_tomans=user_total, is_estimated=is_est)
+            snap = Snapshot(
+                user=user,
+                account=None,
+                total_value_tomans=user_total,
+                is_estimated=is_est,
+                is_session_close=(
+                    not is_est
+                    and bool(account_close_flags)
+                    and all(account_close_flags)
+                ),
+            )
             if ts:
                 snap.timestamp = ts
             batch_snaps.append(snap)

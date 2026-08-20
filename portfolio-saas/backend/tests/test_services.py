@@ -36,6 +36,26 @@ def test_latest_prices_is_cached(asset_catalog, write_prices):
     assert second["emami_coin"] == Decimal("480000000")
 
 
+def test_latest_prices_cache_is_invalidated_by_market_state_change(
+    asset_catalog, write_prices, monkeypatch
+):
+    write_prices({"emami_coin": Decimal("480000000")})
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "open")
+    get_latest_prices()
+
+    Price.objects.create(
+        asset=asset_catalog["emami_coin"],
+        price=Decimal("500000000"),
+        source="TEST",
+    )
+    monkeypatch.setattr(
+        "marketdata.market_state.market_state",
+        lambda: "closed_daytime",
+    )
+
+    assert get_latest_prices()["emami_coin"] == Decimal("500000000")
+
+
 def test_invalidate_forces_refresh(asset_catalog, write_prices):
     write_prices({"emami_coin": Decimal("480000000")})
     get_latest_prices()  # populate cache

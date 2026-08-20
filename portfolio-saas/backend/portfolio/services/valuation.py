@@ -17,6 +17,7 @@ from ..models import HOUSE_AREA_SQM, Account, Asset, Holding, Price
 logger = logging.getLogger(__name__)
 
 _LATEST_PRICES_CACHE_KEY = "prices:latest"
+_LATEST_PRICES_STATE_KEY = "prices:latest:market-state"
 _ARCHIVE_DROP_FLOOR = Decimal("0.50")
 _ARCHIVE_SPIKE_CEILING = Decimal("2.00")
 
@@ -40,6 +41,18 @@ _CLOSED_BRS_GRACE_SECONDS = 24 * 3600
 # compute_dynamic_net_worth_series, value_as_of's _stale_sessions): forward-fill
 # past this many sessions invents a price rather than reports one.
 MAX_FORWARD_FILL_SESSIONS = 5
+
+
+def current_market_state() -> str:
+    from marketdata.market_state import market_state
+
+    return market_state()
+
+
+def tse_market_is_closed(state: str | None = None) -> bool:
+    from marketdata.market_state import OPEN
+
+    return (state or current_market_state()) != OPEN
 
 
 def _q(value) -> Decimal:
@@ -67,8 +80,9 @@ def get_latest_prices() -> dict:
     blast radius is total rather than partial: one `price=1` row values the whole
     holding at one Toman. The extra queries are amortised by the 120s cache.
     """
+    current_state = current_market_state()
     cached = cache.get(_LATEST_PRICES_CACHE_KEY)
-    if cached is not None:
+    if cached is not None and cache.get(_LATEST_PRICES_STATE_KEY) == current_state:
         return cached
 
     latest = (
@@ -85,10 +99,15 @@ def get_latest_prices() -> dict:
     # silent archive value and hide the gap the valuation layer reports.
     prices.update({
         key: value
-        for key, value in _archive_replacements(prices, live_fetched_at=fetched_at).items()
+        for key, value in _archive_replacements(
+            prices,
+            live_fetched_at=fetched_at,
+            prefer_closed_tse=tse_market_is_closed(current_state),
+        ).items()
         if key in prices
     })
     cache.set(_LATEST_PRICES_CACHE_KEY, prices, timeout=120)
+    cache.set(_LATEST_PRICES_STATE_KEY, current_state, timeout=120)
     return prices
 
 
@@ -146,7 +165,13 @@ def guard_price_map(prices: dict, *, fill_missing=True, archive_replacements=Non
     return guarded
 
 
-def _archive_replacements(prices: dict, *, live_fetched_at: dict | None = None) -> dict:
+def _archive_replacements(
+    prices: dict,
+    *,
+    live_fetched_at: dict | None = None,
+    prefer_closed_tse: bool = False,
+    verified_close_keys: set[str] | None = None,
+) -> dict:
     """Return archive-backed replacements for missing, broken, or outrun live prices.
 
     `live_fetched_at`, when given, also catches a live price that passes the
@@ -162,6 +187,8 @@ def _archive_replacements(prices: dict, *, live_fetched_at: dict | None = None) 
     from portfolio.services.returns import to_jalali_str
 
     assets = Asset.objects.filter(is_active=True).exclude(is_house=True)
+    assets_by_key = {asset.key: asset for asset in assets}
+    current_jalali_date = to_jalali_str(timezone.now())
     stock_symbols = {
         asset.tse_symbol: asset.key
         for asset in assets
@@ -220,7 +247,22 @@ def _archive_replacements(prices: dict, *, live_fetched_at: dict | None = None) 
     replacements = {}
     for key, archive_price in archive_prices.items():
         live_price = _q(prices.get(key))
-        if live_price <= 0:
+        asset = assets_by_key.get(key)
+        if (
+            prefer_closed_tse
+            and asset
+            and asset.tse_symbol
+            and archive_dates[key] == current_jalali_date
+        ):
+            logger.info(
+                "Key='%s' TSE is closed; using latest archive close %s.",
+                key,
+                archive_price,
+            )
+            replacements[key] = archive_price
+            if verified_close_keys is not None:
+                verified_close_keys.add(key)
+        elif live_price <= 0:
             logger.warning("Key='%s' Live=0. Using archive price %s", key, archive_price)
             replacements[key] = archive_price
         elif live_price < archive_price * _ARCHIVE_DROP_FLOOR or live_price > archive_price * _ARCHIVE_SPIKE_CEILING:
@@ -266,6 +308,7 @@ def _live_quality_status(asset, age_seconds: int, state: str) -> str:
 def invalidate_prices_cache() -> None:
     """Called after a fresh fetch so reads immediately see new prices."""
     cache.delete(_LATEST_PRICES_CACHE_KEY)
+    cache.delete(_LATEST_PRICES_STATE_KEY)
 
 
 def _house_value(price_per_sqm_million: Decimal, area_sqm: Decimal = HOUSE_AREA_SQM) -> Decimal:

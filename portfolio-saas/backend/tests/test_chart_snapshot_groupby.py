@@ -1,6 +1,4 @@
-"""Net-worth history: one point per calendar day, averaged across that day's
-fetches (fetchers run every 2 minutes; "today" is the running average so far).
-"""
+"""Net-worth history: one point per calendar day, preferring verified closes."""
 import pytest
 from datetime import timedelta
 from decimal import Decimal
@@ -24,7 +22,7 @@ def _mark_traded(account, asset):
 
 
 @pytest.mark.django_db
-def test_same_day_snapshots_collapse_to_one_averaged_point(make_user):
+def test_same_day_snapshots_use_latest_live_point(make_user):
     user = make_user("chart_test_user@example.com")
     client = APIClient()
     client.force_authenticate(user=user)
@@ -36,7 +34,13 @@ def test_same_day_snapshots_collapse_to_one_averaged_point(make_user):
 
     now = timezone.now()
     Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("100000"), timestamp=now - timedelta(hours=3))
-    Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("105000"), timestamp=now - timedelta(hours=1))
+    Snapshot.objects.create(
+        user=user,
+        account=account,
+        total_value_tomans=Decimal("105000"),
+        timestamp=now - timedelta(hours=1),
+        is_session_close=True,
+    )
     Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("110000"), timestamp=now - timedelta(minutes=5))
 
     res = client.get(f"/api/snapshots/?days=7&account={account.id}")
@@ -45,7 +49,8 @@ def test_same_day_snapshots_collapse_to_one_averaged_point(make_user):
 
     assert len(series) == 1
     assert series[0]["date"] == now.strftime("%Y-%m-%d")
-    assert Decimal(series[0]["total"]) == Decimal("105000")  # mean of the three
+    assert Decimal(series[0]["total"]) == Decimal("105000")
+    assert series[0]["is_session_close"] is True
 
 
 @pytest.mark.django_db

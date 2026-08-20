@@ -10,6 +10,7 @@ from io import StringIO
 import pytest
 from django.core.cache import cache
 from django.core.management import call_command
+from django.utils import timezone
 
 from accounts.models import User
 from marketdata.models import GoldCurrencyHistory, MarketCandle
@@ -106,6 +107,34 @@ def test_fetch_snapshots_use_archive_guard_for_bad_latest_price(asset_catalog, m
     snap = Snapshot.objects.get(user=user, account=None)
     assert latest.price == Decimal("479000000")
     assert snap.total_value_tomans == Decimal("958000000")
+
+
+def test_closed_tse_fetch_persists_archive_close(asset_catalog, raw_market_sample, monkeypatch):
+    from portfolio.services.returns import to_jalali_str
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    MarketCandle.objects.create(
+        symbol="کاما",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=to_jalali_str(timezone.now()),
+        close_price=Decimal("5200"),
+    )
+    user = User.objects.create_user(email="closed-tse@test.test", password="Sup3rSecret!")
+    account = Account.objects.create(user=user, name="Main")
+    account.holdings.create(asset=stock, quantity=Decimal("10"))
+    _patch_fetch(monkeypatch, raw_market_sample)
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
+
+    call_command("fetch_prices", stdout=StringIO())
+
+    latest = Price.objects.filter(asset=stock).order_by("-id").first()
+    assert latest.price == Decimal("5200")
+    assert latest.source == "ARCHIVE"
+    snapshot = Snapshot.objects.get(user=user, account=None)
+    assert snapshot.total_value_tomans == Decimal("52000")
+    assert snapshot.is_session_close is True
 
 
 def test_partial_fetch_keeps_previous_prices_in_snapshots(asset_catalog, monkeypatch):
