@@ -6,7 +6,7 @@ from typing import Any
 import jdatetime
 from django.utils import timezone
 
-from .candles import (
+from .calendars import (
     actual_trading_days,
     candle_close_qs,
     gold_currency_quoting_days,
@@ -25,7 +25,7 @@ MAX_REJECTION_RATIO = 0.01
 # A quiet stretch longer than this is investigated rather than assumed benign.
 # NOT a reliable closure test on its own: the exchange was shut for 83 days
 # across 1404-1405, and there are 74 market-wide closure days over 12 Jalali
-# years. `marketdata.candles.market_closure_days()` is the actual discriminator
+# years. `marketdata.calendars.market_closure_days()` is the actual discriminator
 # (market-wide zero volume AND zero trades).
 MAX_OUTAGE_CALENDAR_DAYS = 21
 

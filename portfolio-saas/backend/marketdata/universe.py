@@ -7,7 +7,7 @@ from django.db.models import Count
 from django.utils import timezone
 import jdatetime
 
-from marketdata.candles import candle_close_qs
+from marketdata.calendars import candle_close_qs
 from marketdata.currency import tse_close_to_toman
 from django.core.cache import cache
 

@@ -337,7 +337,7 @@ def test_candle_close_qs_only_returns_adjusted_candles(asset_catalog):
     """Live-tick-derived AGGREGATE candles are retired; only the provider's
     ADJUSTED close is ever a valid archive/fallback price.
     """
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     from marketdata.models import MarketCandle
 
     day = "1403-10-19"
@@ -413,7 +413,7 @@ def test_currency_conversion_has_one_unit_driven_rule(
 
 
 def test_symbol_matching_never_uses_substrings():
-    from marketdata.symbols import find_symbol_record
+    from marketdata.catalog import find_symbol_record
 
     rows = [
         {"l18": "KAMA1", "l30": "KAMA Holdings"},
@@ -668,7 +668,7 @@ def test_ingest_real_legal_rejection_uses_distinct_endpoint():
 
 def test_candle_close_qs_includes_both_date_formats(asset_catalog):
     """F5: candle_close_qs must include rows with and without time suffix for as_of."""
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     from marketdata.models import MarketCandle
     from decimal import Decimal
 
@@ -711,7 +711,7 @@ def test_candle_close_qs_includes_both_date_formats(asset_catalog):
 
 def test_candle_close_qs_excludes_following_day(asset_catalog):
     """F5: as_of must not include the following day's rows."""
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     from marketdata.models import MarketCandle
     from decimal import Decimal
 
@@ -751,7 +751,7 @@ def test_candle_close_qs_excludes_following_day(asset_catalog):
 
 def test_candle_close_qs_adjusted_preference_preserved(asset_catalog):
     """F5: adjusted-price preference must still work with the fix."""
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     from marketdata.models import MarketCandle
     from decimal import Decimal
 

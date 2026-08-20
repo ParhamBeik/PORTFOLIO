@@ -16,7 +16,7 @@ from decimal import Decimal
 import pandas as pd
 import pytest
 
-from marketdata.candles import market_closure_days
+from marketdata.calendars import market_closure_days
 from marketdata.models import DailyStockHistory
 from portfolio.services.returns import _closure_explained, _mask_closure_returns
 

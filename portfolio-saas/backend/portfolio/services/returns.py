@@ -119,7 +119,7 @@ def _trading_session_index(start: dt.datetime, end: dt.datetime) -> pd.DatetimeI
     Shares `actual_trading_days()` with `marketdata.integrity` so the gap gate
     here and the nightly integrity gate agree on what a missing session is.
     """
-    from marketdata.candles import actual_trading_days
+    from marketdata.calendars import actual_trading_days
 
     days = actual_trading_days(start=to_jalali_str(start), end=to_jalali_str(end))
     if not days:
@@ -154,7 +154,7 @@ def _closure_explained(left: pd.Timestamp, right: pd.Timestamp) -> bool:
     emits a row per symbol carrying the previous price with zero volume and zero
     trades, so the market-wide totals are zero.
     """
-    from marketdata.candles import market_closure_days
+    from marketdata.calendars import market_closure_days
 
     closures = market_closure_days(
         start=to_jalali_str(left), end=to_jalali_str(right)
@@ -462,7 +462,7 @@ def _load_price_panel(
             days=history_days + _HISTORY_BUFFER_DAYS
         )
 
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     from marketdata.models import SymbolIntegrity, GoldCurrencyHistory
     # A current nightly assessment must not leak into a historical cutoff. Its
     # window may contain observations that did not exist at that cutoff; the

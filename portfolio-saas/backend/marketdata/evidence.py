@@ -9,7 +9,7 @@ from __future__ import annotations
 from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
 
-from .candles import candle_close_qs
+from .calendars import candle_close_qs
 from .integrity import compute_symbol_integrity
 from .models import (
     ArchiveFetchState,

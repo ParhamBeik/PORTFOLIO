@@ -31,7 +31,7 @@ urlpatterns = [
     path("api/auth/", include("accounts.urls")),
     path("api/admin/clean-prices/scan/", AdminCleanPricesScanView.as_view(), name="admin-clean-prices-scan"),
     path("api/admin/clean-prices/execute/", AdminCleanPricesExecuteView.as_view(), name="admin-clean-prices-execute"),
-    path("api/admin/", include("marketdata.admin_urls")),
+    path("api/admin/", include("marketdata.admin_api")),
     path("api/", include("portfolio.urls")),
     path(
         "api/token/refresh/",

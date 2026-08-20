@@ -481,7 +481,7 @@ def market_trading_days(window_days=None):
     a per-symbol view cannot tell apart. Requesting ticks for a closed day costs
     a request and returns nothing, so this is a direct quota saving.
     """
-    from .candles import actual_trading_days
+    from .calendars import actual_trading_days
 
     return actual_trading_days(window_days=window_days or TICK_WINDOW_DAYS)
 

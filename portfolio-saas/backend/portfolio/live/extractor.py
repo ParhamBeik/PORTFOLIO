@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from marketdata.currency import IRR_QUOTE_UNITS, FOREIGN_QUOTE_UNITS, canonical_symbol, to_toman
-from marketdata.symbols import find_symbol_record
+from marketdata.catalog import find_symbol_record
 
 logger = logging.getLogger(__name__)
 

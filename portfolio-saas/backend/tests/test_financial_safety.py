@@ -236,7 +236,7 @@ def test_unadjusted_price_selection_fallback(asset_catalog):
     )
 
     # Load candles via candle_close_qs
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     qs = candle_close_qs(symbol)
     candle = qs.filter(date_time=date_str).first()
     
@@ -364,7 +364,7 @@ def test_no_fallback_when_adjusted_absent(asset_catalog):
         volume=1000,
     )
 
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     qs = candle_close_qs(symbol)
     candle = qs.filter(date_time=date_str).first()
     assert candle is None
@@ -386,7 +386,7 @@ def test_invalid_data_blocked_through_fallback(asset_catalog):
         volume=1000,
     )
 
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     qs = candle_close_qs(symbol)
     candle = qs.filter(date_time=date_str).first()
     assert candle is None
@@ -468,7 +468,7 @@ def test_rejected_record_does_not_exclude_other_endpoints(asset_catalog):
         payload={},
     )
 
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     # candle_close_qs does not exclude this date since it is not a daily candle/history rejection
     rejections = RejectedRecord.objects.filter(
         symbol=symbol,

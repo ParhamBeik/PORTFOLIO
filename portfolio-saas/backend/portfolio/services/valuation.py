@@ -182,7 +182,7 @@ def _archive_replacements(
     next to an archive close already at session N is not a spike, it is stale
     data that happens to still be in a plausible range.
     """
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     from marketdata.models import GoldCurrencyHistory, RejectedRecord
     from portfolio.services.returns import to_jalali_str
 
@@ -337,7 +337,7 @@ def asset_value(holding: Holding, price: Decimal) -> Decimal:
 
 def _latest_archive_close(asset) -> dict | None:
     """Latest warehouse close used when live Price is missing or replaced."""
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     from marketdata.models import GoldCurrencyHistory
 
     if asset.tse_symbol:
@@ -575,7 +575,7 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     from datetime import timedelta
     import jdatetime
     from django.utils import timezone
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     from marketdata.models import GoldCurrencyHistory
     from portfolio.models import Holding, Liability
     from portfolio.services.timeline import holdings_as_of
@@ -710,7 +710,7 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     from portfolio.services.deflator import cpi_for_date, normalize_basis
     from portfolio.services.returns import normalize_as_of, to_jalali_str
     from portfolio.services.timeline import cash_as_of, holdings_as_of
-    from marketdata.candles import candle_close_qs
+    from marketdata.calendars import candle_close_qs
     from marketdata.models import GoldCurrencyHistory
     from portfolio.models import Asset
 

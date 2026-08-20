@@ -457,3 +457,20 @@ class AdminAssetRefreshView(APIView):
             metadata={"queued": result.get("queued"), "actor": request.user.email},
         )
         return Response(result)
+
+
+# Mounted at /api/admin/ by config/urls.py.
+from django.urls import path  # noqa: E402
+
+urlpatterns = [
+    path("overview/", AdminOverviewView.as_view(), name="admin-ops-overview"),
+    path("workflows/", AdminWorkflowListView.as_view(), name="admin-ops-workflows"),
+    path("logs/", AdminLogListView.as_view(), name="admin-ops-logs"),
+    path("archive-states/", AdminArchiveStateListView.as_view(), name="admin-ops-archive-states"),
+    path("archive-states/retry/", AdminArchiveRetryView.as_view(), name="admin-ops-archive-retry"),
+    path("assets/", AdminAssetListView.as_view(), name="admin-ops-assets"),
+    path("assets/<str:key>/evidence/", AdminAssetEvidenceView.as_view(), name="admin-ops-asset-evidence"),
+    path("assets/<str:key>/retry/", AdminAssetRetryView.as_view(), name="admin-ops-asset-retry"),
+    path("assets/<str:key>/recompute-integrity/", AdminAssetRecomputeIntegrityView.as_view(), name="admin-ops-asset-recompute"),
+    path("assets/<str:key>/refresh/", AdminAssetRefreshView.as_view(), name="admin-ops-asset-refresh"),
+]
