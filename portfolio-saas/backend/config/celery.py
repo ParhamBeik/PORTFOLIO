@@ -176,7 +176,7 @@ app.conf.beat_schedule = {
 
 @before_task_publish.connect
 def attach_request_id(headers=None, **kwargs):
-    from config.request_context import get_request_id
+    from config.observability import get_request_id
 
     if headers is not None:
         headers["x-request-id"] = get_request_id()
@@ -184,7 +184,7 @@ def attach_request_id(headers=None, **kwargs):
 
 @task_prerun.connect
 def restore_request_id(task=None, **kwargs):
-    from config.request_context import request_id_var
+    from config.observability import request_id_var
 
     request_id = (
         getattr(getattr(task, "request", None), "x-request-id", None)

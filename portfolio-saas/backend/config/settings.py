@@ -56,7 +56,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
-    "config.middleware.RequestIDMiddleware",
+    "config.observability.RequestIDMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -66,8 +66,7 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = "config.urls"
-WSGI_APPLICATION = "config.wsgi.application"
-ASGI_APPLICATION = "config.asgi.application"
+ASGI_APPLICATION = "config.asgi.application"  # gunicorn runs uvicorn workers; there is no WSGI entrypoint
 
 TEMPLATES = [
     {
@@ -155,7 +154,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 REST_FRAMEWORK = {
     # Translates domain errors (currently CpiUnavailable) that any
     # basis-accepting endpoint can raise into honest responses instead of 500s.
-    "EXCEPTION_HANDLER": "config.exception_handlers.handle",
+    "EXCEPTION_HANDLER": "config.api.handle",
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
@@ -172,7 +171,7 @@ REST_FRAMEWORK = {
         "user": os.getenv("USER_THROTTLE", "120/min"),
     },
     # M5: render Decimal as a string so large Toman values stay exact on the wire.
-    "DEFAULT_RENDERER_CLASSES": ("config.renderers.DecimalStringJSONRenderer",),
+    "DEFAULT_RENDERER_CLASSES": ("config.api.DecimalStringJSONRenderer",),
 }
 
 SIMPLE_JWT = {
@@ -265,8 +264,6 @@ MARKETDATA_TICK_VOLUME_TOLERANCE = float(
 # still reported verified. Bound the target to the newest N pages per symbol so
 # the state can honestly converge; raise it when the backlog is otherwise idle.
 MARKETDATA_CODAL_MAX_PAGES = int(os.getenv("MARKETDATA_CODAL_MAX_PAGES", "5"))
-MONGO_URI = os.getenv("MONGO_URI", "")
-MONGO_DATABASE = os.getenv("MONGO_DATABASE", "portfolio")
 # 20/day left 96.7% of the 76,868-row backlog (74,303 rows) never even attempted
 # -- at 20/day it clears in ~10 years. Raised alongside the beat schedule itself
 # running every 6h instead of once/day (config/celery.py); still bounded well
@@ -426,7 +423,7 @@ LOGGING = {
         "raw": {"format": "%(message)s"},
     },
     "filters": {
-        "request_id": {"()": "config.logging.RequestIDFilter"},
+        "request_id": {"()": "config.observability.RequestIDFilter"},
     },
     "handlers": {
         "console": {

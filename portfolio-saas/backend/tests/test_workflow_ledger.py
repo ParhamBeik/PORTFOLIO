@@ -60,7 +60,7 @@ def test_wedged_states_alert_and_name_their_cause(settings):
                    "failed (ReadTimeout, status=None).",
     )
 
-    with patch("config.alerts.notify") as notify:
+    with patch("config.observability.notify") as notify:
         operational_health_check()
 
     fired = {call.args[0]: call.args[1] for call in notify.call_args_list}
@@ -78,7 +78,7 @@ def test_healthy_archive_raises_no_wedged_alert(settings):
         symbol="fine", consecutive_failures=1,
     )
 
-    with patch("config.alerts.notify") as notify:
+    with patch("config.observability.notify") as notify:
         operational_health_check()
 
     assert "wedged-archive-states" not in {c.args[0] for c in notify.call_args_list}

@@ -26,8 +26,6 @@ x-backend-env: &backend-env
   BRS_URL: ${BRS_URL:-https://Api.BrsApi.ir/Market/Gold_Currency.php}
   TSETMC_API_KEY: ${TSETMC_API_KEY:-}
   TSETMC_URL: ${TSETMC_URL:-https://Api.BrsApi.ir/Tsetmc/AllSymbols.php}
-  MONGO_URI: ${MONGO_URI:-mongodb://mongo:27017}
-  MONGO_DATABASE: ${MONGO_DATABASE:-portfolio}
   CODAL_S3_ENDPOINT_URL: ${CODAL_S3_ENDPOINT_URL:-http://minio:9000}
   CODAL_S3_BUCKET: ${CODAL_S3_BUCKET:-codal-artifacts}
   CODAL_S3_ACCESS_KEY: ${CODAL_S3_ACCESS_KEY:-codal}
@@ -98,26 +96,6 @@ services:
         limits:
           cpus: "0.5"
           memory: 256m
-
-  mongo:
-    image: mongo:7
-    restart: unless-stopped
-    logging: *json-logging
-    command: ["mongod", "--wiredTigerCacheSizeGB", "1"]
-    volumes:
-      - mongodata:/data/db
-    healthcheck:
-      # `mongosh` pings open several server-side connections and dominate Compose
-      # logs. PID 1 is the mongod process; Docker restart policy handles a dead one.
-      test: ["CMD-SHELL", "test \"$$(cat /proc/1/comm)\" = mongod"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 1280m
 
   minio:
     image: minio/minio:RELEASE.2024-10-13T13-34-11Z
@@ -220,10 +198,9 @@ services:
           cpus: "1"
           memory: 1g
 
-  # Archive queue: archive_tick claims states and fans out run_archive_state tasks.
-  # Concurrency 4 processes several independently leased states in parallel;
-  # quota still serializes provider spend. Kept off the live queue so price
-  # fetches never wait on a backfill batch.
+  # Background queue: warehouse backfill (archive_tick fans out run_archive_state)
+  # plus Codal document extraction. Kept off the live queue so price fetches never
+  # wait on a backfill batch; quota still serializes provider spend.
   celery_worker_archive:
     build: ./backend
     restart: unless-stopped
@@ -236,12 +213,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      minio:
+        condition: service_healthy
     environment:
       <<: *backend-env
       SERVICE_NAME: celery_worker_archive
     volumes:
       - ./backend:/app
-    command: celery -A config worker -l info --concurrency=2 -Q archive -n archive@%h --max-memory-per-child=400000
+    command: celery -A config worker -l info --concurrency=2 -Q archive,codal -n archive@%h --max-memory-per-child=600000
     healthcheck:
       test: ["CMD-SHELL", "celery -A config inspect ping -d archive@$$HOSTNAME"]
       interval: 60s
@@ -253,31 +232,6 @@ services:
         limits:
           cpus: "1"
           memory: 1536m
-
-  celery_worker_codal:
-    build: ./backend
-    restart: unless-stopped
-    logging: *json-logging
-    entrypoint: []
-    depends_on:
-      backend:
-        condition: service_started
-      mongo:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: celery_worker_codal
-    volumes:
-      - ./backend:/app
-    command: celery -A config worker -l info --concurrency=1 -Q codal -n codal@%h --max-memory-per-child=600000
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A config inspect ping -d codal@$$HOSTNAME"]
-      interval: 60s
-      timeout: 15s
-      retries: 3
-      start_period: 40s
 
   celery_beat:
     build: ./backend
@@ -331,5 +285,4 @@ services:
 
 volumes:
   pgdata:
-  mongodata:
   codaldata:

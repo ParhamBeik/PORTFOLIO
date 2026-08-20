@@ -128,7 +128,7 @@ def _capture_etf_nav_batch():
     from django.core.cache import cache
 
     from .fetchers import fetch_etf_nav
-    from .fetchers.base import PermanentMarketDataError, TransientMarketDataError
+    from .fetchers import PermanentMarketDataError, TransientMarketDataError
     from .models import MarketInstrument
 
     outcome = _ledgered(
@@ -320,7 +320,7 @@ def queue_codal_extractions():
 def operational_health_check():
     from redis import Redis
 
-    from config.alerts import notify
+    from config.observability import notify
     from portfolio.models import Price
     from .models import ApiRequestQuota, ArchiveFetchState, SymbolIntegrity, WorkflowRun
 

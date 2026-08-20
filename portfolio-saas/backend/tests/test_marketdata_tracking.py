@@ -7,7 +7,7 @@ from django.core.exceptions import ValidationError
 
 from marketdata.archive import run_archive_state
 from marketdata.catalog import is_ordinary_stock, sync_provider_catalog
-from marketdata.fetchers.base import (
+from marketdata.fetchers import (
     PermanentMarketDataError,
     TransientMarketDataError,
     fetch_json,
@@ -92,7 +92,7 @@ def test_permanent_http_error_uses_one_call_without_retry(settings):
     # leaving the headroom set would hold back more than this 10-request day has.
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 0
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
-    with patch("marketdata.fetchers.base.requests.get") as get:
+    with patch("marketdata.fetchers.requests.get") as get:
         get.return_value.status_code = 400
         get.return_value.json.side_effect = ValueError
         with pytest.raises(PermanentMarketDataError):
@@ -108,7 +108,7 @@ def test_transient_http_error_does_not_leak_api_key(settings, caplog):
     secret = "provider-secret"
     from requests.exceptions import RequestException
     with patch(
-        "marketdata.fetchers.base.requests.get",
+        "marketdata.fetchers.requests.get",
         side_effect=RequestException(f"failed https://example.test/?key={secret}"),
     ):
         with pytest.raises(TransientMarketDataError) as exc:
@@ -124,8 +124,8 @@ def test_every_transient_http_attempt_consumes_quota(settings):
     from requests.exceptions import RequestException
 
     with (
-        patch("marketdata.fetchers.base.requests.get", side_effect=RequestException("timeout")) as get,
-        patch("marketdata.fetchers.base.time.sleep"),
+        patch("marketdata.fetchers.requests.get", side_effect=RequestException("timeout")) as get,
+        patch("marketdata.fetchers.time.sleep"),
     ):
         with pytest.raises(TransientMarketDataError):
             fetch_json("https://example.test", retries=2)
@@ -496,7 +496,7 @@ def test_archive_state_transient_error_reschedules_quickly_then_escalates(settin
     The delay used to be a flat 2 minutes with no failure count, so a symbol that
     always timed out consumed a batch slot every 2 minutes indefinitely.
     """
-    from marketdata.fetchers.base import TransientMarketDataError
+    from marketdata.fetchers import TransientMarketDataError
     state = ArchiveFetchState.objects.create(
         endpoint=ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
         symbol="TEST_TRANSIENT",
@@ -568,7 +568,7 @@ def test_borrowing_never_eats_the_live_floor(settings):
 
 
 def test_archive_state_permanent_error_exponential_backoff(settings):
-    from marketdata.fetchers.base import PermanentMarketDataError
+    from marketdata.fetchers import PermanentMarketDataError
     state = ArchiveFetchState.objects.create(
         endpoint=ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
         symbol="TEST_PERMANENT",

@@ -24,7 +24,7 @@ def _mock_get(mock):
 
 def test_backfill_writes_history_rows(settings):
     settings.TSETMC_API_KEY = "test-key"
-    with patch("marketdata.fetchers.base.requests.get") as mock:
+    with patch("marketdata.fetchers.requests.get") as mock:
         _mock_get(mock)
         call_command("backfill_market_data", "--symbol", "کاما",
                      "--kinds", "history", "--sleep", "0")
@@ -49,7 +49,7 @@ def test_real_legal_is_retained_without_a_matching_price_row():
 
 def test_backfill_dry_run_writes_nothing(settings):
     settings.TSETMC_API_KEY = "test-key"
-    with patch("marketdata.fetchers.base.requests.get") as mock:
+    with patch("marketdata.fetchers.requests.get") as mock:
         _mock_get(mock)
         call_command("backfill_market_data", "--symbol", "کاما",
                      "--kinds", "history", "--sleep", "0", "--dry-run")

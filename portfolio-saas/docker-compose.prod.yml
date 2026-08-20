@@ -25,8 +25,6 @@ x-backend-env: &backend-env
   BRS_URL: ${BRS_URL:-https://Api.BrsApi.ir/Market/Gold_Currency.php}
   TSETMC_API_KEY: ${TSETMC_API_KEY:-}
   TSETMC_URL: ${TSETMC_URL:-https://Api.BrsApi.ir/Tsetmc/AllSymbols.php}
-  MONGO_URI: ${MONGO_URI:-mongodb://mongo:27017}
-  MONGO_DATABASE: ${MONGO_DATABASE:-portfolio}
   CODAL_S3_ENDPOINT_URL: ${CODAL_S3_ENDPOINT_URL:-http://minio:9000}
   CODAL_S3_BUCKET: ${CODAL_S3_BUCKET:-codal-artifacts}
   CODAL_S3_ACCESS_KEY: ${CODAL_S3_ACCESS_KEY:?set CODAL_S3_ACCESS_KEY}
@@ -124,24 +122,6 @@ services:
         limits:
           cpus: "0.5"
           memory: 512m
-
-  mongo:
-    image: mongo:7
-    restart: unless-stopped
-    logging: *logging
-    command: ["mongod", "--wiredTigerCacheSizeGB", "1"]
-    volumes:
-      - mongodata:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 1280m
 
   minio:
     image: minio/minio:RELEASE.2024-10-13T13-34-11Z
@@ -242,8 +222,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_healthy
     environment: *backend-env
-    command: celery -A config worker -l info --concurrency=4 -Q archive -n archive@%h --max-memory-per-child=400000
+    command: celery -A config worker -l info --concurrency=4 -Q archive,codal -n archive@%h --max-memory-per-child=600000
     healthcheck:
       test: ["CMD-SHELL", "celery -A config inspect ping -d archive@$$HOSTNAME"]
       interval: 60s
@@ -255,32 +237,6 @@ services:
         limits:
           cpus: "1"
           memory: 2g
-
-  celery_worker_codal:
-    build: ./backend
-    restart: unless-stopped
-    logging: *logging
-    entrypoint: []
-    depends_on:
-      backend:
-        condition: service_healthy
-      mongo:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-    environment: *backend-env
-    command: celery -A config worker -l info --concurrency=1 -Q codal -n codal@%h --max-memory-per-child=600000
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A config inspect ping -d codal@$$HOSTNAME"]
-      interval: 60s
-      timeout: 15s
-      retries: 3
-      start_period: 40s
-    deploy:
-      resources:
-        limits:
-          cpus: "0.75"
-          memory: 1g
 
   celery_beat:
     build: ./backend
@@ -324,7 +280,6 @@ services:
 volumes:
   pgdata:
   redisdata:
-  mongodata:
   codaldata:
   staticfiles:
 

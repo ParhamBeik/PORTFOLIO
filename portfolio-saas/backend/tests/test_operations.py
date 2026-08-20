@@ -21,9 +21,9 @@ def test_request_id_is_accepted_or_generated():
 
 @override_settings(ALERT_WEBHOOK_URL="https://alerts.test/hook")
 def test_alert_notifier_redacts_and_deduplicates():
-    from config.alerts import notify
+    from config.observability import notify
 
-    with mock.patch("config.alerts.requests.post") as post:
+    with mock.patch("config.observability.requests.post") as post:
         first = notify(
             "test-alert",
             {"password": "secret", "nested": {"authorization": "Bearer token"}},

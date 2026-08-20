@@ -247,7 +247,7 @@ def test_index_probe_closes_a_holiday_before_tse_jobs(settings):
     index_payload = {"date": "1405-05-17", "time": "08:30", "state": "بسته"}
     with (
         patch("marketdata.market_state.claim_provider_state_probe", return_value=True),
-        patch("marketdata.fetchers.index.fetch_market_index", return_value=index_payload) as index,
+        patch("marketdata.fetchers.fetch_market_index", return_value=index_payload) as index,
         patch("marketdata.ingest.ingest_market_index", return_value=(1, 0)),
         patch("marketdata.market_state.market_state", return_value=CLOSED_DAYTIME),
         patch("portfolio.live.fetcher._tsetmc_job") as stocks,

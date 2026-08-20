@@ -6,7 +6,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, wait
 from django.conf import settings
 
-from marketdata.fetchers.base import MarketDataFetchError, fetch_json
+from marketdata.fetchers import MarketDataFetchError, fetch_json
 from marketdata.quota import LIVE, QuotaExhausted
 from marketdata.symbols import find_symbol_record
 
@@ -118,7 +118,7 @@ def _brs_job(brs_url, brs_key):
     result = {"brsapi": fetch_brsapi(brs_url, brs_key)}
     if brs_key:
         try:
-            from marketdata.fetchers.gold_currency import fetch_gold_currency_pro_history_24h
+            from marketdata.fetchers import fetch_gold_currency_pro_history_24h
 
             usdt_quote = fetch_gold_currency_pro_history_24h(brs_key, "USDT")
             if usdt_quote:
@@ -177,7 +177,7 @@ def fetch_all_markets(api_settings):
     from datetime import datetime
     from zoneinfo import ZoneInfo
     from marketdata import ingest
-    from marketdata.fetchers.index import fetch_market_index
+    from marketdata.fetchers import fetch_market_index
     from marketdata.market_state import (
         claim_provider_state_probe,
         live_job_keys,

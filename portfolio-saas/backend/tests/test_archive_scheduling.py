@@ -185,7 +185,7 @@ def test_codal_reverifies_weekly_not_daily():
 
 
 def test_repeated_transients_escalate():
-    from marketdata.fetchers.base import TransientMarketDataError
+    from marketdata.fetchers import TransientMarketDataError
 
     state = _state("ونفت")
     with patch(

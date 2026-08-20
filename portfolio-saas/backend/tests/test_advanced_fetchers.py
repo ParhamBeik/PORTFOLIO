@@ -36,7 +36,7 @@ def test_fetch_gold_currency_free():
             {"symbol": "USD", "name": "دلار", "price": 81650, "unit": "تومان"}
         ]
     }
-    with patch("marketdata.fetchers.base.requests.get") as mock_get:
+    with patch("marketdata.fetchers.requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = mock_payload
 
@@ -56,7 +56,7 @@ def test_fetch_gold_currency_pro_history_daily():
             {"date": "1404/03/21", "open": 73290000, "high": 73610000, "low": 73080000, "close": 73385000}
         ]
     }
-    with patch("marketdata.fetchers.base.requests.get") as mock_get:
+    with patch("marketdata.fetchers.requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = mock_payload
 
@@ -96,7 +96,7 @@ def test_fetch_symbol_data_and_model_persistence():
         "pe": -4.93,
         "state": "مجاز",
     }
-    with patch("marketdata.fetchers.base.requests.get") as mock_get:
+    with patch("marketdata.fetchers.requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = mock_payload
 
@@ -151,7 +151,7 @@ def test_fetch_daily_history_and_real_legal():
             "Sell_N_Volume": 46708806,
         }
     ]
-    with patch("marketdata.fetchers.base.requests.get") as mock_get:
+    with patch("marketdata.fetchers.requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = mock_payload
 
@@ -199,7 +199,7 @@ def test_fetch_candlesticks():
             {"date": "1404-02-24", "open": 7380, "high": 7400, "low": 7280, "close": 7340, "volume": 180715348}
         ]
     }
-    with patch("marketdata.fetchers.base.requests.get") as mock_get:
+    with patch("marketdata.fetchers.requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = mock_payload
 
@@ -226,7 +226,7 @@ def test_fetch_transactions():
     mock_payload = [
         {"row": 1, "time": "09:01:02", "volume": 100000, "price": 26550, "canceled": 0}
     ]
-    with patch("marketdata.fetchers.base.requests.get") as mock_get:
+    with patch("marketdata.fetchers.requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = mock_payload
 
@@ -252,7 +252,7 @@ def test_fetch_shareholders():
     mock_payload = [
         {"id": 262011, "name": "بانک صادرات ایران", "volume": 27842346668, "percent": 5.16, "change": 0}
     ]
-    with patch("marketdata.fetchers.base.requests.get") as mock_get:
+    with patch("marketdata.fetchers.requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = mock_payload
 
@@ -289,7 +289,7 @@ def test_fetch_codal_announcements():
             }
         ]
     }
-    with patch("marketdata.fetchers.base.requests.get") as mock_get:
+    with patch("marketdata.fetchers.requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = mock_payload
 
@@ -325,7 +325,7 @@ def test_fetch_market_index():
         "tval": 134757329520715,
         "tvol": 16326463426,
     }
-    with patch("marketdata.fetchers.base.requests.get") as mock_get:
+    with patch("marketdata.fetchers.requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = mock_payload
 

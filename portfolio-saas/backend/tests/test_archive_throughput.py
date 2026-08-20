@@ -4,7 +4,7 @@ import pytest
 import requests
 
 from marketdata.archive import _tick_trading_days, claim_archive_batch
-from marketdata.fetchers.base import TransientMarketDataError, fetch_json
+from marketdata.fetchers import TransientMarketDataError, fetch_json
 from marketdata.models import ArchiveFetchState, MarketCandle
 from marketdata.quota import ARCHIVE
 
@@ -241,8 +241,8 @@ def test_no_progress_at_all_still_backs_off():
 
 
 def test_archive_fetch_has_one_physical_attempt_by_default():
-    with patch("marketdata.fetchers.base.reserve_request") as reserve, patch(
-        "marketdata.fetchers.base.requests.get", side_effect=requests.Timeout("timeout")
+    with patch("marketdata.fetchers.reserve_request") as reserve, patch(
+        "marketdata.fetchers.requests.get", side_effect=requests.Timeout("timeout")
     ):
         with pytest.raises(TransientMarketDataError):
             fetch_json("https://example.test", quota_bucket=ARCHIVE)

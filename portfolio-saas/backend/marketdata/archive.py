@@ -18,7 +18,7 @@ from .fetchers import (
     fetch_shareholders,
     fetch_transactions,
 )
-from .fetchers.base import MarketDataFetchError
+from .fetchers import MarketDataFetchError
 from .models import (
     ArchiveFetchState,
     CodalAnnouncement,
@@ -727,7 +727,7 @@ def run_archive_state(state_id):
         logger.info("Archive quota unavailable for %s (%s): %s", state.symbol, state.endpoint, exc)
         raise
     except MarketDataFetchError as exc:
-        from .fetchers.base import TransientMarketDataError
+        from .fetchers import TransientMarketDataError
         is_transient = isinstance(exc, TransientMarketDataError) or getattr(exc, "status_code", None) == 429
         message = str(exc)
 
