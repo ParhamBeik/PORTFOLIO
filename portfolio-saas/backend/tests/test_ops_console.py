@@ -113,6 +113,37 @@ def test_admin_overview_refresh_bypasses_cache(staff_user, monkeypatch):
     assert calls["n"] == 2
 
 
+def test_cached_overview_still_reports_live_health(staff_user):
+    """A cache hit must not serve a stale "all healthy".
+
+    The overview payload is cached for 15 minutes so the page loads instantly,
+    which would otherwise let it insist the price feed is fine a quarter of an
+    hour after the feed died -- the one thing an ops console must never do.
+    `live_health_overlay` is what keeps the is-it-broken-now signals current on
+    every request, and this fails if someone folds it back into the cache.
+    """
+    from django.core.cache import cache
+    from marketdata.admin_telemetry import OVERVIEW_CACHE_KEY
+
+    cache.clear()
+    client = _auth(APIClient(), staff_user)
+
+    first = client.get("/api/admin/overview/")
+    assert first.status_code == 200
+    assert cache.get(OVERVIEW_CACHE_KEY) is not None
+    first_generated = first.json()["generated_at"]
+
+    # Served from cache now: the expensive sections must not be rebuilt, but the
+    # health block must still be freshly computed.
+    second = client.get("/api/admin/overview/")
+    assert second.status_code == 200
+    assert second.json()["generated_at"] != first_generated, (
+        "generated_at came from the cache, so the health block is stale too"
+    )
+    for key in ("checks", "price_feed", "status", "overall_status", "queue"):
+        assert key in second.json(), f"live health key {key!r} missing from a cached response"
+
+
 def test_admin_workflows_filter_and_pagination(staff_user):
     WorkflowRun.objects.create(workflow="archive", outcome="success", endpoint="stock_candle_adjusted")
     WorkflowRun.objects.create(workflow="archive", outcome="failed", endpoint="stock_transaction_ticks")

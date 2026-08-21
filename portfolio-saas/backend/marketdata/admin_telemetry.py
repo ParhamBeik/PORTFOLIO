@@ -689,10 +689,16 @@ def get_admin_telemetry_context():
 
 
 def get_ops_overview():
-    """JSON-ready overview for /api/admin/overview/ (cached 15s)."""
+    """JSON-ready overview for /api/admin/overview/.
+
+    Two tiers: the expensive warehouse/disk/coverage sections come from a cache
+    the metrics worker keeps warm, while `live_health_overlay` recomputes the
+    is-it-broken-right-now signals on every request. Serving a 15-minute-old
+    "price feed healthy" would be worse than serving it slowly.
+    """
     cached = cache.get(OVERVIEW_CACHE_KEY)
     if cached is not None:
-        return cached
+        return {**cached, **live_health_overlay()}
 
     ctx = get_admin_telemetry_context()
     workers = ctx["workers"]
@@ -756,6 +762,77 @@ def get_ops_overview():
     body["coverage"] = build_coverage_report(database_rows=body["database_rows"])
     cache.set(OVERVIEW_CACHE_KEY, body, OVERVIEW_CACHE_TTL)
     return body
+
+
+def live_health_overlay():
+    """The signals an operator needs to be true *now*, recomputed per request.
+
+    Caching the whole overview for 15 minutes makes the page load instantly but
+    would also let it report a healthy price feed a quarter of an hour after the
+    feed died -- which defeats the point of an ops console. These four are the
+    ones that answer "is it broken right now", and they are cheap: the price
+    timestamp is an indexed MAX, queue depth is a Redis read, and the worker
+    ping is bounded by its own timeout. The expensive warehouse, disk and
+    coverage sections stay cached, because their answers do not change minute to
+    minute.
+    """
+    now = timezone.now()
+    checks = {"database": True, "cache": True}
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+    except Exception:
+        checks["database"] = False
+    try:
+        cache.set("admin_health_probe", "1", 5)
+        checks["cache"] = cache.get("admin_health_probe") == "1"
+    except Exception:
+        checks["cache"] = False
+
+    latest_price = Price.objects.aggregate(value=Max("fetched_at"))["value"]
+    price_age = None if latest_price is None else now - latest_price
+    price_status = "stale" if price_age is None or price_age > PRICE_STALE_AFTER else "fresh"
+    workers = _workers()
+    queues = _queues()
+
+    overall = "healthy"
+    if not all(checks.values()) or workers["status"] == "critical":
+        overall = "critical"
+    elif price_status == "stale" or queues["status"] != "healthy" or workers["status"] != "healthy":
+        overall = "degraded"
+
+    price_feed = {
+        "status": price_status,
+        "latest": _iso(latest_price),
+        "age_seconds": None if price_age is None else int(price_age.total_seconds()),
+        "threshold_seconds": int(PRICE_STALE_AFTER.total_seconds()),
+    }
+    return {
+        "generated_at": _iso(now),
+        "status": overall,
+        "overall_status": overall,
+        "checks": {
+            "database": {"ok": checks["database"], "status": "healthy" if checks["database"] else "critical"},
+            "cache": {"ok": checks["cache"], "status": "healthy" if checks["cache"] else "critical"},
+            "price_feed": {
+                "status": price_status,
+                "latest_price_age_seconds": price_feed["age_seconds"],
+                "threshold_seconds": price_feed["threshold_seconds"],
+            },
+        },
+        "price_feed": price_feed,
+        "workers": {
+            "status": workers.get("status"),
+            "summary": {"online": len(workers.get("items") or {}), "active_tasks": 0, "reserved_tasks": 0},
+            "detail": workers,
+        },
+        "queues": queues,
+        "queue": {
+            "status": queues.get("status"),
+            "depths": queues.get("depths") or {},
+            "depth": sum((queues.get("depths") or {}).values()),
+        },
+    }
 
 
 def _workflows_24h():
