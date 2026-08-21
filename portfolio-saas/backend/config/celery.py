@@ -20,13 +20,8 @@ TEHRAN = ZoneInfo("Asia/Tehran")
 # Read all CELERY_* settings from Django settings.
 app.config_from_object("django.conf:settings", namespace="CELERY")
 # Discover tasks.py in each installed app (portfolio.tasks, marketdata.tasks).
+# Every task lives in one of those two modules; there is no second discovery pass.
 app.autodiscover_tasks()
-# portfolio/services/maintenance.py and best_overall.py aren't under a
-# `tasks.py` module, so each needs its own discovery pass (still lazy --
-# resolved after Django apps are ready, same as the call above, not at this
-# import time).
-app.autodiscover_tasks(["portfolio"], related_name="services.maintenance")
-app.autodiscover_tasks(["portfolio"], related_name="services.best_overall")
 
 # Global reliability defaults. Per-task retry policy (autoretry_for) belongs in
 # the individual tasks (e.g. portfolio/tasks.py), not here.
@@ -155,20 +150,20 @@ app.conf.beat_schedule = {
         "schedule": crontab(day_of_week=5, hour=5, minute=0),
     },
     # Snapshot retention. No-op unless SNAPSHOT_PRUNE_ENABLED=1 (see
-    # portfolio/services/maintenance.py) -- deleting rows needs explicit sign-off.
+    # portfolio/tasks.py) -- deleting rows needs explicit sign-off.
     "prune-snapshots-nightly": {
-        "task": "portfolio.services.maintenance.prune_snapshots",
+        "task": "portfolio.tasks.prune_snapshots",
         "schedule": crontab(hour=2, minute=0),
     },
     "prune-prices-nightly": {
-        "task": "portfolio.services.maintenance.prune_prices",
+        "task": "portfolio.tasks.prune_prices",
         "schedule": crontab(hour=2, minute=20),
     },
     # "Best Possible Portfolio Overall" precompute: 4 windows x 2 scenarios,
     # market-wide. Runs after nightly-asset-metrics (01:00) so AssetMetricSnapshot
     # (top performers by class) is fresh when this reads the same warehouse data.
     "best-overall-snapshots-nightly": {
-        "task": "portfolio.services.best_overall.run_best_overall_snapshots",
+        "task": "portfolio.tasks.run_best_overall_snapshots",
         "schedule": crontab(hour=2, minute=30),
     },
 }

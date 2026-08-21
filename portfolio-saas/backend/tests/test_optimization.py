@@ -24,7 +24,7 @@ from portfolio.models import Account, Asset, Holding, Price
 from portfolio.models import Asset
 from portfolio.optimization_models import OptimizationSnapshot
 from portfolio.services import diagnostics as diag_mod
-from portfolio.services.best_overall import SCENARIOS, WINDOWS_DAYS, run_best_overall_snapshots
+from portfolio.tasks import SCENARIOS, WINDOWS_DAYS, run_best_overall_snapshots
 from portfolio.services.classification import (
     HARD_ASSET_SLEEVE,
     POLICY_VERSION,

@@ -426,7 +426,7 @@ def test_admin_dashboard_renders_operational_history(make_user, monkeypatch):
 
 def test_prune_prices_keeps_latest_and_ledgers(settings, make_user, asset_catalog, write_prices):
     from portfolio.models import Price
-    from portfolio.services.maintenance import prune_prices
+    from portfolio.tasks import prune_prices
 
     settings.PRICE_PRUNE_ENABLED = True
     settings.PRICE_RETENTION_DAYS = 7

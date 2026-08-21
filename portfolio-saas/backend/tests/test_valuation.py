@@ -862,7 +862,7 @@ def test_holdings_only_snapshots_use_warehouse_series(make_user, asset_catalog, 
 
 @pytest.mark.django_db
 def test_prune_snapshots_disabled_by_default_deletes_nothing(make_user, settings):
-    from portfolio.services.maintenance import prune_snapshots
+    from portfolio.tasks import prune_snapshots
 
     settings.SNAPSHOT_PRUNE_ENABLED = False
     settings.SNAPSHOT_RETENTION_DAYS = 30

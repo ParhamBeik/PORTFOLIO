@@ -1462,7 +1462,7 @@ def _asset_class_leaders():
 class BestOverallView(APIView):
     """"what is the best portfolio available across ALL tracked
     assets?" -- a pure read of the nightly `run_best_overall_snapshots`
-    precompute (see `portfolio/services/best_overall.py`). No solver call in
+    precompute (see `portfolio/tasks.py`). No solver call in
     the request path; a window with no snapshot yet reports its own status
     rather than leaving the whole response empty.
     """
@@ -1471,7 +1471,7 @@ class BestOverallView(APIView):
 
     def get(self, request):
         from .optimization_models import OptimizationSnapshot
-        from .services.best_overall import SCENARIOS, WINDOWS_DAYS
+        from .tasks import SCENARIOS, WINDOWS_DAYS
 
         window_labels = {365: "1Y", 1095: "3Y", 1825: "5Y", 3650: "10Y"}
         windows = []
