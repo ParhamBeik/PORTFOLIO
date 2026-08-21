@@ -523,10 +523,21 @@ CPI_VERIFIED_THROUGH_YEAR = max(CPI_BY_JALALI_YEAR)
 # that the regime broke, not a continuation of the trend, and it is deliberately
 # separated from the verified table so nothing downstream can mistake it for one.
 CPI_ESTIMATED_MONTHLY_RATE = float(os.environ.get("CPI_ESTIMATED_MONTHLY_RATE", "0.065"))
-# How far past the verified table the estimate may run. Two years is the minimum
-# that makes the *current* year deflate at all: the current year needs its own
-# anchor and the next one to interpolate between.
-CPI_ESTIMATE_MAX_YEARS = int(os.environ.get("CPI_ESTIMATE_MAX_YEARS", "2"))
+# How far past the verified table the estimate may run.
+#
+# Two years is the minimum that makes the *current* year deflate at all: the
+# current year needs its own anchor and the next one to interpolate between.
+# Measured against the calendar rather than fixed, or the horizon stops covering
+# the year in progress at the next Nowruz and real Toman goes quietly flat
+# again -- which is how it broke this time. Capped at four so an unattended
+# deployment cannot keep compounding a guess indefinitely; past that,
+# CpiUnavailable fires and someone has to look at it.
+import jdatetime as _jdatetime  # noqa: E402  (plain library, no Django setup needed)
+
+CPI_ESTIMATE_MAX_YEARS = int(os.environ.get(
+    "CPI_ESTIMATE_MAX_YEARS",
+    max(2, min(4, _jdatetime.date.today().year + 1 - CPI_VERIFIED_THROUGH_YEAR)),
+))
 
 CPI_ESTIMATED_YEARS = set()
 if CPI_ESTIMATED_MONTHLY_RATE > 0:

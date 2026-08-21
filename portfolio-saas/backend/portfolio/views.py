@@ -738,7 +738,12 @@ def _express_usd_real(valuation: dict, basis: str = "usd_denominated") -> dict:
 
 
 def _express_real_toman(valuation: dict) -> dict:
-    """Deflate a live Toman valuation by the last published SCI CPI vintage."""
+    """Deflate a live Toman valuation by the CPI index for today.
+
+    That index is an SCI release for verified years and an operator projection
+    beyond them, so the payload carries `cpi_estimated_years` and `cpi_source`
+    to say which was used. Never assume the number here is published data.
+    """
     _rescale(valuation, Decimal(str(cpi_for_date(timezone.now()))) / Decimal("100"))
     valuation["basis"] = "real_toman"
     valuation["cpi_vintage_year"] = settings.CPI_VERIFIED_THROUGH_YEAR
