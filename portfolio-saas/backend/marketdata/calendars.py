@@ -128,6 +128,57 @@ def actual_trading_days(*, start=None, end=None, window_days=None):
     return result
 
 
+def sessions_between(last_date: str, as_of: str, *, market: str) -> int:
+    """Market sessions strictly after `last_date` and up to `as_of`, inclusive.
+
+    The one blessed answer to "how stale is this price?", shared by every
+    forward-fill bound in the codebase. Both Jalali `YYYY-MM-DD` strings.
+
+    The calendar has to be market-wide. Deriving it from the one symbol being
+    valued is circular -- that symbol's own latest row is by construction the
+    newest one at or before `as_of`, so nothing is ever counted after it and the
+    answer is always 0. Counting raw calendar days instead is the opposite
+    error: the Thursday/Friday weekend and a public holiday burn days without
+    burning sessions, so a five-session bound fires after three real sessions.
+    Both mistakes shipped simultaneously before this helper existed.
+    """
+    if not last_date or not as_of or last_date >= as_of:
+        return 0
+    if market == "tse":
+        queryset = MarketCandle.objects.filter(timeframe=MarketCandle.ADJUSTED)
+        field = "date_time"
+    elif market == "gold_currency":
+        from .models import GoldCurrencyHistory
+
+        queryset = GoldCurrencyHistory.objects.all()
+        field = "date"
+    else:
+        raise ValueError(f"unknown market calendar: {market!r}")
+    # Deliberately the raw distinct-date set, not the breadth-gated
+    # `actual_trading_days`/`gold_currency_quoting_days`. Those exist to score
+    # coverage, where a thin feed defining its own calendar is circular. Here a
+    # single symbol printing is proof the market was open, and gating on breadth
+    # would silently return "not stale" for any window the gate cannot vouch for
+    # -- failing open on exactly the question this bound is asked to answer.
+    # `date_time` carries both "1405-05-09" and "1405-05-09 00:00:00"; the upper
+    # bound is extended to end-of-day for the same reason candle_close_qs does
+    # it, and the day is taken from the first 10 chars so the two spellings of
+    # one session are not counted as two.
+    days = (
+        queryset.filter(
+            **{f"{field}__gt": last_date, f"{field}__lte": as_of + " 23:59:59"}
+        )
+        .values_list(field, flat=True)
+        .distinct()
+    )
+    return len({str(day)[:10] for day in days})
+
+
+def market_for_asset(asset) -> str:
+    """Which session calendar an asset's price staleness is measured against."""
+    return "tse" if asset.tse_symbol else "gold_currency"
+
+
 def candle_close_qs(symbol, *, as_of=None, since=None):
     """Provider-adjusted daily candles for a symbol.
 

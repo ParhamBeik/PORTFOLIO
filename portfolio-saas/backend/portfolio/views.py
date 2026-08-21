@@ -827,11 +827,13 @@ class SnapshotListView(APIView):
         has_holdings = Holding.objects.filter(account__in=accounts).exists() if accounts else False
 
         short_window = not show_all and days <= SYNTHETIC_HISTORY_MAX_DAYS
-        use_synthetic = (
-            has_holdings
-            and holdings_only
-            and (len(daily) < days if short_window else len(daily) < 2)
-        )
+        # Only synthesise when there is genuinely nothing recorded to draw.
+        # This used to compare the number of observed days against the number of
+        # CALENDAR days in the window; markets are shut on Thursday and Friday,
+        # so that comparison was permanently true for every holdings-only
+        # account and threw away real snapshots on every single request in
+        # favour of a recomputed estimate. Recorded history always wins.
+        use_synthetic = has_holdings and holdings_only and len(daily) < 2
 
         if use_synthetic:
             synth_days = days if short_window else SYNTHETIC_HISTORY_MAX_DAYS

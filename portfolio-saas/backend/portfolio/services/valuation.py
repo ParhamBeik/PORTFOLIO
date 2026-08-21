@@ -32,14 +32,16 @@ _FRESH_SECONDS = 300
 # ponytail: these are calendar-day grace bounds, not a real trading-session
 # calendar (see MAX_FORWARD_FILL_SESSIONS below for that). Good enough to
 # cover the Thu/Fri weekend without a session lookup on every valuation call;
-# upgrade to a session-count bound (like _stale_sessions) if a genuine
-# multi-day outage needs finer detection than "older than the grace window".
+# upgrade to `calendars.sessions_between` if a genuine multi-day outage needs
+# finer detection than "older than the grace window".
 _CLOSED_TSE_GRACE_SECONDS = 4 * 24 * 3600
 _CLOSED_BRS_GRACE_SECONDS = 24 * 3600
 
 # Shared by every price-resolution path in this module (guard_price_map,
-# compute_dynamic_net_worth_series, value_as_of's _stale_sessions): forward-fill
-# past this many sessions invents a price rather than reports one.
+# compute_dynamic_net_worth_series, value_as_of): forward-fill past this many
+# sessions invents a price rather than reports one. Sessions are always counted
+# with `marketdata.calendars.sessions_between` -- never in calendar days, and
+# never off a single symbol's own rows. See that helper for why both fail.
 MAX_FORWARD_FILL_SESSIONS = 5
 
 
@@ -129,7 +131,7 @@ def guard_price_map(prices: dict, *, fill_missing=True, archive_replacements=Non
     # never persisted as a new Price row (see _persistable_prices), so without
     # this bound a delisted/broken asset's `fetched_at` never advances and this
     # keeps re-forward-filling the same ancient price forever -- the same
-    # invariant value_as_of enforces via _stale_sessions.
+    # invariant value_as_of enforces via `calendars.sessions_between`.
     now = timezone.now()
     max_age = timedelta(days=MAX_FORWARD_FILL_SESSIONS)
     latest_db_rows = (
@@ -575,7 +577,11 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     from datetime import timedelta
     import jdatetime
     from django.utils import timezone
-    from marketdata.calendars import candle_close_qs
+    from marketdata.calendars import (
+        candle_close_qs,
+        market_for_asset,
+        sessions_between,
+    )
     from marketdata.models import GoldCurrencyHistory
     from portfolio.models import Holding, Liability
     from portfolio.services.timeline import holdings_as_of
@@ -623,14 +629,38 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     latest_prices = get_latest_prices()
     usd_rate = Decimal(latest_prices.get("usd_cash", 0) or 0)
 
+    window_start_jalali = jdatetime.date.fromgregorian(
+        date=(now - timedelta(days=days - 1)).date()
+    ).strftime("%Y-%m-%d")
+
     # Track last known price for each asset to seamlessly fill non-trading days.
-    last_known_prices = {key: _q(latest_prices.get(key, 0)) for key in assets}
-    # Day index (loop's `i`, i.e. days-ago) of the last REAL close used per
-    # asset. Once an asset stops printing real closes, last_known_prices must
-    # not be trusted past MAX_FORWARD_FILL_SESSIONS days from that day, or a
-    # delisted/broken asset flat-lines the rest of the window at a made-up
-    # price -- same invariant value_as_of enforces via _stale_sessions.
-    last_priced_day_index = {}
+    #
+    # Primed from each asset's last real close at or before the window opens, so
+    # a window that starts on a Thursday values a stock at the Wednesday close
+    # rather than at today's price. Assets with no warehouse history at all
+    # (crypto, the Swiss bars -- the provider has no series for them) still fall
+    # back to the live price: it is the only number that exists, and the whole
+    # series is flagged `is_estimated`.
+    last_known_prices = {}
+    # Jalali date of the last REAL close used per asset. Once an asset stops
+    # printing, last_known_prices must not be trusted past
+    # MAX_FORWARD_FILL_SESSIONS *sessions* -- counted on the market's own
+    # calendar, never in calendar days, or the Thu/Fri weekend and every public
+    # holiday age a price faster than the market does. Same invariant, and now
+    # the same helper, that value_as_of enforces. A live-price fallback gets no
+    # entry here: there is no real close to measure staleness from.
+    last_priced_date = {}
+    for closes in (stock_closes, gold_closes):
+        for date, by_key in closes.items():
+            if date > window_start_jalali:
+                continue
+            for key, price in by_key.items():
+                if date >= last_priced_date.get(key, ""):
+                    last_priced_date[key] = date
+                    last_known_prices[key] = price
+    for key in assets:
+        if key not in last_known_prices:
+            last_known_prices[key] = _q(latest_prices.get(key, 0))
 
     liabilities = Liability.objects.filter(account__in=accounts)
     total_liabilities = sum(l.amount_tomans for l in liabilities)
@@ -663,12 +693,18 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
                     p = gold_closes.get(jalali_str, {}).get(key)
                 if p is not None:
                     last_known_prices[key] = p
-                    last_priced_day_index[key] = i
+                    last_priced_date[key] = jalali_str
                 else:
-                    last_real_day = last_priced_day_index.get(key)
-                    if last_real_day is not None and (last_real_day - i) > MAX_FORWARD_FILL_SESSIONS:
-                        continue  # gap exceeded: exclude rather than invent a price
-                    p = last_known_prices.get(key, _q(latest_prices.get(key, 0)))
+                    last_real_date = last_priced_date.get(key)
+                    if last_real_date is not None:
+                        stale = sessions_between(
+                            last_real_date, jalali_str, market=market_for_asset(asset)
+                        )
+                        if stale > MAX_FORWARD_FILL_SESSIONS:
+                            continue  # gap exceeded: don't invent a price
+                    # No real close anywhere means an asset the provider has no
+                    # history for; the live price is the only figure available.
+                    p = last_known_prices[key]
                 total += qty * p
 
         total -= total_liabilities
@@ -684,33 +720,13 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     return series
 
 
-def _stale_sessions(queryset, date_field: str, last_date: str, as_of_jalali: str) -> int:
-    """Market sessions between a price's own date and `as_of`, exclusive of both.
-
-    These warehouse tables hold one row per symbol per session, so the distinct
-    dates across all symbols in the window *are* the market's session calendar.
-    A count above MAX_FORWARD_FILL_SESSIONS means the asset stopped printing
-    while the market kept trading — carrying its last close further would
-    invent a price rather than report one.
-    """
-    return (
-        queryset.filter(**{
-            f"{date_field}__gt": last_date,
-            f"{date_field}__lte": as_of_jalali,
-        })
-        .values_list(date_field, flat=True)
-        .distinct()
-        .count()
-    )
-
-
 def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     """Compute valuation of portfolio assets as of a specific date and basis."""
     from django.utils import timezone
     from portfolio.services.deflator import cpi_for_date, normalize_basis
     from portfolio.services.returns import normalize_as_of, to_jalali_str
     from portfolio.services.timeline import cash_as_of, holdings_as_of
-    from marketdata.calendars import candle_close_qs
+    from marketdata.calendars import candle_close_qs, sessions_between
     from marketdata.models import GoldCurrencyHistory
     from portfolio.models import Asset
 
@@ -804,8 +820,8 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                     if candle:
                         # Portfolio TSE quotes are Rial (same as warehouse).
                         price = _q(candle.close_price)
-                        stale_sessions = _stale_sessions(
-                            candles, "date_time", candle.date_time, jalali_str
+                        stale_sessions = sessions_between(
+                            candle.date_time[:10], jalali_str, market="tse"
                         )
                 elif asset.brs_symbol:
                     from marketdata.models import RejectedRecord
@@ -822,8 +838,8 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                     ).exclude(date__in=rejections).order_by("-date").first()
                     if hist:
                         price = Decimal(str(hist.close_price))
-                        stale_sessions = _stale_sessions(
-                            history, "date", hist.date, jalali_str
+                        stale_sessions = sessions_between(
+                            hist.date, jalali_str, market="gold_currency"
                         )
 
                 if price <= 0:

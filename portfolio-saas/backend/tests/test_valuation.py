@@ -860,6 +860,113 @@ def test_holdings_only_snapshots_use_warehouse_series(make_user, asset_catalog, 
     assert all(float(row["total"]) > 0 for row in series)
 
 
+# --- Forward-fill is bounded in SESSIONS, never in calendar days ------------
+# Regression cover for the 1405-04 incident: کاما last printed an adjusted close
+# on 1405-04-09, the exchange then shut for five days (1405-04-11..15), and the
+# chart dropped the position on 2026-07-06 and 07-07 -- a ~3% cliff in a
+# portfolio that had not moved. Five *calendar* days had passed; one *session*
+# had. See marketdata.calendars.sessions_between.
+
+
+def _write_candles(symbol, dates, price="3000"):
+    from marketdata.models import MarketCandle
+
+    MarketCandle.objects.bulk_create(
+        MarketCandle(
+            symbol=symbol,
+            timeframe=MarketCandle.ADJUSTED,
+            date_time=date,
+            close_price=Decimal(price),
+        )
+        for date in dates
+    )
+
+
+@pytest.mark.django_db
+def test_market_closure_does_not_drop_a_held_stock(asset_catalog, write_prices, make_user):
+    """A closure longer than five calendar days is not five stale sessions."""
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+    from portfolio.services.returns import to_jalali_str
+
+    asset = asset_catalog["kama_stock"]
+    asset.tse_symbol = "کاما"
+    asset.save(update_fields=["tse_symbol"])
+    write_prices({"kama_stock": Decimal("3000"), "usd_cash": Decimal("60000")})
+
+    now = timezone.now()
+    # A close 9 days ago, then the exchange is shut every day since: no symbol
+    # printed, so no session elapsed and the last close still stands.
+    _write_candles("کاما", [to_jalali_str(now - timedelta(days=9))])
+
+    user = make_user(email="closure@test.test")
+    account = Account.objects.create(user=user, name="Closure")
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("100"))
+
+    series = compute_dynamic_net_worth_series(user, account, days=10)
+    totals = [float(row["total"]) for row in series]
+    assert all(total > 0 for total in totals), "closure wrongly dropped the holding"
+    assert len(set(totals)) == 1, "value should be flat across a closure, not cliffed"
+
+
+@pytest.mark.django_db
+def test_stock_silent_beyond_five_sessions_is_still_dropped(
+    asset_catalog, write_prices, make_user
+):
+    """The bound must still fire when the market genuinely kept trading."""
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+    from portfolio.services.returns import to_jalali_str
+
+    asset = asset_catalog["kama_stock"]
+    asset.tse_symbol = "کاما"
+    asset.save(update_fields=["tse_symbol"])
+    write_prices({"kama_stock": Decimal("3000"), "usd_cash": Decimal("60000")})
+
+    now = timezone.now()
+    _write_candles("کاما", [to_jalali_str(now - timedelta(days=9))])
+    # Another symbol prints on each of the last 8 days: the market was open and
+    # کاما simply stopped -- carrying its close further would invent a price.
+    _write_candles(
+        "فولاد", [to_jalali_str(now - timedelta(days=d)) for d in range(1, 9)]
+    )
+
+    user = make_user(email="silent@test.test")
+    account = Account.objects.create(user=user, name="Silent")
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("100"))
+
+    series = compute_dynamic_net_worth_series(user, account, days=10)
+    assert float(series[-1]["total"]) == 0.0, "a genuinely stale price must be excluded"
+
+
+@pytest.mark.django_db
+def test_recorded_snapshots_are_never_discarded_for_an_estimate(
+    make_user, asset_catalog, write_prices
+):
+    """Weekends must not make real history look 'too thin' and trigger the estimate."""
+    write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
+    user = make_user("recorded_wins@example.com")
+    account = Account.objects.create(user=user, name="Mother")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("2")
+    )
+    now = timezone.now()
+    # 20 recorded days inside a 30-day window -- exactly the weekend-shaped
+    # coverage that used to be treated as "no history at all".
+    for offset in range(20):
+        Snapshot.objects.create(
+            user=user,
+            account=account,
+            timestamp=now - timedelta(days=offset),
+            total_value_tomans=Decimal("960000000"),
+        )
+
+    client = APIClient()
+    client.force_authenticate(user=user)
+    series = client.get(f"/api/snapshots/?days=30&account={account.id}").json()["series"]
+
+    assert len(series) == 20, "recorded snapshots should be returned, not recomputed"
+    assert all(row["is_estimated"] is False for row in series)
+
+
 @pytest.mark.django_db
 def test_prune_snapshots_disabled_by_default_deletes_nothing(make_user, settings):
     from portfolio.tasks import prune_snapshots
