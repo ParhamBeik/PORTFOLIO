@@ -83,8 +83,31 @@ def _autovacuum_reset_sql():
     return "\n".join(f"ALTER TABLE {t} RESET ({names});" for t, _, _ in _AUTOVACUUM)
 
 
+def _already_a_hypertable(cursor) -> bool:
+    """True when a previous release already converted the tick table.
+
+    Every database that ran the pre-squash history got its hypertable from the
+    old `0032_hypertables`, so this migration re-runs against a table that is
+    already in its target shape. Re-running is not harmless: `create_hypertable`
+    raises "table is already a hypertable" without `if_not_exists`, and the
+    DROP/CREATE of the natural-key index would rewrite a multi-GB compressed
+    table for no reason. Detect it and do nothing.
+    """
+    cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')")
+    if not cursor.fetchone()[0]:
+        return False
+    cursor.execute(
+        "SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
+        "WHERE hypertable_name = %s)",
+        [_TICK],
+    )
+    return bool(cursor.fetchone()[0])
+
+
 def make_tick_hypertable(apps, schema_editor):
     with schema_editor.connection.cursor() as cursor:
+        if _already_a_hypertable(cursor):
+            return
         cursor.execute(f"ALTER TABLE {_TICK} ALTER COLUMN ts SET NOT NULL;")
         cursor.execute(f"ALTER TABLE {_TICK} DROP CONSTRAINT IF EXISTS {_TICK}_pkey;")
         cursor.execute(f"CREATE INDEX IF NOT EXISTS {_TICK}_id_idx ON {_TICK} (id);")
@@ -101,14 +124,18 @@ def make_tick_hypertable(apps, schema_editor):
         cursor.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
         cursor.execute(
             f"SELECT create_hypertable('{_TICK}', 'ts', "
-            f"chunk_time_interval => INTERVAL '1 day', migrate_data => true);"
+            f"chunk_time_interval => INTERVAL '1 day', migrate_data => true, "
+            f"if_not_exists => true);"
         )
         cursor.execute(
             f"ALTER TABLE {_TICK} SET (timescaledb.compress, "
             f"timescaledb.compress_segmentby = 'symbol', "
             f"timescaledb.compress_orderby = 'ts, \"row\"');"
         )
-        cursor.execute(f"SELECT add_compression_policy('{_TICK}', INTERVAL '30 days');")
+        cursor.execute(
+            f"SELECT add_compression_policy('{_TICK}', INTERVAL '30 days', "
+            f"if_not_exists => true);"
+        )
 
 
 def drop_compression_policy(apps, schema_editor):
