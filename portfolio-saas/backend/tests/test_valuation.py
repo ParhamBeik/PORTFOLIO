@@ -1,17 +1,53 @@
-"""Valuation engine: holdings x latest prices -> portfolio value.
+"""Live valuation: holdings x prices, the bases it can be expressed in, house marks, price fallbacks, and the daily averages the charts read.
 
-Covers the two non-trivial pieces of portfolio.services: the real-estate house
-formula and the live aggregation across accounts.
+Merged from 8 files; each section keeps its original banner.
 """
+
+from datetime import timedelta
+import datetime as dt
 from decimal import Decimal
 
+from django.core.cache import cache
+from django.test import override_settings
+from django.utils import timezone
 import pytest
+from rest_framework.test import APIClient
 
+from config.settings import CpiUnavailable, cpi_for
+from marketdata.models import GoldCurrencyHistory
+from portfolio.models import Account
+from portfolio.models import Account, Asset, Holding, LedgerEntry
+from portfolio.models import Account, Asset, Holding, LedgerEntry, Snapshot
 from portfolio.models import Account, Holding
+from portfolio.models import DailyPriceAverage, Price
+from portfolio.models import Price
 from portfolio.services import asset_value, value_account, value_user
+from portfolio.services.insights import (
+    _liquid_items,
+    _total,
+    allocation_breakdown,
+    concentration_risk,
+)
+from portfolio.services.ledger import record_house_mark
+from portfolio.services.timeline import (
+    house_area_as_of,
+    house_marks_as_of,
+    holdings_as_of,
+)
 from portfolio.services.valuation import _house_value
+from portfolio.services.valuation import get_latest_prices, invalidate_prices_cache
+from portfolio.tasks import _persistable_prices
+from portfolio.tasks import aggregate_daily_price_averages
 
 pytestmark = pytest.mark.django_db
+
+
+# ----------------------------------------------------------------------
+# test_valuation.py
+# Valuation engine: holdings x latest prices -> portfolio value.
+# 
+# Covers the two non-trivial pieces of portfolio.services: the real-estate house
+# formula and the live aggregation across accounts.
 
 
 def test_house_formula_is_gross_of_mortgage():
@@ -348,3 +384,582 @@ def test_quality_status_stale_when_tse_open_and_price_did_not_refresh(
     result = value_account(account)
     item = next(i for i in result["items"] if i["key"] == "kama_stock")
     assert item["quality_status"] == "stale"
+
+
+# ----------------------------------------------------------------------
+# test_services.py
+# Cache + DISTINCT ON behaviour of get_latest_prices.
+# 
+# These are the scale levers: one query for the newest price per asset, cached so
+# reads stay cheap. The DISTINCT ON clause is Postgres-only, which is why these
+# tests require a real postgres (not sqlite).
+
+
+def test_latest_price_is_newest_per_asset(asset_catalog, write_prices):
+    write_prices({"emami_coin": Decimal("400000000")})
+    write_prices({"emami_coin": Decimal("480000000")})  # newer
+    cache.delete("prices:latest")
+
+    prices = get_latest_prices()
+    assert prices["emami_coin"] == Decimal("480000000")
+
+
+def test_latest_prices_is_cached(asset_catalog, write_prices):
+    write_prices({"emami_coin": Decimal("480000000")})
+    first = get_latest_prices()
+
+    # Add a newer row WITHOUT busting the cache; the cached read must not see it.
+    Price.objects.create(asset=asset_catalog["emami_coin"], price=Decimal("1"), source="TEST")
+    second = get_latest_prices()
+    assert second == first
+    assert second["emami_coin"] == Decimal("480000000")
+
+
+def test_latest_prices_cache_is_invalidated_by_market_state_change(
+    asset_catalog, write_prices, monkeypatch
+):
+    write_prices({"emami_coin": Decimal("480000000")})
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "open")
+    get_latest_prices()
+
+    Price.objects.create(
+        asset=asset_catalog["emami_coin"],
+        price=Decimal("500000000"),
+        source="TEST",
+    )
+    monkeypatch.setattr(
+        "marketdata.market_state.market_state",
+        lambda: "closed_daytime",
+    )
+
+    assert get_latest_prices()["emami_coin"] == Decimal("500000000")
+
+
+def test_invalidate_forces_refresh(asset_catalog, write_prices):
+    write_prices({"emami_coin": Decimal("480000000")})
+    get_latest_prices()  # populate cache
+    write_prices({"emami_coin": Decimal("500000000")})
+
+    invalidate_prices_cache()
+    refreshed = get_latest_prices()
+    assert refreshed["emami_coin"] == Decimal("500000000")
+
+
+def test_inactive_assets_are_excluded(asset_catalog, write_prices):
+    from portfolio.models import Asset
+
+    write_prices({"emami_coin": Decimal("480000000")})
+    Asset.objects.filter(key="emami_coin").update(is_active=False)
+    cache.delete("prices:latest")
+    prices = get_latest_prices()
+    assert "emami_coin" not in prices
+
+
+def test_latest_price_uses_archive_when_latest_fetch_sharply_drops(asset_catalog):
+    gold = asset_catalog["emami_coin"]
+    gold.brs_symbol = "IR_COIN_EMAMI"
+    gold.save(update_fields=["brs_symbol"])
+    Price.objects.create(asset=gold, price=Decimal("480000000"), source="SEED")
+    Price.objects.create(asset=gold, price=Decimal("1"), source="BAD_FETCH")
+    GoldCurrencyHistory.objects.create(
+        symbol="IR_COIN_EMAMI",
+        date="1404-01-02",
+        close_price=Decimal("479000000"),
+    )
+    cache.delete("prices:latest")
+
+    prices = get_latest_prices()
+    assert prices["emami_coin"] == Decimal("479000000")
+
+
+# ----------------------------------------------------------------------
+# test_price_fallback.py
+
+
+def test_archive_replacement_is_persisted_but_forward_fill_is_not():
+    priced, sources = _persistable_prices(
+        {"archive": 0, "forward_fill": 0, "live": 4300},
+        {
+            "archive": Decimal("4360"),
+            "forward_fill": Decimal("4240"),
+            "live": Decimal("4300"),
+        },
+        {"archive": Decimal("4360")},
+    )
+
+    assert priced == {"archive": Decimal("4360"), "live": Decimal("4300")}
+    assert sources == {"archive": "ARCHIVE", "live": "API"}
+
+
+# ----------------------------------------------------------------------
+# test_unpriced_asset_does_not_crash.py
+# An unpriced holding must not take down the analytics endpoints.
+# 
+# Unit tests: `_liquid_items` / `_total` are pure functions over the valuation
+# payload dict, so the defect (a None value reaching sum()/max()) reproduces
+# without a database. That keeps this fast and pins exactly one behaviour.
+
+
+def _valuation_with_one_unpriced():
+    """Shape produced by value_user(): one priced asset, one with no price."""
+    return {
+        "accounts": [
+            {
+                "items": [
+                    {
+                        "key": "emami_coin",
+                        "asset": "Emami Coin",
+                        "class": "Gold",
+                        "value": Decimal("1000"),
+                        "quality_status": "live",
+                    },
+                    {
+                        # valuation.py sets value=None when the price is missing.
+                        "key": "kama_stock",
+                        "asset": "KAMA Stock",
+                        "class": "Stock",
+                        "value": None,
+                        "quality_status": "unavailable",
+                    },
+                    {
+                        "key": "house_asset",
+                        "asset": "Real Estate",
+                        "class": "Real Estate",
+                        "value": Decimal("5000"),
+                        "quality_status": "manual",
+                    },
+                ]
+            }
+        ],
+        "excluded": [{"asset_key": "kama_stock", "reason": "missing_price"}],
+    }
+
+
+def test_unpriced_holding_is_dropped_from_liquid_items():
+    items = _liquid_items(_valuation_with_one_unpriced())
+
+    keys = {i["key"] for i in items}
+    assert keys == {"emami_coin"}  # real estate and the unpriced stock both gone
+    assert all(i["value"] is not None for i in items)
+
+
+def test_total_does_not_raise_on_an_unpriced_holding():
+    # Before the fix this raised TypeError: unsupported operand Decimal + None.
+    assert _total(_liquid_items(_valuation_with_one_unpriced())) == Decimal("1000")
+
+
+def test_allocation_and_concentration_survive_an_unpriced_holding():
+    valuation = _valuation_with_one_unpriced()
+
+    # concentration_risk did `max(items, key=lambda i: i["value"])`, which raised.
+    breakdown = allocation_breakdown(valuation)
+    risk = concentration_risk(valuation)
+
+    # The one priced liquid asset is 100% of the liquid portfolio; the unpriced
+    # stock contributes nothing rather than blowing up the calculation.
+    assert breakdown == {"Gold": 100.0}
+    assert risk["share"] == 100.0  # concentration_risk reports a percentage
+
+
+def test_every_holding_unpriced_yields_empty_not_an_exception():
+    valuation = {"accounts": [{"items": [
+        {"key": "a", "asset": "A", "class": "Gold", "value": None,
+         "quality_status": "unavailable"},
+    ]}]}
+
+    assert _liquid_items(valuation) == []
+    assert _total(_liquid_items(valuation)) == Decimal("0")
+    assert concentration_risk(valuation)["severity"] == "info"
+
+
+# ----------------------------------------------------------------------
+# test_house_valuation_marks.py
+# A house must be worth what it was worth at the time, not what it is worth now.
+# 
+# Integration tests: the behaviour spans LedgerEntry rows, the holding projection
+# and the as-of valuation, so it only reproduces against the database.
+# 
+# Before dated marks existed, revaluing a house REPLACED its single opening entry.
+# The house therefore carried one price across all of history: every rial of
+# appreciation was invisible to the net-worth chart, and today's price was baked
+# into the opening balance, which understated TWR. Since real estate is a large
+# share of this family's net worth, that distortion was material.
+
+
+@pytest.fixture
+def house_account(asset_catalog, make_user):
+    user = make_user(email="house-marks@test.test")
+    account = Account.objects.create(user=user, name="Home")
+    return user, account, Asset.objects.get(key="house_asset")
+
+
+def test_first_mark_is_the_opening_position(house_account):
+    user, account, house = house_account
+
+    entry = record_house_mark(
+        user=user, account_id=account.id, asset=house,
+        quantity=Decimal("90"), area_sqm=Decimal("90.2"),
+        occurred_at=timezone.now() - dt.timedelta(days=400),
+    )
+
+    assert entry.kind == LedgerEntry.Kind.OPENING_POSITION
+
+
+def test_later_marks_append_and_do_not_overwrite_history(house_account):
+    user, account, house = house_account
+    old = timezone.now() - dt.timedelta(days=400)
+    recent = timezone.now() - dt.timedelta(days=10)
+
+    record_house_mark(
+        user=user, account_id=account.id, asset=house,
+        quantity=Decimal("90"), area_sqm=Decimal("90.2"), occurred_at=old,
+    )
+    second = record_house_mark(
+        user=user, account_id=account.id, asset=house,
+        quantity=Decimal("150"), area_sqm=Decimal("90.2"), occurred_at=recent,
+    )
+
+    assert second.kind == LedgerEntry.Kind.VALUATION_MARK
+    # Both events survive; the revaluation did not rewrite the opening.
+    assert LedgerEntry.objects.filter(account=account, asset=house).count() == 2
+    # The old date still sees the old price -- this is the whole point.
+    assert house_marks_as_of(account, old)["house_asset"] == Decimal("90")
+    assert house_marks_as_of(account, recent)["house_asset"] == Decimal("150")
+    # Before any mark exists the house simply is not there yet.
+    assert house_marks_as_of(account, old - dt.timedelta(days=1)) == {}
+
+
+def test_marks_replace_rather_than_accumulate(house_account):
+    """90 then 150 is a revaluation to 150, never a holding of 240."""
+    user, account, house = house_account
+    record_house_mark(
+        user=user, account_id=account.id, asset=house, quantity=Decimal("90"),
+        area_sqm=Decimal("90.2"),
+        occurred_at=timezone.now() - dt.timedelta(days=400),
+    )
+    record_house_mark(
+        user=user, account_id=account.id, asset=house, quantity=Decimal("150"),
+        area_sqm=Decimal("90.2"),
+        occurred_at=timezone.now() - dt.timedelta(days=10),
+    )
+
+    holding = Holding.objects.get(account=account, asset=house)
+
+    assert holding.quantity == Decimal("150")
+    assert holdings_as_of(user, account, timezone.now())["house_asset"] == Decimal("150")
+
+
+def test_area_travels_with_the_mark_in_force(house_account):
+    user, account, house = house_account
+    old = timezone.now() - dt.timedelta(days=400)
+    record_house_mark(
+        user=user, account_id=account.id, asset=house,
+        quantity=Decimal("90"), area_sqm=Decimal("90.2"), occurred_at=old,
+    )
+    record_house_mark(
+        user=user, account_id=account.id, asset=house,
+        quantity=Decimal("150"), area_sqm=Decimal("120.5"),
+        occurred_at=timezone.now() - dt.timedelta(days=10),
+    )
+
+    # Pairing a historical price with today's area would mix two points in time.
+    assert house_area_as_of(account, old)["house_asset"] == Decimal("90.2")
+    assert house_area_as_of(account, timezone.now())["house_asset"] == Decimal("120.5")
+
+
+def test_a_mark_cannot_be_dated_in_the_future(house_account):
+    from portfolio.services.ledger import LedgerError
+
+    user, account, house = house_account
+
+    with pytest.raises(LedgerError):
+        record_house_mark(
+            user=user, account_id=account.id, asset=house,
+            quantity=Decimal("90"), area_sqm=Decimal("90.2"),
+            occurred_at=timezone.now() + dt.timedelta(days=1),
+        )
+
+
+# ----------------------------------------------------------------------
+# test_chart_snapshot_groupby.py
+# Net-worth history: one point per calendar day, preferring verified closes.
+
+
+def _mark_traded(account, asset):
+    """BUY/SELL presence opts the account out of holdings-only synthetic history."""
+    LedgerEntry.objects.create(
+        account=account,
+        asset=asset,
+        kind=LedgerEntry.Kind.BUY,
+        quantity=Decimal("1"),
+        price_tomans=Decimal("1"),
+        amount_tomans=Decimal("1"),
+        source="system",
+        note="test marker",
+    )
+
+
+@pytest.mark.django_db
+def test_same_day_snapshots_use_latest_live_point(make_user):
+    user = make_user("chart_test_user@example.com")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    account = Account.objects.create(user=user, name="Test Account")
+    asset = Asset.objects.create(key="test_gold", name="Gold Asset", asset_class=Asset.AssetClass.GOLD, is_active=True)
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("10"))
+    _mark_traded(account, asset)
+
+    now = timezone.now()
+    Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("100000"), timestamp=now - timedelta(hours=3))
+    Snapshot.objects.create(
+        user=user,
+        account=account,
+        total_value_tomans=Decimal("105000"),
+        timestamp=now - timedelta(hours=1),
+        is_session_close=True,
+    )
+    Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("110000"), timestamp=now - timedelta(minutes=5))
+
+    res = client.get(f"/api/snapshots/?days=7&account={account.id}")
+    assert res.status_code == 200
+    series = res.json()["series"]
+
+    assert len(series) == 1
+    assert series[0]["date"] == now.strftime("%Y-%m-%d")
+    assert Decimal(series[0]["total"]) == Decimal("105000")
+    assert series[0]["is_session_close"] is True
+
+
+@pytest.mark.django_db
+def test_day_avg_prefers_live_over_estimated_gap_fills(make_user):
+    """Gap-fill estimates must not drag a day that also has live snaps."""
+    user = make_user("chart_live_pref@example.com")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    account = Account.objects.create(user=user, name="Test Account")
+    asset = Asset.objects.create(
+        key="test_live_pref", name="Gold", asset_class=Asset.AssetClass.GOLD, is_active=True
+    )
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("1"))
+    _mark_traded(account, asset)
+
+    now = timezone.now()
+    for i in range(10):
+        Snapshot.objects.create(
+            user=user,
+            account=account,
+            total_value_tomans=Decimal("18000000000"),
+            timestamp=now - timedelta(minutes=2 * i),
+            is_estimated=True,
+        )
+    Snapshot.objects.create(
+        user=user,
+        account=account,
+        total_value_tomans=Decimal("27000000000"),
+        timestamp=now,
+        is_estimated=False,
+    )
+
+    series = client.get(f"/api/snapshots/?days=7&account={account.id}").json()["series"]
+    assert len(series) == 1
+    assert Decimal(series[0]["total"]) == Decimal("27000000000")
+    assert series[0]["is_estimated"] is False
+
+
+@pytest.mark.django_db
+def test_snapshots_across_multiple_days_yield_one_point_per_day(make_user):
+    user = make_user("chart_multi_day@example.com")
+    account = Account.objects.create(user=user, name="Test Account")
+    asset = Asset.objects.create(key="test_gold_multi", name="Gold", asset_class=Asset.AssetClass.GOLD, is_active=True)
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("1"))
+    _mark_traded(account, asset)
+    now = timezone.now()
+
+    for offset_days, values in enumerate([[100000, 102000], [200000], [300000, 301000, 299000]]):
+        day = now - timedelta(days=offset_days)
+        for i, value in enumerate(values):
+            Snapshot.objects.create(
+                user=user, account=account, total_value_tomans=Decimal(str(value)),
+                timestamp=day - timedelta(hours=i),
+            )
+
+    client = APIClient()
+    client.force_authenticate(user=user)
+    res = client.get(f"/api/snapshots/?days=7&account={account.id}")
+    assert res.status_code == 200
+    series = res.json()["series"]
+
+    assert len(series) == 3
+    # Oldest first.
+    assert series[0]["date"] < series[1]["date"] < series[2]["date"]
+
+
+@pytest.mark.django_db
+def test_days_all_returns_history_beyond_one_year(make_user):
+    user = make_user("chart_all_range@example.com")
+    account = Account.objects.create(user=user, name="Test Account")
+    old_snapshot_time = timezone.now() - timedelta(days=800)
+    Snapshot.objects.create(
+        user=user, account=account, total_value_tomans=Decimal("50000"), timestamp=old_snapshot_time,
+    )
+    # Second recent point so 365/all keep real Snapshot history (≥2 days).
+    Snapshot.objects.create(
+        user=user, account=account, total_value_tomans=Decimal("51000"),
+        timestamp=timezone.now() - timedelta(days=1),
+    )
+
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    capped = client.get(f"/api/snapshots/?days=365&account={account.id}").json()["series"]
+    assert len(capped) == 1
+    assert capped[0]["date"] == (timezone.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    full = client.get(f"/api/snapshots/?days=all&account={account.id}").json()["series"]
+    assert len(full) == 2
+    assert full[0]["date"] == old_snapshot_time.strftime("%Y-%m-%d")
+
+
+@pytest.mark.django_db
+def test_snapshot_series_does_not_fabricate_pre_history(make_user):
+    user = make_user("chart_start@example.com")
+    snapshot_time = timezone.now() - timedelta(days=1)
+    Snapshot.objects.create(
+        user=user,
+        account=None,
+        total_value_tomans=Decimal("100000"),
+        timestamp=snapshot_time,
+    )
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    series = client.get("/api/snapshots/?days=30").json()["series"]
+
+    assert series[0]["date"] == snapshot_time.strftime("%Y-%m-%d")
+    assert len(series) == 1
+
+
+@pytest.mark.django_db
+def test_holdings_only_snapshots_use_warehouse_series(make_user, asset_catalog, write_prices):
+    """Quantity-only accounts get multi-day synthetic history without BUY/SELL."""
+    write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
+    user = make_user("holdings_only_chart@example.com")
+    account = Account.objects.create(user=user, name="Mother")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("2")
+    )
+
+    client = APIClient()
+    client.force_authenticate(user=user)
+    series = client.get(f"/api/snapshots/?days=30&account={account.id}").json()["series"]
+
+    assert len(series) == 30
+    assert all(row["is_estimated"] is True for row in series)
+    assert all(float(row["total"]) > 0 for row in series)
+
+
+@pytest.mark.django_db
+def test_prune_snapshots_disabled_by_default_deletes_nothing(make_user, settings):
+    from portfolio.services.maintenance import prune_snapshots
+
+    settings.SNAPSHOT_PRUNE_ENABLED = False
+    settings.SNAPSHOT_RETENTION_DAYS = 30
+    user = make_user("prune_test@example.com")
+    account = Account.objects.create(user=user, name="Test Account")
+    old_time = timezone.now() - timedelta(days=90)
+    Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("10000"), timestamp=old_time)
+
+    before = Snapshot.objects.count()
+    result = prune_snapshots()
+    after = Snapshot.objects.count()
+
+    assert result["enabled"] is False
+    assert after == before
+
+
+# ----------------------------------------------------------------------
+# test_daily_price_average.py
+
+
+def test_aggregate_excludes_archive_rows_from_the_average(asset_catalog):
+    """ARCHIVE-tagged Price rows are guard_price_map's forward-fill-to-warehouse
+    writes, not a live observation -- they must not enter the daily average.
+    """
+    asset = asset_catalog["emami_coin"]
+    Price.objects.create(asset=asset, price=Decimal("100"), source="API")
+    Price.objects.create(asset=asset, price=Decimal("200"), source="API")
+    Price.objects.create(asset=asset, price=Decimal("999999"), source="ARCHIVE")
+
+    written = aggregate_daily_price_averages()
+
+    assert written == 1
+    row = DailyPriceAverage.objects.get(asset=asset)
+    assert row.avg_price == Decimal("150.0000")
+    assert row.sample_count == 2
+
+
+def test_aggregate_skips_assets_with_no_ticks(asset_catalog):
+    written = aggregate_daily_price_averages()
+
+    assert written == 0
+    assert not DailyPriceAverage.objects.exists()
+
+
+def test_aggregate_is_idempotent_per_day(asset_catalog):
+    asset = asset_catalog["emami_coin"]
+    Price.objects.create(asset=asset, price=Decimal("100"), source="API")
+
+    aggregate_daily_price_averages()
+    aggregate_daily_price_averages()
+
+    assert DailyPriceAverage.objects.filter(asset=asset).count() == 1
+
+
+# ----------------------------------------------------------------------
+# test_cpi_unavailable_response.py
+# Requesting real_toman without CPI coverage must be honest, not a 500.
+# 
+# Integration test: the behaviour under test is the DRF exception handler wired
+# into the request/response cycle, so it only reproduces through the API layer —
+# a unit test of `cpi_for()` alone proves the raise, not the response.
+
+
+def _client(user):
+    client = APIClient()
+    client.force_authenticate(user=user)
+    return client
+
+
+def test_cpi_for_raises_instead_of_clamping_past_the_table():
+    # The old behaviour silently returned the newest known value for ANY future
+    # year, which made real_toman identical to nominal_toman for 17 months.
+    with pytest.raises(CpiUnavailable) as exc:
+        cpi_for(9999)
+    assert exc.value.jalali_year == 9999
+    assert exc.value.last_verified_year < 9999
+
+
+def test_cpi_extrapolates_below_the_base_year_on_purpose():
+    # Flat before the base year is defined behaviour, not a missing value.
+    assert cpi_for(1000) == cpi_for(1398)
+
+
+@override_settings(CPI_BY_JALALI_YEAR_EXTRA_APPLIED=True)
+def test_real_toman_reports_unavailable_rather_than_returning_nominal(
+    asset_catalog, make_user
+):
+    user = make_user(email="cpi-gap@test.test")
+    Account.objects.create(user=user, name="Main")
+
+    response = _client(user).get("/api/valuation/?basis=real_toman")
+
+    # Either the CPI covers the period (200) or it honestly refuses (503).
+    # What must never happen is a 500, or a 200 carrying nominal numbers
+    # mislabelled as real.
+    assert response.status_code in (200, 503), response.status_code
+    if response.status_code == 503:
+        assert response.data["reason"] == "cpi_unavailable"
+        assert response.data["basis"] == "real_toman"
+        assert "last_verified_jalali_year" in response.data

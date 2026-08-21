@@ -1,0 +1,1149 @@
+"""The live price loop end to end: fetch, extract, concurrency, staleness, cleanup of bad prices, and the seeded asset catalog.
+
+Merged from 10 files; each section keeps its original banner.
+"""
+
+from datetime import timedelta
+import datetime as dt
+from decimal import Decimal
+from io import StringIO
+from unittest.mock import MagicMock
+from unittest.mock import patch
+
+from django.conf import settings
+from django.core.cache import cache
+from django.core.management import call_command
+from django.test import RequestFactory
+from django.utils import timezone
+import pytest
+from rest_framework.test import APIClient
+
+from accounts.models import User
+from config.health import PriceFeedView
+from marketdata.currency import to_toman
+from marketdata.models import GoldCurrencyHistory, MarketCandle
+from marketdata.models import MarketCandle, RejectedRecord
+from marketdata.models import MarketInstrument
+from marketdata.models import RejectedRecord, GoldCurrencyHistory, MarketCandle
+from marketdata.models import WorkflowRun
+from marketdata.tasks import capture_derivative_snapshots
+from portfolio.live.extractor import extract_standard_prices
+from portfolio.management.commands.clean_mispriced_data import audit_and_repair_prices
+from portfolio.models import Account, Asset, Price, Snapshot
+from portfolio.models import Account, Holding, Price
+from portfolio.models import Account, Price, Snapshot
+from portfolio.models import Asset
+from portfolio.models import Price
+from portfolio.services import value_account, value_user
+from portfolio.services.returns import daily_returns_matrix, _load_live_price_panel
+from portfolio.services.valuation import get_latest_prices, value_as_of
+from portfolio.tasks import run_price_fetch
+
+pytestmark = pytest.mark.django_db
+
+
+# ----------------------------------------------------------------------
+# test_financial_safety.py
+
+
+def test_negative_prices_blocked_from_valuation(asset_catalog, make_user):
+    """Proves that a negative price in the Price model is blocked from live valuation."""
+    user = make_user()
+    account = Account.objects.create(user=user, name="Negative Test")
+    asset = asset_catalog["emami_coin"]
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("2"))
+
+    # Create a negative price record
+    Price.objects.create(asset=asset, price=Decimal("-480000"), source="API")
+
+    # Confirm that get_latest_prices() does not return the negative price
+    latest_prices = get_latest_prices()
+    assert asset.key not in latest_prices or latest_prices[asset.key] <= 0
+
+    # Valuation should exclude it and treat it as unavailable/missing_price
+    result = value_account(account)
+    assert result["total"] == Decimal("0")
+    assert result["priced_assets"] == 0
+    assert result["quality_status"] == "unavailable"
+    assert any(item["asset_key"] == asset.key and item["reason"] == "missing_price" for item in result["excluded"])
+
+
+def test_zero_prices_blocked_from_valuation(asset_catalog, make_user):
+    """Proves that zero prices are blocked from valuation."""
+    user = make_user()
+    account = Account.objects.create(user=user, name="Zero Test")
+    asset = asset_catalog["emami_coin"]
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("2"))
+
+    # Create a zero price record
+    Price.objects.create(asset=asset, price=Decimal("0"), source="API")
+
+    # Zero prices should be filtered out
+    latest_prices = get_latest_prices()
+    assert asset.key not in latest_prices or latest_prices[asset.key] <= 0
+
+    result = value_account(account)
+    assert result["total"] == Decimal("0")
+    assert result["quality_status"] == "unavailable"
+
+
+def test_rejected_record_excludes_historical_valuation(asset_catalog, make_user):
+    """Proves that matching a RejectedRecord excludes a historical price from value_as_of."""
+    user = make_user()
+    account = Account.objects.create(user=user, name="Rejection Test")
+    asset = asset_catalog["emami_coin"]
+    asset.brs_symbol = "IR_COIN_EMAMI"
+    asset.save(update_fields=["brs_symbol"])
+    
+    as_of = timezone.now()
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("2"))
+
+    # Seed gold currency history row
+    jalali_date = "1403-10-19"
+    GoldCurrencyHistory.objects.create(
+        symbol="IR_COIN_EMAMI",
+        date=jalali_date,
+        close_price=Decimal("10000"),
+    )
+
+    # 1. Without rejection, valuation succeeds
+    res_normal = value_as_of(user, account=account, as_of=as_of)
+    # The normal run might mark it as gap exceeded if we don't have enough recent dates, but it reads the price.
+    # Let's add USD history to prevent gap exceeded if needed, or check the specific price missing reason
+    
+    # 2. Add RejectedRecord for the same symbol and date
+    RejectedRecord.objects.create(
+        endpoint="gold_daily",
+        symbol="IR_COIN_EMAMI",
+        date=jalali_date,
+        reason="high_below_low",
+        payload={},
+    )
+
+    res_rejected = value_as_of(user, account=account, as_of=as_of)
+    reasons = {item["reason"] for item in res_rejected["excluded"]}
+    # The price was rejected, so it should be missing_price
+    assert "missing_price" in reasons
+
+
+def test_rejected_record_excludes_returns_panel(asset_catalog):
+    """Proves that a price matching a RejectedRecord is excluded from the returns price panel."""
+    asset = asset_catalog["emami_coin"]
+    asset.brs_symbol = "IR_COIN_EMAMI"
+    asset.save(update_fields=["brs_symbol"])
+
+    cutoff = timezone.now() - dt.timedelta(days=10)
+    jalali_date = "1403-10-19"
+
+    # Seed gold currency history row
+    GoldCurrencyHistory.objects.create(
+        symbol="IR_COIN_EMAMI",
+        date=jalali_date,
+        close_price=Decimal("10000"),
+    )
+
+    # Seed rejection
+    RejectedRecord.objects.create(
+        endpoint="gold_daily",
+        symbol="IR_COIN_EMAMI",
+        date=jalali_date,
+        reason="test_rejection",
+        payload={},
+    )
+
+    # Load returns
+    returns, excluded = daily_returns_matrix(
+        history_days=30,
+        universe=[asset.key],
+    )
+    # Excluded because the only price date we had was rejected, leading to insufficient history
+    assert any(e["key"] == asset.key and e["reason"] in ("insufficient_history", "no_price_history") for e in excluded)
+
+
+def test_stale_live_price_excluded_from_optimization_inputs(asset_catalog):
+    """Proves that stale live prices are excluded from returns/optimization inputs."""
+    asset = asset_catalog["emami_coin"]
+
+    # Seed a stale live price (older than settings.PRICE_STALE_THRESHOLD_SECONDS)
+    stale_time = timezone.now() - dt.timedelta(seconds=settings.PRICE_STALE_THRESHOLD_SECONDS + 10)
+    p = Price.objects.create(asset=asset, price=Decimal("500000"), source="API")
+    Price.objects.filter(pk=p.pk).update(fetched_at=stale_time)
+
+    # Load panel
+    panel = _load_live_price_panel(
+        cutoff=timezone.now() - dt.timedelta(days=10),
+        as_of=None,
+        keys=[asset.key],
+    )
+    # Since it is stale, it should be excluded (panel should not have the column, or it is empty)
+    assert asset.key not in panel.columns or panel[asset.key].isna().all()
+
+
+def test_fresh_live_price_remains_usable(asset_catalog):
+    """Proves that fresh live prices remain usable."""
+    asset = asset_catalog["emami_coin"]
+
+    # Seed a fresh live price
+    fresh_time = timezone.now() - dt.timedelta(minutes=2)
+    Price.objects.create(asset=asset, price=Decimal("500000"), fetched_at=fresh_time, source="API")
+
+    panel = _load_live_price_panel(
+        cutoff=timezone.now() - dt.timedelta(days=10),
+        as_of=None,
+        keys=[asset.key],
+    )
+    assert asset.key in panel.columns
+    assert not panel[asset.key].isna().all()
+
+
+def test_live_panel_resists_a_glitched_final_tick(asset_catalog):
+    """A day's value is the median of its last 3 ticks, not a flat average of
+    every tick and not the single last tick either.
+
+    Averaging silently swapped the return definition away from the
+    close-to-close basis every warehouse-backed column in the same panel uses
+    (see _load_price_panel), which is what this fallback is reserved for now
+    that MarketDailyBar covers ETF NAV directly. But the naive fix -- just
+    take the single last tick -- reopens the exact bug a prior mean-based
+    version of this function existed to fix: one glitched final-tick price
+    would singlehandedly define the whole day's return. Median-of-last-3
+    tracks the close-to-close basis on a normal day while still rejecting a
+    lone bad tick.
+    """
+    asset = asset_catalog["emami_coin"]
+    now = timezone.now()
+    for offset_minutes, price in ((15, "100"), (10, "100"), (5, "100"), (0, "9999")):
+        p = Price.objects.create(asset=asset, price=Decimal(price), source="API")
+        Price.objects.filter(pk=p.pk).update(
+            fetched_at=now - dt.timedelta(minutes=offset_minutes)
+        )
+
+    panel = _load_live_price_panel(
+        cutoff=timezone.now() - dt.timedelta(days=10),
+        as_of=None,
+        keys=[asset.key],
+    )
+    day_value = panel[asset.key].dropna().iloc[-1]
+    assert day_value == pytest.approx(100.0), (
+        "expected the median of the last 3 ticks (100/100/9999 -> 100), "
+        "not the glitched last tick (9999) or the mean of all 4 ticks (~2574.75)"
+    )
+
+
+def test_rial_to_toman_conversion():
+    """Protects Rial-to-Toman unit conversion logic (Price storage unit is Toman)."""
+    assert to_toman("کاما", 10000, "Toman") == Decimal("10000")
+    assert to_toman("کاما", 10000, "Rial") == Decimal("1000")
+
+
+def test_unadjusted_price_selection_fallback(asset_catalog):
+    """Proves adjusted closes are preferred, with unadjusted fallback working appropriately."""
+    # Seed adjusted and unadjusted candles for the same symbol/date
+    # MarketCandle handles adjusted closes with timeframe="1d_adj", unadjusted with "1d_unadj"
+    symbol = "کاما"
+    date_str = "1405-04-31"
+
+    # Write adjusted candle
+    MarketCandle.objects.create(
+        symbol=symbol,
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=date_str,
+        open_price=Decimal("100"),
+        high_price=Decimal("100"),
+        low_price=Decimal("100"),
+        close_price=Decimal("200"),
+        volume=1000,
+    )
+
+    # Write aggregate/unadjusted candle
+    MarketCandle.objects.create(
+        symbol=symbol,
+        timeframe=MarketCandle.AGGREGATE,
+        date_time=date_str,
+        open_price=Decimal("100"),
+        high_price=Decimal("100"),
+        low_price=Decimal("100"),
+        close_price=Decimal("150"),
+        volume=1000,
+    )
+
+    # Load candles via candle_close_qs
+    from marketdata.calendars import candle_close_qs
+    qs = candle_close_qs(symbol)
+    candle = qs.filter(date_time=date_str).first()
+    
+    # Proves adjusted (200) is preferred over aggregate/unadjusted (150)
+    assert candle is not None
+    assert candle.close_price == Decimal("200")
+
+
+def test_negative_prices_blocked_from_returns(asset_catalog):
+    """Proves negative prices cannot enter returns calculation."""
+    asset = asset_catalog["emami_coin"]
+    asset.brs_symbol = "IR_COIN_EMAMI"
+    asset.save(update_fields=["brs_symbol"])
+
+    GoldCurrencyHistory.objects.create(
+        symbol="IR_COIN_EMAMI",
+        date="1403-10-19",
+        close_price=Decimal("-10000"),
+    )
+
+    returns, excluded = daily_returns_matrix(
+        history_days=30,
+        universe=[asset.key],
+    )
+    # The negative price is filtered out, leading to no valid price history
+    assert any(e["key"] == asset.key and e["reason"] in ("insufficient_history", "no_price_history") for e in excluded)
+
+
+def test_negative_prices_blocked_from_optimization(asset_catalog):
+    """Proves negative prices are excluded from optimization inputs."""
+    asset = asset_catalog["emami_coin"]
+    asset.brs_symbol = "IR_COIN_EMAMI"
+    asset.save(update_fields=["brs_symbol"])
+
+    GoldCurrencyHistory.objects.create(
+        symbol="IR_COIN_EMAMI",
+        date="1403-10-19",
+        close_price=Decimal("-500"),
+    )
+
+    returns, excluded = daily_returns_matrix(
+        history_days=30,
+        universe=[asset.key],
+    )
+    assert asset.key not in returns.columns
+
+
+def test_low_integrity_symbols_excluded_from_optimization(asset_catalog):
+    """Proves low-integrity symbols (passes_gate=False) are excluded from returns/optimization."""
+    asset = asset_catalog["kama_stock"]
+    asset.tse_symbol = "کاما"
+    asset.save(update_fields=["tse_symbol"])
+
+    # Seed SymbolIntegrity as failed
+    from marketdata.models import SymbolIntegrity
+    SymbolIntegrity.objects.update_or_create(
+        symbol="کاما",
+        defaults={"passes_gate": False, "reason": "extreme_spikes"},
+    )
+
+    # Seed daily candle
+    MarketCandle.objects.create(
+        symbol="کاما",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time="1403-10-19",
+        open_price=Decimal("100"),
+        high_price=Decimal("100"),
+        low_price=Decimal("100"),
+        close_price=Decimal("200"),
+        volume=1000,
+    )
+
+    returns, excluded = daily_returns_matrix(
+        history_days=30,
+        universe=[asset.key],
+    )
+    assert any(e["key"] == asset.key and e["reason"] == "integrity_gate_failed" for e in excluded)
+    assert asset.key not in returns.columns
+
+
+def test_missing_prices_produce_controlled_behavior(asset_catalog, make_user):
+    """Proves missing prices are explicitly logged as missing_price in excluded list."""
+    user = make_user()
+    account = Account.objects.create(user=user, name="Missing Test")
+    asset = asset_catalog["emami_coin"]
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("2"))
+
+    # No price created
+    result = value_account(account, prices={})
+    assert result["total"] == Decimal("0")
+    assert any(item["asset_key"] == asset.key and item["reason"] == "missing_price" for item in result["excluded"])
+
+
+def test_stale_prices_label_in_current_valuation(asset_catalog, make_user):
+    """Proves stale prices (older than 300s) are labeled as stale in current valuation."""
+    user = make_user()
+    account = Account.objects.create(user=user, name="Stale Test")
+    asset = asset_catalog["emami_coin"]
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("2"))
+
+    stale_time = timezone.now() - dt.timedelta(seconds=400)
+    p = Price.objects.create(asset=asset, price=Decimal("480000"), source="API")
+    Price.objects.filter(pk=p.pk).update(fetched_at=stale_time)
+
+    # Run valuation
+    result = value_account(account)
+    item = next(i for i in result["items"] if i["key"] == asset.key)
+    assert item["quality_status"] == "stale"
+
+
+def test_no_fallback_when_adjusted_absent(asset_catalog):
+    """Proves there is no tick-derived fallback: only ADJUSTED rows are ever picked."""
+    symbol = "کاما"
+    date_str = "1405-04-31"
+
+    # A non-ADJUSTED candle for the day must never be picked as a substitute.
+    MarketCandle.objects.create(
+        symbol=symbol,
+        timeframe=MarketCandle.UNADJUSTED,
+        date_time=date_str,
+        open_price=Decimal("100"),
+        high_price=Decimal("100"),
+        low_price=Decimal("100"),
+        close_price=Decimal("150"),
+        volume=1000,
+    )
+
+    from marketdata.calendars import candle_close_qs
+    qs = candle_close_qs(symbol)
+    candle = qs.filter(date_time=date_str).first()
+    assert candle is None
+
+
+def test_invalid_data_blocked_through_fallback(asset_catalog):
+    """Proves adjusted closes with zero/negative close prices are blocked."""
+    symbol = "کاما"
+    date_str = "1405-04-31"
+
+    MarketCandle.objects.create(
+        symbol=symbol,
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=date_str,
+        open_price=Decimal("100"),
+        high_price=Decimal("100"),
+        low_price=Decimal("100"),
+        close_price=Decimal("0"),
+        volume=1000,
+    )
+
+    from marketdata.calendars import candle_close_qs
+    qs = candle_close_qs(symbol)
+    candle = qs.filter(date_time=date_str).first()
+    assert candle is None
+
+
+def test_cached_and_uncached_paths_match(asset_catalog):
+    """Proves cached and uncached paths return identical results (tested via cache-invalidation fingerprint)."""
+    asset = asset_catalog["emami_coin"]
+    asset.brs_symbol = "IR_COIN_EMAMI"
+    asset.save(update_fields=["brs_symbol"])
+
+    from portfolio.services.returns import to_jalali_str
+    # Seed 35 days of history for both EMAMI and USD to avoid insufficient history exclusion
+    for day in range(35):
+        date_str = to_jalali_str(timezone.now() - dt.timedelta(days=day + 1))
+        GoldCurrencyHistory.objects.create(
+            symbol="IR_COIN_EMAMI",
+            date=date_str,
+            close_price=Decimal("10000") + day * 100,
+        )
+        GoldCurrencyHistory.objects.create(
+            symbol="USD",
+            date=date_str,
+            close_price=Decimal("60000"),
+        )
+
+    # First call - loads uncached
+    m1, e1 = daily_returns_matrix(history_days=30, universe=[asset.key])
+
+    # Second call - loads cached
+    m2, e2 = daily_returns_matrix(history_days=30, universe=[asset.key])
+
+    assert not m1.empty
+    assert m1.equals(m2)
+    assert e1 == e2
+
+
+def test_existing_valid_valuation_unchanged(asset_catalog, make_user):
+    """Proves that a valid asset price remains usable and valued correctly."""
+    user = make_user()
+    account = Account.objects.create(user=user, name="Valid Account")
+    asset = asset_catalog["emami_coin"]
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("2"))
+
+    # Write a fresh positive price
+    Price.objects.create(asset=asset, price=Decimal("480000"), source="API")
+
+    result = value_account(account)
+    assert result["total"] == Decimal("960000")
+    assert result["quality_status"] == "complete"
+
+
+def test_rejected_record_does_not_exclude_other_endpoints(asset_catalog):
+    """Proves that a rejection on 'stock_transaction_ticks' does not exclude daily close candles."""
+    symbol = "کاما"
+    date_str = "1403-10-19"
+    asset = asset_catalog["kama_stock"]
+    asset.tse_symbol = symbol
+    asset.save(update_fields=["tse_symbol"])
+
+    # Write daily close candle
+    MarketCandle.objects.create(
+        symbol=symbol,
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=date_str,
+        open_price=Decimal("100"),
+        high_price=Decimal("100"),
+        low_price=Decimal("100"),
+        close_price=Decimal("200"),
+        volume=1000,
+    )
+
+    # Write RejectedRecord for intraday ticks endpoint (should not affect daily candle)
+    RejectedRecord.objects.create(
+        endpoint="stock_transaction_ticks",
+        symbol=symbol,
+        date=date_str,
+        reason="test_intraday_failure",
+        payload={},
+    )
+
+    from marketdata.calendars import candle_close_qs
+    # candle_close_qs does not exclude this date since it is not a daily candle/history rejection
+    rejections = RejectedRecord.objects.filter(
+        symbol=symbol,
+        endpoint__in=[
+            "stock_candle_adjusted", "stock_candle_unadjusted",
+            "stock_history_adjusted", "stock_history_unadjusted",
+            "series:1d_adj", "series:1d_unadj"
+        ]
+    ).values_list("date", flat=True)
+    
+    candles = candle_close_qs(symbol).exclude(date_time__in=rejections)
+    assert candles.filter(date_time=date_str).exists()
+
+
+def test_f1_tse_valuation_marked_unverified(asset_catalog, make_user, monkeypatch):
+    import marketdata.currency
+    monkeypatch.setattr(marketdata.currency, "TSE_PRICE_UNIT", "unverified")
+    user = make_user()
+    account = Account.objects.create(user=user, name="F1 Val")
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    Holding.objects.create(account=account, asset=stock, quantity=Decimal("10"))
+    Price.objects.create(asset=stock, price=Decimal("3320"), source="API")
+    result = value_account(account)
+    assert result["tse_unit_policy"] == "unverified"
+    item = next(i for i in result["items"] if i["key"] == "kama_stock")
+    assert item["price_unit_status"] == "unverified"
+
+
+def test_f1_mixed_optimize_blocked(asset_catalog, monkeypatch):
+    import marketdata.currency
+    monkeypatch.setattr(marketdata.currency, "TSE_PRICE_UNIT", "unverified")
+    from portfolio.services.optimization import MixedUnitUniverseBlocked, _guard_mixed_tse_units
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    with pytest.raises(MixedUnitUniverseBlocked) as exc:
+        _guard_mixed_tse_units(["kama_stock", "emami_coin", "usd_cash"])
+    assert "kama_stock" in exc.value.tse_keys
+    assert "emami_coin" in exc.value.other_keys or "usd_cash" in exc.value.other_keys
+
+
+def test_f1_tse_only_guard_allows_partition(asset_catalog, monkeypatch):
+    import marketdata.currency
+    monkeypatch.setattr(marketdata.currency, "TSE_PRICE_UNIT", "unverified")
+    from marketdata.currency import partition_tse_asset_keys, tse_unit_verified
+    from portfolio.services.optimization import _guard_mixed_tse_units
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    assert tse_unit_verified() is False
+    tse, other = partition_tse_asset_keys(["kama_stock"])
+    assert tse == ["kama_stock"]
+    assert other == []
+    _guard_mixed_tse_units(["kama_stock"])  # TSE-only must not raise
+
+
+# ----------------------------------------------------------------------
+# test_fetch_command.py
+# fetch_prices management command.
+# 
+# This is the single entry point that keeps prices fresh and snapshots every user.
+# The tests mock the network fetch so they run offline and assert the write
+# behaviour (C2 fix: network stays outside the transaction).
+
+
+def _patch_fetch(monkeypatch, payload):
+    import portfolio.tasks as mod
+
+    monkeypatch.setattr(mod, "fetch_all_markets", lambda _settings: payload)
+
+
+def test_fetch_writes_prices_and_snapshots(asset_catalog, raw_market_sample, monkeypatch):
+    user = User.objects.create_user(email="fetch@test.test", password="Sup3rSecret!")
+    Account.objects.create(user=user, name="Main")
+    _patch_fetch(monkeypatch, raw_market_sample)
+
+    out = StringIO()
+    call_command("fetch_prices", stdout=out)
+    output = out.getvalue()
+    assert "Price fetch complete" in output
+
+    keys = set(Price.objects.values_list("asset__key", flat=True))
+    assert {"emami_coin", "kama_stock", "usd_cash"}.issubset(keys)
+    # One account=None whole-user row + one per-account row (the user has a
+    # single empty account), so both the aggregate and per-portfolio charts
+    # have history. Both are 0: the account holds nothing.
+    assert Snapshot.objects.filter(user=user).count() == 2
+    assert Snapshot.objects.filter(user=user, account=None).count() == 1
+    snap = Snapshot.objects.get(user=user, account=None)
+    assert snap.total_value_tomans == 0
+
+
+def test_fetch_dry_run_writes_nothing(asset_catalog, raw_market_sample, monkeypatch):
+    _patch_fetch(monkeypatch, raw_market_sample)
+
+    out = StringIO()
+    call_command("fetch_prices", "--dry-run", stdout=out)
+    assert Price.objects.count() == 0
+    assert Snapshot.objects.count() == 0
+
+
+def test_fetch_persists_archive_replacement_for_missing_live_price(asset_catalog, monkeypatch):
+    """Any asset can replace a missing live quote with its verified archive close."""
+    cache.delete("prices:latest")
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "ARCHIVE_STOCK"
+    stock.save(update_fields=["tse_symbol"])
+    Price.objects.create(asset=stock, price=Decimal("7777"), source="SEED")
+    MarketCandle.objects.create(
+        symbol="ARCHIVE_STOCK",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time="1405-05-26",
+        close_price=Decimal("8888"),
+    )
+
+    _patch_fetch(monkeypatch, {"brsapi": {"items": [{"symbol": "USD", "price": 63200}]}, "tsetmc": []})
+
+    out = StringIO()
+    call_command("fetch_prices", stdout=out)
+    latest = Price.objects.filter(asset=stock).order_by("-id").first()
+    assert latest is not None and latest.price == Decimal("8888")
+    assert latest.source == "ARCHIVE"
+
+    call_command("fetch_prices", stdout=StringIO())
+    assert Price.objects.filter(asset=stock).count() == 2
+
+
+def test_fetch_snapshots_use_archive_guard_for_bad_latest_price(asset_catalog, monkeypatch):
+    gold = asset_catalog["emami_coin"]
+    gold.brs_symbol = "IR_COIN_EMAMI"
+    gold.save(update_fields=["brs_symbol"])
+    GoldCurrencyHistory.objects.create(
+        symbol="IR_COIN_EMAMI",
+        date="1404-01-02",
+        close_price=Decimal("479000000"),
+    )
+    user = User.objects.create_user(email="guard@test.test", password="Sup3rSecret!")
+    account = Account.objects.create(user=user, name="Main")
+    account.holdings.create(asset=gold, quantity=Decimal("2"))
+    _patch_fetch(monkeypatch, {
+        "brsapi": {
+            "gold": [{"symbol": "IR_COIN_EMAMI", "price": 1}],
+            "currency": [{"symbol": "USD", "price": 63200}],
+        },
+        "tsetmc": [],
+    })
+
+    out = StringIO()
+    call_command("fetch_prices", stdout=out)
+    latest = Price.objects.filter(asset=gold).order_by("-id").first()
+    snap = Snapshot.objects.get(user=user, account=None)
+    assert latest.price == Decimal("479000000")
+    assert snap.total_value_tomans == Decimal("958000000")
+
+
+def test_closed_tse_fetch_persists_archive_close(asset_catalog, raw_market_sample, monkeypatch):
+    from portfolio.services.returns import to_jalali_str
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    MarketCandle.objects.create(
+        symbol="کاما",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=to_jalali_str(timezone.now()),
+        close_price=Decimal("5200"),
+    )
+    user = User.objects.create_user(email="closed-tse@test.test", password="Sup3rSecret!")
+    account = Account.objects.create(user=user, name="Main")
+    account.holdings.create(asset=stock, quantity=Decimal("10"))
+    _patch_fetch(monkeypatch, raw_market_sample)
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
+
+    call_command("fetch_prices", stdout=StringIO())
+
+    latest = Price.objects.filter(asset=stock).order_by("-id").first()
+    assert latest.price == Decimal("5200")
+    assert latest.source == "ARCHIVE"
+    snapshot = Snapshot.objects.get(user=user, account=None)
+    assert snapshot.total_value_tomans == Decimal("52000")
+    assert snapshot.is_session_close is True
+
+
+def test_partial_fetch_keeps_previous_prices_in_snapshots(asset_catalog, monkeypatch):
+    gold = asset_catalog["emami_coin"]
+    Price.objects.create(asset=gold, price=Decimal("400000000"), source="SEED")
+    user = User.objects.create_user(email="partial@test.test", password="Sup3rSecret!")
+    account = Account.objects.create(user=user, name="Main")
+    account.holdings.create(asset=gold, quantity=Decimal("2"))
+    _patch_fetch(monkeypatch, {
+        "brsapi": {"currency": [{"symbol": "USD", "price": 63200}]},
+        "tsetmc": [],
+    })
+
+    call_command("fetch_prices", stdout=StringIO())
+
+    assert Snapshot.objects.get(user=user, account=None).total_value_tomans == Decimal("800000000")
+    assert Price.objects.filter(asset=gold).count() == 1
+
+
+def test_fetch_snapshots_subtract_liabilities(asset_catalog, monkeypatch):
+    gold = asset_catalog["emami_coin"]
+    Price.objects.create(asset=gold, price=Decimal("400000000"), source="SEED")
+    user = User.objects.create_user(email="liability@test.test", password="Sup3rSecret!")
+    account = Account.objects.create(user=user, name="Main")
+    account.holdings.create(asset=gold, quantity=Decimal("2"))
+    account.liabilities.create(label="Loan", amount_tomans=Decimal("300000000"))
+    _patch_fetch(monkeypatch, {
+        "brsapi": {"currency": [{"symbol": "USD", "price": 63200}]},
+        "tsetmc": [],
+    })
+
+    call_command("fetch_prices", stdout=StringIO())
+
+    assert Snapshot.objects.get(user=user, account=account).total_value_tomans == Decimal("500000000")
+    assert Snapshot.objects.get(user=user, account=None).total_value_tomans == Decimal("500000000")
+
+
+def test_fetch_no_users_still_writes_prices(asset_catalog, raw_market_sample, monkeypatch):
+    """Prices are global; a fetch with zero users still records the market."""
+    _patch_fetch(monkeypatch, raw_market_sample)
+
+    out = StringIO()
+    call_command("fetch_prices", stdout=out)
+    assert Price.objects.filter(asset__key="emami_coin").exists()
+    assert Snapshot.objects.count() == 0
+
+
+# ----------------------------------------------------------------------
+# test_price_fetch_concurrency.py
+# Integration tests for run_price_fetch Redis lock concurrency and downtime gap backfill tagging.
+
+
+@pytest.mark.django_db
+def test_run_price_fetch_concurrency_lock(asset_catalog, raw_market_sample, monkeypatch):
+    """Verify that a second run_price_fetch call fails to run concurrently if a Redis lock is held."""
+    import portfolio.tasks as mod
+    monkeypatch.setattr(mod, "fetch_all_markets", lambda _settings: raw_market_sample)
+
+    # Mock get_redis to return a fake Redis client that simulates locking
+    mock_redis = MagicMock()
+    # First call to set (nx=True) returns True (success), second returns False (locked)
+    mock_redis.set.side_effect = [True, False]
+    monkeypatch.setattr(mod, "get_redis", lambda: mock_redis)
+
+    # First fetch succeeds
+    res1 = run_price_fetch()
+    assert res1["written"] is True
+
+    # Second concurrent fetch gets blocked by lock and does not write
+    res2 = run_price_fetch()
+    assert res2["written"] is False
+    assert res2["priced"] == {}
+    mock_redis.eval.assert_called_once()
+
+
+@pytest.mark.django_db
+def test_run_price_fetch_downtime_gap_tagging(asset_catalog, raw_market_sample, monkeypatch):
+    """Verify that snapshots generated for downtime gaps are tagged with is_estimated=True."""
+    import portfolio.tasks as mod
+    monkeypatch.setattr(mod, "fetch_all_markets", lambda _settings: raw_market_sample)
+    # Disable Redis during this test to avoid lock interference
+    monkeypatch.setattr(mod, "get_redis", lambda: None)
+
+    user = User.objects.create_user(email="gap@test.test", password="Sup3rSecret!")
+    account = Account.objects.create(user=user, name="Main")
+
+    # Seed one old snapshot to establish a downtime gap
+    old_time = timezone.now() - timedelta(minutes=10)
+    # Use update() to bypass auto_now_add=True restriction
+    snap1 = Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("1000"))
+    snap2 = Snapshot.objects.create(user=user, account=None, total_value_tomans=Decimal("1000"))
+    Snapshot.objects.filter(id__in=[snap1.id, snap2.id]).update(timestamp=old_time)
+
+    # Execute fetch (will detect gap and backfill missing intervals)
+    res = run_price_fetch()
+    assert res["written"] is True
+
+    # Check that the backfilled snapshots are marked as estimated
+    estimated_snaps = Snapshot.objects.filter(user=user, is_estimated=True)
+    assert estimated_snaps.exists()
+    assert estimated_snaps.values("timestamp").distinct().count() > 1
+    assert estimated_snaps.order_by("timestamp").first().timestamp < timezone.now() - timedelta(minutes=2)
+    
+    # Real current snapshot must not be estimated
+    current_snaps = Snapshot.objects.filter(user=user, is_estimated=False).order_by("-timestamp")
+    # There should be 4: the original 2 (one account, one user) + 2 new ones (one account, one user)
+    assert current_snaps.count() == 4
+
+
+# ----------------------------------------------------------------------
+# test_price_history_api.py
+
+
+def test_price_history_rejects_invalid_limit(make_user):
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+
+    response = client.get("/api/prices/history/?asset=emami_coin&limit=abc")
+
+    assert response.status_code == 400
+
+
+# ----------------------------------------------------------------------
+# test_health_prices.py
+# PriceFeedView: the dead-man's switch the watchdog cron and the GitHub
+# Actions probe both poll. Must not cry wolf every night during OVERNIGHT, when
+# zero live jobs run by design (see marketdata.market_state.live_job_keys).
+
+
+def _get(rf):
+    return PriceFeedView.as_view()(rf.get("/api/health/prices/"))
+
+
+def test_stale_price_during_open_hours_is_reported_stale(asset_catalog, write_prices, monkeypatch):
+    write_prices({"emami_coin": 500000000})
+    Price.objects.update(fetched_at=timezone.now() - timedelta(minutes=30))
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "open")
+
+    response = _get(RequestFactory())
+    assert response.status_code == 503
+    assert response.data["status"] == "stale"
+
+
+def test_stale_price_overnight_is_not_reported_stale(asset_catalog, write_prices, monkeypatch):
+    """No live job runs OVERNIGHT (marketdata.market_state.live_job_keys), so an
+    old price then is the correct current price, not a broken feed -- the
+    watchdog must not restart Celery every night for this.
+    """
+    write_prices({"emami_coin": 500000000})
+    Price.objects.update(fetched_at=timezone.now() - timedelta(hours=8))
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "overnight")
+
+    response = _get(RequestFactory())
+    assert response.status_code == 200
+    assert response.data["status"] == "fresh"
+
+
+def test_fresh_price_is_reported_fresh_regardless_of_state(asset_catalog, write_prices, monkeypatch):
+    write_prices({"emami_coin": 500000000})
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
+
+    response = _get(RequestFactory())
+    assert response.status_code == 200
+    assert response.data["status"] == "fresh"
+
+
+def test_no_price_ever_written_is_stale_even_overnight(asset_catalog, monkeypatch):
+    """A Price table with zero rows (fresh deploy, catastrophic data loss) must
+    never read as 'fresh' -- expects_live_prices() excuses an old-but-real
+    price during a designed pause, not a total absence of data.
+    """
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "overnight")
+
+    response = _get(RequestFactory())
+    assert response.status_code == 503
+    assert response.data["status"] == "stale"
+
+
+# ----------------------------------------------------------------------
+# test_clean_mispriced_data.py
+# Tests for the clean_mispriced_data management command and its core logic.
+# 
+# Unit/integration tests (DB-backed but no HTTP layer) exercising
+# `audit_and_repair_prices` directly: this is pure business logic with a few
+# collaborators (ORM models), so a narrow DB-integration test is the right
+# fit on the pyramid — fast enough to run every commit, but real enough to
+# catch the `KeyError` and cross-user contamination bugs a mocked DB would
+# hide.
+
+
+def test_dry_run_cli_does_not_raise(asset_catalog):
+    """Reproduces audit finding #1: `options['dry-run']` used to KeyError on any invocation."""
+    call_command("clean_mispriced_data", "--dry-run")
+    call_command("clean_mispriced_data")  # bare invocation is also dry-run by default
+
+
+def test_fix_and_dry_run_are_mutually_exclusive(asset_catalog):
+    with pytest.raises(Exception):
+        call_command("clean_mispriced_data", "--fix", "--dry-run")
+
+
+def test_flagged_spike_is_not_folded_into_baseline(asset_catalog, db):
+    """A single bad spike must not corrupt the baseline for the next (correct) price."""
+    asset = asset_catalog["emami_coin"]
+    for price in [Decimal("1000000"), Decimal("1010000"), Decimal("1005000")]:
+        Price.objects.create(asset=asset, price=price, source="TEST")
+    spike = Price.objects.create(asset=asset, price=Decimal("5000000"), source="TEST")  # bogus spike
+    recovery = Price.objects.create(asset=asset, price=Decimal("1015000"), source="TEST")  # correct, back to normal
+
+    stats = audit_and_repair_prices(fix=True)
+
+    assert stats["flagged_spikes"] == 1
+    assert not Price.objects.filter(id=spike.id).exists()
+    assert Price.objects.filter(id=recovery.id).exists()  # must survive: it's not a spike vs. the real baseline
+
+
+def test_snapshot_purge_is_scoped_per_user(asset_catalog, db):
+    """Audit finding #2: a global median let one whale account nuke another user's legit snapshots."""
+    from accounts.models import User
+
+    whale = User.objects.create_user(email="whale@test.test", password="Sup3rSecret!")
+    normal = User.objects.create_user(email="normal@test.test", password="Sup3rSecret!")
+    whale_account = Account.objects.create(user=whale, name="Main")
+    normal_account = Account.objects.create(user=normal, name="Main")
+
+    # Whale: legit history clusters around 10,000,000,000 Tomans.
+    for _ in range(6):
+        Snapshot.objects.create(user=whale, account=whale_account, total_value_tomans=Decimal("10000000000"))
+    whale_outlier = Snapshot.objects.create(
+        user=whale, account=whale_account, total_value_tomans=Decimal("100000000000")  # 10x median -> corrupt
+    )
+
+    # Normal user: legit history clusters around 50,000,000 Tomans — far below
+    # the whale's median, so a global-median filter would wrongly flag these.
+    normal_snaps = [
+        Snapshot.objects.create(user=normal, account=normal_account, total_value_tomans=Decimal("50000000"))
+        for _ in range(6)
+    ]
+
+    stats = audit_and_repair_prices(fix=True)
+
+    assert stats["purged_snapshots"] == 1
+    assert not Snapshot.objects.filter(id=whale_outlier.id).exists()
+    for snap in normal_snaps:
+        assert Snapshot.objects.filter(id=snap.id).exists()
+
+
+# ----------------------------------------------------------------------
+# test_clean_invalid_candles.py
+
+
+def test_cleanup_salvages_valid_close_only_when_applied():
+    candle = MarketCandle.objects.create(
+        symbol="TEST", timeframe="1d_adj", date_time="1405-05-03",
+        open_price=100, high_price=90, low_price=95, close_price=96, volume=1,
+    )
+    call_command("clean_invalid_candles")
+    assert MarketCandle.objects.filter(pk=candle.pk).exists()
+
+    call_command("clean_invalid_candles", "--apply")
+    candle.refresh_from_db()
+    assert candle.close_price == 96
+    assert candle.high_price is None
+    assert candle.low_price is None
+    assert RejectedRecord.objects.filter(
+        endpoint="stock_candle_adjusted", symbol="TEST", reason__startswith="field_"
+    ).exists()
+
+
+# ----------------------------------------------------------------------
+# test_extractor_parity.py
+# extractor.extract_standard_prices must match the legacy engine exactly.
+# 
+# This is the contract that makes the SaaS a faithful port: identical raw payloads
+# must yield identical price maps, key for key. These are pure functions — no
+# database is needed.
+
+
+# Mirror settings.MANUAL_PRICES plus the two derived-coin factors, in the shape
+# the legacy engine's `constants` dict expects.
+LEGACY_CONSTANTS = {
+    "swiss_gold_bar_1g_price": 25900000,
+    "swiss_gold_bar_2_5g_price": 61610000,
+    "quarter_pre86_factor": 0.8694109297,
+    "quarter_to_1g_ratio": 0.493733384,
+}
+
+PARITY_KEYS = [
+    "emami_coin", "half_coin", "quarter_coin", "quarter_coin_pre86",
+    "one_gram_coin", "swiss_gold_bar_1g", "swiss_gold_bar_2_5g",
+    "gold_18k_gram", "usd_cash", "usdt_irt", "euro_cash",
+    "gold_ounce_usd", "bitcoin_usd", "kama_stock",
+]
+
+
+def test_extract_matches_legacy_for_every_key(raw_market_sample, legacy_engine):
+    saas = extract_standard_prices(raw_market_sample)
+    legacy = legacy_engine.extract_standard_prices(raw_market_sample, LEGACY_CONSTANTS)
+
+    assert set(saas) == set(legacy), (
+        f"key sets differ: saas_only={set(saas) - set(legacy)} legacy_only={set(legacy) - set(saas)}"
+    )
+
+    mismatches = {
+        k: (float(saas[k]), float(legacy[k]))
+        for k in PARITY_KEYS
+        if float(saas[k]) != float(legacy[k])
+    }
+    assert not mismatches, f"price map diverged from legacy engine: {mismatches}"
+
+
+def test_usdt_low_quote_is_converted_to_tomans(raw_market_sample):
+    """When only the ~1 USD peg quote exists, USDT falls back to USD Tomans."""
+    prices = extract_standard_prices(raw_market_sample)
+    assert prices["usdt_irt"] == Decimal("63200")
+    assert prices["usd_cash"] == Decimal("63200")
+
+
+def test_usdt_history_irt_quote_differs_from_usd_pegged_feed(raw_market_sample):
+    prices = extract_standard_prices({
+        **raw_market_sample,
+        "usdt_irt_quote": {
+            "symbol": "USDT",
+            "unit": "ریال",
+            "history_daily": [
+                {"date": "1405-05-04", "close": 1880000},
+            ],
+        },
+    })
+    assert prices["usd_cash"] == Decimal("63200")
+    assert prices["usdt_irt"] == Decimal("188000")
+
+
+def test_btc_high_quote_is_left_in_usd(raw_market_sample):
+    """Above the conversion threshold the USD quote is passed through unchanged."""
+    prices = extract_standard_prices(raw_market_sample)
+    assert prices["bitcoin_usd"] == Decimal("64500")
+
+
+def test_kama_extracted_from_tsetmc_in_provider_rials(raw_market_sample):
+    """TSE live quotes preserve provider Rial under the legacy quantity convention."""
+    prices = extract_standard_prices(raw_market_sample)
+    assert prices["kama_stock"] == Decimal("5230")
+
+
+def test_kama_falls_back_to_last_price_when_missing():
+    """When TSETMC returns nothing, KAMA reuses the last-known price."""
+    raw = {"brsapi": {"items": [{"symbol": "USD", "price": 63200}]}, "tsetmc": []}
+    prices = extract_standard_prices(raw, last_prices={"kama_stock": 9999})
+    assert prices["kama_stock"] == Decimal("9999")
+
+
+def test_derived_coins_match_legacy_arithmetic(raw_market_sample, legacy_engine):
+    """quarter_pre86 and one_gram_coin are derived from the quarter coin identically."""
+    saas = extract_standard_prices(raw_market_sample)
+    legacy = legacy_engine.extract_standard_prices(raw_market_sample, LEGACY_CONSTANTS)
+    assert saas["quarter_coin_pre86"] == Decimal("108676366")
+    assert saas["one_gram_coin"] == Decimal("61716673")
+    assert saas["quarter_coin_pre86"] == Decimal(legacy["quarter_coin_pre86"])
+    assert saas["one_gram_coin"] == Decimal(legacy["one_gram_coin"])
+
+
+# ----------------------------------------------------------------------
+# test_seed_assets.py
+
+
+def test_seed_assets_includes_formula_valued_house(db):
+    MarketInstrument.objects.bulk_create([
+        MarketInstrument(
+            source="brs",
+            symbol=symbol,
+            category=MarketInstrument.Category.GOLD,
+            eligible=True,
+        )
+        for symbol in (
+            "IR_COIN_EMAMI",
+            "IR_COIN_HALF",
+            "IR_COIN_QUARTER",
+            "IR_COIN_1G",
+            "IR_GOLD_18K",
+            "USD",
+            # Asset.clean() requires an eligible catalog row for every active,
+            # non-manual asset, so the fixture has to cover the whole seeded set.
+            "USDT_IRT",
+            "EUR",
+        )
+    ] + [
+        MarketInstrument(
+            source="tsetmc",
+            symbol="کاما",
+            category=MarketInstrument.Category.STOCK,
+            eligible=True,
+        )
+    ])
+
+    call_command("seed_assets")
+    Asset.objects.filter(key="house_asset").update(is_active=False)
+    call_command("seed_assets")
+
+    house = Asset.objects.get(key="house_asset")
+    assert house.is_active
+    assert house.is_house
+    assert house.asset_class == Asset.AssetClass.REAL_ESTATE
+
+
+# ----------------------------------------------------------------------
+# test_derivative_snapshot_split.py
+# capture_derivative_snapshots: each of tse_option/ime_future/ime_option is
+# its own provider endpoint and must be its own failure domain. Before this
+# split, ime_futures/ime_options (evaluated after tse_option) repeatedly timed
+# out and re-raised, so tse_option's already-ingested rows were the only ones
+# ever reflected in the WorkflowRun ledger and the ime kinds never got an
+# independent success/failure signal (DerivativeContract held 1,111 tse_option
+# rows and zero ime_future/ime_option rows in production).
+
+
+def test_one_kinds_failure_does_not_block_the_others(settings):
+    settings.TSETMC_API_KEY = "test-key"
+
+    def fake_fetch(api_key, endpoint_key):
+        if endpoint_key == "ime_futures":
+            raise TimeoutError("ReadTimeout")
+        return []
+
+    with (
+        patch("marketdata.fetchers.fetch_derivatives", side_effect=fake_fetch),
+        patch("marketdata.ingest.ingest_derivative_snapshots", return_value=(3, 0)),
+    ):
+        results = capture_derivative_snapshots()
+
+    assert results["tse_option"] == (3, 0)
+    assert results["ime_option"] == (3, 0)
+    assert isinstance(results["ime_future"], TimeoutError)
+
+    runs = {
+        run.workflow: run.outcome
+        for run in WorkflowRun.objects.filter(workflow__startswith="capture_derivative_snapshots:")
+    }
+    assert runs["capture_derivative_snapshots:tse_option"] == WorkflowRun.Outcome.SUCCESS
+    assert runs["capture_derivative_snapshots:ime_option"] == WorkflowRun.Outcome.SUCCESS
+    assert runs["capture_derivative_snapshots:ime_future"] == WorkflowRun.Outcome.FAILED
+
+
+def test_all_three_kinds_succeed_independently(settings):
+    settings.TSETMC_API_KEY = "test-key"
+
+    with (
+        patch("marketdata.fetchers.fetch_derivatives", return_value=[]),
+        patch("marketdata.ingest.ingest_derivative_snapshots", return_value=(1, 0)),
+    ):
+        results = capture_derivative_snapshots()
+
+    assert results == {
+        "tse_option": (1, 0),
+        "ime_future": (1, 0),
+        "ime_option": (1, 0),
+    }
+    assert WorkflowRun.objects.filter(
+        workflow__startswith="capture_derivative_snapshots:",
+        outcome=WorkflowRun.Outcome.SUCCESS,
+    ).count() == 3

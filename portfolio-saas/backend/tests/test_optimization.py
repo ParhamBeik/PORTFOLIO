@@ -1,30 +1,53 @@
-"""Pro portfolio-optimization engine: returns pipeline, scenarios, caching, gating.
+"""The optimizer and the risk numbers around it: frontier, weight floors, diversification policy, and metric correctness.
 
-The synthetic_history fixture writes ~40 days of Price rows for 4 liquid assets
-with KNOWN daily-return profiles (low-vol emami_coin, alternating bitcoin_usd,
-flat usd_cash, drift kama_stock) plus usd_cash so the USD->Toman conversion
-path is exercised. Tests then assert the engine recovers the known values and
-that the scenario optimizers produce well-formed, constraint-respecting
-weights.
-
-NB: `Price.fetched_at` is `auto_now_add`, so explicit `fetched_at` values on
-create are silently overridden. The fixtures use a CASE-expression bulk UPDATE
-after bulk_create to backfill the intended timestamps.
+Merged from 7 files; each section keeps its original banner.
 """
-from datetime import timedelta
-from decimal import Decimal
 
-import numpy as np
-import pandas as pd
-import pytest
+from datetime import timedelta
+import datetime
+from decimal import Decimal
+from unittest import mock
+from unittest.mock import patch
+
 from django.core.cache import cache
 from django.db.models import Case, DateTimeField, When
 from django.utils import timezone
+import jdatetime
+import numpy as np
+import pandas as pd
+import pytest
 from rest_framework.test import APIClient
 
 from accounts.models import User
+from marketdata.models import GoldCurrencyHistory, MarketCandle, MarketInstrument, SymbolIntegrity
 from portfolio.models import Account, Asset, Holding, Price
+from portfolio.models import Asset
+from portfolio.optimization_models import OptimizationSnapshot
+from portfolio.services import diagnostics as diag_mod
+from portfolio.services.best_overall import SCENARIOS, WINDOWS_DAYS, run_best_overall_snapshots
+from portfolio.services.classification import (
+    HARD_ASSET_SLEEVE,
+    POLICY_VERSION,
+    BALANCED_CONSTRAINTS,
+    asset_class_map,
+    class_totals,
+)
+from portfolio.services.diagnostics import (
+    _calmar,
+    _historical_var_cvar,
+    _period_returns,
+    _sharpe,
+    _sortino,
+)
+from portfolio.services.diagnostics import _portfolio_returns, portfolio_diagnostics
 from portfolio.services.diagnostics import portfolio_diagnostics
+from portfolio.services.optimization import (
+    EXPECTED_RETURN_CREDIBILITY_CEILING,
+    MIN_OBSERVATIONS_PER_ASSET,
+    SHARPE_CREDIBILITY_CEILING,
+    UniverseTooSmall,
+    optimize,
+)
 from portfolio.services.optimization import (
     UniverseTooSmall,
     _correlation_clusters,
@@ -33,6 +56,11 @@ from portfolio.services.optimization import (
     _rebalance_trades,
     optimize,
 )
+from portfolio.services.optimization import (
+    _correlation_clusters,
+    _enforce_caps,
+    summarize_optimizer_inputs,
+)
 from portfolio.services.returns import (
     DEFAULT_HISTORY_DAYS,
     RETURNS_CACHE_KEY,
@@ -40,9 +68,30 @@ from portfolio.services.returns import (
     daily_returns_matrix,
     invalidate_returns_cache,
 )
-
+from portfolio.services.returns import (
+    _build_returns_matrix,
+    _gap_profile,
+    daily_returns_matrix,
+    periods_per_year,
+)
 
 pytestmark = pytest.mark.django_db
+
+
+# ----------------------------------------------------------------------
+# test_optimization.py
+# Pro portfolio-optimization engine: returns pipeline, scenarios, caching, gating.
+# 
+# The synthetic_history fixture writes ~40 days of Price rows for 4 liquid assets
+# with KNOWN daily-return profiles (low-vol emami_coin, alternating bitcoin_usd,
+# flat usd_cash, drift kama_stock) plus usd_cash so the USD->Toman conversion
+# path is exercised. Tests then assert the engine recovers the known values and
+# that the scenario optimizers produce well-formed, constraint-respecting
+# weights.
+# 
+# NB: `Price.fetched_at` is `auto_now_add`, so explicit `fetched_at` values on
+# create are silently overridden. The fixtures use a CASE-expression bulk UPDATE
+# after bulk_create to backfill the intended timestamps.
 
 
 # ---------- fixture helpers -------------------------------------------------
@@ -249,7 +298,6 @@ def test_min_history_exclusion(kama_short_history):
     assert "kama_stock" in keys_excluded
     assert "kama_stock" not in df.columns
     assert "emami_coin" in df.columns
-
 
 
 # ---------- 3. house excluded ------------------------------------------------
@@ -1285,3 +1333,1011 @@ def test_robustness_endpoint_returns_bands(synthetic_history, make_user):
         assert body["scenario"] == "min_volatility"
         assert body["forecast_free"] is True
         assert body["robustness"]["converged"] >= 0
+
+
+# ----------------------------------------------------------------------
+# test_optimizer_floors.py
+# Unit tests for the observations floor / graceful fallback / credibility ceiling.
+# 
+# Test type: unit. `optimize()`'s floor/fallback/credibility logic is pure
+# arithmetic over a returns DataFrame; `daily_returns_matrix` is monkeypatched
+# with a synthetic in-memory frame so each test is fast and needs no price
+# fixtures. `@pytest.mark.django_db` is still required because `optimize()`
+# unconditionally resolves asset classes via `resolve_universe()` (an ORM
+# query) even when the returns frame is faked -- that's genuine model access,
+# not something worth mocking away.
+
+
+def _dates(n, start="2020-01-01"):
+    return pd.date_range(start, periods=n, freq="D", tz="UTC")
+
+
+def _run(returns_df, **kwargs):
+    """Patch daily_returns_matrix with a synthetic frame and call optimize()."""
+    cache.clear()
+    with mock.patch(
+        "portfolio.services.optimization.daily_returns_matrix",
+        return_value=(returns_df, []),
+    ):
+        return optimize(
+            scenario=kwargs.pop("scenario", "equal_weight"),
+            current_weights={},
+            total_value_tomans=Decimal("1"),
+            user=None,
+            universe=list(returns_df.columns),
+            **kwargs,
+        )
+
+
+# ---------- 1. shared window far below the 10x floor triggers fallback -----
+
+
+def test_shallow_shared_window_triggers_fallback():
+    n_assets, n_rows = 15, 400
+    cols = [f"asset_{i}" for i in range(n_assets)]
+    rng = np.random.default_rng(1)
+    data = rng.normal(0.0003, 0.01, size=(n_rows, n_assets))
+    df = pd.DataFrame(data, index=_dates(n_rows), columns=cols)
+    # Every asset is valid every day except the last one, which is only
+    # valid on 40 scattered days (>= MIN_DAILY_RETURNS=30, so it clears the
+    # per-asset filter individually) -- the exact "45 rows for 200 assets"
+    # pathology: it alone collapses the shared window.
+    shallow = cols[-1]
+    mask = np.zeros(n_rows, dtype=bool)
+    mask[rng.choice(n_rows, size=40, replace=False)] = True
+    df.loc[~mask, shallow] = np.nan
+
+    result = _run(df)
+
+    assert result["fallback_applied"] is True
+    assert result["fallback_from_n_assets"] == n_assets
+    dropped = {e["key"]: e for e in result["excluded_assets"] if e["reason"] == "insufficient_shared_history"}
+    assert shallow in dropped
+    assert dropped[shallow]["observations"] == 40
+    assert result["n_assets"] == n_assets - 1
+    assert result["observations"] >= result["required_observations"]
+    assert result["required_observations"] == MIN_OBSERVATIONS_PER_ASSET * result["n_assets"]
+
+
+# ---------- 2. well-conditioned frame does not fall back, is plausible -----
+
+
+def test_well_conditioned_frame_no_fallback_and_plausible():
+    n_assets, n_rows = 5, 300
+    cols = [f"asset_{i}" for i in range(n_assets)]
+    rng = np.random.default_rng(2)
+    # ~7.5%/yr mean, ~24%/yr vol -- unremarkable, Sharpe well under the ceiling.
+    data = rng.normal(0.0003, 0.015, size=(n_rows, n_assets))
+    df = pd.DataFrame(data, index=_dates(n_rows), columns=cols)
+
+    result = _run(df)
+
+    assert result["fallback_applied"] is False
+    assert "fallback_from_n_assets" not in result
+    assert result["observations"] == n_rows
+    assert result["credibility"]["plausible"] is True
+    assert result["credibility"]["reasons"] == []
+
+
+# ---------- 3. absurd Sharpe fails the credibility ceiling ------------------
+
+
+def _absurd_drift_frame():
+    """Strong daily drift, tiny noise -> triple-digit annualized SAMPLE return."""
+    n_assets, n_rows = 4, 200
+    cols = [f"asset_{i}" for i in range(n_assets)]
+    rng = np.random.default_rng(3)
+    data = rng.normal(0.02, 0.0005, size=(n_rows, n_assets))
+    return pd.DataFrame(data, index=_dates(n_rows), columns=cols)
+
+
+def test_absurd_sharpe_fails_credibility_ceiling():
+    """The ceiling must still fire for an estimator that can produce nonsense.
+
+    Pinned against `sample_mean` explicitly: that is the estimator whose output
+    the ceiling exists to catch. It is no longer the default (see
+    services/expected_returns.py), so leaving this on the default would test the
+    ceiling against a number that can no longer reach it.
+    """
+    result = _run(_absurd_drift_frame(), expected_return_method="sample_mean")
+
+    assert result["target_metrics"]["sharpe"] > SHARPE_CREDIBILITY_CEILING
+    assert result["target_metrics"]["expected_return_annual"] > EXPECTED_RETURN_CREDIBILITY_CEILING
+    assert result["credibility"]["plausible"] is False
+    assert len(result["credibility"]["reasons"]) >= 1
+    assert result["credibility"]["thresholds"] == {
+        "sharpe": SHARPE_CREDIBILITY_CEILING,
+        "expected_return_annual": EXPECTED_RETURN_CREDIBILITY_CEILING,
+    }
+
+
+def test_default_estimator_does_not_produce_the_absurd_sharpe():
+    """The improvement, stated as a test.
+
+    The same panel that drives `sample_mean` to a triple-digit expected return
+    must not do so under the default estimator. A ceiling that keeps firing is a
+    warning; an estimator that stops generating the nonsense is a fix.
+    """
+    frame = _absurd_drift_frame()
+    naive = _run(frame, expected_return_method="sample_mean")
+    default = _run(frame)
+
+    assert naive["credibility"]["plausible"] is False
+    assert default["credibility"]["plausible"] is True
+    assert default["target_metrics"]["sharpe"] < SHARPE_CREDIBILITY_CEILING
+    assert default["expected_return_method"] == "black_litterman"
+
+
+# ---------- 4. fewer than 3 usable assets still raises UniverseTooSmall ----
+
+
+def test_fewer_than_three_assets_raises():
+    n_rows = 60
+    cols = ["asset_0", "asset_1"]
+    rng = np.random.default_rng(4)
+    data = rng.normal(0.0003, 0.01, size=(n_rows, len(cols)))
+    df = pd.DataFrame(data, index=_dates(n_rows), columns=cols)
+
+    with pytest.raises(UniverseTooSmall):
+        _run(df)
+
+
+# ----------------------------------------------------------------------
+# test_best_overall.py
+# Best Possible Portfolio Overall: nightly precompute + read-only view.
+
+
+@pytest.fixture
+def held_universe(synthetic_history):
+    return ["emami_coin", "bitcoin_usd", "usd_cash", "kama_stock"]
+
+
+def test_run_best_overall_snapshots_writes_one_per_window_and_scenario(held_universe):
+    with mock.patch(
+        "marketdata.universe.get_candidate_universe", return_value=(held_universe, [])
+    ):
+        result = run_best_overall_snapshots()
+
+    assert result["ok"] is True
+    snaps = OptimizationSnapshot.objects.filter(account=None)
+    # synthetic_history is a short (~42 day) fixture, so only windows the
+    # engine can actually solve over that history will have written rows --
+    # the task must not raise on windows that can't solve, just skip them.
+    assert snaps.count() > 0
+    for snap in snaps:
+        assert snap.window_days in WINDOWS_DAYS
+        assert snap.scenario in SCENARIOS
+
+
+def test_run_best_overall_snapshots_skips_when_universe_too_small():
+    with mock.patch("marketdata.universe.get_candidate_universe", return_value=([], [])):
+        result = run_best_overall_snapshots()
+    assert result["ok"] is False
+    assert OptimizationSnapshot.objects.count() == 0
+
+
+def test_best_overall_view_reads_precomputed_snapshots(held_universe, make_user):
+    with mock.patch(
+        "marketdata.universe.get_candidate_universe", return_value=(held_universe, [])
+    ):
+        run_best_overall_snapshots()
+
+    pro = make_user(email="best_overall@t.t")
+    resp = _client(pro).get("/api/optimization/best-overall/")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["windows"]) == len(WINDOWS_DAYS)
+    labels = [w["label"] for w in body["windows"]]
+    assert labels == ["1Y", "3Y", "5Y", "10Y"]
+    assert any(w["status"] == "ok" for w in body["windows"])
+
+
+# ----------------------------------------------------------------------
+# test_diversification_policy.py
+# Diversification policy: correlation clusters, balanced caps, policy version.
+# 
+# Unit tests: `_correlation_clusters` and `_enforce_caps` are pure functions over
+# in-memory frames/dicts, and `class_totals` is arithmetic — no DB, no network, so
+# they belong at the fast base of the pyramid rather than behind a database fixture.
+
+
+def test_correlation_clusters_group_positively_correlated_assets_only():
+    idx = pd.date_range("2024-01-01", periods=40, freq="D")
+    rng = np.random.default_rng(0)
+    a = rng.normal(0, 0.01, size=40)
+    b = a + rng.normal(0, 0.001, size=40)  # highly correlated with a
+    c = -a + rng.normal(0, 0.001, size=40)  # negatively correlated — must not join
+    d = rng.normal(0, 0.01, size=40)
+    returns = pd.DataFrame({"a": a, "b": b, "c": c, "d": d}, index=idx)
+
+    clusters = _correlation_clusters(returns, threshold=0.80)
+
+    # a and b land together; c never joins them despite |corr| being high.
+    assert any({"a", "b"} <= set(cluster) for cluster in clusters)
+    assert all(not {"a", "c"} <= set(cluster) for cluster in clusters)
+    # Every column is accounted for exactly once.
+    assert sorted(x for cluster in clusters for x in cluster) == ["a", "b", "c", "d"]
+
+
+def test_enforce_caps_respects_asset_class_and_cluster_limits():
+    weights = {"s1": 0.5, "s2": 0.3, "g1": 0.2}
+    class_map = {"s1": "Stock", "s2": "Stock", "g1": "Gold"}
+
+    capped = _enforce_caps(
+        weights,
+        max_weight_per_asset=0.25,
+        max_weight_per_class=BALANCED_CONSTRAINTS["max_weight_per_class"],
+        class_map=class_map,
+        correlation_clusters=[["s1", "s2"]],
+        max_weight_per_correlation_cluster=0.40,
+    )
+
+    assert all(v <= 0.25 + 1e-6 for v in capped.values())
+    assert sum(v for k, v in capped.items() if class_map[k] == "Stock") <= 0.60 + 1e-6
+    assert sum(v for k, v in capped.items() if k in ("s1", "s2")) <= 0.40 + 1e-6
+    # Capping never invents weight.
+    assert sum(capped.values()) <= 1.0 + 1e-6
+
+
+def test_class_totals_and_policy_version_constant():
+    totals = class_totals({"a": 0.6, "b": 0.4}, {"a": "Stock", "b": "Gold"})
+    assert abs(sum(totals.values()) - 1.0) < 1e-9
+    assert POLICY_VERSION == "balanced-v1"
+
+
+def test_enforce_caps_hard_asset_sleeve():
+    weights = {"usd_cash": 0.40, "gold_18k_gram": 0.40, "kama_stock": 0.20}
+    class_map = {"usd_cash": "Cash", "gold_18k_gram": "Gold", "kama_stock": "Stock"}
+    sleeves = [{
+        "id": HARD_ASSET_SLEEVE["id"],
+        "assets": ["usd_cash", "gold_18k_gram"],
+        "max_combined_weight": HARD_ASSET_SLEEVE["max_weight"],
+    }]
+
+    capped = _enforce_caps(
+        weights,
+        max_weight_per_asset=0.40,
+        max_weight_per_class={"Gold": 0.60, "Cash": 0.80, "Stock": 0.50},
+        class_map=class_map,
+        sleeves=sleeves,
+    )
+
+    hard = capped.get("usd_cash", 0.0) + capped.get("gold_18k_gram", 0.0)
+    assert hard <= HARD_ASSET_SLEEVE["max_weight"] + 1e-6
+    assert capped.get("kama_stock", 0.0) >= 0.20 - 1e-6
+    assert sum(capped.values()) <= 1.0 + 1e-6
+
+
+@pytest.mark.django_db
+def test_catalog_gold_and_cash_classes(asset_catalog):
+    cls = asset_class_map(["emami_coin", "gold_18k_gram", "usd_cash", "kama_stock"])
+    assert cls["emami_coin"] == "Gold"
+    assert cls["gold_18k_gram"] == "Gold"
+    assert cls["usd_cash"] == "Cash"
+    assert cls["kama_stock"] == "Stock"
+    assert set(HARD_ASSET_SLEEVE["classes"]) == {"Gold", "Cash"}
+
+
+def test_summarize_optimizer_inputs_flags_gold_cash_pairs():
+    idx = pd.date_range("2024-01-01", periods=40, freq="D")
+    rng = np.random.default_rng(4)
+    gold = rng.normal(0.002, 0.01, size=40)
+    usd = rng.normal(0.002, 0.01, size=40)
+    stock = rng.normal(0.0003, 0.015, size=40)
+    returns = pd.DataFrame(
+        {"gold_18k_gram": gold, "usd_cash": usd, "kama_stock": stock}, index=idx
+    )
+    class_map = {"gold_18k_gram": "Gold", "usd_cash": "Cash", "kama_stock": "Stock"}
+
+    summary = summarize_optimizer_inputs(returns, class_map, cluster_threshold=0.65)
+
+    assert summary["observations"] == 40
+    keys = {row["key"] for row in summary["assets"]}
+    assert keys == {"gold_18k_gram", "usd_cash", "kama_stock"}
+    pair_keys = {(p["a"], p["b"]) for p in summary["gold_cash_pairs"]}
+    assert ("gold_18k_gram", "usd_cash") in pair_keys or ("usd_cash", "gold_18k_gram") in pair_keys
+    assert all("would_cluster" in p for p in summary["gold_cash_pairs"])
+
+
+# ----------------------------------------------------------------------
+# test_risk_breakdown.py
+# Per-asset and per-class risk breakdown on portfolio_diagnostics.
+
+
+def _dates_risk_breakdown(n, start="2024-01-01"):
+    return pd.date_range(start, periods=n, freq="D", tz="UTC")
+
+
+def _valuation(items):
+    return {"items": items}
+
+
+def test_by_asset_includes_excluded_and_ready_rows():
+    dates = _dates_risk_breakdown(120)
+    returns = pd.DataFrame(
+        {
+            "alpha": np.full(120, 0.001),
+            "beta": np.full(120, 0.002),
+        },
+        index=dates,
+    )
+    excluded = [{"key": "gamma", "reason": "price_gap_exceeded"}]
+    valuation = _valuation([
+        {"key": "alpha", "asset": "Alpha", "class": "Stock", "value": 600, "is_house": False, "is_manual": False},
+        {"key": "beta", "asset": "Beta", "class": "Gold", "value": 400, "is_house": False, "is_manual": False},
+        {"key": "gamma", "asset": "Gamma", "class": "Gold", "value": 100, "is_house": False, "is_manual": False},
+        {"key": "house", "asset": "House", "class": "Real Estate", "value": 1000, "is_house": True, "is_manual": False},
+    ])
+    weights = {"alpha": 0.6, "beta": 0.4}
+
+    with patch.object(diag_mod, "daily_returns_matrix", return_value=(returns, excluded)), \
+         patch.object(diag_mod, "_load_index_returns", return_value=None):
+        payload = diag_mod.portfolio_diagnostics(
+            weights,
+            Decimal("1100"),
+            valuation=valuation,
+        )
+
+    by_key = {row["key"]: row for row in payload["by_asset"]}
+    assert set(by_key) == {"alpha", "beta", "gamma", "house"}
+    assert by_key["alpha"]["status"] == "ready"
+    assert by_key["alpha"]["metrics"] is not None
+    assert by_key["gamma"]["status"] == "excluded"
+    assert by_key["gamma"]["metrics"] is None
+    assert by_key["house"]["status"] == "not_applicable"
+
+
+def test_by_asset_class_partial_when_some_assets_excluded():
+    dates = _dates_risk_breakdown(120)
+    returns = pd.DataFrame({"only": np.full(120, 0.001)}, index=dates)
+    valuation = _valuation([
+        {"key": "only", "asset": "Only", "class": "Stock", "value": 700, "is_house": False, "is_manual": False},
+        {"key": "bad", "asset": "Bad", "class": "Stock", "value": 300, "is_house": False, "is_manual": False},
+    ])
+    excluded = [{"key": "bad", "reason": "insufficient_history"}]
+
+    with patch.object(diag_mod, "daily_returns_matrix", return_value=(returns, excluded)), \
+         patch.object(diag_mod, "_load_index_returns", return_value=None):
+        payload = diag_mod.portfolio_diagnostics(
+            {"only": 1.0},
+            Decimal("1000"),
+            valuation=valuation,
+        )
+
+    stock = next(row for row in payload["by_asset_class"] if row["asset_class"] == "Stock")
+    assert stock["status"] == "partial"
+    assert stock["held_count"] == 2
+    assert stock["analyzable_count"] == 1
+    assert stock["metrics"] is not None
+
+
+def test_coverage_health_degraded_when_exclusions_exist():
+    dates = _dates_risk_breakdown(120)
+    returns = pd.DataFrame({"alpha": np.full(120, 0.001)}, index=dates)
+    valuation = _valuation([
+        {"key": "alpha", "asset": "Alpha", "class": "Stock", "value": 900, "is_house": False, "is_manual": False},
+        {"key": "bad", "asset": "Bad", "class": "Stock", "value": 100, "is_house": False, "is_manual": False},
+    ])
+    excluded = [{"key": "bad", "reason": "integrity_gate_failed"}]
+
+    with patch.object(diag_mod, "daily_returns_matrix", return_value=(returns, excluded)), \
+         patch.object(diag_mod, "_load_index_returns", return_value=None):
+        payload = diag_mod.portfolio_diagnostics(
+            {"alpha": 1.0},
+            Decimal("1000"),
+            valuation=valuation,
+        )
+
+    assert payload["coverage"]["health"] == "degraded"
+    assert payload["coverage"]["excluded_by_reason"]["integrity_gate_failed"] == 1
+    assert payload["portfolio_full"]["concentration_hhi"] == pytest.approx(0.82, abs=0.01)
+
+
+def test_portfolio_metrics_unchanged_for_single_asset():
+    dates = _dates_risk_breakdown(120)
+    returns = pd.DataFrame({"solo": np.full(120, 0.001)}, index=dates)
+    weights = {"solo": 1.0}
+
+    with patch.object(diag_mod, "daily_returns_matrix", return_value=(returns, [])), \
+         patch.object(diag_mod, "_load_index_returns", return_value=None):
+        payload = portfolio_diagnostics(weights, Decimal("1000"))
+
+    assert payload["metrics"]["sharpe"] != 0
+    assert payload["by_asset"] == []
+
+
+def test_diversification_block_risk_contributions_sum_to_one():
+    """Euler's theorem: risk contributions of a homogeneous-degree-1 vol
+    function sum to exactly 1, so they read as percentages with no fudge.
+
+    This is the number the household view is for -- "this holding is X% of my
+    risk" -- and it was computed in services/diversification.py but never
+    reached /api/analytics/ until it was wired into portfolio_diagnostics.
+    """
+    rng = np.random.default_rng(7)
+    dates = _dates_risk_breakdown(200)
+    # Deliberately unequal volatility and a correlated pair, so the risk split
+    # cannot coincidentally equal the money split.
+    quiet = rng.normal(0.0, 0.002, 200)
+    loud = rng.normal(0.0, 0.030, 200)
+    returns = pd.DataFrame(
+        {"quiet": quiet, "twin": quiet * 0.98, "loud": loud}, index=dates
+    )
+    valuation = _valuation([
+        {"key": "quiet", "asset": "Quiet", "class": "Cash", "value": 500,
+         "is_house": False, "is_manual": False},
+        {"key": "twin", "asset": "Twin", "class": "Cash", "value": 400,
+         "is_house": False, "is_manual": False},
+        {"key": "loud", "asset": "Loud", "class": "Crypto", "value": 100,
+         "is_house": False, "is_manual": False},
+    ])
+    weights = {"quiet": 0.5, "twin": 0.4, "loud": 0.1}
+
+    with patch.object(diag_mod, "daily_returns_matrix", return_value=(returns, [])), \
+         patch.object(diag_mod, "_load_index_returns", return_value=None):
+        payload = portfolio_diagnostics(weights, Decimal("1000"), valuation=valuation)
+
+    block = payload["diversification"]
+    contributions = block["risk_contributions"]
+    assert set(contributions) == {"quiet", "twin", "loud"}
+    assert sum(contributions.values()) == pytest.approx(1.0, abs=1e-6)
+
+    # The 10% crypto sleeve is ~15x the volatility of the rest, so it must carry
+    # far more risk than money. If these ever match, the decomposition is not
+    # doing anything and the chart built on it would be decorative.
+    assert contributions["loud"] > weights["loud"] * 2
+
+    # Two of the three assets are 98% correlated, so they are ~one bet, not two.
+    assert block["effective_bets"] < 3.0
+    assert block["effective_holdings"] == pytest.approx(1 / sum(w**2 for w in weights.values()), abs=1e-3)
+
+    gaps = {row["key"]: row for row in block["concentration_gap"]}
+    assert gaps["loud"]["gap"] == pytest.approx(
+        contributions["loud"] - weights["loud"], abs=1e-6
+    )
+    # Sorted worst-first so the UI can lead with the offender.
+    assert block["concentration_gap"][0]["key"] == "loud"
+    # A partially-covered book must not read as a fully-covered one.
+    assert "mean_weight_covered" in block
+
+
+def test_correlation_payload_is_square_and_unit_diagonal():
+    """The heatmap's source. Reuses the panel diagnostics already built rather
+    than triggering a second daily_returns_matrix pass."""
+    rng = np.random.default_rng(11)
+    dates = _dates_risk_breakdown(200)
+    returns = pd.DataFrame(
+        {
+            "a": rng.normal(0.0, 0.01, 200),
+            "b": rng.normal(0.0, 0.01, 200),
+        },
+        index=dates,
+    )
+    valuation = _valuation([
+        {"key": "a", "asset": "A", "class": "Stock", "value": 500,
+         "is_house": False, "is_manual": False},
+        {"key": "b", "asset": "B", "class": "Stock", "value": 500,
+         "is_house": False, "is_manual": False},
+    ])
+
+    with patch.object(diag_mod, "daily_returns_matrix", return_value=(returns, [])), \
+         patch.object(diag_mod, "_load_index_returns", return_value=None):
+        payload = portfolio_diagnostics(
+            {"a": 0.5, "b": 0.5}, Decimal("1000"), valuation=valuation
+        )
+
+    corr = payload["correlation"]
+    assets, matrix = corr["assets"], corr["matrix"]
+    assert assets == ["a", "b"]
+    assert len(matrix) == len(assets)
+    for i, row in enumerate(matrix):
+        assert len(row) == len(assets)
+        assert row[i] == pytest.approx(1.0, abs=1e-9)
+        for j, value in enumerate(row):
+            assert matrix[j][i] == pytest.approx(value, abs=1e-9)
+
+
+def test_diversification_degrades_honestly_on_a_single_asset():
+    """One asset has no covariance structure. It must say so rather than
+    reporting a confident 1.0 diversification ratio as if it were measured."""
+    dates = _dates_risk_breakdown(120)
+    returns = pd.DataFrame({"only": np.full(120, 0.001)}, index=dates)
+    valuation = _valuation([
+        {"key": "only", "asset": "Only", "class": "Gold", "value": 100,
+         "is_house": False, "is_manual": False},
+    ])
+
+    with patch.object(diag_mod, "daily_returns_matrix", return_value=(returns, [])), \
+         patch.object(diag_mod, "_load_index_returns", return_value=None):
+        payload = portfolio_diagnostics({"only": 1.0}, Decimal("100"), valuation=valuation)
+
+    block = payload["diversification"]
+    assert block["risk_contributions"] == {}
+    assert block["unavailable_reason"]
+
+
+def test_diversifier_ranking_prefers_uncorrelated_over_high_return():
+    """Ranking must answer a diversification question, not a returns one.
+
+    The trap this guards: sorting candidates by past return recommends whatever
+    already went up, which on a gold-heavy book means more gold. A candidate that
+    moves with what you already own must rank BELOW one that does not, even when
+    its return is far better.
+    """
+    from portfolio.services.diversification import diversifier_candidates
+
+    rng = np.random.default_rng(3)
+    dates = _dates_risk_breakdown(300)
+    portfolio = pd.Series(rng.normal(0.0, 0.02, 300), index=dates)
+
+    candidates = pd.DataFrame({
+        # Moves in lockstep with the book and is MORE volatile, and had a great
+        # year. (A perfect twin of equal volatility would score exactly 0: at any
+        # weight, (1-w)s + ws == s. Only extra volatility makes it actively worse.)
+        "twin_high_return": portfolio.to_numpy() * 1.5 + 0.004,
+        # Moves against the book, and had a mediocre year.
+        "hedge_low_return": -portfolio.to_numpy() * 0.9 + 0.0001,
+    }, index=dates)
+
+    rows = diversifier_candidates(portfolio, candidates, entry_weight=0.05)
+    ranked = [r["key"] for r in rows]
+    assert ranked[0] == "hedge_low_return", (
+        "a negatively-correlated candidate must outrank a perfectly-correlated "
+        "one regardless of return"
+    )
+
+    by_key = {r["key"]: r for r in rows}
+    assert by_key["twin_high_return"]["total_return"] > by_key["hedge_low_return"]["total_return"]
+    # Adding more of what you already own increases volatility: the benefit is
+    # negative, not merely small.
+    assert by_key["twin_high_return"]["vol_reduction"] < 0
+    assert by_key["hedge_low_return"]["vol_reduction"] > 0
+    assert by_key["hedge_low_return"]["correlation"] < -0.9
+    assert by_key["twin_high_return"]["correlation"] > 0.9
+
+
+def test_diversifier_skips_candidates_without_enough_overlap():
+    """A candidate sharing 10 days with the book cannot be scored honestly."""
+    from portfolio.services.diversification import diversifier_candidates
+
+    rng = np.random.default_rng(5)
+    dates = _dates_risk_breakdown(300)
+    portfolio = pd.Series(rng.normal(0.0, 0.02, 300), index=dates)
+    short = pd.Series(rng.normal(0.0, 0.02, 300), index=dates)
+    short.iloc[:290] = np.nan
+
+    rows = diversifier_candidates(
+        portfolio, pd.DataFrame({"barely_listed": short}), min_observations=60
+    )
+    assert rows == []
+
+
+# ----------------------------------------------------------------------
+# test_risk_data_gathering.py
+# How the risk breakdown finds a held asset's history in the warehouse.
+# 
+# Integration, not unit: every defect these cover lived at the ORM -> panel ->
+# matrix boundary (a SymbolIntegrity row, a leading run of NaNs, an Asset.proxy_key
+# lookup), not in a pure function. The pre-existing suite mocked
+# `daily_returns_matrix` wholesale, which is exactly why a 37%-weight holding could
+# vanish from the risk card without a single test going red. These seed real rows
+# and go through the real loader.
+
+
+WINDOW_DAYS = 180
+
+
+def _jalali_days(count, *, offset=0):
+    """`count` consecutive Jalali date strings ending `offset` days before today."""
+    today = jdatetime.date.today()
+    return [
+        (today - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+        for i in range(count + offset - 1, offset - 1, -1)
+    ]
+
+
+def _gold(symbol, days, *, start=1000.0, step=5.0):
+    GoldCurrencyHistory.objects.bulk_create([
+        GoldCurrencyHistory(
+            symbol=symbol, date=day, close_price=start + i * step, unit="تومان"
+        )
+        for i, day in enumerate(days)
+    ])
+
+
+def _instrument(symbol, source=MarketInstrument.Source.BRS):
+    return MarketInstrument.objects.create(
+        symbol=symbol,
+        name=symbol,
+        source=source,
+        category=MarketInstrument.Category.GOLD,
+        eligible=True,
+    )
+
+
+def _asset(key, **kwargs):
+    # Asset.save() runs full_clean, which requires an eligible MarketInstrument
+    # for non-manual/non-house assets -- so seed the instrument first.
+    kwargs.setdefault("name", key)
+    kwargs.setdefault("is_active", True)
+    return Asset.objects.create(key=key, **kwargs)
+
+
+def _valuation_risk_data_gathering(items):
+    return {"items": [
+        {
+            "key": key,
+            "asset": key,
+            "class": cls,
+            "value": value,
+            "is_house": cls == "Real Estate",
+            "is_manual": False,
+        }
+        for key, cls, value in items
+    ]}
+
+
+@pytest.fixture(autouse=True)
+def _clear_cache():
+    cache.clear()
+    yield
+    cache.clear()
+
+
+# --- the gap profile: short history is not corruption -------------------------
+
+def test_leading_nans_are_not_counted_as_a_price_gap():
+    # 10 missing days at the front, then a clean run: the asset simply started
+    # late. The old single-scan reported this as a 10-session gap.
+    observed = np.array([False] * 10 + [True] * 30)
+    assert _gap_profile(observed) == (10, 0)
+
+
+def test_interior_and_trailing_holes_still_count():
+    observed = np.array([False] * 3 + [True] * 5 + [False] * 7 + [True] * 5)
+    assert _gap_profile(observed) == (3, 7)
+    # A series that stops mid-window is a hole, not a short history.
+    assert _gap_profile(np.array([True] * 5 + [False] * 9)) == (0, 9)
+
+
+def test_short_history_survives_for_a_held_asset_but_not_a_screened_one():
+    index = pd.date_range("2026-01-01", periods=60, tz="UTC")
+    panel = pd.DataFrame(
+        {
+            "late": np.linspace(100.0, 160.0, len(index)),
+            "complete": np.linspace(200.0, 260.0, len(index)),
+        },
+        index=index,
+    )
+    panel.loc[index[:40], "late"] = np.nan  # only 20 sessions of real history
+
+    screened, excluded, _ = _build_returns_matrix(panel)
+    assert "late" not in screened.columns
+    assert {e["key"]: e["reason"] for e in excluded}["late"] == "insufficient_history"
+
+    held, excluded_held, warnings = _build_returns_matrix(panel, frozenset({"late"}))
+    assert "late" in held.columns, "a held asset keeps whatever history it has"
+    assert not [e for e in excluded_held if e["key"] == "late"]
+    assert {w["key"]: w["reason"] for w in warnings}["late"] == "short_history"
+
+
+def test_a_real_interior_gap_excludes_even_a_held_asset():
+    # Forward-filling past MAX_FORWARD_FILL_SESSIONS invents prices; a made-up
+    # return is worse than a missing one, so this bar does not bend for holdings.
+    index = pd.date_range("2026-01-01", periods=60, tz="UTC")
+    panel = pd.DataFrame({"holed": np.linspace(100.0, 160.0, len(index))}, index=index)
+    panel.loc[index[20:32], "holed"] = np.nan
+
+    _, excluded, _ = _build_returns_matrix(panel, frozenset({"holed"}))
+    assert {e["key"]: e["reason"] for e in excluded}["holed"] == "price_gap_exceeded"
+
+
+# --- annualization frequency --------------------------------------------------
+
+def test_periods_per_year_reads_the_calendar_not_a_constant():
+    daily = pd.date_range("2026-01-01", periods=200, freq="D", tz="UTC")
+    assert periods_per_year(daily) == pytest.approx(365.25, abs=1.0)
+
+    # Sat-Wed: five sessions a week, spacings of 1,1,1,1,3 -- whose MEDIAN is 1.
+    sessions = daily[~daily.dayofweek.isin([3, 4])]
+    assert periods_per_year(sessions) == pytest.approx(261, abs=8)
+
+    # An exchange closure is not the cadence and must not drag the figure down.
+    with_closure = sessions.delete(range(40, 100))
+    assert periods_per_year(with_closure) == pytest.approx(
+        periods_per_year(sessions), abs=8
+    )
+
+
+# --- portfolio aggregation ----------------------------------------------------
+
+def test_portfolio_returns_renormalize_per_day_instead_of_dropping_assets():
+    index = pd.date_range("2026-01-01", periods=40, tz="UTC")
+    returns = pd.DataFrame(
+        {"a": np.full(40, 0.01), "b": np.full(40, 0.02)}, index=index
+    )
+    returns.iloc[5, returns.columns.get_loc("b")] = np.nan
+
+    series = _portfolio_returns(returns, {"a": 0.6, "b": 0.4})
+
+    assert len(series.index) == 40, "no row lost because one asset missed a day"
+    assert series.iloc[0] == pytest.approx(0.6 * 0.01 + 0.4 * 0.02)
+    # On the thin day the weights renormalize onto 'a' alone.
+    assert series.iloc[5] == pytest.approx(0.01)
+    assert set(series.attrs["weights_used"]) == {"a", "b"}
+    assert series.attrs["dropped_assets"] == []
+    assert series.attrs["mean_weight_covered"] == pytest.approx(1 - 0.4 / 40, abs=1e-6)
+
+
+def test_many_assets_on_a_short_window_are_not_truncated_to_three():
+    # The old drop-loop required 10 shared observations per asset and stopped at
+    # 3 survivors, so a 10-asset book on a 60-session window lost half itself.
+    index = pd.date_range("2026-01-01", periods=60, tz="UTC")
+    keys = [f"a{i}" for i in range(10)]
+    returns = pd.DataFrame({k: np.full(60, 0.01) for k in keys}, index=index)
+
+    series = _portfolio_returns(returns, {k: 0.1 for k in keys})
+
+    assert len(series.attrs["weights_used"]) == 10
+    assert series.attrs["weights_rescaled"] is False
+    assert series.iloc[0] == pytest.approx(0.01)
+
+
+# --- the full path, through the ORM ------------------------------------------
+
+@pytest.mark.django_db
+def test_held_asset_with_a_failed_integrity_gate_is_reported_with_a_warning():
+    days = _jalali_days(120)
+    _instrument("IR_GOLD_18K")
+    _instrument("IR_COIN_EMAMI")
+    _gold("IR_GOLD_18K", days)
+    _gold("IR_COIN_EMAMI", days, start=5000.0, step=11.0)
+    _asset("gold_18k_gram", asset_class="Gold", brs_symbol="IR_GOLD_18K")
+    _asset("emami_coin", asset_class="Gold", brs_symbol="IR_COIN_EMAMI")
+    # The nightly screen fails it on a rejection ratio, despite full coverage.
+    SymbolIntegrity.objects.create(
+        symbol="IR_GOLD_18K", passes_gate=False, reason="excessive_rejections"
+    )
+
+    # Unheld, it is still screened out: the optimizer's universe is unchanged.
+    screened, excluded = daily_returns_matrix(
+        history_days=WINDOW_DAYS, universe=["gold_18k_gram", "emami_coin"]
+    )
+    assert "gold_18k_gram" not in screened.columns
+    assert {e["key"]: e["reason"] for e in excluded}["gold_18k_gram"] == (
+        "integrity_gate_failed"
+    )
+
+    valuation = _valuation_risk_data_gathering([("gold_18k_gram", "Gold", 600), ("emami_coin", "Gold", 400)])
+    payload = portfolio_diagnostics(
+        {"gold_18k_gram": 0.6, "emami_coin": 0.4},
+        1000,
+        history_days=WINDOW_DAYS,
+        valuation=valuation,
+    )
+
+    row = {r["key"]: r for r in payload["by_asset"]}["gold_18k_gram"]
+    assert row["status"] == "ready"
+    assert row["metrics"] is not None
+    assert row["metrics"]["annualized_volatility"] > 0
+    assert "integrity_gate_failed" in row["warnings"]
+    assert payload["coverage"]["analyzed_weight_pct"] == pytest.approx(1.0, abs=1e-6)
+    assert payload["coverage"]["health"] == "degraded", "a caveat must be visible"
+
+
+@pytest.mark.django_db
+def test_manual_asset_borrows_its_proxy_series():
+    days = _jalali_days(120)
+    _instrument("IR_GOLD_18K")
+    _gold("IR_GOLD_18K", days)
+    _asset("gold_18k_gram", asset_class="Gold", brs_symbol="IR_GOLD_18K")
+    _asset(
+        "swiss_gold_bar_1g",
+        asset_class="Gold",
+        is_manual=True,
+        proxy_key="gold_18k_gram",
+    )
+
+    valuation = _valuation_risk_data_gathering([
+        ("gold_18k_gram", "Gold", 900),
+        ("swiss_gold_bar_1g", "Gold", 100),
+    ])
+    payload = portfolio_diagnostics(
+        {"gold_18k_gram": 0.9, "swiss_gold_bar_1g": 0.1},
+        1000,
+        history_days=WINDOW_DAYS,
+        valuation=valuation,
+    )
+
+    rows = {r["key"]: r for r in payload["by_asset"]}
+    bar, gold = rows["swiss_gold_bar_1g"], rows["gold_18k_gram"]
+    assert bar["status"] == "ready"
+    assert bar["proxied_from"] == "gold_18k_gram"
+    assert "proxied" in bar["warnings"]
+    assert bar["metrics"]["annualized_volatility"] == pytest.approx(
+        gold["metrics"]["annualized_volatility"]
+    )
+    # Proxying is a modeling choice, not a data defect.
+    assert payload["coverage"]["health"] == "healthy"
+
+
+@pytest.mark.django_db
+def test_proxies_stay_out_of_the_unheld_universe():
+    # Two identical columns would give the optimizer a singular covariance and an
+    # arbitrary choice between them, so proxy resolution is opt-in via held_keys.
+    days = _jalali_days(120)
+    _instrument("IR_GOLD_18K")
+    _gold("IR_GOLD_18K", days)
+    _asset("gold_18k_gram", asset_class="Gold", brs_symbol="IR_GOLD_18K")
+    _asset(
+        "swiss_gold_bar_1g",
+        asset_class="Gold",
+        is_manual=True,
+        proxy_key="gold_18k_gram",
+    )
+
+    universe = ["gold_18k_gram", "swiss_gold_bar_1g"]
+    screened, _ = daily_returns_matrix(history_days=WINDOW_DAYS, universe=universe)
+    assert "swiss_gold_bar_1g" not in screened.columns
+
+    held, _ = daily_returns_matrix(
+        history_days=WINDOW_DAYS,
+        universe=universe,
+        held_keys=frozenset({"swiss_gold_bar_1g"}),
+    )
+    assert "swiss_gold_bar_1g" in held.columns
+
+
+@pytest.mark.django_db
+def test_real_estate_is_excluded_from_weights_but_stated_in_coverage():
+    days = _jalali_days(120)
+    _instrument("IR_GOLD_18K")
+    _gold("IR_GOLD_18K", days)
+    _asset("gold_18k_gram", asset_class="Gold", brs_symbol="IR_GOLD_18K")
+    _asset("house_asset", asset_class="Real Estate", is_house=True)
+
+    valuation = _valuation_risk_data_gathering([
+        ("gold_18k_gram", "Gold", 700),
+        ("house_asset", "Real Estate", 300),
+    ])
+    payload = portfolio_diagnostics(
+        {"gold_18k_gram": 1.0}, 700, history_days=WINDOW_DAYS, valuation=valuation
+    )
+
+    rows = {r["key"]: r for r in payload["by_asset"]}
+    assert rows["house_asset"]["status"] == "not_applicable"
+    # The metrics describe 70% of the book, and the payload says so out loud.
+    assert payload["coverage"]["analyzed_weight_pct"] == pytest.approx(0.7, abs=1e-6)
+
+
+# ----------------------------------------------------------------------
+# test_metric_correctness.py
+# Unit tests for the diagnostics metric fixes (Sortino annualization, period-return
+# off-by-one, diversification ratio floor, CVaR tail-size guard).
+# 
+# These are pure-function tests over small in-memory pandas Series -- no DB, no
+# django_db mark -- so they exercise the math directly and run fast (unit tests,
+# not integration: the functions under test have no I/O, so pinning them at the
+# DataFrame/Series boundary is the cheapest way to catch a regression in the
+# math itself).
+
+
+def _dates_risk_breakdown(n, start="2024-01-01"):
+    return pd.date_range(start, periods=n, freq="D", tz="UTC")
+
+
+# ---------- Sortino annualization -------------------------------------------
+
+
+def test_sortino_is_annualized_not_daily():
+    # Symmetric-ish series so sigma ~= sigma_downside; before the fix, sortino
+    # was ~sqrt(252)=15.87x sharpe because the denominator stayed daily while
+    # the numerator was annualized.
+    rng = np.random.default_rng(0)
+    values = rng.normal(loc=0.0005, scale=0.01, size=500)
+    series = pd.Series(values, index=_dates_risk_breakdown(500))
+
+    sharpe = _sharpe(series, risk_free_annual=0.0)
+    sortino = _sortino(series, risk_free_annual=0.0)
+
+    assert sharpe != 0
+    ratio = sortino / sharpe
+    # For a roughly symmetric series, sortino and sharpe should be the same
+    # order of magnitude (downside deviation ~= full deviation / sqrt(2)-ish).
+    assert 0.3 < ratio < 3.0, f"sortino/sharpe = {ratio} looks unannualized"
+    assert abs(ratio - 15.87) > 5, "sortino is still ~sqrt(252)x inflated"
+
+
+def test_sortino_known_downside_deviation():
+    # Returns alternate 0 and -0.02 -> downside deviation (around MAR=0) is
+    # easy to hand-compute: mean(downside**2) = mean(0, 0.0004 alternating)
+    # = 0.0002, daily dd = sqrt(0.0002); annualized = that * sqrt(252).
+    values = [0.0, -0.02] * 100
+    series = pd.Series(values, index=_dates_risk_breakdown(200))
+    sortino = _sortino(series, risk_free_annual=0.0)
+
+    mean_excess = np.mean(values)
+    downside = np.clip(values, a_min=None, a_max=0.0)
+    dd_daily = np.sqrt(np.mean(np.array(downside) ** 2))
+    expected = (mean_excess / dd_daily) * np.sqrt(252)
+
+    assert sortino == pytest.approx(expected, rel=1e-9)
+
+
+# ---------- Period returns off-by-one ---------------------------------------
+
+
+def test_period_returns_does_not_drop_first_day():
+    # 10 known daily returns of 1% each. The "7d" window must compound every
+    # day the date filter actually selects -- not silently drop the earliest
+    # one (the old bug used wealth[window[0]] as the denominator, which
+    # already had that first day's return baked in).
+    values = [0.01] * 10
+    series = pd.Series(values, index=_dates_risk_breakdown(10))
+    result = _period_returns(series)
+
+    last_date = series.index[-1]
+    n_in_window = int((series.index >= last_date - pd.Timedelta(days=7)).sum())
+    expected_7d = 1.01 ** n_in_window - 1.0
+    assert result["7d"] == pytest.approx(expected_7d, rel=1e-9)
+
+    # 30d/90d windows (fewer than 30/90 days of history) fall back to the
+    # full 10-day compounding, again with all 10 days included.
+    expected_full = 1.01 ** 10 - 1.0
+    assert result["30d"] == pytest.approx(expected_full, rel=1e-9)
+
+
+# ---------- Diversification ratio floor --------------------------------------
+
+
+def test_diversification_ratio_not_floored():
+    # Mathematically, weighted_avg_vol / portfolio_vol >= 1.0 for any
+    # well-conditioned covariance (Cauchy-Schwarz on the correlation matrix)
+    # -- a sub-1.0 result can only come from a broken/ill-conditioned
+    # estimate. So this test targets the actual bug: the payload assembly
+    # in portfolio_diagnostics() used to clamp any such value up to 1.0 via
+    # max(_finite(div_ratio), 1.0), silently hiding the broken estimate.
+    # Mock the covariance step to return a sub-1.0 ratio and assert it comes
+    # through the payload unchanged.
+    dates = _dates_risk_breakdown(20)
+    returns = pd.DataFrame({"a": [0.001] * 20}, index=dates)
+    weights = {"a": 1.0}
+
+    with patch.object(diag_mod, "daily_returns_matrix", return_value=(returns, [])), \
+         patch.object(diag_mod, "_diversification_ratio", return_value=0.7):
+        result = diag_mod.portfolio_diagnostics(weights, Decimal("1000000"))
+
+    assert result["metrics"]["diversification_ratio"] == pytest.approx(0.7)
+
+
+# ---------- CVaR tail-size guard ----------------------------------------------
+
+
+def test_cvar_none_when_tail_too_small():
+    # 20 observations, alpha=0.95 -> 5% tail = ~1 point, well under the
+    # 5-observation floor. CVaR must be None, not an average of 1-2 numbers.
+    values = list(np.linspace(-0.05, 0.05, 20))
+    series = pd.Series(values, index=_dates_risk_breakdown(20))
+    var, cvar = _historical_var_cvar(series, alpha=0.95)
+    assert cvar is None
+    assert var is not None
+
+
+def test_cvar_present_with_enough_tail_observations():
+    values = list(np.linspace(-0.05, 0.05, 200))
+    series = pd.Series(values, index=_dates_risk_breakdown(200))
+    var, cvar = _historical_var_cvar(series, alpha=0.95)
+    assert cvar is not None
+    assert cvar <= var  # CVaR (tail average) is at least as bad as VaR
+
+
+# ---------- Calmar: explicit None below the 36-month window ------------------
+
+
+def test_calmar_none_when_window_too_short():
+    # Only ~200 days of history, far short of the 36-month (1095-day) window.
+    values = [0.001] * 200
+    series = pd.Series(values, index=_dates_risk_breakdown(200))
+    calmar, window_days = _calmar(series)
+    assert calmar is None
+    assert window_days < 1095
