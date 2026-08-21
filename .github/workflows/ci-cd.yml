@@ -1,0 +1,139 @@
+# Push to main -> test -> deploy. Nothing reaches the VPS that has not gone
+# green here first, and the VPS runs origin/main and nothing else.
+#
+# The backend suite runs in well under two minutes, so there is no filtered
+# subset and no `|| true`: a red test is a red build, and a red build does not
+# deploy.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   VPS_HOST         the server's address
+#   VPS_USER         the deploy account (not root once a deploy user exists)
+#   VPS_SSH_KEY      the deploy key's PRIVATE half, in full PEM form
+#   VPS_KNOWN_HOSTS  output of `ssh-keyscan <host>`, so the job never trusts
+#                    an unverified host key
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One deploy at a time. Two overlapping runs would race on `git reset --hard`
+# and on the compose rebuild; the newer commit is the one worth shipping.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      # config.settings_test builds its own test database through these; it
+      # deliberately ignores DATABASE_URL so a stray secret cannot point the
+      # suite at a real database.
+      TEST_PG_HOST: localhost
+      TEST_PG_USER: postgres
+      TEST_PG_PASSWORD: postgres
+    defaults:
+      run:
+        working-directory: portfolio-saas/backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      # A model edited without its migration deploys cleanly and then fails at
+      # runtime on the first query. Catch the drift here instead.
+      - name: Check for missing migrations
+        run: python manage.py makemigrations --check --dry-run
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings_test
+      - run: python -m pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: portfolio-saas/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: portfolio-saas/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  # Reports whether deployment is configured yet. Without this the deploy job
+  # would go red on every push until the secrets exist, training everyone to
+  # ignore a red build -- the one signal that has to stay meaningful.
+  deploy-configured:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        run: |
+          if [ -n "${{ secrets.VPS_HOST }}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::VPS secrets are not set; skipping deploy."
+          fi
+
+  deploy:
+    needs: [backend, frontend, deploy-configured]
+    if: >-
+      github.ref == 'refs/heads/main'
+      && github.event_name == 'push'
+      && needs.deploy-configured.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    # A GitHub Environment gives this job its own secrets and an optional
+    # manual approval gate; add reviewers there if a deploy should ever pause.
+    environment: production
+    steps:
+      - name: Deploy origin/main to the VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+              "${VPS_USER}@${VPS_HOST}" 'bash -euo pipefail -s' <<'REMOTE'
+          repo=/opt/apps/portfolio-repo
+          cd "$repo"
+          git fetch --prune origin main
+          # --hard, not merge: the server mirrors origin/main exactly and has no
+          # local commits worth keeping. Untracked files are left alone, which
+          # is what keeps .env.production (gitignored) in place across deploys.
+          git reset --hard origin/main
+          cd "$repo/portfolio-saas"
+          # deploy.sh takes it from here: backup, build, migrate, restart, then
+          # verify both Celery workers and three health endpoints. It exits
+          # non-zero on any failed check, which fails this job.
+          ./scripts/deploy.sh
+          REMOTE
+
+      - name: Report the deployed revision
+        if: always()
+        run: echo "Deployed ${{ github.sha }} to production."
