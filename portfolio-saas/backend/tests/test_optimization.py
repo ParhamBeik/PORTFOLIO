@@ -2222,10 +2222,6 @@ def test_real_estate_is_excluded_from_weights_but_stated_in_coverage():
 # math itself).
 
 
-def _dates_risk_breakdown(n, start="2024-01-01"):
-    return pd.date_range(start, periods=n, freq="D", tz="UTC")
-
-
 # ---------- Sortino annualization -------------------------------------------
 
 

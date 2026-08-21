@@ -32,6 +32,14 @@ install genuinely needs them:
 
    Without the extension (CI, a plain-Postgres install) only step 1 of the tick
    work applies and the table stays an ordinary one.
+
+   **Trap, and the reason a whole migration once existed to work around it:**
+   `uniq_stock_tick_symbol_date_row_time` is created below as a bare
+   `CREATE UNIQUE INDEX`, never `ADD CONSTRAINT`, while Django's migration state
+   still records it as a `UniqueConstraint`. A future declarative
+   `RemoveConstraint` on that name emits `ALTER TABLE ... DROP CONSTRAINT` and
+   dies with `UndefinedObject`. Drop it with `SeparateDatabaseAndState`, doing
+   `DROP CONSTRAINT IF EXISTS` *and* `DROP INDEX IF EXISTS` on the database side.
 """
 from django.db import migrations
 
