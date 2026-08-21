@@ -938,6 +938,40 @@ def test_stock_silent_beyond_five_sessions_is_still_dropped(
 
 
 @pytest.mark.django_db
+def test_dynamic_series_query_count_is_flat_in_window_length(
+    asset_catalog, write_prices, make_user
+):
+    """Staleness is asked per asset per day; it must not be a query per ask."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+    from portfolio.services.returns import to_jalali_str
+
+    asset = asset_catalog["kama_stock"]
+    asset.tse_symbol = "کاما"
+    asset.save(update_fields=["tse_symbol"])
+    write_prices({"kama_stock": Decimal("3000"), "usd_cash": Decimal("60000")})
+    now = timezone.now()
+    _write_candles("کاما", [to_jalali_str(now - timedelta(days=40))])
+
+    user = make_user(email="queries@test.test")
+    account = Account.objects.create(user=user, name="Queries")
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("100"))
+
+    cache.clear()
+    with CaptureQueriesContext(connection) as short:
+        compute_dynamic_net_worth_series(user, account, days=10)
+    cache.clear()
+    with CaptureQueriesContext(connection) as long:
+        compute_dynamic_net_worth_series(user, account, days=90)
+
+    assert len(long) == len(short), (
+        f"query count grew with the window ({len(short)} -> {len(long)}): "
+        "the session calendar is being refetched inside the day loop"
+    )
+
+
+@pytest.mark.django_db
 def test_recorded_snapshots_are_never_discarded_for_an_estimate(
     make_user, asset_catalog, write_prices
 ):

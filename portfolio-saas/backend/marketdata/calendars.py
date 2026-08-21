@@ -16,6 +16,8 @@ Getting this wrong in either direction is a real failure mode: too lenient hides
 an ingest hole, too strict flags every weekend as broken.
 """
 
+from bisect import bisect_right
+
 from django.db.models import Count, Sum
 from django.core.cache import cache
 
@@ -128,7 +130,41 @@ def actual_trading_days(*, start=None, end=None, window_days=None):
     return result
 
 
-def sessions_between(last_date: str, as_of: str, *, market: str) -> int:
+def session_calendar(market: str, *, start: str, end: str) -> list[str]:
+    """Sorted Jalali days the given market held a session, within [start, end].
+
+    Deliberately the raw distinct-date set, not the breadth-gated
+    `actual_trading_days`/`gold_currency_quoting_days`. Those exist to score
+    coverage, where a thin feed defining its own calendar is circular. Here a
+    single symbol printing is proof the market was open, and gating on breadth
+    would silently report "not stale" for any window the gate cannot vouch for
+    -- failing open on exactly the question this calendar is asked to answer.
+    """
+    if market == "tse":
+        queryset = MarketCandle.objects.filter(timeframe=MarketCandle.ADJUSTED)
+        field = "date_time"
+    elif market == "gold_currency":
+        from .models import GoldCurrencyHistory
+
+        queryset = GoldCurrencyHistory.objects.all()
+        field = "date"
+    else:
+        raise ValueError(f"unknown market calendar: {market!r}")
+    # `date_time` carries both "1405-05-09" and "1405-05-09 00:00:00"; the upper
+    # bound is extended to end-of-day for the same reason candle_close_qs does
+    # it, and the day is taken from the first 10 chars so the two spellings of
+    # one session are not counted as two.
+    days = (
+        queryset.filter(**{f"{field}__gte": start, f"{field}__lte": end + " 23:59:59"})
+        .values_list(field, flat=True)
+        .distinct()
+    )
+    return sorted({str(day)[:10] for day in days})
+
+
+def sessions_between(
+    last_date: str, as_of: str, *, market: str | None = None, calendar=None
+) -> int:
     """Market sessions strictly after `last_date` and up to `as_of`, inclusive.
 
     The one blessed answer to "how stale is this price?", shared by every
@@ -141,37 +177,16 @@ def sessions_between(last_date: str, as_of: str, *, market: str) -> int:
     error: the Thursday/Friday weekend and a public holiday burn days without
     burning sessions, so a five-session bound fires after three real sessions.
     Both mistakes shipped simultaneously before this helper existed.
+
+    Pass `calendar` (from `session_calendar`) when asking repeatedly over one
+    window -- the chart walks 90 days per asset and would otherwise issue a
+    query per asset per day.
     """
     if not last_date or not as_of or last_date >= as_of:
         return 0
-    if market == "tse":
-        queryset = MarketCandle.objects.filter(timeframe=MarketCandle.ADJUSTED)
-        field = "date_time"
-    elif market == "gold_currency":
-        from .models import GoldCurrencyHistory
-
-        queryset = GoldCurrencyHistory.objects.all()
-        field = "date"
-    else:
-        raise ValueError(f"unknown market calendar: {market!r}")
-    # Deliberately the raw distinct-date set, not the breadth-gated
-    # `actual_trading_days`/`gold_currency_quoting_days`. Those exist to score
-    # coverage, where a thin feed defining its own calendar is circular. Here a
-    # single symbol printing is proof the market was open, and gating on breadth
-    # would silently return "not stale" for any window the gate cannot vouch for
-    # -- failing open on exactly the question this bound is asked to answer.
-    # `date_time` carries both "1405-05-09" and "1405-05-09 00:00:00"; the upper
-    # bound is extended to end-of-day for the same reason candle_close_qs does
-    # it, and the day is taken from the first 10 chars so the two spellings of
-    # one session are not counted as two.
-    days = (
-        queryset.filter(
-            **{f"{field}__gt": last_date, f"{field}__lte": as_of + " 23:59:59"}
-        )
-        .values_list(field, flat=True)
-        .distinct()
-    )
-    return len({str(day)[:10] for day in days})
+    if calendar is None:
+        calendar = session_calendar(market, start=last_date, end=as_of)
+    return bisect_right(calendar, as_of) - bisect_right(calendar, last_date)
 
 
 def market_for_asset(asset) -> str:

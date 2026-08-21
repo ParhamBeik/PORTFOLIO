@@ -580,6 +580,7 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     from marketdata.calendars import (
         candle_close_qs,
         market_for_asset,
+        session_calendar,
         sessions_between,
     )
     from marketdata.models import GoldCurrencyHistory
@@ -662,6 +663,19 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
         if key not in last_known_prices:
             last_known_prices[key] = _q(latest_prices.get(key, 0))
 
+    # Fetched once for the whole window rather than per asset per day: the loop
+    # below asks the same staleness question up to `days` x len(assets) times.
+    # It has to reach back to the oldest primed close, not just to the window
+    # start -- an asset last priced before the window opened is measured from
+    # that older date, and a calendar starting later would undercount the gap
+    # and keep forward-filling a price that should already have been dropped.
+    today_jalali = jdatetime.date.fromgregorian(date=now.date()).strftime("%Y-%m-%d")
+    calendar_start = min([window_start_jalali, *last_priced_date.values()])
+    calendars = {
+        market: session_calendar(market, start=calendar_start, end=today_jalali)
+        for market in {market_for_asset(asset) for asset in assets.values()}
+    }
+
     liabilities = Liability.objects.filter(account__in=accounts)
     total_liabilities = sum(l.amount_tomans for l in liabilities)
 
@@ -698,7 +712,9 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
                     last_real_date = last_priced_date.get(key)
                     if last_real_date is not None:
                         stale = sessions_between(
-                            last_real_date, jalali_str, market=market_for_asset(asset)
+                            last_real_date,
+                            jalali_str,
+                            calendar=calendars[market_for_asset(asset)],
                         )
                         if stale > MAX_FORWARD_FILL_SESSIONS:
                             continue  # gap exceeded: don't invent a price
