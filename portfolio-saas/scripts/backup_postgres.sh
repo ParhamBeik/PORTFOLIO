@@ -29,9 +29,26 @@ trap 'rm -f "${partial}"' EXIT
       -pass "file:${passphrase_file}" -out "${partial}"
 mv "${partial}" "${destination}"
 
+# Verify the artifact decrypts into a readable archive. `pg_restore --list`
+# only reads the table of contents at the head of a custom-format dump and then
+# exits 0 -- it never drains the rest of the stream. openssl is consequently
+# still writing into a closed pipe, takes EPIPE ("error writing output file")
+# and exits 1, which under `pipefail` failed this script every single time,
+# right before the checksum below. That is why no daily-*.sha256 or
+# backup-evidence-*.json has ever existed on the server, and why deploy.sh --
+# which runs this first under `set -e` -- could never get past its backup step.
+# Judge the verification on pg_restore's status alone; openssl's EPIPE is the
+# expected consequence of a successful early exit, not a failure.
+set +o pipefail
 openssl enc -d -aes-256-cbc -pbkdf2 -iter 310000 \
-  -pass "file:${passphrase_file}" -in "${destination}" \
+  -pass "file:${passphrase_file}" -in "${destination}" 2>/dev/null \
   | "${compose[@]}" exec -T db pg_restore --list >/dev/null
+verify_status="${PIPESTATUS[1]}"
+set -o pipefail
+[[ "${verify_status}" -eq 0 ]] || {
+  echo "Backup verification failed: ${destination} did not decrypt into a readable archive." >&2
+  exit 1
+}
 checksum="$(sha256sum "${destination}" 2>/dev/null | awk '{print $1}' || shasum -a 256 "${destination}" | awk '{print $1}')"
 printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" > "${destination}.sha256"
 

@@ -128,6 +128,10 @@ jobs:
           # is what keeps .env.production (gitignored) in place across deploys.
           git reset --hard origin/main
           cd "$repo/portfolio-saas"
+          # deploy.sh takes a backup first, and backup_postgres.sh refuses to run
+          # without this. The passphrase lives outside /root so the unprivileged
+          # deploy user can read it.
+          export BACKUP_PASSPHRASE_FILE=/etc/portfolio/backup.pass
           # deploy.sh takes it from here: backup, build, migrate, restart, then
           # verify both Celery workers and three health endpoints. It exits
           # non-zero on any failed check, which fails this job.
