@@ -182,7 +182,8 @@ def _trim_to_contiguous(panel: pd.DataFrame) -> pd.DataFrame:
     shut. Trimming there discarded a decade of history over the 83-day 1404-1405
     closure, which is why every lookback window used to return the same ~55
     sessions. Closure-explained breaks are kept; `_mask_closure_returns` removes
-    the one distorted return that spans them.
+    the distorted return each asset carries across them -- per asset, because
+    they do not all resume on the day the exchange does.
     """
     index = panel.index
     if len(index) < 2:
@@ -231,6 +232,9 @@ def _mask_closure_returns(returns: pd.DataFrame, panel: pd.DataFrame) -> pd.Data
         if len(observed) < 2:
             continue
         spans = (observed[1:] - observed[:-1]).days
+        # Scalar sets, deliberately. A closure leaves ~one breach per column, so
+        # batching them per column adds an index intersection to save a single
+        # assignment: measured at 1000 instruments that is 218 ms against 178 ms.
         for day in observed[1:][spans > MAX_OUTAGE_CALENDAR_DAYS]:
             if day in returns.index:
                 returns.loc[day, key] = np.nan
