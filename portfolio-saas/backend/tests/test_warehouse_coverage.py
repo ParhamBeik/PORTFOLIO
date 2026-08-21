@@ -1379,14 +1379,57 @@ def test_the_return_bridging_a_long_break_is_masked():
         ]
     )
     returns = pd.DataFrame({"کاما": [0.01, 0.02, 0.90, 0.01]}, index=index)
+    panel = pd.DataFrame({"کاما": [100.0, 102.0, 194.0, 196.0]}, index=index)
 
-    masked = _mask_closure_returns(returns.copy(), index)
+    masked = _mask_closure_returns(returns.copy(), panel)
 
     assert pd.isna(masked.loc[index[2], "کاما"])  # the 90% bridge is gone
     # Everything either side survives -- this is the whole point of not trimming.
     assert masked.loc[index[0], "کاما"] == 0.01
     assert masked.loc[index[1], "کاما"] == 0.02
     assert masked.loc[index[3], "کاما"] == 0.01
+
+
+def test_an_asset_resuming_after_the_market_is_still_masked():
+    """Unit test: pure frame arithmetic, and the whole point is one column.
+
+    The war closure reopened the exchange on 2026-05-19, so the panel index
+    carries a single 83-day jump there. Gold resumed with the market; کاما did
+    not trade until 2026-05-24. Masking only the index's bridging row leaves the
+    stock's 88-day move sitting on a later date, published as one day's return.
+    """
+    index = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2026-02-25", tz=dt.timezone.utc),
+            pd.Timestamp("2026-05-19", tz=dt.timezone.utc),  # market reopens
+            pd.Timestamp("2026-05-24", tz=dt.timezone.utc),  # کاما reopens
+        ]
+    )
+    panel = pd.DataFrame(
+        {
+            "gold_18k_gram": [100.0, 130.0, 131.0],
+            "کاما": [1872.0, float("nan"), 2613.0],  # silent on reopening day
+        },
+        index=index,
+    )
+    returns = pd.DataFrame(
+        {"gold_18k_gram": [float("nan"), 0.30, 0.008],
+         "کاما": [float("nan"), float("nan"), 0.396]},
+        index=index,
+    )
+
+    masked = _mask_closure_returns(returns.copy(), panel)
+
+    assert pd.isna(masked.loc[index[1], "gold_18k_gram"]), (
+        "gold resumed with the market; its bridging return must still go"
+    )
+    assert pd.isna(masked.loc[index[2], "کاما"]), (
+        "the stock's 88-day move was published as a single day's return because "
+        "it resumed after the day the index-wide mask looks at"
+    )
+    # The move is not a daily return; the price behind it is real and untouched.
+    assert panel.loc[index[2], "کاما"] == 2613.0
+    assert masked.loc[index[2], "gold_18k_gram"] == 0.008
 
 
 # ----------------------------------------------------------------------

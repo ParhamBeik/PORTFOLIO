@@ -198,24 +198,42 @@ def _trim_to_contiguous(panel: pd.DataFrame) -> pd.DataFrame:
     return panel.iloc[breaks[-1] + 1:]
 
 
-def _mask_closure_returns(returns: pd.DataFrame, panel_index: pd.Index) -> pd.DataFrame:
-    """NaN the single return that spans an exchange closure.
+def _mask_closure_returns(returns: pd.DataFrame, panel: pd.DataFrame) -> pd.DataFrame:
+    """NaN each return that spans a long break in *its own* asset's history.
 
     Reopening after 83 shut days produces one row holding nearly three months of
     price movement. It is a real move, but it is not a daily return, and feeding
     it to an annualized volatility or a covariance estimate corrupts both. The
     history either side stays; only the bridging observation is dropped.
+
+    Measured per column, not on the panel index, because assets do not all
+    resume on the day the exchange does. Read from the index, the war closure is
+    a single 83-day jump from 2026-02-25 to 2026-05-19, and masking that one row
+    is right for everything that reopened with the market. `کاما` did not: its
+    first post-halt price is 2026-05-24, five sessions later. Its 88-day move
+    therefore lands on a date the index-wide mask never looks at, and shipped as
+    a +39.6% single-day return with 54.8% of the book behind it.
+
+    Per column the span is measured between an asset's own consecutive
+    observations, so the mask follows each asset to whatever day it actually
+    resumed. A market-wide closure still works: it is simply the case where
+    every column broke at once.
+
+    The prices themselves are untouched and correct; only the claim that this
+    move happened in one day is withdrawn.
     """
-    if returns.empty or len(panel_index) < 2:
+    if returns.empty or panel.empty:
         return returns
-    spans = (panel_index[1:] - panel_index[:-1]).days
-    bridging = [
-        panel_index[i + 1] for i, days in enumerate(spans)
-        if days > MAX_OUTAGE_CALENDAR_DAYS
-    ]
-    for day in bridging:
-        if day in returns.index:
-            returns.loc[day] = np.nan
+    for key in returns.columns:
+        if key not in panel.columns:
+            continue
+        observed = panel.index[panel[key].notna()]
+        if len(observed) < 2:
+            continue
+        spans = (observed[1:] - observed[:-1]).days
+        for day in observed[1:][spans > MAX_OUTAGE_CALENDAR_DAYS]:
+            if day in returns.index:
+                returns.loc[day, key] = np.nan
     return returns
 
 
@@ -872,7 +890,7 @@ def _build_returns_matrix(
     returns = filled.pct_change(fill_method=None)
     # History either side of an exchange closure is kept (see _trim_to_contiguous),
     # so the one row bridging it holds months of movement. Drop just that row.
-    returns = _mask_closure_returns(returns, panel.index)
+    returns = _mask_closure_returns(returns, panel)
     excluded: list[dict] = []
     warnings: list[dict] = []
     keep: list[str] = []
