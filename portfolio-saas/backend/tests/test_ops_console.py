@@ -201,6 +201,36 @@ def test_row_counts_never_record_an_unconfirmed_zero(staff_user):
     )
 
 
+def test_repair_metric_zeros_removes_only_bracketed_readings():
+    """Integration test: it is the command's ORM read/write boundary under test,
+    not a pure function, and the whole point is which rows it leaves alone."""
+    from django.core.management import call_command
+
+    base = timezone.now() - timedelta(hours=5)
+    rows = [
+        {"ticks": 0, "candles": 0},        # before either table had rows
+        {"ticks": 100, "candles": 0},
+        {"ticks": 0, "candles": 0},        # phantom: bracketed by 100 and 200
+        {"ticks": 200, "candles": 0},
+    ]
+    for offset, counts in enumerate(rows):
+        OperationalMetricSnapshot.objects.create(
+            captured_at=base + timedelta(hours=offset), database_counts=counts
+        )
+
+    call_command("repair_metric_zeros", "--apply")
+
+    stored = list(
+        OperationalMetricSnapshot.objects.order_by("captured_at")
+        .values_list("database_counts", flat=True)
+    )
+    assert "ticks" not in stored[2], "the bracketed phantom zero was not removed"
+    assert stored[0]["ticks"] == 0, "a leading zero is a table that was genuinely empty"
+    assert all(row["candles"] == 0 for row in stored), (
+        "a table that is empty throughout was rewritten; only bracketed zeros are false"
+    )
+
+
 def test_admin_workflows_filter_and_pagination(staff_user):
     WorkflowRun.objects.create(workflow="archive", outcome="success", endpoint="stock_candle_adjusted")
     WorkflowRun.objects.create(workflow="archive", outcome="failed", endpoint="stock_transaction_ticks")
