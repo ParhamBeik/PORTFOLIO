@@ -26,12 +26,19 @@ import { dateTime, humanize, num } from "../format.js";
 
 const POLL_MS = 10000;
 
-function statusVariant(status) {
-  if (status === "healthy" || status === "fresh") return "good";
-  if (status === "degraded" || status === "stale") return "warn";
-  if (status === "critical") return "critical";
-  return "neutral";
-}
+// Every status-ish string this console renders lands on one of four badge
+// tones. Five near-identical mappers disagreed about the overlap (is "partial"
+// warn or neutral?); one table cannot. Unknown values stay neutral rather than
+// guessing -- including "complete", which has always read as neutral here.
+const TONE = {
+  healthy: "good", fresh: "good", success: "good", pass: "good",
+  degraded: "warn", stale: "warn", partial: "warn", retry: "warn",
+  skipped: "warn", not_assessed: "warn",
+  critical: "critical", failed: "critical", fail: "critical",
+  missing: "critical", blocked_network: "critical", blocked_storage: "critical",
+};
+
+const tone = (value) => TONE[value] || "neutral";
 
 function gb(bytes) {
   if (bytes == null) return "—";
@@ -47,17 +54,6 @@ function Pager({ page, count, pageSize = 25, onPage }) {
       <Button disabled={page >= pages} onClick={() => onPage(page + 1)}>Next</Button>
     </div>
   );
-}
-
-function claimTone(passed) {
-  return passed ? "good" : "warn";
-}
-
-function outcomeVariant(outcome) {
-  if (outcome === "success") return "good";
-  if (outcome === "partial" || outcome === "retry" || outcome === "skipped") return "warn";
-  if (outcome === "failed" || outcome === "blocked_network" || outcome === "blocked_storage") return "critical";
-  return "neutral";
 }
 
 function archiveJobVariant(row) {
@@ -84,13 +80,6 @@ const WH_TABLE_KEYS = new Set([
   "announcements",
   "shareholders",
 ]);
-
-function integrityVariant(status) {
-  if (status === "pass") return "good";
-  if (status === "fail") return "critical";
-  if (status === "not_assessed") return "warn";
-  return "neutral";
-}
 
 function SortHeader({ label, field, ordering, onSort }) {
   const active = ordering === field || ordering === `-${field}`;
@@ -150,7 +139,7 @@ function AssetDetailPanel({ lookup, evidence, error, busy, onAct }) {
       <Card title={`${evidence.identity?.name || evidence.identity?.key || lookup}`} subtitle={`key ${evidence.identity?.key || "—"} · TSE ${evidence.identity?.tse_symbol || "—"} · BRS ${evidence.identity?.brs_symbol || "—"}`}>
         <div className="flex flex-wrap gap-2">
           {claims.map((c) => (
-            <Badge key={c.id} variant={claimTone(c.passed)} title={c.definition} testId={`ops-claim-${c.id}`}>
+            <Badge key={c.id} variant={c.passed ? "good" : "warn"} title={c.definition} testId={`ops-claim-${c.id}`}>
               {c.label}: {c.passed ? "yes" : "no"}
             </Badge>
           ))}
@@ -180,7 +169,7 @@ function AssetDetailPanel({ lookup, evidence, error, busy, onAct }) {
               key: "state",
               header: "State",
               render: (r) => (
-                <Badge variant={liveStatusVariant(archiveJobVariant(r))}>{humanize(archiveJobVariant(r))}</Badge>
+                <Badge variant={tone(archiveJobVariant(r))}>{humanize(archiveJobVariant(r))}</Badge>
               ),
             },
             { key: "stored_rows", header: "Stored", align: "right", render: (r) => num(r.stored_rows) },
@@ -205,7 +194,7 @@ function AssetDetailPanel({ lookup, evidence, error, busy, onAct }) {
           columns={[
             { key: "created_at", header: "When", render: (r) => dateTime(r.created_at) },
             { key: "workflow", header: "Workflow" },
-            { key: "outcome", header: "Outcome", render: (r) => <Badge variant={outcomeVariant(r.outcome)}>{humanize(r.outcome)}</Badge> },
+            { key: "outcome", header: "Outcome", render: (r) => <Badge variant={tone(r.outcome)}>{humanize(r.outcome)}</Badge> },
             { key: "endpoint", header: "Endpoint" },
             { key: "error_code", header: "Error", render: (r) => r.error_code || "—" },
           ]}
@@ -433,17 +422,17 @@ function AssetInspector() {
                           {row.tse_symbol || "—"}{row.brs_symbol ? ` · ${row.brs_symbol}` : ""}
                         </td>
                         <td className="px-3 py-2">
-                          <Badge variant={liveStatusVariant(row.live_status)}>{humanize(row.live_status)}</Badge>
+                          <Badge variant={tone(row.live_status)}>{humanize(row.live_status)}</Badge>
                         </td>
                         <td className="px-3 py-2 tabular text-right text-muted">
                           {row.age_seconds != null ? `${num(row.age_seconds)}s` : "—"}
                         </td>
                         <td className="px-3 py-2">
-                          <Badge variant={integrityVariant(row.integrity_status)}>{humanize(row.integrity_status)}</Badge>
+                          <Badge variant={tone(row.integrity_status)}>{humanize(row.integrity_status)}</Badge>
                         </td>
                         <td className="px-3 py-2">
                           {row.archive_status ? (
-                            <Badge variant={liveStatusVariant(row.archive_status)}>{humanize(row.archive_status)}</Badge>
+                            <Badge variant={tone(row.archive_status)}>{humanize(row.archive_status)}</Badge>
                           ) : (
                             <span className="text-muted">—</span>
                           )}
@@ -488,13 +477,6 @@ const WAREHOUSE_SERIES = [
   { key: "failed", name: "Failed" },
   { key: "not_tried", name: "Not tried" },
 ];
-
-function liveStatusVariant(status) {
-  if (status === "fresh") return "good";
-  if (status === "stale" || status === "partial") return "warn";
-  if (status === "missing" || status === "failed") return "critical";
-  return "neutral";
-}
 
 function totalsToDonut(totals, labels) {
   return Object.entries(totals || {})
@@ -558,7 +540,7 @@ function LiveCoveragePanel({ coverage }) {
           rowKey={(r) => r.key}
           columns={[
             { key: "name", header: "Asset", render: (r) => r.name || r.key },
-            { key: "status", header: "Status", render: (r) => <Badge variant={liveStatusVariant(r.status)}>{humanize(r.status)}</Badge> },
+            { key: "status", header: "Status", render: (r) => <Badge variant={tone(r.status)}>{humanize(r.status)}</Badge> },
             { key: "class", header: "Class", render: (r) => r.asset_class },
             { key: "age", header: "Age", align: "right", render: (r) => (r.age_seconds != null ? `${num(r.age_seconds)}s` : "—") },
             { key: "source", header: "Source", render: (r) => r.source || "—" },
@@ -749,7 +731,7 @@ function WorkflowsPanel({ overview, wf, wfPage, setWfPage }) {
           columns={[
             { key: "created_at", header: "When", render: (r) => dateTime(r.created_at) },
             { key: "workflow", header: "Workflow" },
-            { key: "outcome", header: "Outcome", render: (r) => <Badge variant={outcomeVariant(r.outcome)}>{humanize(r.outcome)}</Badge> },
+            { key: "outcome", header: "Outcome", render: (r) => <Badge variant={tone(r.outcome)}>{humanize(r.outcome)}</Badge> },
             { key: "endpoint", header: "Endpoint", render: (r) => r.endpoint || "—" },
             { key: "symbol", header: "Symbol", render: (r) => r.symbol || "—" },
             { key: "rows_accepted", header: "Accepted", align: "right", render: (r) => num(r.rows_accepted) },
@@ -808,7 +790,7 @@ function ErrorsPanel({ overview, wf, logPage, setLogPage }) {
           columns={[
             { key: "created_at", header: "When", render: (r) => dateTime(r.created_at) },
             { key: "workflow", header: "Workflow" },
-            { key: "outcome", header: "Outcome", render: (r) => <Badge variant={outcomeVariant(r.outcome)}>{humanize(r.outcome)}</Badge> },
+            { key: "outcome", header: "Outcome", render: (r) => <Badge variant={tone(r.outcome)}>{humanize(r.outcome)}</Badge> },
             { key: "symbol", header: "Symbol", render: (r) => r.symbol || "—" },
             { key: "endpoint", header: "Endpoint", render: (r) => r.endpoint || "—" },
             { key: "error_code", header: "Error", render: (r) => r.error_code || "—" },
@@ -901,7 +883,7 @@ function ArchiveJobsPanel({
               key: "state",
               header: "State",
               render: (r) => (
-                <Badge variant={liveStatusVariant(archiveJobVariant(r))}>{humanize(archiveJobVariant(r))}</Badge>
+                <Badge variant={tone(archiveJobVariant(r))}>{humanize(archiveJobVariant(r))}</Badge>
               ),
             },
             { key: "stored", header: "Stored", align: "right", render: (r) => num(r.stored_rows) },
@@ -1217,7 +1199,7 @@ function InfraPanel({ overview, depths, queueTotal, gb }) {
     <div className="space-y-5" data-testid="ops-infra-panel">
       <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-panel-2 px-3 py-2.5">
         <span className="text-sm text-muted">Overall</span>
-        <Badge variant={statusVariant(overview.status)} testId="ops-infra-overall">{humanize(overview.status)}</Badge>
+        <Badge variant={tone(overview.status)} testId="ops-infra-overall">{humanize(overview.status)}</Badge>
       </div>
 
       <InfraMeter
@@ -1237,7 +1219,7 @@ function InfraPanel({ overview, depths, queueTotal, gb }) {
         valueLabel={priceAge != null ? formatAge(priceAge) : humanize(priceFeed.status)}
         pct={pricePct}
         tone={priceTone}
-        badge={<Badge variant={statusVariant(priceFeed.status)}>{humanize(priceFeed.status)}</Badge>}
+        badge={<Badge variant={tone(priceFeed.status)}>{humanize(priceFeed.status)}</Badge>}
         sub={priceThreshold ? `Fresh threshold: ${num(priceThreshold)}s` : undefined}
         testId="ops-infra-price-feed"
       />

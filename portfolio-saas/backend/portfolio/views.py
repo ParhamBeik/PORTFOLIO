@@ -1056,7 +1056,7 @@ class OptimizationView(APIView):
                     "detail": str(exc),
                     "tse_keys": exc.tse_keys,
                     "other_keys": exc.other_keys,
-                    "policy": "docs/F1_POLICY.md",
+                    "policy": "docs/REFERENCE.md",
                 },
                 status=409,
             )
@@ -1105,7 +1105,7 @@ class FrontierView(APIView):
                     "detail": str(exc),
                     "tse_keys": exc.tse_keys,
                     "other_keys": exc.other_keys,
-                    "policy": "docs/F1_POLICY.md",
+                    "policy": "docs/REFERENCE.md",
                 },
                 status=409,
             )

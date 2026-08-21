@@ -93,7 +93,7 @@ def tse_close_to_toman(value):
 
     Returns/universe readers combine provider-verbatim TSE rows with Toman gold
     data and therefore convert here. Portfolio valuation deliberately does not;
-    see the legacy quantity convention in docs/F1_POLICY.md.
+    see the legacy quantity convention in docs/REFERENCE.md.
     """
     if value in (None, ""):
         return None

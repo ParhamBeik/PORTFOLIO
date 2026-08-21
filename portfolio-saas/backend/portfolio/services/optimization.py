@@ -114,7 +114,7 @@ class NoAssetBeatsRiskFreeRate(Exception):
 class MixedUnitUniverseBlocked(Exception):
     """F1 is resolved (TSE_PRICE_UNIT = "rial", storage-wide), so this never
     raises in current operation. Kept as a fail-safe: if TSE_PRICE_UNIT is ever
-    reverted to "unverified" (see docs/F1_POLICY.md), mixed
+    reverted to "unverified" (see docs/REFERENCE.md), mixed
     TSE/non-TSE universes fail closed again instead of silently optimizing
     across a possible 10x unit mismatch.
     """

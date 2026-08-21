@@ -1,19 +1,24 @@
 # portfolio-saas
 
-Subscription, real-time portfolio tracker for the Iranian market (BRS gold/currency/crypto + TSETMC stocks).
+Real-time portfolio tracker for the Iranian market (BRS gold/currency/crypto + TSETMC stocks).
 Multi-user from day one: prices are fetched once globally and shared across every user (see README "Why it scales").
 
 **Stack:** React (JS, Vite, Tailwind 4, echarts) + Django REST + PostgreSQL/TimescaleDB + Redis + Celery, Docker Compose.
-Full API surface, layout tree, and prod deploy steps: [`README.md`](README.md). Price unit policy: [`docs/F1_POLICY.md`](docs/F1_POLICY.md).
+Full API surface, layout tree, and prod deploy steps: [`README.md`](README.md). Price unit policy: [`docs/REFERENCE.md`](docs/REFERENCE.md).
 
 ## Layout
 
-- `backend/config/` — Django project (settings, urls, celery, health)
+- `backend/config/` — Django project: settings, urls, celery, health, `api.py` (JSON rendering + global error translation), `observability.py` (request id, log filter, Sentry, operator alerts)
 - `backend/accounts/` — User model + JWT auth
 - `backend/portfolio/` — user-portfolio domain: models (Asset, Account, Holding, Price, Snapshot, LedgerEntry), `services/` (valuation, ledger, performance, returns, diagnostics, optimization), `live/` (price loop: fetcher, extractor, redis_client), `tasks.py` (Celery heartbeat)
-- `backend/marketdata/` — market-history warehouse, separate bounded context: symbol-keyed tables, no user FKs, BrsApi fetchers, ingest, archive/quota-driven backfill, staff-only Ops console backend
+- `backend/marketdata/` — market-history warehouse, separate bounded context: symbol-keyed tables, no user FKs. `fetchers.py` (every BrsApi client, validated against the `endpoints.py` registry), `ingest.py`, `archive.py`/`quota.py` (gap-driven backfill under a request budget), `calendars.py` (which days a market was open), `admin_api.py` (staff-only Ops console plus its urlpatterns)
+- `backend/tests/` — 11 thematic suites, one per bounded concern; each merges the older single-topic files and keeps their banners
 - `frontend/src/` — `pages/` (Dashboard, Ops, MyOptimal, BestOverall, Family, Ledger, Onboarding), `components/ui.jsx` (shared primitives: Card, StatTile, Async, Table, Button…), `components/charts.jsx` (themed echarts wrappers), `api.js` + `useApi.js` (the one fetch pattern), `format.js` (number/date formatting)
-- `archive/` — legacy Excel pipeline, reference only, not active
+
+Each app has one squashed schema migration (`0001_squashed`, carrying `replaces=`);
+marketdata adds `0002_storage_tuning` for autovacuum triggers and the TimescaleDB
+tick hypertable. Do not resurrect the one-shot data repairs they replaced — those
+have run on every deployed database and a fresh one has nothing to repair.
 
 ## Commands
 
