@@ -140,6 +140,41 @@ def get_cached_db_counts():
     return counts
 
 
+def _latest_tick_day():
+    """Jalali day of the newest transaction tick, without scanning the hypertable.
+
+    `MAX(date)` here cost 9.5 of the Ops overview's 15 seconds. `date` is the
+    Jalali varchar, not the `ts` partition column, so Timescale can exclude no
+    chunks and decompresses its way through tens of millions of rows; asking for
+    `MAX(ts)` instead only brings it to 4.3 s, because the merge still visits
+    every chunk. Timescale already records each chunk's time range, and the
+    newest chunk's start IS the day the newest ticks belong to -- 23 ms, and the
+    same answer. Falls back to the honest scan if the extension is absent.
+    """
+    import jdatetime
+    from django.db import transaction
+
+    try:
+        # Savepoint, not a bare try: without the extension this query errors and
+        # Postgres refuses every later statement in the same transaction, so
+        # catching the Python exception alone would poison the whole request.
+        with transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT range_start FROM timescaledb_information.chunks "
+                "WHERE hypertable_name = %s ORDER BY range_start DESC LIMIT 1",
+                [StockTransactionTick._meta.db_table],
+            )
+            row = cursor.fetchone()
+        if row and row[0] is not None:
+            # Chunks are one UTC day wide and the session (05:00-09:30 UTC)
+            # never straddles that boundary, so the chunk's own start day is
+            # the day its ticks belong to.
+            return jdatetime.date.fromgregorian(date=row[0].date()).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return StockTransactionTick.objects.aggregate(value=Max("date"))["value"]
+
+
 def get_cached_table_bytes():
     cached = cache.get("db_table_bytes_diagnostics")
     if cached is not None:
@@ -161,7 +196,11 @@ def get_cached_table_bytes():
                 sizes[key] = int(row[0]) if row and row[0] is not None else 0
             except Exception:
                 sizes[key] = 0
-    cache.set("db_table_bytes_diagnostics", sizes, 30)
+    # 5 minutes, not 30 seconds: hypertable_size() alone costs ~1.8 s because it
+    # walks every chunk, and on-disk size does not move meaningfully inside a
+    # single ops-page visit. The 30 s window mostly guaranteed each visit paid
+    # the full price again.
+    cache.set("db_table_bytes_diagnostics", sizes, 300)
     return sizes
 
 
@@ -569,7 +608,7 @@ def get_admin_telemetry_context():
         "stock_history_rows": DailyStockHistory.objects.aggregate(value=Max("date"))["value"],
         "gold_currency_rows": GoldCurrencyHistory.objects.aggregate(value=Max("date"))["value"],
         "candles": MarketCandle.objects.aggregate(value=Max("date_time"))["value"],
-        "stock_transaction_ticks": StockTransactionTick.objects.aggregate(value=Max("date"))["value"],
+        "stock_transaction_ticks": _latest_tick_day(),
         "announcements": CodalAnnouncement.objects.aggregate(value=Max("date_publish"))["value"],
         "shareholders": ShareholderRecord.objects.aggregate(value=Max("date"))["value"],
     }
