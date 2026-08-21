@@ -42,7 +42,11 @@ def handle(exc, context):
                 "basis": "real_toman",
                 "requested_jalali_year": exc.jalali_year,
                 "last_verified_jalali_year": exc.last_verified_year,
-                "remedy": "Set CPI_BY_JALALI_YEAR_EXTRA with the missing year.",
+                "remedy": (
+                    "Set CPI_BY_JALALI_YEAR_EXTRA to the published index for "
+                    "that year, or CPI_ESTIMATED_MONTHLY_RATE to project one "
+                    "forward as a labelled estimate."
+                ),
             },
             status=503,
         )

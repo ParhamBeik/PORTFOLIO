@@ -466,10 +466,16 @@ class CpiUnavailable(Exception):
         self.jalali_year = jalali_year
         self.last_verified_year = last_verified_year
         super().__init__(
-            f"CPI unavailable for Jalali year {jalali_year}: table verified "
-            f"only through {last_verified_year}. Set CPI_BY_JALALI_YEAR_EXTRA "
-            f"(JSON, e.g. '{{\"{jalali_year}\": 950.0}}') once the real figure "
-            f"is published."
+            f"Inflation-adjusted values are unavailable for Jalali year "
+            f"{jalali_year}. Converting to real Toman needs a consumer price "
+            f"index for that year, and the table only reaches "
+            f"{last_verified_year} — so the figure cannot be computed without "
+            f"inventing the missing inflation. Nominal Toman, USD and USDT are "
+            f"unaffected. Two ways to resolve it: set CPI_BY_JALALI_YEAR_EXTRA "
+            f"to the published figure (JSON, e.g. '{{\"{jalali_year}\": 950.0}}'), "
+            f"or set CPI_ESTIMATED_MONTHLY_RATE to an estimated monthly "
+            f"inflation rate, which projects forward from {last_verified_year} "
+            f"and is labelled as an estimate everywhere it is used."
         )
 
 
@@ -492,7 +498,10 @@ RISK_FREE_RATE_SOURCE = (
     "years remain the prior hand-maintained estimates"
 )
 
-# Cumulative annual CPI index derived from SCI annual CPI releases, base 1398=100.
+# Cumulative CPI index, base 1398=100. Each entry anchors 1 Farvardin of its
+# year; `cpi_for_date` interpolates between consecutive anchors, so year N's
+# inflation is encoded in the gap between anchor N and anchor N+1 -- which is
+# why the newest anchor alone leaves its own year deflating flat.
 CPI_BY_JALALI_YEAR = {
     1398: 100.0,
     1399: 136.4,
@@ -502,16 +511,56 @@ CPI_BY_JALALI_YEAR = {
     1403: 519.8,
     1404: 680.9,
 }
+# Everything above is a published SCI figure. Anything added below is not.
+CPI_VERIFIED_THROUGH_YEAR = max(CPI_BY_JALALI_YEAR)
+
+# Operator estimate for years SCI has not published yet. Set to 0.0 to restore
+# strict behaviour (any unpublished year raises CpiUnavailable).
+#
+# 6.5%/month compounds to +112%/year. That is roughly TRIPLE the pace of the
+# verified series above, whose annual steps run 36.4 / 40.2 / 45.8 / 40.7 /
+# 32.5 / 31.0 percent -- about 2.5%/month. This figure is an operator judgement
+# that the regime broke, not a continuation of the trend, and it is deliberately
+# separated from the verified table so nothing downstream can mistake it for one.
+CPI_ESTIMATED_MONTHLY_RATE = float(os.environ.get("CPI_ESTIMATED_MONTHLY_RATE", "0.065"))
+# How far past the verified table the estimate may run. Two years is the minimum
+# that makes the *current* year deflate at all: the current year needs its own
+# anchor and the next one to interpolate between.
+CPI_ESTIMATE_MAX_YEARS = int(os.environ.get("CPI_ESTIMATE_MAX_YEARS", "2"))
+
+CPI_ESTIMATED_YEARS = set()
+if CPI_ESTIMATED_MONTHLY_RATE > 0:
+    _cpi_anchor = CPI_BY_JALALI_YEAR[CPI_VERIFIED_THROUGH_YEAR]
+    for _ahead in range(1, CPI_ESTIMATE_MAX_YEARS + 1):
+        _year = CPI_VERIFIED_THROUGH_YEAR + _ahead
+        CPI_BY_JALALI_YEAR[_year] = _cpi_anchor * (1 + CPI_ESTIMATED_MONTHLY_RATE) ** (12 * _ahead)
+        CPI_ESTIMATED_YEARS.add(_year)
+
 # Extend without a code deploy once a new year's figure is published, e.g.
-# CPI_BY_JALALI_YEAR_EXTRA='{"1405": 950.0}'. Keys may be str or int.
+# CPI_BY_JALALI_YEAR_EXTRA='{"1405": 950.0}'. Keys may be str or int. A real
+# figure supersedes the estimate for that year and is marked verified again.
 _cpi_extra_raw = os.environ.get("CPI_BY_JALALI_YEAR_EXTRA", "")
 if _cpi_extra_raw:
     import json as _json
 
-    CPI_BY_JALALI_YEAR.update(
-        {int(year): float(value) for year, value in _json.loads(_cpi_extra_raw).items()}
+    _cpi_extra = {int(year): float(value) for year, value in _json.loads(_cpi_extra_raw).items()}
+    CPI_BY_JALALI_YEAR.update(_cpi_extra)
+    CPI_ESTIMATED_YEARS -= set(_cpi_extra)
+    CPI_VERIFIED_THROUGH_YEAR = max(
+        year for year in CPI_BY_JALALI_YEAR if year not in CPI_ESTIMATED_YEARS
     )
-CPI_SOURCE = "Statistical Center of Iran annual CPI releases; manually reviewed through 1404"
+
+CPI_SOURCE = (
+    f"Statistical Center of Iran annual CPI releases, verified through "
+    f"{CPI_VERIFIED_THROUGH_YEAR}"
+    + (
+        f"; {'/'.join(str(year) for year in sorted(CPI_ESTIMATED_YEARS))} are an "
+        f"OPERATOR ESTIMATE at {CPI_ESTIMATED_MONTHLY_RATE:.1%}/month, not a "
+        f"published figure"
+        if CPI_ESTIMATED_YEARS
+        else ""
+    )
+)
 
 
 def rate_for(jalali_year):

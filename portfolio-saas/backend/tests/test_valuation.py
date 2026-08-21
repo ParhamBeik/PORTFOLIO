@@ -1082,6 +1082,35 @@ def test_cpi_for_raises_instead_of_clamping_past_the_table():
     assert exc.value.last_verified_year < 9999
 
 
+def test_projected_cpi_years_are_never_counted_as_published():
+    """Unit test: pure configuration arithmetic, no I/O.
+
+    The estimate exists so real_toman works in the current year; it must not
+    acquire the authority of an SCI release on the way. Anything that reports
+    provenance has to keep the two apart.
+    """
+    from django.conf import settings
+
+    estimated = settings.CPI_ESTIMATED_YEARS
+    if not estimated:
+        pytest.skip("estimation disabled via CPI_ESTIMATED_MONTHLY_RATE=0")
+
+    assert settings.CPI_VERIFIED_THROUGH_YEAR < min(estimated), (
+        "an estimated year was folded into the verified range"
+    )
+    assert "ESTIMATE" in settings.CPI_SOURCE, (
+        "CPI_SOURCE is the provenance string shipped in the valuation payload; "
+        "it must disclose that a projected index was used"
+    )
+    # Each projected anchor compounds the configured monthly rate over 12 months
+    # from the last published one -- not from the previous projection's rounding.
+    base = settings.CPI_BY_JALALI_YEAR[settings.CPI_VERIFIED_THROUGH_YEAR]
+    for year in sorted(estimated):
+        ahead = year - settings.CPI_VERIFIED_THROUGH_YEAR
+        expected = base * (1 + settings.CPI_ESTIMATED_MONTHLY_RATE) ** (12 * ahead)
+        assert settings.CPI_BY_JALALI_YEAR[year] == pytest.approx(expected)
+
+
 def test_cpi_extrapolates_below_the_base_year_on_purpose():
     # Flat before the base year is defined behaviour, not a missing value.
     assert cpi_for(1000) == cpi_for(1398)

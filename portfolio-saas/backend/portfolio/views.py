@@ -741,7 +741,10 @@ def _express_real_toman(valuation: dict) -> dict:
     """Deflate a live Toman valuation by the last published SCI CPI vintage."""
     _rescale(valuation, Decimal(str(cpi_for_date(timezone.now()))) / Decimal("100"))
     valuation["basis"] = "real_toman"
-    valuation["cpi_vintage_year"] = max(settings.CPI_BY_JALALI_YEAR)
+    valuation["cpi_vintage_year"] = settings.CPI_VERIFIED_THROUGH_YEAR
+    # The deflator may have used an estimated anchor. Say so rather than letting
+    # a projected index pass for a published one.
+    valuation["cpi_estimated_years"] = sorted(settings.CPI_ESTIMATED_YEARS)
     valuation["cpi_source"] = settings.CPI_SOURCE
     return valuation
 
