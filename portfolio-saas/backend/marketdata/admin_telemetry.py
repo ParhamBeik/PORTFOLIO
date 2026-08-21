@@ -63,7 +63,13 @@ DATABASE_MODELS = {
 }
 
 OVERVIEW_CACHE_KEY = "admin_ops_overview"
-OVERVIEW_CACHE_TTL = 15
+# Matches the `capture_operational_metrics` beat interval, which rebuilds this
+# straight after invalidating it. A 15-second TTL on a payload that takes
+# multiple seconds to assemble meant essentially every visit was a cache miss
+# and every operator paid the full cost -- the entire reason the Ops page felt
+# broken. The payload carries `generated_at`, and the view still honours
+# `?refresh=1`, so staleness is both visible and escapable.
+OVERVIEW_CACHE_TTL = 15 * 60
 
 
 def _iso(value):

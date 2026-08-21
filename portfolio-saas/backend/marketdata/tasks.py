@@ -741,7 +741,11 @@ def weekly_warehouse_audit():
 @shared_task(ignore_result=True)
 def capture_operational_metrics():
     """Capture one idempotent 15-minute ops point and retain 90 days."""
-    from marketdata.admin_telemetry import collect_metric_payload, invalidate_ops_cache
+    from marketdata.admin_telemetry import (
+        collect_metric_payload,
+        get_ops_overview,
+        invalidate_ops_cache,
+    )
     from marketdata.models import OperationalMetricSnapshot, WorkflowRun
     from marketdata.workflows import WorkflowOutcome
 
@@ -758,6 +762,14 @@ def capture_operational_metrics():
         defaults=payload,
     )
     invalidate_ops_cache()
+    # Rebuild it here rather than leaving the next operator to pay for it.
+    # Invalidating alone meant whoever opened the Ops page after this task ran
+    # reassembled the whole payload themselves, and the slowest piece of it --
+    # hypertable_size() over 528 chunks -- was measured at 10 s.
+    try:
+        get_ops_overview()
+    except Exception:
+        logger.warning("ops overview cache re-warm failed", exc_info=True)
     OperationalMetricSnapshot.objects.filter(
         captured_at__lt=now - timedelta(days=90)
     ).delete()
