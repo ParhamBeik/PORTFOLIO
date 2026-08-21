@@ -459,7 +459,7 @@ def test_currency_conversion_has_one_unit_driven_rule(
 
 
 def test_symbol_matching_never_uses_substrings():
-    from marketdata.catalog import find_symbol_record
+    from portfolio.live import find_symbol_record
 
     rows = [
         {"l18": "KAMA1", "l30": "KAMA Holdings"},

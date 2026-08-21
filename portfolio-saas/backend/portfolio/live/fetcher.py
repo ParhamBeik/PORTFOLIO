@@ -8,7 +8,7 @@ from django.conf import settings
 
 from marketdata.fetchers import MarketDataFetchError, fetch_json
 from marketdata.quota import LIVE, QuotaExhausted
-from marketdata.catalog import find_symbol_record
+from portfolio.live import find_symbol_record
 
 logger = logging.getLogger(__name__)
 
