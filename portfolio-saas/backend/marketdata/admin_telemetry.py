@@ -111,7 +111,12 @@ def _hypertables():
     except Exception:
         # No timescaledb extension here (plain Postgres, CI): every table is a
         # normal relation and the plain lookups below are already correct.
-        names = set()
+        # Deliberately NOT cached. A transient failure used to pin an empty set
+        # for five minutes, and every count taken in that window read the
+        # hypertable *parent* -- which genuinely holds 0 rows -- so the tick
+        # table appeared to collapse to zero and recover. That is exactly the
+        # phantom gap seen in the warehouse-growth chart on 2026-08-16/17.
+        return set()
     cache.set(cache_key, sorted(names), 300)
     return names
 
@@ -138,7 +143,17 @@ def get_cached_db_counts():
                         "SELECT reltuples FROM pg_class WHERE relname = %s", [table_name]
                     )
                 row = cursor.fetchone()
-                counts[key] = int(row[0]) if row and row[0] is not None and row[0] >= 0 else model.objects.count()
+                # `> 0`, not `>= 0`: a zero estimate is either a table that
+                # really is empty -- in which case COUNT(*) is free -- or a
+                # measurement that looked in the wrong place, which is what
+                # made a 41.6M-row table chart as zero. Never record a zero we
+                # have not confirmed.
+                estimate = row[0] if row else None
+                counts[key] = (
+                    int(estimate)
+                    if estimate is not None and estimate > 0
+                    else model.objects.count()
+                )
             except Exception:
                 counts[key] = model.objects.count()
 

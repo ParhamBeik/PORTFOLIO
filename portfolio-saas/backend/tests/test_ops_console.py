@@ -144,6 +144,63 @@ def test_cached_overview_still_reports_live_health(staff_user):
         assert key in second.json(), f"live health key {key!r} missing from a cached response"
 
 
+def test_hypertable_lookup_failure_is_never_cached(monkeypatch):
+    """A transient failure must not pin "there are no hypertables" for 5 minutes.
+
+    While that empty set was cached, every row count read the hypertable
+    *parent*, which genuinely holds zero rows -- so a 41.6M-row tick table
+    charted as a collapse to zero and back. That is the phantom gap the
+    warehouse-growth chart showed on 2026-08-16/17.
+    """
+    from django.core.cache import cache
+    import marketdata.admin_telemetry as telemetry
+
+    cache.clear()
+
+    class Boom:
+        def cursor(self):
+            raise RuntimeError("timescaledb_information is unavailable")
+
+    monkeypatch.setattr(telemetry, "connection", Boom())
+    assert telemetry._hypertables() == set()
+    assert cache.get("admin_hypertable_names") is None, (
+        "a failed hypertable lookup was cached; row counts will read the "
+        "empty parent relation until it expires"
+    )
+
+
+def test_row_counts_never_record_an_unconfirmed_zero(staff_user):
+    """A zero estimate must be confirmed by a real count before it is reported.
+
+    Analysing the table while it is empty and inserting afterwards reproduces
+    the production shape exactly: a stale statistic that says zero about a
+    table that has rows. Trusting it is what charted 41.6M ticks as a gap.
+    """
+    from django.core.cache import cache
+    from django.db import connection
+    from marketdata.admin_telemetry import get_cached_db_counts
+    from marketdata.models import StockTransactionTick
+
+    with connection.cursor() as cursor:
+        cursor.execute(f"ANALYZE {StockTransactionTick._meta.db_table}")
+        cursor.execute(
+            "SELECT reltuples FROM pg_class WHERE relname = %s",
+            [StockTransactionTick._meta.db_table],
+        )
+        assert cursor.fetchone()[0] == 0, "expected a zero estimate to test against"
+
+    StockTransactionTick.objects.create(
+        symbol="کاما", date="1405-05-28", row=1, time="09:00:00",
+        price=Decimal("3000"), volume=10,
+    )
+    cache.clear()
+    counts = get_cached_db_counts()
+    assert counts["stock_transaction_ticks"] == 1, (
+        "a table with rows reported zero; the estimate was trusted without "
+        "falling back to a real count"
+    )
+
+
 def test_admin_workflows_filter_and_pagination(staff_user):
     WorkflowRun.objects.create(workflow="archive", outcome="success", endpoint="stock_candle_adjusted")
     WorkflowRun.objects.create(workflow="archive", outcome="failed", endpoint="stock_transaction_ticks")
