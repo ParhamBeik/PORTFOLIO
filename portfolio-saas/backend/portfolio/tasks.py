@@ -22,6 +22,7 @@ from portfolio.services import asset_value, invalidate_prices_cache
 from portfolio.services.valuation import (
     _archive_replacements,
     current_market_state,
+    fetch_sessions,
     guard_price_map,
 )
 from portfolio.live.extractor import extract_standard_prices
@@ -112,30 +113,9 @@ def run_price_fetch(*, dry_run=False):
         }
         current_state = current_market_state()
         verified_close_keys = set()
-        # What session each key's price is from. A key quoted this cycle is
-        # from now; a key that went unquoted -- which is every TSE symbol the
-        # moment the session closes -- keeps the session of whatever is already
-        # stored. Reporting "now" for those too would say the archive is behind
-        # a price that does not exist, and reporting nothing would let an older
-        # archive close overwrite the last price the session actually printed.
-        # The write path decides what becomes a Price row, so getting this
-        # wrong here bakes yesterday's number into today's newest observation.
-        fetched_now = timezone.now()
-        stored_fetched_at = {
-            row.asset.key: row.fetched_at
-            for row in Price.objects.select_related("asset")
-            .filter(asset__key__in=live_prices.keys(), price__gt=0)
-            .order_by("asset_id", "-fetched_at", "-id")
-            .distinct("asset_id")
-        }
-        live_fetched_at = {}
-        for key, value in live_prices.items():
-            when = fetched_now if Decimal(str(value or 0)) > 0 else stored_fetched_at.get(key)
-            if when is not None:
-                live_fetched_at[key] = when
         archive_replacements = _archive_replacements(
             live_prices,
-            live_fetched_at=live_fetched_at,
+            live_fetched_at=fetch_sessions(live_prices, fetched_at=timezone.now()),
             market_state=current_state,
             verified_close_keys=verified_close_keys,
         )
@@ -239,9 +219,14 @@ def _write_snapshots(
     *,
     session_close_keys: set[str] | None = None,
 ) -> None:
-    """Snapshot each active user's net worth in bulk and fill downtime gaps safely."""
-    guarded_priced = guard_price_map(priced)
-    prices = {k: Decimal(str(v)) for k, v in guarded_priced.items()}
+    """Snapshot each active user's net worth in bulk and fill downtime gaps safely.
+
+    `priced` must already be resolved -- `run_price_fetch` hands over the output
+    of `guard_price_map`. Re-guarding here re-ran the whole archive resolution
+    (three warehouse tables plus two session calendars) against values that can
+    no longer change, on every fetch cycle.
+    """
+    prices = {k: Decimal(str(v)) for k, v in priced.items()}
     session_close_keys = session_close_keys or set()
     now = timezone.now()
 

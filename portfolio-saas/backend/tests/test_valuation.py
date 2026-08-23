@@ -1308,3 +1308,38 @@ def test_stale_archive_close_still_vetoes_a_corrupt_live_quote(
     assert _archive_replacements({"kama_stock": Decimal("52000")}) == {
         "kama_stock": Decimal("5200")
     }
+
+
+def test_archive_is_behind_protection_holds_without_an_explicit_session_map(
+    asset_catalog, write_prices, monkeypatch
+):
+    """A caller that supplies no session map still gets the protection.
+
+    Opting IN to it is how the closed-market regression reached three separate
+    branches; the resolver now falls back to the sessions already stored.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+    from marketdata.models import MarketCandle
+    from portfolio.services.returns import to_jalali_str
+    from portfolio.services.valuation import _archive_replacements
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    write_prices({"kama_stock": Decimal("4890")})
+    MarketCandle.objects.create(
+        symbol="کاما",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=to_jalali_str(timezone.now() - timedelta(days=1)),
+        close_price=Decimal("4750"),
+    )
+
+    # No live_fetched_at, and a market state that would otherwise hand the
+    # closed-market branch a lagging close.
+    replacements = _archive_replacements(
+        {"kama_stock": Decimal("4890")}, market_state="closed_daytime"
+    )
+
+    assert "kama_stock" not in replacements

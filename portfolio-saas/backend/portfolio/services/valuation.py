@@ -131,8 +131,26 @@ def guard_price_map(prices: dict, *, fill_missing=True, archive_replacements=Non
     supplied_keys = set(prices)
     guarded = {key: _q(value) for key, value in prices.items()}
 
+    # Read once, used twice: the forward-fill below needs the newest stored row
+    # per asset, and so does the archive comparison -- a close only outranks a
+    # live price if it is not from an older session than the one already held.
+    latest_db_rows = list(
+        Price.objects.select_related("asset")
+        .filter(asset__is_active=True, price__gt=0)
+        .order_by("asset_id", "-fetched_at", "-id")
+        .distinct("asset_id")
+    )
+    prev_prices = {row.asset.key: (_q(row.price), row.fetched_at) for row in latest_db_rows}
+
     # 1. The warehouse close is more authoritative than an older live row.
-    replacements = archive_replacements if archive_replacements is not None else _archive_replacements(guarded)
+    replacements = (
+        archive_replacements
+        if archive_replacements is not None
+        else _archive_replacements(
+            guarded,
+            live_fetched_at={key: when for key, (_price, when) in prev_prices.items()},
+        )
+    )
     guarded.update(
         replacements if fill_missing else {
             key: value for key, value in replacements.items() if key in supplied_keys
@@ -147,13 +165,6 @@ def guard_price_map(prices: dict, *, fill_missing=True, archive_replacements=Non
     # invariant value_as_of enforces via `calendars.sessions_between`.
     now = timezone.now()
     max_age = timedelta(days=MAX_FORWARD_FILL_SESSIONS)
-    latest_db_rows = (
-        Price.objects.select_related("asset")
-        .filter(asset__is_active=True, price__gt=0)
-        .order_by("asset_id", "-fetched_at", "-id")
-        .distinct("asset_id")
-    )
-    prev_prices = {row.asset.key: (_q(row.price), row.fetched_at) for row in latest_db_rows}
 
     # Large positive moves remain observable; archive corroboration above
     # rejects only catastrophic deviations.
@@ -180,35 +191,52 @@ def guard_price_map(prices: dict, *, fill_missing=True, archive_replacements=Non
     return guarded
 
 
-def _archive_replacements(
-    prices: dict,
-    *,
-    live_fetched_at: dict | None = None,
-    market_state: str | None = None,
-    verified_close_keys: set[str] | None = None,
-) -> dict:
-    """Return archive-backed replacements for missing, broken, or outrun live prices.
+def stored_price_sessions(keys) -> dict:
+    """When each key's newest stored price was recorded.
 
-    `live_fetched_at`, when given, also catches a live price that passes the
-    magnitude sanity band below but is simply behind: the live loop can miss
-    an entire trading session outright (an outage), while the warehouse's own
-    archive backfill -- a separate pipeline, unaffected by a live-loop outage
-    -- keeps converging on real closes. A live price from session N-1 sitting
-    next to an archive close already at session N is not a spike, it is stale
-    data that happens to still be in a plausible range.
+    The session a price belongs to is what says whether an archive close is
+    newer information or older; see `_archive_replacements`.
     """
-    from marketdata.calendars import (
-        candle_close_qs,
-        market_for_asset,
-        session_calendar,
-        sessions_between,
-    )
-    from marketdata.models import GoldCurrencyHistory, MarketDailyBar, MarketInstrument, RejectedRecord
-    from marketdata.provenance import daily_bar_classes, instrument_lookup
-    from portfolio.services.returns import to_jalali_str
+    return {
+        row.asset.key: row.fetched_at
+        for row in Price.objects.select_related("asset")
+        .filter(asset__key__in=list(keys), price__gt=0)
+        .order_by("asset_id", "-fetched_at", "-id")
+        .distinct("asset_id")
+    }
 
-    assets = Asset.objects.filter(is_active=True).exclude(is_house=True)
-    assets_by_key = {asset.key: asset for asset in assets}
+
+def fetch_sessions(live_prices: dict, *, fetched_at) -> dict:
+    """Session per key for one fetch cycle.
+
+    A key quoted this cycle is from `fetched_at`; a key that went unquoted --
+    which is every TSE symbol the moment the session closes -- keeps the
+    session of whatever is already stored. Claiming everything was fetched
+    this instant asserts the archive is behind a price that does not exist.
+    """
+    stored = stored_price_sessions(live_prices.keys())
+    sessions = {}
+    for key, value in live_prices.items():
+        when = fetched_at if _q(value) > 0 else stored.get(key)
+        if when is not None:
+            sessions[key] = when
+    return sessions
+
+
+def _latest_archive_closes(assets) -> tuple[dict, dict]:
+    """Newest usable warehouse close per asset key, as (prices, jalali dates).
+
+    Three tables answer this depending on the feed -- adjusted candles for TSE
+    symbols, gold/currency history for BRS symbols, and the distilled daily bar
+    for the live-only classes that have no provider history endpoint at all.
+    Rows the warehouse recorded as rejected are excluded from all three.
+    """
+    from marketdata.calendars import candle_close_qs
+    from marketdata.models import (
+        GoldCurrencyHistory, MarketDailyBar, MarketInstrument, RejectedRecord,
+    )
+    from marketdata.provenance import daily_bar_classes, instrument_lookup
+
     stock_symbols = {
         asset.tse_symbol: asset.key
         for asset in assets
@@ -315,6 +343,39 @@ def _archive_replacements(
         ]
         if candidates:
             archive_dates[key], archive_prices[key] = max(candidates, key=lambda item: item[0])
+
+    return archive_prices, archive_dates
+
+
+def _archive_replacements(
+    prices: dict,
+    *,
+    live_fetched_at: dict | None = None,
+    market_state: str | None = None,
+    verified_close_keys: set[str] | None = None,
+) -> dict:
+    """Return archive-backed replacements for missing, broken, or outrun live prices.
+
+    `live_fetched_at`, when given, also catches a live price that passes the
+    magnitude sanity band below but is simply behind: the live loop can miss
+    an entire trading session outright (an outage), while the warehouse's own
+    archive backfill -- a separate pipeline, unaffected by a live-loop outage
+    -- keeps converging on real closes. A live price from session N-1 sitting
+    next to an archive close already at session N is not a spike, it is stale
+    data that happens to still be in a plausible range.
+    """
+    from marketdata.calendars import market_for_asset, session_calendar, sessions_between
+    from portfolio.services.returns import to_jalali_str
+
+    assets = list(Asset.objects.filter(is_active=True).exclude(is_house=True))
+    assets_by_key = {asset.key: asset for asset in assets}
+    archive_prices, archive_dates = _latest_archive_closes(assets)
+    if live_fetched_at is None:
+        # Default to the sessions we already hold, so a caller that supplies
+        # nothing still cannot have a lagging close substituted for a newer
+        # price. Opting IN to that protection is how the closed-market
+        # regression reached three separate branches.
+        live_fetched_at = stored_price_sessions(assets_by_key.keys())
 
     # One calendar per market, built once for the whole batch rather than per
     # asset. The window is deliberately a fixed recent slice and NOT "back to
