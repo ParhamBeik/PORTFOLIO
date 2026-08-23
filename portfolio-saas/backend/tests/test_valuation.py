@@ -14,7 +14,7 @@ import pytest
 from rest_framework.test import APIClient
 
 from config.settings import CpiUnavailable, cpi_for
-from marketdata.models import GoldCurrencyHistory
+from marketdata.models import GoldCurrencyHistory, MarketDailyBar
 from portfolio.models import Account
 from portfolio.models import Account, Asset, Holding, LedgerEntry
 from portfolio.models import Account, Asset, Holding, LedgerEntry, Snapshot
@@ -299,9 +299,82 @@ def test_closed_tse_valuation_uses_latest_archive_close(asset_catalog, write_pri
     assert get_latest_prices()["kama_stock"] == Decimal("200")
 
 
-def test_closed_tse_keeps_live_price_until_archive_reaches_current_session(
+def test_live_only_asset_uses_market_daily_bar_when_closed(asset_catalog, write_prices, monkeypatch):
+    """An ETF has no candle history at all -- its only close is the daily bar
+    distilled from the live NAV poll, and the TSE desk being shut is what makes
+    that close authoritative over an older live row."""
+    from marketdata.models import MarketInstrument
+
+    etf = asset_catalog["kama_stock"]
+    etf.tse_symbol = "اهرم"
+    etf.save(update_fields=["tse_symbol"])
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.TSETMC,
+        symbol="اهرم",
+        category=MarketInstrument.Category.ETF,
+    )
+    from portfolio.services.returns import to_jalali_str
+
+    write_prices({"kama_stock": Decimal("900")})
+    MarketDailyBar.objects.create(
+        asset_class=MarketDailyBar.AssetClass.ETF_NAV,
+        symbol="اهرم",
+        date=to_jalali_str(timezone.now()),
+        close_price=Decimal("800"),
+    )
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
+    cache.delete("prices:latest")
+
+    assert get_latest_prices()["kama_stock"] == Decimal("800")
+
+
+def test_crypto_keeps_its_live_price_overnight(asset_catalog, write_prices, monkeypatch):
+    """Crypto desks never shut, so OVERNIGHT is not "closed" for them -- taking
+    the archive close there would replace a current price with last night's."""
+    asset = asset_catalog["bitcoin_usd"]
+    asset.brs_symbol = "BTC"
+    asset.save(update_fields=["brs_symbol"])
+    write_prices({"bitcoin_usd": Decimal("900")})
+    MarketDailyBar.objects.create(
+        asset_class=MarketDailyBar.AssetClass.CRYPTO,
+        symbol="BTC",
+        date="1405-05-30",
+        close_price=Decimal("800"),
+    )
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "overnight")
+    cache.delete("prices:latest")
+
+    assert get_latest_prices()["bitcoin_usd"] == Decimal("900")
+
+
+def test_live_bar_fallback_requires_matching_asset_class(asset_catalog, write_prices, monkeypatch):
+    """Same symbol, wrong feed: an index bar named "BTC" must never price a coin."""
+    asset = asset_catalog["bitcoin_usd"]
+    asset.brs_symbol = "BTC"
+    asset.save(update_fields=["brs_symbol"])
+    write_prices({"bitcoin_usd": Decimal("0")})
+    MarketDailyBar.objects.create(
+        asset_class=MarketDailyBar.AssetClass.INDEX,
+        symbol="BTC",
+        date="1405-05-30",
+        close_price=Decimal("800"),
+    )
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "overnight")
+    cache.delete("prices:latest")
+
+    assert get_latest_prices().get("bitcoin_usd", Decimal("0")) == Decimal("0")
+
+
+def test_closed_tse_keeps_todays_live_price_until_the_archive_catches_up(
     asset_catalog, write_prices, monkeypatch
 ):
+    """Observed in production 2026-08-23: KAMA showed 4890 correctly while the
+    session was open, then dropped to yesterday's close the moment it shut.
+
+    The archive ingests a session's close hours after the bell, so between the
+    two the newest live row IS today's close. Preferring an older archive row
+    there throws away the real closing price every single day.
+    """
     from datetime import timedelta
 
     from django.core.cache import cache
@@ -313,7 +386,7 @@ def test_closed_tse_keeps_live_price_until_archive_reaches_current_session(
     stock = asset_catalog["kama_stock"]
     stock.tse_symbol = "کاما"
     stock.save(update_fields=["tse_symbol"])
-    write_prices({"kama_stock": Decimal("5230")})
+    write_prices({"kama_stock": Decimal("4890")})
     yesterday = to_jalali_str(timezone.now() - timedelta(days=1))
     MarketCandle.objects.create(
         symbol="کاما",
@@ -324,7 +397,34 @@ def test_closed_tse_keeps_live_price_until_archive_reaches_current_session(
     monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
     cache.delete("prices:latest")
 
-    assert get_latest_prices()["kama_stock"] == Decimal("5230")
+    assert get_latest_prices()["kama_stock"] == Decimal("4890")
+
+
+def test_closed_tse_prefers_the_archive_once_it_has_todays_close(
+    asset_catalog, write_prices, monkeypatch
+):
+    """The other half of the same rule: once the warehouse holds today's close
+    it is the settled figure and outranks the last intraday tick."""
+    from django.core.cache import cache
+    from django.utils import timezone
+    from marketdata.models import MarketCandle
+    from portfolio.services.returns import to_jalali_str
+    from portfolio.services.valuation import get_latest_prices
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    write_prices({"kama_stock": Decimal("4890")})
+    MarketCandle.objects.create(
+        symbol="کاما",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=to_jalali_str(timezone.now()),
+        close_price=Decimal("4910"),
+    )
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
+    cache.delete("prices:latest")
+
+    assert get_latest_prices()["kama_stock"] == Decimal("4910")
 
 
 def test_quality_status_not_stale_when_tse_closed(asset_catalog, write_prices, make_user, monkeypatch):
@@ -1133,3 +1233,40 @@ def test_real_toman_reports_unavailable_rather_than_returning_nominal(
         assert response.data["reason"] == "cpi_unavailable"
         assert response.data["basis"] == "real_toman"
         assert "last_verified_jalali_year" in response.data
+
+
+def test_archive_close_past_the_forward_fill_bound_is_not_offered(
+    asset_catalog, write_prices, monkeypatch
+):
+    """A close from beyond the forward-fill bound is the last thing a delisted
+    asset ever printed, not a current price. Offering nothing lets the valuation
+    layer report the gap instead of dressing an ancient number up as today's."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+    from marketdata.models import MarketCandle
+    from portfolio.services.returns import to_jalali_str
+    from portfolio.services.valuation import _archive_replacements
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    # A market-wide calendar with plenty of recent sessions, and this symbol's
+    # own last close sitting well behind them.
+    for offset in range(0, 10):
+        MarketCandle.objects.create(
+            symbol="دیگر",
+            timeframe=MarketCandle.ADJUSTED,
+            date_time=to_jalali_str(timezone.now() - timedelta(days=offset)),
+            close_price=Decimal("100"),
+        )
+    MarketCandle.objects.create(
+        symbol="کاما",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=to_jalali_str(timezone.now() - timedelta(days=30)),
+        close_price=Decimal("5200"),
+    )
+
+    replacements = _archive_replacements({"kama_stock": Decimal("0")})
+
+    assert "kama_stock" not in replacements

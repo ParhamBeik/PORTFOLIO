@@ -1147,3 +1147,39 @@ def test_all_three_kinds_succeed_independently(settings):
         workflow__startswith="capture_derivative_snapshots:",
         outcome=WorkflowRun.Outcome.SUCCESS,
     ).count() == 3
+
+
+@pytest.mark.django_db
+def test_run_price_fetch_does_not_persist_a_lagging_archive_close(
+    asset_catalog, raw_market_sample, monkeypatch
+):
+    """Regression, production 2026-08-23: KAMA priced correctly at 4890 while the
+    session was open and reverted to yesterday's close the moment it shut.
+
+    The write path decides what becomes a Price row, so if a closed market lets
+    a not-yet-backfilled archive row outrank the price just fetched, yesterday's
+    number is persisted as today's observation and every reader inherits it.
+    """
+    import portfolio.tasks as mod
+    from marketdata.models import MarketCandle
+    from portfolio.services.returns import to_jalali_str
+
+    monkeypatch.setattr(mod, "fetch_all_markets", lambda _settings: raw_market_sample)
+    monkeypatch.setattr(mod, "get_redis", lambda: None)
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
+
+    kama = asset_catalog["kama_stock"]
+    kama.tse_symbol = "کاما"
+    kama.save(update_fields=["tse_symbol"])
+    MarketCandle.objects.create(
+        symbol="کاما",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=to_jalali_str(timezone.now() - timedelta(days=1)),
+        close_price=Decimal("4600"),
+    )
+
+    result = run_price_fetch()
+
+    assert result["written"] is True
+    stored = Price.objects.filter(asset=kama).order_by("-fetched_at", "-id").first()
+    assert stored.price == Decimal("5230"), "persisted yesterday's archive close"

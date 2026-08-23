@@ -38,6 +38,14 @@ function friendlyError(msg) {
   if (lower.includes("no active account") || lower.includes("credentials") || lower.includes("incorrect")) {
     return "Invalid email address or password. Please check your credentials and try again.";
   }
+  if (
+    lower.includes("unavailable") ||
+    lower.includes("server") ||
+    lower.includes("network") ||
+    lower.includes("failed to fetch")
+  ) {
+    return "The service is temporarily unavailable. Please try again.";
+  }
   return msg || "An unexpected error occurred.";
 }
 
@@ -55,13 +63,38 @@ export default function Auth({ onAuthed }) {
   const registering = mode === "signup";
   const emailValid = EMAIL_RE.test(email.trim());
   const checks = getPasswordChecks(password, confirmPassword, registering);
-  const pwValid = checks.every((c) => c.ok);
   const strength = calculateStrength(password, checks);
 
   const switchMode = (next) => {
     setMode(next);
     setError("");
     setFieldError({});
+  };
+
+  const handleEmailChange = (value) => {
+    setEmail(value);
+    if (value && !EMAIL_RE.test(value.trim())) {
+      setFieldError((cur) => ({ ...cur, email: "Enter a valid email address." }));
+    } else {
+      setFieldError((cur) => {
+        const next = { ...cur };
+        delete next.email;
+        return next;
+      });
+    }
+  };
+
+  const handlePasswordChange = (value) => {
+    setPassword(value);
+    if (!value) {
+      setFieldError((cur) => ({ ...cur, password: "Password is required." }));
+    } else {
+      setFieldError((cur) => {
+        const next = { ...cur };
+        delete next.password;
+        return next;
+      });
+    }
   };
 
   async function submit(e) {
@@ -79,7 +112,10 @@ export default function Auth({ onAuthed }) {
       onAuthed(await me());
     } catch (err) {
       const msg = err.message || "";
-      if (msg.toLowerCase().includes("password") && !msg.toLowerCase().includes("incorrect")) {
+      const lower = msg.toLowerCase();
+      if (lower.includes("email")) {
+        setFieldError({ email: msg });
+      } else if (lower.includes("password") && !lower.includes("incorrect")) {
         setFieldError({ password: msg });
       }
       setError(friendlyError(msg));
@@ -150,6 +186,16 @@ export default function Auth({ onAuthed }) {
           </div>
         )}
 
+        {registering && (
+          <div
+            data-testid="auth-registration-closed"
+            role="status"
+            className="mb-4 rounded-lg border border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 px-4 py-3 text-sm text-[var(--c-warn)]"
+          >
+            New memberships are currently closed. Existing users can still sign in.
+          </div>
+        )}
+
         <div className="mb-4">
           <div className="mb-1 flex items-center justify-between">
             <label htmlFor="auth-email" className="text-sm font-medium text-text">
@@ -171,7 +217,7 @@ export default function Auth({ onAuthed }) {
             required
             autoComplete="username"
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) => handleEmailChange(e.target.value)}
             placeholder="you@example.com"
             aria-invalid={Boolean(fieldError.email)}
             data-testid="auth-email-input"
@@ -200,7 +246,7 @@ export default function Auth({ onAuthed }) {
               required
               autoComplete={registering ? "new-password" : "current-password"}
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => handlePasswordChange(e.target.value)}
               placeholder={registering ? "Create a password" : "Enter password"}
               aria-invalid={Boolean(fieldError.password)}
               data-testid="auth-password-input"
@@ -289,7 +335,7 @@ export default function Auth({ onAuthed }) {
           type="submit"
           variant="primary"
           data-testid="auth-submit"
-          disabled={busy || (registering ? !(emailValid && pwValid) : !(emailValid && password))}
+          disabled={busy || registering || !(emailValid && password)}
           className="w-full py-1.5"
         >
           {busy ? "Working…" : registering ? "Create account" : "Sign in"}

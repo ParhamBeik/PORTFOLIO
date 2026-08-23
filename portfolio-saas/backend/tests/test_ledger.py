@@ -838,15 +838,39 @@ class TestTradeEndpoint:
         assert len(resp.data["trades"]) == 1
         assert resp.data["trades"][0]["asset_key"] == "emami_coin"
 
-    def test_tradeable_holding_cannot_bypass_ledger(self, account, asset_catalog):
+    def test_dashboard_can_add_tradeable_holding_through_ledger(self, account, asset_catalog, write_prices):
+        write_prices({"emami_coin": Decimal("176000000")})
         client = self._client(account.user)
         resp = client.post(
             f"/api/accounts/{account.id}/holdings/",
             {"asset_key": "emami_coin", "quantity": "2"},
             format="json",
         )
-        assert resp.status_code == 400
-        assert not account.holdings.filter(asset__key="emami_coin").exists()
+        assert resp.status_code == 201, resp.data
+        assert account.holdings.get(asset__key="emami_coin").quantity == Decimal("2")
+        assert LedgerEntry.objects.filter(
+            account=account, asset__key="emami_coin", kind=LedgerEntry.Kind.BUY
+        ).exists()
+
+    def test_dashboard_add_needs_no_cash_on_a_holdings_only_account(
+        self, asset_catalog, make_user, write_prices
+    ):
+        """An account that never opened a cash ledger has nothing to spend, so
+        booking the add as a funded purchase would reject it outright."""
+        write_prices({"emami_coin": Decimal("176000000")})
+        cashless = Account.objects.create(
+            user=make_user(email="holdings-only@test.test"), name="Holdings only"
+        )
+        resp = self._client(cashless.user).post(
+            f"/api/accounts/{cashless.id}/holdings/",
+            {"asset_key": "emami_coin", "quantity": "2"},
+            format="json",
+        )
+        assert resp.status_code == 201, resp.data
+        assert cashless.holdings.get(asset__key="emami_coin").quantity == Decimal("2")
+        assert not LedgerEntry.objects.filter(account=cashless).exists()
+        cashless.refresh_from_db()
+        assert cashless.cash_balance_tomans == Decimal("0")
 
     def test_holding_detail_rejects_wrong_parent_account(self, account, asset_catalog):
         other = Account.objects.create(user=account.user, name="Other")
@@ -885,7 +909,7 @@ class TestTradeEndpoint:
         assert latest.price == Decimal("5500000")
         assert latest.source == "manual"
 
-    def test_tradeable_holding_patch_rejected(self, account, asset_catalog, write_prices):
+    def test_dashboard_can_correct_tradeable_holding_quantity(self, account, asset_catalog, write_prices):
         write_prices({"emami_coin": Decimal("176000000")})
         execute_trade(account=account, asset=asset_catalog["emami_coin"], side="buy", quantity=Decimal("1"))
         holding = Holding.objects.get(account=account, asset=asset_catalog["emami_coin"])
@@ -894,7 +918,24 @@ class TestTradeEndpoint:
             {"quantity": "2"},
             format="json",
         )
-        assert response.status_code == 400
+        assert response.status_code == 200, response.data
+        holding.refresh_from_db()
+        assert holding.quantity == Decimal("2")
+        assert LedgerEntry.objects.filter(
+            account=account, asset=asset_catalog["emami_coin"], kind=LedgerEntry.Kind.BUY
+        ).count() == 2
+
+    def test_dashboard_can_downsize_holding_to_zero(self, account, asset_catalog, write_prices):
+        write_prices({"emami_coin": Decimal("176000000")})
+        execute_trade(account=account, asset=asset_catalog["emami_coin"], side="buy", quantity=Decimal("1"))
+        holding = Holding.objects.get(account=account, asset=asset_catalog["emami_coin"])
+        response = self._client(account.user).patch(
+            f"/api/accounts/{account.id}/holdings/{holding.id}/",
+            {"quantity": "0"},
+            format="json",
+        )
+        assert response.status_code == 200, response.data
+        assert not Holding.objects.filter(pk=holding.id).exists()
 
     def test_house_holding_rejects_nonpositive_price(self, account, asset_catalog):
         response = self._client(account.user).post(
@@ -1271,3 +1312,82 @@ class TestTrackA:
         serializer = TradeInputSerializer(data=data)
         assert not serializer.is_valid()
         assert "timestamp" in serializer.errors
+
+
+def test_resolve_historical_price_falls_back_to_the_daily_bar():
+    """Unit test: crypto/commodity/ETF/index/derivative assets have no provider
+    history endpoint, so the distilled daily bar is the only close they ever
+    get -- without it an opening trade on one of them cannot be priced at all."""
+    from marketdata.models import MarketDailyBar, MarketInstrument
+    from portfolio.services.ledger import resolve_historical_price
+
+    asset = Asset.objects.create(
+        key="leverage_etf", name="Leverage ETF", is_active=True,
+        asset_class=Asset.AssetClass.STOCK, tse_symbol="اهرم",
+    )
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.TSETMC,
+        symbol="اهرم",
+        category=MarketInstrument.Category.ETF,
+    )
+    MarketDailyBar.objects.create(
+        asset_class=MarketDailyBar.AssetClass.ETF_NAV,
+        symbol="اهرم", date="1404-01-01", close_price=Decimal("24500"),
+    )
+
+    assert resolve_historical_price(asset, timezone.now()) == Decimal("24500")
+
+
+def test_daily_bar_fallback_ignores_a_same_symbol_bar_from_another_feed():
+    from marketdata.models import MarketDailyBar, MarketInstrument
+    from portfolio.services.ledger import PriceResolutionError, resolve_historical_price
+
+    asset = Asset.objects.create(
+        key="leverage_etf2", name="Leverage ETF", is_active=True,
+        asset_class=Asset.AssetClass.STOCK, tse_symbol="اهرم",
+    )
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.TSETMC,
+        symbol="اهرم",
+        category=MarketInstrument.Category.ETF,
+    )
+    MarketDailyBar.objects.create(
+        asset_class=MarketDailyBar.AssetClass.INDEX,
+        symbol="اهرم", date="1404-01-01", close_price=Decimal("24500"),
+    )
+
+    with pytest.raises(PriceResolutionError):
+        resolve_historical_price(asset, timezone.now())
+
+
+def test_daily_bar_fallback_skips_a_row_the_warehouse_rejected():
+    """A bar the warehouse flagged bad must not reach a trade price -- valuation
+    already drops it, and the two readers have to agree."""
+    from marketdata.models import (
+        ArchiveFetchState, MarketDailyBar, MarketInstrument, RejectedRecord,
+    )
+    from portfolio.services.ledger import resolve_historical_price
+
+    asset = Asset.objects.create(
+        key="leverage_etf3", name="Leverage ETF", is_active=True,
+        asset_class=Asset.AssetClass.STOCK, tse_symbol="اهرم",
+    )
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.TSETMC,
+        symbol="اهرم",
+        category=MarketInstrument.Category.ETF,
+    )
+    MarketDailyBar.objects.create(
+        asset_class=MarketDailyBar.AssetClass.ETF_NAV,
+        symbol="اهرم", date="1404-01-01", close_price=Decimal("24500"),
+    )
+    MarketDailyBar.objects.create(
+        asset_class=MarketDailyBar.AssetClass.ETF_NAV,
+        symbol="اهرم", date="1404-01-02", close_price=Decimal("1"),
+    )
+    RejectedRecord.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.ETF_NAV_DAILY,
+        symbol="اهرم", date="1404-01-02", reason="close_outside_range",
+    )
+
+    assert resolve_historical_price(asset, timezone.now()) == Decimal("24500")

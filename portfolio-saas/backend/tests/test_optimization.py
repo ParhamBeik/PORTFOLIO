@@ -1532,6 +1532,67 @@ def test_best_overall_view_reads_precomputed_snapshots(held_universe, make_user)
     assert any(w["status"] == "ok" for w in body["windows"])
 
 
+def test_optimization_snapshot_views_keep_account_data_isolated(make_user):
+    owner = make_user(email="snapshot-owner@test.test")
+    other_user = make_user(email="snapshot-other@test.test")
+    staff = make_user(email="snapshot-staff@test.test")
+    staff.is_staff = True
+    staff.save(update_fields=["is_staff"])
+
+    owner_account = Account.objects.create(user=owner, name="Owner")
+    other_account = Account.objects.create(user=other_user, name="Other")
+    staff_account = Account.objects.create(user=staff, name="Staff")
+    global_snapshot = OptimizationSnapshot.objects.create(
+        account=None,
+        payload={"scope": "global"},
+    )
+    owner_snapshot = OptimizationSnapshot.objects.create(
+        account=owner_account,
+        payload={"scope": "owner"},
+    )
+    other_snapshot = OptimizationSnapshot.objects.create(
+        account=other_account,
+        payload={"scope": "other"},
+    )
+    staff_snapshot = OptimizationSnapshot.objects.create(
+        account=staff_account,
+        payload={"scope": "staff"},
+    )
+
+    # The unscoped user-facing endpoints expose only market-wide snapshots;
+    # staff status must not turn them into a cross-account data dump.
+    staff_client = _client(staff)
+    response = staff_client.get("/api/optimization/snapshots/")
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()] == [global_snapshot.id]
+
+    response = staff_client.get("/api/optimization/snapshots/latest/")
+    assert response.status_code == 200
+    assert response.json()["id"] == global_snapshot.id
+
+    # An account scope is valid only for an account owned by the caller.
+    assert staff_client.get(
+        f"/api/optimization/snapshots/?account_id={staff_account.id}"
+    ).json()[0]["id"] == staff_snapshot.id
+    assert staff_client.get(
+        f"/api/optimization/snapshots/?account_id={owner_account.id}"
+    ).status_code == 404
+    assert staff_client.get(
+        f"/api/optimization/snapshots/latest/?account_id={owner_account.id}"
+    ).status_code == 404
+
+    owner_client = _client(owner)
+    assert owner_client.get(
+        f"/api/optimization/snapshots/?account_id={owner_account.id}"
+    ).json()[0]["id"] == owner_snapshot.id
+    assert owner_client.get(
+        f"/api/optimization/snapshots/?account_id={other_account.id}"
+    ).status_code == 404
+    assert owner_client.get(
+        f"/api/optimization/snapshots/latest/?account_id={other_account.id}"
+    ).status_code == 404
+
+
 # ----------------------------------------------------------------------
 # test_diversification_policy.py
 # Diversification policy: correlation clusters, balanced caps, policy version.

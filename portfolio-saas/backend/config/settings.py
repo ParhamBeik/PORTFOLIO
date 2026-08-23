@@ -175,7 +175,7 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=int(os.getenv("REFRESH_TOKEN_LIFETIME_DAYS", "30"))),
     "USER_ID_FIELD": "id",
     "USER_ID_CLAIM": "user_id",
@@ -186,6 +186,7 @@ SIMPLE_JWT = {
     "CHECK_REVOKE_TOKEN": True,
 }
 JWT_COOKIE_SECURE = not DEBUG
+REGISTRATION_OPEN = False
 SNAPSHOT_RETENTION_DAYS = int(os.getenv("SNAPSHOT_RETENTION_DAYS", "30"))
 SNAPSHOT_PRUNE_ENABLED = os.getenv(
     "SNAPSHOT_PRUNE_ENABLED", "1" if ENVIRONMENT == "production" else "0"

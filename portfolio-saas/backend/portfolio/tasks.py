@@ -23,7 +23,6 @@ from portfolio.services.valuation import (
     _archive_replacements,
     current_market_state,
     guard_price_map,
-    tse_market_is_closed,
 )
 from portfolio.live.extractor import extract_standard_prices
 from portfolio.live.fetcher import api_settings_from_django, fetch_all_markets
@@ -113,9 +112,16 @@ def run_price_fetch(*, dry_run=False):
         }
         current_state = current_market_state()
         verified_close_keys = set()
+        # These prices came off the provider seconds ago, so their session is
+        # now. Saying so is what stops a closed market from overwriting a
+        # just-fetched close with an archive row the backfill has not caught
+        # up to yet -- the write path decides what gets persisted, so getting
+        # this wrong here bakes yesterday's number into today's Price row.
+        fetched_now = timezone.now()
         archive_replacements = _archive_replacements(
             live_prices,
-            prefer_closed_tse=tse_market_is_closed(current_state),
+            live_fetched_at={key: fetched_now for key in live_prices},
+            market_state=current_state,
             verified_close_keys=verified_close_keys,
         )
         resolved_prices = guard_price_map(

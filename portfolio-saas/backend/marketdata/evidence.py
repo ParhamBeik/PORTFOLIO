@@ -9,7 +9,6 @@ from __future__ import annotations
 from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
 
-from .calendars import candle_close_qs
 from .integrity import compute_symbol_integrity
 from .models import (
     ArchiveFetchState,
@@ -20,6 +19,7 @@ from .models import (
     RejectedRecord,
     WorkflowRun,
 )
+from .provenance import latest_archive_close
 
 LIVE_PRICE_FRESH_SECONDS = 300
 WORKFLOW_LIMIT = 25
@@ -97,39 +97,10 @@ def _displayed_value(asset):
 
 
 def _latest_archive_close(asset):
-    if asset is None:
-        return None
-    if asset.tse_symbol:
-        row = (
-            candle_close_qs(asset.tse_symbol)
-            .order_by("-date_time")
-            .values("id", "date_time", "timeframe", "close_price")
-            .first()
-        )
-        if row:
-            return {
-                "id": row["id"],
-                "date": str(row["date_time"]).split()[0],
-                "timeframe": row["timeframe"],
-                "table": "MarketCandle",
-                "close": _num(row["close_price"]),
-            }
-    if asset.brs_symbol:
-        row = (
-            GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol, close_price__gt=0)
-            .order_by("-date")
-            .values("id", "date", "close_price")
-            .first()
-        )
-        if row:
-            return {
-                "id": row["id"],
-                "date": row["date"],
-                "timeframe": None,
-                "table": "GoldCurrencyHistory",
-                "close": _num(row["close_price"]),
-            }
-    return None
+    row = latest_archive_close(asset)
+    if row:
+        row["close"] = _num(row["close"])
+    return row
 
 
 def _series_span(symbols: list[str]) -> dict:

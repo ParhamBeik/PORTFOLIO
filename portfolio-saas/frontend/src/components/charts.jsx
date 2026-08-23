@@ -273,8 +273,11 @@ function tipRows(params, t, fmt) {
         `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;` +
         `background:${p.color};margin-right:6px"></span>`;
       const value = fmt(p.value?.[1] ?? p.value, p);
+      // ECharts names an unnamed series "series0"; pie slices carry the
+      // real label on the datum (`name` = Stock / Gold / …).
+      const label = /^series\d+$/.test(p.seriesName || "") ? p.name : (p.seriesName || p.name);
       return `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between">` +
-        `<span style="color:${t.text}">${dot}${p.seriesName || p.name}</span>` +
+        `<span style="color:${t.text}">${dot}${label}</span>` +
         `<span style="color:${t.text};font-variant-numeric:tabular-nums">${value}</span></div>`;
     })
     .join("");

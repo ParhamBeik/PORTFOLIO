@@ -111,27 +111,63 @@ class HoldingListCreateView(generics.ListCreateAPIView):
         )
 
     def perform_create(self, serializer):
-        from .services.ledger import create_ledger_entry
+        from .services.ledger import (
+            LedgerError,
+            create_ledger_entry,
+            record_manual_price,
+            set_orphan_holding,
+        )
 
         account = self._account()
         if account is None:
             raise NotFound("Account not found")
-        if not serializer.validated_data["asset"].is_house:
-            raise ValidationError("Tradeable assets must be changed through the buy/sell endpoint.")
         if account.holdings.filter(asset=serializer.validated_data["asset"]).exists():
             raise ValidationError("This asset already exists in the account.")
         data = serializer.validated_data
-        create_ledger_entry(
-            account=account,
-            kind=LedgerEntry.Kind.OPENING_POSITION,
-            asset=data["asset"],
-            quantity=data["quantity"],
-            area_sqm=data.get("area_sqm"),
-            mortgage_deduction_tomans=data.get("mortgage_deduction_tomans"),
-            occurred_at=account.tracking_started_at or timezone.now(),
-            source="manual",
-            note="Real-estate opening position",
-        )
+        try:
+            if data["asset"].is_house:
+                create_ledger_entry(
+                    account=account,
+                    kind=LedgerEntry.Kind.OPENING_POSITION,
+                    asset=data["asset"],
+                    quantity=data["quantity"],
+                    area_sqm=data.get("area_sqm"),
+                    mortgage_deduction_tomans=data.get("mortgage_deduction_tomans"),
+                    occurred_at=account.tracking_started_at or timezone.now(),
+                    source="manual",
+                    note="Real-estate opening position",
+                )
+            elif data["asset"].is_manual:
+                set_orphan_holding(
+                    account=account, asset=data["asset"], quantity=data["quantity"]
+                )
+                record_manual_price(data["asset"], data.get("unit_price_tomans"))
+            elif account.cash_balance_tomans > 0 or LedgerEntry.objects.filter(
+                account=account
+            ).exists():
+                # This account has cash to spend, so acquiring an asset is a
+                # funded purchase and must be booked as one -- cash included.
+                # Cash is tested first because it is the thing that would be
+                # wrong if we skipped the trade; the entry count alone flips
+                # the moment a user deletes their history to re-import it.
+                create_ledger_entry(
+                    account=account,
+                    kind=LedgerEntry.Kind.BUY,
+                    asset=data["asset"],
+                    quantity=data["quantity"],
+                    unit_price_tomans=data.get("unit_price_tomans"),
+                    source="manual",
+                    note="Dashboard holding opening trade",
+                )
+            else:
+                # Holdings-only account: there is no cash to spend, so a BUY
+                # would be rejected for insufficient funds and "add holding"
+                # could never succeed. Record the position itself instead.
+                set_orphan_holding(
+                    account=account, asset=data["asset"], quantity=data["quantity"]
+                )
+        except LedgerError as exc:
+            raise ValidationError(str(exc)) from exc
         serializer.instance = Holding.objects.get(
             account=account, asset=data["asset"]
         )
@@ -147,24 +183,39 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
         )
 
     def perform_update(self, serializer):
-        from .services.ledger import record_house_mark, update_manual_holding
+        from .services.ledger import (
+            LedgerError,
+            adjust_holding_quantity,
+            record_house_mark,
+            update_manual_holding,
+        )
 
         asset = serializer.instance.asset
         data = serializer.validated_data
-        if asset.is_manual and not asset.is_house:
-            update_manual_holding(
-                serializer.instance,
-                quantity=data.get("quantity", serializer.instance.quantity),
-                unit_price_tomans=data.get("unit_price_tomans"),
-            )
-            serializer.instance = Holding.objects.get(
-                account_id=self.kwargs["account_id"],
-                asset_id=serializer.instance.asset_id,
-            )
+        if asset.is_manual and not asset.is_house and not LedgerEntry.objects.filter(
+            account=serializer.instance.account, asset=asset
+        ).exists():
+            try:
+                serializer.instance = update_manual_holding(
+                    serializer.instance,
+                    quantity=data.get("quantity", serializer.instance.quantity),
+                    unit_price_tomans=data.get("unit_price_tomans"),
+                )
+            except LedgerError as exc:
+                raise ValidationError(str(exc)) from exc
             return
         if not asset.is_house:
-            from rest_framework.exceptions import ValidationError
-            raise ValidationError("Tradeable assets must be changed through the buy/sell endpoint.")
+            try:
+                serializer.instance = adjust_holding_quantity(
+                    user=self.request.user,
+                    account_id=serializer.instance.account_id,
+                    holding_id=serializer.instance.id,
+                    quantity=data.get("quantity", serializer.instance.quantity),
+                    unit_price_tomans=data.get("unit_price_tomans"),
+                )
+            except LedgerError as exc:
+                raise ValidationError(str(exc)) from exc
+            return
         # Append a dated mark rather than rewriting the opening entry, so the
         # house's history shows what it was worth at the time instead of being
         # retro-priced at today's figure. `occurred_at` lets the client date a
@@ -187,11 +238,37 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
         )
 
     def perform_destroy(self, instance):
-        from .services.ledger import house_ledger_entry, reverse_ledger_entry
+        from .services.ledger import (
+            LedgerError,
+            adjust_holding_quantity,
+            delete_orphan_holding,
+            house_ledger_entry,
+            reverse_ledger_entry,
+        )
 
+        if not instance.asset.is_house and not LedgerEntry.objects.filter(
+            account=instance.account, asset=instance.asset
+        ).exists():
+            try:
+                delete_orphan_holding(
+                    user=self.request.user,
+                    account_id=instance.account_id,
+                    holding_id=instance.id,
+                )
+            except LedgerError as exc:
+                raise ValidationError(str(exc)) from exc
+            return
         if not instance.asset.is_house:
-            from rest_framework.exceptions import ValidationError
-            raise ValidationError("Tradeable assets must be changed through the buy/sell endpoint.")
+            try:
+                adjust_holding_quantity(
+                    user=self.request.user,
+                    account_id=instance.account_id,
+                    holding_id=instance.id,
+                    quantity=0,
+                )
+            except LedgerError as exc:
+                raise ValidationError(str(exc)) from exc
+            return
         entry = house_ledger_entry(instance)
         reverse_ledger_entry(
             user=self.request.user,
@@ -513,7 +590,7 @@ admin_logger = logging.getLogger("portfolio.admin")
 class AdminCleanPricesScanView(APIView):
     """Scan database for mispriced price rows and corrupted snapshots (Admin only)."""
 
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
         stats = audit_and_repair_prices(fix=False)
@@ -528,7 +605,7 @@ class AdminCleanPricesExecuteView(APIView):
     bare POST — a single accidental click must not be enough to trigger it.
     """
 
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAdminUser]
     CONFIRM_PHRASE = "DELETE MISPRICED DATA"
 
     def post(self, request):
@@ -1757,12 +1834,9 @@ class PerformanceView(APIView):
 class IntegrityView(APIView):
     """Retrieve symbols integrity quality metrics and rejected records."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
-        if not request.user.is_staff:
-            return Response({"detail": "Staff only endpoint."}, status=status.HTTP_403_FORBIDDEN)
-
         from marketdata.models import SymbolIntegrity, RejectedRecord
 
         try:
@@ -1890,9 +1964,10 @@ class OptimizationSnapshotListView(APIView):
             account = get_object_or_404(Account, pk=account_id, user=request.user)
             qs = qs.filter(account=account)
         else:
-            # Only return global snapshots (account is null) or any snapshots if user is staff
-            if not request.user.is_staff:
-                qs = qs.filter(account__isnull=True)
+            # This is a user-facing endpoint: never infer cross-account access
+            # from staff status. Staff-only operational reads belong on an
+            # explicit admin endpoint with its own permission contract.
+            qs = qs.filter(account__isnull=True)
 
         snaps = qs[:limit]
         serializer = OptimizationSnapshotSerializer(snaps, many=True)
@@ -1910,16 +1985,12 @@ class OptimizationSnapshotLatestView(APIView):
         from .optimization_models import OptimizationSnapshot
         from .serializers import OptimizationSnapshotSerializer
         from django.shortcuts import get_object_or_404
-        from django.db.models import Q
-
         account_id = request.query_params.get("account_id")
         if account_id:
             account = get_object_or_404(Account, pk=account_id, user=request.user)
             snap = OptimizationSnapshot.objects.filter(account=account).order_by("-created_at").first()
         else:
             # latest global snapshot
-            if not request.user.is_staff:
-                return Response({"detail": "Not found."}, status=404)
             snap = OptimizationSnapshot.objects.filter(account__isnull=True).order_by("-created_at").first()
 
         if not snap:

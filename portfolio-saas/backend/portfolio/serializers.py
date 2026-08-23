@@ -21,7 +21,7 @@ class HoldingSerializer(serializers.ModelSerializer):
     quantity = serializers.DecimalField(
         max_digits=20,
         decimal_places=6,
-        min_value=Decimal("0.000001"),
+        min_value=Decimal("0"),
     )
     asset_key = serializers.SlugRelatedField(
         source="asset", slug_field="key", queryset=Asset.objects.filter(is_active=True)
@@ -45,6 +45,11 @@ class HoldingSerializer(serializers.ModelSerializer):
                   "quantity", "unit_price_tomans", "area_sqm", "mortgage_deduction_tomans",
                   "created_at", "updated_at")
         read_only_fields = ("id", "created_at", "updated_at")
+
+    def validate_quantity(self, value):
+        if value == 0 and self.context.get("request") and self.context["request"].method == "POST":
+            raise serializers.ValidationError("Quantity must be positive.")
+        return value
 
 
 class AccountSerializer(serializers.ModelSerializer):
@@ -238,7 +243,9 @@ class LiabilitySerializer(serializers.ModelSerializer):
 # Serializer for OptimizationSnapshot persisted records
 class OptimizationSnapshotSerializer(serializers.Serializer):
     id = serializers.IntegerField(read_only=True)
-    account = serializers.IntegerField(allow_null=True, read_only=True)
+    # source=account_id: the field carries the FK object otherwise, and
+    # IntegerField(Account) raises a 500 on every account-scoped snapshot.
+    account = serializers.IntegerField(source="account_id", allow_null=True, read_only=True)
     scenario = serializers.CharField(read_only=True)
     payload = serializers.JSONField(read_only=True)
     price_version = serializers.CharField(read_only=True)

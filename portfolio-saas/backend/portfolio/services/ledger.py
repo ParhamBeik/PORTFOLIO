@@ -322,11 +322,74 @@ def set_orphan_holding(*, account: Account, asset: Asset, quantity) -> Holding:
     """Set quantity on a holding that has no ledger history."""
     if LedgerEntry.objects.filter(account=account, asset=asset).exists():
         raise LedgerError("This holding has ledger history; edit a buy/sell row instead.")
-    qty = _decimal(quantity, "quantity", required=True)
+    qty = _decimal(quantity, "quantity", required=True, allow_zero=True)
     holding, _ = Holding.objects.update_or_create(
         account=account, asset=asset, defaults={"quantity": qty}
     )
     return holding
+
+
+def record_manual_price(asset: Asset, unit_price_tomans) -> None:
+    """Persist an operator-entered unit price for a manual asset (no-op if none).
+
+    Manual assets have no feed, so this Price row IS their price; every edit
+    path that accepts a unit price writes it here so they cannot disagree.
+    """
+    if unit_price_tomans is None:
+        return
+    from portfolio.models import Price
+    from portfolio.services.valuation import invalidate_prices_cache
+
+    Price.objects.create(
+        asset=asset,
+        price=_decimal(unit_price_tomans, "unit_price_tomans", required=True),
+        source="manual",
+        price_unit=Price.Unit.IRT,
+        price_unit_verified=True,
+    )
+    invalidate_prices_cache()
+
+
+@transaction.atomic
+def adjust_holding_quantity(*, user, account_id: int, holding_id: int, quantity, unit_price_tomans=None):
+    """Apply a dashboard quantity correction through the ledger when history exists."""
+    account = Account.objects.select_for_update().filter(pk=account_id, user=user).first()
+    if account is None:
+        raise LedgerError("Account not found.")
+    holding = Holding.objects.select_for_update().filter(pk=holding_id, account=account).first()
+    if holding is None:
+        raise LedgerError("Holding not found.")
+    target = _decimal(quantity, "quantity", required=True, allow_zero=True)
+    entries_exist = LedgerEntry.objects.filter(
+        account=account, asset=holding.asset
+    ).exists()
+    if not entries_exist:
+        if holding.asset.is_manual and unit_price_tomans is not None:
+            return update_manual_holding(
+                holding, quantity=target, unit_price_tomans=unit_price_tomans
+            )
+        return set_orphan_holding(account=account, asset=holding.asset, quantity=target)
+
+    current = holding.quantity
+    delta = target - current
+    if holding.asset.is_manual:
+        record_manual_price(holding.asset, unit_price_tomans)
+    if delta == 0:
+        return holding
+    kind = LedgerEntry.Kind.BUY if delta > 0 else LedgerEntry.Kind.SELL
+    create_ledger_entry(
+        account=account,
+        kind=kind,
+        asset=holding.asset,
+        quantity=abs(delta),
+        unit_price_tomans=unit_price_tomans,
+        source="manual",
+        note="Dashboard holding quantity correction",
+    )
+    if target == 0:
+        holding.quantity = target
+        return holding
+    return Holding.objects.get(account=account, asset=holding.asset)
 
 
 @transaction.atomic
@@ -613,24 +676,12 @@ def update_manual_holding(
     unit_price_tomans=None,
 ) -> Holding:
     """Update quantity and optional unit price for a manual (non-house) asset."""
-    from portfolio.models import Price
-    from portfolio.services.valuation import invalidate_prices_cache
-
     if not holding.asset.is_manual or holding.asset.is_house:
         raise LedgerError("Only manual non-house assets support this update.")
-    qty = _decimal(quantity, "quantity", required=True)
+    qty = _decimal(quantity, "quantity", required=True, allow_zero=True)
     holding.quantity = qty
     holding.save(update_fields=["quantity", "updated_at"])
-    if unit_price_tomans is not None:
-        price = _decimal(unit_price_tomans, "unit_price_tomans", required=True)
-        Price.objects.create(
-            asset=holding.asset,
-            price=price,
-            source="manual",
-            price_unit=Price.Unit.IRT,
-            price_unit_verified=True,
-        )
-        invalidate_prices_cache()
+    record_manual_price(holding.asset, unit_price_tomans)
     return holding
 
 
@@ -743,6 +794,29 @@ def _latest_live_price(asset: Asset) -> Decimal | None:
     return None
 
 
+def _daily_bar_or_live_price(asset: Asset, j_date: str) -> Decimal:
+    """Last resort for a dated price: the distilled daily bar, then the newest
+    live row.
+
+    Crypto, commodities, ETF NAV, indexes and derivatives have no provider
+    history endpoint at all -- `MarketDailyBar` is their only close series, so
+    without this an opening trade on one of them fails outright the moment its
+    live row is missing. The bar is distilled from the same provider field the
+    live price is read from, so both sides of this fallback share a unit.
+    """
+    from marketdata.provenance import latest_market_daily_bar
+
+    bar = latest_market_daily_bar(asset, as_of=j_date)
+    if bar and bar.close_price and bar.close_price > 0:
+        return Decimal(str(bar.close_price))
+    price = _latest_live_price(asset)
+    if price is None:
+        raise PriceResolutionError(
+            "Price omitted and no historical price found for this date."
+        )
+    return price
+
+
 def assert_not_before_history(asset: Asset, when) -> None:
     from marketdata.models import GoldCurrencyHistory, MarketCandle
 
@@ -810,12 +884,7 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
             )
         if candle and candle.close_price > 0:
             return Decimal(str(candle.close_price))
-        price = _latest_live_price(asset)
-        if price is None:
-            raise PriceResolutionError(
-                "Price omitted and no historical price found for this date."
-            )
-        return price
+        return _daily_bar_or_live_price(asset, j_date)
 
     if (
         asset.asset_class
@@ -849,19 +918,9 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
             )
             if converted > 0:
                 return Decimal(str(converted))
-        price = _latest_live_price(asset)
-        if price is None:
-            raise PriceResolutionError(
-                "Price omitted and no historical price found for this date."
-            )
-        return price
+        return _daily_bar_or_live_price(asset, j_date)
 
-    price = _latest_live_price(asset)
-    if price is None:
-        raise PriceResolutionError(
-            "Price omitted and no historical price found for this date."
-        )
-    return price
+    return _daily_bar_or_live_price(asset, j_date)
 
 
 def entry_pnl_map(entries, prices: dict) -> dict[int, dict]:
@@ -929,4 +988,3 @@ def entry_pnl_map(entries, prices: dict) -> dict[int, dict]:
                 "pnl_kind": "unrealized",
             }
     return result
-

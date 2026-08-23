@@ -44,6 +44,12 @@ _CLOSED_BRS_GRACE_SECONDS = 24 * 3600
 # never off a single symbol's own rows. See that helper for why both fail.
 MAX_FORWARD_FILL_SESSIONS = 5
 
+# How far back the session calendar used to age archive closes is built. Only
+# needs to comfortably exceed MAX_FORWARD_FILL_SESSIONS in calendar days --
+# wide enough that Nowruz (~2 weeks shut) still leaves the bound measurable,
+# narrow enough that the lookup never walks the whole candle history.
+_STALENESS_WINDOW_DAYS = 60
+
 
 def current_market_state() -> str:
     from marketdata.market_state import market_state
@@ -51,10 +57,17 @@ def current_market_state() -> str:
     return market_state()
 
 
-def tse_market_is_closed(state: str | None = None) -> bool:
-    from marketdata.market_state import OPEN
+def _asset_market_is_open(asset, state: str) -> bool:
+    """Return whether this asset's live feed should be authoritative now."""
+    from marketdata.market_state import CLOSED_DAYTIME, OPEN
 
-    return (state or current_market_state()) != OPEN
+    if asset.asset_class == Asset.AssetClass.CRYPTO:
+        return True
+    if asset.tse_symbol:
+        return state == OPEN
+    if asset.brs_symbol:
+        return state in (OPEN, CLOSED_DAYTIME)
+    return False
 
 
 def _q(value) -> Decimal:
@@ -104,7 +117,7 @@ def get_latest_prices() -> dict:
         for key, value in _archive_replacements(
             prices,
             live_fetched_at=fetched_at,
-            prefer_closed_tse=tse_market_is_closed(current_state),
+            market_state=current_state,
         ).items()
         if key in prices
     })
@@ -171,7 +184,7 @@ def _archive_replacements(
     prices: dict,
     *,
     live_fetched_at: dict | None = None,
-    prefer_closed_tse: bool = False,
+    market_state: str | None = None,
     verified_close_keys: set[str] | None = None,
 ) -> dict:
     """Return archive-backed replacements for missing, broken, or outrun live prices.
@@ -184,13 +197,18 @@ def _archive_replacements(
     next to an archive close already at session N is not a spike, it is stale
     data that happens to still be in a plausible range.
     """
-    from marketdata.calendars import candle_close_qs
-    from marketdata.models import GoldCurrencyHistory, RejectedRecord
+    from marketdata.calendars import (
+        candle_close_qs,
+        market_for_asset,
+        session_calendar,
+        sessions_between,
+    )
+    from marketdata.models import GoldCurrencyHistory, MarketDailyBar, MarketInstrument, RejectedRecord
+    from marketdata.provenance import daily_bar_classes, instrument_lookup
     from portfolio.services.returns import to_jalali_str
 
     assets = Asset.objects.filter(is_active=True).exclude(is_house=True)
     assets_by_key = {asset.key: asset for asset in assets}
-    current_jalali_date = to_jalali_str(timezone.now())
     stock_symbols = {
         asset.tse_symbol: asset.key
         for asset in assets
@@ -246,21 +264,115 @@ def _archive_replacements(
             archive_prices.setdefault(key, _q(row["close_price"]))
             archive_dates.setdefault(key, row["date"])
 
+    # Live-only feeds converge into MarketDailyBar. Keep the asset class in
+    # the lookup key so a same-symbol row from another feed cannot be used.
+    # This is the bulk twin of `provenance.latest_market_daily_bar` -- same
+    # usability rules, resolved in two queries instead of two per asset.
+    # Keyed by (source, symbol) because that is what MarketInstrument is unique
+    # on -- see provenance.instrument_lookup.
+    instrument_categories = {
+        (source, symbol): category
+        for source, symbol, category in MarketInstrument.objects.filter(
+            symbol__in=all_symbols
+        ).values_list("source", "symbol", "category")
+    }
+    live_bar_classes = {}
+    for asset in assets:
+        lookup = instrument_lookup(asset)
+        if lookup is None:
+            continue
+        classes = daily_bar_classes(
+            asset, instrument_category=instrument_categories.get(lookup)
+        )
+        if classes:
+            live_bar_classes[lookup[1]] = classes
+    live_bar_symbols = list(live_bar_classes)
+    live_bar_rows = (
+        MarketDailyBar.objects.filter(
+            symbol__in=live_bar_symbols,
+            close_price__gt=0,
+        )
+        .order_by("symbol", "-date")
+        .values("symbol", "date", "close_price", "asset_class")
+    )
+    bar_prices = {}
+    bar_dates = {}
+    for row in live_bar_rows:
+        if row["asset_class"] not in live_bar_classes.get(row["symbol"], set()):
+            continue
+        lookup = (row["symbol"], row["asset_class"])
+        if (row["symbol"], row["date"]) in rejections:
+            continue
+        bar_prices.setdefault(lookup, _q(row["close_price"]))
+        bar_dates.setdefault(lookup, row["date"])
+    for symbol, key in {**stock_symbols, **brs_symbols}.items():
+        if key in archive_prices:
+            continue
+        candidates = [
+            (bar_dates[lookup], bar_prices[lookup])
+            for lookup in bar_prices
+            if lookup[0] == symbol
+        ]
+        if candidates:
+            archive_dates[key], archive_prices[key] = max(candidates, key=lambda item: item[0])
+
+    # One calendar per market, built once for the whole batch rather than per
+    # asset. The window is deliberately a fixed recent slice and NOT "back to
+    # the oldest close in play": MarketCandle is a 7.5M-row table, and a single
+    # delisted asset whose last close is a year old would otherwise make every
+    # price fetch scan a year of candles across every symbol just to count
+    # distinct dates.
+    #
+    # A bounded window still answers the only question asked here -- "is this
+    # close more than MAX_FORWARD_FILL_SESSIONS sessions old?" -- because a date
+    # falling before the window start bisects to 0 and yields the full session
+    # count, which is by construction over the bound. It also keeps the closure
+    # semantics right: if the market barely traded in the window, few sessions
+    # elapsed and the price is correctly NOT stale.
+    now = timezone.now()
+    now_jalali = to_jalali_str(now)
+    window_start = to_jalali_str(now - timedelta(days=_STALENESS_WINDOW_DAYS))
+    session_calendars = {
+        market: session_calendar(market, start=window_start, end=now_jalali)
+        for market in ("tse", "gold_currency")
+    }
+
     replacements = {}
     for key, archive_price in archive_prices.items():
         live_price = _q(prices.get(key))
         asset = assets_by_key.get(key)
-        if (
-            prefer_closed_tse
-            and asset
-            and asset.tse_symbol
-            and archive_dates[key] == current_jalali_date
-        ):
-            logger.info(
-                "Key='%s' TSE is closed; using latest archive close %s.",
-                key,
-                archive_price,
+        archive_date = archive_dates[key]
+        live_session = (
+            to_jalali_str(live_fetched_at[key])
+            if live_fetched_at and key in live_fetched_at
+            else None
+        )
+        if asset is not None and sessions_between(
+            archive_date, now_jalali,
+            calendar=session_calendars[market_for_asset(asset)],
+        ) > MAX_FORWARD_FILL_SESSIONS:
+            # Past the forward-fill bound this close is not a current price, it
+            # is the last thing a delisted/halted asset ever printed. Offering
+            # no replacement lets the valuation layer report the gap instead of
+            # dressing an ancient number up as today's.
+            logger.warning(
+                "Key='%s' archive close %s is from %s, beyond the %d-session "
+                "forward-fill bound -- leaving the price unresolved.",
+                key, archive_price, archive_date, MAX_FORWARD_FILL_SESSIONS,
             )
+            continue
+        if (
+            asset
+            and market_state
+            and not _asset_market_is_open(asset, market_state)
+            # Only when the warehouse has actually caught up. The archive
+            # ingests a session's close well after that session ends, so
+            # between the bell and the backfill the newest live row IS the
+            # close -- preferring an older archive row there replaces today's
+            # real closing price with yesterday's the moment the market shuts.
+            and not (live_session is not None and archive_date < live_session)
+        ):
+            logger.info("Key='%s' market is closed; using archive close %s.", key, archive_price)
             replacements[key] = archive_price
             if verified_close_keys is not None:
                 verified_close_keys.add(key)
@@ -273,16 +385,14 @@ def _archive_replacements(
                 key, live_price, archive_price, archive_price * _ARCHIVE_DROP_FLOOR, archive_price * _ARCHIVE_SPIKE_CEILING
             )
             replacements[key] = archive_price
-        elif live_fetched_at and key in live_fetched_at:
-            live_session = to_jalali_str(live_fetched_at[key])
-            if archive_dates[key] > live_session:
-                logger.warning(
-                    "Key='%s' live price is from session %s but the archive already "
-                    "has session %s (%s) -- the live loop missed a session, using "
-                    "the newer archive close.",
-                    key, live_session, archive_dates[key], archive_price,
-                )
-                replacements[key] = archive_price
+        elif live_session is not None and archive_date > live_session:
+            logger.warning(
+                "Key='%s' live price is from session %s but the archive already "
+                "has session %s (%s) -- the live loop missed a session, using "
+                "the newer archive close.",
+                key, live_session, archive_date, archive_price,
+            )
+            replacements[key] = archive_price
     return replacements
 
 
@@ -334,45 +444,6 @@ def asset_value(holding: Holding, price: Decimal) -> Decimal:
     if holding.asset.is_house:
         return _house_value(holding.quantity, area_sqm=getattr(holding, "area_sqm", HOUSE_AREA_SQM))
     return _q(holding.quantity) * _q(price)
-
-
-
-def _latest_archive_close(asset) -> dict | None:
-    """Latest warehouse close used when live Price is missing or replaced."""
-    from marketdata.calendars import candle_close_qs
-    from marketdata.models import GoldCurrencyHistory
-
-    if asset.tse_symbol:
-        row = (
-            candle_close_qs(asset.tse_symbol)
-            .order_by("-date_time")
-            .values("id", "date_time", "timeframe", "close_price")
-            .first()
-        )
-        if row:
-            return {
-                "id": row["id"],
-                "date": str(row["date_time"]).split()[0],
-                "timeframe": row["timeframe"],
-                "table": "MarketCandle",
-                "close": row["close_price"],
-            }
-    if asset.brs_symbol:
-        row = (
-            GoldCurrencyHistory.objects.filter(symbol=asset.brs_symbol, close_price__gt=0)
-            .order_by("-date")
-            .values("id", "date", "close_price")
-            .first()
-        )
-        if row:
-            return {
-                "id": row["id"],
-                "date": row["date"],
-                "timeframe": None,
-                "table": "GoldCurrencyHistory",
-                "close": row["close_price"],
-            }
-    return None
 
 
 
@@ -452,7 +523,9 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
                 priced_at = None
                 age_seconds = None
                 quality_status = "fallback"
-                archive_record = _latest_archive_close(holding.asset)
+                from marketdata.provenance import latest_archive_close
+
+                archive_record = latest_archive_close(holding.asset)
         if value is not None:
             total += value
             priced_assets += 1

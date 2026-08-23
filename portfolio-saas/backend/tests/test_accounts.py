@@ -10,6 +10,7 @@ import io
 import json
 
 from django.core.cache import cache
+from django.test import override_settings
 from django.utils import timezone
 import pytest
 from rest_framework.test import APIClient
@@ -17,8 +18,7 @@ import zipfile
 
 from accounts.models import User
 from marketdata.models import AssetMetricSnapshot
-from portfolio.models import Account, Asset, Holding, LedgerEntry
-from portfolio.models import Account, Holding, Snapshot
+from portfolio.models import Account, Asset, Holding, LedgerEntry, Snapshot
 from portfolio.services.insights import net_worth_trend
 
 pytestmark = pytest.mark.django_db
@@ -34,30 +34,16 @@ def clear_auth_throttles():
     cache.clear()
 
 
-def test_register_logs_in_immediately():
-    """Signup is minimal-friction: no first/last name, and no wait for the
-    verification email before the user can use the app."""
-    
+def test_register_is_closed_without_creating_a_user():
     client = APIClient()
     resp = client.post(
         "/api/auth/register/",
         {"email": "new@test.test", "password": "Sup3rSecret!"},
         format="json",
     )
-    assert resp.status_code == 201
-    data = resp.json()
-    assert data["user"]["email"] == "new@test.test"
-    assert "access" in data
-    assert "session_expires_at" in data
-    assert resp.cookies["ps_refresh"]["httponly"] is True
-
-    from accounts.models import User
-    user = User.objects.get(email="new@test.test")
-    assert user.is_active is True
-
-    # /me/ works right away with the token from registration.
-    client.credentials(HTTP_AUTHORIZATION=f"Bearer {data['access']}")
-    assert client.get("/api/auth/me/").status_code == 200
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "New memberships are currently closed."
+    assert not User.objects.filter(email="new@test.test").exists()
 
 
 def test_login_returns_access_and_sets_refresh_cookie():
@@ -75,6 +61,12 @@ def test_login_returns_access_and_sets_refresh_cookie():
     assert "refresh" not in data
     assert "session_expires_at" in data
     assert resp.cookies["ps_refresh"]["httponly"] is True
+
+
+def test_access_token_lifetime_is_thirty_minutes():
+    from rest_framework_simplejwt.settings import api_settings
+
+    assert api_settings.ACCESS_TOKEN_LIFETIME == timedelta(minutes=30)
 
 
 def test_cookie_refresh_requires_csrf_and_rotates_cookie(make_user):
@@ -131,28 +123,28 @@ def test_jwt_access_token_authenticates_me():
     assert resp.json()["email"] == "jwt@test.test"
 
 
-def test_register_rejects_weak_all_numeric_password():
-    """AUTH_PASSWORD_VALIDATORS must apply on register (previously bypassed)."""
-    resp = APIClient().post(
+@override_settings(REGISTRATION_OPEN=True)
+def test_register_rejects_weak_all_numeric_password_over_http():
+    response = APIClient().post(
         "/api/auth/register/",
         {"email": "weak@test.test", "password": "12345678"},
         format="json",
     )
-    assert resp.status_code == 400
-    assert "password" in resp.json()
-
-    from accounts.models import User
+    assert response.status_code == 400
+    assert "password" in response.json()
     assert not User.objects.filter(email="weak@test.test").exists()
 
 
-def test_register_rejects_too_short_password():
-    resp = APIClient().post(
+@override_settings(REGISTRATION_OPEN=True)
+def test_register_rejects_too_short_password_over_http():
+    response = APIClient().post(
         "/api/auth/register/",
         {"email": "short@test.test", "password": "Ab1!"},
         format="json",
     )
-    assert resp.status_code == 400
-    assert "password" in resp.json()
+    assert response.status_code == 400
+    assert "password" in response.json()
+    assert not User.objects.filter(email="short@test.test").exists()
 
 
 def test_update_user_profile(make_user):

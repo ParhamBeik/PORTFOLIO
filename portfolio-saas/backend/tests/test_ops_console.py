@@ -81,6 +81,13 @@ def test_admin_overview_requires_staff(free_user, staff_user):
     assert "checks" in body
 
 
+def test_integrity_endpoint_requires_staff(free_user, staff_user):
+    client = _auth(APIClient(), free_user)
+    assert client.get("/api/integrity/").status_code == 403
+    client = _auth(APIClient(), staff_user)
+    assert client.get("/api/integrity/").status_code == 200
+
+
 def test_admin_overview_refresh_bypasses_cache(staff_user, monkeypatch):
     from django.core.cache import cache
     from marketdata.admin_telemetry import OVERVIEW_CACHE_KEY

@@ -470,10 +470,6 @@ function isManualPriceEditable(row) {
   );
 }
 
-function isInlineEditable(row) {
-  return row.is_house || isManualPriceEditable(row);
-}
-
 function draftForRow(row, drafts) {
   const key = holdingsRowKey(row);
   return drafts[key] ?? {
@@ -604,7 +600,6 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
     <Card title="Holdings" testId="dashboard-holdings" actions={cardActions}>
       <Async {...valuationState} testId="dashboard-holdings-body">
         {(data) => {
-          const total = Number(data.total) || 1;
           const items = data.items || [];
           // `data.total` is the NET figure (liabilities and real estate netted
           // off), while these rows are gross holding values. Dividing by it gave
@@ -623,7 +618,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
               align: "right",
               render: (r) => {
                 const holding = resolveHolding(r);
-                if (manageMode === "edit" && isInlineEditable(r) && holding) {
+                if (manageMode === "edit" && holding) {
                   const draft = draftForRow(r, drafts);
                   const rk = holdingsRowKey(r);
                   return (
@@ -708,7 +703,6 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
               header: "",
               align: "right",
               render: (r) => {
-                if (!isInlineEditable(r)) return null;
                 const holding = resolveHolding(r);
                 if (!holding) return <span className="text-xs text-muted">—</span>;
                 const draft = draftForRow(r, drafts);
@@ -759,7 +753,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
               )}
               {manageMode === "edit" && (
                 <p className="mb-3 text-xs text-muted">
-                  Manual holdings: edit quantity and unit price, then click Save on each row. Real estate: edit quantity (price per sqm, millions T), then Save.
+                  Edit any holding quantity and click Save. Manual assets also allow a unit-price update; live assets keep their fetched market price.
                 </p>
               )}
               <Table testId="dashboard-holdings-table" rowKey={holdingsRowKey} rows={items} columns={columns} empty="No holdings priced yet." />
