@@ -45,6 +45,84 @@ class CodalArtifactRejected(RuntimeError):
     pass
 
 
+# ------------------------------------------------------------ reachability gate
+#
+# codal.ir is not reachable from every host this runs on -- from the production
+# VPS, TCP 443 simply times out, which put 4,728 artifacts in `blocked_network`
+# and cost ~986 pointless connect attempts a day. That is a property of the
+# network path, not of any one document, so retrying per-document learns nothing.
+#
+# One shared breaker: consecutive failures trip a cooldown, and exactly one probe
+# is allowed through per cooldown to notice when the path comes back (e.g. when
+# CODAL_HTTP_PROXY is finally pointed somewhere that can reach it).
+_BREAKER_FAILS_KEY = "codal:origin:consecutive_failures"
+_BREAKER_COOLDOWN_KEY = "codal:origin:cooldown"
+_BREAKER_PROBE_PENDING_KEY = "codal:origin:probe_pending"
+_BREAKER_PROBE_LOCK_KEY = "codal:origin:probe_lock"
+
+
+def _breaker_client():
+    from portfolio.live.redis_client import get_redis
+
+    return get_redis()
+
+
+def origin_unreachable(*, probe=False):
+    """Whether the codal.ir path is currently considered down."""
+    client = _breaker_client()
+    if client is None:
+        return False
+    try:
+        if client.get(_BREAKER_COOLDOWN_KEY):
+            return True
+        if not probe or not client.get(_BREAKER_PROBE_PENDING_KEY):
+            return False
+        return not bool(
+            client.set(_BREAKER_PROBE_LOCK_KEY, "1", ex=300, nx=True)
+        )
+    except Exception:
+        # A broken breaker must fail open. Refusing all downloads because Redis
+        # blinked would be a worse outage than the one it guards against.
+        return False
+
+
+def _record_origin_failure():
+    client = _breaker_client()
+    if client is None:
+        return
+    try:
+        fails = client.incr(_BREAKER_FAILS_KEY)
+        client.expire(_BREAKER_FAILS_KEY, settings.CODAL_ORIGIN_COOLDOWN_SECONDS * 2)
+        if fails >= settings.CODAL_ORIGIN_FAILURE_THRESHOLD:
+            client.set(
+                _BREAKER_COOLDOWN_KEY, "1", ex=settings.CODAL_ORIGIN_COOLDOWN_SECONDS
+            )
+            client.set(
+                _BREAKER_PROBE_PENDING_KEY,
+                "1",
+                ex=settings.CODAL_ORIGIN_COOLDOWN_SECONDS + 300,
+            )
+            client.delete(_BREAKER_PROBE_LOCK_KEY)
+            client.delete(_BREAKER_FAILS_KEY)
+    except Exception:
+        pass
+
+
+def _record_origin_success():
+    client = _breaker_client()
+    if client is None:
+        return
+    try:
+        client.delete(
+            _BREAKER_FAILS_KEY,
+            _BREAKER_COOLDOWN_KEY,
+            _BREAKER_PROBE_PENDING_KEY,
+            _BREAKER_PROBE_LOCK_KEY,
+        )
+    except Exception:
+        pass
+
+
 def _absolute_url(value):
     return urljoin("https://codal.ir/", value or "")
 
@@ -92,7 +170,10 @@ def download_artifact(url, kind):
     session = requests.Session()
     current = _absolute_url(url)
     headers = {"User-Agent": "Portfolio-Codal-Warehouse/1.0"}
+    origin_contacted = False
     try:
+        if origin_unreachable(probe=True):
+            raise CodalBlockedNetwork("origin_probe_in_flight")
         for _redirect in range(6):
             _validate_url(current)
             from .workflows import record_http_attempt
@@ -106,6 +187,7 @@ def download_artifact(url, kind):
                 stream=True,
                 allow_redirects=False,
             )
+            origin_contacted = True
             if response.is_redirect or response.is_permanent_redirect:
                 location = response.headers.get("Location")
                 response.close()
@@ -133,13 +215,22 @@ def download_artifact(url, kind):
             if not _valid_magic(kind, content):
                 raise CodalArtifactRejected("invalid_content_signature")
             _check_archive(content)
+            _record_origin_success()
             return current, content_type, content
         raise CodalArtifactRejected("too_many_redirects")
     except CodalArtifactRejected:
+        # The origin answered; this document is just unusable. Not a network fault,
+        # so it must not count toward the breaker.
+        if origin_contacted:
+            _record_origin_success()
         raise
     except requests.RequestException as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
         label = f"HTTP{status}" if status else type(exc).__name__
+        if status is None:
+            # No response at all: connect timeout, DNS, refused. That is the path
+            # being down rather than this URL being bad.
+            _record_origin_failure()
         raise CodalBlockedNetwork(f"{label}@{urlsplit(current).hostname or '?'}") from exc
     finally:
         session.close()

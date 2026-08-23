@@ -553,7 +553,49 @@ def ingest_codal(payload) -> tuple[int, int]:
     created, conflicts = _bulk(
         CodalAnnouncement, rows, scope={"symbol__in": sorted({r.symbol for r in rows})}
     )
+    if created:
+        _enqueue_codal_extractions(rows)
     return created, conflicts + bad
+
+
+def _enqueue_codal_extractions(rows):
+    """Start document extraction for announcements this batch just introduced.
+
+    The extractor used to be a batch job on a six-hourly cron, which against a
+    ~74,000-document backlog meant a filing waited hours to be read even though
+    downloading it costs no provider quota at all. Queueing at write time is the
+    "as soon as it appears" behaviour; `queue_codal_extractions` stays on as the
+    sweeper for anything that fails or is stranded.
+
+    Re-querying rather than using the bulk_create return value: Postgres does not
+    hand back pks under ignore_conflicts (see `_bulk`). Filtering on
+    `report__isnull=True` is what makes this idempotent -- an announcement already
+    extracted is simply not selected, so a repeated payload enqueues nothing.
+    """
+    from django.db.models import Q
+
+    from .codal_storage import origin_unreachable
+    from .tasks import _dispatch_codal_ids
+
+    if origin_unreachable():
+        return 0
+    pairs = sorted({(row.symbol, row.code) for row in rows if row.symbol and row.code})
+    if not pairs:
+        return 0
+    has_artifact = (
+        Q(link_excel__gt="") | Q(link_pdf__gt="") | Q(link__gt="") | Q(link_attachment__gt="")
+    )
+    pair_filter = Q()
+    for symbol, code in pairs:
+        pair_filter |= Q(symbol=symbol, code=code)
+    ids = list(
+        CodalAnnouncement.objects.filter(
+            has_artifact, pair_filter, report__isnull=True
+        )
+        .order_by("id")
+        .values_list("id", flat=True)
+    )
+    return _dispatch_codal_ids(ids)
 
 
 def _number(value):

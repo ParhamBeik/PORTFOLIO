@@ -1113,6 +1113,7 @@ def test_seed_assets_includes_formula_valued_house(db):
 
 def test_one_kinds_failure_does_not_block_the_others(settings):
     settings.TSETMC_API_KEY = "test-key"
+    settings.MARKETDATA_IGNORE_MARKET_HOURS = True  # session-gated; see below
 
     def fake_fetch(api_key, endpoint_key):
         if endpoint_key == "ime_futures":
@@ -1140,6 +1141,10 @@ def test_one_kinds_failure_does_not_block_the_others(settings):
 
 def test_all_three_kinds_succeed_independently(settings):
     settings.TSETMC_API_KEY = "test-key"
+    # Derivative endpoints are session-gated (LiveFetchState.session_only):
+    # contracts only move while the TSE trades. This test is about failure
+    # isolation, not scheduling, so take the market as open.
+    settings.MARKETDATA_IGNORE_MARKET_HOURS = True
 
     with (
         patch("marketdata.fetchers.fetch_derivatives", return_value=[]),
@@ -1228,3 +1233,76 @@ def test_closed_session_does_not_bury_the_days_last_live_price(
 
     newest = Price.objects.filter(asset=kama).order_by("-fetched_at", "-id").first()
     assert newest.price == Decimal("4890"), "yesterday's close buried today's"
+
+
+# ----------------------------------------------------------------------
+# Workflow attribution across the live lane's thread pool.
+#
+# The live fetcher fans its provider calls out over a ThreadPoolExecutor, and a
+# pool worker starts from a *fresh* context. With the tallies held in plain-int
+# ContextVars, every bump made off the calling thread was written to a throwaway
+# context and dropped: production recorded 5 HTTP attempts on a day it spent 488
+# live requests, leaving ~1,191 of the day's quota unattributable.
+
+
+def test_attempts_made_on_a_pool_thread_reach_the_owning_workflow():
+    from concurrent.futures import ThreadPoolExecutor, wait
+
+    from marketdata.workflows import (
+        WorkflowOutcome,
+        record_http_attempt,
+        submit_with_context,
+    )
+
+    outcome = WorkflowOutcome("thread_attribution_probe")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        jobs = [
+            submit_with_context(pool, record_http_attempt, quota=True)
+            for _ in range(12)
+        ]
+        wait(jobs)
+
+    assert outcome._counters.http == 12
+    assert outcome._counters.quota == 12
+
+
+def test_a_bare_submit_would_have_lost_them():
+    """Pins the mechanism, so a future refactor back to executor.submit fails here
+    rather than silently in the quota ledger six months later."""
+    from concurrent.futures import ThreadPoolExecutor, wait
+
+    from marketdata.workflows import WorkflowOutcome, record_http_attempt
+
+    outcome = WorkflowOutcome("thread_attribution_control")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        wait([pool.submit(record_http_attempt, quota=True) for _ in range(5)])
+
+    assert outcome._counters.http == 0
+
+
+def test_attempts_outside_any_workflow_are_not_counted():
+    """The old int vars accumulated into an ownerless default that nothing read."""
+    from marketdata.workflows import counters_var, record_http_attempt
+
+    token = counters_var.set(None)
+    try:
+        record_http_attempt(quota=True)  # must not raise
+        assert counters_var.get() is None
+    finally:
+        counters_var.reset(token)
+
+
+def test_finishing_a_workflow_closes_and_resets_attempt_context():
+    from marketdata.workflows import WorkflowOutcome, counters_var, record_http_attempt
+
+    token = counters_var.set(None)
+    try:
+        outcome = WorkflowOutcome("context_cleanup")
+        outcome.finish("success")
+
+        assert counters_var.get() is None
+        record_http_attempt(quota=True)
+        assert outcome._counters.http == 0
+        assert outcome._counters.quota == 0
+    finally:
+        counters_var.reset(token)

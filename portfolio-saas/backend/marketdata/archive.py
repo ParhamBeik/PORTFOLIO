@@ -50,10 +50,9 @@ STOCK_ENDPOINTS = (
 # days only -- a non-trading day has no daily candle, so it is never requested.
 TICK_WINDOW_DAYS = getattr(settings, "MARKETDATA_TICK_WINDOW_DAYS", 90)
 
-# Cost-ordered classes: drain HISTORICAL_FULL first (~4,600 rows/request, the
-# best rows-per-quota-unit available), then the paged RANGE class, then the
-# expensive PER_DAY class last. Applied as an annotation so the cheap classes
-# always outrank per-day ones regardless of the secondary sort that follows.
+# Endpoints that return an entire history in one request. Used to tag the
+# per-day `historical_full` counter, which is how "we spent the day re-downloading
+# histories" shows up in the quota status.
 _FULL_HISTORY = (
     ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
@@ -61,31 +60,35 @@ _FULL_HISTORY = (
     ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
     ArchiveFetchState.Endpoint.GOLD_DAILY,
 )
-def _expected_gain_qs(qs):
-    """Estimate new rows bought by the state's next provider request."""
+
+
+def _starvation_rank_qs(qs):
+    """Annotate the "how badly is this state owed data?" sort keys.
+
+    Used as `_coverage_rank ASC, _deficit DESC, last_success_at ASC`, which is one
+    ordering in place of what used to be two hard tiers ("incomplete" above
+    "complete and due for refresh"). Tiering by completeness meant that at the
+    14:30 post-close, when every finished full-history state comes due at once,
+    ~5,500 refreshes outranked the one endpoint with a real backlog -- the day's
+    quota went on re-downloading histories that gained nothing while intraday
+    ticks sat at 35% coverage.
+
+    Coverage still leads, because `missing_rows` cannot express "holds nothing":
+    a state that has never stored a row reports missing_rows=0 for the same reason
+    a never-attempted one does -- nothing has run to populate it. Ranking on the
+    deficit alone would sort those behind symbols already holding years of data.
+
+    Within a coverage rank the deficit decides, and a complete state scores 0 and
+    sinks to the back, where it competes only with other complete states and is
+    ordered by longest-since-success. The daily refresh still happens; it just
+    stops outranking work that has never been done.
+    """
     from django.db.models import Case, IntegerField, Value, When
 
-    return qs.annotate(
-        _expected_gain=Case(
-            # Per-day endpoints can only advance one day regardless of the
-            # state's total gap. Production's median tick-day yield is 17 rows.
-            When(
-                endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
-                then=Value(17),
-            ),
-            When(
-                endpoint=ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS,
-                then=Value(20),
-            ),
-            When(
-                endpoint=ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
-                then=Value(30),
-            ),
-            # A full-history request can close every currently known gap.
-            When(endpoint__in=_FULL_HISTORY, missing_rows__gt=0, then=F("missing_rows")),
-            When(endpoint__in=_FULL_HISTORY, last_success_at__isnull=True, then=Value(3000)),
-            When(endpoint__in=_FULL_HISTORY, stored_rows=0, then=Value(3000)),
-            default=Value(1),
+    return _coverage_rank_qs(qs).annotate(
+        _deficit=Case(
+            When(verified_complete=True, then=Value(0)),
+            default=F("missing_rows"),
             output_field=IntegerField(),
         )
     )
@@ -918,20 +921,6 @@ def _pick_ready_states(candidates, limit, now, deferred_pks):
     return ready
 
 
-_HISTORICAL_FULL_ENDPOINTS = (
-    ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
-    ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED,
-    ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED,
-    ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
-    ArchiveFetchState.Endpoint.GOLD_DAILY,
-    ArchiveFetchState.Endpoint.CRYPTO_DAILY,
-    ArchiveFetchState.Endpoint.COMMODITY_DAILY,
-    ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY,
-    ArchiveFetchState.Endpoint.ETF_NAV_DAILY,
-    ArchiveFetchState.Endpoint.OPTION_CONTRACT_DAILY,
-)
-
-
 _GAP_REFETCHABLE_ENDPOINTS = (
     ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED,
     ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
@@ -967,6 +956,23 @@ def reopen_states_with_gaps(symbols=None):
 
 
 def claim_archive_batch(limit=None):
+    """Lease the next batch of states to fetch, in the operator's priority order.
+
+    Three rules, applied in this order:
+
+    1. Anything that has never had a single successful fetch goes first, at any
+       cost, across every endpoint. A symbol we hold nothing for is worse than a
+       symbol that is merely out of date.
+    2. Intraday ticks -- the one endpoint with an unbounded backlog -- take a
+       fixed majority share of what is left. A share rather than strict priority
+       on purpose: ticks buy one symbol-day per request and `grow_tick_windows`
+       keeps reopening finished windows, so strict priority would starve every
+       other endpoint for years rather than days.
+    3. Everything else fills the remainder, most-starved first.
+
+    Either lane hands its unused slots to the other, so a quiet tick queue never
+    leaves quota unspent.
+    """
     now = timezone.now()
     batch_size = min(
         limit or settings.MARKETDATA_ARCHIVE_BATCH_SIZE,
@@ -983,132 +989,64 @@ def claim_archive_batch(limit=None):
         # a symbol already proven to return bad data. They come back only via
         # the weekly probe (claim_probe_batch) or an operator force_retry.
         base = ArchiveFetchState.objects.select_for_update(skip_locked=True).filter(
-            due, verified_complete=False, suspended_at__isnull=True
+            due, suspended_at__isnull=True
         )
         states = []
 
         def take(candidates, n):
+            if n <= 0:
+                return
             picked = _pick_ready_states(candidates, n, now, deferred_pks)
             deferred_pks.update(state.pk for state in picked)
             states.extend(picked)
 
-        remaining = batch_size
+        def starved(qs, n, extra=8):
+            """Least-covered first, then most-owed, then longest-since-success."""
+            return list(
+                _starvation_rank_qs(qs.exclude(pk__in=deferred_pks)).order_by(
+                    "_coverage_rank",
+                    "-_deficit",
+                    F("last_success_at").asc(nulls_first=True),
+                )[: n + extra]
+            )
+
+        # 1. Never succeeded anywhere. Ordered by _coverage_rank so a state that
+        #    has not even been attempted leads the ones that tried and failed.
         take(
             list(
-                _coverage_rank_qs(_expected_gain_qs(base.filter(endpoint__in=_HISTORICAL_FULL_ENDPOINTS)))
-                .order_by("_coverage_rank", "-_expected_gain", _LAST_ATTEMPT_FIRST)[: remaining + 8]
+                _coverage_rank_qs(
+                    base.filter(last_success_at__isnull=True)
+                ).order_by("_coverage_rank", _LAST_ATTEMPT_FIRST)[: batch_size + 8]
             ),
-            remaining,
+            batch_size,
         )
+
+        # 2/3. Split the remainder between the tick lane and everything else,
+        #      each lane taking whatever the other cannot use.
+        #
+        # A *complete* tick state is deliberately not claimable here: reopening
+        # one means widening its window, which is `grow_tick_windows`'s job, and
+        # re-fetching the same window would buy nothing. Every other endpoint's
+        # complete states stay eligible -- that is how the daily refresh happens,
+        # now at the back of the queue instead of ahead of it.
+        ticks = base.filter(endpoint=tick_endpoint, verified_complete=False)
         remaining = batch_size - len(states)
-        if remaining > 0:
-            take(
-                list(
-                    _coverage_rank_qs(_expected_gain_qs(
-                        base.exclude(endpoint__in=(*_HISTORICAL_FULL_ENDPOINTS, tick_endpoint))
-                        .exclude(pk__in=deferred_pks)
-                    ))
-                    .order_by("_coverage_rank", "-_expected_gain", _LAST_ATTEMPT_FIRST)[: remaining + 8]
-                ),
-                remaining,
-            )
-        # Recency-gap tier: verified_complete states whose next post-close
-        # refresh came due. Excluded from `base` above (that queryset only
-        # ever sees verified_complete=False), so without this tier a state
-        # stays frozen the instant it first completes -- the "moving forward
-        # in time reopens a gap between last_date and today" problem. Ticks
-        # are excluded: their own reopening is grow_tick_windows's job, since
-        # growing the window and refreshing the same window are different
-        # operations. Ordered oldest-`last_date`-first as a proxy for gap
-        # size (no per-row trading-day count needed: for the same endpoint, an
-        # older last_date is strictly a bigger gap).
+        tick_slots = int(remaining * settings.MARKETDATA_TICK_QUOTA_SHARE)
+        take(starved(ticks, tick_slots, extra=16), tick_slots)
+
         remaining = batch_size - len(states)
-        if remaining > 0:
-            take(
-                list(
-                    ArchiveFetchState.objects.select_for_update(skip_locked=True)
-                    .filter(due, verified_complete=True, suspended_at__isnull=True)
-                    .exclude(endpoint=tick_endpoint)
-                    .exclude(pk__in=deferred_pks)
-                    .order_by("last_date", _LAST_ATTEMPT_FIRST)[: remaining + 8]
-                ),
-                remaining,
-            )
+        take(starved(base.exclude(endpoint=tick_endpoint), remaining), remaining)
+
+        # Carryover: the general lane could not fill the slots the tick share left
+        # it, so let ticks have them back rather than under-spending the batch.
         remaining = batch_size - len(states)
-        if remaining > 0:
-            take(
-                list(
-                    base.filter(endpoint=tick_endpoint)
-                    .exclude(pk__in=deferred_pks)
-                    .order_by("target_window_days", "stored_rows", _LAST_ATTEMPT_FIRST)
-                    [: remaining + 16]
-                ),
-                remaining,
-            )
+        take(starved(ticks, remaining, extra=16), remaining)
+
         claim_until = now + timedelta(minutes=10)
         ArchiveFetchState.objects.filter(pk__in=[state.pk for state in states]).update(
             next_attempt_at=claim_until
         )
     return [state.pk for state in states]
-
-
-def claim_recent_refresh(limit=None):
-    """Lease post-close history/candle refreshes for held then liquid symbols."""
-    from portfolio.models import Holding
-
-    request_limit = min(
-        limit or settings.MARKETDATA_RECENT_REFRESH_REQUEST_BUDGET,
-        max(remaining_requests(ARCHIVE), 0),
-    )
-    symbol_limit = request_limit // 2
-    if not symbol_limit:
-        return []
-
-    held = list(
-        Holding.objects.filter(quantity__gt=0)
-        .exclude(asset__tse_symbol="")
-        .values_list("asset__tse_symbol", flat=True)
-        .distinct()
-    )
-    latest_day = MarketCandle.objects.filter(
-        timeframe=MarketCandle.UNADJUSTED, volume__gt=0
-    ).aggregate(day=Max("date_time"))["day"]
-    liquid = list(
-        MarketCandle.objects.filter(
-            timeframe=MarketCandle.UNADJUSTED,
-            date_time=latest_day,
-            volume__gt=0,
-        )
-        .order_by("-volume")
-        .values_list("symbol", flat=True)[:symbol_limit]
-    ) if latest_day else []
-    symbols = list(dict.fromkeys([*held, *liquid]))[:symbol_limit]
-    if not symbols:
-        return []
-
-    endpoints = (
-        ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
-        ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
-    )
-    now = timezone.now()
-    due = Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now)
-    with transaction.atomic():
-        states = list(
-            ArchiveFetchState.objects.select_for_update(skip_locked=True).filter(
-                due, symbol__in=symbols, endpoint__in=endpoints
-            )
-        )
-        by_key = {(state.symbol, state.endpoint): state for state in states}
-        ordered = [
-            by_key[(symbol, endpoint)]
-            for symbol in symbols
-            for endpoint in endpoints
-            if (symbol, endpoint) in by_key
-        ][:request_limit]
-        ArchiveFetchState.objects.filter(pk__in=[s.pk for s in ordered]).update(
-            next_attempt_at=now + timedelta(hours=3)
-        )
-    return [state.pk for state in ordered]
 
 
 def grow_tick_windows(step_days=90):

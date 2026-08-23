@@ -273,9 +273,10 @@ function tipRows(params, t, fmt) {
         `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;` +
         `background:${p.color};margin-right:6px"></span>`;
       const value = fmt(p.value?.[1] ?? p.value, p);
-      // ECharts names an unnamed series "series0"; pie slices carry the
-      // real label on the datum (`name` = Stock / Gold / …).
-      const label = /^series\d+$/.test(p.seriesName || "") ? p.name : (p.seriesName || p.name);
+      // ECharts can name an unnamed series "series0" or "series 0"; pie
+      // slices carry the real label on the datum (`name` = Stock / Gold / …).
+      const genericSeries = /^series\s*\d+$/i.test(p.seriesName || "");
+      const label = p.name || (!genericSeries ? p.seriesName : "") || "—";
       return `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between">` +
         `<span style="color:${t.text}">${dot}${label}</span>` +
         `<span style="color:${t.text};font-variant-numeric:tabular-nums">${value}</span></div>`;
@@ -795,7 +796,13 @@ export function StackedStatusBar({
  * `rows` is the API's `diversification.concentration_gap`:
  * [{ key, weight_share, risk_share, gap }], already sorted worst-first.
  */
-export function MoneyVsRisk({ rows = [], height, label = "Share of money versus share of risk", testId }) {
+export function MoneyVsRisk({
+  rows = [],
+  height,
+  label = "Share of money versus share of risk",
+  coverage,
+  testId,
+}) {
   const t = useChartTokens();
   // Worst offender on top: ECharts category axes build upward, so reverse.
   const ordered = useMemo(() => [...rows].reverse(), [rows]);
@@ -818,7 +825,7 @@ export function MoneyVsRisk({ rows = [], height, label = "Share of money versus 
             `<div style="margin-top:4px;color:${t.muted}">Gap ${sign}${pct(row.gap)}</div>`;
         },
       },
-      legend: c.legend(),
+      legend: { ...c.legend(), data: ["Share of money", "Share of risk"] },
       xAxis: {
         type: "value", ...c.valueAxis,
         axisLabel: { ...c.valueAxis.axisLabel, formatter: (v) => pct(v, 0) },
@@ -885,7 +892,7 @@ export function MoneyVsRisk({ rows = [], height, label = "Share of money versus 
     <EChart
       option={option}
       height={height || Math.max(160, ordered.length * rowHeight + 70)}
-      label={label}
+      label={coverage != null && coverage < 0.999 ? `${label} · ${pct(coverage)} of portfolio covered` : label}
       testId={testId}
     />
   );

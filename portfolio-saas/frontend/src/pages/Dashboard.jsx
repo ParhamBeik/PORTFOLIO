@@ -782,157 +782,81 @@ const RISK_WINDOWS = [
 ];
 
 const RISK_VIEWS = [
-  { value: "sources", label: "Where risk comes from" },
-  { value: "add", label: "What to add" },
-  { value: "portfolio", label: "Portfolio" },
-  { value: "class", label: "By class" },
-  { value: "asset", label: "By asset" },
+  { value: "class", label: "Risk by class" },
+  { value: "asset", label: "Risk by asset" },
+  { value: "correlation", label: "Correlations" },
+  { value: "add", label: "Add diversification" },
 ];
 
-const RISK_STATUS_BADGE = {
-  ready: "good",
-  partial: "warn",
-  excluded: "critical",
-  insufficient: "warn",
-  not_applicable: "neutral",
-};
+function riskShareRows(weights = {}, risks = {}, labelFor = (key) => key) {
+  const keys = [...new Set([...Object.keys(weights), ...Object.keys(risks)])];
+  return keys
+    .map((key) => {
+      const weight_share = Number(weights[key] || 0);
+      const risk_share = Number(risks[key] || 0);
+      return {
+        key: labelFor(key),
+        weight_share,
+        risk_share,
+        gap: risk_share - weight_share,
+      };
+    })
+    .filter((row) => row.weight_share > 0 || row.risk_share > 0)
+    .sort((a, b) => b.gap - a.gap);
+}
 
-// `proxied` says the series came from a stand-in asset (a Swiss bar priced off
-// gold); everything else says the underlying data is thinner than it looks.
-const RISK_WARNING_TONE = { proxied: "neutral" };
-
-function RiskWarnings({ row }) {
-  const warnings = row.warnings || [];
-  if (!warnings.length) return null;
+function RiskClassView({ data }) {
+  const div = data.diversification || {};
+  const rows = riskShareRows(div.weight_by_class, div.risk_by_class);
+  if (!rows.length) return <Empty testId="dashboard-risk-class-empty">No class risk data.</Empty>;
   return (
-    <div className="mt-1 flex flex-wrap gap-1" data-testid={`dashboard-risk-warnings-${row.key}`}>
-      {warnings.map((w) => (
-        <Badge key={w} variant={RISK_WARNING_TONE[w] || "warn"}>
-          {w === "proxied" && row.proxied_from ? `Proxied via ${row.proxied_from}` : humanize(w)}
-        </Badge>
-      ))}
+    <div data-testid="dashboard-risk-class-view">
+      <MoneyVsRisk
+        rows={rows}
+        label="Share of money versus share of risk by asset class"
+        coverage={div.mean_weight_covered}
+        testId="risk-money-vs-risk-class"
+      />
     </div>
   );
 }
 
-function calmarValue(metrics) {
-  if (!metrics) return "—";
-  if (metrics.calmar != null) return num(metrics.calmar);
-  const months = Math.floor((metrics.calmar_window_days || 0) / 30);
-  return `needs 36 months (have ${months})`;
-}
-
-function riskHealthLabel(health) {
-  if (health === "healthy") return "Healthy";
-  if (health === "degraded") return "Degraded";
-  return "Unhealthy";
-}
-
-function riskHealthTone(health) {
-  if (health === "healthy") return "good";
-  if (health === "degraded") return "warn";
-  return "critical";
-}
-
-function BenchmarkTiles({ metrics }) {
-  if (!metrics || metrics.benchmark_status === "unavailable") {
-    return (
-      <StatTile
-        label="Beta / alpha vs. benchmark"
-        value="Unavailable"
-        sub={humanize(metrics?.benchmark_status_reason) || "No benchmark index history"}
-        testId="dashboard-risk-benchmark"
+function RiskAssetView({ data, labelFor }) {
+  const div = data.diversification || {};
+  const rows = (div.concentration_gap || []).map((row) => ({
+    ...row,
+    key: labelFor(row.key),
+  }));
+  if (!rows.length) return <Empty testId="dashboard-risk-asset-empty">No asset risk data.</Empty>;
+  return (
+    <div data-testid="dashboard-risk-asset-view">
+      <MoneyVsRisk
+        rows={rows}
+        label="Share of money versus share of risk by asset"
+        coverage={div.mean_weight_covered}
+        testId="risk-money-vs-risk"
       />
-    );
+    </div>
+  );
+}
+
+function RiskCorrelationView({ data, labelFor }) {
+  const correlation = data.correlation || {};
+  if ((correlation.assets || []).length < 2) {
+    return <Empty testId="dashboard-risk-correlation-empty">Not enough overlapping assets.</Empty>;
   }
   return (
-    <>
-      <StatTile label="Beta" value={num(metrics.beta)} testId="dashboard-risk-beta" />
-      <StatTile label="Alpha (annualized)" value={pct(metrics.alpha)} valueTone={toneFor(metrics.alpha)} testId="dashboard-risk-alpha" />
-      <StatTile label="Tracking error" value={pct(metrics.tracking_error)} testId="dashboard-risk-tracking-error" />
-      <StatTile label="Information ratio" value={num(metrics.information_ratio)} valueTone={toneFor(metrics.information_ratio)} testId="dashboard-risk-info-ratio" />
-    </>
-  );
-}
-
-function RiskMetricsGrid({ metrics, prefix = "dashboard-risk" }) {
-  if (!metrics) {
-    return <p className="text-sm text-muted">Not enough price history for this slice.</p>;
-  }
-  const hasCvar = metrics.historical_cvar_95_daily != null;
-  return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-      <StatTile label="Annualized volatility" value={pct(metrics.annualized_volatility)} testId={`${prefix}-volatility`} />
-      <StatTile
-        label="Max drawdown"
-        value={pct(metrics.max_drawdown)}
-        valueTone={toneFor(metrics.max_drawdown)}
-        sub={`${metrics.days_under_water ?? 0} days under water`}
-        testId={`${prefix}-max-drawdown`}
+    <div data-testid="dashboard-risk-correlation-view">
+      <CorrelationHeatmap
+        assets={correlation.assets.map(labelFor)}
+        matrix={correlation.matrix}
+        testId="risk-correlation"
       />
-      <StatTile label="Sharpe" value={num(metrics.sharpe)} valueTone={toneFor(metrics.sharpe)} testId={`${prefix}-sharpe`} />
-      <StatTile label="Sortino" value={num(metrics.sortino)} valueTone={toneFor(metrics.sortino)} testId={`${prefix}-sortino`} />
-      <StatTile label="Calmar" value={calmarValue(metrics)} testId={`${prefix}-calmar`} />
-      <StatTile label="Diversification ratio" value={`${num(metrics.diversification_ratio)}×`} testId={`${prefix}-diversification`} />
-      <StatTile label="VaR 95% (daily)" value={pct(metrics.historical_var_95_daily)} valueTone={toneFor(metrics.historical_var_95_daily)} testId={`${prefix}-var`} />
-      <StatTile
-        label="CVaR 95% (daily)"
-        value={hasCvar ? pct(metrics.historical_cvar_95_daily) : "Unavailable"}
-        valueTone={hasCvar ? toneFor(metrics.historical_cvar_95_daily) : "muted"}
-        sub={hasCvar ? undefined : "fewer than 5 tail observations"}
-        testId={`${prefix}-cvar`}
-      />
-      <BenchmarkTiles metrics={metrics} />
     </div>
   );
 }
 
-function RiskSummary({ data }) {
-  const coverage = data.coverage || {};
-  const full = data.portfolio_full || {};
-  const health = coverage.health || "degraded";
-  return (
-    <div className="space-y-3" data-testid="dashboard-risk-summary">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <Badge variant={riskHealthTone(health)} testId="dashboard-risk-health">{riskHealthLabel(health)}</Badge>
-        <span className="text-xs text-muted">
-          {data.history_days || 180}d window · {Math.round(data.periods_per_year || 252)} obs/yr · {humanize(data.basis || "nominal_toman")}
-        </span>
-      </div>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <StatTile
-          label="Holdings covered"
-          value={`${coverage.analyzable_holdings ?? 0}/${coverage.total_holdings ?? 0}`}
-          sub={`${pct(coverage.value_analyzable_pct)} of value analyzable`}
-          testId="dashboard-risk-coverage"
-        />
-        <StatTile
-          label="Analyzed weight"
-          value={pct(coverage.analyzed_weight_pct)}
-          sub="Share of the book these metrics describe"
-          valueTone={(coverage.analyzed_weight_pct || 0) >= 0.9 ? "good" : "warn"}
-          testId="dashboard-risk-analyzed-weight"
-        />
-        <StatTile label="Excluded" value={num(coverage.excluded_holdings)} sub="Missing history or failed gates" valueTone={(coverage.excluded_holdings || 0) > 0 ? "warn" : "good"} />
-        <StatTile label="Full portfolio HHI" value={num(full.concentration_hhi)} sub="Concentration across all priced holdings" testId="dashboard-risk-hhi" />
-      </div>
-      {(coverage.analyzed_weight_pct ?? 1) < 0.999 && (
-        <p className="text-sm text-muted" data-testid="dashboard-risk-scope-note">
-          Portfolio metrics cover {pct(coverage.analyzed_weight_pct)} of the book, reweighted to 100%. The rest has no daily
-          return history — real estate is valued from marks, not prices.
-        </p>
-      )}
-    </div>
-  );
-}
-
-/**
- * "What should I buy next?" as a diversification question. The x axis is what
- * an asset would do to portfolio volatility; return is plotted but never used
- * to rank, because ranking by return on a concentrated book recommends more of
- * what is already concentrated.
- */
-function RiskAddView({ activeId, basis, window }) {
+function RiskAddView({ activeId, basis, window, labelFor }) {
   const state = useApi(
     () => diversifiers(activeId, { basis, window: Number(window) }),
     [activeId, basis, window]
@@ -943,26 +867,13 @@ function RiskAddView({ activeId, basis, window }) {
         if (!data.candidates?.length) {
           return <Empty>No candidate has enough overlapping history to score yet.</Empty>;
         }
-        const best = data.candidates[0];
         return (
-          <div className="space-y-3" data-testid="dashboard-risk-add-view">
-            <p className="text-xs text-muted">
-              Best diversifier is {assetLabel(best.key)}: correlation{" "}
-              {best.correlation.toFixed(2)} to your book, so a 5% position removes{" "}
-              {pct(best.vol_reduction, 2)} of portfolio volatility. Anything left of
-              the dashed line would add risk instead.
-            </p>
+          <div data-testid="dashboard-risk-add-view">
             <DiversifierScatter
-              candidates={data.candidates}
-              held={data.held}
+              candidates={data.candidates.map((row) => ({ ...row, key: labelFor(row.key) }))}
+              held={(data.held || []).map((row) => ({ ...row, key: labelFor(row.key) }))}
               testId="risk-diversifier-scatter"
             />
-            {data.basis !== data.basis_requested && (
-              <p className="text-xs text-muted">
-                Measured in nominal Toman: the real-terms basis needs a CPI figure
-                that has not been published for this year yet.
-              </p>
-            )}
           </div>
         );
       }}
@@ -970,220 +881,16 @@ function RiskAddView({ activeId, basis, window }) {
   );
 }
 
-/**
- * Where the risk actually comes from — the question the weight split cannot
- * answer. Reads `diversification` and `correlation` off /api/analytics/.
- */
-function RiskSourcesView({ data, labelFor = (k) => k }) {
-  const div = data.diversification;
-  const gaps = div?.concentration_gap || [];
-  const corr = data.correlation || {};
-  const covered = Number(div?.mean_weight_covered ?? 1);
-
-  if (!gaps.length) {
-    return (
-      <Empty>
-        {div?.unavailable_reason
-          ? `Risk cannot be split yet: ${div.unavailable_reason}.`
-          : "No priced holdings to decompose."}
-      </Empty>
-    );
-  }
-
-  const worst = gaps[0];
-  return (
-    <div className="space-y-6" data-testid="dashboard-risk-sources-view">
-      <div className="grid gap-3 sm:grid-cols-3">
-        <StatTile
-          label="Independent bets"
-          value={num(div.effective_bets)}
-          testId="risk-effective-bets"
-        />
-        <StatTile label="Holdings" value={num(div.effective_holdings)} />
-        <StatTile label="Diversification ratio" value={`${num(div.diversification_ratio)}×`} />
-      </div>
-      <p className="text-xs text-muted">
-        {num(div.effective_bets)} independent bets across {num(div.effective_holdings)} holdings:
-        anything the two numbers disagree about is risk you are paying for twice.
-      </p>
-      {data.risk_free_rate_source && (
-        <Disclosure summary="About the risk-free rate" testId="risk-rf-source">
-          <p>
-            Sharpe and Sortino below use a {pct(data.risk_free_rate_annual)} risk-free
-            rate — {data.risk_free_rate_source}.
-          </p>
-        </Disclosure>
-      )}
-
-      <div>
-        <h3 className="mb-1 text-sm font-medium">Share of money versus share of risk</h3>
-        <p className="mb-3 text-xs text-muted">
-          {worst.gap > 0
-            ? `${labelFor(worst.key)} is ${pct(worst.weight_share)} of the money but ${pct(worst.risk_share)} of the risk.`
-            : "No holding carries materially more risk than its size."}
-        </p>
-        <MoneyVsRisk
-          rows={gaps.map((r) => ({ ...r, key: labelFor(r.key) }))}
-          testId="risk-money-vs-risk"
-        />
-      </div>
-
-      {(corr.assets || []).length > 1 && (
-        <div>
-          <h3 className="mb-1 text-sm font-medium">How the holdings move together</h3>
-          <p className="mb-3 text-xs text-muted">
-            Blocks of warm cells are assets that rise and fall as one — they are
-            fewer bets than they look.
-          </p>
-          <CorrelationHeatmap
-            assets={corr.assets.map(labelFor)}
-            matrix={corr.matrix}
-            testId="risk-correlation"
-          />
-        </div>
-      )}
-
-      {covered < 0.999 && (
-        <p className="text-xs text-muted" data-testid="risk-coverage-caveat">
-          Measured over {pct(covered)} of the portfolio by weight; the rest lacks
-          usable history and is excluded from this decomposition.
-        </p>
-      )}
-    </div>
-  );
-}
-
-function RiskPortfolioView({ data }) {
-  return (
-    <div className="space-y-4" data-testid="dashboard-risk-portfolio-view">
-      <RiskMetricsGrid metrics={data.metrics} />
-      {(data.excluded_assets || []).length > 0 && (
-        <div className="rounded-lg border border-border bg-panel-2 p-3 text-sm" data-testid="dashboard-risk-excluded-list">
-          <p className="font-medium">Excluded from analyzable portfolio metrics</p>
-          <ul className="mt-2 space-y-1 text-xs text-muted">
-            {(data.excluded_assets || []).map((e) => (
-              <li key={`${e.key}-${e.reason}`}>{e.key} — {humanize(e.reason)}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function RiskClassView({ data }) {
-  const rows = data.by_asset_class || [];
-  if (!rows.length) return <Empty>No asset classes in this portfolio.</Empty>;
-  return (
-    <div className="space-y-4" data-testid="dashboard-risk-class-view">
-      {rows.map((row) => (
-        <div key={row.asset_class} className="rounded-lg border border-border bg-panel-2 p-4" data-testid={`dashboard-risk-class-${row.asset_class}`}>
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <p className="font-medium">{row.asset_class}</p>
-              <p className="text-xs text-muted">
-                {pct(row.weight_in_portfolio)} of portfolio · {row.analyzable_count}/{row.held_count} assets analyzable
-              </p>
-            </div>
-            <Badge variant={RISK_STATUS_BADGE[row.status] || "neutral"}>{humanize(row.status)}</Badge>
-          </div>
-          {row.status === "not_applicable" ? (
-            <p className="text-sm text-muted">Real estate is valued from marks, not daily return history.</p>
-          ) : (
-            <RiskMetricsGrid metrics={row.metrics} prefix={`dashboard-risk-class-${row.asset_class}`} />
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function RiskAssetView({ data }) {
-  const rows = data.by_asset || [];
-  if (!rows.length) return <Empty>No holdings to analyze.</Empty>;
-  return (
-    <Table
-      testId="dashboard-risk-asset-table"
-      rows={rows}
-      rowKey={(r) => r.key}
-      empty="No holdings."
-      columns={[
-        {
-          key: "asset",
-          header: "Asset",
-          render: (r) => (
-            <div>
-              <div>{assetLabel({ name: r.name, key: r.key })}</div>
-              <div className="text-xs text-muted">
-                {humanize(r.asset_class)}
-                {r.observations ? ` · ${r.observations} obs` : ""}
-              </div>
-            </div>
-          ),
-        },
-        {
-          key: "status",
-          header: "Status",
-          render: (r) => (
-            <div>
-              <Badge variant={RISK_STATUS_BADGE[r.status] || "neutral"} title={humanize(r.status_reason)}>
-                {humanize(r.status)}
-              </Badge>
-              <RiskWarnings row={r} />
-            </div>
-          ),
-        },
-        { key: "weight", header: "Weight", align: "right", render: (r) => pct(r.weight_in_portfolio) },
-        {
-          key: "vol",
-          header: "Vol",
-          align: "right",
-          render: (r) => (r.metrics ? pct(r.metrics.annualized_volatility) : "—"),
-        },
-        {
-          key: "sharpe",
-          header: "Sharpe",
-          align: "right",
-          render: (r) => (r.metrics ? num(r.metrics.sharpe) : "—"),
-        },
-        {
-          key: "mdd",
-          header: "Max DD",
-          align: "right",
-          render: (r) => (r.metrics ? pct(r.metrics.max_drawdown) : "—"),
-        },
-        {
-          key: "var",
-          header: "VaR 95%",
-          align: "right",
-          render: (r) => (r.metrics ? pct(r.metrics.historical_var_95_daily) : "—"),
-        },
-        {
-          key: "reason",
-          header: "Note",
-          render: (r) => {
-            if (r.status_reason) return humanize(r.status_reason);
-            if (r.proxied_from) return `Priced off ${r.proxied_from}`;
-            return "—";
-          },
-        },
-      ]}
-    />
-  );
-}
-
 function RiskCard({ activeId, basis, valuationState }) {
   const [window, setWindow] = useState("180");
-  const [view, setView] = useState("sources");
+  const [view, setView] = useState("class");
   const state = useApi(
     () => analytics(activeId, { basis, window: Number(window) }),
     [activeId, basis, window]
   );
-  // Charts must name assets the way the tables beside them do. The valuation
-  // payload already carries the display names, so no extra request is needed.
   const labelFor = (key) => {
     const item = (valuationState?.data?.items || []).find((i) => i.key === key);
-    return item ? item.name_fa || item.asset || key : key;
+    return item ? assetLabel(item) : assetLabel({ key });
   };
 
   return (
@@ -1203,7 +910,6 @@ function RiskCard({ activeId, basis, valuationState }) {
       <Async {...state} testId="dashboard-risk-body">
         {(data) => (
           <div className="space-y-4">
-            <RiskSummary data={data} />
             <Tabs
               label="Risk breakdown"
               testId="dashboard-risk-view"
@@ -1211,13 +917,17 @@ function RiskCard({ activeId, basis, valuationState }) {
               onChange={setView}
               options={RISK_VIEWS}
             />
-            {view === "sources" && (
-              <RiskSourcesView data={data} labelFor={labelFor} />
-            )}
-            {view === "add" && <RiskAddView activeId={activeId} basis={basis} window={window} />}
-            {view === "portfolio" && <RiskPortfolioView data={data} />}
             {view === "class" && <RiskClassView data={data} />}
-            {view === "asset" && <RiskAssetView data={data} />}
+            {view === "asset" && <RiskAssetView data={data} labelFor={labelFor} />}
+            {view === "correlation" && <RiskCorrelationView data={data} labelFor={labelFor} />}
+            {view === "add" && (
+              <RiskAddView
+                activeId={activeId}
+                basis={basis}
+                window={window}
+                labelFor={labelFor}
+              />
+            )}
           </div>
         )}
       </Async>

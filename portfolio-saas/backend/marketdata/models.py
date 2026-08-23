@@ -75,6 +75,55 @@ class ApiRequestQuota(models.Model):
         ordering = ["-day"]
 
 
+class LiveFetchState(models.Model):
+    """Scheduling state for one cadence-driven live endpoint call.
+
+    `ArchiveFetchState` answers "how much of this symbol's history do we hold?".
+    Snapshot endpoints have no history to converge on, so they never got a row --
+    and consequently fired on a fixed beat that nothing accounted for. That made
+    the live reserve a guess: it priced only the 2-minute price loop while
+    crypto, commodity, ETF NAV, options and futures quietly spent from the same
+    bucket. This table is what makes the reserve arithmetic exact, because the
+    plan it simulates is the plan that actually runs.
+
+    `scope` is the per-request dimension: empty for market-wide endpoints that
+    return everything in one call, the fund's symbol for `etf_nav` (Nav.php is
+    one ETF per request).
+    """
+
+    endpoint_key = models.CharField(max_length=40, db_index=True)
+    scope = models.CharField(max_length=64, blank=True, default="")
+    cadence_seconds = models.PositiveIntegerField()
+    # Contracts and NAVs only move while the TSE is trading; polling them
+    # overnight buys the same numbers at full price.
+    session_only = models.BooleanField(default=False)
+    enabled = models.BooleanField(default=True, db_index=True)
+
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    next_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    consecutive_failures = models.PositiveIntegerField(default=0)
+    last_error = models.CharField(max_length=500, blank=True, default="")
+
+    class Meta:
+        ordering = ["endpoint_key", "scope"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["endpoint_key", "scope"],
+                name="uniq_live_fetch_endpoint_scope",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["enabled", "next_attempt_at"],
+                name="live_fetch_due_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.endpoint_key}/{self.scope or '*'} @{self.cadence_seconds}s"
+
+
 class MarketInstrument(models.Model):
     """Provider-discovered catalog used to verify supported portfolio assets."""
 

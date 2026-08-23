@@ -165,7 +165,13 @@ def fetch_all_markets(api_settings):
 
     All 6 endpoints are fetched in parallel (ThreadPoolExecutor) since they are
     independent HTTP calls; a slow/failing provider must not block the others.
+
+    Jobs go through `submit_with_context`, not a bare `submit`: a pool worker
+    starts from a fresh context, so quota attempts billed inside these threads
+    were invisible to the workflow ledger that owns them.
     """
+    from marketdata.workflows import submit_with_context
+
     raw_data = {}
     jobs = []
 
@@ -210,7 +216,7 @@ def fetch_all_markets(api_settings):
     executor = ThreadPoolExecutor(max_workers=6)
     if brs_url and brs_key:
         if "gold_currency" in planned:
-            jobs.append(executor.submit(_brs_job, brs_url, brs_key))
+            jobs.append(submit_with_context(executor, _brs_job, brs_url, brs_key))
         else:
             logger.info("Domestic gold & currency market closed overnight. Skipping.")
     else:
@@ -219,7 +225,9 @@ def fetch_all_markets(api_settings):
     if tsetmc_url and tsetmc_key:
         if "tsetmc" in planned:
             tsetmc_symbol_url = api_settings.get("tsetmc_symbol_url", settings.TSETMC_SYMBOL_URL)
-            jobs.append(executor.submit(_tsetmc_job, tsetmc_url, tsetmc_key, tsetmc_symbol_url))
+            jobs.append(submit_with_context(
+                executor, _tsetmc_job, tsetmc_url, tsetmc_key, tsetmc_symbol_url
+            ))
         else:
             logger.info("Tehran Stock Exchange (TSE) is closed. Skipping stocks.")
     else:

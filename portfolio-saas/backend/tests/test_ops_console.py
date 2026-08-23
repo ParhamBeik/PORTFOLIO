@@ -999,3 +999,56 @@ def test_admin_endpoints(auth_client, db):
     # Check that failures were reset
     state.refresh_from_db()
     assert state.consecutive_failures == 0
+
+
+# ----------------------------------------------------------------------
+# Quota attribution and the spending-plan preview.
+
+
+def test_ops_metrics_report_unattributed_quota():
+    """Every metered request should be traceable to the workflow that spent it.
+
+    Drift here is the signal that some lane is charging the counter without
+    telling the ledger -- the live loop did exactly that for months.
+    """
+    from marketdata.models import ApiRequestQuota, WorkflowRun
+    from marketdata.quota import quota_day
+    from marketdata.tasks import _quota_attribution_drift
+
+    ApiRequestQuota.objects.create(day=quota_day(), limit=9800, used=100)
+    WorkflowRun.objects.create(
+        workflow="archive_state", outcome="success", quota_attempts=90
+    )
+
+    drift = _quota_attribution_drift()
+
+    assert drift["quota_charged"] == 100
+    assert drift["quota_attributed"] == 90
+    assert drift["quota_unattributed"] == 10
+
+
+def test_quota_plan_command_runs_read_only():
+    """The pre-deploy dry run must not lease, fetch, or write anything."""
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    from marketdata.models import ArchiveFetchState, LiveFetchState
+
+    LiveFetchState.objects.create(
+        endpoint_key="crypto", cadence_seconds=900, session_only=False
+    )
+    state = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+        symbol="PREVIEW",
+        missing_rows=42,
+    )
+
+    out = StringIO()
+    call_command("quota_plan", "--preview", "5", stdout=out)
+
+    text = out.getvalue()
+    assert "crypto" in text and "TOTAL" in text
+    assert "PREVIEW" in text, "the preview must show what would be claimed next"
+    state.refresh_from_db()
+    assert state.next_attempt_at is None, "preview must not lease the state"

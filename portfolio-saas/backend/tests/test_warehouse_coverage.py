@@ -1772,3 +1772,113 @@ def test_workflows_failed_only(staff_client):
     assert res.status_code == 200
     assert res.json()["count"] == 1
     assert res.json()["results"][0]["outcome"] == "failed"
+
+
+# ----------------------------------------------------------------------
+# Live fetch plan: the cadence-driven endpoints that bill the live bucket.
+#
+# Before LiveFetchState these fired on a fixed 5-minute beat with no state row,
+# so the reserve priced only the 2-minute price loop and crypto/commodity/ETF
+# NAV/options/futures spent ~350/day that nothing had set aside. Integration
+# tests, not unit: the plan is read back out of the database by the same query
+# the scheduler uses, and that round trip is the thing being asserted.
+
+
+@pytest.mark.django_db
+class TestLiveFetchPlan:
+    @staticmethod
+    def _configure(settings):
+        settings.BRS_API_KEY = ""
+        settings.TSETMC_API_KEY = ""
+        settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
+        settings.MARKETDATA_IGNORE_MARKET_HOURS = False
+
+    def test_an_always_on_cadence_costs_the_whole_day(self, settings):
+        from marketdata import live_states
+        from marketdata.models import LiveFetchState
+
+        self._configure(settings)
+        LiveFetchState.objects.create(
+            endpoint_key="crypto", cadence_seconds=900, session_only=False
+        )
+        # [start, end): the firing exactly at the next midnight is outside the day.
+        assert live_states.full_day_cost() == 96
+
+    def test_session_gating_costs_only_the_trading_window(self, settings):
+        from marketdata import live_states
+        from marketdata.models import LiveFetchState
+
+        self._configure(settings)
+        LiveFetchState.objects.create(
+            endpoint_key="option_contracts", cadence_seconds=900, session_only=True
+        )
+        # The TSE trades 08:30-13:00, five days a week. A session-gated endpoint
+        # must not be costed for the 19.5 hours it is not allowed to fetch.
+        cost = live_states.full_day_cost()
+        assert 0 <= cost <= 18, "at most one 4.5h session at 15-minute cadence"
+
+    def test_the_reserve_counts_the_plan_not_just_the_price_loop(self, settings):
+        from marketdata import quota
+        from marketdata.models import LiveFetchState
+
+        self._configure(settings)
+        row = ApiRequestQuota(
+            day=quota.quota_day(), limit=9800, used=0,
+            live_used=0, archive_used=0, other_used=0,
+        )
+        midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
+        # No API keys configured, so the price loop plans nothing at all: whatever
+        # is reserved here can only have come from the LiveFetchState table.
+        assert quota.live_reserve_remaining(row, now=midnight_tehran) == 0
+
+        LiveFetchState.objects.create(
+            endpoint_key="crypto", cadence_seconds=3600, session_only=False
+        )
+        assert quota.live_reserve_remaining(row, now=midnight_tehran) == 24
+
+    def test_seeding_never_overwrites_a_tuned_cadence(self):
+        from marketdata import live_states
+        from marketdata.models import LiveFetchState
+
+        live_states.ensure_live_states()
+        tuned = LiveFetchState.objects.filter(endpoint_key="crypto").get()
+        tuned.cadence_seconds = 60
+        tuned.save(update_fields=["cadence_seconds"])
+
+        live_states.ensure_live_states()
+
+        tuned.refresh_from_db()
+        assert tuned.cadence_seconds == 60, "re-seeding must not revert operator tuning"
+
+    def test_seeding_disables_stale_catalog_etfs_without_overriding_manual_disable(self):
+        from marketdata import live_states
+        from marketdata.models import LiveFetchState, MarketInstrument
+
+        MarketInstrument.objects.create(
+            source="tsetmc", symbol="ETF1", category="etf", eligible=True
+        )
+        managed = LiveFetchState.objects.create(
+            endpoint_key="etf_nav", scope="OLD", cadence_seconds=86400
+        )
+        manual = LiveFetchState.objects.create(
+            endpoint_key="etf_nav", scope="MANUAL", cadence_seconds=86400,
+            enabled=False,
+        )
+
+        live_states.ensure_live_states()
+
+        managed.refresh_from_db()
+        manual.refresh_from_db()
+        assert managed.enabled is False
+        assert managed.last_error == "stale_catalog"
+        assert manual.enabled is False
+
+    def test_a_claim_leases_the_row_so_a_second_worker_cannot_double_spend(self):
+        from marketdata import live_states
+        from marketdata.models import LiveFetchState
+
+        LiveFetchState.objects.create(
+            endpoint_key="crypto", cadence_seconds=900, session_only=False
+        )
+        assert len(live_states.claim_due("crypto")) == 1
+        assert live_states.claim_due("crypto") == [], "cadence not elapsed yet"

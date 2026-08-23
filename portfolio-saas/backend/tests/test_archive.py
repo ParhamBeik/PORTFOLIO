@@ -87,19 +87,85 @@ def _state(symbol, endpoint=Endpoint.STOCK_HISTORY_ADJUSTED, **kwargs):
     return ArchiveFetchState.objects.create(symbol=symbol, endpoint=endpoint, **kwargs)
 
 
-def test_claim_fills_historical_full_before_ticks(monkeypatch):
+# Integration tests, not unit: the claim order is expressed as database
+# annotations, so an in-memory fake would be testing a reimplementation of the
+# ordering rather than the SQL that actually decides how the day's quota is spent.
+
+
+def test_never_succeeded_outranks_everything_else(monkeypatch):
+    """Rule 1: one successful fetch everywhere before anything is topped up.
+
+    Endpoint class is irrelevant here. The old scheduler drained cheap
+    full-history endpoints first, so a symbol with no ticks at all waited behind
+    routine refreshes of symbols already holding years of data.
+    """
     monkeypatch.setattr("marketdata.archive._archive_prereqs_ready", lambda state: True)
-    histories = [
-        _state(f"h{i}", Endpoint.STOCK_HISTORY_UNADJUSTED) for i in range(8)
-    ]
-    ticks = [
-        _state(f"t{i}", Endpoint.STOCK_TRANSACTION_TICKS) for i in range(8)
-    ]
-    batch = claim_archive_batch(limit=5)
-    history_ids = {row.pk for row in histories}
-    tick_ids = {row.pk for row in ticks}
-    assert set(batch) <= history_ids
-    assert not (set(batch) & tick_ids)
+    now = timezone.now()
+    virgin_tick = _state("NEVER", Endpoint.STOCK_TRANSACTION_TICKS)
+    _state("GAP", Endpoint.STOCK_HISTORY_UNADJUSTED, missing_rows=500,
+           stored_rows=2000, last_success_at=now, last_attempt_at=now)
+    _state("DONE", Endpoint.STOCK_CANDLE_ADJUSTED, verified_complete=True,
+           stored_rows=3000, last_success_at=now - timedelta(days=9),
+           last_attempt_at=now - timedelta(days=9))
+
+    assert claim_archive_batch(limit=1) == [virgin_tick.pk]
+
+
+def test_ticks_take_the_majority_share_once_everything_has_succeeded(monkeypatch, settings):
+    """Rule 2: the endpoint with the real backlog gets most of the batch.
+
+    A share, not strict priority -- see MARKETDATA_TICK_QUOTA_SHARE. Before this
+    the tick lane was the *last* of four tiers, so the post-close flood of
+    completed full-history refreshes consumed whole batches ahead of it.
+    """
+    monkeypatch.setattr("marketdata.archive._archive_prereqs_ready", lambda state: True)
+    settings.MARKETDATA_TICK_QUOTA_SHARE = 0.70
+    now = timezone.now()
+    for i in range(20):
+        _state(f"t{i}", Endpoint.STOCK_TRANSACTION_TICKS, missing_rows=80,
+               stored_rows=10, last_success_at=now, last_attempt_at=now)
+        _state(f"h{i}", Endpoint.STOCK_HISTORY_UNADJUSTED, missing_rows=80,
+               stored_rows=10, last_success_at=now, last_attempt_at=now)
+
+    batch = claim_archive_batch(limit=10)
+    ticks = ArchiveFetchState.objects.filter(
+        pk__in=batch, endpoint=Endpoint.STOCK_TRANSACTION_TICKS
+    ).count()
+    assert len(batch) == 10
+    assert ticks == 7, "ticks take their configured share, not the whole batch"
+
+
+def test_completed_refreshes_trail_the_backlog_and_sort_by_staleness(monkeypatch):
+    """Rule 3: deficit first, then longest-since-success.
+
+    A complete state scores a deficit of 0 and sinks behind anything still owed
+    rows, instead of occupying a tier of its own above the backlog.
+    """
+    monkeypatch.setattr("marketdata.archive._archive_prereqs_ready", lambda state: True)
+    now = timezone.now()
+    owed = _state("OWED", Endpoint.STOCK_HISTORY_UNADJUSTED, missing_rows=4,
+                  stored_rows=3000, last_success_at=now, last_attempt_at=now)
+    stale = _state("STALE_DONE", Endpoint.STOCK_CANDLE_ADJUSTED, verified_complete=True,
+                   stored_rows=3000, last_success_at=now - timedelta(days=9),
+                   last_attempt_at=now - timedelta(days=9))
+    fresh = _state("FRESH_DONE", Endpoint.STOCK_CANDLE_UNADJUSTED, verified_complete=True,
+                   stored_rows=3000, last_success_at=now - timedelta(hours=1),
+                   last_attempt_at=now - timedelta(hours=1))
+
+    batch = claim_archive_batch(limit=3)
+    assert batch.index(owed.pk) < batch.index(stale.pk) < batch.index(fresh.pk)
+
+
+def test_a_lane_takes_the_slots_the_other_cannot_fill(monkeypatch, settings):
+    """An empty tick queue must not leave 70% of the batch -- and the quota -- unspent."""
+    monkeypatch.setattr("marketdata.archive._archive_prereqs_ready", lambda state: True)
+    settings.MARKETDATA_TICK_QUOTA_SHARE = 0.70
+    now = timezone.now()
+    for i in range(10):
+        _state(f"h{i}", Endpoint.STOCK_HISTORY_UNADJUSTED, missing_rows=80,
+               stored_rows=10, last_success_at=now, last_attempt_at=now)
+
+    assert len(claim_archive_batch(limit=10)) == 10
 
 
 def test_claim_order_is_coverage_first():
@@ -1171,51 +1237,6 @@ def test_ensure_archive_states_covers_all_endpoints():
     assert len(endpoints) == 7
     assert ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY not in endpoints
     assert ArchiveFetchState.Endpoint.ETF_NAV_DAILY not in endpoints
-
-
-def test_expected_gain_ranks_full_history_ahead_of_tick_backlog():
-    from marketdata.archive import _expected_gain_qs
-
-    candle = ArchiveFetchState.objects.create(
-        endpoint=ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
-        symbol="HIGH_YIELD",
-    )
-    ArchiveFetchState.objects.create(
-        endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
-        symbol="LOW_YIELD",
-        expected_rows=90,
-        stored_rows=1,
-        missing_rows=89,
-    )
-    first = _expected_gain_qs(ArchiveFetchState.objects.all()).order_by(
-        "-_expected_gain"
-    ).first()
-    assert first == candle
-
-
-def test_recent_refresh_prefers_the_most_liquid_symbol():
-    from marketdata.archive import claim_recent_refresh
-    from marketdata.models import MarketCandle
-
-    for symbol, volume in (("QUIET", 10), ("LIQUID", 1000)):
-        MarketCandle.objects.create(
-            symbol=symbol,
-            timeframe=MarketCandle.UNADJUSTED,
-            date_time="1405-05-17",
-            close_price=100,
-            volume=volume,
-        )
-        for endpoint in (
-            ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
-            ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
-        ):
-            ArchiveFetchState.objects.create(endpoint=endpoint, symbol=symbol)
-
-    with patch("marketdata.archive.remaining_requests", return_value=10):
-        claimed = claim_recent_refresh(limit=2)
-    assert set(
-        ArchiveFetchState.objects.filter(pk__in=claimed).values_list("symbol", flat=True)
-    ) == {"LIQUID"}
 
 
 def test_archive_state_for_codal_shareholder_and_ticks(settings):

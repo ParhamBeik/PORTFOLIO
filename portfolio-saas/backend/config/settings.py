@@ -220,23 +220,21 @@ MARKETDATA_DAILY_REQUEST_LIMIT = int(os.getenv("MARKETDATA_DAILY_REQUEST_LIMIT",
 MARKETDATA_WINDOW_LIMIT = int(os.getenv("MARKETDATA_WINDOW_LIMIT", "1000"))
 MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
 
-# Per-bucket daily budget. LIVE gets a floor, not a leftover: live is the
-# customer-facing path, so it is reserved first and archive takes the remainder.
-# Replaces the legacy MARKETDATA_ARCHIVE_REQUEST_RESERVE=8820, which reserved for
-# archive and left live to fight for what was left -- backwards.
+# Per-bucket daily budget. LIVE is reserved first and priced from the plan that
+# actually runs (marketdata/live_states.py + the price-loop simulation in
+# marketdata/quota.py); ARCHIVE is defined as whatever is left over. Hand-setting
+# both is what let them drift apart and sum to 10,000 against a 9,800 limit.
 #
-# The four budgets must sum to <= MARKETDATA_DAILY_REQUEST_LIMIT. They summed to
-# 10,000 against a 9,800 limit, and the live floor of 4,320 was sized for a
-# 2-minute poll running all day -- observed live usage is 24-719/day (12-day
-# sample), so ~3,600/day was reserved for requests live never makes. The floor
-# below still leaves ~2.4x headroom over the worst day ever recorded.
+# The floor is the reserve's lower bound, used when the plan cannot be read (cold
+# DB, mid-migration): over-reserving only slows the backfill, while under-reserving
+# gets customer-facing price fetches refused.
 MARKETDATA_LIVE_REQUEST_FLOOR = int(os.getenv("MARKETDATA_LIVE_REQUEST_FLOOR", "1200"))
 MARKETDATA_LIVE_REQUEST_HEADROOM = int(os.getenv("MARKETDATA_LIVE_REQUEST_HEADROOM", "500"))
-MARKETDATA_ARCHIVE_REQUEST_BUDGET = int(os.getenv("MARKETDATA_ARCHIVE_REQUEST_BUDGET", "7900"))
 MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET", "200"))
-# Kept as a backwards-compatible alias so older management commands and tests that
-# still read it keep working; the archive budget above is the authoritative value.
-MARKETDATA_ARCHIVE_REQUEST_RESERVE = MARKETDATA_ARCHIVE_REQUEST_BUDGET
+# 0 (the default) means "derive from the limit minus the live reserve" -- the
+# dynamic behaviour above. Set a positive value only to pin the archive to a hard
+# ceiling regardless of what live costs.
+MARKETDATA_ARCHIVE_REQUEST_BUDGET = int(os.getenv("MARKETDATA_ARCHIVE_REQUEST_BUDGET", "0"))
 MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "120"))
 # Pending work, not active workers. Sized to keep archive workers busy between
 # scheduler ticks without exceeding the archive slice of the 5-minute window
@@ -244,9 +242,13 @@ MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "
 MARKETDATA_ARCHIVE_QUEUE_LIMIT = int(
     os.getenv("MARKETDATA_ARCHIVE_QUEUE_LIMIT", "48")
 )
-MARKETDATA_RECENT_REFRESH_REQUEST_BUDGET = int(
-    os.getenv("MARKETDATA_RECENT_REFRESH_REQUEST_BUDGET", "500")
-)
+# Share of each archive batch reserved for intraday ticks, the one endpoint with
+# an unbounded backlog (one symbol-day per request, and grow_tick_windows keeps
+# reopening finished windows back to each symbol's listing date). A share rather
+# than strict priority: at ~5M requests to exhaust, strict priority would starve
+# candles, price history, gold and Codal for well over a year. The remainder goes
+# to every other endpoint, and either lane takes slots the other cannot fill.
+MARKETDATA_TICK_QUOTA_SHARE = float(os.getenv("MARKETDATA_TICK_QUOTA_SHARE", "0.70"))
 
 # Per-day HISTORICAL_PER_DAY endpoints (ticks) walk one calendar day per request,
 # so the trailing window is bounded to keep cost finite. Trading days only -- a
@@ -279,6 +281,13 @@ CODAL_FETCHING_STALE_SECONDS = int(os.getenv("CODAL_FETCHING_STALE_SECONDS", "18
 # default -- unset means connect to codal.ir directly, correct on any host that
 # can already reach it.
 CODAL_HTTP_PROXY = os.getenv("CODAL_HTTP_PROXY", "")
+# Reachability breaker (marketdata/codal_storage.py). codal.ir is unreachable from
+# some hosts -- from the production VPS, TCP 443 times out outright. Without this
+# the extractor retried a dead network path thousands of times a day. After N
+# consecutive connect-level failures the whole origin is parked for the cooldown,
+# and one probe per cooldown notices when it comes back.
+CODAL_ORIGIN_FAILURE_THRESHOLD = int(os.getenv("CODAL_ORIGIN_FAILURE_THRESHOLD", "10"))
+CODAL_ORIGIN_COOLDOWN_SECONDS = int(os.getenv("CODAL_ORIGIN_COOLDOWN_SECONDS", "900"))
 CODAL_MAX_ARTIFACT_BYTES = int(os.getenv("CODAL_MAX_ARTIFACT_BYTES", str(50 * 1024 * 1024)))
 CODAL_S3_ENDPOINT_URL = os.getenv("CODAL_S3_ENDPOINT_URL", "http://minio:9000")
 CODAL_S3_BUCKET = os.getenv("CODAL_S3_BUCKET", "codal-artifacts")
@@ -340,13 +349,16 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True  # survive a broker restart
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 QUEUE_BACKLOG_THRESHOLD = int(os.getenv("QUEUE_BACKLOG_THRESHOLD", "100"))
-# ETFs fetched per capture_market_snapshots tick (every 5 min, ~417 known ETFs,
-# marketdata/tasks.py:_capture_etf_nav_batch). Tsetmc/Nav.php is one request per
-# ETF with no batch form; kept small because it shares the TSETMC daily quota
-# with every other endpoint this app calls, and ETF NAV only feeds a daily bar
-# so does not need every symbol fresh every tick -- 5/tick completes a full
-# rotation in ~7 hours (417 / 5 * 5min).
-ETF_NAV_BATCH_SIZE = int(os.getenv("ETF_NAV_BATCH_SIZE", "5"))
+# Burst cap on ETF NAV fetches per capture_market_snapshots tick, not a coverage
+# strategy: which funds are due is now decided by their own LiveFetchState rows
+# (once per trading day each). This only stops one tick claiming all ~417 at once
+# and tripping the 5-minute window limiter.
+#
+# Sizing: the whole set comes due at rollover but etf_nav is session-gated, so the
+# drain window is the 4.5h session = ~54 ticks at the 5-minute beat. 10/tick
+# clears 540 >= 417 with margin; 5/tick would only reach 270 and leave a third of
+# the funds unfetched every day.
+ETF_NAV_BATCH_SIZE = int(os.getenv("ETF_NAV_BATCH_SIZE", "10"))
 APPLICATION_ERROR_THRESHOLD = int(os.getenv("APPLICATION_ERROR_THRESHOLD", "20"))
 WORKFLOW_FAILURE_RATE_THRESHOLD = float(os.getenv("WORKFLOW_FAILURE_RATE_THRESHOLD", "0.10"))
 # Today 1,072 of 1,346 symbols (0.80) fail the integrity gate purely because the

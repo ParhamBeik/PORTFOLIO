@@ -41,7 +41,6 @@ app.conf.update(
     # dispatch control. The work they create still runs on its dedicated queue.
     task_routes={
         "marketdata.tasks.archive_tick": {"queue": "live"},
-        "marketdata.tasks.recent_history_refresh": {"queue": "live"},
         "marketdata.tasks.archive_maintenance": {"queue": "live"},
         "marketdata.tasks.capture_operational_metrics": {"queue": "live"},
         "marketdata.tasks.capture_derivative_snapshots": {"queue": "live"},
@@ -66,10 +65,11 @@ app.conf.beat_schedule = {
         "task": "marketdata.tasks.archive_tick",
         "schedule": 15.0,
     },
-    "marketdata-recent-history-after-close": {
-        "task": "marketdata.tasks.recent_history_refresh",
-        "schedule": crontab(day_of_week="0-4", hour=14, minute=35),
-    },
+    # No post-close refresh entry: the daily catch-up is no longer a privileged
+    # job. `claim_archive_batch` surfaces completed states by longest-since-success
+    # once the backlog has taken its share, and `next_post_close` scheduling
+    # already makes them due at the right moment. Held symbols' same-day close
+    # comes from the live lane, which is reserved first.
     "marketdata-low-rate-maintenance": {
         "task": "marketdata.tasks.archive_maintenance",
         "schedule": crontab(hour=4, minute=10),
@@ -100,9 +100,12 @@ app.conf.beat_schedule = {
         "task": "marketdata.tasks.aggregate_market_daily_bars_task",
         "schedule": crontab(hour=1, minute=40),
     },
+    # Sweeper only -- new announcements are queued at ingest time. Frequent
+    # because document work costs no provider quota and the backlog is ~74,000;
+    # it is bounded by the codal queue depth, not by the clock.
     "queue-codal-extractions": {
         "task": "marketdata.tasks.queue_codal_extractions",
-        "schedule": crontab(minute=55, hour="*/6"),
+        "schedule": 300.0,
     },
     # Roll the day's live Price ticks into one DailyPriceAverage row per asset.
     "aggregate-daily-price-averages": {

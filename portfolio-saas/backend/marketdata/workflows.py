@@ -3,18 +3,68 @@
 import json
 import logging
 import re
+import threading
 import time
 import uuid
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field
+from functools import partial
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from celery import current_task
 
 logger = logging.getLogger("workflow")
-http_attempt_var = ContextVar("workflow_http_attempts", default=0)
-quota_attempt_var = ContextVar("workflow_quota_attempts", default=0)
+
+
+class AttemptCounters:
+    """Mutable, thread-safe attempt tallies belonging to one workflow.
+
+    Mutable on purpose. `ThreadPoolExecutor` starts each worker in a *fresh*
+    context, so the previous design -- two plain-int ContextVars rebound by
+    `var.set()` -- threw away every bump made off the calling thread. The live
+    price loop fans its provider calls out across a pool, so it recorded 5 HTTP
+    attempts on a day it actually spent 488 requests. A shared object mutated in
+    place is visible to the parent, provided the context reaches the child at all
+    (see `submit_with_context`).
+    """
+
+    __slots__ = ("http", "quota", "_closed", "_lock")
+
+    def __init__(self):
+        self.http = 0
+        self.quota = 0
+        self._closed = False
+        self._lock = threading.Lock()
+
+    def record(self, *, quota=False):
+        # `+= 1` is load/add/store, not atomic. Six pool threads billing the same
+        # quota counter is exactly the race that would under-report spend.
+        with self._lock:
+            if self._closed:
+                return
+            self.http += 1
+            if quota:
+                self.quota += 1
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            return self.http, self.quota
+
+
+# `None` means "no workflow owns this call". Counting into an ownerless default
+# is what the old int vars did, and those numbers went nowhere.
+counters_var = ContextVar("workflow_attempt_counters", default=None)
 correlation_id_var = ContextVar("workflow_correlation_id", default="")
+
+
+def submit_with_context(executor, fn, /, *args, **kwargs):
+    """`executor.submit` that carries the caller's context into the worker thread.
+
+    Without this the child sees default ContextVars: attempt bumps land in a
+    throwaway context and log lines carry an empty correlation id.
+    """
+    return executor.submit(copy_context().run, partial(fn, *args, **kwargs))
 
 
 def current_correlation_id() -> str:
@@ -74,9 +124,9 @@ def _task_id():
 
 
 def record_http_attempt(*, quota=False):
-    http_attempt_var.set(http_attempt_var.get() + 1)
-    if quota:
-        quota_attempt_var.set(quota_attempt_var.get() + 1)
+    counters = counters_var.get()
+    if counters is not None:
+        counters.record(quota=quota)
 
 
 @dataclass
@@ -89,17 +139,19 @@ class WorkflowOutcome:
     task_id: str = ""
     correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     started: float = field(default_factory=time.monotonic)
-    _http_start: int = field(init=False, repr=False)
-    _quota_start: int = field(init=False, repr=False)
+    _counters: AttemptCounters = field(init=False, repr=False)
 
     def __post_init__(self):
-        self._http_start = http_attempt_var.get()
-        self._quota_start = quota_attempt_var.get()
+        # A fresh counter per workflow, so tallies are the workflow's own total
+        # rather than a delta against whatever ran before it in this context.
+        self._counters = AttemptCounters()
+        self._counters_token = counters_var.set(self._counters)
         self._correlation_token = correlation_id_var.set(self.correlation_id)
 
     def finish(self, outcome, **values):
         from .models import WorkflowRun
 
+        counted_http, counted_quota = self._counters.close()
         payload = {
             "workflow": self.workflow,
             "task_id": self.task_id or _task_id(),
@@ -114,8 +166,8 @@ class WorkflowOutcome:
             "rows_created": int(values.pop("rows_created", 0) or 0),
             "rows_updated": int(values.pop("rows_updated", 0) or 0),
             "rows_rejected": int(values.pop("rows_rejected", 0) or 0),
-            "http_attempts": int(values.pop("http_attempts", http_attempt_var.get() - self._http_start) or 0),
-            "quota_attempts": int(values.pop("quota_attempts", quota_attempt_var.get() - self._quota_start) or 0),
+            "http_attempts": int(values.pop("http_attempts", counted_http) or 0),
+            "quota_attempts": int(values.pop("quota_attempts", counted_quota) or 0),
             "duration_ms": int(
                 values.pop("duration_ms", None)
                 or round((time.monotonic() - self.started) * 1000)
@@ -148,6 +200,9 @@ class WorkflowOutcome:
             )
             return None
         finally:
+            token = getattr(self, "_counters_token", None)
+            if token is not None:
+                counters_var.reset(token)
             token = getattr(self, "_correlation_token", None)
             if token is not None:
                 correlation_id_var.reset(token)

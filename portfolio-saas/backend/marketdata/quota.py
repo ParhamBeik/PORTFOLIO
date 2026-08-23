@@ -65,14 +65,37 @@ def quota_day():
 
 
 def bucket_budget(bucket):
+    """The bucket's slice of the day. LIVE is capped, ARCHIVE takes the remainder.
+
+    LIVE stays a configured ceiling rather than being derived from the live plan.
+    A cap that grows with the thing it is capping cannot bind: a mis-set cadence
+    would silently raise its own ceiling and starve the backfill with no signal.
+    What *is* plan-driven is `live_reserve_remaining` -- the forward-looking "how
+    much must the archive leave alone between now and rollover".
+
+    ARCHIVE was a second hand-set constant, so the two could drift apart from each
+    other and from the daily limit; they once summed to 10,000 against a 9,800
+    cap. Defining it as the remainder makes that arithmetically impossible, and is
+    the user-facing rule: reserve live first, everything else is dynamic.
+
+    `manage.py quota_plan` reports when the day's plan outgrows the LIVE ceiling.
+    """
     if bucket == LIVE:
         return (
             settings.MARKETDATA_LIVE_REQUEST_FLOOR
             + settings.MARKETDATA_LIVE_REQUEST_HEADROOM
         )
-    if bucket == ARCHIVE:
-        return settings.MARKETDATA_ARCHIVE_REQUEST_BUDGET
-    return settings.MARKETDATA_OTHER_REQUEST_BUDGET
+    if bucket == OTHER:
+        return settings.MARKETDATA_OTHER_REQUEST_BUDGET
+    pinned = settings.MARKETDATA_ARCHIVE_REQUEST_BUDGET
+    if pinned:
+        return pinned
+    return max(
+        0,
+        settings.MARKETDATA_DAILY_REQUEST_LIMIT
+        - bucket_budget(LIVE)
+        - settings.MARKETDATA_OTHER_REQUEST_BUDGET,
+    )
 
 
 def _window_limit(bucket):
@@ -140,23 +163,15 @@ def _check_and_record_window(bucket=OTHER):
     return len(window)
 
 
-def live_reserve_remaining(row, now=None):
-    """Requests to hold back for live prices between now and the day rollover.
+def _simulate_price_loop(start, end):
+    """Requests the 2-minute price loop makes across [start, end).
 
-    The static floor reserved the same 600 at 23:00 as at 08:00, so the archive
-    could never touch the tail of a quiet day. This asks the only question that
-    matters: how many requests can live still spend before the quota day ends?
-
-    Cycles left x calls per cycle, capped by what is actually left of the live
-    bucket -- live cannot borrow, so reserving beyond its own budget protects
-    requests nobody is allowed to make. The cap shrinks to zero at rollover.
+    Simulating the same state planner the live loop uses is both smaller and more
+    accurate than a second formula that drifts whenever endpoint gating changes.
+    At most ~720 iterations at the supported cadences.
     """
-    now = now or timezone.now()
-    local = now.astimezone(ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE))
-    rollover = (local + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
     from . import market_state as _market_state
+
     has_brs = bool(getattr(settings, "BRS_API_KEY", ""))
     has_tsetmc = bool(getattr(settings, "TSETMC_API_KEY", ""))
     ignore_hours = getattr(settings, "MARKETDATA_IGNORE_MARKET_HOURS", False)
@@ -166,12 +181,9 @@ def live_reserve_remaining(row, now=None):
         _market_state.OVERNIGHT: settings.MARKETDATA_LIVE_INTERVAL_OVERNIGHT,
     }
     needed = 0
-    cursor = local
-    next_state_probe = local
-    # At most 720 iterations at the supported cadences. Simulating the same
-    # state planner the live loop uses is both smaller and more accurate than a
-    # second formula that drifts whenever endpoint gating changes.
-    while cursor < rollover:
+    cursor = start
+    next_state_probe = start
+    while cursor < end:
         state = _market_state.market_state_at(cursor)
         include_state_probe = (
             has_tsetmc
@@ -189,6 +201,40 @@ def live_reserve_remaining(row, now=None):
         if include_state_probe:
             next_state_probe = cursor + timedelta(seconds=_market_state._STATE_TTL_OPEN)
         cursor += timedelta(seconds=max(1, intervals[state]))
+    return needed
+
+
+def live_reserve_remaining(row, now=None):
+    """Requests to hold back for live between now and the day rollover.
+
+    The static floor reserved the same 600 at 23:00 as at 08:00, so the archive
+    could never touch the tail of a quiet day. This asks the only question that
+    matters: how many requests can live still spend before the quota day ends?
+
+    Two lanes are summed, because both bill the live bucket: the price loop
+    (simulated above) and the cadence-driven snapshot endpoints in
+    `LiveFetchState`. Pricing only the first is what let crypto, commodity, ETF
+    NAV, options and futures spend ~350/day that nothing had reserved for.
+
+    Capped by what is actually left of the live bucket -- live cannot borrow, so
+    reserving beyond its own budget protects requests nobody is allowed to make.
+    The cap shrinks to zero at rollover.
+    """
+    now = now or timezone.now()
+    local = now.astimezone(ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE))
+    rollover = (local + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    needed = _simulate_price_loop(local, rollover)
+    try:
+        from . import live_states
+
+        needed += live_states.planned_requests(now, rollover)
+    except Exception:
+        # Same reasoning as `_live_day_cost`: an unreadable plan must not silently
+        # release the reserve. Under-reserving is the failure that gets live
+        # requests refused; over-reserving only slows the backfill.
+        logger.warning("live plan unavailable; reserving the price loop only")
     return max(0, min(needed, bucket_budget(LIVE) - row.live_used))
 
 

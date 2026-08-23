@@ -43,7 +43,6 @@ from .models import (
     CodalReport,
     CodalSection,
 )
-from .quota import ARCHIVE, QuotaExhausted, reserve_request
 
 
 class CodalExtractionRegressed(RuntimeError):
@@ -157,7 +156,11 @@ def extract_report(announcement_id):
             report=report, kind=kind, source_url=_absolute_url(source_url)
         )
         try:
-            reserve_request(ARCHIVE)
+            # No quota reservation. These bytes come from codal.ir, not from the
+            # metered provider -- charging them to the BrsApi archive budget spent
+            # ~1,000 requests/day of somebody else's allowance and, on a day when
+            # the budget ran out, stopped document extraction for a reason that
+            # had nothing to do with documents.
             _final_url, content_type, content = download_artifact(source_url, kind)
             key, checksum = store_artifact(content, content_type, kind)
             artifact.s3_key = key
@@ -168,13 +171,6 @@ def extract_report(announcement_id):
             artifact.error_code = ""
             artifact.save()
             downloaded.append((kind, artifact, content))
-        except QuotaExhausted:
-            # Not this artifact's failure -- the day's provider budget is
-            # spent. Stop the whole report rather than burning the same
-            # exhausted budget on the next artifact/announcement in the
-            # batch; the report stays at FETCHING and is picked up again
-            # once it goes stale (CODAL_FETCHING_STALE_SECONDS).
-            raise
         except CodalArtifactRejected as exc:
             artifact.fetch_status = CodalArtifact.FetchStatus.REJECTED
             artifact.error_code = str(exc)[:64]

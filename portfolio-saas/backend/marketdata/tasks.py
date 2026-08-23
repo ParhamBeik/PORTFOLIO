@@ -26,7 +26,6 @@ from . import ingest, jalali
 from .archive import (
     claim_archive_batch,
     claim_archive_maintenance,
-    claim_recent_refresh,
     ensure_archive_states,
     run_archive_state as process_archive_state,
     grow_tick_windows,
@@ -47,8 +46,18 @@ def capture_derivative_snapshots():
     repeatedly timed out and re-raised, so `tse_option`'s already-ingested
     rows were the only ones ever reflected in the ledger and the ime kinds
     never got an independent success/failure signal of their own.
+
+    Cadence comes from `LiveFetchState`, not from the beat interval: these fetches
+    bill the live bucket, and the quota reserve can only be exact if the schedule
+    it prices is the schedule that runs.
     """
+    from . import live_states
     from .fetchers import fetch_derivatives
+
+    # Insert-only and idempotent. Self-seeding here rather than in some earlier
+    # job means a fresh deployment starts snapshotting on its first tick instead
+    # of waiting for whatever else happened to own the seeding.
+    live_states.ensure_live_states()
 
     results = {}
     for kind, endpoint_key in (
@@ -56,6 +65,10 @@ def capture_derivative_snapshots():
         ("ime_future", "ime_futures"),
         ("ime_option", "ime_options"),
     ):
+        claimed = live_states.claim_due(endpoint_key, limit=1)
+        if not claimed:
+            continue
+        state = claimed[0]
         outcome = _ledgered(
             f"capture_derivative_snapshots:{kind}",
             endpoint=endpoint_key,
@@ -65,9 +78,11 @@ def capture_derivative_snapshots():
             payload = fetch_derivatives(settings.TSETMC_API_KEY, endpoint_key)
             created, rejected = ingest.ingest_derivative_snapshots(kind, payload) or (0, 0)
             results[kind] = (created, rejected)
+            live_states.record_result(state, ok=True)
             _finish_ok(outcome, rows_created=created, rows_rejected=rejected)
         except Exception as err:
             results[kind] = err
+            live_states.record_result(state, ok=False, error=err)
             _finish_fail(outcome, err)
     return results
 
@@ -82,14 +97,23 @@ def capture_market_snapshots():
     `Market/*` paths (crypto, commodity) use `BRS_API_KEY`; `Tsetmc/*` paths
     (etf_nav) use `TSETMC_API_KEY` -- same split the existing gold/currency
     vs. index/option fetchers already follow.
+
+    Cadence comes from `LiveFetchState` (see capture_derivative_snapshots).
     """
+    from . import live_states
     from .fetchers import fetch_derivatives
+
+    live_states.ensure_live_states()  # see capture_derivative_snapshots
 
     results = {}
     for asset_class, endpoint_key, api_key in (
         ("crypto", "crypto", settings.BRS_API_KEY),
         ("commodity", "commodity", settings.BRS_API_KEY),
     ):
+        claimed = live_states.claim_due(endpoint_key, limit=1)
+        if not claimed:
+            continue
+        state = claimed[0]
         outcome = _ledgered(
             f"capture_market_snapshots:{asset_class}",
             endpoint=endpoint_key,
@@ -99,69 +123,55 @@ def capture_market_snapshots():
             payload = fetch_derivatives(api_key, endpoint_key)
             created, skipped = ingest.ingest_market_snapshots(asset_class, payload) or (0, 0)
             results[asset_class] = (created, skipped)
+            live_states.record_result(state, ok=True)
             _finish_ok(outcome, rows_created=created, rows_rejected=skipped)
         except Exception as err:
             results[asset_class] = err
+            live_states.record_result(state, ok=False, error=err)
             _finish_fail(outcome, err)
 
     results["etf_nav"] = _capture_etf_nav_batch()
     return results
 
 
-_ETF_NAV_CURSOR_CACHE_KEY = "marketdata:etf_nav:cursor"
-
-
 def _capture_etf_nav_batch():
-    """Fetch NAV for a bounded, rotating slice of known ETFs.
+    """Fetch NAV for whichever funds are due this tick.
 
-    Nav.php is one request per ETF (see fetch_etf_nav), and there are ~417 of
-    them (marketdata.catalog's IRT-ISIN discovery) -- fetching all of them
-    every 5-minute tick (this task's schedule, config/celery.py) would burn
-    roughly 12x that per hour against a 10,000/day account-wide quota shared
-    with every other endpoint this app calls. ETF NAV only ever feeds a daily
-    OHLC bar (aggregate_market_daily_bars), not the 2-minute held-asset price
-    loop, so it does not need every symbol fresh every tick -- a bounded slice
-    per tick, rotating through the full set via a cache-held cursor, is
-    sufficient and keeps steady-state cost to
-    settings.ETF_NAV_BATCH_SIZE requests per 5 minutes.
+    Nav.php is one request per ETF (see fetch_etf_nav) and there are ~417 of them
+    (marketdata.catalog's IRT-ISIN discovery). This used to rotate through them
+    with a cache-held cursor, which bounded the cost but guaranteed no fund any
+    particular freshness -- coverage depended on how often the beat happened to
+    fire between catalog changes. Each fund now owns a `LiveFetchState` row on a
+    once-per-trading-day cadence, so every fund gets exactly one NAV per session
+    and the reserve can price that in advance instead of guessing.
     """
-    from django.core.cache import cache
-
+    from . import live_states
     from .fetchers import fetch_etf_nav
     from .fetchers import PermanentMarketDataError, TransientMarketDataError
-    from .models import MarketInstrument
+
+    # Bounded per tick so one beat cannot claim all ~417 at once and blow through
+    # the 5-minute window limiter; the rest stay due and land on the next tick.
+    due = live_states.claim_due("etf_nav", limit=settings.ETF_NAV_BATCH_SIZE)
+    if not due:
+        return (0, 0)
 
     outcome = _ledgered(
         "capture_market_snapshots:etf_nav",
         endpoint="etf_nav",
         destination_table="MarketSnapshot",
     )
-    symbols = list(
-        MarketInstrument.objects.filter(
-            category=MarketInstrument.Category.ETF, eligible=True,
-        ).order_by("symbol").values_list("symbol", flat=True)
-    )
-    if not symbols:
-        # Expected before the first catalog sync of the day (sync_provider_catalog
-        # is what populates category=ETF rows); not an error.
-        _finish_ok(outcome, rows_created=0, metadata={"reason": "no_etf_instruments_yet"})
-        logger.info("capture_market_snapshots(etf_nav): no ETF instruments in catalog yet")
-        return (0, 0)
-
-    batch_size = max(1, getattr(settings, "ETF_NAV_BATCH_SIZE", 5))
-    cursor = cache.get(_ETF_NAV_CURSOR_CACHE_KEY, 0) % len(symbols)
-    batch = [symbols[(cursor + i) % len(symbols)] for i in range(min(batch_size, len(symbols)))]
-    cache.set(_ETF_NAV_CURSOR_CACHE_KEY, (cursor + len(batch)) % len(symbols), None)
-
     created = failed = 0
     permanent_failures = []
-    for symbol in batch:
+    for state in due:
+        symbol = state.scope
         try:
             payload = fetch_etf_nav(settings.TSETMC_API_KEY, symbol)
             if ingest.ingest_etf_nav_snapshot(symbol, payload):
                 created += 1
+                live_states.record_result(state, ok=True)
             else:
                 failed += 1
+                live_states.record_result(state, ok=False, error="empty_payload")
         except PermanentMarketDataError as exc:
             # A specific symbol rejected (e.g. delisted, per endpoints.py's
             # "non-ETF symbol returns 502" note) must not abort the rest of
@@ -169,16 +179,17 @@ def _capture_etf_nav_batch():
             # loops in this module (ingest_market_snapshots et al).
             failed += 1
             permanent_failures.append(symbol)
+            live_states.record_result(state, ok=False, error=exc)
             logger.warning("capture_market_snapshots(etf_nav): %s permanently failed: %s", symbol, exc)
         except TransientMarketDataError as exc:
             failed += 1
+            live_states.record_result(state, ok=False, error=exc)
             logger.warning("capture_market_snapshots(etf_nav): %s transient failure: %s", symbol, exc)
 
     logger.info(
-        "capture_market_snapshots(etf_nav): created %d, failed %d of %d fetched "
-        "(cursor now %d/%d, permanent_failures=%s)",
-        created, failed, len(batch), cache.get(_ETF_NAV_CURSOR_CACHE_KEY, 0), len(symbols),
-        permanent_failures or None,
+        "capture_market_snapshots(etf_nav): created %d, failed %d of %d due "
+        "(permanent_failures=%s)",
+        created, failed, len(due), permanent_failures or None,
     )
     _finish_ok(outcome, rows_created=created, rows_rejected=failed)
     return (created, failed)
@@ -247,14 +258,6 @@ def extract_codal_report(announcement_id):
     )
     try:
         report, result = extract_report(announcement_id)
-    except QuotaExhausted as err:
-        # Not a failure: the day's provider budget is spent and the next run
-        # picks this up. Recording it as FAILED would make a healthy backlog
-        # look like a broken pipeline.
-        outcome.finish(
-            WorkflowRun.Outcome.SKIPPED, metadata={"reason": str(err)[:200]}
-        )
-        return {"status": "skipped"}
     except Exception as err:
         _finish_fail(outcome, err)
         raise
@@ -268,7 +271,13 @@ def extract_codal_report(announcement_id):
 
 @shared_task
 def queue_codal_extractions():
-    """Fan out a bounded batch so document work never occupies archive workers.
+    """Sweeper for Codal reports the event-driven path did not finish.
+
+    New announcements are enqueued the moment `ingest.ingest_codal_announcements`
+    writes them, so this is no longer the main way work starts -- it is the safety
+    net for rows that were stranded mid-flight or failed retryably. It runs every
+    few minutes rather than every six hours because the backlog is ~74,000
+    documents and none of this spends provider quota.
 
     Picks up never-attempted announcements AND stranded ones. The original
     filter was `report__isnull=True`, which meant a report that died mid-flight
@@ -283,7 +292,27 @@ def queue_codal_extractions():
     """
     from django.db.models import Q
 
-    from .models import CodalAnnouncement, CodalReport
+    from .codal_storage import origin_unreachable
+    from .models import CodalAnnouncement, CodalReport, WorkflowRun
+
+    outcome = _ledgered("queue_codal_extractions", endpoint="codal_artifacts")
+    if origin_unreachable():
+        # Every one of these would fail at connect. Enqueueing them anyway is how
+        # the ledger filled with ~986 identical timeouts a day.
+        outcome.finish(
+            WorkflowRun.Outcome.SKIPPED, error_code="origin_unreachable"
+        )
+        return 0
+
+    # Never enqueue more than the codal queue can absorb: the backlog is ~74,000
+    # rows, and a flat batch size would just move it from the database into Redis.
+    limit, depth = _queue_slots("codal", settings.CODAL_EXTRACT_BATCH_SIZE)
+    if not limit:
+        outcome.finish(
+            WorkflowRun.Outcome.SKIPPED,
+            metadata={"reason": "queue_full", "queue_depth": depth},
+        )
+        return 0
 
     has_artifact = (
         Q(link_excel__gt="")
@@ -291,7 +320,6 @@ def queue_codal_extractions():
         | Q(link__gt="")
         | Q(link_attachment__gt="")
     )
-    limit = settings.CODAL_EXTRACT_BATCH_SIZE
 
     # A FETCHING row younger than this may still be in flight on a live worker.
     stale_before = timezone.now() - timedelta(
@@ -311,9 +339,9 @@ def queue_codal_extractions():
         .order_by("-date_publish", "-time_publish")
         .values_list("id", flat=True)[:limit]
     )
-    for announcement_id in ids:
-        extract_codal_report.delay(announcement_id)
-    return len(ids)
+    queued = _dispatch_codal_ids(ids, slots=limit)
+    _finish_ok(outcome, rows_accepted=queued)
+    return queued
 
 
 @shared_task(ignore_result=True)
@@ -462,6 +490,24 @@ def _queue_slots(queue, limit):
         logger.exception("Could not inspect Celery queue %s.", queue)
         return 0, None
     return max(0, limit - depth), depth
+
+
+def _dispatch_codal_ids(ids, *, slots=None):
+    """Best-effort, queue-bounded dispatch shared by ingest and the sweeper."""
+    if slots is None:
+        slots, _ = _queue_slots("codal", settings.CODAL_EXTRACT_BATCH_SIZE)
+    queued = 0
+    for announcement_id in list(ids)[:slots]:
+        try:
+            extract_codal_report.delay(announcement_id)
+        except Exception:
+            logger.exception(
+                "Could not enqueue Codal extraction announcement_id=%s.",
+                announcement_id,
+            )
+            break
+        queued += 1
+    return queued
 
 
 def _pause():
@@ -700,25 +746,6 @@ def archive_tick():
 
 
 @shared_task(ignore_result=True)
-def recent_history_refresh():
-    """Refresh authoritative recent stock series after the TSE close."""
-    outcome = _ledgered("recent_history_refresh", destination_table="ArchiveFetchState")
-    try:
-        slots, depth = _queue_slots("archive", settings.MARKETDATA_ARCHIVE_QUEUE_LIMIT)
-        if not slots:
-            from .models import WorkflowRun
-            outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "queue_full", "queue_depth": depth})
-            return
-        state_ids = claim_recent_refresh(limit=slots)
-        if state_ids:
-            group(*(run_archive_state.si(state_id) for state_id in state_ids)).apply_async()
-        _finish_ok(outcome, rows_accepted=len(state_ids))
-    except Exception as err:
-        _finish_fail(outcome, err)
-        raise
-
-
-@shared_task(ignore_result=True)
 def weekly_warehouse_audit():
     """Run the full read-only audit and leave a timestamped manifest behind."""
     outcome = _ledgered("weekly_warehouse_audit")
@@ -778,9 +805,49 @@ def capture_operational_metrics():
         rows_accepted=1,
         rows_created=1 if created else 0,
         rows_updated=0 if created else 1,
-        metadata={"slot": slot.isoformat()},
+        metadata={"slot": slot.isoformat(), **_quota_attribution_drift()},
     )
     return snapshot.pk
+
+
+def _quota_attribution_drift():
+    """Compare what the ledger claims we spent against what the counter charged.
+
+    Every metered request goes through `quota.reserve_request` and is tallied by
+    the workflow that owns it, so these two numbers should agree. When they do
+    not, some lane is spending quota nobody can account for -- which is how ~1,191
+    requests a day went missing before the live lane's thread-pool attribution was
+    fixed. Surfaced here so it shows up on the Ops console rather than needing a
+    shell and a hand-written aggregate.
+    """
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+
+    from django.db.models import Sum
+
+    from .models import ApiRequestQuota, WorkflowRun
+    from .quota import quota_day
+
+    try:
+        day = quota_day()
+        zone = ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE)
+        start = datetime.combine(day, dtime.min, tzinfo=zone)
+        charged = (
+            ApiRequestQuota.objects.filter(day=day)
+            .values_list("used", flat=True)
+            .first()
+        ) or 0
+        attributed = WorkflowRun.objects.filter(created_at__gte=start).aggregate(
+            total=Sum("quota_attempts")
+        )["total"] or 0
+        return {
+            "quota_charged": charged,
+            "quota_attributed": attributed,
+            "quota_unattributed": charged - attributed,
+        }
+    except Exception:
+        logger.warning("quota attribution check failed", exc_info=True)
+        return {}
 
 
 @shared_task(ignore_result=True)

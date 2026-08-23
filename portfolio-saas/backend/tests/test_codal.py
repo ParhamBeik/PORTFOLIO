@@ -22,7 +22,6 @@ from marketdata.codal_parsers import ParsedDocument
 from marketdata.codal_storage import CodalArtifactRejected, CodalBlockedNetwork
 from marketdata.models import CodalAnnouncement
 from marketdata.models import CodalAnnouncement, CodalArtifact, CodalReport
-from marketdata.quota import QuotaExhausted
 
 pytestmark = pytest.mark.django_db
 
@@ -95,8 +94,8 @@ def test_parse_pdf_with_no_text_layer_yields_empty_document_not_a_crash():
 # marketdata.codal_pipeline.extract_report: the CodalReport.status it picks
 # must match the retry policy documented in the module's docstring -- transient
 # fetch/store problems retried, a document that fails its own validation not
-# retried forever. Network/storage/parsing are mocked; reserve_request(ARCHIVE)
-# runs for real against the test DB's quota row.
+# retried forever. Network/storage/parsing are mocked. Note that this path spends
+# no provider quota at all: codal.ir is not the metered API.
 
 
 def _announcement(**kwargs):
@@ -175,23 +174,28 @@ def test_no_artifact_links_is_permanent_not_retryable():
     assert report.error_code == "no_artifact_links"
 
 
-def test_quota_exhaustion_propagates_and_stops_the_report(monkeypatch):
+def test_artifact_download_spends_no_provider_quota(monkeypatch):
+    """Documents come from codal.ir, not from the metered provider.
+
+    Reserving ARCHIVE quota per artifact charged ~1,000 requests/day of BrsApi's
+    allowance to a host BrsApi has nothing to do with, and coupled document
+    extraction to a budget running out for unrelated reasons.
+    """
+    from marketdata import quota
+    from marketdata.models import ApiRequestQuota
+
     announcement = _announcement()
+    monkeypatch.setattr(
+        codal_pipeline, "download_artifact",
+        lambda url, kind: (url, "application/vnd.ms-excel", b"x"),
+    )
+    monkeypatch.setattr(
+        codal_pipeline, "store_artifact", lambda content, content_type, kind: ("k", "c"),
+    )
 
-    def _exhausted(url, kind):
-        raise AssertionError("download_artifact should not run past reserve_request")
+    codal_pipeline.extract_report(announcement.pk)
 
-    def _reserve(bucket):
-        raise QuotaExhausted("Daily archive request budget exhausted (7900).")
-
-    monkeypatch.setattr(codal_pipeline, "download_artifact", _exhausted)
-    monkeypatch.setattr(codal_pipeline, "reserve_request", _reserve)
-
-    with pytest.raises(QuotaExhausted):
-        codal_pipeline.extract_report(announcement.pk)
-
-    report = CodalReport.objects.get(announcement=announcement)
-    assert report.status == CodalReport.Status.FETCHING  # stuck, not misclassified as a failure
+    assert not ApiRequestQuota.objects.filter(day=quota.quota_day()).exists()
 
 
 def test_unreconciled_category_is_needs_review_not_parsed(monkeypatch):
@@ -504,3 +508,139 @@ def test_the_three_types_left_at_tier_3_stay_there():
         "تغییرات در ترکیب اعضای هیئت مدیره",
     ):
         assert classify(title, None, "").tier == 3, title
+
+
+# ----------------------------------------------------------------------
+# Event-driven extraction and the codal.ir reachability breaker.
+#
+# The extractor used to be a 200-row batch on a six-hourly cron against a backlog
+# of ~74,000 announcements, and every attempt reserved BrsApi quota it had no
+# business spending. Meanwhile codal.ir is unreachable from the production host
+# (TCP 443 times out), so ~986 of those attempts a day were guaranteed to fail at
+# connect. Work now starts at ingest time, and a dead origin parks itself.
+
+
+def test_ingesting_a_new_announcement_queues_its_extraction(monkeypatch):
+    """"As soon as a downloadable document appears" -- no waiting for a cron."""
+    from marketdata import ingest
+
+    queued = []
+    monkeypatch.setattr(
+        "marketdata.tasks.extract_codal_report.delay", lambda pk: queued.append(pk)
+    )
+    monkeypatch.setattr("marketdata.tasks._queue_slots", lambda queue, limit: (limit, 0))
+    payload = {"announcement": [{
+        "l18": "فملی", "l30": "ملی مس", "title": "گزارش فعالیت ماهانه",
+        "code": "1", "category": 1, "category_title": "ماهانه",
+        "date_title": "1404-01-31", "date_send": "1404-02-01", "time_send": "10:00:00",
+        "date_publish": "1404-02-01", "time_publish": "10:00:00",
+        "link_excel": "https://excel.codal.ir/r.xlsx",
+    }]}
+
+    created, _ = ingest.ingest_codal(payload)
+
+    assert created == 1
+    assert queued == list(
+        CodalAnnouncement.objects.values_list("id", flat=True)
+    )
+
+
+def test_event_enqueue_matches_symbol_and_code_as_a_pair(monkeypatch):
+    from marketdata import ingest
+
+    exact = _announcement(symbol="A", code="1")
+    paired = _announcement(symbol="B", code="2")
+    cross = _announcement(symbol="A", code="2")
+    queued = []
+    monkeypatch.setattr(
+        "marketdata.tasks.extract_codal_report.delay", lambda pk: queued.append(pk)
+    )
+    monkeypatch.setattr("marketdata.tasks._queue_slots", lambda queue, limit: (limit, 0))
+
+    assert ingest._enqueue_codal_extractions([
+        CodalAnnouncement(symbol="A", code="1"),
+        CodalAnnouncement(symbol="B", code="2"),
+    ]) == 2
+    assert queued == [exact.pk, paired.pk]
+    assert cross.pk not in queued
+
+
+def test_reingesting_the_same_announcement_queues_nothing_new(monkeypatch):
+    """Idempotence comes from report__isnull, not from the bulk_create count."""
+    from marketdata import ingest
+
+    queued = []
+    monkeypatch.setattr(
+        "marketdata.tasks.extract_codal_report.delay", lambda pk: queued.append(pk)
+    )
+    announcement = _announcement(code="7", date_publish="1404-02-01", time_publish="10:00:00")
+    CodalReport.objects.create(announcement=announcement)
+
+    assert ingest._enqueue_codal_extractions([announcement]) == 0
+    assert queued == []
+
+
+def test_an_unreachable_origin_stops_enqueueing_instead_of_retrying(monkeypatch):
+    """A network path that is down is not 74,000 individual document failures."""
+    from marketdata import tasks
+    from marketdata.models import WorkflowRun
+
+    monkeypatch.setattr(
+        "marketdata.codal_storage.origin_unreachable", lambda: True
+    )
+    monkeypatch.setattr(
+        "marketdata.tasks.extract_codal_report.delay",
+        lambda pk: pytest.fail("must not enqueue against a dead origin"),
+    )
+
+    assert tasks.queue_codal_extractions() == 0
+    run = WorkflowRun.objects.get(workflow="queue_codal_extractions")
+    assert run.outcome == WorkflowRun.Outcome.SKIPPED
+    assert run.error_code == "origin_unreachable"
+
+
+def test_a_rejected_document_does_not_trip_the_origin_breaker(monkeypatch):
+    """The origin answered; this file is just unusable. Only connect-level
+    failures are evidence about the network."""
+    tripped = []
+    monkeypatch.setattr(codal_storage, "_record_origin_failure", lambda: tripped.append(1))
+    monkeypatch.setattr(codal_storage, "_record_origin_success", lambda: None)
+
+    class _Response:
+        is_redirect = is_permanent_redirect = False
+        status_code = 200
+        headers = {"Content-Type": "text/plain"}
+
+        def raise_for_status(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        codal_storage.requests.Session, "get", lambda *a, **kw: _Response()
+    )
+    with pytest.raises(CodalArtifactRejected):
+        codal_storage.download_artifact("https://codal.ir/x.pdf", "pdf")
+    assert tripped == []
+
+
+def test_recovery_probe_is_single_flight(monkeypatch):
+    class FakeRedis:
+        def __init__(self):
+            self.values = {codal_storage._BREAKER_PROBE_PENDING_KEY: "1"}
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def set(self, key, value, *, ex, nx):
+            if nx and key in self.values:
+                return False
+            self.values[key] = value
+            return True
+
+    client = FakeRedis()
+    monkeypatch.setattr(codal_storage, "_breaker_client", lambda: client)
+
+    assert codal_storage.origin_unreachable(probe=True) is False
+    assert codal_storage.origin_unreachable(probe=True) is True
