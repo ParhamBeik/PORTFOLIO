@@ -112,15 +112,30 @@ def run_price_fetch(*, dry_run=False):
         }
         current_state = current_market_state()
         verified_close_keys = set()
-        # These prices came off the provider seconds ago, so their session is
-        # now. Saying so is what stops a closed market from overwriting a
-        # just-fetched close with an archive row the backfill has not caught
-        # up to yet -- the write path decides what gets persisted, so getting
-        # this wrong here bakes yesterday's number into today's Price row.
+        # What session each key's price is from. A key quoted this cycle is
+        # from now; a key that went unquoted -- which is every TSE symbol the
+        # moment the session closes -- keeps the session of whatever is already
+        # stored. Reporting "now" for those too would say the archive is behind
+        # a price that does not exist, and reporting nothing would let an older
+        # archive close overwrite the last price the session actually printed.
+        # The write path decides what becomes a Price row, so getting this
+        # wrong here bakes yesterday's number into today's newest observation.
         fetched_now = timezone.now()
+        stored_fetched_at = {
+            row.asset.key: row.fetched_at
+            for row in Price.objects.select_related("asset")
+            .filter(asset__key__in=live_prices.keys(), price__gt=0)
+            .order_by("asset_id", "-fetched_at", "-id")
+            .distinct("asset_id")
+        }
+        live_fetched_at = {}
+        for key, value in live_prices.items():
+            when = fetched_now if Decimal(str(value or 0)) > 0 else stored_fetched_at.get(key)
+            if when is not None:
+                live_fetched_at[key] = when
         archive_replacements = _archive_replacements(
             live_prices,
-            live_fetched_at={key: fetched_now for key in live_prices},
+            live_fetched_at=live_fetched_at,
             market_state=current_state,
             verified_close_keys=verified_close_keys,
         )

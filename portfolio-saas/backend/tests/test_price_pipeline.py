@@ -607,12 +607,21 @@ def test_fetch_dry_run_writes_nothing(asset_catalog, raw_market_sample, monkeypa
 
 
 def test_fetch_persists_archive_replacement_for_missing_live_price(asset_catalog, monkeypatch):
-    """Any asset can replace a missing live quote with its verified archive close."""
+    """Any asset can replace a missing live quote with its verified archive close.
+
+    The stored price is aged behind the candle on purpose: the archive stands in
+    only when it is NOT older than what is already held. A close that trails the
+    stored session is the market having shut before the backfill ran, and taking
+    it there walks the price backwards a session.
+    """
     cache.delete("prices:latest")
     stock = asset_catalog["kama_stock"]
     stock.tse_symbol = "ARCHIVE_STOCK"
     stock.save(update_fields=["tse_symbol"])
-    Price.objects.create(asset=stock, price=Decimal("7777"), source="SEED")
+    seed = Price.objects.create(asset=stock, price=Decimal("7777"), source="SEED")
+    Price.objects.filter(pk=seed.pk).update(
+        fetched_at=timezone.now() - timedelta(days=15)
+    )
     MarketCandle.objects.create(
         symbol="ARCHIVE_STOCK",
         timeframe=MarketCandle.ADJUSTED,
@@ -1183,3 +1192,39 @@ def test_run_price_fetch_does_not_persist_a_lagging_archive_close(
     assert result["written"] is True
     stored = Price.objects.filter(asset=kama).order_by("-fetched_at", "-id").first()
     assert stored.price == Decimal("5230"), "persisted yesterday's archive close"
+
+
+@pytest.mark.django_db
+def test_closed_session_does_not_bury_the_days_last_live_price(
+    asset_catalog, raw_market_sample, monkeypatch
+):
+    """The other half of the KAMA regression: once the session closes the live
+    loop stops quoting TSE, so the fetch sees no price at all. An unguarded
+    archive substitution there writes yesterday's close as today's NEWEST row,
+    burying the price the session actually ended at.
+    """
+    import portfolio.tasks as mod
+    from marketdata.models import MarketCandle
+    from portfolio.services.returns import to_jalali_str
+
+    kama = asset_catalog["kama_stock"]
+    kama.tse_symbol = "کاما"
+    kama.save(update_fields=["tse_symbol"])
+    # Today's closing tick, captured while the session was still open.
+    Price.objects.create(asset=kama, price=Decimal("4890"), source="API")
+    MarketCandle.objects.create(
+        symbol="کاما",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=to_jalali_str(timezone.now() - timedelta(days=1)),
+        close_price=Decimal("4750"),
+    )
+    # The provider returns nothing for TSE now that the session is over.
+    sample = {**raw_market_sample, "tsetmc": []}
+    monkeypatch.setattr(mod, "fetch_all_markets", lambda _settings: sample)
+    monkeypatch.setattr(mod, "get_redis", lambda: None)
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
+
+    run_price_fetch()
+
+    newest = Price.objects.filter(asset=kama).order_by("-fetched_at", "-id").first()
+    assert newest.price == Decimal("4890"), "yesterday's close buried today's"

@@ -361,31 +361,43 @@ def _archive_replacements(
                 key, archive_price, archive_date, MAX_FORWARD_FILL_SESSIONS,
             )
             continue
+        # The archive ingests a session's close well after that session ends,
+        # so between the bell and the backfill the newest live row IS the
+        # close. Substituting an older archive row for a price we already hold
+        # from a later session walks the value backwards -- it replaced today's
+        # real closing price with yesterday's the moment the market shut.
+        archive_is_behind = live_session is not None and archive_date < live_session
         if (
             asset
             and market_state
             and not _asset_market_is_open(asset, market_state)
-            # Only when the warehouse has actually caught up. The archive
-            # ingests a session's close well after that session ends, so
-            # between the bell and the backfill the newest live row IS the
-            # close -- preferring an older archive row there replaces today's
-            # real closing price with yesterday's the moment the market shuts.
-            and not (live_session is not None and archive_date < live_session)
+            and not archive_is_behind
         ):
             logger.info("Key='%s' market is closed; using archive close %s.", key, archive_price)
             replacements[key] = archive_price
             if verified_close_keys is not None:
                 verified_close_keys.add(key)
-        elif live_price <= 0:
+        elif live_price <= 0 and not archive_is_behind:
+            # No quote this cycle. The archive stands in only if it is not
+            # older than what we already have: once the session closes the
+            # live loop stops quoting, and an unguarded substitution here
+            # persists yesterday's close as today's newest observation.
             logger.warning("Key='%s' Live=0. Using archive price %s", key, archive_price)
             replacements[key] = archive_price
-        elif live_price < archive_price * _ARCHIVE_DROP_FLOOR or live_price > archive_price * _ARCHIVE_SPIKE_CEILING:
+        elif live_price > 0 and (
+            live_price < archive_price * _ARCHIVE_DROP_FLOOR
+            or live_price > archive_price * _ARCHIVE_SPIKE_CEILING
+        ):
+            # Deliberately NOT gated on the archive being current: a live quote
+            # this far out of band is corrupt, and an older good close beats a
+            # fresh bad one. `live_price > 0` keeps "no quote at all" out of
+            # here -- zero is below every floor and would match every time.
             logger.warning(
                 "Key='%s' Live=%s Archive=%s outside range [%s, %s]. Using archive price.",
                 key, live_price, archive_price, archive_price * _ARCHIVE_DROP_FLOOR, archive_price * _ARCHIVE_SPIKE_CEILING
             )
             replacements[key] = archive_price
-        elif live_session is not None and archive_date > live_session:
+        elif live_price > 0 and live_session is not None and archive_date > live_session:
             logger.warning(
                 "Key='%s' live price is from session %s but the archive already "
                 "has session %s (%s) -- the live loop missed a session, using "
