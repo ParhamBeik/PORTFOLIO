@@ -347,20 +347,22 @@ def _archive_replacements(
             if live_fetched_at and key in live_fetched_at
             else None
         )
-        if asset is not None and sessions_between(
+        # Past the forward-fill bound this close is not a current price, it is
+        # the last thing a delisted/halted asset ever printed. It may no longer
+        # stand in FOR a price -- the valuation layer should report the gap
+        # rather than dress an ancient number up as today's -- but it is still
+        # a valid magnitude reference, so the spike guard below keeps using it.
+        too_stale = asset is not None and sessions_between(
             archive_date, now_jalali,
             calendar=session_calendars[market_for_asset(asset)],
-        ) > MAX_FORWARD_FILL_SESSIONS:
-            # Past the forward-fill bound this close is not a current price, it
-            # is the last thing a delisted/halted asset ever printed. Offering
-            # no replacement lets the valuation layer report the gap instead of
-            # dressing an ancient number up as today's.
+        ) > MAX_FORWARD_FILL_SESSIONS
+        if too_stale:
             logger.warning(
                 "Key='%s' archive close %s is from %s, beyond the %d-session "
-                "forward-fill bound -- leaving the price unresolved.",
+                "forward-fill bound -- it may still veto a corrupt quote but "
+                "will not stand in as a current price.",
                 key, archive_price, archive_date, MAX_FORWARD_FILL_SESSIONS,
             )
-            continue
         # The archive ingests a session's close well after that session ends,
         # so between the bell and the backfill the newest live row IS the
         # close. Substituting an older archive row for a price we already hold
@@ -372,12 +374,13 @@ def _archive_replacements(
             and market_state
             and not _asset_market_is_open(asset, market_state)
             and not archive_is_behind
+            and not too_stale
         ):
             logger.info("Key='%s' market is closed; using archive close %s.", key, archive_price)
             replacements[key] = archive_price
             if verified_close_keys is not None:
                 verified_close_keys.add(key)
-        elif live_price <= 0 and not archive_is_behind:
+        elif live_price <= 0 and not archive_is_behind and not too_stale:
             # No quote this cycle. The archive stands in only if it is not
             # older than what we already have: once the session closes the
             # live loop stops quoting, and an unguarded substitution here

@@ -1270,3 +1270,41 @@ def test_archive_close_past_the_forward_fill_bound_is_not_offered(
     replacements = _archive_replacements({"kama_stock": Decimal("0")})
 
     assert "kama_stock" not in replacements
+
+
+def test_stale_archive_close_still_vetoes_a_corrupt_live_quote(
+    asset_catalog, write_prices, monkeypatch
+):
+    """Staleness stops a close STANDING IN for a price; it must not disable the
+    corruption guard. The archive backfill is quota-driven and does fall behind,
+    and a 10x live quote persisted unchecked is worse than an old real one."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+    from marketdata.models import MarketCandle
+    from portfolio.services.returns import to_jalali_str
+    from portfolio.services.valuation import _archive_replacements
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+    for offset in range(0, 10):
+        MarketCandle.objects.create(
+            symbol="دیگر",
+            timeframe=MarketCandle.ADJUSTED,
+            date_time=to_jalali_str(timezone.now() - timedelta(days=offset)),
+            close_price=Decimal("100"),
+        )
+    MarketCandle.objects.create(
+        symbol="کاما",
+        timeframe=MarketCandle.ADJUSTED,
+        date_time=to_jalali_str(timezone.now() - timedelta(days=30)),
+        close_price=Decimal("5200"),
+    )
+
+    # A plausible quote is left alone even though the close is stale...
+    assert "kama_stock" not in _archive_replacements({"kama_stock": Decimal("5100")})
+    # ...but a corrupt one is still vetoed by it.
+    assert _archive_replacements({"kama_stock": Decimal("52000")}) == {
+        "kama_stock": Decimal("5200")
+    }
