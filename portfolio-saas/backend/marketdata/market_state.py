@@ -91,7 +91,10 @@ def remember_provider_state(payload, *, now=None):
 def claim_provider_state_probe(now=None):
     """Claim the single half-hourly Index.php probe for the live workers."""
     now = now or _now_tehran()
-    if market_state_at(now) != OPEN or _provider_says_closed():
+    # The clock must get one chance to reopen a stale provider-closed cache at
+    # the next session. Otherwise a pre-open "closed" response can suppress
+    # every TSE fetch until the cached TTL expires after the session has ended.
+    if market_state_at(now) != OPEN:
         return False
     client = get_redis()
     if client is None:

@@ -18,6 +18,9 @@ x-backend-env: &backend-env
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
   POSTGRES_HOST: db
   POSTGRES_PORT: "5432"
+  # Close Django connections at the end of each request/task.  This prevents
+  # long-lived workers from accumulating idle PostgreSQL sessions.
+  DB_CONN_MAX_AGE: "0"
   REDIS_URL: redis://redis:6379/1            # cache (DB 1)
   CELERY_BROKER_URL: redis://redis:6379/2    # broker/result (DB 2)
   CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS}
@@ -81,11 +84,21 @@ services:
     # what this 16 GB database had been running on. Values below are sized for
     # the 6 GB limit set at the foot of this block, not for the host's 16 GB:
     # shared_buffers ~25% of the container, and work_mem kept modest because it
-    # is per sort/hash node and multiplies by max_connections (100).
+    # is per sort/hash node and multiplies by max_connections (150).
     command:
       - postgres
       - -c
       - shared_preload_libraries=timescaledb
+      - -c
+      # Capacity for the bounded API/Celery workers, with headroom for admin
+      # maintenance.  The previous persisted default of 75 was exhausted.
+      - max_connections=150
+      - -c
+      # Prevent abandoned worker sockets and runaway queries from consuming all
+      # available sessions indefinitely.
+      - idle_session_timeout=300000
+      - -c
+      - statement_timeout=900000
       - -c
       - shared_buffers=1536MB
       - -c
