@@ -362,8 +362,14 @@ def test_missing_prices_produce_controlled_behavior(asset_catalog, make_user):
     assert any(item["asset_key"] == asset.key and item["reason"] == "missing_price" for item in result["excluded"])
 
 
-def test_stale_prices_label_in_current_valuation(asset_catalog, make_user):
-    """Proves stale prices (older than 300s) are labeled as stale in current valuation."""
+def test_stale_prices_label_in_current_valuation(asset_catalog, make_user, monkeypatch):
+    """A quote older than 300s is stale while that asset's market is open.
+
+    Gold desks run through CLOSED_DAYTIME; overnight the same age must stay
+    live (the last print is the current price). Pin daytime so this does not
+    flip with the wall clock.
+    """
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
     user = make_user()
     account = Account.objects.create(user=user, name="Stale Test")
     asset = asset_catalog["emami_coin"]
@@ -373,7 +379,6 @@ def test_stale_prices_label_in_current_valuation(asset_catalog, make_user):
     p = Price.objects.create(asset=asset, price=Decimal("480000"), source="API")
     Price.objects.filter(pk=p.pk).update(fetched_at=stale_time)
 
-    # Run valuation
     result = value_account(account)
     item = next(i for i in result["items"] if i["key"] == asset.key)
     assert item["quality_status"] == "stale"
