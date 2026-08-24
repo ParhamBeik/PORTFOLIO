@@ -1,6 +1,26 @@
-"""Atomic daily and 5-minute window provider quota shared by every web and Celery process."""
+"""Atomic daily and 5-minute window provider quota shared by every web and Celery process.
+
+Two dimensions, and they are not the same thing:
+
+* **plan** -- which provider subscription is billed. BrsApi issues one API key
+  per plan and meters each independently: `Tsetmc/*` and `Codal/*` against
+  TSETMC_API_KEY, `Market/*` against BRS_API_KEY. These are separate wallets.
+* **bucket** -- which lane inside a plan is spending (live prices, archive
+  backfill, or incidental metadata). This is our own allocation policy.
+
+Conflating the two is what broke production on 2026-08-24: one shared counter
+capped at 9,800 meant a full TSETMC backfill refused gold/currency requests that
+still had 79% of the BRS plan free, so the USDT quote failed 201 times in a day
+and dollar-denominated holdings went stale.
+
+There is deliberately **no hardcoded daily ceiling**. The provider is the only
+authority on how much is left, so we spend until it says stop and then break the
+circuit for that plan until the Tehran-midnight reset. Within a plan we still
+reserve live's forward-looking need, because that is our policy, not a limit.
+"""
 import collections
 import logging
+import re
 import time
 import uuid
 from datetime import timedelta
@@ -18,6 +38,11 @@ logger = logging.getLogger(__name__)
 ARCHIVE = "archive"
 LIVE = "live"
 OTHER = "other"
+
+# Provider subscriptions. One counter row and one circuit breaker per plan.
+TSETMC = "tsetmc"
+BRS = "brs"
+PLANS = (TSETMC, BRS)
 
 # Shares of the provider's single 1,000-per-5-minute window. They sum to 1.0 so
 # the three buckets together can never exceed what the provider allows.
@@ -64,21 +89,92 @@ def quota_day():
     return timezone.now().astimezone(zone).date()
 
 
+def _seconds_to_rollover(now=None):
+    now = now or timezone.now()
+    local = now.astimezone(ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE))
+    rollover = (local + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return max(60, int((rollover - local).total_seconds()))
+
+
+# --------------------------------------------------------------- circuit breaker
+
+# What the provider's body looks like when the subscription is spent. Matched on
+# the body rather than the status code alone: BrsApi answers quota exhaustion
+# with a 5xx, but a plain 5xx is also just a bad minute at the origin, and
+# pausing a whole plan for the rest of the day on an ordinary blip would be a
+# self-inflicted outage.
+_QUOTA_MESSAGE_RE = re.compile(
+    r"quota|limit|اعتبار|محدودیت|تعداد درخواست|درخواست.*مجاز", re.I
+)
+
+
+def _breaker_key(plan):
+    return f"quota:blocked:{plan}:{quota_day()}"
+
+
+def is_plan_blocked(plan):
+    from django.core.cache import cache
+
+    try:
+        return bool(cache.get(_breaker_key(plan)))
+    except Exception:
+        # Failing open is correct here: the provider still enforces its own
+        # limit, and refusing every request because the cache blinked would take
+        # live prices down for a reason that has nothing to do with quota.
+        return False
+
+
+def trip_plan_breaker(plan, *, reason=""):
+    """Stop spending this plan until the Tehran-midnight reset.
+
+    Called when the provider itself reports exhaustion. Idempotent, and scoped
+    to one plan so a spent TSETMC subscription never silences gold/currency.
+
+    Uses the Django cache rather than a raw Redis handle: it is Redis-backed in
+    every deployed environment, shared across workers exactly the same way, and
+    it works in-process under tests, where a breaker that silently never trips
+    would be worse than no test at all.
+    """
+    from django.core.cache import cache
+
+    try:
+        cache.set(_breaker_key(plan), reason or "1", timeout=_seconds_to_rollover())
+    except Exception:
+        logger.warning("could not persist quota breaker for plan %s", plan)
+    logger.warning(
+        "quota_breaker_tripped plan=%s reason=%s until=rollover", plan, reason or "-"
+    )
+
+
+def looks_like_quota_error(status_code, body_text):
+    """True when this response is the provider saying "you are out"."""
+    if status_code not in (429, 500, 502, 503):
+        return False
+    return bool(_QUOTA_MESSAGE_RE.search(body_text or ""))
+
+
+def _quota_row(plan, *, locked=False):
+    manager = ApiRequestQuota.objects
+    if locked:
+        manager = manager.select_for_update()
+    row, _ = manager.get_or_create(day=quota_day(), plan=plan)
+    return row
+
+
 def bucket_budget(bucket):
-    """The bucket's slice of the day. LIVE is capped, ARCHIVE takes the remainder.
+    """The bucket's own ceiling, where one exists.
 
-    LIVE stays a configured ceiling rather than being derived from the live plan.
-    A cap that grows with the thing it is capping cannot bind: a mis-set cadence
-    would silently raise its own ceiling and starve the backfill with no signal.
-    What *is* plan-driven is `live_reserve_remaining` -- the forward-looking "how
-    much must the archive leave alone between now and rollover".
+    LIVE and OTHER keep a configured ceiling: both have a bounded, knowable daily
+    cost, and a cap that grows with the thing it is capping cannot bind -- a
+    mis-set cadence would silently raise its own ceiling with no signal.
 
-    ARCHIVE was a second hand-set constant, so the two could drift apart from each
-    other and from the daily limit; they once summed to 10,000 against a 9,800
-    cap. Defining it as the remainder makes that arithmetically impossible, and is
-    the user-facing rule: reserve live first, everything else is dynamic.
-
-    `manage.py quota_plan` reports when the day's plan outgrows the LIVE ceiling.
+    ARCHIVE returns None: **unbounded**. Its backlog is effectively infinite, so
+    any number here is arbitrary, and the previous arbitrary number (9,800 minus
+    the others) was the bug. What stops the archive is the live reserve inside
+    its plan, the rolling window limiter, and ultimately the provider's own
+    refusal -- not a constant in a settings file.
     """
     if bucket == LIVE:
         return (
@@ -87,15 +183,7 @@ def bucket_budget(bucket):
         )
     if bucket == OTHER:
         return settings.MARKETDATA_OTHER_REQUEST_BUDGET
-    pinned = settings.MARKETDATA_ARCHIVE_REQUEST_BUDGET
-    if pinned:
-        return pinned
-    return max(
-        0,
-        settings.MARKETDATA_DAILY_REQUEST_LIMIT
-        - bucket_budget(LIVE)
-        - settings.MARKETDATA_OTHER_REQUEST_BUDGET,
-    )
+    return None
 
 
 def _window_limit(bucket):
@@ -163,12 +251,19 @@ def _check_and_record_window(bucket=OTHER):
     return len(window)
 
 
-def _simulate_price_loop(start, end):
+# Which provider plan each live price-loop job bills. `gold_currency` is the
+# BRS wallet; the TSE index probe and the AllSymbols fetch are TSETMC's.
+_JOB_PLAN = {"gold_currency": BRS, "market_index": TSETMC, "tsetmc": TSETMC}
+
+
+def _simulate_price_loop(start, end, plan=None):
     """Requests the 2-minute price loop makes across [start, end).
 
     Simulating the same state planner the live loop uses is both smaller and more
     accurate than a second formula that drifts whenever endpoint gating changes.
     At most ~720 iterations at the supported cadences.
+
+    `plan` counts only the jobs billed to that subscription.
     """
     from . import market_state as _market_state
 
@@ -190,22 +285,26 @@ def _simulate_price_loop(start, end):
             and state == _market_state.OPEN
             and cursor >= next_state_probe
         )
-        needed += len(_market_state.live_job_keys(
+        jobs = _market_state.live_job_keys(
             state=state,
             now=cursor,
             has_brs=has_brs,
             has_tsetmc=has_tsetmc,
             ignore_hours=ignore_hours,
             include_state_probe=include_state_probe,
-        ))
+        )
+        needed += sum(
+            1 for job in jobs
+            if plan is None or _JOB_PLAN.get(job, TSETMC) == plan
+        )
         if include_state_probe:
             next_state_probe = cursor + timedelta(seconds=_market_state._STATE_TTL_OPEN)
         cursor += timedelta(seconds=max(1, intervals[state]))
     return needed
 
 
-def live_reserve_remaining(row, now=None):
-    """Requests to hold back for live between now and the day rollover.
+def live_reserve_remaining(plan, row=None, now=None):
+    """Requests to hold back for live on `plan` between now and the day rollover.
 
     The static floor reserved the same 600 at 23:00 as at 08:00, so the archive
     could never touch the tail of a quiet day. This asks the only question that
@@ -216,68 +315,62 @@ def live_reserve_remaining(row, now=None):
     `LiveFetchState`. Pricing only the first is what let crypto, commodity, ETF
     NAV, options and futures spend ~350/day that nothing had reserved for.
 
-    Capped by what is actually left of the live bucket -- live cannot borrow, so
-    reserving beyond its own budget protects requests nobody is allowed to make.
-    The cap shrinks to zero at rollover.
+    Scoped to one plan: reserving TSETMC's live need out of the BRS wallet is
+    exactly the cross-plan confusion this module now exists to prevent.
     """
     now = now or timezone.now()
     local = now.astimezone(ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE))
     rollover = (local + timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    needed = _simulate_price_loop(local, rollover)
+    needed = _simulate_price_loop(local, rollover, plan=plan)
     try:
         from . import live_states
 
-        needed += live_states.planned_requests(now, rollover)
+        needed += live_states.planned_requests(now, rollover, plan=plan)
     except Exception:
-        # Same reasoning as `_live_day_cost`: an unreadable plan must not silently
-        # release the reserve. Under-reserving is the failure that gets live
-        # requests refused; over-reserving only slows the backfill.
+        # An unreadable plan must not silently release the reserve.
+        # Under-reserving is the failure that gets live requests refused;
+        # over-reserving only slows the backfill.
         logger.warning("live plan unavailable; reserving the price loop only")
-    return max(0, min(needed, bucket_budget(LIVE) - row.live_used))
+    if row is not None:
+        # Live cannot borrow, so reserving beyond its own ceiling would protect
+        # requests nobody is allowed to make. Shrinks to zero at rollover.
+        needed = min(needed, bucket_budget(LIVE) - row.live_used)
+    return max(0, needed)
 
 
-def _headroom_for_borrowing(row):
-    """Daily requests nobody has claimed and nobody has reserved.
+def reserve_request(bucket=OTHER, plan=TSETMC):
+    """Claim one request on `plan` for `bucket`, or raise `QuotaExhausted`.
 
-    The three bucket budgets deliberately sum to less than the daily limit, so a
-    quiet live day used to leave ~1,000 of the fixed 9,800 unspent -- the archive
-    backlog stopped dead at its own 8,800 cap while the account still had room.
-    What stays untouchable is live's remaining need for the rest of the day and
-    the small `other` allowance for catalog/metadata calls.
+    Three gates, and deliberately no daily ceiling:
+
+    1. The plan's circuit breaker -- the provider already told us it is spent.
+    2. The bucket's own ceiling, where it has one (ARCHIVE does not).
+    3. Live's forward-looking reserve, so backfill cannot eat the requests the
+       price loop still needs before rollover. Enforced only against non-live
+       buckets, within this plan.
     """
-    unspent_other = max(0, bucket_budget(OTHER) - row.other_used)
-    return row.limit - row.used - live_reserve_remaining(row) - unspent_other
-
-
-def _may_borrow(bucket, row):
-    """Only ARCHIVE borrows: it is the one bucket with an unbounded backlog."""
-    return bucket == ARCHIVE and _headroom_for_borrowing(row) > 0
-
-
-def reserve_request(bucket=OTHER):
-    limit = settings.MARKETDATA_DAILY_REQUEST_LIMIT
+    if is_plan_blocked(plan):
+        raise QuotaExhausted(
+            f"Provider reported the {plan} plan exhausted; paused until reset."
+        )
     budget = bucket_budget(bucket)
     field = f"{bucket}_used"
     with transaction.atomic():
-        row, _ = ApiRequestQuota.objects.select_for_update().get_or_create(
-            day=quota_day(),
-            defaults={"limit": limit},
-        )
-        if row.limit != limit:
-            row.limit = limit
-        if row.used >= row.limit:
-            raise QuotaExhausted("Daily API request quota exhausted.")
-        if getattr(row, field) >= budget and not _may_borrow(bucket, row):
-            raise QuotaExhausted(f"Daily {bucket} request budget exhausted ({budget}).")
-        if bucket != LIVE:
-            # The reserve is enforced against the day total, not just the archive
-            # budget, so provider-reconciled drift can never eat it either.
-            reserve = live_reserve_remaining(row)
+        row = _quota_row(plan, locked=True)
+        if budget is not None and getattr(row, field) >= budget:
+            raise QuotaExhausted(
+                f"Daily {bucket} request budget exhausted ({budget}) on {plan}."
+            )
+        if bucket != LIVE and row.limit:
+            # `limit` is only set once the provider has told us what this plan's
+            # ceiling actually is (see `reconcile_account`). Until then there is
+            # nothing to reserve *against*, and the breaker is the real stop.
+            reserve = live_reserve_remaining(plan, row)
             if row.used + reserve >= row.limit:
                 raise QuotaExhausted(
-                    f"Remaining daily quota is reserved for live prices "
+                    f"Remaining {plan} quota is reserved for live prices "
                     f"({reserve} req to cover the rest of the day)."
                 )
 
@@ -285,16 +378,21 @@ def reserve_request(bucket=OTHER):
 
         row.used += 1
         setattr(row, field, getattr(row, field) + 1)
-        row.save(update_fields=["limit", "used", field, "updated_at"])
-        return row.limit - row.used
+        row.save(update_fields=["used", field, "updated_at"])
+        return (row.limit - row.used) if row.limit else None
 
 
-def reconcile_account(account):
-    """Conservatively merge provider counters; return its backoff seconds.
+def reconcile_account(account, plan=TSETMC):
+    """Conservatively merge one plan's provider counters; return its backoff seconds.
 
     The `account` block only rides along on ERROR responses, so its absence means
     "no news", never zero usage -- treating a missing block as zero would reset the
     day counter on every successful fetch.
+
+    Scoped to `plan`. Merging both subscriptions into one row meant the larger
+    counter always won: BRS spend was invisible in `ApiRequestQuota` all the way
+    through the incident, which is why the shared total looked plausible while
+    one wallet sat 79% unused.
     """
     if not isinstance(account, dict):
         return 0
@@ -302,61 +400,123 @@ def reconcile_account(account):
         block = int(account.get("request_block") or 0)
     except (TypeError, ValueError):
         block = 0
+
+    # The provider is also the only authority on this plan's ceiling. Recording
+    # what it reports is what makes the limit observed data instead of a guess
+    # in a settings file.
+    reported_limit = None
+    for name in ("limit_today", "daily_limit", "request_limit", "limit"):
+        try:
+            reported_limit = int(account[name])
+            break
+        except (KeyError, TypeError, ValueError):
+            continue
+
     try:
         usage = int(account["usage_today"])
     except (KeyError, TypeError, ValueError):
+        usage = None
+
+    if usage is None and reported_limit is None:
         return block
 
     with transaction.atomic():
-        row, _ = ApiRequestQuota.objects.select_for_update().get_or_create(
-            day=quota_day(),
-            defaults={"limit": settings.MARKETDATA_DAILY_REQUEST_LIMIT},
-        )
+        row = _quota_row(plan, locked=True)
+        updates = []
         # Responses from concurrent requests can arrive out of order. Lowering
         # the local counter to an older response re-opens quota that was already
         # spent, while a larger counter is useful evidence of calls made outside
         # this process. Keep usage monotonic and account unexplained positive
         # drift in `other_used` so the bucket sum remains an exact ledger.
-        if usage > row.used:
+        if usage is not None and usage > row.used:
             drift = usage - row.used
             logger.info(
-                "quota reconciled day_usage %d->%d unattributed=%d",
-                row.used,
-                usage,
-                drift,
+                "quota reconciled plan=%s day_usage %d->%d unattributed=%d",
+                plan, row.used, usage, drift,
             )
             row.used = usage
             row.other_used += drift
-            row.save(update_fields=["used", "other_used", "updated_at"])
+            updates += ["used", "other_used"]
+        if reported_limit and reported_limit != row.limit:
+            logger.info(
+                "quota limit observed plan=%s %d->%d", plan, row.limit, reported_limit
+            )
+            row.limit = reported_limit
+            updates.append("limit")
+        if updates:
+            row.save(update_fields=[*updates, "updated_at"])
     return block
 
 
-def remaining_requests(bucket=None):
-    row = ApiRequestQuota.objects.filter(day=quota_day()).first()
+#: What `claim_archive_batch` may assume is available on a plan whose ceiling the
+#: provider has not disclosed yet. Only ever bounds ONE batch -- the breaker and
+#: the 5-minute window are the real stops -- so it needs to be big enough not to
+#: throttle a healthy day, not accurate.
+_UNKNOWN_LIMIT_BATCH_ALLOWANCE = 10_000
+
+
+def remaining_requests(bucket=None, plan=TSETMC):
+    """How many requests `bucket` may still spend on `plan` right now.
+
+    With no hardcoded daily limit this is an estimate, not a contract: it sizes
+    archive batches and feeds the Ops console. The authoritative "stop" is the
+    provider's own refusal, via `trip_plan_breaker`.
+    """
+    if is_plan_blocked(plan):
+        return 0
+    row = ApiRequestQuota.objects.filter(day=quota_day(), plan=plan).first()
     used = row.used if row else 0
-    day_left = settings.MARKETDATA_DAILY_REQUEST_LIMIT - used
+    limit = (row.limit if row and row.limit else 0) or _UNKNOWN_LIMIT_BATCH_ALLOWANCE
+    day_left = max(0, limit - used)
     if bucket is None:
         return day_left
-    bucket_left = bucket_budget(bucket) - (getattr(row, f"{bucket}_used") if row else 0)
-    if row is None:
-        row = ApiRequestQuota(
-            day=quota_day(), limit=settings.MARKETDATA_DAILY_REQUEST_LIMIT
-        )  # unsaved stand-in so the reserve arithmetic reads a zeroed day
-    if bucket == ARCHIVE:
-        # Mirror _may_borrow, or claim_archive_batch would size batches off the
-        # 8,800 cap and hand back an empty batch while the day still had room.
-        bucket_left = max(bucket_left, _headroom_for_borrowing(row))
+    budget = bucket_budget(bucket)
+    if budget is not None:
+        day_left = min(
+            day_left, max(0, budget - (getattr(row, f"{bucket}_used") if row else 0))
+        )
     if bucket != LIVE:
-        day_left -= live_reserve_remaining(row)
-    return max(0, min(bucket_left, day_left))
+        day_left -= live_reserve_remaining(plan, row)
+    return max(0, day_left)
+
+
+def archive_capacity():
+    """Archive room across every plan, as `{plan: remaining}`.
+
+    A single archive batch is a mixed bag -- `gold_daily` bills BRS while every
+    stock endpoint bills TSETMC -- so the scheduler asks about all wallets at
+    once and lets the per-request reserve refuse the individual calls. Summing
+    to one number here is what would reintroduce the original bug.
+    """
+    return {plan: remaining_requests(ARCHIVE, plan) for plan in PLANS}
 
 
 def get_quota_status():
-    """Detailed quota metrics: daily usage history, remaining quotas, and 5-min window status."""
+    """Detailed quota metrics: per-plan usage, remaining quotas, and window status."""
     day = quota_day()
-    limit = settings.MARKETDATA_DAILY_REQUEST_LIMIT
-    row = ApiRequestQuota.objects.filter(day=day).first()
-    used = row.used if row else 0
+    rows = {
+        row.plan: row
+        for row in ApiRequestQuota.objects.filter(day=day)
+    }
+    plans = {}
+    for plan in PLANS:
+        row = rows.get(plan)
+        plans[plan] = {
+            "plan": plan,
+            # 0 means "the provider has not told us yet"; the UI shows it as
+            # unknown rather than inventing a number.
+            "limit": row.limit if row else 0,
+            "used": row.used if row else 0,
+            "archive_used": row.archive_used if row else 0,
+            "live_used": row.live_used if row else 0,
+            "other_used": row.other_used if row else 0,
+            "blocked": is_plan_blocked(plan),
+            "remaining_archive": remaining_requests(ARCHIVE, plan),
+            "remaining_live": remaining_requests(LIVE, plan),
+            "live_reserve": live_reserve_remaining(plan, row),
+        }
+    used = sum(entry["used"] for entry in plans.values())
+    limit = sum(entry["limit"] for entry in plans.values())
 
     window_seconds = getattr(settings, "MARKETDATA_WINDOW_SECONDS", 300)
     window_limit = getattr(settings, "MARKETDATA_WINDOW_LIMIT", 1000)
@@ -378,30 +538,39 @@ def get_quota_status():
     window_used = sum(window_by_bucket.values())
 
     history = list(
-        ApiRequestQuota.objects.all().order_by("-day")[:30].values(
-            "day", "limit", "used", "archive_used", "live_used", "other_used", "updated_at"
+        ApiRequestQuota.objects.all().order_by("-day", "plan")[:60].values(
+            "day", "plan", "limit", "used", "archive_used", "live_used",
+            "other_used", "updated_at",
         )
     )
     for h in history:
         h["day"] = str(h["day"])
         h["updated_at"] = h["updated_at"].isoformat() if h["updated_at"] else ""
 
+    archive_used = sum(entry["archive_used"] for entry in plans.values())
+    historical_full = get_historical_full_used_today()
     return {
         "day": str(day),
+        "plans": plans,
+        # Cross-plan totals. Kept because the Ops header and the health check
+        # read them, but the per-plan block above is the one that means anything
+        # -- these two wallets are not fungible.
         "limit": limit,
         "used": used,
-        "remaining_daily": max(0, limit - used),
-        "archive_used": row.archive_used if row else 0,
-        "live_used": row.live_used if row else 0,
-        "other_used": row.other_used if row else 0,
-        "historical_full_used": get_historical_full_used_today(),
-        "dynamic_archive_used": max(0, (row.archive_used if row else 0) - get_historical_full_used_today()),
+        "remaining_daily": max(0, limit - used) if limit else None,
+        "archive_used": archive_used,
+        "live_used": sum(entry["live_used"] for entry in plans.values()),
+        "other_used": sum(entry["other_used"] for entry in plans.values()),
+        "historical_full_used": historical_full,
+        "dynamic_archive_used": max(0, archive_used - historical_full),
         "archive_budget": bucket_budget(ARCHIVE),
         "live_budget": bucket_budget(LIVE),
         "live_floor": settings.MARKETDATA_LIVE_REQUEST_FLOOR,
         "other_budget": bucket_budget(OTHER),
-        "remaining_archive": remaining_requests(ARCHIVE),
-        "remaining_live": remaining_requests(LIVE),
+        "remaining_archive": sum(
+            entry["remaining_archive"] for entry in plans.values()
+        ),
+        "remaining_live": sum(entry["remaining_live"] for entry in plans.values()),
         "window_limit": window_limit,
         "window_seconds": window_seconds,
         "window_used": window_used,

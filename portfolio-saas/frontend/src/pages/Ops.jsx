@@ -1011,6 +1011,20 @@ function JobsHealthPanel({
 
 function CodalPanel({ codal }) {
   if (!codal) return null;
+  if (!codal.enabled) {
+    return (
+      <div className="space-y-4" data-testid="ops-codal">
+        <Card title="Codal is dormant" subtitle="The subsystem is switched off; nothing is running.">
+          <p className="text-sm text-muted">
+            No worker, no schedule and no backfill states are active. Stored
+            announcements and {gb(codal.artifact_bytes)} of artifacts are kept
+            untouched. Re-enable with CODAL_ENABLED=1 once the origin is
+            reachable from the host.
+          </p>
+        </Card>
+      </div>
+    );
+  }
   const statusDonut = totalsToDonut(codal.status_counts, {});
   const blockedRate = codal.extract_runs_24h
     ? Math.round((codal.blocked_network_24h / codal.extract_runs_24h) * 100)
@@ -1053,9 +1067,6 @@ function CodalPanel({ codal }) {
               <dd>Codal worker · concurrency 1</dd>
             </div>
           </dl>
-          {!codal.enabled && (
-            <p className="mt-3 text-sm text-muted">Codal extraction is off in local Docker. Enable on VPS via CODAL_EXTRACTION_ENABLED.</p>
-          )}
         </Card>
       </div>
     </div>
@@ -1169,18 +1180,10 @@ function InfraPanel({ overview, depths, queueTotal, gb }) {
   const pricePct = priceAge != null ? pctOf(priceAge, priceThreshold) : 0;
   const priceTone = priceFeed.status === "fresh" ? "good" : priceFeed.status === "stale" ? "warn" : "critical";
 
-  const quotaUsed = quota.used || 0;
-  const quotaLimit = quota.limit || 0;
-  const quotaRemaining = quota.remaining_daily ?? Math.max(0, quotaLimit - quotaUsed);
-  const quotaPct = pctOf(quotaUsed, quotaLimit);
-  const archiveUsed = quota.archive_used || 0;
-  const liveUsed = quota.live_used || 0;
-  const otherUsed = quota.other_used || 0;
-  const quotaSegments = quotaLimit > 0 ? [
-    { key: "archive", pct: pctOf(archiveUsed, quotaLimit), color: "bg-[var(--c-s3)]", title: `Archive ${num(archiveUsed)}` },
-    { key: "live", pct: pctOf(liveUsed, quotaLimit), color: "bg-[var(--c-good)]", title: `Live ${num(liveUsed)}` },
-    { key: "other", pct: pctOf(otherUsed, quotaLimit), color: "bg-muted", title: `Other ${num(otherUsed)}` },
-  ] : [];
+  // One bar per provider plan. The two subscriptions are metered separately and
+  // are not fungible, so a single combined meter hid the failure it should have
+  // shown: a fully spent TSETMC wallet while the BRS one sat 79% unused.
+  const quotaPlans = Object.values(quota.plans || {});
 
   const liveQ = Number(depths?.live || 0);
   const archiveQ = Number(depths?.archive || 0);
@@ -1202,15 +1205,30 @@ function InfraPanel({ overview, depths, queueTotal, gb }) {
         <Badge variant={tone(overview.status)} testId="ops-infra-overall">{humanize(overview.status)}</Badge>
       </div>
 
-      <InfraMeter
-        label="API quota today"
-        valueLabel={`${num(quotaRemaining)} left`}
-        pct={quotaPct}
-        tone={infraMeterTone(quotaPct, { warn: 75, critical: 92 })}
-        segments={quotaSegments}
-        sub={`${num(quotaUsed)} used of ${num(quotaLimit)} · archive ${num(archiveUsed)} · live ${num(liveUsed)}`}
-        testId="ops-infra-quota"
-      />
+      {quotaPlans.map((plan) => {
+        const limit = plan.limit || 0;
+        const used = plan.used || 0;
+        const pct = pctOf(used, limit);
+        const segments = limit > 0 ? [
+          { key: "archive", pct: pctOf(plan.archive_used || 0, limit), color: "bg-[var(--c-s3)]", title: `Archive ${num(plan.archive_used || 0)}` },
+          { key: "live", pct: pctOf(plan.live_used || 0, limit), color: "bg-[var(--c-good)]", title: `Live ${num(plan.live_used || 0)}` },
+          { key: "other", pct: pctOf(plan.other_used || 0, limit), color: "bg-muted", title: `Other ${num(plan.other_used || 0)}` },
+        ] : [];
+        return (
+          <InfraMeter
+            key={plan.plan}
+            label={`API quota today · ${plan.plan}`}
+            // A limit of 0 means the provider has not disclosed one yet, not
+            // that we are out. Saying "0 left" would be a lie in both cases.
+            valueLabel={plan.blocked ? "Provider blocked" : limit ? `${num(Math.max(0, limit - used))} left` : `${num(used)} used`}
+            pct={pct}
+            tone={plan.blocked ? "critical" : infraMeterTone(pct, { warn: 75, critical: 92 })}
+            segments={segments}
+            sub={`${num(used)} used of ${limit ? num(limit) : "unknown"} · archive ${num(plan.archive_used || 0)} · live ${num(plan.live_used || 0)}`}
+            testId={`ops-infra-quota-${plan.plan}`}
+          />
+        );
+      })}
 
       <InfraWorkers workers={overview.workers} />
 

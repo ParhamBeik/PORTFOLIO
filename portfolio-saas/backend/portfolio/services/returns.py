@@ -523,11 +523,18 @@ def _load_price_panel(
         qs_tse = candle_close_qs(tse_symbols, as_of=as_of_jalali)
         # Raw Rial -> Toman: the panel mixes TSE and BRS columns and is later
         # multiplied by a Toman FX rate, so units must agree before that.
+        # `-id` is load-bearing, not cosmetic. Duplicate (symbol, date) candles
+        # are collapsed downstream by `groupby(...).last()`, so without a total
+        # ordering the surviving close is whatever Postgres returned first --
+        # production carried 380,330 duplicate pairs that disagreed on price,
+        # making every risk and return figure non-reproducible between runs.
+        # Migration 0005 removes those and the unique constraint now forbids
+        # them; this keeps the read deterministic regardless.
         tse_rows = [
             (sym, dt, tse_close_to_toman(close))
-            for sym, dt, close in qs_tse.order_by("symbol", "date_time").values_list(
-                "symbol", "date_time", "close_price"
-            )
+            for sym, dt, close in qs_tse.order_by(
+                "symbol", "date_time", "-id"
+            ).values_list("symbol", "date_time", "close_price")
         ]
 
         # ETF NAV has no MarketCandle rows -- Tsetmc/Nav.php is a live-only

@@ -216,25 +216,25 @@ TSETMC_SYMBOL_URL = os.getenv(
 
 # Seconds to sleep between BrsApi calls inside one sync task (paid API courtesy).
 MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "0.05"))
-MARKETDATA_DAILY_REQUEST_LIMIT = int(os.getenv("MARKETDATA_DAILY_REQUEST_LIMIT", "9800"))
+# NOTE: there is deliberately no MARKETDATA_DAILY_REQUEST_LIMIT any more. The
+# provider meters each API key separately (~10,000/day TSETMC, ~1,500/day BRS),
+# so one number could never describe the account -- and the one that was here
+# capped the pair at 9,800, which let a full TSETMC backfill refuse gold/currency
+# calls with 79% of that plan unspent. The limit is now learned from the
+# provider's own `account` block and enforced by its refusal; see marketdata/quota.py.
 MARKETDATA_WINDOW_LIMIT = int(os.getenv("MARKETDATA_WINDOW_LIMIT", "1000"))
 MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
 
-# Per-bucket daily budget. LIVE is reserved first and priced from the plan that
-# actually runs (marketdata/live_states.py + the price-loop simulation in
-# marketdata/quota.py); ARCHIVE is defined as whatever is left over. Hand-setting
-# both is what let them drift apart and sum to 10,000 against a 9,800 limit.
+# Per-bucket ceilings, applied WITHIN each provider plan. LIVE and OTHER have a
+# bounded, knowable daily cost so they keep a cap; ARCHIVE has an effectively
+# infinite backlog and deliberately has none (see marketdata/quota.bucket_budget).
 #
-# The floor is the reserve's lower bound, used when the plan cannot be read (cold
-# DB, mid-migration): over-reserving only slows the backfill, while under-reserving
-# gets customer-facing price fetches refused.
+# The floor is the live reserve's lower bound, used when the plan cannot be read
+# (cold DB, mid-migration): over-reserving only slows the backfill, while
+# under-reserving gets customer-facing price fetches refused.
 MARKETDATA_LIVE_REQUEST_FLOOR = int(os.getenv("MARKETDATA_LIVE_REQUEST_FLOOR", "1200"))
 MARKETDATA_LIVE_REQUEST_HEADROOM = int(os.getenv("MARKETDATA_LIVE_REQUEST_HEADROOM", "500"))
 MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET", "200"))
-# 0 (the default) means "derive from the limit minus the live reserve" -- the
-# dynamic behaviour above. Set a positive value only to pin the archive to a hard
-# ceiling regardless of what live costs.
-MARKETDATA_ARCHIVE_REQUEST_BUDGET = int(os.getenv("MARKETDATA_ARCHIVE_REQUEST_BUDGET", "0"))
 MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "120"))
 # Pending work, not active workers. Sized to keep archive workers busy between
 # scheduler ticks without exceeding the archive slice of the 5-minute window
@@ -261,6 +261,14 @@ MARKETDATA_TICK_VOLUME_TOLERANCE = float(
     os.getenv("MARKETDATA_TICK_VOLUME_TOLERANCE", "0.01")
 )
 
+# Master switch for the whole Codal subsystem. Off means: no `codal` queue route,
+# no beat entry, no archive states claimed for CODAL_ANNOUNCEMENTS, no extraction
+# enqueued at ingest, and no Ops panel -- the code and the stored rows survive,
+# nothing runs. codal.ir is unreachable from the production VPS (TCP 443 times
+# out) and CODAL_HTTP_PROXY is unset, so every attempt burned CPU retrying a
+# connect that cannot succeed: ~20,000 no-op workflow runs and 583 connect
+# timeouts in one day. Turn back on once the network path exists.
+CODAL_ENABLED = os.getenv("CODAL_ENABLED", "0") == "1"
 # Codal announcements are paged 20 per request and a mature symbol has ~50 pages,
 # so "all history for all symbols" is ~32,000 requests -- more than three days of
 # the whole archive budget. Only page 1 was ever fetched, which stored 2% and

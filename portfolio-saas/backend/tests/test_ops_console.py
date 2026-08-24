@@ -381,7 +381,7 @@ def test_pipelines_write_workflow_runs(settings, monkeypatch):
     capture_operational_metrics()
     assert WorkflowRun.objects.filter(workflow="capture_operational_metrics").exists()
 
-    monkeypatch.setattr("marketdata.quota.remaining_requests", lambda bucket: 0)
+    monkeypatch.setattr("marketdata.quota.remaining_requests", lambda bucket=None, plan=None: 0)
     archive_tick()
     assert WorkflowRun.objects.filter(workflow="archive_tick", outcome="skipped").exists()
 
@@ -665,9 +665,18 @@ def test_account_data_quality_is_windowed_and_account_scoped(
 
     assert response.status_code == 200, response.data
     assert response.data["account_id"] == account.id
-    assert response.data["assets"][0]["observed_sessions"] == 1
-    assert response.data["assets"][0]["expected_sessions"] == 5
-    assert response.data["assets"][0]["reason_codes"] == ["low_coverage"]
+    # The series starts today, so there are no earlier sessions it is *missing*
+    # -- it simply has no history yet. Scoring the four days before its first
+    # print as a coverage failure is what dropped 537 clean-but-newly-listed
+    # symbols out of the universe. The shortfall is reported as history_start /
+    # leading_gap_sessions, and "not enough observations to model" is the
+    # returns matrix's call (`insufficient_history`), not the integrity gate's.
+    asset_quality = response.data["assets"][0]
+    assert asset_quality["observed_sessions"] == 1
+    assert asset_quality["expected_sessions"] == 1
+    assert asset_quality["leading_gap_sessions"] == 4
+    assert asset_quality["history_start"] == today.isoformat()
+    assert asset_quality["reason_codes"] == []
     assert denied.status_code == 404
 
 

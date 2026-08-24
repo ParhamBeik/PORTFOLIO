@@ -17,7 +17,7 @@ sent", confirmed live 2026-08-19). It is one ETF's NAV per request, same as
 """
 from dataclasses import dataclass, field
 
-from .quota import ARCHIVE, LIVE, OTHER
+from .quota import ARCHIVE, BRS, LIVE, OTHER, TSETMC
 
 BASE_URL = "https://Api.BrsApi.ir"
 
@@ -46,6 +46,12 @@ class Endpoint:
     path: str
     nature: str
     bucket: str
+    # Which provider subscription bills this call. BrsApi issues one key per
+    # plan and meters each one separately -- `Tsetmc/*` and `Codal/*` against
+    # TSETMC_API_KEY (~10,000/day), `Market/*` against BRS_API_KEY (~1,500/day).
+    # Counting both against one pool is what let a full TSETMC backfill refuse
+    # gold/currency calls that still had 79% of their own allowance free.
+    plan: str = TSETMC
     # Params the provider rejects the request without (beyond `key`).
     required_params: tuple = ()
     # Params that must be Jalali YYYY-MM-DD; Gregorian returns HTTP 400.
@@ -66,6 +72,7 @@ REGISTRY = {
         # ------------------------------------------------------------------ LIVE
         Endpoint(
             key="gold_currency_free",
+            plan=BRS,
             path="Market/Gold_Currency.php",
             nature=Nature.LIVE,
             bucket=LIVE,
@@ -73,6 +80,7 @@ REGISTRY = {
         ),
         Endpoint(
             key="gold_currency_pro",
+            plan=BRS,
             path="Market/Gold_Currency_Pro.php",
             nature=Nature.LIVE,
             bucket=LIVE,
@@ -107,6 +115,7 @@ REGISTRY = {
         ),
         Endpoint(
             key="crypto",
+            plan=BRS,
             path="Market/Cryptocurrency.php",
             nature=Nature.LIVE,
             bucket=LIVE,
@@ -115,6 +124,7 @@ REGISTRY = {
         ),
         Endpoint(
             key="commodity",
+            plan=BRS,
             path="Market/Commodity.php",
             nature=Nature.LIVE,
             bucket=LIVE,
@@ -192,6 +202,7 @@ REGISTRY = {
         ),
         Endpoint(
             key="gold_currency_history",
+            plan=BRS,
             path="Market/Gold_Currency_Pro.php",
             nature=Nature.HISTORICAL_FULL,
             bucket=ARCHIVE,

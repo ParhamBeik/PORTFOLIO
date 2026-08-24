@@ -255,33 +255,40 @@ services:
   # to serve `-Q archive,codal`: document work is not quota-bound and should run
   # continuously, but sharing four slots with quota fetches meant it competed with
   # the backfill for exactly the resource it does not consume.
-  celery_worker_codal:
-    build: ./backend
-    restart: unless-stopped
-    logging: *logging
-    entrypoint: []
-    depends_on:
-      backend:
-        condition: service_healthy
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-    environment: *backend-env
-    command: celery -A config worker -l info --concurrency=4 -Q codal -n codal@%h --max-memory-per-child=600000
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A config inspect ping -d codal@$$HOSTNAME"]
-      interval: 60s
-      timeout: 15s
-      retries: 3
-      start_period: 40s
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
-          memory: 2g
+  #
+  # DISABLED 2026-08-25. codal.ir is unreachable from this VPS (TCP 443 times out)
+  # and CODAL_HTTP_PROXY is unset, so this worker spent every cycle retrying a
+  # connect that cannot succeed -- ~20,000 no-op runs and 583 timeouts in one day
+  # at ~10% of a core. Set CODAL_ENABLED=1 and uncomment this block together; the
+  # flag alone controls the queue route and the beat entry, but only this block
+  # creates the worker that would consume the queue.
+  # celery_worker_codal:
+  #   build: ./backend
+  #   restart: unless-stopped
+  #   logging: *logging
+  #   entrypoint: []
+  #   depends_on:
+  #     backend:
+  #       condition: service_healthy
+  #     db:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     minio:
+  #       condition: service_healthy
+  #   environment: *backend-env
+  #   command: celery -A config worker -l info --concurrency=4 -Q codal -n codal@%h --max-memory-per-child=600000
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "celery -A config inspect ping -d codal@$$HOSTNAME"]
+  #     interval: 60s
+  #     timeout: 15s
+  #     retries: 3
+  #     start_period: 40s
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: "1"
+  #         memory: 2g
 
   celery_beat:
     build: ./backend

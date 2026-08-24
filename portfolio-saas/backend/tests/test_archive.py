@@ -43,6 +43,7 @@ from marketdata.quota import (
     ARCHIVE,
     LIVE,
     QuotaExhausted,
+    quota_day,
     reconcile_account,
     remaining_requests,
     reserve_request,
@@ -624,7 +625,7 @@ def test_queue_slots_uses_broker_depth_and_fails_closed(monkeypatch):
 def test_archive_claim_includes_each_due_endpoint_before_filling_priority(monkeypatch):
     import marketdata.archive as archive
 
-    monkeypatch.setattr(archive, "remaining_requests", lambda bucket: 10)
+    monkeypatch.setattr(archive, "archive_capacity", lambda: {"tsetmc": 10, "brs": 10})
     monkeypatch.setattr(archive, "_archive_prereqs_ready", lambda state: True)
     ArchiveFetchState.objects.create(endpoint="stock_history_unadjusted", symbol="price")
     ArchiveFetchState.objects.create(endpoint="stock_transaction_ticks", symbol="ticks")
@@ -894,25 +895,30 @@ def mock_timezone_now(monkeypatch, settings):
 
 def test_live_floor_survives_an_archive_burst(settings):
     """Archive must never consume the requests reserved for customer-facing prices."""
-    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 10
+    from marketdata.quota import TSETMC
+
+    # The TSETMC reserve prices the jobs that key actually enables; with no key
+    # configured the simulated plan is empty and nothing gets reserved.
+    settings.TSETMC_API_KEY = "test-key"
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 4
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
-    settings.MARKETDATA_ARCHIVE_REQUEST_BUDGET = 10
     settings.MARKETDATA_OTHER_REQUEST_BUDGET = 10
+    # The reserve only binds once the provider has told us this plan's ceiling;
+    # there is no hardcoded daily limit any more.
+    ApiRequestQuota.objects.create(day=quota_day(), plan=TSETMC, limit=10)
     for _ in range(6):
         reserve_request(ARCHIVE)
     with pytest.raises(QuotaExhausted):
         reserve_request(ARCHIVE)
     for _ in range(4):
         reserve_request(LIVE)
-    row = ApiRequestQuota.objects.get()
+    row = ApiRequestQuota.objects.get(plan=TSETMC)
     assert row.used == 10
     assert row.archive_used == 6
     assert row.live_used == 4
 
 
 def test_bucket_budget_caps_a_single_bucket(settings):
-    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 100
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 0
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 2
     reserve_request(LIVE)
@@ -921,9 +927,22 @@ def test_bucket_budget_caps_a_single_bucket(settings):
         reserve_request(LIVE)
 
 
+def test_archive_bucket_has_no_hardcoded_ceiling(settings):
+    """The bug: a constant cap stopped the backfill while the account had room.
+
+    ARCHIVE is deliberately uncapped now -- what stops it is the live reserve,
+    the rolling window, and ultimately the provider's own refusal.
+    """
+    from marketdata.quota import bucket_budget
+
+    assert bucket_budget(ARCHIVE) is None
+    for _ in range(50):
+        reserve_request(ARCHIVE)
+    assert ApiRequestQuota.objects.get().archive_used == 50
+
+
 def test_provider_account_reconciles_local_counter(settings):
     """Provider drift is monotonic and remains represented in bucket totals."""
-    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 10000
     reserve_request(ARCHIVE)
     assert reconcile_account({"usage_today": 4021, "request_block": 120}) == 120
     row = ApiRequestQuota.objects.get()
@@ -937,8 +956,52 @@ def test_provider_account_reconciles_local_counter(settings):
     assert ApiRequestQuota.objects.get().used == 4021
 
 
+def test_reconcile_records_the_limit_the_provider_reports(settings):
+    """The daily ceiling is observed data now, not a constant in settings."""
+    from marketdata.quota import TSETMC
+
+    reconcile_account({"usage_today": 12, "limit_today": 10000}, TSETMC)
+    row = ApiRequestQuota.objects.get(plan=TSETMC)
+    assert (row.limit, row.used) == (10000, 12)
+
+
+def test_each_provider_plan_keeps_its_own_wallet(settings):
+    """The production failure: a spent TSETMC plan refused BRS calls.
+
+    BrsApi meters the two API keys separately (~10,000/day vs ~1,500/day), so
+    exhausting one must leave the other completely untouched. This is the single
+    most important behaviour in this module -- when it regressed, the USDT quote
+    failed 201 times in one day and dollar holdings went stale.
+    """
+    from marketdata.quota import BRS, TSETMC
+
+    settings.MARKETDATA_LIVE_REQUEST_FLOOR = 0
+    settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
+    ApiRequestQuota.objects.create(day=quota_day(), plan=TSETMC, limit=5)
+
+    for _ in range(5):
+        reserve_request(ARCHIVE, TSETMC)
+    with pytest.raises(QuotaExhausted):
+        reserve_request(ARCHIVE, TSETMC)
+
+    # The other wallet is untouched and still spends freely.
+    for _ in range(5):
+        reserve_request(ARCHIVE, BRS)
+    assert ApiRequestQuota.objects.get(plan=BRS).archive_used == 5
+    assert ApiRequestQuota.objects.get(plan=TSETMC).used == 5
+
+
+def test_reconcile_does_not_cross_plans(settings):
+    """A BRS `usage_today` must never be merged into the TSETMC counter."""
+    from marketdata.quota import BRS, TSETMC
+
+    reconcile_account({"usage_today": 9000}, TSETMC)
+    reconcile_account({"usage_today": 300}, BRS)
+    assert ApiRequestQuota.objects.get(plan=TSETMC).used == 9000
+    assert ApiRequestQuota.objects.get(plan=BRS).used == 300
+
+
 def test_permanent_http_error_uses_one_call_without_retry(settings):
-    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 10
     # Zero the whole live bucket: the reserve is bounded by floor + headroom, so
     # leaving the headroom set would hold back more than this 10-request day has.
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 0
@@ -953,7 +1016,6 @@ def test_permanent_http_error_uses_one_call_without_retry(settings):
 
 
 def test_transient_http_error_does_not_leak_api_key(settings, caplog):
-    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 10
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 0
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
     secret = "provider-secret"
@@ -969,7 +1031,6 @@ def test_transient_http_error_does_not_leak_api_key(settings, caplog):
 
 
 def test_every_transient_http_attempt_consumes_quota(settings):
-    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 10
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 0
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
     from requests.exceptions import RequestException
@@ -1184,10 +1245,8 @@ def test_5m_window_rate_limit(settings, monkeypatch):
     from marketdata import quota
     from marketdata.quota import get_quota_status
     monkeypatch.setattr(quota, "get_redis", lambda: None)
-    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 100
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 0
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
-    settings.MARKETDATA_ARCHIVE_REQUEST_BUDGET = 100
     settings.MARKETDATA_REQUIRE_SHARED_WINDOW = False
     # The window is per bucket, and with no Redis in the suite the degraded
     # per-process window applies, so back out both divisors to land on 3.
@@ -1222,9 +1281,10 @@ def test_window_quota_uses_one_atomic_redis_operation(settings, monkeypatch):
     client.eval.assert_called_once()
 
 
-def test_ensure_archive_states_covers_all_endpoints():
+def test_ensure_archive_states_covers_all_endpoints(settings):
     """We choose a unit test because verifying archive state generation across all provider endpoints tests pure data warehouse mapping logic at the base of the test pyramid."""
     from marketdata.archive import ensure_archive_states
+    settings.CODAL_ENABLED = True
     ensure_archive_states(stock_symbols=["KAMA"], gold_symbols=["USD"])
     states = ArchiveFetchState.objects.filter(symbol="KAMA")
     endpoints = set(states.values_list("endpoint", flat=True))
@@ -1237,6 +1297,25 @@ def test_ensure_archive_states_covers_all_endpoints():
     assert len(endpoints) == 7
     assert ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY not in endpoints
     assert ArchiveFetchState.Endpoint.ETF_NAV_DAILY not in endpoints
+
+
+def test_disabled_codal_is_neither_created_nor_claimed(settings):
+    """Dormant means dormant: no new states, and existing ones go unclaimed."""
+    from marketdata.archive import claim_archive_batch, ensure_archive_states
+
+    settings.CODAL_ENABLED = False
+    ensure_archive_states(stock_symbols=["KAMA"], gold_symbols=["USD"])
+    assert not ArchiveFetchState.objects.filter(
+        endpoint=ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS
+    ).exists()
+
+    # A state left over from before the flag flipped survives untouched, but is
+    # never leased -- it resumes exactly where it was if Codal is switched on.
+    stale = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS, symbol="KAMA"
+    )
+    assert stale.pk not in set(claim_archive_batch(limit=50))
+    assert ArchiveFetchState.objects.filter(pk=stale.pk).exists()
 
 
 def test_archive_state_for_codal_shareholder_and_ticks(settings):
@@ -1325,52 +1404,70 @@ def test_archive_state_transient_error_reschedules_quickly_then_escalates(settin
     assert diff.total_seconds() == 32 * 60  # 2 ** 5, capped at 60m
 
 
-def test_archive_borrows_quota_the_live_bucket_never_spent(settings):
-    """The fixed daily allowance should not go unused because a bucket capped out."""
-    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 20
+def test_archive_stops_only_where_the_live_reserve_begins(settings):
+    """With no fixed archive cap, the reserve is the only thing that holds it back."""
+    from marketdata.quota import TSETMC
+
+    settings.TSETMC_API_KEY = "test-key"
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 4
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 2
-    settings.MARKETDATA_ARCHIVE_REQUEST_BUDGET = 10
     settings.MARKETDATA_OTHER_REQUEST_BUDGET = 2
+    ApiRequestQuota.objects.create(day=quota_day(), plan=TSETMC, limit=20)
 
-    for _ in range(10):
-        reserve_request(ARCHIVE)
-    row = ApiRequestQuota.objects.get()
-    assert row.archive_used == 10  # own budget spent
-
-    # 20 total - 10 archive - 6 live still spendable - 2 unspent other = 2 to borrow.
-    # The live term is the reserve, not the bare floor: with a whole day left the
-    # 5-minute cadence needs far more cycles than this bucket holds, so the
-    # reserve saturates at everything live could still spend (4 floor + 2 headroom).
-    assert remaining_requests(ARCHIVE) == 2
-    for _ in range(2):
+    # 20 reported - 6 live still spendable = 14 for everything else. The live
+    # term is the reserve, not the bare floor: with a whole day left the cadence
+    # needs more cycles than the bucket holds, so it saturates at floor+headroom.
+    assert remaining_requests(ARCHIVE) == 14
+    for _ in range(14):
         reserve_request(ARCHIVE)
     with pytest.raises(QuotaExhausted):
         reserve_request(ARCHIVE)
 
-    row.refresh_from_db()
-    assert row.archive_used == 12
-    # The live bucket and the other allowance are still intact.
-    assert row.limit - row.used == 8
+    # The live bucket is still intact -- that is the whole point of the reserve.
     for _ in range(4):
         reserve_request(LIVE)
     assert ApiRequestQuota.objects.get().live_used == 4
 
 
-def test_borrowing_never_eats_the_live_floor(settings):
-    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 10
-    settings.MARKETDATA_LIVE_REQUEST_FLOOR = 6
-    settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
-    settings.MARKETDATA_ARCHIVE_REQUEST_BUDGET = 2
-    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 0
+def test_quota_error_response_trips_the_breaker_for_that_plan_only(settings):
+    """`Stop when the provider says stop` -- the replacement for the hard cap.
 
-    for _ in range(4):
-        reserve_request(ARCHIVE)  # 2 own + 2 borrowed
+    A 500 used to fall straight through to `response.json()` and be returned as
+    if it were data, so an exhausted subscription looked like an empty payload.
+    """
+    from marketdata import quota
+    from marketdata.quota import BRS, TSETMC, is_plan_blocked
+
+    with patch("marketdata.fetchers.requests.get") as get:
+        get.return_value.status_code = 500
+        get.return_value.text = '{"error":"daily request quota exceeded"}'
+        get.return_value.json.return_value = {}
+        with pytest.raises(QuotaExhausted):
+            fetch_json("https://example.test", retries=0, quota_plan=TSETMC)
+
+    assert is_plan_blocked(TSETMC)
+    assert not is_plan_blocked(BRS)
     with pytest.raises(QuotaExhausted):
-        reserve_request(ARCHIVE)
-    for _ in range(6):
-        reserve_request(LIVE)
-    assert ApiRequestQuota.objects.get().live_used == 6
+        reserve_request(ARCHIVE, TSETMC)
+    reserve_request(ARCHIVE, BRS)  # the other wallet is unaffected
+
+
+def test_ordinary_server_error_does_not_pause_the_day(settings):
+    """A 5xx without a quota message is a bad minute, not an exhausted plan."""
+    from marketdata.quota import TSETMC, is_plan_blocked
+
+    with (
+        patch("marketdata.fetchers.requests.get") as get,
+        patch("marketdata.fetchers.time.sleep"),
+    ):
+        get.return_value.status_code = 502
+        get.return_value.text = "upstream connect error"
+        get.return_value.json.return_value = {}
+        with pytest.raises(TransientMarketDataError):
+            fetch_json("https://example.test", retries=0, quota_plan=TSETMC)
+
+    assert not is_plan_blocked(TSETMC)
+    reserve_request(ARCHIVE, TSETMC)
 
 
 def test_archive_state_permanent_error_exponential_backoff(settings):

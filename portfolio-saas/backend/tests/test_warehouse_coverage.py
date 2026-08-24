@@ -986,18 +986,29 @@ class TestLiveReserve:
         settings.MARKETDATA_QUOTA_TIMEZONE = "Asia/Tehran"
         settings.MARKETDATA_IGNORE_MARKET_HOURS = False
 
+    def _both_plans(self, now):
+        """The reserve is per provider plan now; these cases span both.
+
+        Gold/currency bills the BRS wallet while the index probe and AllSymbols
+        bill TSETMC, so a scenario that enables the TSE has to add the two.
+        """
+        return sum(
+            quota.live_reserve_remaining(plan, self._row(), now=now)
+            for plan in quota.PLANS
+        )
+
     def test_a_full_day_ahead_reserves_every_cycle_it_will_need(self, settings):
         """Reserve the real BRS plan for a full quota day."""
         self._configure(settings)
         # 00:00 Tehran is 20:30 UTC the previous day: a whole quota day remains.
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(self._row(), now=midnight_tehran) == 192
+        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=midnight_tehran) == 192
 
     def test_the_reserve_shrinks_as_the_day_closes(self, settings):
         self._configure(settings)
         # Overnight gold only: one job every 5 minutes for the last two hours.
         two_hours_left = datetime(2026, 7, 27, 18, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(self._row(), now=two_hours_left) == 12
+        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=two_hours_left) == 12
 
     def test_the_reserve_never_exceeds_what_live_could_still_spend(self, settings):
         """Live cannot borrow, so holding more than its bucket protects nothing."""
@@ -1005,7 +1016,7 @@ class TestLiveReserve:
         settings.MARKETDATA_LIVE_REQUEST_FLOOR = 100
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
         row = self._row(live_used=70)
-        assert quota.live_reserve_remaining(row, now=midnight_tehran) == 30
+        assert quota.live_reserve_remaining(quota.BRS, row, now=midnight_tehran) == 30
 
     def test_a_faster_cadence_reserves_more(self, settings):
         """But only for the hours the fast cadence actually runs.
@@ -1020,9 +1031,9 @@ class TestLiveReserve:
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
 
         settings.MARKETDATA_LIVE_INTERVAL_OPEN = 300
-        baseline = quota.live_reserve_remaining(self._row(), now=midnight_tehran)
+        baseline = self._both_plans(midnight_tehran)
         settings.MARKETDATA_LIVE_INTERVAL_OPEN = 120  # the old 2-minute loop
-        faster = quota.live_reserve_remaining(self._row(), now=midnight_tehran)
+        faster = self._both_plans(midnight_tehran)
 
         assert faster > baseline
         # BRS gold is one job off-session; during the 135 open cycles gold plus
@@ -1036,13 +1047,13 @@ class TestLiveReserve:
         settings.MARKETDATA_LIVE_INTERVAL_OPEN = 120
         # 1405-05-09 is a Friday (jdatetime weekday 6).
         friday_midnight = datetime(2026, 7, 30, 20, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(self._row(), now=friday_midnight) == 192
+        assert self._both_plans(friday_midnight) == 192
 
     def test_no_credentials_means_no_phantom_reserve(self, settings):
         self._configure(settings)
         settings.BRS_API_KEY = ""
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(self._row(), now=midnight_tehran) == 0
+        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=midnight_tehran) == 0
 
 
 def test_live_job_plan_changes_with_market_state():
@@ -1829,12 +1840,15 @@ class TestLiveFetchPlan:
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
         # No API keys configured, so the price loop plans nothing at all: whatever
         # is reserved here can only have come from the LiveFetchState table.
-        assert quota.live_reserve_remaining(row, now=midnight_tehran) == 0
+        assert quota.live_reserve_remaining(quota.BRS, row, now=midnight_tehran) == 0
 
         LiveFetchState.objects.create(
             endpoint_key="crypto", cadence_seconds=3600, session_only=False
         )
-        assert quota.live_reserve_remaining(row, now=midnight_tehran) == 24
+        # `crypto` is a Market/* endpoint, so it bills the BRS wallet -- and must
+        # NOT show up in the TSETMC reserve.
+        assert quota.live_reserve_remaining(quota.BRS, row, now=midnight_tehran) == 24
+        assert quota.live_reserve_remaining(quota.TSETMC, row, now=midnight_tehran) == 0
 
     def test_seeding_never_overwrites_a_tuned_cadence(self):
         from marketdata import live_states

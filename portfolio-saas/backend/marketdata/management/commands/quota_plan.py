@@ -28,13 +28,14 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         day = quota.quota_day()
-        row = ApiRequestQuota.objects.filter(day=day).first() or ApiRequestQuota(
-            day=day, limit=settings.MARKETDATA_DAILY_REQUEST_LIMIT
-        )
+        rows = {
+            row.plan: row for row in ApiRequestQuota.objects.filter(day=day)
+        }
 
         self.stdout.write(self.style.MIGRATE_HEADING(f"Quota day {day}"))
         self._live_plan()
-        self._budgets(row)
+        for plan in quota.PLANS:
+            self._budgets(plan, rows.get(plan) or ApiRequestQuota(day=day, plan=plan))
         preview = options["preview"]
         if preview:
             self._preview(preview)
@@ -76,21 +77,27 @@ class Command(BaseCommand):
             ))
 
     @staticmethod
-    def _price_loop():
+    def _price_loop(plan=None):
         start = live_states.day_start()
-        return quota._simulate_price_loop(start, start + timedelta(days=1))
+        return quota._simulate_price_loop(start, start + timedelta(days=1), plan=plan)
 
-    def _budgets(self, row):
-        self.stdout.write(self.style.MIGRATE_HEADING("\nBudgets"))
+    def _budgets(self, plan, row):
+        blocked = quota.is_plan_blocked(plan)
+        ceiling = row.limit or "unknown (not yet reported by provider)"
+        self.stdout.write(self.style.MIGRATE_HEADING(
+            f"\nPlan {plan} -- used {row.used}/{ceiling}"
+            + (" [BLOCKED until reset]" if blocked else "")
+        ))
         for bucket in (quota.LIVE, quota.ARCHIVE, quota.OTHER):
             used = getattr(row, f"{bucket}_used", 0)
+            budget = quota.bucket_budget(bucket)
             self.stdout.write(
-                f"  {bucket:<10} budget={quota.bucket_budget(bucket):<7} "
-                f"used={used:<7} remaining={quota.remaining_requests(bucket)}"
+                f"  {bucket:<10} budget={str(budget if budget is not None else 'uncapped'):<9} "
+                f"used={used:<7} remaining={quota.remaining_requests(bucket, plan)}"
             )
         self.stdout.write(
             f"  reserved for live between now and rollover: "
-            f"{quota.live_reserve_remaining(row)}"
+            f"{quota.live_reserve_remaining(plan, row)}"
         )
 
     def _preview(self, limit):

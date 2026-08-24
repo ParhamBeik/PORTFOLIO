@@ -410,6 +410,148 @@ def test_integrity_uses_an_explicit_window_and_real_expected_sessions():
     assert "low_coverage" in result["reason_codes"]
 
 
+# ----------------------------------------------------------------------
+# The integrity gate excluded 79% of the tracked universe (1,119 of 1,410) on
+# 2026-08-24, stripping those assets from the returns matrix, risk metrics and
+# the optimizer. These four pin the causes, each measured against production.
+
+
+def _seed_market(symbol, days, *, timeframe="1d_adj", volume=1):
+    """Candles for `symbol` on `days`, plus the unadjusted market-wide calendar."""
+    for day in days:
+        jday = jdatetime.date.fromgregorian(date=day)
+        stamp = f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}"
+        MarketCandle.objects.create(
+            symbol=symbol, timeframe=timeframe, date_time=stamp,
+            open_price=100, high_price=100, low_price=100,
+            close_price=100, volume=volume,
+        )
+        MarketCandle.objects.get_or_create(
+            symbol="REFERENCE", timeframe="1d_unadj", date_time=stamp,
+            defaults={"close_price": 100, "volume": 1},
+        )
+
+
+def _instrument(symbol):
+    return MarketInstrument.objects.create(
+        symbol=symbol, name=symbol,
+        source=MarketInstrument.Source.TSETMC,
+        category=MarketInstrument.Category.STOCK,
+        eligible=True,
+    )
+
+
+@pytest.mark.django_db
+def test_a_symbol_listed_midway_is_not_accused_of_missing_history():
+    """The largest cause: 537 symbols failed purely for being newer than the window.
+
+    A leading run of absent days is the absence of history, not a hole in it --
+    the same rule `_build_returns_matrix._gap_profile` already applies. The two
+    layers must agree, or the gate silently overrules the matrix.
+    """
+    _instrument("NEWLY_LISTED")
+    start, end = dt.date(2026, 7, 20), dt.date(2026, 7, 29)
+    # The market traded every day; this symbol only exists for the last four.
+    _seed_market("OTHER", [start + dt.timedelta(days=n) for n in range(10)])
+    listed = [end - dt.timedelta(days=n) for n in range(4)]
+    _seed_market("NEWLY_LISTED", listed)
+
+    result = compute_symbol_integrity("NEWLY_LISTED", start=start, end=end)
+
+    assert result["passes_gate"] is True, result["reason_codes"]
+    assert result["coverage_ratio"] == pytest.approx(1.0)
+    assert result["history_start"] == min(listed).isoformat()
+    assert result["leading_gap_sessions"] == 6
+
+
+@pytest.mark.django_db
+def test_a_couple_of_rejected_days_does_not_disqualify_a_symbol():
+    """208 symbols were dropped over one or two bad rows in ~112 sessions.
+
+    `MAX_REJECTION_RATIO` is 1%, which over a window this size means "at most one
+    rejected day". Rejected rows are already excluded from the series, so a
+    handful is a quality note, not grounds to refuse the asset entirely.
+    """
+    _instrument("SLIGHTLY_DIRTY")
+    start, end = dt.date(2026, 7, 5), dt.date(2026, 7, 29)
+    days = [start + dt.timedelta(days=n) for n in range(25)]
+    _seed_market("SLIGHTLY_DIRTY", days)
+    for day in days[:2]:
+        jday = jdatetime.date.fromgregorian(date=day)
+        RejectedRecord.objects.create(
+            endpoint="stock_candle_adjusted", symbol="SLIGHTLY_DIRTY",
+            date=f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}",
+            reason="series_spike", payload={},
+        )
+
+    result = compute_symbol_integrity("SLIGHTLY_DIRTY", start=start, end=end)
+
+    assert result["rejected_count"] == 2
+    assert "excessive_rejections" not in result["reason_codes"]
+    assert result["passes_gate"] is True, result["reason_codes"]
+
+
+@pytest.mark.django_db
+def test_a_halted_symbol_is_not_scored_as_a_data_gap():
+    """A suspended stock has no candle to fetch, and never will.
+
+    The provider pads a halted symbol exactly as it pads a market-wide closure:
+    a DailyStockHistory row at the last price with zero volume and zero trades.
+    Counting those as missing sessions is a permanent, unfixable failure for an
+    asset whose data is fine.
+    """
+    _instrument("HALTED")
+    start, end = dt.date(2026, 7, 15), dt.date(2026, 7, 29)
+    days = [start + dt.timedelta(days=n) for n in range(15)]
+    _seed_market("OTHER", days)
+    traded = days[:4] + days[12:]
+    _seed_market("HALTED", traded)
+
+    for day in days:
+        jday = jdatetime.date.fromgregorian(date=day)
+        stamp = f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}"
+        halted = day not in traded
+        DailyStockHistory.objects.create(
+            symbol="HALTED", date=stamp, pc=100,
+            tvol=0 if halted else 500, tno=0 if halted else 5,
+        )
+        # The rest of the market kept trading, so this is a halt, not a closure.
+        DailyStockHistory.objects.create(
+            symbol="OTHER", date=stamp, pc=100, tvol=900, tno=9,
+        )
+
+    result = compute_symbol_integrity("HALTED", start=start, end=end)
+
+    assert result["halted_sessions"] == 8
+    assert "price_gap_exceeded" not in result["reason_codes"]
+    assert result["passes_gate"] is True, result["reason_codes"]
+
+
+@pytest.mark.django_db
+def test_a_genuine_interior_hole_still_fails_the_gate():
+    """The guard on all of the above: forgiveness must not become blindness."""
+    _instrument("BROKEN")
+    start, end = dt.date(2026, 7, 15), dt.date(2026, 7, 29)
+    days = [start + dt.timedelta(days=n) for n in range(15)]
+    _seed_market("OTHER", days)
+    _seed_market("BROKEN", days[:4] + days[12:])
+    # The market traded on the missing days AND so did this symbol -- the rows
+    # are simply not in the warehouse. Nothing forgives that.
+    for day in days:
+        jday = jdatetime.date.fromgregorian(date=day)
+        DailyStockHistory.objects.create(
+            symbol="BROKEN",
+            date=f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}",
+            pc=100, tvol=500, tno=5,
+        )
+
+    result = compute_symbol_integrity("BROKEN", start=start, end=end)
+
+    assert result["halted_sessions"] == 0
+    assert "price_gap_exceeded" in result["reason_codes"]
+    assert result["passes_gate"] is False
+
+
 @pytest.mark.django_db
 def test_index_ingest_uses_the_shared_validation_screen():
     created, rejected = ingest.ingest_market_index(

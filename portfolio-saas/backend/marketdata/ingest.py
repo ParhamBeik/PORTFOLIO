@@ -283,7 +283,7 @@ def ingest_daily_history(symbol: str, payload) -> tuple[int, int]:
             "buy_n_value", "sell_i_value", "sell_n_value",
             "ingested_at", "last_correlation_id",
         ),
-        unique_fields=("symbol", "date", "ts"),
+        unique_fields=("symbol", "date"),
         recent_field="date",
     )
     return created, conflicts + bad
@@ -389,7 +389,7 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
     created, conflicts = _bulk(
         MarketCandle, rows, scope={"symbol": symbol, "timeframe": timeframe},
         update_fields=("open_price", "high_price", "low_price", "close_price", "volume", "ingested_at", "last_correlation_id"),
-        unique_fields=("symbol", "timeframe", "date_time", "ts"),
+        unique_fields=("symbol", "timeframe", "date_time"),
         recent_field="date_time",
     )
     return created, conflicts + bad
@@ -572,12 +572,13 @@ def _enqueue_codal_extractions(rows):
     `report__isnull=True` is what makes this idempotent -- an announcement already
     extracted is simply not selected, so a repeated payload enqueues nothing.
     """
+    from django.conf import settings
     from django.db.models import Q
 
     from .codal_storage import origin_unreachable
     from .tasks import _dispatch_codal_ids
 
-    if origin_unreachable():
+    if not settings.CODAL_ENABLED or origin_unreachable():
         return 0
     pairs = sorted({(row.symbol, row.code) for row in rows if row.symbol and row.code})
     if not pairs:

@@ -520,8 +520,9 @@ def test_the_three_types_left_at_tier_3_stay_there():
 # connect. Work now starts at ingest time, and a dead origin parks itself.
 
 
-def test_ingesting_a_new_announcement_queues_its_extraction(monkeypatch):
+def test_ingesting_a_new_announcement_queues_its_extraction(monkeypatch, settings):
     """"As soon as a downloadable document appears" -- no waiting for a cron."""
+    settings.CODAL_ENABLED = True
     from marketdata import ingest
 
     queued = []
@@ -545,7 +546,8 @@ def test_ingesting_a_new_announcement_queues_its_extraction(monkeypatch):
     )
 
 
-def test_event_enqueue_matches_symbol_and_code_as_a_pair(monkeypatch):
+def test_event_enqueue_matches_symbol_and_code_as_a_pair(monkeypatch, settings):
+    settings.CODAL_ENABLED = True
     from marketdata import ingest
 
     exact = _announcement(symbol="A", code="1")
@@ -580,8 +582,9 @@ def test_reingesting_the_same_announcement_queues_nothing_new(monkeypatch):
     assert queued == []
 
 
-def test_an_unreachable_origin_stops_enqueueing_instead_of_retrying(monkeypatch):
+def test_an_unreachable_origin_stops_enqueueing_instead_of_retrying(monkeypatch, settings):
     """A network path that is down is not 74,000 individual document failures."""
+    settings.CODAL_ENABLED = True
     from marketdata import tasks
     from marketdata.models import WorkflowRun
 
@@ -644,3 +647,34 @@ def test_recovery_probe_is_single_flight(monkeypatch):
 
     assert codal_storage.origin_unreachable(probe=True) is False
     assert codal_storage.origin_unreachable(probe=True) is True
+
+
+def test_disabled_codal_enqueues_nothing_at_ingest(monkeypatch, settings):
+    """Dormant is enforced at the source, not just at the worker.
+
+    With no codal worker running, anything still enqueued would pile up in Redis
+    forever. Ingest is where announcements enter the system, so it is where the
+    flag has to bite.
+    """
+    from marketdata import ingest
+
+    settings.CODAL_ENABLED = False
+    monkeypatch.setattr(
+        "marketdata.tasks.extract_codal_report.delay",
+        lambda pk: pytest.fail("a disabled subsystem must not enqueue work"),
+    )
+    row = _announcement(symbol="A", code="1")
+    assert ingest._enqueue_codal_extractions([row]) == 0
+    # The announcement itself is untouched -- only the extraction is switched off.
+    assert CodalAnnouncement.objects.filter(pk=row.pk).exists()
+
+
+def test_disabled_codal_sweeper_reports_why_it_skipped(settings):
+    """The ledger should say `codal_disabled`, not look like a silent success."""
+    from marketdata import tasks
+    from marketdata.models import WorkflowRun
+
+    settings.CODAL_ENABLED = False
+    assert tasks.queue_codal_extractions() == 0
+    run = WorkflowRun.objects.filter(workflow="queue_codal_extractions").latest("id")
+    assert (run.outcome, run.error_code) == (WorkflowRun.Outcome.SKIPPED, "codal_disabled")

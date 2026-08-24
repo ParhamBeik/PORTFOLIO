@@ -225,13 +225,13 @@ def enqueue_archive_retries(ids, actor_email, *, require_failed=True):
     except (TypeError, ValueError) as exc:
         raise RetryBlocked(400, "ids must be integers.") from exc
 
-    quota = get_quota_status()
-    remaining = None
-    if isinstance(quota, dict):
-        remaining = quota.get("remaining_daily")
-        if remaining is None and "limit" in quota and "used" in quota:
-            remaining = int(quota["limit"]) - int(quota["used"])
-    if remaining is not None and remaining <= 0:
+    # "Exhausted" means the provider said so, not that our arithmetic hit zero.
+    # There is no hardcoded daily limit any more, so an undisclosed ceiling reads
+    # as 0 remaining -- treating that as exhausted would block every retry on a
+    # fresh quota day. The per-plan breaker is the authoritative signal.
+    from marketdata.quota import PLANS, is_plan_blocked
+
+    if all(is_plan_blocked(plan) for plan in PLANS):
         raise RetryBlocked(503, "Provider quota exhausted; retry blocked.")
 
     from django.conf import settings

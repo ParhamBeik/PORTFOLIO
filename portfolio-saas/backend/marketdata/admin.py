@@ -97,14 +97,17 @@ class ArchiveFetchStateAdmin(admin.ModelAdmin):
 
 @admin.register(ApiRequestQuota)
 class ApiRequestQuotaAdmin(admin.ModelAdmin):
-    list_display = ("day", "used", "limit", "remaining_display", "archive_used", "live_used", "other_used", "updated_at")
-    ordering = ("-day",)
-    readonly_fields = ("day", "used", "limit", "archive_used", "live_used", "other_used", "updated_at")
+    list_display = ("day", "plan", "used", "limit", "remaining_display", "archive_used", "live_used", "other_used", "updated_at")
+    ordering = ("-day", "plan")
+    list_filter = ("plan",)
+    readonly_fields = ("day", "plan", "used", "limit", "archive_used", "live_used", "other_used", "updated_at")
     list_per_page = 30
 
     @admin.display(description="Remaining")
     def remaining_display(self, obj):
-        return max(0, obj.limit - obj.used)
+        # limit=0 means the provider has not disclosed this plan's ceiling yet.
+        # Rendering that as "0 remaining" would read as exhausted.
+        return max(0, obj.limit - obj.used) if obj.limit else "—"
 
 
 # ---------------------------------------------------------------------------

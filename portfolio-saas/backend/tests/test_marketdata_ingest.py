@@ -280,16 +280,37 @@ class TestJalaliPartitionColumn:
         # 09:00 Tehran is 05:30 UTC; a naive read would store the wall clock.
         assert row.ts.isoformat() == "2026-08-15T05:30:00+00:00"
 
-    def test_an_explicit_value_is_never_overwritten(self):
+    def test_a_stale_explicit_value_is_always_recomputed(self):
+        """The Jalali key is the single source of truth for `ts`.
+
+        This used to be the opposite assertion -- an explicit value won. That is
+        how 3.7M duplicate candles were created: `ts` sat inside the unique key,
+        so a row carrying a value derived by an older, wrong formula never
+        matched on conflict and was inserted again on every backfill.
+        """
         import datetime
         from marketdata.models import MarketCandle
 
-        pinned = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+        stale = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
         MarketCandle.objects.bulk_create([
             MarketCandle(symbol="PIN", timeframe=MarketCandle.ADJUSTED,
-                         date_time="1405-05-24", close_price=1, volume=0, ts=pinned),
+                         date_time="1405-05-24", close_price=1, volume=0, ts=stale),
         ])
-        assert MarketCandle.objects.get(symbol="PIN").ts == pinned
+        row = MarketCandle.objects.get(symbol="PIN")
+        assert row.ts.isoformat() == "2026-08-14T20:30:00+00:00"
+
+    def test_re_ingesting_the_same_day_never_duplicates_it(self):
+        """The regression that would have caught half a table of duplicates."""
+        import datetime
+        from marketdata.models import MarketCandle
+
+        for ts in (None, datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)):
+            MarketCandle.objects.bulk_create(
+                [MarketCandle(symbol="DUP", timeframe=MarketCandle.ADJUSTED,
+                              date_time="1405-05-24", close_price=7, volume=1, ts=ts)],
+                ignore_conflicts=True,
+            )
+        assert MarketCandle.objects.filter(symbol="DUP").count() == 1
 
 
 # ----------------------------------------------------------------------
@@ -1259,7 +1280,6 @@ def test_never_attempted_states_get_a_reserved_slice(settings, db):
     from marketdata.models import ArchiveFetchState
 
     settings.MARKETDATA_ARCHIVE_BATCH_SIZE = 10
-    settings.MARKETDATA_DAILY_REQUEST_LIMIT = 10000
     # Saturate the queue with already-attempted states that all look urgent.
     for index in range(20):
         ArchiveFetchState.objects.create(

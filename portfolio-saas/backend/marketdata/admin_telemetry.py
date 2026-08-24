@@ -431,6 +431,10 @@ def _tick_coverage():
 
 
 def _codal_status():
+    if not settings.CODAL_ENABLED:
+        # Skip the queries too: with the subsystem off these counts only ever
+        # describe a frozen backlog, and the panel is hidden on `enabled`.
+        return {"enabled": False, "artifact_bytes": _codal_volume_bytes()}
     counts = {
         row["status"]: row["c"]
         for row in CodalReport.objects.values("status").annotate(c=Count("id"))

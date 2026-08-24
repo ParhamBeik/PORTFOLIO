@@ -30,7 +30,7 @@ from .models import (
     ShareholderRecord,
     StockTransactionTick,
 )
-from .quota import ARCHIVE, QuotaExhausted, remaining_requests, increment_historical_full_used
+from .quota import ARCHIVE, QuotaExhausted, archive_capacity, increment_historical_full_used
 
 
 STOCK_ENDPOINTS = (
@@ -166,6 +166,20 @@ _RETIRED_ARCHIVE_ENDPOINTS = frozenset({
 })
 
 
+def disabled_endpoints():
+    """Endpoints no state may be claimed or created for right now.
+
+    Distinct from `_RETIRED_ARCHIVE_ENDPOINTS`, which marks a state
+    `verified_complete` because another path genuinely covers it. A disabled
+    endpoint is not covered by anything -- it is switched off -- so its states
+    stay exactly as they are, claimed by nobody, and resume untouched when the
+    flag flips back.
+    """
+    if settings.CODAL_ENABLED:
+        return frozenset()
+    return frozenset({ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS})
+
+
 def ensure_archive_states(stock_symbols=None, gold_symbols=None):
     from .models import MarketInstrument
     from .catalog import sync_provider_catalog
@@ -185,9 +199,12 @@ def ensure_archive_states(stock_symbols=None, gold_symbols=None):
 
     import re
     rows = []
+    disabled = disabled_endpoints()
     for symbol in stock_symbols:
         is_derivative = bool(re.search(r"\d$", symbol))
         for endpoint in STOCK_ENDPOINTS:
+            if endpoint in disabled:
+                continue
             # Skip creating codal_announcements and shareholder_records for digit-suffixed symbols
             if is_derivative and endpoint in (
                 ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
@@ -974,9 +991,14 @@ def claim_archive_batch(limit=None):
     leaves quota unspent.
     """
     now = timezone.now()
+    # Sized against the roomiest wallet, not the sum: a batch is claimed before
+    # anyone knows which plan each state bills, and `reserve_request` refuses the
+    # individual calls anyway. Summing would over-claim; taking the minimum would
+    # let a spent TSETMC plan stop the handful of gold states, which is the whole
+    # cross-plan failure this work removed.
     batch_size = min(
         limit or settings.MARKETDATA_ARCHIVE_BATCH_SIZE,
-        max(remaining_requests(ARCHIVE), 0),
+        max([*archive_capacity().values(), 0]),
     )
     if not batch_size:
         return []
@@ -990,7 +1012,7 @@ def claim_archive_batch(limit=None):
         # the weekly probe (claim_probe_batch) or an operator force_retry.
         base = ArchiveFetchState.objects.select_for_update(skip_locked=True).filter(
             due, suspended_at__isnull=True
-        )
+        ).exclude(endpoint__in=disabled_endpoints())
         states = []
 
         def take(candidates, n):

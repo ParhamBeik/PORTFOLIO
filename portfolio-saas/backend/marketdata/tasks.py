@@ -256,6 +256,11 @@ def extract_codal_report(announcement_id):
         endpoint="codal_announcements",
         destination_table="s3:codal-artifacts",
     )
+    if not settings.CODAL_ENABLED:
+        # Belt and braces: nothing should be enqueueing these, but a message
+        # left in the broker from before the flag flipped must not run.
+        outcome.finish(WorkflowRun.Outcome.SKIPPED, error_code="codal_disabled")
+        return {}
     try:
         report, result = extract_report(announcement_id)
     except Exception as err:
@@ -296,6 +301,9 @@ def queue_codal_extractions():
     from .models import CodalAnnouncement, CodalReport, WorkflowRun
 
     outcome = _ledgered("queue_codal_extractions", endpoint="codal_artifacts")
+    if not settings.CODAL_ENABLED:
+        outcome.finish(WorkflowRun.Outcome.SKIPPED, error_code="codal_disabled")
+        return 0
     if origin_unreachable():
         # Every one of these would fail at connect. Enqueueing them anyway is how
         # the ledger filled with ~986 identical timeouts a day.
@@ -430,11 +438,17 @@ def operational_health_check():
     ):
         alerts.append(("stale-archive-progress", {"stale_seconds": settings.ARCHIVE_PROGRESS_STALE_SECONDS}))
 
-    quota = ApiRequestQuota.objects.order_by("-day").first()
-    if quota:
+    # Per plan: each subscription is its own ledger, and summing them would let
+    # an overcount on one wallet cancel an undercount on the other.
+    from .quota import quota_day as _quota_day
+
+    for quota in ApiRequestQuota.objects.filter(day=_quota_day()):
         bucket_total = quota.archive_used + quota.live_used + quota.other_used
         if bucket_total != quota.used:
-            alerts.append(("quota-ledger-drift", {"used": quota.used, "bucket_total": bucket_total}))
+            alerts.append((
+                "quota-ledger-drift",
+                {"plan": quota.plan, "used": quota.used, "bucket_total": bucket_total},
+            ))
 
     from marketdata.admin_telemetry import project_disk
 
@@ -688,12 +702,13 @@ def archive_tick():
         return
     try:
         from .models import ArchiveFetchState
-        from .quota import ARCHIVE, remaining_requests
-        if remaining_requests(ARCHIVE) <= 0:
+        from .quota import archive_capacity
+        capacity = archive_capacity()
+        if not any(value > 0 for value in capacity.values()):
             outcome.finish(
                 WorkflowRun.Outcome.SKIPPED,
                 error_code="quota_exhausted",
-                metadata={"reason": "archive_budget_empty"},
+                metadata={"reason": "archive_budget_empty", **capacity},
             )
             return
         slots, depth = _queue_slots(
@@ -832,11 +847,11 @@ def _quota_attribution_drift():
         day = quota_day()
         zone = ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE)
         start = datetime.combine(day, dtime.min, tzinfo=zone)
-        charged = (
-            ApiRequestQuota.objects.filter(day=day)
-            .values_list("used", flat=True)
-            .first()
-        ) or 0
+        # Summed across plans: `attributed` counts every workflow run regardless
+        # of which subscription it billed, so the charged side has to match.
+        charged = ApiRequestQuota.objects.filter(day=day).aggregate(
+            total=Sum("used")
+        )["total"] or 0
         attributed = WorkflowRun.objects.filter(created_at__gte=start).aggregate(
             total=Sum("quota_attempts")
         )["total"] or 0

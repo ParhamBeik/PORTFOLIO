@@ -139,12 +139,23 @@ def _session_bounds(day):
     return open_at, close_at
 
 
-def planned_requests(start, end):
-    """Total live-bucket requests these states will spend across [start, end)."""
-    return sum(
-        _firings_until(state, start, end)
-        for state in LiveFetchState.objects.filter(enabled=True)
-    )
+def planned_requests(start, end, plan=None):
+    """Live-bucket requests these states will spend across [start, end).
+
+    `plan` narrows the answer to one provider subscription, because the reserve
+    it feeds is now per-plan: gold/currency requests must not be held back on
+    behalf of TSETMC states that bill a different wallet entirely.
+    """
+    states = LiveFetchState.objects.filter(enabled=True)
+    if plan is not None:
+        from . import endpoints
+
+        keys = [
+            key for key, endpoint in endpoints.REGISTRY.items()
+            if endpoint.plan == plan
+        ]
+        states = states.filter(endpoint_key__in=keys)
+    return sum(_firings_until(state, start, end) for state in states)
 
 
 def day_start():

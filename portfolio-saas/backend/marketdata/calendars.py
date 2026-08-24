@@ -62,6 +62,38 @@ def market_closure_days(*, start=None, end=None) -> set[str]:
     return result
 
 
+def symbol_halt_days(symbol, *, start=None, end=None) -> set[str]:
+    """Jalali days this ONE symbol was halted while the exchange itself traded.
+
+    The market-wide twin of this check is `market_closure_days` above, and the
+    provider's behaviour is identical in both cases: a symbol that did not trade
+    still gets a `DailyStockHistory` row carrying its last known price with zero
+    volume and zero trades. Market-wide that means a closure; for a single symbol
+    on a day the rest of the market traded, it means a trading halt.
+
+    This matters because `MarketCandle` -- what the returns matrix and the
+    integrity gate actually read -- correctly has nothing for those days. Without
+    this the gate scores a suspended stock as having a data gap and drops it from
+    the universe, which is a corruption verdict on a symbol whose data is fine.
+    The exchange simply did not print a price, and no amount of backfill will
+    ever produce one.
+    """
+    queryset = DailyStockHistory.objects.filter(symbol=symbol)
+    if start is not None:
+        queryset = queryset.filter(date__gte=start)
+    if end is not None:
+        queryset = queryset.filter(date__lte=end)
+    quiet = {
+        row["date"]
+        for row in queryset.values("date").annotate(vol=Sum("tvol"), trades=Sum("tno"))
+        if not row["vol"] and not row["trades"]
+    }
+    # Subtract the days the whole exchange was shut: those are already excluded
+    # from the expected session set, and double-counting them here would let a
+    # genuinely missing day hide behind a closure it had nothing to do with.
+    return quiet - market_closure_days(start=start, end=end)
+
+
 def gold_currency_quoting_days(*, start=None, end=None) -> set[str]:
     """Jalali days the gold/FX feed broadly published, for integrity coverage.
 

@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from django.conf import settings
 
 from marketdata.fetchers import MarketDataFetchError, fetch_json
-from marketdata.quota import LIVE, QuotaExhausted
+from marketdata.quota import BRS, LIVE, TSETMC, QuotaExhausted
 from portfolio.live import find_symbol_record
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,11 @@ def _extract_price(record):
 
 
 def _find_symbol_record(tsetmc_payload, symbol):
+    if tsetmc_payload is None:
+        # See extractor._find_tsetmc_symbol: an absent payload is a closed
+        # market, not an unresolvable symbol.
+        logger.debug("No TSETMC payload this cycle (market closed); %s unchanged.", symbol)
+        return None
     record = find_symbol_record(tsetmc_payload, symbol)
     if record is None:
         logger.warning("No exact TSETMC match for %s; skipping.", symbol)
@@ -56,6 +61,7 @@ def fetch_brsapi(brs_url, brs_api_key):
             params={"key": brs_api_key},
             headers=HEADERS,
             quota_bucket=LIVE,
+            quota_plan=BRS,
         )
         logger.info("Successfully fetched gold/currency payload from %s", brs_url)
         return data
@@ -74,6 +80,7 @@ def fetch_tsetmc(tsetmc_url, tsetmc_api_key):
             params={"key": tsetmc_api_key, "type": "1"},
             headers=HEADERS,
             quota_bucket=LIVE,
+            quota_plan=TSETMC,
         )
         logger.info("Successfully fetched stock payload from %s", tsetmc_url)
         return data
@@ -92,6 +99,7 @@ def fetch_tsetmc_symbol(tsetmc_symbol_url, tsetmc_api_key, symbol):
             params={"key": tsetmc_api_key, "l18": symbol},
             headers=HEADERS,
             quota_bucket=LIVE,
+            quota_plan=TSETMC,
         )
         logger.info("Fetched symbol %s from %s", symbol, tsetmc_symbol_url)
         return data

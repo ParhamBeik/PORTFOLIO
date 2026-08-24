@@ -25,8 +25,17 @@ class JalaliDerivedDateTime(models.DateTimeField):
 
     `pre_save` is the single point Django routes ALL ORM writes through --
     `save()`, `bulk_create()`, `update_or_create()` alike -- so deriving the
-    value here means no caller ever has to know this column exists. An explicit
-    value is always respected; this only fills a blank.
+    value here means no caller ever has to know this column exists.
+
+    The derived value ALWAYS wins over whatever is on the instance. It used to
+    defer to a pre-set value, which meant a row read back and re-saved carried
+    its old `ts` forward. Combined with `ts` sitting inside the unique keys, a
+    later correction to this formula (a timezone sign error: Tehran midnight is
+    20:30 UTC the previous day, not 03:30 UTC the same day) turned every
+    re-ingest into an insert rather than a match -- 3.7M duplicate candles and
+    495k duplicate history rows, about half of each table. The keys no longer
+    contain `ts`, and this no longer trusts the caller, so neither half of that
+    failure can recur on its own.
     """
 
     def __init__(self, *args, date_field="date", time_field=None, **kwargs):
@@ -42,9 +51,6 @@ class JalaliDerivedDateTime(models.DateTimeField):
         return name, path, args, kwargs
 
     def pre_save(self, model_instance, add):
-        existing = getattr(model_instance, self.attname, None)
-        if existing is not None:
-            return existing
         from . import jalali
 
         raw_date = getattr(model_instance, self.date_field, "") or ""
@@ -57,14 +63,34 @@ class JalaliDerivedDateTime(models.DateTimeField):
             else ""
         )
         derived = jalali.to_datetime(date_value, time_value)
+        if derived is None:
+            # Unparseable domain key -- there is nothing to derive from, so fall
+            # back to whatever the caller supplied. The column is NOT NULL, and
+            # overwriting a usable value with None would fail the write outright.
+            return getattr(model_instance, self.attname, None)
         setattr(model_instance, self.attname, derived)
         return derived
 
-class ApiRequestQuota(models.Model):
-    """Persistent provider-call counter shared by every worker and endpoint."""
 
-    day = models.DateField(unique=True)
-    limit = models.PositiveIntegerField(default=9800)
+class ApiRequestQuota(models.Model):
+    """Per-day, per-plan provider-call counter shared by every worker.
+
+    One row per (day, provider subscription). BrsApi meters each API key
+    separately -- `Tsetmc/*` and `Market/*` are different wallets with different
+    ceilings -- so a single row per day could not represent the account, and in
+    production it hid the fact that one plan sat 79% unused while the other was
+    refusing requests. See `marketdata.quota`.
+    """
+
+    day = models.DateField()
+    # `marketdata.quota.TSETMC` / `.BRS`. Not a TextChoices enum: the plan set is
+    # owned by the quota module, and importing it here would invert the
+    # models -> quota dependency that every other module relies on.
+    plan = models.CharField(max_length=16, default="tsetmc")
+    # 0 means "not yet disclosed by the provider". There is no hardcoded ceiling
+    # any more; this is filled in from the `account` block when one arrives, and
+    # the circuit breaker is what actually stops spending.
+    limit = models.PositiveIntegerField(default=0)
     used = models.PositiveIntegerField(default=0)
     archive_used = models.PositiveIntegerField(default=0)
     live_used = models.PositiveIntegerField(default=0)
@@ -72,7 +98,12 @@ class ApiRequestQuota(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["-day"]
+        ordering = ["-day", "plan"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["day", "plan"], name="uniq_api_quota_day_plan"
+            )
+        ]
 
 
 class LiveFetchState(models.Model):
@@ -316,8 +347,11 @@ class DailyStockHistory(models.Model):
     class Meta:
         ordering = ["-date"]
         constraints = [
+            # `ts` deliberately excluded -- see MarketCandle.Meta for the full
+            # reasoning. The index comment below already assumed this constraint
+            # was (symbol, date); now it actually is.
             models.UniqueConstraint(
-                fields=["symbol", "date", "ts"],
+                fields=["symbol", "date"],
                 name="uniq_stock_history_symbol_date_adj",
             )
         ]
@@ -410,8 +444,15 @@ class MarketCandle(models.Model):
     class Meta:
         ordering = ["-date_time"]
         constraints = [
+            # `ts` is NOT part of the key. It is a derived Gregorian mirror of
+            # `date_time` kept only as a partition dimension, and this table is
+            # not actually a hypertable (only StockTransactionTick is), so
+            # nothing required it here. Including it meant a change to the
+            # derivation formula silently made every re-ingest an INSERT instead
+            # of a conflict -- half this table was duplicate rows, 380k of them
+            # disagreeing on close price. The Jalali string is the identity.
             models.UniqueConstraint(
-                fields=["symbol", "timeframe", "date_time", "ts"],
+                fields=["symbol", "timeframe", "date_time"],
                 name="uniq_market_candle_symbol_tf_dt",
             )
         ]

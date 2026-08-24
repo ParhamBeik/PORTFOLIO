@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from celery import Celery
 from celery.signals import before_task_publish, task_prerun
 from celery.schedules import crontab
+from django.conf import settings
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 
@@ -45,8 +46,17 @@ app.conf.update(
         "marketdata.tasks.capture_operational_metrics": {"queue": "live"},
         "marketdata.tasks.capture_derivative_snapshots": {"queue": "live"},
         "marketdata.tasks.capture_market_snapshots": {"queue": "live"},
-        "marketdata.tasks.extract_codal_report": {"queue": "codal"},
-        "marketdata.tasks.queue_codal_extractions": {"queue": "live"},
+        # Only routed while CODAL_ENABLED. With the flag off there is no codal
+        # worker to consume the queue, so a route here would pile messages up in
+        # Redis forever; falling through to `archive` would be worse still.
+        **(
+            {
+                "marketdata.tasks.extract_codal_report": {"queue": "codal"},
+                "marketdata.tasks.queue_codal_extractions": {"queue": "live"},
+            }
+            if settings.CODAL_ENABLED
+            else {}
+        ),
         "marketdata.tasks.*": {"queue": "archive"},
         "portfolio.tasks.*": {"queue": "live"},
     },
@@ -99,13 +109,6 @@ app.conf.beat_schedule = {
     "aggregate-market-daily-bars": {
         "task": "marketdata.tasks.aggregate_market_daily_bars_task",
         "schedule": crontab(hour=1, minute=40),
-    },
-    # Sweeper only -- new announcements are queued at ingest time. Frequent
-    # because document work costs no provider quota and the backlog is ~74,000;
-    # it is bounded by the codal queue depth, not by the clock.
-    "queue-codal-extractions": {
-        "task": "marketdata.tasks.queue_codal_extractions",
-        "schedule": 300.0,
     },
     # Roll the day's live Price ticks into one DailyPriceAverage row per asset.
     "aggregate-daily-price-averages": {
@@ -170,6 +173,15 @@ app.conf.beat_schedule = {
         "schedule": crontab(hour=2, minute=30),
     },
 }
+
+if settings.CODAL_ENABLED:
+    # Sweeper only -- new announcements are queued at ingest time. Frequent
+    # because document work costs no provider quota and the backlog is ~74,000;
+    # it is bounded by the codal queue depth, not by the clock.
+    app.conf.beat_schedule["queue-codal-extractions"] = {
+        "task": "marketdata.tasks.queue_codal_extractions",
+        "schedule": 300.0,
+    }
 
 
 @before_task_publish.connect

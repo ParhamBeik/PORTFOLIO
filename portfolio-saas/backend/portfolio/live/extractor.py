@@ -49,6 +49,13 @@ def _lookup_price(lookup, symbols):
 
 
 def _find_tsetmc_symbol(tsetmc_payload, name):
+    if tsetmc_payload is None:
+        # No payload at all means the price loop deliberately skipped the TSE
+        # fetch because the exchange is shut -- not a failure to resolve the
+        # symbol. Warning about it logged 210 alarms a day for a symbol that was
+        # priced correctly all session and simply had no new quote to report.
+        logger.debug("No TSETMC payload this cycle (market closed); %s unchanged.", name)
+        return None
     record = find_symbol_record(tsetmc_payload, name)
     if record is None:
         logger.warning("No exact TSETMC match for %s; skipping.", name)

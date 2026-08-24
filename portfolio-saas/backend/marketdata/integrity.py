@@ -10,6 +10,7 @@ from .calendars import (
     actual_trading_days,
     candle_close_qs,
     gold_currency_quoting_days,
+    symbol_halt_days,
 )
 from .models import (
     GoldCurrencyHistory,
@@ -22,6 +23,19 @@ from .models import (
 MAX_FORWARD_FILL_SESSIONS = 5
 MIN_COVERAGE = 0.90
 MAX_REJECTION_RATIO = 0.01
+# A ratio alone is not a usable bar over a ~112-session window: 1% means "at most
+# one bad day", so 208 symbols were dropped from the universe over one or two
+# rejected rows. Rejected rows are already excluded from the series, so a handful
+# is a data-quality note, not grounds to refuse an asset. Both the floor AND the
+# ratio must be exceeded.
+MIN_REJECTIONS_FOR_GATE = 5
+# Separating "we have not fetched this yet" from "this data is broken". Both
+# conditions are relative to the window: an absolute row count alone would label
+# a legitimately short window as un-backfilled. A symbol holding less than half
+# the sessions it should is a gap in OUR warehouse; one holding most of them with
+# holes is a gap in the DATA, and only the second deserves a corruption verdict.
+MIN_OBSERVATIONS_FOR_VERDICT = 20
+BACKFILL_COVERAGE_FLOOR = 0.5
 # A quiet stretch longer than this is investigated rather than assumed benign.
 # NOT a reliable closure test on its own: the exchange was shut for 83 days
 # across 1404-1405, and there are 74 market-wide closure days over 12 Jalali
@@ -137,6 +151,37 @@ def compute_symbol_integrity(
         day for value in raw_dates
         if (day := _stored_date(value)) is not None and day in expected
     }
+
+    # A symbol listed (or first backfilled) partway into the window has no
+    # history before its first print -- that is the absence of history, not a
+    # hole in it. Scoring from the window start instead accused 537 of the 1,410
+    # tracked symbols of low coverage over data that is completely clean, and
+    # dropped every one of them from the returns matrix. `_build_returns_matrix`
+    # already reasons this way via `_gap_profile`; the two layers must agree or
+    # the gate silently overrules the matrix.
+    first_observed = min(observed) if observed else None
+    leading_gap = (
+        len([day for day in sessions if day < first_observed])
+        if first_observed is not None else len(sessions)
+    )
+    if first_observed is not None:
+        sessions = [day for day in sessions if day >= first_observed]
+
+    # Days this symbol was halted while the exchange traded. The provider prints
+    # no candle for them and never will, so counting them as missing is a
+    # permanent, unfixable failure for an asset whose data is fine.
+    halted = set()
+    if tse_calendar and sessions:
+        halted = {
+            day for value in symbol_halt_days(
+                symbol, start=_jalali_text(sessions[0]), end=_jalali_text(end_date)
+            )
+            if (day := _stored_date(value)) is not None
+        }
+        sessions = [day for day in sessions if day not in halted]
+
+    expected = set(sessions)
+    observed &= expected
     observed_sessions = len(observed)
     expected_sessions = len(sessions)
     coverage = observed_sessions / expected_sessions if expected_sessions else 0.0
@@ -176,14 +221,29 @@ def compute_symbol_integrity(
         if observed_sessions + rejected_count else 0.0
     )
 
+    # Distinct from `low_coverage` on purpose. This says "the backfill has not
+    # reached this symbol", which is a statement about our warehouse; the other
+    # codes accuse the data of being broken. Conflating them is why the Ops
+    # console reported 79% of the universe as an integrity failure when most of
+    # it was simply un-fetched. Only asked of a window long enough to judge.
+    not_backfilled = expected_sessions >= MIN_OBSERVATIONS_FOR_VERDICT and (
+        observed_sessions < MIN_OBSERVATIONS_FOR_VERDICT
+        or coverage < BACKFILL_COVERAGE_FLOOR
+    )
+
     reason_codes = []
-    if coverage < MIN_COVERAGE:
+    if not_backfilled:
+        reason_codes.append("insufficient_backfill")
+    elif coverage < MIN_COVERAGE:
         reason_codes.append("low_coverage")
     if max_gap > MAX_FORWARD_FILL_SESSIONS:
         reason_codes.append("price_gap_exceeded")
     if freshness > MAX_FORWARD_FILL_SESSIONS:
         reason_codes.append("stale")
-    if rejection_ratio > MAX_REJECTION_RATIO:
+    if (
+        rejected_count >= MIN_REJECTIONS_FOR_GATE
+        and rejection_ratio > MAX_REJECTION_RATIO
+    ):
         reason_codes.append("excessive_rejections")
 
     missing_sessions = [day for day in sessions if day not in observed]
@@ -193,6 +253,11 @@ def compute_symbol_integrity(
         "timeframe": timeframe,
         "window_start": start_date.isoformat(),
         "window_end": end_date.isoformat(),
+        # Where scoring actually began, once the pre-listing run and any halts
+        # were removed. Differs from `window_start` for anything newly listed.
+        "history_start": first_observed.isoformat() if first_observed else None,
+        "leading_gap_sessions": leading_gap,
+        "halted_sessions": len(halted),
         "observed_sessions": observed_sessions,
         "expected_sessions": expected_sessions,
         "coverage_ratio": coverage,
@@ -204,6 +269,11 @@ def compute_symbol_integrity(
         "passes_gate": not reason_codes,
         "reason_codes": reason_codes,
         "reason": ",".join(reason_codes),
+        # Non-fatal: a short but clean series is usable, the consumer just needs
+        # to know it is short. Mirrors the matrix's `short_history` warning.
+        "notes": (
+            ["short_history"] if leading_gap > MAX_FORWARD_FILL_SESSIONS else []
+        ),
         "missing_count": len(missing_sessions),
         "missing_dates": [_jalali_text(day) for day in missing_sessions[:20]],
     }

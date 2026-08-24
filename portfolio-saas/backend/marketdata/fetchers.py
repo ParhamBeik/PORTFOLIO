@@ -15,7 +15,15 @@ import requests
 
 from . import endpoints, market_state
 from .jalali import assert_jalali
-from .quota import OTHER, reconcile_account, reserve_request
+from .quota import (
+    OTHER,
+    TSETMC,
+    QuotaExhausted,
+    looks_like_quota_error,
+    reconcile_account,
+    reserve_request,
+    trip_plan_breaker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +77,21 @@ def fetch_json(
     retries=None,
     backoff_factor=1.0,
     quota_bucket=OTHER,
+    quota_plan=TSETMC,
 ):
     """Execute an HTTP GET request to fetch JSON payload with backoff retries.
 
-    Quota is reserved immediately before every HTTP attempt. A timeout does not
-    prove that the provider failed to receive or bill the request, so counting
-    only the logical fetch can under-report usage by the full retry multiplier.
-    The provider's `account` block (when present on a response) is
-    reconciled to `ApiRequestQuota.used` so the local counter self-heals drift
-    from worker restarts, dropped responses, and manual probing; `request_block`
-    is honored as a real backoff signal on rate-limited responses.
+    Quota is reserved immediately before every HTTP attempt, against
+    `quota_plan`'s wallet. A timeout does not prove that the provider failed to
+    receive or bill the request, so counting only the logical fetch can
+    under-report usage by the full retry multiplier. The provider's `account`
+    block (when present on a response) is reconciled to that plan's
+    `ApiRequestQuota` row so the local counter self-heals drift from worker
+    restarts, dropped responses, and manual probing; `request_block` is honored
+    as a real backoff signal on rate-limited responses.
+
+    A quota-exhaustion response trips the plan's circuit breaker, which is what
+    stops the day now that no hardcoded daily ceiling exists.
     """
     # Archive failures are rescheduled by ArchiveFetchState. Retrying inline
     # only holds a worker and can spend the provider quota several times for
@@ -94,7 +107,7 @@ def fetch_json(
     req_headers = {**DEFAULT_HEADERS, **(headers or {})}
     attempt = 0
     while attempt <= retries:
-        reserve_request(quota_bucket)
+        reserve_request(quota_bucket, quota_plan)
         from .workflows import record_http_attempt
 
         record_http_attempt(quota=True)
@@ -117,13 +130,37 @@ def fetch_json(
 
         # The provider is the source of truth for quota: reconcile our counter to
         # its `usage_today` whenever it exposes one, before deciding to retry.
-        block = reconcile_account(_extract_account(response))
+        block = reconcile_account(_extract_account(response), quota_plan)
+
+        # The provider signals an exhausted subscription with a 5xx carrying a
+        # quota message. Checked before the status-class branches below, because
+        # that response used to fall straight through to `response.json()` and be
+        # returned as if it were data -- a 500 was never handled at all.
+        if looks_like_quota_error(response.status_code, response.text):
+            trip_plan_breaker(quota_plan, reason=f"http_{response.status_code}")
+            raise QuotaExhausted(
+                f"Provider reports the {quota_plan} plan exhausted "
+                f"(HTTP {response.status_code}); paused until reset."
+            )
 
         if 400 <= response.status_code < 500 and response.status_code != 429:
             raise PermanentMarketDataError(
                 f"Provider rejected request with HTTP {response.status_code}.",
                 status_code=response.status_code,
             )
+
+        if response.status_code >= 500:
+            # Not quota (that returned above) -- an ordinary origin failure. It
+            # must still raise: returning the error body as a payload marked
+            # backfills converged on zero rows.
+            attempt += 1
+            if attempt > retries:
+                raise TransientMarketDataError(
+                    f"Provider returned HTTP {response.status_code}.",
+                    status_code=response.status_code,
+                )
+            time.sleep(backoff_factor * (2 ** (attempt - 1)))
+            continue
 
         if response.status_code == 429:
             # `request_block` (seconds) is the provider's own backoff ask; fall back
@@ -178,6 +215,7 @@ def _call(endpoint_key, api_key, **params):
         endpoint.url,
         params={"key": api_key, **{k: str(v) for k, v in query.items()}},
         quota_bucket=endpoint.bucket,
+        quota_plan=endpoint.plan,
     )
 
 
