@@ -456,6 +456,60 @@ def test_quality_status_not_stale_when_tse_closed(asset_catalog, write_prices, m
     assert item["quality_status"] == "live"
 
 
+def test_quality_status_follows_each_market_not_one_symbol(
+    asset_catalog, write_prices, make_user, monkeypatch
+):
+    """Last print stays live after THAT asset's market closes. Crypto never
+    closes, so an old quote is stale overnight. Unit test: this is a pure
+    per-asset decision over a fixed clock, which is where the pyramid puts it.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from portfolio.models import Asset, Price
+
+    stock = Asset.objects.create(
+        key="khodro_stock", name="Khodro", asset_class=Asset.AssetClass.STOCK,
+        tse_symbol="خودرو", is_active=True,
+    )
+    gold = asset_catalog["emami_coin"]
+    gold.brs_symbol = "EMAMI"
+    gold.save(update_fields=["brs_symbol"])
+    crypto = asset_catalog["bitcoin_usd"]
+    # Production crypto carries a BRS join key; without it the old helper
+    # already returned stale overnight, so the assert would not pin the fix.
+    crypto.brs_symbol = "BTC"
+    crypto.save(update_fields=["brs_symbol"])
+
+    write_prices({
+        "khodro_stock": Decimal("2800"),
+        "emami_coin": Decimal("480000000"),
+        "bitcoin_usd": Decimal("900"),
+    })
+    Price.objects.filter(asset__key="khodro_stock").update(
+        fetched_at=timezone.now() - timedelta(hours=8),
+    )
+    Price.objects.filter(asset__key="emami_coin").update(
+        fetched_at=timezone.now() - timedelta(hours=8),
+    )
+    Price.objects.filter(asset__key="bitcoin_usd").update(
+        fetched_at=timezone.now() - timedelta(minutes=20),
+    )
+
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "overnight")
+    user = make_user(email="any-market@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    Holding.objects.create(account=account, asset=stock, quantity=Decimal("1"))
+    Holding.objects.create(account=account, asset=gold, quantity=Decimal("1"))
+    Holding.objects.create(account=account, asset=crypto, quantity=Decimal("1"))
+
+    by_key = {item["key"]: item["quality_status"] for item in value_account(account)["items"]}
+    assert by_key["khodro_stock"] == "live"
+    assert by_key["emami_coin"] == "live"
+    assert by_key["bitcoin_usd"] == "stale"
+
+
 def test_quality_status_stale_when_tse_open_and_price_did_not_refresh(
     asset_catalog, write_prices, make_user, monkeypatch
 ):

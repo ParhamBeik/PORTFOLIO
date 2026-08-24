@@ -63,9 +63,12 @@ def _asset_market_is_open(asset, state: str) -> bool:
 
     if asset.asset_class == Asset.AssetClass.CRYPTO:
         return True
-    if asset.tse_symbol:
+    if asset.asset_class == Asset.AssetClass.STOCK or asset.tse_symbol:
         return state == OPEN
-    if asset.brs_symbol:
+    if (
+        asset.asset_class in (Asset.AssetClass.GOLD, Asset.AssetClass.CASH)
+        or asset.brs_symbol
+    ):
         return state in (OPEN, CLOSED_DAYTIME)
     return False
 
@@ -476,21 +479,21 @@ def _live_quality_status(asset, age_seconds: int, state: str) -> str:
     """"live" vs "stale" for a fresh Price row, aware of whether the asset's
     market/desk is even open right now.
 
-    A price older than `_FRESH_SECONDS` is only "stale" if a fresher one
-    should have arrived by now — i.e. the relevant market is open. If it's
-    closed, the last price is still the correct current price; only flag it
-    once it's older than the grace window (missed a whole session, a real
-    problem) rather than every evening/weekend by design.
+    Applies to every asset class, not one symbol: a price older than
+    `_FRESH_SECONDS` is only "stale" if a fresher one should have arrived —
+    i.e. that asset's market is open. Crypto never closes, so it always uses
+    the freshness window. Closed TSE / gold-FX desks keep the last print as
+    the current price until it ages past the grace window (a missed session,
+    a real problem) rather than every evening/weekend by design.
     """
-    from marketdata.market_state import OPEN, OVERNIGHT
-
     if age_seconds <= _FRESH_SECONDS:
         return "live"
-    if asset.tse_symbol and state != OPEN:
-        return "live" if age_seconds <= _CLOSED_TSE_GRACE_SECONDS else "stale"
-    if asset.brs_symbol and state == OVERNIGHT:
-        return "live" if age_seconds <= _CLOSED_BRS_GRACE_SECONDS else "stale"
-    return "stale"
+    if _asset_market_is_open(asset, state):
+        return "stale"
+    grace = (
+        _CLOSED_TSE_GRACE_SECONDS if asset.tse_symbol else _CLOSED_BRS_GRACE_SECONDS
+    )
+    return "live" if age_seconds <= grace else "stale"
 
 
 def invalidate_prices_cache() -> None:
