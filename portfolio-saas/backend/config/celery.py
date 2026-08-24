@@ -46,17 +46,15 @@ app.conf.update(
         "marketdata.tasks.capture_operational_metrics": {"queue": "live"},
         "marketdata.tasks.capture_derivative_snapshots": {"queue": "live"},
         "marketdata.tasks.capture_market_snapshots": {"queue": "live"},
-        # Only routed while CODAL_ENABLED. With the flag off there is no codal
-        # worker to consume the queue, so a route here would pile messages up in
-        # Redis forever; falling through to `archive` would be worse still.
-        **(
-            {
-                "marketdata.tasks.extract_codal_report": {"queue": "codal"},
-                "marketdata.tasks.queue_codal_extractions": {"queue": "live"},
-            }
-            if settings.CODAL_ENABLED
-            else {}
-        ),
+        # Routed unconditionally, and that is deliberate: dropping these entries
+        # while Codal is off does NOT stop them, it hands them to the
+        # `marketdata.tasks.*` glob below and runs document work on the archive
+        # worker. Parking a straggler on a queue nobody consumes is the harmless
+        # outcome; executing it on the wrong worker is not. Nothing enqueues
+        # these while disabled anyway -- both dispatch paths and the task bodies
+        # check the flag.
+        "marketdata.tasks.extract_codal_report": {"queue": "codal"},
+        "marketdata.tasks.queue_codal_extractions": {"queue": "live"},
         "marketdata.tasks.*": {"queue": "archive"},
         "portfolio.tasks.*": {"queue": "live"},
     },

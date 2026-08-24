@@ -432,8 +432,10 @@ def _tick_coverage():
 
 def _codal_status():
     if not settings.CODAL_ENABLED:
-        # Skip the queries too: with the subsystem off these counts only ever
-        # describe a frozen backlog, and the panel is hidden on `enabled`.
+        # Skip the status/run aggregates: with the subsystem off they only ever
+        # describe a frozen backlog. Artifact bytes stay -- the panel reports
+        # how much disk the dormant data still occupies, which is the one
+        # number an operator wants while it is switched off.
         return {"enabled": False, "artifact_bytes": _codal_volume_bytes()}
     counts = {
         row["status"]: row["c"]

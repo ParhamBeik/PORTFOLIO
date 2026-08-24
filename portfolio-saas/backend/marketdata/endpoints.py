@@ -139,6 +139,10 @@ REGISTRY = {
         ),
         Endpoint(
             key="ime_futures",
+            # IME/* is served on the TSETMC subscription, not the Market/* one:
+            # every caller passes TSETMC_API_KEY (marketdata/tasks.py). Stated
+            # explicitly so the plan is a decision, not an inherited default.
+            plan=TSETMC,
             # Capital IME, not Ime -- BrsApi's routing is case-sensitive and the
             # lowercase path 404s (confirmed live 2026-08-19). Docs:
             # https://brsapi.ir/ime-api-futures-webservice/
@@ -149,6 +153,10 @@ REGISTRY = {
         ),
         Endpoint(
             key="ime_options",
+            # IME/* is served on the TSETMC subscription, not the Market/* one:
+            # every caller passes TSETMC_API_KEY (marketdata/tasks.py). Stated
+            # explicitly so the plan is a decision, not an inherited default.
+            plan=TSETMC,
             # Capital IME, not Ime -- same case-sensitive routing 404 (confirmed
             # live 2026-08-19). Docs: https://brsapi.ir/ime-api-option-webservice/
             path="IME/Option.php",

@@ -38,7 +38,12 @@ from django.db import migrations, models
 # present in either table, so the hour alone separates the two populations.
 def _is_correct_ts(alias=""):
     prefix = f"{alias}." if alias else ""
-    return f"EXTRACT(HOUR FROM {prefix}ts) >= 19"
+    # `AT TIME ZONE 'UTC'` is explicit on purpose. Bare EXTRACT on a timestamptz
+    # reads it in the SESSION timezone, so this predicate -- which decides which
+    # of 4.2M rows gets DELETED -- would silently invert under a connection that
+    # is not UTC. Django sets UTC today; a destructive migration should not
+    # depend on that staying true.
+    return f"EXTRACT(HOUR FROM {prefix}ts AT TIME ZONE 'UTC') >= 19"
 
 
 _BATCH = 200_000

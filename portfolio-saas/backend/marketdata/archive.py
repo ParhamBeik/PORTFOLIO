@@ -725,6 +725,12 @@ def next_quota_day_start(now=None):
 def run_archive_state(state_id):
     state = ArchiveFetchState.objects.get(pk=state_id)
     now = timezone.now()
+    if state.endpoint in disabled_endpoints():
+        # Last line of defence, and the only one that covers a task already
+        # sitting in the broker when the flag flipped. Deliberately touches
+        # nothing on the row: a disabled endpoint resumes exactly where it was.
+        logger.info("Skipping %s (%s): endpoint disabled.", state.symbol, state.endpoint)
+        return
     logger.info("Processing archive state %s (%s).", state.symbol, state.endpoint)
     try:
         (created, _), expected, stored = _fetch_and_ingest(state)
@@ -1127,7 +1133,15 @@ def grow_tick_windows(step_days=90):
 
 
 def claim_archive_maintenance(limit=2):
-    """Low-rate leases for completed disclosure/shareholder reverification."""
+    """Low-rate leases for completed disclosure/shareholder reverification.
+
+    Honours `disabled_endpoints()` for the same reason `claim_archive_batch`
+    does, and it is the easier one to forget: this sweep is the ONLY other place
+    that leases a state, it runs unconditionally from its own beat entry, and it
+    selects `verified_complete=True` rows -- which is exactly what the 758
+    finished Codal states in production are. Without the filter, switching Codal
+    off still fetched two of them a day against an unreachable origin.
+    """
     now = timezone.now()
     due = Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now)
     with transaction.atomic():
@@ -1141,6 +1155,7 @@ def claim_archive_maintenance(limit=2):
                     ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS,
                 ),
             )
+            .exclude(endpoint__in=disabled_endpoints())
             .order_by(_LAST_ATTEMPT_FIRST)[:limit]
         )
         ArchiveFetchState.objects.filter(pk__in=[state.pk for state in states]).update(

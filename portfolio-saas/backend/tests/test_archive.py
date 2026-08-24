@@ -293,7 +293,8 @@ def test_real_progress_keeps_the_fast_retry_path():
     assert state.next_attempt_at - timezone.now() < timedelta(minutes=2)
 
 
-def test_codal_reverifies_weekly_not_daily():
+def test_codal_reverifies_weekly_not_daily(settings):
+    settings.CODAL_ENABLED = True
     codal = _state("شیراز", endpoint=Endpoint.CODAL_ANNOUNCEMENTS)
     prices = _state("شیراز", endpoint=Endpoint.STOCK_HISTORY_UNADJUSTED)
     complete = ((1, 0), {"a"}, {"a"})
@@ -1318,8 +1319,53 @@ def test_disabled_codal_is_neither_created_nor_claimed(settings):
     assert ArchiveFetchState.objects.filter(pk=stale.pk).exists()
 
 
+def test_disabled_codal_is_not_leased_by_the_maintenance_sweep(settings):
+    """The second, easier-to-miss lease path.
+
+    `claim_archive_maintenance` runs from its own unconditional beat entry and
+    selects `verified_complete=True` rows -- which is exactly what the 758
+    finished Codal states in production are. It bypassed `disabled_endpoints()`
+    entirely, so switching Codal off still fetched two of them a day against an
+    origin that cannot be reached.
+    """
+    from marketdata.archive import claim_archive_maintenance
+
+    settings.CODAL_ENABLED = False
+    codal = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
+        symbol="KAMA", verified_complete=True,
+    )
+    shareholders = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS,
+        symbol="KAMA", verified_complete=True,
+    )
+    claimed = set(claim_archive_maintenance(limit=10))
+    assert codal.pk not in claimed
+    # The other endpoint this sweep exists for is unaffected.
+    assert shareholders.pk in claimed
+
+
+def test_a_disabled_state_already_in_the_broker_is_not_fetched(settings, monkeypatch):
+    """Covers the task enqueued before the flag flipped."""
+    from marketdata import archive
+
+    settings.CODAL_ENABLED = False
+    state = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS, symbol="KAMA",
+    )
+    monkeypatch.setattr(
+        archive, "_fetch_and_ingest",
+        lambda *a, **k: pytest.fail("a disabled endpoint must not be fetched"),
+    )
+    archive.run_archive_state(state.pk)
+    # Nothing on the row moved: it resumes exactly where it was.
+    state.refresh_from_db()
+    assert state.last_attempt_at is None
+
+
 def test_archive_state_for_codal_shareholder_and_ticks(settings):
     """We choose an integration test because testing run_archive_state for Codal, Shareholder, and Ticks verifies fetcher response handling and database ingestion boundary logic."""
+    settings.CODAL_ENABLED = True
     from marketdata.archive import run_archive_state
     from marketdata.models import CodalAnnouncement, ShareholderRecord, StockTransactionTick
 
