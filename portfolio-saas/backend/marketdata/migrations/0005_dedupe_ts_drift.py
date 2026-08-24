@@ -118,6 +118,58 @@ def purge_ts_drift(apps, schema_editor):
         )
 
 
+def drop_ts_identity_uniques(apps, schema_editor):
+    """Drop whichever unique still contains `ts`, whatever it is named.
+
+    Production never had the squashed name `uniq_market_candle_symbol_tf_dt`
+    (the live unique was created under a different name before the squash),
+    so a hardcoded RemoveConstraint aborts after the data purge. Look the
+    constraint up from the catalog and drop it; unique indexes that are not
+    constraints get the same treatment.
+    """
+    with schema_editor.connection.cursor() as cursor:
+        for table, _keys, _date in _TABLES:
+            cursor.execute(
+                """
+                SELECT c.conname
+                FROM pg_constraint c
+                JOIN pg_class t ON t.oid = c.conrelid
+                WHERE t.relname = %s AND c.contype = 'u'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM unnest(c.conkey) AS ck(attnum)
+                    JOIN pg_attribute a
+                      ON a.attrelid = t.oid AND a.attnum = ck.attnum
+                    WHERE a.attname = 'ts'
+                  )
+                """,
+                [table],
+            )
+            for (name,) in cursor.fetchall():
+                cursor.execute(
+                    f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS "{name}"'
+                )
+            cursor.execute(
+                """
+                SELECT i.relname
+                FROM pg_index x
+                JOIN pg_class t ON t.oid = x.indrelid
+                JOIN pg_class i ON i.oid = x.indexrelid
+                JOIN pg_attribute a
+                  ON a.attrelid = t.oid AND a.attnum = ANY (x.indkey)
+                WHERE t.relname = %s
+                  AND x.indisunique AND NOT x.indisprimary
+                  AND a.attname = 'ts'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM pg_constraint c WHERE c.conindid = x.indexrelid
+                  )
+                """,
+                [table],
+            )
+            for (idx,) in cursor.fetchall():
+                cursor.execute(f'DROP INDEX IF EXISTS "{idx}"')
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -128,9 +180,20 @@ class Migration(migrations.Migration):
         # Data first: AddConstraint below would fail outright while duplicates
         # are still present.
         migrations.RunPython(purge_ts_drift, migrations.RunPython.noop),
-        migrations.RemoveConstraint(
-            model_name='marketcandle',
-            name='uniq_market_candle_symbol_tf_dt',
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunPython(drop_ts_identity_uniques, migrations.RunPython.noop),
+            ],
+            state_operations=[
+                migrations.RemoveConstraint(
+                    model_name='marketcandle',
+                    name='uniq_market_candle_symbol_tf_dt',
+                ),
+                migrations.RemoveConstraint(
+                    model_name='dailystockhistory',
+                    name='uniq_stock_history_symbol_date_adj',
+                ),
+            ],
         ),
         migrations.AddConstraint(
             model_name='marketcandle',
@@ -138,10 +201,6 @@ class Migration(migrations.Migration):
                 fields=('symbol', 'timeframe', 'date_time'),
                 name='uniq_market_candle_symbol_tf_dt',
             ),
-        ),
-        migrations.RemoveConstraint(
-            model_name='dailystockhistory',
-            name='uniq_stock_history_symbol_date_adj',
         ),
         migrations.AddConstraint(
             model_name='dailystockhistory',
