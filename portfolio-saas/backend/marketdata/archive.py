@@ -729,8 +729,13 @@ def run_archive_state(state_id):
         # Last line of defence, and the only one that covers a task already
         # sitting in the broker when the flag flipped. Deliberately touches
         # nothing on the row: a disabled endpoint resumes exactly where it was.
+        #
+        # Returns `state`, like every other exit from this function. Returning
+        # None instead crashes the Celery wrapper, which reads state.last_error
+        # OUTSIDE its try/except (tasks.py) -- so the guard meant to protect the
+        # task would have killed it and dropped the ledger row with it.
         logger.info("Skipping %s (%s): endpoint disabled.", state.symbol, state.endpoint)
-        return
+        return state
     logger.info("Processing archive state %s (%s).", state.symbol, state.endpoint)
     try:
         (created, _), expected, stored = _fetch_and_ingest(state)
@@ -1136,11 +1141,13 @@ def claim_archive_maintenance(limit=2):
     """Low-rate leases for completed disclosure/shareholder reverification.
 
     Honours `disabled_endpoints()` for the same reason `claim_archive_batch`
-    does, and it is the easier one to forget: this sweep is the ONLY other place
-    that leases a state, it runs unconditionally from its own beat entry, and it
-    selects `verified_complete=True` rows -- which is exactly what the 758
-    finished Codal states in production are. Without the filter, switching Codal
-    off still fetched two of them a day against an unreachable origin.
+    does, and it is easier to forget: it runs unconditionally from its own beat
+    entry and selects `verified_complete=True` rows -- which is exactly what the
+    758 finished Codal states in production are. Without the filter, switching
+    Codal off still fetched two of them a day against an unreachable origin.
+
+    There are THREE lease paths, not two: this one, `claim_archive_batch`, and
+    `suspension.claim_probe_batch`. All three must filter.
     """
     now = timezone.now()
     due = Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now)

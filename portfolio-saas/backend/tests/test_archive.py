@@ -1357,10 +1357,61 @@ def test_a_disabled_state_already_in_the_broker_is_not_fetched(settings, monkeyp
         archive, "_fetch_and_ingest",
         lambda *a, **k: pytest.fail("a disabled endpoint must not be fetched"),
     )
-    archive.run_archive_state(state.pk)
+    returned = archive.run_archive_state(state.pk)
     # Nothing on the row moved: it resumes exactly where it was.
     state.refresh_from_db()
     assert state.last_attempt_at is None
+    # Must return the state like every other exit -- see the next test for why.
+    assert returned is not None and returned.pk == state.pk
+
+
+def test_a_disabled_state_does_not_crash_the_celery_wrapper(settings):
+    """The guard must not kill the task it exists to protect.
+
+    `marketdata.tasks.run_archive_state` reads `state.last_error` OUTSIDE its
+    try/except, so an early `return` (None) from the archive function raises an
+    uncaught AttributeError: the task dies and its WorkflowRun ledger row is
+    lost entirely -- not even recorded as failed. Exercising the archive
+    function directly cannot catch this, which is how it shipped.
+
+    Not hypothetical: production has 10 suspended Codal states that
+    `suspension.claim_probe_batch` re-probes weekly through this exact wrapper.
+    """
+    from marketdata.models import WorkflowRun
+    from marketdata.tasks import run_archive_state as task
+
+    settings.CODAL_ENABLED = False
+    state = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
+        symbol="KAMA", verified_complete=True,
+    )
+    task(state.pk)
+    assert WorkflowRun.objects.filter(
+        workflow="archive_state", symbol="KAMA"
+    ).exists(), "the ledger row for this attempt was dropped"
+
+
+def test_a_suspended_disabled_state_is_not_probed(settings):
+    """The third lease path: the weekly recovery probe.
+
+    A subsystem is usually switched off *because* it kept failing, and repeated
+    failure is exactly what suspends a state -- so this path is the one most
+    likely to be holding a disabled endpoint's rows.
+    """
+    from marketdata.suspension import claim_probe_batch
+
+    settings.CODAL_ENABLED = False
+    codal = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
+        symbol="KAMA", suspended_at=timezone.now(), suspension_reason="peer_outlier",
+    )
+    other = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+        symbol="KAMA", suspended_at=timezone.now(), suspension_reason="peer_outlier",
+    )
+    claimed = set(claim_probe_batch(limit=10))
+    assert codal.pk not in claimed
+    assert other.pk in claimed
 
 
 def test_archive_state_for_codal_shareholder_and_ticks(settings):

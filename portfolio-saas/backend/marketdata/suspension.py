@@ -62,6 +62,14 @@ REASON_PEER_OUTLIER = "peer_outlier"
 REASON_OPERATOR_BLACKLIST = "operator_blacklist"
 
 
+def _disabled_endpoints():
+    # Imported lazily: archive.py imports nothing from here, and a module-level
+    # import would close that loop.
+    from .archive import disabled_endpoints
+
+    return disabled_endpoints()
+
+
 @dataclass
 class SuspensionCandidate:
     state_id: int
@@ -168,6 +176,12 @@ def claim_probe_batch(limit=5, *, now=None):
         states = list(
             ArchiveFetchState.objects.select_for_update(skip_locked=True)
             .filter(due, suspended_at__isnull=False, blacklisted=False)
+            # The third lease path, and the one most likely to hold a disabled
+            # endpoint's rows: a subsystem is usually switched off *because* it
+            # kept failing, and repeated failure is what suspends a state in the
+            # first place. Production carries 10 suspended Codal states, which
+            # this would otherwise re-probe every week.
+            .exclude(endpoint__in=_disabled_endpoints())
             .order_by("last_probe_at")[:limit]
         )
         ArchiveFetchState.objects.filter(pk__in=[s.pk for s in states]).update(
