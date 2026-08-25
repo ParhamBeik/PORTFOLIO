@@ -220,7 +220,8 @@ def reverse_ledger_entry(*, user, account_id: int, entry_id: int) -> LedgerEntry
 @transaction.atomic
 def update_ledger_entry(
     *, user, account_id: int, entry_id: int, quantity=None,
-    unit_price_tomans=None, amount_tomans=None, occurred_at=None, note=None,
+    unit_price_tomans=None, amount_tomans=None, area_sqm=None, occurred_at=None,
+    note=None,
 ) -> LedgerEntry:
     """Mutate a ledger row in place, then rebuild holdings/cash from the timeline."""
     entry = (
@@ -243,6 +244,14 @@ def update_ledger_entry(
         entry.price_tomans = _decimal(unit_price_tomans, "unit_price_tomans", required=True)
     if amount_tomans is not None:
         entry.amount_tomans = _decimal(amount_tomans, "amount_tomans", required=True)
+    if area_sqm is not None:
+        # Same rule create_ledger_entry applies: only a house mark carries a size.
+        if not (entry.asset and entry.asset.is_house) or entry.kind not in {
+            LedgerEntry.Kind.OPENING_POSITION,
+            LedgerEntry.Kind.VALUATION_MARK,
+        }:
+            raise LedgerError("Only a property entry has a size in square meters.")
+        entry.area_sqm = _decimal(area_sqm, "area_sqm", required=True)
     if entry.kind in {LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL}:
         qty = entry.quantity
         price = entry.price_tomans
@@ -690,6 +699,17 @@ def record_house_mark(
 
     The first mark for an account is still the OPENING_POSITION, so the opening
     baseline keeps its existing meaning.
+
+    Which kind to write is an ACCOUNT-level question, not an asset-level one.
+    Every opening entry defines the account's baseline and they must all carry
+    `tracking_started_at` (create_ledger_entry enforces that, and TWR depends on
+    it). Deciding purely on "does this asset have an opening yet" therefore blew
+    up the moment a portfolio held more than one property, or gained its first
+    property after tracking had already begun: the new opening was stamped
+    `now`, the guard rejected it, and the resulting LedgerError surfaced as a
+    500 on the holdings screen. A property entered after the baseline is set is
+    a dated mark instead -- which `_projection_state` already treats identically
+    to an opening for a house, so the holding and its terms come out the same.
     """
     account = Account.objects.select_for_update().get(pk=account_id, user=user)
     has_opening = LedgerEntry.objects.filter(
@@ -699,12 +719,14 @@ def record_house_mark(
         reversal_of__isnull=True,
         reversed_by__isnull=True,
     ).exists()
-    kind = (
-        LedgerEntry.Kind.VALUATION_MARK
-        if has_opening
-        else LedgerEntry.Kind.OPENING_POSITION
-    )
     when = occurred_at or timezone.now()
+    baseline = account.tracking_started_at
+    can_open = not has_opening and (baseline is None or baseline == when)
+    kind = (
+        LedgerEntry.Kind.OPENING_POSITION
+        if can_open
+        else LedgerEntry.Kind.VALUATION_MARK
+    )
     if when > timezone.now():
         raise LedgerError("A valuation mark cannot be dated in the future.")
     return create_ledger_entry(

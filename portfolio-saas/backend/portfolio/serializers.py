@@ -64,6 +64,11 @@ class HoldingSerializer(serializers.ModelSerializer):
     new_property_name = serializers.CharField(
         max_length=120, required=False, write_only=True
     )
+    # Lets a client date a revaluation it is entering after the fact. Declared
+    # here so DRF parses it: the view used to read it straight off request.data
+    # and hand the raw STRING to a datetime comparison, so dating a property
+    # mark crashed with a TypeError instead of being accepted or refused.
+    occurred_at = serializers.DateTimeField(required=False, write_only=True)
 
     class Meta:
         model = Holding
@@ -71,7 +76,7 @@ class HoldingSerializer(serializers.ModelSerializer):
                   "quantity", "unit_price_tomans", "area_sqm", "mortgage_deduction_tomans",
                   "display_name", "label", "is_hidden",
                   "price_per_sqm_million", "price_per_sqm_tomans", "gross_value_tomans",
-                  "new_property_name",
+                  "new_property_name", "occurred_at",
                   "created_at", "updated_at")
         read_only_fields = ("id", "created_at", "updated_at")
 
@@ -236,6 +241,12 @@ class LedgerEntryPatchSerializer(serializers.Serializer):
     )
     amount_tomans = serializers.DecimalField(
         max_digits=24, decimal_places=4, min_value=Decimal("0.0001"), required=False
+    )
+    # A property's size is part of the row the ledger shows, so it has to be part
+    # of the row the ledger can correct. Without it the endpoint accepted the
+    # field, dropped it, and answered 200 -- a resize that looked saved and was not.
+    area_sqm = serializers.DecimalField(
+        max_digits=10, decimal_places=2, min_value=Decimal("0.01"), required=False
     )
     occurred_at = serializers.DateTimeField(required=False)
     note = serializers.CharField(max_length=200, required=False, allow_blank=True)

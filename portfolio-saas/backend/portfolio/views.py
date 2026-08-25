@@ -265,18 +265,24 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
         # house's history shows what it was worth at the time instead of being
         # retro-priced at today's figure. `occurred_at` lets the client date a
         # revaluation it is entering after the fact.
-        record_house_mark(
-            user=self.request.user,
-            account_id=serializer.instance.account_id,
-            asset=serializer.instance.asset,
-            quantity=data.get("quantity", serializer.instance.quantity),
-            area_sqm=data.get("area_sqm", serializer.instance.area_sqm),
-            mortgage_deduction_tomans=data.get(
-                "mortgage_deduction_tomans",
-                serializer.instance.mortgage_deduction_tomans,
-            ),
-            occurred_at=self.request.data.get("occurred_at") or None,
-        )
+        # Every other branch here translates a LedgerError into a 400 that names
+        # the rule; this one did not, so a rejected mark reached the client as an
+        # unexplained 500 ("Something went wrong").
+        try:
+            record_house_mark(
+                user=self.request.user,
+                account_id=serializer.instance.account_id,
+                asset=serializer.instance.asset,
+                quantity=data.get("quantity", serializer.instance.quantity),
+                area_sqm=data.get("area_sqm", serializer.instance.area_sqm),
+                mortgage_deduction_tomans=data.get(
+                    "mortgage_deduction_tomans",
+                    serializer.instance.mortgage_deduction_tomans,
+                ),
+                occurred_at=data.get("occurred_at"),
+            )
+        except LedgerError as exc:
+            raise ValidationError(str(exc)) from exc
         serializer.instance = Holding.objects.get(
             account_id=self.kwargs["account_id"],
             asset_id=serializer.instance.asset_id,

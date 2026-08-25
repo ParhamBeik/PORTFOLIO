@@ -265,6 +265,22 @@ function chrome(t) {
 }
 
 /** Tooltip rows: a colored dot carries identity, the text stays in ink tokens. */
+const HTML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
+/**
+ * Escape text bound for a tooltip.
+ *
+ * ECharts renders a formatter's returned string as HTML, and the labels these
+ * tooltips print are user-typed: a holding nickname is free text. Unescaped, a
+ * nickname containing `<` is swallowed by the parser (the row renders blank),
+ * and one shaped like a tag executes in the owner's own session. Every name
+ * reaching a tooltip goes through the two helpers below, so escaping here
+ * covers all of them.
+ */
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);
+}
+
 function tipRows(params, t, fmt) {
   const list = Array.isArray(params) ? params : [params];
   return list
@@ -278,14 +294,14 @@ function tipRows(params, t, fmt) {
       const genericSeries = /^series\s*\d+$/i.test(p.seriesName || "");
       const label = p.name || (!genericSeries ? p.seriesName : "") || "—";
       return `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between">` +
-        `<span style="color:${t.text}">${dot}${label}</span>` +
+        `<span style="color:${t.text}">${dot}${esc(label)}</span>` +
         `<span style="color:${t.text};font-variant-numeric:tabular-nums">${value}</span></div>`;
     })
     .join("");
 }
 
 function header(label, t) {
-  return `<div style="color:${t.muted};margin-bottom:4px">${label}</div>`;
+  return `<div style="color:${t.muted};margin-bottom:4px">${esc(label)}</div>`;
 }
 
 /**

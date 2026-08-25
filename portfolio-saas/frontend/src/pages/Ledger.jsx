@@ -97,6 +97,11 @@ function quantityCell(row) {
  */
 function EditEntryDialog({ row, onClose, onSaved }) {
   const [quantity, setQuantity] = useState(String(Number(row.quantity ?? 0)));
+  // A property is described by two numbers and this dialog only ever offered
+  // one, so its size was the one thing about it nobody could correct.
+  const [areaSqm, setAreaSqm] = useState(
+    row.area_sqm != null ? String(row.area_sqm) : ""
+  );
   const [note, setNote] = useState(row.note || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -108,7 +113,11 @@ function EditEntryDialog({ row, onClose, onSaved }) {
       if (row.is_synthetic) {
         await updateLedgerHolding(row.account_id, row.holding_id, quantity);
       } else {
-        await updateLedgerEntry(row.account_id, row.id, { quantity, note });
+        await updateLedgerEntry(row.account_id, row.id, {
+          quantity,
+          note,
+          ...(row.is_house && areaSqm.trim() ? { area_sqm: areaSqm } : {}),
+        });
       }
       await onSaved();
       onClose();
@@ -155,6 +164,23 @@ function EditEntryDialog({ row, onClose, onSaved }) {
             data-testid="ledger-edit-qty"
           />
         </div>
+        {row.is_house && !row.is_synthetic && (
+          <div>
+            <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">
+              Size (square meters)
+            </div>
+            <Input
+              label="Size in square meters"
+              type="number"
+              step="any"
+              min="0"
+              className="w-full"
+              value={areaSqm}
+              onChange={(e) => setAreaSqm(e.target.value)}
+              data-testid="ledger-edit-area"
+            />
+          </div>
+        )}
         {!row.is_synthetic && (
           <div>
             <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">Note</div>

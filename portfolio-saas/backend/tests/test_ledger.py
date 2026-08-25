@@ -1469,3 +1469,128 @@ def test_daily_bar_fallback_skips_a_row_the_warehouse_rejected():
     )
 
     assert resolve_historical_price(asset, timezone.now()) == Decimal("24500")
+
+
+# --- Real estate: entering and correcting a property ------------------------
+#
+# Both bugs below reached the user. Adding or revaluing a property on an account
+# whose baseline was already set raised a LedgerError that escaped as a 500 (the
+# holdings screen showed a bare "Something went wrong"), and the ledger's edit
+# endpoint accepted a new size, dropped it, and answered 200 -- a resize that
+# looked saved and was not.
+
+
+def _add_property(account, name="Apartment", area="91", price="100"):
+    return _client(account.user).post(
+        f"/api/accounts/{account.id}/holdings/",
+        {"new_property_name": name, "area_sqm": area, "price_per_sqm_million": price},
+        format="json",
+    )
+
+
+@pytest.mark.django_db
+def test_a_property_can_be_added_after_tracking_has_begun(account, asset_catalog):
+    # `account` already carries an opening-cash baseline, which is what made the
+    # new property's opening entry illegal.
+    response = _add_property(account)
+
+    assert response.status_code == 201, response.data
+    holding = Holding.objects.get(pk=response.data["id"])
+    assert holding.area_sqm == Decimal("91")
+    assert holding.quantity == Decimal("100")
+
+
+@pytest.mark.django_db
+def test_a_portfolio_can_hold_more_than_one_property(account, asset_catalog):
+    first = _add_property(account, name="Apartment", area="91", price="100")
+    second = _add_property(account, name="Villa", area="200", price="80")
+
+    assert (first.status_code, second.status_code) == (201, 201), second.data
+    sizes = sorted(
+        h.area_sqm for h in account.holdings.filter(asset__is_house=True)
+    )
+    assert sizes == [Decimal("91.00"), Decimal("200.00")]
+
+
+@pytest.mark.django_db
+def test_resizing_a_property_from_the_holdings_screen(account, asset_catalog):
+    holding = Holding.objects.get(pk=_add_property(account).data["id"])
+
+    response = _client(account.user).patch(
+        f"/api/accounts/{account.id}/holdings/{holding.id}/",
+        {"quantity": "150", "area_sqm": "120"},
+        format="json",
+    )
+
+    assert response.status_code == 200, response.data
+    holding.refresh_from_db()
+    assert (holding.quantity, holding.area_sqm) == (Decimal("150"), Decimal("120.00"))
+
+
+@pytest.mark.django_db
+def test_resizing_a_property_from_the_ledger(account, asset_catalog):
+    holding = Holding.objects.get(pk=_add_property(account).data["id"])
+    entry = LedgerEntry.objects.get(account=account, asset=holding.asset)
+
+    response = _client(account.user).patch(
+        f"/api/accounts/{account.id}/ledger/{entry.id}/",
+        {"area_sqm": "120"},
+        format="json",
+    )
+
+    assert response.status_code == 200, response.data
+    holding.refresh_from_db()
+    assert holding.area_sqm == Decimal("120.00")
+    # Repricing must not silently resize, and resizing must not silently reprice.
+    assert holding.quantity == Decimal("100")
+
+
+@pytest.mark.django_db
+def test_repricing_from_the_ledger_keeps_the_size(account, asset_catalog):
+    holding = Holding.objects.get(pk=_add_property(account).data["id"])
+    entry = LedgerEntry.objects.get(account=account, asset=holding.asset)
+
+    response = _client(account.user).patch(
+        f"/api/accounts/{account.id}/ledger/{entry.id}/",
+        {"quantity": "150"},
+        format="json",
+    )
+
+    assert response.status_code == 200, response.data
+    holding.refresh_from_db()
+    assert (holding.quantity, holding.area_sqm) == (Decimal("150"), Decimal("91.00"))
+
+
+@pytest.mark.django_db
+def test_only_a_property_entry_accepts_a_size(account, asset_catalog, write_prices):
+    write_prices({"emami_coin": Decimal("176000000")})
+    execute_trade(
+        account=account, asset=asset_catalog["emami_coin"], side="buy",
+        quantity=Decimal("1"),
+    )
+    entry = LedgerEntry.objects.filter(
+        account=account, kind=LedgerEntry.Kind.BUY
+    ).latest("pk")
+
+    response = _client(account.user).patch(
+        f"/api/accounts/{account.id}/ledger/{entry.id}/",
+        {"area_sqm": "120"},
+        format="json",
+    )
+
+    assert response.status_code == 400, response.data
+
+
+@pytest.mark.django_db
+def test_a_rejected_property_mark_is_explained_not_a_500(account, asset_catalog):
+    """A ledger rule the user trips must arrive as a readable 400."""
+    holding = Holding.objects.get(pk=_add_property(account).data["id"])
+
+    response = _client(account.user).patch(
+        f"/api/accounts/{account.id}/holdings/{holding.id}/",
+        {"quantity": "150", "occurred_at": "2999-01-01T00:00:00Z"},
+        format="json",
+    )
+
+    assert response.status_code == 400, response.data
+    assert "future" in str(response.data).lower()

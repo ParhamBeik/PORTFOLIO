@@ -114,7 +114,14 @@ export async function api(path, { method = "GET", body, _retried = false } = {})
   }
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
-    throw apiError(extractError(detail) || res.statusText, res.status);
+    // `statusText` is ALWAYS "" over HTTP/2, which is what production serves. So
+    // any error the body didn't explain arrived as an Error with an empty
+    // message, and the UI fell back to a bare "Something went wrong." with
+    // nothing to act on. Say at least what the server said.
+    throw apiError(
+      extractError(detail) || res.statusText || `Request failed (${res.status}).`,
+      res.status
+    );
   }
   return res.status === 204 ? null : res.json();
 }
