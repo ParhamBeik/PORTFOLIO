@@ -58,6 +58,11 @@ x-logging: &logging
     max-size: "10m"
     max-file: "5"
 
+# Live worker filled 84 GB of core.* files on 2026-08-25 and wedged Postgres.
+# Host sysctl also points core_pattern at /bin/true; this is the compose belt.
+x-no-core: &no-core
+  core: 0
+
 services:
   db:
     # TimescaleDB, not stock Postgres: the tick table grows ~744k rows/day and
@@ -185,6 +190,7 @@ services:
         condition: service_completed_successfully
     environment: *backend-env
     expose: ["8000"]
+    ulimits: *no-core
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -H 'Host: ${PORTFOLIO_DOMAIN:?set PORTFOLIO_DOMAIN}' -H 'X-Forwarded-Proto: https' http://localhost:8000/api/health/ready/ || exit 1"]
       interval: 15s
@@ -211,6 +217,7 @@ services:
         condition: service_healthy
     environment: *backend-env
     command: celery -A config worker -l info --concurrency=2 -Q live -n live@%h
+    ulimits: *no-core
     healthcheck:
       test: ["CMD-SHELL", "celery -A config inspect ping -d live@$$HOSTNAME"]
       interval: 60s
@@ -239,6 +246,7 @@ services:
         condition: service_healthy
     environment: *backend-env
     command: celery -A config worker -l info --concurrency=4 -Q archive -n archive@%h --max-memory-per-child=600000
+    ulimits: *no-core
     healthcheck:
       test: ["CMD-SHELL", "celery -A config inspect ping -d archive@$$HOSTNAME"]
       interval: 60s
@@ -302,6 +310,7 @@ services:
         condition: service_healthy
     environment: *backend-env
     command: celery -A config beat -l info
+    ulimits: *no-core
     healthcheck:
       disable: true
     deploy:
