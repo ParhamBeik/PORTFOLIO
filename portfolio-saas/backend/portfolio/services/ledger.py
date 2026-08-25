@@ -47,6 +47,14 @@ CASH_KINDS = frozenset({
     LedgerEntry.Kind.FEE,
 })
 
+# The two kinds that state what a property is worth. A property is a SERIES of
+# these -- the opening plus one row per revaluation -- not a single position, and
+# four places were independently re-testing the same pair.
+HOUSE_MARK_KINDS = frozenset({
+    LedgerEntry.Kind.OPENING_POSITION,
+    LedgerEntry.Kind.VALUATION_MARK,
+})
+
 
 def _cash_delta(
     kind: str, amount: Decimal, reverse: bool, track_cash: bool = True
@@ -133,10 +141,7 @@ def create_ledger_entry(
     if area is not None or mortgage is not None:
         # A revaluation carries the same terms as the opening it supersedes, so
         # both house mark kinds may set them. Anything else still may not.
-        if kind not in {
-            LedgerEntry.Kind.OPENING_POSITION,
-            LedgerEntry.Kind.VALUATION_MARK,
-        } or not asset or not asset.is_house:
+        if kind not in HOUSE_MARK_KINDS or not asset or not asset.is_house:
             raise LedgerError(
                 "Real-estate baseline fields require a house opening position."
             )
@@ -246,10 +251,7 @@ def update_ledger_entry(
         entry.amount_tomans = _decimal(amount_tomans, "amount_tomans", required=True)
     if area_sqm is not None:
         # Same rule create_ledger_entry applies: only a house mark carries a size.
-        if not (entry.asset and entry.asset.is_house) or entry.kind not in {
-            LedgerEntry.Kind.OPENING_POSITION,
-            LedgerEntry.Kind.VALUATION_MARK,
-        }:
+        if not (entry.asset and entry.asset.is_house) or entry.kind not in HOUSE_MARK_KINDS:
             raise LedgerError("Only a property entry has a size in square meters.")
         entry.area_sqm = _decimal(area_sqm, "area_sqm", required=True)
     if entry.kind in {LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL}:
@@ -465,10 +467,7 @@ def _projection_state(account: Account) -> dict:
             entry.asset_id
             and entry.asset
             and entry.asset.is_house
-            and entry.kind in {
-                LedgerEntry.Kind.OPENING_POSITION,
-                LedgerEntry.Kind.VALUATION_MARK,
-            }
+            and entry.kind in HOUSE_MARK_KINDS
         )
         if is_house_mark:
             # A house mark is a price, not a position: successive marks REPLACE
@@ -739,6 +738,30 @@ def record_house_mark(
         occurred_at=when,
         source="manual",
     )
+
+
+@transaction.atomic
+def retire_house(*, user, account_id: int, holding: Holding) -> None:
+    """Remove a property by reversing every mark that states its value.
+
+    Deleting a property was expressed as "reverse its opening entry", which only
+    held while a property had exactly one entry. Revaluation gave it many, and
+    the replay rebuilds a house from whichever mark is still live -- so reversing
+    the opening alone left the later marks standing and the property came back on
+    the next projection. Reverse the whole series.
+    """
+    account = Account.objects.select_for_update().get(pk=account_id, user=user)
+    marks = [
+        entry
+        for entry in _active_entries(account)
+        if entry.asset_id == holding.asset_id and entry.kind in HOUSE_MARK_KINDS
+    ]
+    if not marks:
+        # A holding that predates the ledger has nothing to reverse yet; mint its
+        # baseline first so the deletion is recorded like any other.
+        marks = [house_ledger_entry(holding)]
+    for mark in marks:
+        reverse_ledger_entry(user=user, account_id=account_id, entry_id=mark.pk)
 
 
 @transaction.atomic

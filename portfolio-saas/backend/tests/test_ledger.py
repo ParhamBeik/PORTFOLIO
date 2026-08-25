@@ -1594,3 +1594,34 @@ def test_a_rejected_property_mark_is_explained_not_a_500(account, asset_catalog)
 
     assert response.status_code == 400, response.data
     assert "future" in str(response.data).lower()
+
+
+@pytest.mark.django_db
+def test_deleting_a_property_removes_it(account, asset_catalog):
+    holding = Holding.objects.get(pk=_add_property(account).data["id"])
+    asset_id = holding.asset_id
+
+    response = _client(account.user).delete(
+        f"/api/accounts/{account.id}/holdings/{holding.id}/"
+    )
+
+    assert response.status_code in (200, 204), getattr(response, "data", response)
+    assert not Holding.objects.filter(account=account, asset_id=asset_id).exists()
+
+
+@pytest.mark.django_db
+def test_deleting_a_revalued_property_removes_it(account, asset_catalog):
+    holding = Holding.objects.get(pk=_add_property(account).data["id"])
+    _client(account.user).patch(
+        f"/api/accounts/{account.id}/holdings/{holding.id}/",
+        {"quantity": "150"},
+        format="json",
+    )
+    asset_id = holding.asset_id
+
+    response = _client(account.user).delete(
+        f"/api/accounts/{account.id}/holdings/{holding.id}/"
+    )
+
+    assert response.status_code in (200, 204), getattr(response, "data", response)
+    assert not Holding.objects.filter(account=account, asset_id=asset_id).exists()

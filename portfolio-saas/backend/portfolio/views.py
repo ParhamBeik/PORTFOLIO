@@ -293,8 +293,7 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
             LedgerError,
             adjust_holding_quantity,
             delete_orphan_holding,
-            house_ledger_entry,
-            reverse_ledger_entry,
+            retire_house,
         )
 
         if not instance.asset.is_house and not LedgerEntry.objects.filter(
@@ -320,12 +319,14 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
             except LedgerError as exc:
                 raise ValidationError(str(exc)) from exc
             return
-        entry = house_ledger_entry(instance)
-        reverse_ledger_entry(
-            user=self.request.user,
-            account_id=instance.account_id,
-            entry_id=entry.pk,
-        )
+        try:
+            retire_house(
+                user=self.request.user,
+                account_id=instance.account_id,
+                holding=instance,
+            )
+        except LedgerError as exc:
+            raise ValidationError(str(exc)) from exc
 
 
 def _ledger_payload(user, account=None):
