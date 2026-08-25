@@ -149,12 +149,38 @@ export const addHolding = (accountId, assetKey, quantity) =>
     method: "POST",
     body: { asset_key: assetKey, quantity: Number(quantity) },
   });
-export const updateHolding = (accountId, id, { quantity, unitPriceTomans } = {}) =>
+
+// A property is described by its size and what a square meter is worth, in
+// millions of Toman — never by a bare "quantity". `newPropertyName` mints a new
+// one; passing `assetKey` instead revalues a property already held.
+export const addProperty = (accountId, { name, areaSqm, pricePerSqmMillion, mortgageTomans }) =>
+  api(`/api/accounts/${accountId}/holdings/`, {
+    method: "POST",
+    body: {
+      new_property_name: name,
+      area_sqm: Number(areaSqm),
+      price_per_sqm_million: Number(pricePerSqmMillion),
+      ...(mortgageTomans ? { mortgage_deduction_tomans: Number(mortgageTomans) } : {}),
+    },
+  });
+
+const numeric = (key, value) =>
+  value == null || value === "" ? {} : { [key]: Number(value) };
+
+export const updateHolding = (
+  accountId,
+  id,
+  { quantity, unitPriceTomans, areaSqm, pricePerSqmMillion, displayName, isHidden } = {}
+) =>
   api(`/api/accounts/${accountId}/holdings/${id}/`, {
     method: "PATCH",
     body: {
-      quantity: Number(quantity),
-      ...(unitPriceTomans != null && unitPriceTomans !== "" ? { unit_price_tomans: Number(unitPriceTomans) } : {}),
+      ...numeric("quantity", quantity),
+      ...numeric("unit_price_tomans", unitPriceTomans),
+      ...numeric("area_sqm", areaSqm),
+      ...numeric("price_per_sqm_million", pricePerSqmMillion),
+      ...(displayName != null ? { display_name: displayName } : {}),
+      ...(isHidden != null ? { is_hidden: isHidden } : {}),
     },
   });
 export const removeHolding = (accountId, id) =>
@@ -162,10 +188,22 @@ export const removeHolding = (accountId, id) =>
 
 // Buy/sell: the ledger write path. Appends a Transaction, updates the holding
 // balance, and stamps a net-worth snapshot — all atomically on the backend.
-export const trade = (accountId, { assetKey, side, quantity, note = "", timestamp = null }) =>
+export const trade = (
+  accountId,
+  { assetKey, side, quantity, note = "", timestamp = null, priceTomans = null }
+) =>
   api(`/api/accounts/${accountId}/trades/`, {
     method: "POST",
-    body: { asset_key: assetKey, side, quantity: Number(quantity), note, ...(timestamp ? { timestamp } : {}) },
+    body: {
+      asset_key: assetKey,
+      side,
+      quantity: Number(quantity),
+      note,
+      ...(timestamp ? { timestamp } : {}),
+      // Omitted means "use the market price for that date"; the backend resolves
+      // it from the warehouse rather than the client guessing.
+      ...numeric("price_tomans", priceTomans),
+    },
   });
 export const getPerformance = (accountId, basis = "nominal_toman") =>
   api(`/api/accounts/${accountId}/performance/?basis=${basis}`);

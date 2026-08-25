@@ -117,3 +117,22 @@ export function ago(seconds) {
 
 /** Prefer the Persian name — that is how TSE symbols are recognized. */
 export const assetLabel = (a) => a?.name_fa || a?.name || a?.key || "—";
+
+/**
+ * What to call one row of someone's portfolio.
+ *
+ * `label` is the owner's own name for their copy of the asset ("Home", "Dad's
+ * gold bar"), resolved server-side against the holding. Everything else falls
+ * back to the shared catalog, so a row without a nickname reads exactly as it
+ * always did. Rows arrive from three shapes — valuation items, ledger entries
+ * and the asset catalog — hence the spread of key names.
+ */
+export const holdingLabel = (row) =>
+  row?.label || row?.name_fa || row?.asset_name_fa || row?.asset ||
+  row?.name || row?.asset_name || row?.key || row?.asset_key || "—";
+
+/** Floor area, e.g. "91 m²". */
+export const area = (sqm) => (bad(sqm) ? "—" : num(sqm, 2) + " m²");
+
+/** Real-estate unit price: what one square meter costs, e.g. "100,000,000 T / m²". */
+export const perSqm = (tomans) => (bad(tomans) ? "—" : toman(tomans) + " / m²");

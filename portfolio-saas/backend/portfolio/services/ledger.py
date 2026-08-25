@@ -29,17 +29,42 @@ def _decimal(value, field: str, *, required: bool = False, allow_zero: bool = Fa
     return result
 
 
-def _holding_delta(kind: str, quantity: Decimal, reverse: bool) -> Decimal:
-    direction = Decimal("-1") if reverse else Decimal("1")
-    if kind in {LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.BUY}:
-        return quantity * direction
-    if kind == LedgerEntry.Kind.SELL:
-        return -quantity * direction
-    return Decimal("0")
+# `_holding_delta` and `_apply_projection` used to live here: an incremental
+# apply-one-entry path that duplicated the house-mark-replaces rule, the negative
+# balance guards and the mortgage/Liability sync now owned by
+# `_projection_state` / `rebuild_projections`. Nothing had called them since
+# every write started replaying the whole ledger, and a second copy of those
+# rules is exactly the kind of thing that drifts out of agreement in silence.
 
 
-def _cash_delta(kind: str, amount: Decimal, reverse: bool) -> Decimal:
+# Kinds that ARE a cash movement: recording one is what opts a portfolio into
+# cash tracking, so they always move the balance.
+CASH_KINDS = frozenset({
+    LedgerEntry.Kind.OPENING_CASH,
+    LedgerEntry.Kind.DEPOSIT,
+    LedgerEntry.Kind.WITHDRAWAL,
+    LedgerEntry.Kind.DIVIDEND,
+    LedgerEntry.Kind.FEE,
+})
+
+
+def _cash_delta(
+    kind: str, amount: Decimal, reverse: bool, track_cash: bool = True
+) -> Decimal:
+    """Signed change to the cash balance.
+
+    A trade settles against the balance only when the portfolio actually tracks
+    cash. Otherwise the money is assumed to have come from, and to go back to,
+    somewhere outside the tracked portfolio, and a buy is simply a position.
+    Booking every buy as a funded purchase meant a portfolio that had never
+    recorded a deposit was refused the first time it recorded a trade -- the
+    error surfaced as "Insufficient cash balance" after the user pressed save,
+    which is why trades appeared to hover unsaved.
+    """
     direction = Decimal("-1") if reverse else Decimal("1")
+    is_trade = kind in {LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL}
+    if is_trade and not track_cash:
+        return Decimal("0")
     if kind in {
         LedgerEntry.Kind.OPENING_CASH,
         LedgerEntry.Kind.DEPOSIT,
@@ -54,92 +79,6 @@ def _cash_delta(kind: str, amount: Decimal, reverse: bool) -> Decimal:
     }:
         return -amount * direction
     return Decimal("0")
-
-
-def _apply_projection(
-    *, account: Account, kind: str, asset: Asset | None, quantity: Decimal | None,
-    amount: Decimal | None, area_sqm: Decimal | None = None,
-    mortgage_deduction_tomans: Decimal | None = None, reverse: bool = False
-) -> None:
-    from portfolio.models import Liability
-    cash_delta = _cash_delta(kind, amount or Decimal("0"), reverse)
-    new_cash = account.cash_balance_tomans + cash_delta
-    if new_cash < 0:
-        raise LedgerError("Insufficient cash balance.")
-
-    if asset is not None and quantity is not None:
-        holding = (
-            Holding.objects.select_for_update()
-            .filter(account=account, asset=asset)
-            .first()
-        )
-        current = holding.quantity if holding else Decimal("0")
-        if (
-            asset.is_house
-            and not reverse
-            and kind in {
-                LedgerEntry.Kind.OPENING_POSITION,
-                LedgerEntry.Kind.VALUATION_MARK,
-            }
-        ):
-            # A house "quantity" is price-per-sqm, so a new mark REPLACES the
-            # old one. Adding would read a revaluation from 90 to 150 as 240.
-            new_quantity = quantity
-        else:
-            new_quantity = current + _holding_delta(kind, quantity, reverse)
-        if new_quantity < 0:
-            raise LedgerError("Insufficient holding quantity.")
-        if new_quantity == 0 and holding:
-            holding.delete()
-            if asset.is_house:
-                Liability.objects.filter(account=account, asset=asset).delete()
-        elif holding:
-            holding.quantity = new_quantity
-            fields = ["quantity", "updated_at"]
-            if asset.is_house and not reverse:
-                holding.area_sqm = area_sqm or holding.area_sqm
-                holding.mortgage_deduction_tomans = (
-                    mortgage_deduction_tomans or holding.mortgage_deduction_tomans
-                )
-                fields += ["area_sqm", "mortgage_deduction_tomans"]
-            holding.save(update_fields=fields)
-            if asset.is_house:
-                mortgage_val = holding.mortgage_deduction_tomans
-                if mortgage_val > 0:
-                    Liability.objects.update_or_create(
-                        account=account,
-                        asset=asset,
-                        defaults={
-                            "label": f"Mortgage ({asset.name})",
-                            "amount_tomans": mortgage_val,
-                        }
-                    )
-                else:
-                    Liability.objects.filter(account=account, asset=asset).delete()
-        elif new_quantity > 0:
-            values = {"account": account, "asset": asset, "quantity": new_quantity}
-            if asset.is_house:
-                values.update(
-                    area_sqm=area_sqm or HOUSE_AREA_SQM,
-                    mortgage_deduction_tomans=(
-                        mortgage_deduction_tomans or Decimal("0")
-                    ),
-                )
-            new_holding = Holding.objects.create(**values)
-            if asset.is_house:
-                mortgage_val = new_holding.mortgage_deduction_tomans
-                if mortgage_val > 0:
-                    Liability.objects.update_or_create(
-                        account=account,
-                        asset=asset,
-                        defaults={
-                            "label": f"Mortgage ({asset.name})",
-                            "amount_tomans": mortgage_val,
-                        }
-                    )
-
-    account.cash_balance_tomans = new_cash
-    account.save(update_fields=["cash_balance_tomans", "updated_at"])
 
 
 @transaction.atomic
@@ -231,6 +170,22 @@ def create_ledger_entry(
         external_id=external_id[:120],
         import_batch=import_batch,
     )
+    # A manual asset has no feed, so a price only exists if someone states one.
+    # Stating one on the ledger entry left it there and nowhere else: the asset
+    # still had no Price row, so it valued as "unavailable" and contributed 0 to
+    # the total -- recording a Swiss bar you already own made it vanish from your
+    # net worth. Only filled when the asset has no price at all, so a backdated
+    # entry can never overwrite a more recent mark with a stale figure.
+    if (
+        asset is not None
+        and asset.is_manual
+        and not asset.is_house
+        and unit_price is not None
+    ):
+        from portfolio.models import Price
+
+        if not Price.objects.filter(asset=asset).exists():
+            record_manual_price(asset, unit_price)
     _commit_projections(account)
     return entry
 
@@ -427,6 +382,10 @@ def synthetic_position_rows(accounts, ledger_rows) -> list[dict]:
             "asset_key": holding.asset.key,
             "asset_name": holding.asset.name,
             "asset_name_fa": holding.asset.name_fa,
+            "label": holding.label,
+            "is_hidden": holding.is_hidden,
+            "is_house": holding.asset.is_house,
+            "area_sqm": str(holding.area_sqm) if holding.asset.is_house else None,
             "quantity": str(holding.quantity),
             "unit_price_tomans": None,
             "amount_tomans": None,
@@ -475,7 +434,22 @@ def _projection_state(account: Account) -> dict:
     real_estate: dict[int, dict[str, Decimal]] = {}
     cash = Decimal("0")
     entries = _active_entries(account)
+    # Derived, not read off the account: whether a portfolio settles trades
+    # against a balance is a property of what is IN its ledger, and deriving it
+    # here keeps the replay self-consistent no matter what the stored flag says.
+    # `rebuild_projections` writes the answer back, exactly as it does for
+    # `ledger_complete`.
+    #
+    # It starts where the cash history starts, rather than applying to the whole
+    # ledger at once. Entries arrive in timestamp order, so a trade recorded
+    # before any cash was declared stays a bare position even after a later
+    # deposit turns tracking on -- otherwise recording your first deposit would
+    # retroactively bill every past purchase against it and fail the replay for
+    # insufficient funds.
+    settling = False
     for entry in entries:
+        if entry.kind in CASH_KINDS:
+            settling = True
         qty = entry.quantity or Decimal("0")
         amount = entry.amount_tomans or Decimal("0")
         is_house_mark = (
@@ -500,7 +474,7 @@ def _projection_state(account: Account) -> dict:
             holdings[entry.asset_id] = holdings.get(entry.asset_id, Decimal("0")) + qty
         elif entry.kind == LedgerEntry.Kind.SELL and entry.asset_id:
             holdings[entry.asset_id] = holdings.get(entry.asset_id, Decimal("0")) - qty
-        cash += _cash_delta(entry.kind, amount, reverse=False)
+        cash += _cash_delta(entry.kind, amount, reverse=False, track_cash=settling)
         if cash < 0:
             raise LedgerError(f"Ledger replay produced negative cash at entry {entry.pk}.")
         if entry.asset_id and holdings.get(entry.asset_id, Decimal("0")) < 0:
@@ -521,6 +495,7 @@ def _projection_state(account: Account) -> dict:
         },
         "cash": cash,
         "real_estate": real_estate,
+        "track_cash": settling,
         "ledger_complete": any(
             entry.kind in {
                 LedgerEntry.Kind.OPENING_CASH,
@@ -561,8 +536,11 @@ def rebuild_projections(account: Account) -> dict:
 
     account.cash_balance_tomans = expected_cash
     account.ledger_complete = state["ledger_complete"]
+    account.track_cash = state["track_cash"]
     account.save(
-        update_fields=["cash_balance_tomans", "ledger_complete", "updated_at"]
+        update_fields=[
+            "cash_balance_tomans", "ledger_complete", "track_cash", "updated_at",
+        ]
     )
     from portfolio.models import Liability
     Liability.objects.filter(account=account, asset__isnull=False).delete()
@@ -637,6 +615,12 @@ def projection_drift(account: Account) -> list[dict]:
             "kind": "ledger_complete",
             "stored": account.ledger_complete,
             "ledger": state["ledger_complete"],
+        })
+    if account.track_cash != state["track_cash"]:
+        drifts.append({
+            "kind": "track_cash",
+            "stored": account.track_cash,
+            "ledger": state["track_cash"],
         })
     return drifts
 

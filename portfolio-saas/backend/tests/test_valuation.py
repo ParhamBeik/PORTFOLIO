@@ -1397,3 +1397,451 @@ def test_archive_is_behind_protection_holds_without_an_explicit_session_map(
     )
 
     assert "kama_stock" not in replacements
+
+
+# ---------------------------------------------------------------------------
+# Switched-off holdings, personal nicknames, and multiple properties
+#
+# A holding can be listed without being counted -- someone's primary residence
+# belongs in the inventory but swamps every figure of a portfolio they actually
+# trade. The exclusion has to be identical everywhere: today's total, the
+# allocation, the risk weights, the performance metrics and the recorded
+# history. These pin the parts of that which are cheap to assert.
+# ---------------------------------------------------------------------------
+
+
+def _house_holding(account, asset, *, price_per_sqm_million, area_sqm, hidden=False):
+    return Holding.objects.create(
+        account=account,
+        asset=asset,
+        quantity=Decimal(str(price_per_sqm_million)),
+        area_sqm=Decimal(str(area_sqm)),
+        is_hidden=hidden,
+    )
+
+
+def test_house_value_is_area_times_price_per_sqm_in_millions(asset_catalog, make_user):
+    """91 m2 at 100 million a meter is 9.1 billion Toman.
+
+    Unit test: one arithmetic convention, no I/O, and the cheapest place to pin
+    the number the whole real-estate feature rests on.
+    """
+    from portfolio.services.valuation import _house_value
+
+    assert _house_value(Decimal("100"), area_sqm=Decimal("91")) == Decimal("9100000000")
+
+
+def test_hidden_holding_is_listed_but_not_counted(
+    asset_catalog, make_user, write_prices
+):
+    """Integration: the split between `items` and `hidden_items` is what makes
+    every downstream consumer -- donut, weights, diagnostics, optimizer -- honour
+    the tick without code of its own, so it is asserted at that boundary."""
+    write_prices({"emami_coin": Decimal("100")})
+    account = Account.objects.create(user=make_user(email="hidden@test.test"), name="Main")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("2")
+    )
+    _house_holding(
+        account, asset_catalog["house_asset"],
+        price_per_sqm_million=100, area_sqm=91, hidden=True,
+    )
+
+    result = value_account(account)
+
+    assert [i["key"] for i in result["items"]] == ["emami_coin"]
+    assert [i["key"] for i in result["hidden_items"]] == ["house_asset"]
+    # Valued, so the UI can show what is being left out -- just not added in.
+    assert Decimal(result["hidden_items"][0]["value"]) == Decimal("9100000000")
+    assert result["total"] == Decimal("200")
+    assert result["total_assets"] == 1
+
+
+def test_snapshot_writers_still_record_everything_owned(
+    asset_catalog, make_user, write_prices
+):
+    """`include_hidden=True` keeps the stored series meaning one thing.
+
+    If the writer started omitting whatever was switched off, the chart would
+    show a cliff on the day the box was unticked rather than a continuous line.
+    """
+    write_prices({"emami_coin": Decimal("100")})
+    account = Account.objects.create(user=make_user(email="snap@test.test"), name="Main")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("2")
+    )
+    _house_holding(
+        account, asset_catalog["house_asset"],
+        price_per_sqm_million=100, area_sqm=91, hidden=True,
+    )
+
+    assert value_account(account, include_hidden=True)["total"] == Decimal("9100000200")
+    assert value_account(account)["total"] == Decimal("200")
+
+
+def test_hiding_a_mortgaged_house_takes_its_mortgage_with_it(
+    asset_catalog, make_user, write_prices
+):
+    """Otherwise net worth drops by the loan alone."""
+    from portfolio.models import Liability
+
+    write_prices({"emami_coin": Decimal("100")})
+    account = Account.objects.create(user=make_user(email="mortgage@test.test"), name="Main")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("2")
+    )
+    house = asset_catalog["house_asset"]
+    _house_holding(account, house, price_per_sqm_million=100, area_sqm=91, hidden=True)
+    Liability.objects.create(
+        account=account, asset=house, label="Mortgage", amount_tomans=Decimal("500000000")
+    )
+
+    result = value_account(account)
+
+    assert result["total"] == Decimal("200")
+    assert result["total_liabilities"] == 0.0
+
+
+def test_a_portfolio_can_hold_more_than_one_property(asset_catalog, make_user):
+    """Properties are minted per holding, so three homes are three catalog rows
+    owned by that user -- the shared catalog is untouched."""
+    user = make_user(email="landlord@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    for name, sqm, price in (("Home", "91", "100"), ("Shop", "40", "250")):
+        resp = client.post(
+            f"/api/accounts/{account.id}/holdings/",
+            {"new_property_name": name, "area_sqm": sqm, "price_per_sqm_million": price},
+            format="json",
+        )
+        assert resp.status_code == 201, resp.data
+
+    owned = Asset.objects.filter(owner=user, is_house=True)
+    assert owned.count() == 2
+    assert account.holdings.filter(asset__is_house=True).count() == 2
+    # 91 x 100M + 40 x 250M
+    assert value_account(account)["total"] == Decimal("19100000000")
+
+
+def test_seed_assets_leaves_user_properties_active(asset_catalog, make_user):
+    """The seeder deactivates anything outside its list, and it runs on every
+    container start -- unscoped, it switched off every property ever created."""
+    from django.core.management import call_command
+
+    user = make_user(email="seed@test.test")
+    mine = Asset.objects.create(
+        key="re-abc123", name="Home", asset_class="Real Estate",
+        currency="IRT", is_house=True, owner=user,
+    )
+
+    call_command("seed_assets")
+
+    mine.refresh_from_db()
+    assert mine.is_active is True
+
+
+def test_nickname_and_visibility_save_without_touching_the_ledger(
+    asset_catalog, make_user, write_prices
+):
+    """A rename or a tick is how a holding is shown, not something that happened
+    to it. Routing them through the ledger appended a revaluation mark every
+    time someone renamed a property."""
+    write_prices({"swiss_gold_bar_1g": Decimal("5000000")})
+    user = make_user(email="rename@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    holding = Holding.objects.create(
+        account=account, asset=asset_catalog["swiss_gold_bar_1g"], quantity=Decimal("2")
+    )
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    resp = client.patch(
+        f"/api/accounts/{account.id}/holdings/{holding.id}/",
+        {"display_name": "Dad's bar", "is_hidden": True},
+        format="json",
+    )
+
+    assert resp.status_code == 200, resp.data
+    holding.refresh_from_db()
+    assert holding.display_name == "Dad's bar"
+    assert holding.is_hidden is True
+    assert holding.quantity == Decimal("2")
+    assert not LedgerEntry.objects.filter(account=account).exists()
+
+
+def test_recorded_history_is_netted_of_switched_off_holdings(
+    asset_catalog, make_user, write_prices
+):
+    """Integration, at the endpoint: the subtraction spans the whole window.
+
+    Snapshots record everything owned, so the tick has to be applied at read
+    time -- and to every point, not from today forward. Applying it only to new
+    rows would put a cliff in the line on the day the user changed their mind.
+    A property is the clean case to assert: its worth on a date is the mark in
+    force, so no warehouse price is involved.
+    """
+    write_prices({"emami_coin": Decimal("100")})
+    user = make_user(email="history@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("2")
+    )
+    _house_holding(
+        account, asset_catalog["house_asset"],
+        price_per_sqm_million=100, area_sqm=91, hidden=True,
+    )
+    # Two days of recorded totals, both counting the house (9.1B + 200).
+    for days_ago in (2, 1):
+        Snapshot.objects.create(
+            user=user,
+            account=account,
+            total_value_tomans=Decimal("9100000200"),
+            timestamp=timezone.now() - timedelta(days=days_ago),
+        )
+
+    client = APIClient()
+    client.force_authenticate(user=user)
+    resp = client.get(f"/api/snapshots/?days=30&account={account.id}")
+
+    assert resp.status_code == 200, resp.data
+    series = resp.data["series"]
+    assert len(series) >= 2
+    # Every point, including the oldest, is net of the switched-off property.
+    for point in series:
+        assert Decimal(str(point["total"])) == Decimal("200")
+
+
+def test_history_older_than_the_recompute_bound_is_still_netted(
+    asset_catalog, make_user, write_prices, monkeypatch
+):
+    """Beyond the recompute ceiling the adjustment is carried back, not dropped.
+
+    Leaving those points unadjusted would put the switched-off asset back into
+    the far end of the line -- the same cliff the read-time subtraction exists to
+    avoid, just relocated to the bound. They are netted from the oldest computed
+    day and flagged `approximated`.
+    """
+    from portfolio import views as portfolio_views
+
+    # Squeeze the ceiling so the test does not need years of snapshots.
+    monkeypatch.setattr(portfolio_views, "HIDDEN_ADJUSTMENT_MAX_DAYS", 2)
+
+    write_prices({"emami_coin": Decimal("100")})
+    user = make_user(email="bound@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("2")
+    )
+    _house_holding(
+        account, asset_catalog["house_asset"],
+        price_per_sqm_million=100, area_sqm=91, hidden=True,
+    )
+    for days_ago in (10, 1):
+        Snapshot.objects.create(
+            user=user,
+            account=account,
+            total_value_tomans=Decimal("9100000200"),
+            timestamp=timezone.now() - timedelta(days=days_ago),
+        )
+
+    client = APIClient()
+    client.force_authenticate(user=user)
+    resp = client.get(f"/api/snapshots/?days=30&account={account.id}")
+
+    assert resp.status_code == 200, resp.data
+    series = resp.data["series"]
+    assert len(series) == 2
+    # Both points netted, including the one older than the ceiling.
+    assert all(Decimal(str(p["total"])) == Decimal("200") for p in series), series
+    # And the out-of-reach one is honest about being an estimate.
+    assert series[0]["approximated"] is True
+
+
+def test_deleting_a_user_who_owns_a_property_succeeds(asset_catalog, make_user):
+    """Account deletion must survive the new `Asset.owner` cascade.
+
+    Before properties were user-owned, deleting a user never touched the asset
+    catalog. Now it does -- and `Holding.asset` / `LedgerEntry.asset` are
+    PROTECT, so the cascade walks straight into them. If Django resolves that as
+    a ProtectedError, the delete-my-account endpoint breaks for every user who
+    ever added a property.
+    """
+    user = make_user(email="closing@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    client = APIClient()
+    client.force_authenticate(user=user)
+    created = client.post(
+        f"/api/accounts/{account.id}/holdings/",
+        {"new_property_name": "Home", "area_sqm": "91", "price_per_sqm_million": "100"},
+        format="json",
+    )
+    assert created.status_code == 201, created.data
+    key = created.data["asset_key"]
+
+    user.delete()
+
+    assert not Asset.objects.filter(key=key).exists()
+    assert not Account.objects.filter(pk=account.pk).exists()
+
+
+def test_deleting_a_user_who_ran_a_csv_import_succeeds(asset_catalog, make_user):
+    """The other PROTECT deadlock in the same cascade.
+
+    `LedgerEntry.import_batch` PROTECTs `ImportBatch`, which is CASCADEd from
+    `Account` -- so closing an account that ever imported a CSV raised
+    ProtectedError. Pre-existing, and it fails for exactly the same reason the
+    owned-property case did, which is why `User.delete` resolves both by
+    ordering rather than special-casing either.
+    """
+    from portfolio.models import ImportBatch
+
+    user = make_user(email="importer@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    batch = ImportBatch.objects.create(account=account, file_hash="abc", row_count=1)
+    LedgerEntry.objects.create(
+        account=account, asset=asset_catalog["emami_coin"],
+        kind=LedgerEntry.Kind.OPENING_POSITION, quantity=Decimal("1"),
+        source="csv", import_batch=batch,
+    )
+
+    user.delete()
+
+    assert not Account.objects.filter(pk=account.pk).exists()
+    assert not ImportBatch.objects.filter(pk=batch.pk).exists()
+
+
+def test_revaluing_a_property_replaces_its_price_and_keeps_its_size(
+    asset_catalog, make_user
+):
+    """"Its value changed" in the add dialog, end to end.
+
+    The client sends `price_per_sqm_million`; the serializer folds it onto the
+    column a house actually stores it in. Two marks must REPLACE each other, not
+    accumulate -- a revaluation from 100 to 150 a meter is a 150 house, not a
+    250 one -- and the size must survive a price-only update.
+    """
+    user = make_user(email="revalue@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    client = APIClient()
+    client.force_authenticate(user=user)
+    created = client.post(
+        f"/api/accounts/{account.id}/holdings/",
+        {"new_property_name": "Home", "area_sqm": "91", "price_per_sqm_million": "100"},
+        format="json",
+    )
+    assert created.status_code == 201, created.data
+    holding_id = created.data["id"]
+
+    bumped = client.patch(
+        f"/api/accounts/{account.id}/holdings/{holding_id}/",
+        {"price_per_sqm_million": "150"},
+        format="json",
+    )
+
+    assert bumped.status_code == 200, bumped.data
+    holding = Holding.objects.get(pk=holding_id)
+    assert holding.quantity == Decimal("150")          # replaced, not 250
+    assert holding.area_sqm == Decimal("91.00")        # size survived
+    assert value_account(account)["total"] == Decimal("13650000000")  # 91 x 150M
+    # The revaluation is its own dated event on top of the opening position.
+    kinds = list(
+        LedgerEntry.objects.filter(account=account).values_list("kind", flat=True)
+    )
+    assert sorted(kinds) == ["opening_position", "valuation_mark"], kinds
+
+
+def test_selling_part_of_a_holding_through_the_trade_endpoint(
+    asset_catalog, make_user, write_prices
+):
+    """The dialog's "I sold it" path on a portfolio that tracks no cash."""
+    write_prices({"emami_coin": Decimal("176000000")})
+    user = make_user(email="seller@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    client = APIClient()
+    client.force_authenticate(user=user)
+    bought = client.post(
+        f"/api/accounts/{account.id}/trades/",
+        {"asset_key": "emami_coin", "side": "buy", "quantity": "3",
+         "price_tomans": "176000000"},
+        format="json",
+    )
+    assert bought.status_code == 201, bought.data
+
+    sold = client.post(
+        f"/api/accounts/{account.id}/trades/",
+        {"asset_key": "emami_coin", "side": "sell", "quantity": "1",
+         "price_tomans": "180000000"},
+        format="json",
+    )
+
+    assert sold.status_code == 201, sold.data
+    assert account.holdings.get(asset__key="emami_coin").quantity == Decimal("2")
+    account.refresh_from_db()
+    # No cash was ever declared, so neither leg moved a balance.
+    assert account.cash_balance_tomans == Decimal("0")
+
+
+def test_recording_a_manual_asset_you_already_own_gives_it_a_value(
+    asset_catalog, make_user
+):
+    """A stated price on a manual asset has to reach the price map.
+
+    Manual assets (a Swiss bar, a pre-86 quarter coin) have no feed, so the only
+    price they will ever have is one the user states. Storing it on the ledger
+    row alone left the asset with no Price row: it valued as "unavailable" and
+    added nothing, so recording something you own made it disappear from your
+    net worth instead of increasing it.
+    """
+    user = make_user(email="manualprice@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    resp = client.post(
+        f"/api/accounts/{account.id}/ledger/",
+        {
+            "kind": "opening_position",
+            "asset_key": "swiss_gold_bar_1g",
+            "quantity": "2",
+            "unit_price_tomans": "5000000",
+        },
+        format="json",
+    )
+
+    assert resp.status_code == 201, resp.data
+    result = value_account(account)
+    assert result["total"] == Decimal("10000000")
+    assert result["items"][0]["quality_status"] == "manual"
+
+
+def test_a_backdated_entry_never_overwrites_a_newer_manual_price(
+    asset_catalog, make_user, write_prices
+):
+    """The guard on the fix above: only fill a price that is missing.
+
+    Recording "I bought this bar in 2020 for 2 million" must not reprice today's
+    holding at 2 million.
+    """
+    write_prices({"swiss_gold_bar_1g": Decimal("5000000")})
+    user = make_user(email="backdated@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    resp = client.post(
+        f"/api/accounts/{account.id}/ledger/",
+        {
+            "kind": "opening_position",
+            "asset_key": "swiss_gold_bar_1g",
+            "quantity": "1",
+            "unit_price_tomans": "2000000",
+            "occurred_at": (timezone.now() - timedelta(days=1800)).isoformat(),
+        },
+        format="json",
+    )
+
+    assert resp.status_code == 201, resp.data
+    # Still valued at the current 5,000,000 mark, not the 2020 purchase price.
+    assert value_account(account)["total"] == Decimal("5000000")

@@ -5,13 +5,13 @@ part (latest prices) is cached, so these endpoints stay cheap at scale.
 Every endpoint requires authentication only — the FREE/PRO tier gating these
 docs used to describe was removed along with the subscription model.
 """
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import numpy as np
 import pandas as pd
 from django.conf import settings
-from django.db.models import F, Window
+from django.db.models import F, Q, Window
 from django.db.models.functions import RowNumber
 from django.db.models.functions import TruncDate
 from django.utils import timezone
@@ -37,9 +37,11 @@ from .serializers import (
 )
 from .services import execute_trade, get_latest_prices, undo_trade, value_account, value_user
 from .services.valuation import (
+    HIDDEN_ADJUSTMENT_MAX_DAYS,
     SYNTHETIC_HISTORY_MAX_DAYS,
     compute_dynamic_net_worth_series,
 )
+from .services.visibility import hidden_asset_ids
 from .services.trades import TradeError
 from .services.ledger import (
     LedgerError,
@@ -75,10 +77,14 @@ from .services.returns import daily_returns_matrix
 
 
 class AssetListView(generics.ListAPIView):
-    """The investable asset catalog. Public to any authenticated user."""
+    """The shared asset catalog, plus this user's own properties."""
 
-    queryset = Asset.objects.filter(is_active=True)
     serializer_class = AssetSerializer
+
+    def get_queryset(self):
+        return Asset.objects.filter(is_active=True).filter(
+            Q(owner__isnull=True) | Q(owner=self.request.user)
+        )
 
 
 class AccountListCreateView(generics.ListCreateAPIView):
@@ -96,6 +102,44 @@ class AccountDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         return self.request.user.accounts.all()
+
+
+def _mint_property_asset(user, name: str) -> Asset:
+    """Create a catalog row this user owns, for one property.
+
+    Real estate is the only asset a user mints. A property is not a market
+    instrument -- there is no ticker to point at and no other user's portfolio it
+    belongs in -- but `Holding` is unique per (account, asset), so holding three
+    properties needs three rows. Keys are random rather than derived from the
+    name: two properties may legitimately share a name, and the key is an
+    internal join, never something the owner reads (that is `Holding.label`).
+    """
+    from uuid import uuid4
+
+    return Asset.objects.create(
+        key=f"re-{uuid4().hex[:12]}",
+        name=name[:120],
+        asset_class=Asset.AssetClass.REAL_ESTATE,
+        currency=Asset.Currency.IRT,
+        is_house=True,
+        is_active=True,
+        owner=user,
+    )
+
+
+def _apply_presentation_fields(holding: Holding, data: dict) -> None:
+    """Persist the nickname and the visibility tick.
+
+    These describe how a holding is *shown*, not what happened to it, so they are
+    written straight to the row. Routing them through the ledger would append a
+    revaluation mark every time someone renamed a property or unticked it.
+    """
+    fields = [f for f in ("display_name", "is_hidden") if f in data]
+    if not fields:
+        return
+    for field in fields:
+        setattr(holding, field, data[field])
+    holding.save(update_fields=[*fields, "updated_at"])
 
 
 class HoldingListCreateView(generics.ListCreateAPIView):
@@ -121,9 +165,12 @@ class HoldingListCreateView(generics.ListCreateAPIView):
         account = self._account()
         if account is None:
             raise NotFound("Account not found")
-        if account.holdings.filter(asset=serializer.validated_data["asset"]).exists():
-            raise ValidationError("This asset already exists in the account.")
         data = serializer.validated_data
+        property_name = data.pop("new_property_name", "")
+        if property_name and not data.get("asset"):
+            data["asset"] = _mint_property_asset(self.request.user, property_name)
+        if account.holdings.filter(asset=data["asset"]).exists():
+            raise ValidationError("This asset already exists in the account.")
         try:
             if data["asset"].is_house:
                 create_ledger_entry(
@@ -142,14 +189,13 @@ class HoldingListCreateView(generics.ListCreateAPIView):
                     account=account, asset=data["asset"], quantity=data["quantity"]
                 )
                 record_manual_price(data["asset"], data.get("unit_price_tomans"))
-            elif account.cash_balance_tomans > 0 or LedgerEntry.objects.filter(
-                account=account
-            ).exists():
-                # This account has cash to spend, so acquiring an asset is a
-                # funded purchase and must be booked as one -- cash included.
-                # Cash is tested first because it is the thing that would be
-                # wrong if we skipped the trade; the entry count alone flips
-                # the moment a user deletes their history to re-import it.
+            else:
+                # Always a purchase now, whether or not the portfolio tracks cash.
+                # It used to branch: an account with no cash recorded the bare
+                # position instead, because a BUY would have been rejected for
+                # insufficient funds. `Account.track_cash` removed that failure,
+                # so every acquisition can be the dated, priced event it really
+                # is -- which is also the only way it gets a cost basis.
                 create_ledger_entry(
                     account=account,
                     kind=LedgerEntry.Kind.BUY,
@@ -159,18 +205,11 @@ class HoldingListCreateView(generics.ListCreateAPIView):
                     source="manual",
                     note="Dashboard holding opening trade",
                 )
-            else:
-                # Holdings-only account: there is no cash to spend, so a BUY
-                # would be rejected for insufficient funds and "add holding"
-                # could never succeed. Record the position itself instead.
-                set_orphan_holding(
-                    account=account, asset=data["asset"], quantity=data["quantity"]
-                )
         except LedgerError as exc:
             raise ValidationError(str(exc)) from exc
-        serializer.instance = Holding.objects.get(
-            account=account, asset=data["asset"]
-        )
+        instance = Holding.objects.get(account=account, asset=data["asset"])
+        _apply_presentation_fields(instance, data)
+        serializer.instance = instance
 
 
 class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -192,6 +231,12 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
 
         asset = serializer.instance.asset
         data = serializer.validated_data
+        # Presentation first and unconditionally: a rename or a visibility toggle
+        # must not fall through into a ledger write, and may arrive on its own.
+        _apply_presentation_fields(serializer.instance, data)
+        if not any(k in data for k in ("quantity", "unit_price_tomans", "area_sqm",
+                                       "mortgage_deduction_tomans")):
+            return
         if asset.is_manual and not asset.is_house and not LedgerEntry.objects.filter(
             account=serializer.instance.account, asset=asset
         ).exists():
@@ -290,9 +335,18 @@ def _ledger_payload(user, account=None):
         .select_related("asset", "account")
         .order_by("-timestamp", "-pk")
     )
+    labels = {
+        (h.account_id, h.asset_id): h.display_name
+        for h in Holding.objects.filter(account__in=accounts).exclude(display_name="")
+    }
     data = list(
         LedgerEntrySerializer(
-            rows, many=True, context={"pnl": entry_pnl_map(rows, get_latest_prices())}
+            rows,
+            many=True,
+            context={
+                "pnl": entry_pnl_map(rows, get_latest_prices()),
+                "labels": labels,
+            },
         ).data
     )
     data.extend(synthetic_position_rows(accounts, rows))
@@ -477,7 +531,7 @@ class AccountDataQualityView(APIView):
         if account is None:
             raise NotFound("Account not found.")
         assets = []
-        for holding in account.holdings.select_related("asset"):
+        for holding in account.holdings.filter(is_hidden=False).select_related("asset"):
             asset = holding.asset
             symbol = asset.tse_symbol or asset.brs_symbol
             if asset.is_house or asset.is_manual or not symbol:
@@ -786,18 +840,24 @@ def _rescale(valuation, factor):
     """
     def scale_items(items):
         for item in items or []:
-            for field in ("value", "unit_price"):
+            # `price_per_sqm_tomans` is money too: a property left in Toman while
+            # its own value column converted would read as an absurd unit price.
+            for field in ("value", "unit_price", "price_per_sqm_tomans"):
                 if item.get(field) is not None:
                     item[field] = float(Decimal(str(item[field])) / factor)
 
     valuation["total"] = Decimal(str(valuation.get("total", 0) or 0)) / factor
     if valuation.get("total_usd") is not None:
         valuation["total_usd"] = Decimal(str(valuation["total_usd"])) / factor
+    # Switched-off rows are still displayed, so they are re-expressed alongside
+    # the counted ones even though they are absent from the total.
     scale_items(valuation.get("items"))
+    scale_items(valuation.get("hidden_items"))
     for account in valuation.get("accounts") or []:
         if account.get("total") is not None:
             account["total"] = Decimal(str(account["total"])) / factor
         scale_items(account.get("items"))
+        scale_items(account.get("hidden_items"))
     return valuation
 
 
@@ -829,6 +889,58 @@ def _express_real_toman(valuation: dict) -> dict:
     valuation["cpi_estimated_years"] = sorted(settings.CPI_ESTIMATED_YEARS)
     valuation["cpi_source"] = settings.CPI_SOURCE
     return valuation
+
+
+def _subtract_hidden_holdings(user, account, series, now) -> None:
+    """Net switched-off holdings out of a recorded net-worth series, in place.
+
+    Stored snapshots are a faithful record of everything owned; the tick that
+    hides an asset is a view preference applied at read time. Subtracting here --
+    over the whole window rather than from the moment the box was unticked --
+    is what keeps the line continuous instead of putting a cliff in it on the day
+    the user changed their mind.
+
+    The subtrahend comes from the same routine that draws the synthetic series,
+    so both sides of the arithmetic resolve a past price identically. Days where
+    a hidden asset had no real close and its live price stood in are marked
+    `approximated` rather than silently adjusted, and the result is floored at
+    zero: a stale snapshot paired with a since-appreciated property could
+    otherwise subtract past the total and draw a negative net worth.
+
+    Recomputation is bounded at HIDDEN_ADJUSTMENT_MAX_DAYS. Points older than
+    that reuse the oldest adjustment that WAS computed rather than going
+    unadjusted: leaving them alone would put the hidden asset back into the far
+    end of the line and draw exactly the cliff this function exists to avoid,
+    only at the bound instead of at the day the box was unticked. Carrying the
+    value back is an estimate, and says so.
+    """
+    if not series:
+        return
+    accounts = [account] if account is not None else list(user.accounts.all())
+    if not hidden_asset_ids(accounts):
+        return
+    earliest = min(row["date"] for row in series)
+    span = (now.date() - datetime.strptime(earliest, "%Y-%m-%d").date()).days + 1
+    span = max(1, min(span, HIDDEN_ADJUSTMENT_MAX_DAYS))
+    hidden = compute_dynamic_net_worth_series(
+        user, account=account, days=span, only_hidden=True, max_days=span
+    )
+    if not hidden:
+        return
+    # Both sides key on a "%Y-%m-%d" string: the snapshot rows via TruncDate, the
+    # subtrahend via strftime on an aware datetime. They agree only because
+    # settings.TIME_ZONE is UTC. Change that and this join silently misses,
+    # leaving totals unadjusted (and flagged approximate) on the shifted days.
+    by_date = {row["date"]: row for row in hidden}
+    oldest = min(by_date)
+    for row in series:
+        adjustment = by_date.get(row["date"])
+        beyond_reach = adjustment is None
+        if beyond_reach:
+            adjustment = by_date[oldest]
+        net = Decimal(row["total"]) - Decimal(adjustment["total"])
+        row["total"] = str(max(net, Decimal("0")))
+        row["approximated"] = beyond_reach or bool(adjustment["approximated"])
 
 
 class SnapshotListView(APIView):
@@ -937,9 +1049,16 @@ class SnapshotListView(APIView):
                 for row in dynamic
             ]
         else:
-            # No snapshot rows yet (brand-new user) -> fall back to today's live total.
+            # No snapshot rows yet (brand-new user) -> fall back to today's live
+            # total. Hidden holdings included, so this row means the same thing as
+            # the stored rows it stands in for and goes through the same
+            # subtraction below rather than being netted twice.
             if not daily:
-                fallback_val = value_account(account)["total"] if account else value_user(request.user)["total"]
+                fallback_val = (
+                    value_account(account, include_hidden=True)["total"]
+                    if account
+                    else value_user(request.user, include_hidden=True)["total"]
+                )
                 if fallback_val > 0:
                     daily = [{
                         "day": now.date(),
@@ -951,16 +1070,25 @@ class SnapshotListView(APIView):
             series = []
             for row in daily:
                 total = Decimal(row["total_value_tomans"] or 0)
-                val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
                 day_str = row["day"].strftime("%Y-%m-%d")
                 series.append({
                     "timestamp": day_str,
                     "date": day_str,
                     "total": str(total),
-                    "total_usd": val_usd,
+                    "total_usd": None,
                     "is_estimated": bool(row["is_estimated"]),
                     "is_session_close": bool(row["is_session_close"]),
                 })
+            # Snapshots record everything owned, so anything switched off has to
+            # come back out here -- across the whole window, not from today
+            # forward, or the chart would step down on the day the box was
+            # unticked. USD is derived after the subtraction for the same reason.
+            _subtract_hidden_holdings(request.user, account, series, now)
+            for row in series:
+                total = Decimal(row["total"])
+                row["total_usd"] = (
+                    str(round(total / usd_rate, 2)) if usd_rate > 0 else None
+                )
 
         trades = (
             Transaction.objects.filter(
@@ -1302,7 +1430,17 @@ class MyOptimalView(APIView):
             holding_q = holding_q.filter(account=account)
         max_ledger_id = ledger_q.order_by("-id").values_list("id", flat=True).first() or 0
         max_holding_id = holding_q.order_by("-id").values_list("id", flat=True).first() or 0
-        fingerprint = f"{_price_version_fingerprint()}:{max_ledger_id}:{max_holding_id}"
+        # Ticking a holding off changes the answer without inserting a row, so the
+        # highest ids alone cannot see it and the cached analytics would outlive
+        # the toggle for the full TTL.
+        hidden_fp = "-".join(
+            str(i) for i in sorted(
+                holding_q.filter(is_hidden=True).values_list("id", flat=True)
+            )
+        )
+        fingerprint = (
+            f"{_price_version_fingerprint()}:{max_ledger_id}:{max_holding_id}:{hidden_fp}"
+        )
         account_key = account.id if account is not None else "all"
         return f"my_optimal:{user.id}:{account_key}:{basis}:{fingerprint}", _cache
 
@@ -1601,7 +1739,7 @@ class AssetRankingView(APIView):
             return Response({"detail": "account query param is required."}, status=400)
         symbols = [
             holding.asset.tse_symbol or holding.asset.brs_symbol
-            for holding in account.holdings.select_related("asset")
+            for holding in account.holdings.filter(is_hidden=False).select_related("asset")
             if holding.asset.tse_symbol or holding.asset.brs_symbol
         ]
         rows = AssetMetricSnapshot.objects.filter(

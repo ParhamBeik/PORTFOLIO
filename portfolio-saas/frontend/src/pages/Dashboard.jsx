@@ -1,20 +1,32 @@
 import { useState } from "react";
+import AddTransactionDialog from "../components/AddTransactionDialog.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { useApi } from "../useApi.js";
 import {
   valuation,
   snapshots,
   getPerformance,
-  addHolding,
   updateHolding,
   removeHolding,
-  listAssets,
   adminAssetEvidence,
   analytics,
   diversifiers,
   benchmarks,
 } from "../api.js";
-import { num, toman, pct, signedToman, humanize, assetLabel, perfLabel, PERF_UNLOCK_HINT, ago } from "../format.js";
+import {
+  ago,
+  area,
+  assetLabel,
+  holdingLabel,
+  humanize,
+  num,
+  pct,
+  perfLabel,
+  perSqm,
+  PERF_UNLOCK_HINT,
+  signedToman,
+  toman,
+} from "../format.js";
 import {
   AreaTrend,
   CorrelationHeatmap,
@@ -29,8 +41,6 @@ import {
   Badge,
   Button,
   Delta,
-  Select,
-  Input,
   Tabs,
   Table,
   Empty,
@@ -172,6 +182,9 @@ function TrendCard({ activeId, basis }) {
         {(data) => {
           const points = (data.series || []).map((s) => ({ x: s.date, y: Number(s.total) }));
           const hasEstimated = (data.series || []).some((s) => s.is_estimated);
+          // Set when a switched-off holding had no recorded close for that day and
+          // its current price stood in while netting it out of the history.
+          const hasApproximated = (data.series || []).some((s) => s.approximated);
           const longTicks = range === "365" || range === "all";
 
           if (mode === "benchmarks" && benchState.data?.series?.length) {
@@ -240,6 +253,12 @@ function TrendCard({ activeId, basis }) {
               {hasEstimated && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-note">
                   Some points are estimated where a daily snapshot was missing.
+                </p>
+              )}
+              {hasApproximated && (
+                <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-hidden-note">
+                  On some days an asset you switched off had no recorded price, so
+                  the amount removed from the line there is an estimate.
                 </p>
               )}
             </>
@@ -400,56 +419,6 @@ function PerformanceCard({ activeId, basis, accounts }) {
   );
 }
 
-function AddHoldingRow({ activeId, onDone }) {
-  const assetsState = useApi(listAssets, [], { enabled: activeId != null });
-  const [assetKey, setAssetKey] = useState("");
-  const [qty, setQty] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState(null);
-
-  const handleAdd = async () => {
-    if (!assetKey || !qty) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      await addHolding(activeId, assetKey, qty);
-      setAssetKey("");
-      setQty("");
-      onDone();
-    } catch (e) {
-      setError(e);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="dashboard-add-holding">
-      <Select label="Asset" value={assetKey} onChange={(e) => setAssetKey(e.target.value)} className="min-w-40" data-testid="dashboard-add-asset-select">
-        <option value="">Select asset…</option>
-        {(assetsState.data || []).map((a) => (
-          <option key={a.key} value={a.key}>
-            {assetLabel(a)}
-          </option>
-        ))}
-      </Select>
-      <Input
-        label="Quantity"
-        type="number"
-        placeholder="Quantity"
-        value={qty}
-        onChange={(e) => setQty(e.target.value)}
-        className="w-28"
-        data-testid="dashboard-add-quantity"
-      />
-      <Button variant="primary" disabled={submitting || !assetKey || !qty} onClick={handleAdd} data-testid="dashboard-add-button">
-        Add
-      </Button>
-      {error && <ErrorState error={error} testId="dashboard-add-error" />}
-    </div>
-  );
-}
-
 function holdingsByAccountAsset(accounts) {
   const map = new Map();
   for (const account of accounts) {
@@ -470,19 +439,30 @@ function isManualPriceEditable(row) {
   );
 }
 
+// For a property `qty` is the price per square meter in millions of Toman — the
+// column the API stores it in — and `area` is its size. Those are the two numbers
+// a property is described by; the raw `quantity` is never shown on its own.
 function draftForRow(row, drafts) {
   const key = holdingsRowKey(row);
   return drafts[key] ?? {
     qty: String(row.quantity ?? ""),
     price: row.unit_price != null && row.unit_price !== "" ? String(row.unit_price) : "",
+    area: row.area_sqm != null ? String(row.area_sqm) : "",
   };
 }
 
 function hasDraftChanges(row, draft) {
   const origQty = String(row.quantity ?? "");
   const origPrice = row.unit_price != null && row.unit_price !== "" ? String(row.unit_price) : "";
+  const origArea = row.area_sqm != null ? String(row.area_sqm) : "";
   if (draft.qty.trim() !== origQty) return true;
+  if (row.is_house) return draft.area.trim() !== origArea;
   return isManualPriceEditable(row) && draft.price.trim() !== origPrice;
+}
+
+/** Manual and real-estate rows are the ones whose name is the user's to choose. */
+function isRenamable(row) {
+  return !!(row.is_house || row.is_manual);
 }
 
 const inlineInputClass = "w-full min-w-[5rem] rounded-md border border-border bg-panel px-2 py-1 text-right text-sm tabular";
@@ -506,6 +486,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
   const [savingKey, setSavingKey] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [whyKey, setWhyKey] = useState(null);
+  const [adding, setAdding] = useState(false);
 
   const reloadAll = () => {
     valuationState.reload();
@@ -513,6 +494,11 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
   };
 
   const holdingsMap = holdingsByAccountAsset(portfolio.accounts);
+  // Flat holding rows with their owning account attached — what the add dialog
+  // needs to revalue a property it already holds.
+  const allHoldings = portfolio.accounts.flatMap((a) =>
+    (a.holdings || []).map((h) => ({ ...h, account_id: a.id }))
+  );
 
   const resolveHolding = (row) => {
     const accountId = row.account_id ?? activeId;
@@ -551,6 +537,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
     try {
       await updateHolding(accountId, holding.id, {
         quantity: qty,
+        areaSqm: row.is_house ? draft.area : undefined,
         unitPriceTomans: isManualPriceEditable(row) ? draft.price : undefined,
       });
       setDrafts((cur) => {
@@ -558,6 +545,23 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
         delete next[key];
         return next;
       });
+      reloadAll();
+    } catch (e) {
+      setActionError(e);
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  /** Rename and visibility are saved on their own, the moment they change. */
+  const patchPresentation = async (row, holding, body) => {
+    const accountId = row.account_id ?? activeId;
+    if (!holding || accountId == null) return;
+    const key = holdingsRowKey(row);
+    setSavingKey(key);
+    setActionError(null);
+    try {
+      await updateHolding(accountId, holding.id, body);
       reloadAll();
     } catch (e) {
       setActionError(e);
@@ -600,34 +604,109 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
     <Card title="Holdings" testId="dashboard-holdings" actions={cardActions}>
       <Async {...valuationState} testId="dashboard-holdings-body">
         {(data) => {
-          const items = data.items || [];
+          const visible = data.items || [];
+          const hidden = data.hidden_items || [];
+          // Switched-off rows stay on screen, dimmed, so the user can see what
+          // they are leaving out and switch it back on. They are excluded from
+          // the weight base for the same reason they are excluded from the
+          // total: they are not part of the portfolio being measured.
+          const items = [...visible, ...hidden];
           // `data.total` is the NET figure (liabilities and real estate netted
           // off), while these rows are gross holding values. Dividing by it gave
           // a 945M holding a 109.7% weight. Weight is a share of what is listed.
           const weightBase =
-            items.reduce((sum, i) => sum + Number(i.value || 0), 0) || 1;
-          const staleCount = items.filter((i) => i.quality_status && i.quality_status !== "live").length;
-          const showStaleBanner = items.length > 0 && staleCount / items.length >= 0.5;
+            visible.reduce((sum, i) => sum + Number(i.value || 0), 0) || 1;
+          const staleCount = visible.filter((i) => i.quality_status && i.quality_status !== "live").length;
+          const showStaleBanner = visible.length > 0 && staleCount / visible.length >= 0.5;
 
           const columns = [
-            { key: "asset", header: "Asset", render: (r) => r.name_fa || r.asset },
+            {
+              key: "include",
+              header: "",
+              render: (r) => {
+                const holding = resolveHolding(r);
+                if (!holding) return null;
+                return (
+                  <input
+                    type="checkbox"
+                    checked={!r.is_hidden}
+                    disabled={savingKey === holdingsRowKey(r)}
+                    aria-label={`Count ${holdingLabel(r)} in this portfolio`}
+                    title={
+                      r.is_hidden
+                        ? "Switched off — not counted anywhere. Tick to include it again."
+                        : "Counted. Untick to leave it out of every figure without deleting it."
+                    }
+                    data-testid="dashboard-holdings-include"
+                    onChange={(e) =>
+                      patchPresentation(r, holding, { isHidden: !e.target.checked })
+                    }
+                  />
+                );
+              },
+            },
+            {
+              key: "asset",
+              header: "Asset",
+              render: (r) => {
+                const holding = resolveHolding(r);
+                if (manageMode === "edit" && holding && isRenamable(r)) {
+                  return (
+                    <input
+                      className={`${inlineInputClass} text-left`}
+                      defaultValue={r.display_name || ""}
+                      placeholder={r.name_fa || r.asset}
+                      aria-label={`Name for ${holdingLabel(r)}`}
+                      data-testid="dashboard-holdings-edit-name"
+                      disabled={savingKey === holdingsRowKey(r)}
+                      onBlur={(e) => {
+                        const next = e.target.value.trim();
+                        if (next !== (r.display_name || "")) {
+                          patchPresentation(r, holding, { displayName: next });
+                        }
+                      }}
+                    />
+                  );
+                }
+                return holdingLabel(r);
+              },
+            },
             { key: "class", header: "Class", render: (r) => humanize(r.class) },
             {
               key: "qty",
-              header: "Quantity",
+              header: "Size / quantity",
               align: "right",
               render: (r) => {
                 const holding = resolveHolding(r);
-                if (manageMode === "edit" && holding) {
-                  const draft = draftForRow(r, drafts);
-                  const rk = holdingsRowKey(r);
+                const editing = manageMode === "edit" && holding;
+                const draft = draftForRow(r, drafts);
+                const rk = holdingsRowKey(r);
+                // A property's stored "quantity" is its price per square meter,
+                // so what belongs in this column is its size, not that number.
+                if (r.is_house) {
+                  return editing ? (
+                    <input
+                      type="number"
+                      step="any"
+                      className={inlineInputClass}
+                      value={draft.area}
+                      aria-label={`Size in square meters for ${holdingLabel(r)}`}
+                      data-testid="dashboard-holdings-edit-area"
+                      disabled={savingKey === rk}
+                      onChange={(e) => setDraftField(r, "area", e.target.value)}
+                    />
+                  ) : (
+                    area(r.area_sqm)
+                  );
+                }
+                if (editing) {
                   return (
                     <input
                       type="number"
                       step="any"
                       className={inlineInputClass}
                       value={draft.qty}
-                      aria-label={`Quantity for ${r.asset}`}
+                      aria-label={`Quantity for ${holdingLabel(r)}`}
                       data-testid="dashboard-holdings-edit-qty"
                       disabled={savingKey === rk}
                       onChange={(e) => setDraftField(r, "qty", e.target.value)}
@@ -643,17 +722,35 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
               align: "right",
               render: (r) => {
                 const holding = resolveHolding(r);
-                if (r.is_house) return "—";
+                const draft = draftForRow(r, drafts);
+                const rk = holdingsRowKey(r);
+                if (r.is_house) {
+                  // Editing a property means editing what a meter is worth --
+                  // entered in millions, the unit the market quotes in.
+                  return manageMode === "edit" && holding ? (
+                    <input
+                      type="number"
+                      step="any"
+                      className={inlineInputClass}
+                      value={draft.qty}
+                      aria-label={`Price per square meter, in millions, for ${holdingLabel(r)}`}
+                      title="Millions of Toman per square meter"
+                      data-testid="dashboard-holdings-edit-price-per-sqm"
+                      disabled={savingKey === rk}
+                      onChange={(e) => setDraftField(r, "qty", e.target.value)}
+                    />
+                  ) : (
+                    perSqm(r.price_per_sqm_tomans)
+                  );
+                }
                 if (manageMode === "edit" && isManualPriceEditable(r) && holding) {
-                  const draft = draftForRow(r, drafts);
-                  const rk = holdingsRowKey(r);
                   return (
                     <input
                       type="number"
                       step="any"
                       className={inlineInputClass}
                       value={draft.price}
-                      aria-label={`Unit price for ${r.asset}`}
+                      aria-label={`Unit price for ${holdingLabel(r)}`}
                       data-testid="dashboard-holdings-edit-price"
                       disabled={savingKey === rk}
                       onChange={(e) => setDraftField(r, "price", e.target.value)}
@@ -663,13 +760,29 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
                 return toman(r.unit_price);
               },
             },
-            { key: "value", header: "Value", align: "right", render: (r) => toman(r.value) },
-            { key: "weight", header: "Weight", align: "right", render: (r) => pct(Number(r.value) / weightBase) },
+            {
+              key: "value",
+              header: "Value",
+              align: "right",
+              render: (r) =>
+                r.is_hidden ? (
+                  <span className="line-through">{toman(r.value)}</span>
+                ) : (
+                  toman(r.value)
+                ),
+            },
+            {
+              key: "weight",
+              header: "Weight",
+              align: "right",
+              render: (r) => (r.is_hidden ? "—" : pct(Number(r.value) / weightBase)),
+            },
             {
               key: "status",
               header: "Status",
               render: (r) => (
                 <div className="flex flex-wrap items-center gap-1">
+                  {r.is_hidden && <Badge variant="warn">Not counted</Badge>}
                   <Badge variant={ITEM_BADGE[r.quality_status] || "neutral"}>{humanize(r.quality_status)}</Badge>
                   {r.price_unit_status === "unverified" && <Badge variant="warn">unverified unit</Badge>}
                 </div>
@@ -748,22 +861,55 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
                   data-testid="dashboard-stale-banner"
                   className="mb-3 rounded-lg border border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 px-4 py-3 text-sm"
                 >
-                  Live pricing unavailable for {staleCount} of {items.length} holdings — showing archived or manual prices instead.
+                  Live pricing unavailable for {staleCount} of {visible.length} holdings — showing archived or manual prices instead.
                 </div>
+              )}
+              {hidden.length > 0 && (
+                <p className="mb-3 text-sm text-muted" data-testid="dashboard-holdings-hidden-note">
+                  {hidden.length === 1 ? "One asset is" : `${hidden.length} assets are`} switched
+                  off — listed below but left out of your total, your allocation, your risk and
+                  your history. Tick the box to count {hidden.length === 1 ? "it" : "them"} again.
+                </p>
               )}
               {manageMode === "edit" && (
                 <p className="mb-3 text-xs text-muted">
-                  Edit any holding quantity and click Save. Manual assets also allow a unit-price update; live assets keep their fetched market price.
+                  Change any quantity and click Save. Manual assets also take a unit price; a
+                  property takes its size and what a square meter is worth, in millions of Toman.
+                  Names of your own assets save as soon as you click away.
                 </p>
               )}
-              <Table testId="dashboard-holdings-table" rowKey={holdingsRowKey} rows={items} columns={columns} empty="No holdings priced yet." />
+              <Table
+                testId="dashboard-holdings-table"
+                rowKey={holdingsRowKey}
+                rows={items}
+                columns={columns}
+                empty="No holdings priced yet."
+                rowClass={(r) => (r.is_hidden ? "opacity-50" : "")}
+              />
               <PricingGlossaryDisclosure />
               {actionError && (
                 <div className="mt-2">
                   <ErrorState error={actionError} testId="dashboard-holdings-error" />
                 </div>
               )}
-              {activeId != null && <AddHoldingRow activeId={activeId} onDone={reloadAll} />}
+              <div className="mt-3">
+                <Button
+                  variant="primary"
+                  onClick={() => setAdding(true)}
+                  data-testid="dashboard-add-button"
+                >
+                  Add an asset
+                </Button>
+              </div>
+              {adding && (
+                <AddTransactionDialog
+                  accountId={activeId}
+                  accounts={portfolio.accounts}
+                  holdings={allHoldings}
+                  onClose={() => setAdding(false)}
+                  onSaved={reloadAll}
+                />
+              )}
               {staff && whyKey && <WhyDrawer assetKey={whyKey} onClose={() => setWhyKey(null)} />}
             </>
           );
@@ -779,13 +925,6 @@ const RISK_WINDOWS = [
   { value: "90", label: "90d" },
   { value: "180", label: "180d" },
   { value: "365", label: "365d" },
-];
-
-const RISK_VIEWS = [
-  { value: "class", label: "Risk by class" },
-  { value: "asset", label: "Risk by asset" },
-  { value: "correlation", label: "Correlations" },
-  { value: "add", label: "Add diversification" },
 ];
 
 function riskShareRows(weights = {}, risks = {}, labelFor = (key) => key) {
@@ -805,7 +944,18 @@ function riskShareRows(weights = {}, risks = {}, labelFor = (key) => key) {
     .sort((a, b) => b.gap - a.gap);
 }
 
-function RiskClassView({ data }) {
+/** One stacked panel: a heading, a sentence saying what to look for, the chart. */
+function RiskPanel({ title, caption, children }) {
+  return (
+    <section className="border-t border-border pt-5 first:border-0 first:pt-0">
+      <h3 className="text-sm font-semibold">{title}</h3>
+      <p className="mt-1 mb-3 max-w-prose text-xs text-muted">{caption}</p>
+      {children}
+    </section>
+  );
+}
+
+function RiskClassView({ data, valueByClass }) {
   const div = data.diversification || {};
   const rows = riskShareRows(div.weight_by_class, div.risk_by_class);
   if (!rows.length) return <Empty testId="dashboard-risk-class-empty">No class risk data.</Empty>;
@@ -815,13 +965,14 @@ function RiskClassView({ data }) {
         rows={rows}
         label="Share of money versus share of risk by asset class"
         coverage={div.mean_weight_covered}
+        valueFor={(key) => valueByClass[key]}
         testId="risk-money-vs-risk-class"
       />
     </div>
   );
 }
 
-function RiskAssetView({ data, labelFor }) {
+function RiskAssetView({ data, labelFor, valueByLabel }) {
   const div = data.diversification || {};
   const rows = (div.concentration_gap || []).map((row) => ({
     ...row,
@@ -834,6 +985,7 @@ function RiskAssetView({ data, labelFor }) {
         rows={rows}
         label="Share of money versus share of risk by asset"
         coverage={div.mean_weight_covered}
+        valueFor={(key) => valueByLabel[key]}
         testId="risk-money-vs-risk"
       />
     </div>
@@ -865,7 +1017,13 @@ function RiskAddView({ activeId, basis, window, labelFor }) {
     <Async {...state} testId="dashboard-risk-add-body">
       {(data) => {
         if (!data.candidates?.length) {
-          return <Empty>No candidate has enough overlapping history to score yet.</Empty>;
+          // Addressable, like every other panel's empty state: `Async` renders
+          // its own testId only when it does NOT reach this branch.
+          return (
+            <Empty testId="dashboard-risk-add-empty">
+              No candidate has enough overlapping history to score yet.
+            </Empty>
+          );
         }
         return (
           <div data-testid="dashboard-risk-add-view">
@@ -881,21 +1039,40 @@ function RiskAddView({ activeId, basis, window, labelFor }) {
   );
 }
 
+/**
+ * All four risk views, stacked.
+ *
+ * They used to be behind tabs, which meant three of the four were never seen and
+ * the section answered whichever question the user happened to click. Stacking
+ * makes the page longer and shows the whole picture, which is the point of it.
+ * The time-window control stays because it changes what every panel measures.
+ */
 function RiskCard({ activeId, basis, valuationState }) {
   const [window, setWindow] = useState("180");
-  const [view, setView] = useState("class");
   const state = useApi(
     () => analytics(activeId, { basis, window: Number(window) }),
     [activeId, basis, window]
   );
+  const items = valuationState?.data?.items || [];
   const labelFor = (key) => {
-    const item = (valuationState?.data?.items || []).find((i) => i.key === key);
-    return item ? assetLabel(item) : assetLabel({ key });
+    const item = items.find((i) => i.key === key);
+    return item ? holdingLabel(item) : assetLabel({ key });
   };
+  // The charts identify rows by their display label, so the amount has to be
+  // reachable under the same key the tooltip is handed.
+  const valueByLabel = {};
+  const valueByClass = {};
+  for (const item of items) {
+    const value = Number(item.value || 0);
+    valueByLabel[holdingLabel(item)] = value;
+    const cls = humanize(item.class || "other");
+    valueByClass[cls] = (valueByClass[cls] || 0) + value;
+  }
 
   return (
     <Card
       title="Risk"
+      subtitle="Where your money sits, where your risk actually comes from, and what would spread it out."
       testId="dashboard-risk"
       actions={(
         <Tabs
@@ -907,30 +1084,45 @@ function RiskCard({ activeId, basis, valuationState }) {
         />
       )}
     >
-      <Async {...state} testId="dashboard-risk-body">
-        {(data) => (
-          <div className="space-y-4">
-            <Tabs
-              label="Risk breakdown"
-              testId="dashboard-risk-view"
-              value={view}
-              onChange={setView}
-              options={RISK_VIEWS}
-            />
-            {view === "class" && <RiskClassView data={data} />}
-            {view === "asset" && <RiskAssetView data={data} labelFor={labelFor} />}
-            {view === "correlation" && <RiskCorrelationView data={data} labelFor={labelFor} />}
-            {view === "add" && (
-              <RiskAddView
-                activeId={activeId}
-                basis={basis}
-                window={window}
-                labelFor={labelFor}
-              />
-            )}
-          </div>
-        )}
-      </Async>
+      <div className="space-y-5">
+        <Async {...state} testId="dashboard-risk-body">
+          {(data) => (
+            <>
+              <RiskPanel
+                title="Risk by class"
+                caption="Two dots per row: the share of your money in that class, and the share of your portfolio's swings it accounts for. A risk dot far right of the money dot means that class moves the portfolio more than its size suggests."
+              >
+                <RiskClassView data={data} valueByClass={valueByClass} />
+              </RiskPanel>
+              <RiskPanel
+                title="Risk by asset"
+                caption="The same comparison, one row per holding. The widest gaps are the positions worth trimming first."
+              >
+                <RiskAssetView data={data} labelFor={labelFor} valueByLabel={valueByLabel} />
+              </RiskPanel>
+              <RiskPanel
+                title="Correlations"
+                caption="How closely each pair moves together. Warm cells move in lockstep and give you less protection than owning two things suggests; cool cells pull against each other."
+              >
+                <RiskCorrelationView data={data} labelFor={labelFor} />
+              </RiskPanel>
+            </>
+          )}
+        </Async>
+        {/* Its own request and its own Async: a slow or empty diversifier
+            response must not hold up the three panels above it. */}
+        <RiskPanel
+          title="Where diversification would come from"
+          caption="Each dot is an asset you could add. Further right means it would calm the portfolio more; higher means it also returned more over the window."
+        >
+          <RiskAddView
+            activeId={activeId}
+            basis={basis}
+            window={window}
+            labelFor={labelFor}
+          />
+        </RiskPanel>
+      </div>
     </Card>
   );
 }

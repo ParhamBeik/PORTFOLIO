@@ -50,5 +50,36 @@ class User(AbstractUser):
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []
 
+    def delete(self, *args, **kwargs):
+        """Tear the portfolio down innermost-first, then delete the user.
+
+        Django's collector gathers an entire cascade before deleting anything,
+        so a PROTECT pointing at something else inside the same cascade is a
+        deadlock, not an ordering it can resolve. This graph has two of them:
+
+          * `LedgerEntry.import_batch` PROTECTs `ImportBatch`, which is CASCADEd
+            from `Account` -- so deleting an account that ever ran a CSV import
+            raised ProtectedError. Pre-existing, and it broke account closure
+            for those users.
+          * `Holding.asset` / `LedgerEntry.asset` / `Liability.asset` PROTECT
+            `Asset`, which is CASCADEd from the user for real estate (a property
+            belongs to one person and must not outlive them into the shared
+            catalog) -- so closing the account failed once you added a property.
+
+        Both dissolve the same way: remove the rows that hold the PROTECT
+        references first, so by the time the account and user cascades run
+        nothing points at the things they are about to take with them. Ordered
+        here rather than in the delete-account view so every caller -- admin,
+        shell, management command -- gets it.
+        """
+        from portfolio.models import Holding, LedgerEntry, Liability
+
+        accounts = self.accounts.all()
+        LedgerEntry.objects.filter(account__in=accounts).delete()
+        Holding.objects.filter(account__in=accounts).delete()
+        Liability.objects.filter(account__in=accounts).delete()
+        accounts.delete()
+        return super().delete(*args, **kwargs)
+
 
 

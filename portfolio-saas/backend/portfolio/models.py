@@ -28,6 +28,12 @@ from . import optimization_models  # noqa: F401
 # mortgage is a `Liability` row, and a house with no declared mortgage has none.
 HOUSE_AREA_SQM = Decimal("90.2")
 
+# A property's price is entered and stored in MILLIONS of Toman per square meter,
+# because that is the unit the market quotes in ("this place is 100 a meter").
+# This is the one place that convention is written down; `valuation._house_value`
+# and the API serializers both scale by it rather than repeating a literal.
+HOUSE_PRICE_SCALE = Decimal("1000000")
+
 
 
 class Asset(models.Model):
@@ -52,6 +58,20 @@ class Asset(models.Model):
     key = models.SlugField(max_length=64, unique=True)
     name = models.CharField(max_length=120)
     name_fa = models.CharField(max_length=120, blank=True, default="")
+    # NULL = the shared global catalog every user sees. A non-null owner is a row
+    # one user minted for themselves, and only real estate is ever minted this way
+    # (see HoldingListCreateView). That restriction is load-bearing: every loop
+    # over the global catalog -- the live price fetch, nightly_asset_metrics, the
+    # returns universe -- already excludes `is_house=True`, so none of them need an
+    # owner filter. Widen this to another asset class and those loops must be
+    # audited first.
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="owned_assets",
+        null=True,
+        blank=True,
+    )
     asset_class = models.CharField(
         max_length=16, choices=AssetClass.choices, default=AssetClass.GOLD
     )
@@ -132,6 +152,16 @@ class Account(models.Model):
         default=False,
         help_text="True when opening balances and subsequent cash flows are complete.",
     )
+    # Opt-in double-entry cash. When False a buy is just a position: the money is
+    # assumed to have come from outside the tracked portfolio. Booking every buy
+    # as a funded purchase meant any portfolio that had never recorded a deposit
+    # was refused ("Insufficient cash balance") the first time it recorded one --
+    # the single most common reason a trade could not be saved. Flipped on
+    # automatically by the first cash entry; see ledger._cash_delta.
+    track_cash = models.BooleanField(
+        default=False,
+        help_text="True when this portfolio records cash movements, so trades settle against a balance.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -158,6 +188,16 @@ class Holding(models.Model):
     mortgage_deduction_tomans = models.DecimalField(
         max_digits=20, decimal_places=4, default=Decimal("0")
     )
+    # This user's own name for their copy of the asset ("Dad's gold bar", "Home").
+    # Blank falls back to the catalog name. It lives here rather than on Asset
+    # because the catalog is shared: renaming there would rename the asset for
+    # every other user of the application.
+    display_name = models.CharField(max_length=120, blank=True, default="")
+    # Switched off: still listed, still owned, but excluded from every figure the
+    # app computes -- value, allocation, risk, performance and the historical net
+    # worth line. Lets someone list a primary residence without it dominating a
+    # portfolio they actually trade. See services/visibility.py.
+    is_hidden = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -169,6 +209,18 @@ class Holding(models.Model):
                 fields=["account", "asset"], name="uniq_asset_per_account"
             )
         ]
+
+    @property
+    def label(self) -> str:
+        """What to call this holding on screen: the owner's name for it, else the
+        catalog's. Persian first, because that is how TSE symbols are recognized."""
+        return self.display_name or self.asset.name_fa or self.asset.name or self.asset.key
+
+    @property
+    def price_per_sqm_tomans(self) -> Decimal | None:
+        if not self.asset.is_house:
+            return None
+        return Decimal(self.quantity) * HOUSE_PRICE_SCALE
 
 
 class Price(models.Model):

@@ -13,8 +13,10 @@ test.describe("dashboard", () => {
     }
 
     await page.getByTestId("nav-portfolio").click();
+    // `.first()`: both testids are present once the hero renders, and an `.or()`
+    // that matches two elements is a strict-mode violation, not a pass.
     await expect
-      .soft(page.getByTestId("dashboard-hero").or(page.getByTestId("dashboard-total")))
+      .soft(page.getByTestId("dashboard-hero").or(page.getByTestId("dashboard-total")).first())
       .toBeVisible({ timeout: 20000 });
 
     await expect.soft(page.getByTestId("dashboard-trend")).toBeVisible();
@@ -66,7 +68,7 @@ test.describe("dashboard", () => {
     await basis.selectOption("nominal_toman");
   });
 
-  test("inline add controls when a portfolio is selected", async ({ page }) => {
+  test("add opens the step-by-step dialog when a portfolio is selected", async ({ page }) => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }
@@ -80,10 +82,15 @@ test.describe("dashboard", () => {
     const value = await options[1].getAttribute("value");
     await scope.selectOption(value);
 
-    await expect.soft(page.getByTestId("dashboard-add-holding")).toBeVisible({ timeout: 15000 });
-    await expect.soft(page.getByTestId("dashboard-add-asset-select")).toBeVisible();
-    await expect.soft(page.getByTestId("dashboard-add-quantity")).toBeVisible();
-    await expect.soft(page.getByTestId("dashboard-add-button")).toBeVisible();
+    // The quick-add row was replaced by the same guided dialog the Ledger uses,
+    // so there is one add flow instead of two that disagreed.
+    const addButton = page.getByTestId("dashboard-add-button");
+    await expect(addButton).toBeVisible({ timeout: 15000 });
+    await addButton.click();
+    await expect(page.getByTestId("add-transaction")).toBeVisible();
+    await expect(page.getByTestId("add-transaction-category-gold")).toBeVisible();
+    await page.getByTestId("add-transaction-close").click();
+    await expect(page.getByTestId("add-transaction")).toHaveCount(0);
 
     await expect.soft(page.getByTestId("dashboard-holdings-manage-edit")).toBeVisible();
     await page.getByTestId("dashboard-holdings-manage-edit").click();

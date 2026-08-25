@@ -68,7 +68,12 @@ class Command(BaseCommand):
                 for field in dirty:
                     setattr(asset, field, changes[field])
                 asset.save(update_fields=dirty)
-        Asset.objects.exclude(key__in=[row[0] for row in ASSETS]).update(is_active=False)
+        # Global catalog only. A user's own real-estate rows are not in ASSETS by
+        # construction, so an unscoped sweep would switch every property off on
+        # the next boot -- this command runs on every container start.
+        Asset.objects.filter(owner__isnull=True).exclude(
+            key__in=[row[0] for row in ASSETS]
+        ).update(is_active=False)
         self.stdout.write(self.style.SUCCESS(
             f"Asset catalog ready ({created} new, {len(ASSETS)} total)."
         ))

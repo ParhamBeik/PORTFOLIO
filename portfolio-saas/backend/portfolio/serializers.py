@@ -1,8 +1,16 @@
 from decimal import Decimal
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import Account, Asset, Holding, LedgerEntry, Transaction, Liability
+from .models import (
+    Account,
+    Asset,
+    Holding,
+    LedgerEntry,
+    Transaction,
+    Liability,
+)
 from .services.ledger import (
     PriceResolutionError,
     assert_not_before_history,
@@ -18,13 +26,16 @@ class AssetSerializer(serializers.ModelSerializer):
 
 
 class HoldingSerializer(serializers.ModelSerializer):
+    # `asset_key` is optional so a brand-new property can be created in the same
+    # POST that opens the holding -- there is no catalog row to point at yet.
     quantity = serializers.DecimalField(
         max_digits=20,
         decimal_places=6,
         min_value=Decimal("0"),
+        required=False,
     )
     asset_key = serializers.SlugRelatedField(
-        source="asset", slug_field="key", queryset=Asset.objects.filter(is_active=True)
+        source="asset", slug_field="key", queryset=Asset.objects.none(), required=False
     )
     asset_name = serializers.CharField(source="asset.name", read_only=True)
     asset_name_fa = serializers.CharField(source="asset.name_fa", read_only=True)
@@ -38,18 +49,79 @@ class HoldingSerializer(serializers.ModelSerializer):
         required=False,
         write_only=True,
     )
+    # A property is described the way its owner describes it: how big, and what a
+    # square meter is worth. `quantity` stores the second of those in millions of
+    # Toman (see HOUSE_AREA_SQM / valuation._house_value), which is meaningless on
+    # screen, so it is never the field the client reads or writes for a house.
+    price_per_sqm_million = serializers.DecimalField(
+        max_digits=20, decimal_places=6, min_value=Decimal("0.000001"),
+        required=False, write_only=True,
+    )
+    price_per_sqm_tomans = serializers.SerializerMethodField()
+    gross_value_tomans = serializers.SerializerMethodField()
+    label = serializers.SerializerMethodField()
+    # Only supplied when minting a new property; ignored otherwise.
+    new_property_name = serializers.CharField(
+        max_length=120, required=False, write_only=True
+    )
 
     class Meta:
         model = Holding
         fields = ("id", "asset_key", "asset_name", "asset_name_fa", "asset_class", "is_house", "is_manual",
                   "quantity", "unit_price_tomans", "area_sqm", "mortgage_deduction_tomans",
+                  "display_name", "label", "is_hidden",
+                  "price_per_sqm_million", "price_per_sqm_tomans", "gross_value_tomans",
+                  "new_property_name",
                   "created_at", "updated_at")
         read_only_fields = ("id", "created_at", "updated_at")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Scoped per request so one user cannot attach another user's property to
+        # their own account by guessing its key.
+        user = getattr(self.context.get("request"), "user", None)
+        catalog = Asset.objects.filter(is_active=True)
+        self.fields["asset_key"].queryset = (
+            catalog.filter(Q(owner__isnull=True) | Q(owner=user))
+            if user is not None and user.is_authenticated
+            else catalog.filter(owner__isnull=True)
+        )
+
+    def get_label(self, obj) -> str:
+        return obj.label
+
+    def get_price_per_sqm_tomans(self, obj):
+        price = obj.price_per_sqm_tomans
+        return None if price is None else str(price)
+
+    def get_gross_value_tomans(self, obj):
+        price = obj.price_per_sqm_tomans
+        return None if price is None else str(price * Decimal(obj.area_sqm))
 
     def validate_quantity(self, value):
         if value == 0 and self.context.get("request") and self.context["request"].method == "POST":
             raise serializers.ValidationError("Quantity must be positive.")
         return value
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        creating = request is not None and request.method == "POST"
+        # A house's price-per-sqm and the generic `quantity` are the same column;
+        # accept either name and normalise here so no downstream branch has to.
+        if "price_per_sqm_million" in attrs:
+            attrs["quantity"] = attrs.pop("price_per_sqm_million")
+        if creating:
+            if not attrs.get("asset") and not attrs.get("new_property_name"):
+                raise serializers.ValidationError(
+                    {"asset_key": "Choose an asset, or name a new property."}
+                )
+            if attrs.get("quantity") is None:
+                raise serializers.ValidationError({"quantity": "This field is required."})
+            if attrs.get("new_property_name") and not attrs.get("area_sqm"):
+                raise serializers.ValidationError(
+                    {"area_sqm": "A property needs its size in square meters."}
+                )
+        return attrs
 
 
 class AccountSerializer(serializers.ModelSerializer):
@@ -109,12 +181,16 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
     account_id = serializers.IntegerField(source="account.id", read_only=True)
     account_name = serializers.CharField(source="account.name", read_only=True)
     is_synthetic = serializers.SerializerMethodField()
+    label = serializers.SerializerMethodField()
+    # A property's `quantity` is a price per square meter, not a count, so the
+    # client has to know which convention to render before it prints the number.
+    is_house = serializers.BooleanField(source="asset.is_house", read_only=True, default=False)
 
     class Meta:
         model = LedgerEntry
         fields = (
-            "id", "kind", "asset_key", "asset_name", "asset_name_fa",
-            "quantity", "unit_price_tomans",
+            "id", "kind", "asset_key", "asset_name", "asset_name_fa", "label",
+            "is_house", "quantity", "unit_price_tomans",
             "amount_tomans", "area_sqm", "mortgage_deduction_tomans",
             "occurred_at", "source", "note", "external_id", "reversal_of",
             "created_at", "pnl_tomans", "pnl_kind",
@@ -133,6 +209,22 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
 
     def get_is_synthetic(self, obj):
         return False
+
+    def get_label(self, obj) -> str | None:
+        """The owner's name for the asset this entry moved.
+
+        Supplied by the view as a {(account_id, asset_id): name} map rather than
+        looked up per row -- the alternative is one query per ledger line. Falls
+        back to the catalog name when the holding is gone (a fully sold position
+        keeps its history)."""
+        if not obj.asset_id:
+            return None
+        names = self.context.get("labels") or {}
+        return (
+            names.get((obj.account_id, obj.asset_id))
+            or obj.asset.name_fa
+            or obj.asset.name
+        )
 
 
 class LedgerEntryPatchSerializer(serializers.Serializer):

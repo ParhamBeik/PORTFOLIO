@@ -99,8 +99,46 @@ def test_opening_baseline_and_trade_update_cash_and_holdings(
     assert LedgerEntry.objects.filter(account=ledger_account).count() == 3
 
 
-def test_buy_cannot_make_cash_negative(ledger_account, asset_catalog):
+def test_buy_funds_itself_when_the_portfolio_does_not_track_cash(
+    ledger_account, asset_catalog
+):
+    """A portfolio that has never recorded cash can still record a purchase.
+
+    Booking every buy as a funded purchase meant this was refused with
+    "Insufficient cash balance" -- the most common reason a trade could not be
+    saved, and it looked like the app had lost the entry rather than declined it.
+    The money is assumed to have come from outside the tracked portfolio.
+    """
     client = _client(ledger_account.user)
+    response = _post(client, ledger_account, {
+        "kind": "buy",
+        "asset_key": "emami_coin",
+        "quantity": "1",
+        "unit_price_tomans": "100",
+        "occurred_at": timezone.now().isoformat(),
+    })
+
+    assert response.status_code == 201, response.data
+    ledger_account.refresh_from_db()
+    assert ledger_account.cash_balance_tomans == Decimal("0")
+    assert ledger_account.track_cash is False
+    assert Holding.objects.get(
+        account=ledger_account, asset=asset_catalog["emami_coin"]
+    ).quantity == Decimal("1")
+
+
+def test_buy_cannot_make_cash_negative_once_cash_is_tracked(
+    ledger_account, asset_catalog
+):
+    """Declaring cash opts the portfolio into settling trades against it."""
+    client = _client(ledger_account.user)
+    opened = _post(client, ledger_account, {
+        "kind": "opening_cash",
+        "amount_tomans": "50",
+        "occurred_at": (timezone.now() - datetime.timedelta(days=1)).isoformat(),
+    })
+    assert opened.status_code == 201, opened.data
+
     response = _post(client, ledger_account, {
         "kind": "buy",
         "asset_key": "emami_coin",
@@ -111,7 +149,40 @@ def test_buy_cannot_make_cash_negative(ledger_account, asset_catalog):
 
     assert response.status_code == 400
     assert response.data["detail"] == "Insufficient cash balance."
-    assert not LedgerEntry.objects.filter(account=ledger_account).exists()
+    ledger_account.refresh_from_db()
+    assert ledger_account.track_cash is True
+    assert ledger_account.cash_balance_tomans == Decimal("50")
+
+
+def test_declaring_cash_does_not_retroactively_bill_earlier_trades(
+    ledger_account, asset_catalog
+):
+    """Cash tracking starts where the cash history starts, not at the ledger's head.
+
+    Applying it to the whole ledger at once meant recording your first deposit
+    charged every past purchase against it and failed the replay for insufficient
+    funds -- turning "I want to start tracking cash" into an unfixable error.
+    """
+    client = _client(ledger_account.user)
+    bought = _post(client, ledger_account, {
+        "kind": "buy",
+        "asset_key": "emami_coin",
+        "quantity": "1",
+        "unit_price_tomans": "1000",
+        "occurred_at": (timezone.now() - datetime.timedelta(days=5)).isoformat(),
+    })
+    assert bought.status_code == 201, bought.data
+
+    deposited = _post(client, ledger_account, {
+        "kind": "deposit",
+        "amount_tomans": "300",
+        "occurred_at": timezone.now().isoformat(),
+    })
+
+    assert deposited.status_code == 201, deposited.data
+    ledger_account.refresh_from_db()
+    # The earlier 1,000 purchase is not charged against the 300 deposit.
+    assert ledger_account.cash_balance_tomans == Decimal("300")
 
 
 def test_reversal_is_append_only_and_restores_projections(
@@ -855,8 +926,13 @@ class TestTradeEndpoint:
     def test_dashboard_add_needs_no_cash_on_a_holdings_only_account(
         self, asset_catalog, make_user, write_prices
     ):
-        """An account that never opened a cash ledger has nothing to spend, so
-        booking the add as a funded purchase would reject it outright."""
+        """An account that never opened a cash ledger can still book a purchase.
+
+        It used to record a bare position instead, because a funded purchase
+        would have been rejected for insufficient funds. Now that a buy funds
+        itself, the acquisition is the dated, priced event it really is -- which
+        is also the only way the holding gets a cost basis.
+        """
         write_prices({"emami_coin": Decimal("176000000")})
         cashless = Account.objects.create(
             user=make_user(email="holdings-only@test.test"), name="Holdings only"
@@ -868,7 +944,9 @@ class TestTradeEndpoint:
         )
         assert resp.status_code == 201, resp.data
         assert cashless.holdings.get(asset__key="emami_coin").quantity == Decimal("2")
-        assert not LedgerEntry.objects.filter(account=cashless).exists()
+        assert LedgerEntry.objects.filter(
+            account=cashless, kind=LedgerEntry.Kind.BUY
+        ).exists()
         cashless.refresh_from_db()
         assert cashless.cash_balance_tomans == Decimal("0")
 

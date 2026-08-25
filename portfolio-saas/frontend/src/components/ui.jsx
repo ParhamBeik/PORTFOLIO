@@ -5,6 +5,8 @@
 // rendered as `data-testid`. Naming convention: "<page>-<thing>", lowercase and
 // hyphenated, e.g. "dashboard-total", "optimal-window-tabs".
 
+import { useEffect, useRef } from "react";
+
 const tone = {
   neutral: "text-text",
   muted: "text-muted",
@@ -155,8 +157,12 @@ export function Tabs({ options, value, onChange, label, testId }) {
 /**
  * `columns` is [{ key, header, align?, render?(row), width? }].
  * Numeric columns should pass align:"right" so the tabular figures line up.
+ *
+ * `rowClass(row)` styles a whole row by its state — dimming one that has been
+ * switched off, say. Per row rather than per cell so the treatment cannot drift
+ * between columns.
  */
-export function Table({ columns, rows, rowKey, empty = "No rows.", testId, caption }) {
+export function Table({ columns, rows, rowKey, empty = "No rows.", testId, caption, rowClass }) {
   if (!rows?.length) return <Empty testId={testId ? `${testId}-empty` : undefined}>{empty}</Empty>;
   return (
     <div className="overflow-x-auto">
@@ -183,7 +189,9 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
             <tr
               key={rowKey ? rowKey(row) : i}
               data-testid={testId ? `${testId}-row` : undefined}
-              className="border-b border-border/60 last:border-0 hover:bg-panel-2"
+              className={`border-b border-border/60 last:border-0 hover:bg-panel-2 ${
+                rowClass?.(row) || ""
+              }`}
             >
               {columns.map((c) => (
                 <td
@@ -242,6 +250,68 @@ export function Async({ data, error, loading, reload, children, empty, testId })
   if (loading && data == null) return <Loading testId={testId} />;
   if (data == null) return <Empty testId={testId}>{empty || "No data yet."}</Empty>;
   return children(data);
+}
+
+/**
+ * Centred dialog over a scrim. Escape and a backdrop click both close it, and
+ * focus moves inside on open so a keyboard user is not left behind on the page.
+ *
+ * `footer` is pinned below the scrolling body: a stepper's Back/Next must stay
+ * reachable when the step is taller than the viewport.
+ */
+export function Modal({ title, subtitle, onClose, children, footer, testId }) {
+  const panel = useRef(null);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    // The page behind must not scroll under the scrim.
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    panel.current?.querySelector(
+      "input, select, button, [tabindex]:not([tabindex='-1'])"
+    )?.focus();
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previous;
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:items-center"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={panel}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        data-testid={testId}
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-lg flex-col rounded-xl border border-border bg-panel shadow-2xl"
+      >
+        <header className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+          <div>
+            <h2 className="text-base font-semibold">{title}</h2>
+            {subtitle && <p className="mt-1 text-sm text-muted">{subtitle}</p>}
+          </div>
+          <Button variant="ghost" onClick={onClose} aria-label="Close" data-testid={testId ? `${testId}-close` : undefined}>
+            ✕
+          </Button>
+        </header>
+        <div className="flex-1 overflow-y-auto px-5 py-4">{children}</div>
+        {footer && (
+          <footer className="flex items-center justify-between gap-2 border-t border-border px-5 py-3">
+            {footer}
+          </footer>
+        )}
+      </div>
+    </div>
+  );
 }
 
 /** Collapsed assumptions / methodology block. */

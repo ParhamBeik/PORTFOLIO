@@ -801,6 +801,7 @@ export function MoneyVsRisk({
   height,
   label = "Share of money versus share of risk",
   coverage,
+  valueFor,
   testId,
 }) {
   const t = useChartTokens();
@@ -813,21 +814,55 @@ export function MoneyVsRisk({
     const risk = t.series[1];
     return {
       ...c,
-      grid: { top: 8, right: 64, bottom: 28, left: 8, containLabel: true },
+      // Legend above the plot, not below: the value axis now carries a name in
+      // the same place a bottom legend would sit, and the two collided.
+      grid: { top: 34, right: 64, bottom: 34, left: 8, containLabel: true },
       tooltip: {
         trigger: "axis",
         ...c.tooltipBase,
         axisPointer: { type: "shadow" },
+        // Reads both numbers off the row, NOT off the hovered series. The shared
+        // `tipRows` helper takes `p.value[1]`, which on these scatter points is
+        // the category index -- so the tooltip reported a row's position in the
+        // list as a percentage ("200%" for the third asset). Everything the
+        // tooltip states is a real quantity from `rows`.
         formatter: (p) => {
           const row = ordered[p[0].dataIndex];
-          const sign = row.gap >= 0 ? "+" : "";
-          return header(row.key, t) + tipRows(p, t, (v) => pct(v)) +
-            `<div style="margin-top:4px;color:${t.muted}">Gap ${sign}${pct(row.gap)}</div>`;
+          const line = (color, text, value) =>
+            `<div style="display:flex;gap:12px;align-items:center;justify-content:space-between">` +
+            `<span style="color:${t.text}"><span style="display:inline-block;width:8px;height:8px;` +
+            `border-radius:50%;background:${color};margin-right:6px"></span>${text}</span>` +
+            `<span style="color:${t.text};font-variant-numeric:tabular-nums">${value}</span></div>`;
+          const amount = valueFor?.(row.key);
+          // The gap is a difference between two shares, so it is measured in
+          // percentage POINTS. Calling it "16.1% more risk" would state a ratio
+          // the number is not.
+          const points = (Math.abs(row.gap) * 100).toFixed(1);
+          const verdict =
+            row.gap >= 0
+              ? `Carries ${points} points more of the risk than of the money`
+              : `Carries ${points} points less of the risk than of the money`;
+          return (
+            header(row.key, t) +
+            line(money, "Share of your money", pct(row.weight_share)) +
+            line(risk, "Share of your risk", pct(row.risk_share)) +
+            `<div style="margin-top:4px;color:${t.muted}">` +
+            verdict +
+            (amount ? ` · ${toman(amount)}` : "") +
+            `</div>`
+          );
         },
       },
-      legend: { ...c.legend(), data: ["Share of money", "Share of risk"] },
+      legend: {
+        ...c.legend(), bottom: undefined, top: 0, left: "center",
+        data: ["Share of money", "Share of risk"],
+      },
       xAxis: {
         type: "value", ...c.valueAxis,
+        name: "Share of portfolio",
+        nameLocation: "middle",
+        nameGap: 26,
+        nameTextStyle: { color: t.muted, fontSize: 11 },
         axisLabel: { ...c.valueAxis.axisLabel, formatter: (v) => pct(v, 0) },
       },
       yAxis: {
@@ -885,13 +920,13 @@ export function MoneyVsRisk({
       ],
       animation: false,
     };
-  }, [ordered, t]);
+  }, [ordered, t, valueFor]);
 
   const rowHeight = 34;
   return (
     <EChart
       option={option}
-      height={height || Math.max(160, ordered.length * rowHeight + 70)}
+      height={height || Math.max(180, ordered.length * rowHeight + 90)}
       label={coverage != null && coverage < 0.999 ? `${label} · ${pct(coverage)} of portfolio covered` : label}
       testId={testId}
     />

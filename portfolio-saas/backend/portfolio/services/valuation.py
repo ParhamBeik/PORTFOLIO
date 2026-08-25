@@ -12,7 +12,7 @@ from decimal import Decimal
 from django.core.cache import cache
 from django.utils import timezone
 
-from ..models import HOUSE_AREA_SQM, Account, Asset, Holding, Price
+from ..models import HOUSE_AREA_SQM, HOUSE_PRICE_SCALE, Account, Asset, Holding, Price
 
 logger = logging.getLogger(__name__)
 
@@ -513,7 +513,7 @@ def _house_value(price_per_sqm_million: Decimal, area_sqm: Decimal = HOUSE_AREA_
     mortgage is a `Liability` row, and every caller already nets liabilities off
     the account total — deducting it again here would double-count the debt.
     """
-    sqm_price = _q(price_per_sqm_million) * Decimal("1000000")
+    sqm_price = _q(price_per_sqm_million) * HOUSE_PRICE_SCALE
     area = _q(area_sqm) if area_sqm is not None else HOUSE_AREA_SQM
     return sqm_price * area
 
@@ -537,16 +537,35 @@ def _quality_rollup(items, excluded, total_assets, priced_assets):
     return "manual"
 
 
-def value_account(account: Account, prices: dict | None = None) -> dict:
+def value_account(
+    account: Account, prices: dict | None = None, *, include_hidden: bool = False
+) -> dict:
     """Compute one account's per-asset values and total.
 
     Returns: {'total': Decimal, 'items': [{'asset','key','class','quantity',
-    'unit_price','value'}]}
+    'unit_price','value'}], 'hidden_items': [...]}
+
+    Holdings the user has switched off come back in `hidden_items` -- valued, so
+    the UI can show what is being left out, but absent from `items` and from
+    every derived figure. Keeping them out of `items` rather than tagging them
+    inside it is deliberate: `items` is what the allocation donut, the risk
+    weights (`views._holding_weights`), the diagnostics and the optimizer all
+    read, and the split makes every one of them honour the tick with no code of
+    its own.
+
+    `include_hidden=True` restores the everything-you-own total. Only the
+    snapshot writers pass it, so the recorded history keeps one meaning and
+    switching an asset off never puts a step in it.
     """
     from portfolio.models import Liability
+    from portfolio.services.visibility import hidden_asset_ids
     prices = prices if prices is not None else get_latest_prices()
-    items, excluded, total = [], [], Decimal("0")
+    items, hidden_items, excluded, total = [], [], [], Decimal("0")
+    hidden_ids = set() if include_hidden else hidden_asset_ids([account] if account.pk else [])
     liabilities_qs = account.liabilities.all() if account.pk else Liability.objects.none()
+    # A hidden house takes its mortgage with it. Subtracting the debt of an asset
+    # we are not counting would drop net worth by the loan alone.
+    liabilities_qs = [l for l in liabilities_qs if l.asset_id not in hidden_ids]
     total_liabilities = sum(l.amount_tomans for l in liabilities_qs)
     holdings = (
         account.holdings.select_related("asset")
@@ -571,6 +590,7 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
         unit_price = prices.get(holding.asset.key)
         row = latest_rows.get(holding.asset_id)
         archive_record = None
+        is_hidden = holding.asset_id in hidden_ids
         if holding.asset.is_house or (
             holding.asset.is_manual and unit_price is not None and _q(unit_price) > 0
         ):
@@ -586,10 +606,13 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
             priced_at = None
             age_seconds = None
             quality_status = "unavailable"
-            excluded.append({
-                "asset_key": holding.asset.key,
-                "reason": "missing_price",
-            })
+            if not is_hidden:
+                # A switched-off holding is not "excluded from the valuation for
+                # want of a price" -- it is excluded because the user said so.
+                excluded.append({
+                    "asset_key": holding.asset.key,
+                    "reason": "missing_price",
+                })
         else:
             value = asset_value(holding, unit_price)
             if row and _q(row.price) == _q(unit_price):
@@ -605,7 +628,7 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
                 from marketdata.provenance import latest_archive_close
 
                 archive_record = latest_archive_close(holding.asset)
-        if value is not None:
+        if value is not None and not is_hidden:
             total += value
             priced_assets += 1
         price_unit_status = "ok"
@@ -614,10 +637,16 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
         item = {
             "asset": holding.asset.name,
             "name_fa": holding.asset.name_fa or "",
+            # `label` is what to show; `display_name` is the raw nickname, blank
+            # when there isn't one. An edit box needs the second, not the first,
+            # or clearing the field looks like a rename to the catalog name.
+            "label": holding.label,
+            "display_name": holding.display_name,
             "key": holding.asset.key,
             "class": holding.asset.asset_class,
             "is_manual": holding.asset.is_manual,
             "is_house": holding.asset.is_house,
+            "is_hidden": is_hidden,
             "quantity": holding.quantity,
             "unit_price": unit_price,
             "value": value,
@@ -627,15 +656,24 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
             "quality_status": quality_status,
             "price_unit_status": price_unit_status,
         }
+        if holding.asset.is_house:
+            # The two numbers a property is actually described by. Sent from here
+            # so no client re-derives the millions-per-sqm convention.
+            item["area_sqm"] = holding.area_sqm
+            item["price_per_sqm_tomans"] = holding.price_per_sqm_tomans
         if archive_record:
             item["archive_record"] = archive_record
+        if is_hidden:
+            hidden_items.append(item)
+            continue
         items.append(item)
-    total_assets = len(holdings)
+    total_assets = len(items)
     quality_status = _quality_rollup(items, excluded, total_assets, priced_assets)
     total -= total_liabilities
     return {
         "total": total,
         "items": items,
+        "hidden_items": hidden_items,
         "priced_assets": priced_assets,
         "total_assets": total_assets,
         "quality_status": quality_status,
@@ -654,7 +692,7 @@ def value_account(account: Account, prices: dict | None = None) -> dict:
     }
 
 
-def value_user(user) -> dict:
+def value_user(user, *, include_hidden: bool = False) -> dict:
     """Aggregate valuation across all of a user's accounts."""
     prices = get_latest_prices()
     accounts, total = [], Decimal("0")
@@ -663,7 +701,7 @@ def value_user(user) -> dict:
     total_liabilities = Decimal("0")
     all_liabilities = []
     for account in user.accounts.all():
-        valuation = value_account(account, prices)
+        valuation = value_account(account, prices, include_hidden=include_hidden)
         total += valuation["total"]
         priced_assets += valuation["priced_assets"]
         total_assets += valuation["total_assets"]
@@ -676,6 +714,7 @@ def value_user(user) -> dict:
             "broker": account.broker,
             "total": valuation["total"],
             "items": valuation["items"],
+            "hidden_items": valuation["hidden_items"],
             "liabilities": valuation.get("liabilities", []),
             "total_liabilities": valuation.get("total_liabilities", 0.0),
         })
@@ -689,11 +728,17 @@ def value_user(user) -> dict:
         for acc in accounts
         for item in acc["items"]
     ]
+    hidden_items = [
+        {"account_id": acc["id"], "account_name": acc["name"], **item}
+        for acc in accounts
+        for item in acc["hidden_items"]
+    ]
     quality_status = _quality_rollup(items, excluded, total_assets, priced_assets)
     return {
         "total": total,
         "accounts": accounts,
         "items": items,
+        "hidden_items": hidden_items,
         "prices": prices,
         "priced_assets": priced_assets,
         "total_assets": total_assets,
@@ -706,17 +751,35 @@ def value_user(user) -> dict:
 
 SYNTHETIC_HISTORY_MAX_DAYS = 90
 
+# How far back the hidden-holding adjustment is recomputed day by day.
+#
+# Separate from SYNTHETIC_HISTORY_MAX_DAYS: that bounds a fabricated series we
+# would rather not show at all, while this bounds real arithmetic we do want,
+# just not without a ceiling. `?days=all` on a long-lived account would otherwise
+# size the loop from the oldest snapshot -- and if a hidden asset has trade
+# history, every one of those days costs a full per-account ledger replay
+# (`holdings_as_of`), so a single chart request could run thousands of them.
+# Points older than this reuse the oldest computed adjustment and are flagged
+# `approximated`; see `_subtract_hidden_holdings`.
+HIDDEN_ADJUSTMENT_MAX_DAYS = 1095
 
-def _accounts_have_buy_sell(accounts) -> bool:
+
+def _accounts_have_buy_sell(accounts, asset_ids=None) -> bool:
     from portfolio.models import LedgerEntry
 
-    return LedgerEntry.objects.filter(
+    qs = LedgerEntry.objects.filter(
         account__in=list(accounts),
         kind__in=[LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL],
-    ).exists()
+    )
+    if asset_ids is not None:
+        qs = qs.filter(asset_id__in=asset_ids)
+    return qs.exists()
 
 
-def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list[dict]:
+def compute_dynamic_net_worth_series(
+    user, account=None, days: int = 30, *, only_hidden: bool = False,
+    max_days: int | None = None,
+) -> list[dict]:
     """Compute an instant on-the-fly historical net worth series for a portfolio.
 
     Multiplies holdings against historical asset price time-series in
@@ -725,6 +788,17 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     When the account(s) have no BUY/SELL ledger rows (opening/quantity-only),
     current quantities are held constant across the window. Otherwise quantities
     are walked backward via `holdings_as_of`.
+
+    `only_hidden` inverts the visibility filter and values *just* the switched-off
+    holdings. That is what `SnapshotListView` subtracts from the recorded totals,
+    so the same price resolution -- warehouse closes, the 5-session forward-fill
+    bound, house marks in force -- decides both sides of the subtraction. Two
+    implementations of "what was this worth that day" would disagree, and the
+    difference would land in the user's net worth.
+
+    Each point carries `approximated`: True when some asset that day had no real
+    close to read and its live price stood in. On the hidden series that is the
+    signal the chart uses to say the adjustment is an estimate.
     """
     from datetime import timedelta
     import jdatetime
@@ -738,8 +812,9 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
     from marketdata.models import GoldCurrencyHistory
     from portfolio.models import Holding, Liability
     from portfolio.services.timeline import holdings_as_of
+    from portfolio.services.visibility import hidden_asset_ids
 
-    days = max(1, min(int(days), SYNTHETIC_HISTORY_MAX_DAYS))
+    days = max(1, min(int(days), max_days or SYNTHETIC_HISTORY_MAX_DAYS))
     now = timezone.now()
 
     if account is not None:
@@ -749,12 +824,24 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
         holdings = list(Holding.objects.filter(account__user=user).select_related("asset").all())
         accounts = list(user.accounts.all())
 
+    # Switched-off holdings leave the history too, along with their mortgages --
+    # the user asked for them to be absent from every figure, not just today's.
+    hidden_ids = hidden_asset_ids(accounts)
+    holdings = [
+        h for h in holdings if (h.asset_id in hidden_ids) == only_hidden
+    ]
+
     if not holdings:
         return []
 
     latest_quantities = {h.asset.key: _q(h.quantity) for h in holdings}
     assets = {h.asset.key: h.asset for h in holdings}
-    constant_holdings = not _accounts_have_buy_sell(accounts)
+    # Scoped to the assets actually being valued. A book with one traded stock and
+    # one untouched property should not walk the property's quantity backwards
+    # through a per-day ledger replay it can never change.
+    constant_holdings = not _accounts_have_buy_sell(
+        accounts, asset_ids=[h.asset_id for h in holdings]
+    )
 
     stock_symbols = {a.tse_symbol: a.key for a in assets.values() if a.tse_symbol}
     brs_symbols = {a.brs_symbol: a.key for a in assets.values() if a.brs_symbol}
@@ -828,7 +915,14 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
         for market in {market_for_asset(asset) for asset in assets.values()}
     }
 
+    # The hidden series carries the hidden assets' own debts, so subtracting it
+    # removes a mortgaged property whole -- value and mortgage together.
     liabilities = Liability.objects.filter(account__in=accounts)
+    liabilities = (
+        liabilities.filter(asset_id__in=hidden_ids)
+        if only_hidden
+        else liabilities.exclude(asset_id__in=hidden_ids)
+    )
     total_liabilities = sum(l.amount_tomans for l in liabilities)
 
     series = []
@@ -838,6 +932,10 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
         jalali_str = jdatetime.date.fromgregorian(date=target_date.date()).strftime("%Y-%m-%d")
 
         total = Decimal("0")
+        # True once some asset this day had no real close anywhere and its live
+        # price had to stand in. A property is never approximate: its worth on a
+        # date is the mark that was in force, not a market print.
+        approximated = False
 
         if constant_holdings:
             day_holdings = dict(latest_quantities)
@@ -870,8 +968,11 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
                         )
                         if stale > MAX_FORWARD_FILL_SESSIONS:
                             continue  # gap exceeded: don't invent a price
-                    # No real close anywhere means an asset the provider has no
-                    # history for; the live price is the only figure available.
+                    else:
+                        # No real close anywhere means an asset the provider has
+                        # no history for; the live price is the only figure
+                        # available, and only for a position we actually hold.
+                        approximated = approximated or qty > 0
                     p = last_known_prices[key]
                 total += qty * p
 
@@ -883,6 +984,7 @@ def compute_dynamic_net_worth_series(user, account=None, days: int = 30) -> list
             "total": str(round(total, 4)),
             "total_usd": val_usd,
             "is_estimated": True,
+            "approximated": approximated,
         })
 
     return series
@@ -894,6 +996,7 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     from portfolio.services.deflator import cpi_for_date, normalize_basis
     from portfolio.services.returns import normalize_as_of, to_jalali_str
     from portfolio.services.timeline import cash_as_of, holdings_as_of
+    from portfolio.services.visibility import hidden_keys
     from marketdata.calendars import candle_close_qs, sessions_between
     from marketdata.models import GoldCurrencyHistory
     from portfolio.models import Asset
@@ -944,8 +1047,11 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     # Resolve close price for each asset
     for acc in accounts:
         acc_holdings = holdings_as_of(user, acc, as_of_dt)
+        # Per account, not per user: the same asset may be counted in one
+        # portfolio and switched off in another.
+        acc_hidden = hidden_keys(user, account=acc)
         for key, qty in acc_holdings.items():
-            if qty <= 0:
+            if qty <= 0 or key in acc_hidden:
                 continue
             asset = Asset.objects.filter(key=key).first()
             if not asset:
@@ -1050,9 +1156,12 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
         total += cash
 
     from portfolio.models import Liability
-    liabilities = Liability.objects.filter(account__in=accounts)
+    from portfolio.services.visibility import hidden_asset_ids
+    liabilities = Liability.objects.filter(account__in=accounts).exclude(
+        asset_id__in=hidden_asset_ids(list(accounts))
+    )
     total_liabilities = sum(l.amount_tomans for l in liabilities)
-    
+
     scaled_liabilities = total_liabilities
     if basis in ("usd_denominated", "usdt_denominated") and usd_rate > 0:
         scaled_liabilities /= usd_rate

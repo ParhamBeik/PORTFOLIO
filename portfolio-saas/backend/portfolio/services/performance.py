@@ -65,12 +65,19 @@ def _flow_amount(entry, basis: str) -> Decimal | None:
 
 
 def _position_metrics(account) -> dict:
+    from .visibility import hidden_asset_ids
+
+    hidden_ids = hidden_asset_ids([account])
     version = account.transactions.aggregate(
         count=Count("id"), max_id=Max("id"), id_sum=Sum("id")
     )
     cache_key = (
         f"position-metrics:{account.id}:{version['count']}:"
-        f"{version['max_id'] or 0}:{version['id_sum'] or 0}"
+        f"{version['max_id'] or 0}:{version['id_sum'] or 0}:"
+        # Ticking an asset off changes this result without touching a single
+        # ledger row, so the visibility set has to be part of the key or the
+        # cached answer outlives the toggle for an hour.
+        f"{'-'.join(str(i) for i in sorted(hidden_ids))}"
     )
     cached = cache.get(cache_key)
     if cached is not None:
@@ -81,7 +88,7 @@ def _position_metrics(account) -> dict:
     for entry in account.transactions.select_related("asset").order_by(
         "timestamp", "pk"
     ):
-        if entry.asset_id:
+        if entry.asset_id and entry.asset_id not in hidden_ids:
             entries_by_asset.setdefault(entry.asset_id, []).append(entry)
     for entries in entries_by_asset.values():
         asset = entries[0].asset

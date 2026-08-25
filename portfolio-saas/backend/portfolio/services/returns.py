@@ -400,11 +400,19 @@ def get_universe_by_mode(mode: str, user=None, account=None) -> list[str] | None
     active_assets = list(Asset.objects.filter(is_active=True).exclude(is_house=True).values_list("key", flat=True))
 
     if mode == "held":
+        # `is_hidden` holdings are owned but deliberately not counted, so they are
+        # not part of "what I hold" for risk purposes either.
         res = []
         if account is not None:
-            res = list(account.holdings.values_list("asset__key", flat=True))
+            res = list(
+                account.holdings.filter(is_hidden=False)
+                .values_list("asset__key", flat=True)
+            )
         elif user is not None:
-            res = list(Holding.objects.filter(account__user=user).values_list("asset__key", flat=True))
+            res = list(
+                Holding.objects.filter(account__user=user, is_hidden=False)
+                .values_list("asset__key", flat=True)
+            )
 
         if not res:
             return active_assets

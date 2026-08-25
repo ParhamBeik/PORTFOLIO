@@ -51,8 +51,14 @@ def _q(value) -> Decimal:
 
 
 def _stamp_snapshots(user, account: Account) -> dict:
-    valuation = value_user(user)
-    account_total = value_account(account)["total"]
+    # Snapshots record everything owned, hidden holdings included, matching the
+    # cron writer in portfolio.tasks. The stored series has to keep one meaning
+    # across its whole length: if the writer started omitting whatever was
+    # switched off today, the chart would show a cliff on the day someone ticked
+    # a box. The read path subtracts hidden assets across the entire window
+    # instead -- see SnapshotListView / valuation.hidden_value_series.
+    valuation = value_user(user, include_hidden=True)
+    account_total = value_account(account, include_hidden=True)["total"]
     Snapshot.objects.bulk_create([
         Snapshot(user=user, account=None, total_value_tomans=valuation["total"]),
         Snapshot(user=user, account=account, total_value_tomans=account_total),
