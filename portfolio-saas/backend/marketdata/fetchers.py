@@ -283,11 +283,6 @@ def fetch_derivatives(api_key, endpoint_key):
     return _call(endpoint_key, api_key)
 
 
-def fetch_etf_nav(api_key, symbol):
-    """One ETF's NAV. `Nav.php` has no batch form -- it is one request per fund."""
-    return _call("etf_nav", api_key, l18=symbol)
-
-
 # ------------------------------------------------------- gold / currency / crypto
 
 def fetch_gold_currency_free(api_key):

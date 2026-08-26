@@ -811,7 +811,11 @@ def compute_dynamic_net_worth_series(
     )
     from marketdata.models import GoldCurrencyHistory
     from portfolio.models import Holding, Liability
-    from portfolio.services.timeline import holdings_as_of
+    from portfolio.services.timeline import (
+        holdings_as_of,
+        house_state_as_of,
+        load_house_marks,
+    )
     from portfolio.services.visibility import hidden_asset_ids
 
     days = max(1, min(int(days), max_days or SYNTHETIC_HISTORY_MAX_DAYS))
@@ -842,6 +846,10 @@ def compute_dynamic_net_worth_series(
     constant_holdings = not _accounts_have_buy_sell(
         accounts, asset_ids=[h.asset_id for h in holdings]
     )
+    house_keys = {h.asset.key for h in holdings if h.asset.is_house}
+    house_histories = {
+        acc.pk: load_house_marks(acc) for acc in accounts
+    } if house_keys else {}
 
     stock_symbols = {a.tse_symbol: a.key for a in assets.values() if a.tse_symbol}
     brs_symbols = {a.brs_symbol: a.key for a in assets.values() if a.brs_symbol}
@@ -937,19 +945,37 @@ def compute_dynamic_net_worth_series(
         # date is the mark that was in force, not a market print.
         approximated = False
 
+        house_areas = {}
         if constant_holdings:
-            day_holdings = dict(latest_quantities)
+            # Today's house qty is the current mark, not history. Painting it
+            # onto every past day is the cliff-on-add-day bug.
+            day_holdings = {
+                k: v for k, v in latest_quantities.items() if k not in house_keys
+            }
+            for acc in accounts:
+                qty_map, area_map = house_state_as_of(
+                    house_histories.get(acc.pk, []), target_date
+                )
+                for k, v in qty_map.items():
+                    day_holdings[k] = day_holdings.get(k, Decimal("0")) + v
+                house_areas.update(area_map)
         else:
             day_holdings = {}
             for acc in accounts:
                 for k, v in holdings_as_of(user, acc, target_date).items():
                     day_holdings[k] = day_holdings.get(k, Decimal("0")) + v
+                _qty, area_map = house_state_as_of(
+                    house_histories.get(acc.pk, []), target_date
+                )
+                house_areas.update(area_map)
 
         for key, asset in assets.items():
             qty = day_holdings.get(key, Decimal("0"))
             if asset.is_house:
                 holding = next((h for h in holdings if h.asset_id == asset.id), None)
-                area = holding.area_sqm if holding else HOUSE_AREA_SQM
+                area = house_areas.get(key)
+                if area is None:
+                    area = holding.area_sqm if holding else HOUSE_AREA_SQM
                 total += _house_value(qty, area_sqm=area)
             else:
                 p = stock_closes.get(jalali_str, {}).get(key)

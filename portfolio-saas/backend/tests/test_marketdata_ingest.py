@@ -1198,11 +1198,11 @@ def test_fetch_market_index():
 
 def test_probe_verified_paths():
     """Wrong paths cost a request and return 404, so pin the ones we verified."""
-    assert endpoints.get("etf_nav").path == "Tsetmc/Nav.php"  # not EtfNav.php (404)
+    assert "etf_nav" not in endpoints.REGISTRY  # Nav.php retired; EtfNav.php 404s
     assert endpoints.get("crypto").path == "Market/Cryptocurrency.php"  # not Crypto.php (404)
     assert endpoints.get("market_index").path == "Tsetmc/Index.php"
     assert endpoints.get("stock_transaction_ticks").path == "Tsetmc/Transaction.php"
-    for key in ("etf_nav", "crypto", "market_index"):
+    for key in ("crypto", "market_index"):
         assert endpoints.get(key).url.startswith("https://Api.BrsApi.ir/")
 
 

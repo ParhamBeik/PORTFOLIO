@@ -54,14 +54,9 @@ def sync_provider_catalog(limit=None):
         if not symbol:
             continue
         isin = str(record.get("isin", "") or "")
-        # IRT-prefixed ISINs are exchange-traded funds (the `all_symbols`
-        # endpoint's own registry note already said so: "ETFs have IRT
-        # ISINs"), confirmed live -- all 417 rows whose `cs` sector reads
-        # "صندوق سرمایه‌گذاری قابل معامله" carry an IRT isin. They used to fall
-        # through to EXCLUDED here, which is why MarketInstrument had zero ETF
-        # rows and etf_nav's "discovery" call (a separate, broken batch fetch
-        # against Tsetmc/Nav.php -- see capture_market_snapshots) never found
-        # anything to iterate even after being fixed to require `l18`.
+        # IRT-prefixed ISINs are exchange-traded funds. They used to fall
+        # through to EXCLUDED here, which left MarketInstrument with zero ETF
+        # rows. Nav.php is not a discovery source (and is no longer polled).
         is_etf = isin.startswith("IRT")
         ordinary = is_ordinary_stock(record)
         eligible = ordinary or is_etf
@@ -115,11 +110,7 @@ def sync_provider_catalog(limit=None):
     # catalog discovery and the live capture task share a payload shape (see
     # flatten_records) -- no separate discovery endpoint needed.
     #
-    # ETF NAV is NOT in this loop (unlike before): Tsetmc/Nav.php requires a
-    # per-symbol `l18` and 400s on a bare batch call, so it can never double as
-    # a discovery source. ETF instruments are discovered above instead, from
-    # the IRT-ISIN rows already present in the `all_symbols` stock payload
-    # this function fetches regardless -- zero extra requests.
+    # Funds are discovered above from IRT-ISIN rows in all_symbols, not here.
     for asset_class, endpoint_key, api_key, category in (
         ("crypto", "crypto", settings.BRS_API_KEY, MarketInstrument.Category.CRYPTO),
         ("commodity", "commodity", settings.BRS_API_KEY, MarketInstrument.Category.COMMODITY),

@@ -9,11 +9,9 @@ The classification below was established by probing the provider directly, not b
 reading the code. Notably: `Gold_Currency_Pro.php?history=2` returns ~15 years in
 one request, and `Transaction.php` is strictly one request per calendar day.
 
-`Nav.php` does NOT return every ETF in one response -- an earlier version of this
-docstring claimed it did, which is why `etf_nav` shipped for months with no
-`required_params` and 400'd on every call ("Required parameter 'l18' was not
-sent", confirmed live 2026-08-19). It is one ETF's NAV per request, same as
-`symbol`'s per-share Symbol.php. See https://brsapi.ir/bourse-api-etf-funds-nav-webservice/
+`Tsetmc/Nav.php` is retired from the live poll: the payload never produced a
+usable series, `EtfNav.php` 404s, and production stored zero NAV snapshots.
+Warehouse `etf_nav` bars remain readable if any exist.
 """
 from dataclasses import dataclass, field
 
@@ -98,19 +96,6 @@ REGISTRY = {
                 "Returns a `state` field with the Persian market status; this is "
                 "the only market-open signal the provider gives us. The `date` "
                 "param is accepted but ignored -- there is no index history here."
-            ),
-        ),
-        Endpoint(
-            key="etf_nav",
-            path="Tsetmc/Nav.php",
-            nature=Nature.LIVE,
-            bucket=LIVE,
-            required_params=("l18",),
-            rows_per_request=1,
-            notes=(
-                "NOT EtfNav.php -- that path returns 404. One ETF per request; "
-                "l18 is required (400 without it). Passing a non-ETF symbol "
-                "returns 502."
             ),
         ),
         Endpoint(

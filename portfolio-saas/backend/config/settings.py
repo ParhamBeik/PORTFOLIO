@@ -375,16 +375,6 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True  # survive a broker restart
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 QUEUE_BACKLOG_THRESHOLD = int(os.getenv("QUEUE_BACKLOG_THRESHOLD", "100"))
-# Burst cap on ETF NAV fetches per capture_market_snapshots tick, not a coverage
-# strategy: which funds are due is now decided by their own LiveFetchState rows
-# (once per trading day each). This only stops one tick claiming all ~417 at once
-# and tripping the 5-minute window limiter.
-#
-# Sizing: the whole set comes due at rollover but etf_nav is session-gated, so the
-# drain window is the 4.5h session = ~54 ticks at the 5-minute beat. 10/tick
-# clears 540 >= 417 with margin; 5/tick would only reach 270 and leave a third of
-# the funds unfetched every day.
-ETF_NAV_BATCH_SIZE = int(os.getenv("ETF_NAV_BATCH_SIZE", "10"))
 APPLICATION_ERROR_THRESHOLD = int(os.getenv("APPLICATION_ERROR_THRESHOLD", "20"))
 WORKFLOW_FAILURE_RATE_THRESHOLD = float(os.getenv("WORKFLOW_FAILURE_RATE_THRESHOLD", "0.10"))
 # Today 1,072 of 1,346 symbols (0.80) fail the integrity gate purely because the

@@ -160,7 +160,7 @@ export const addHolding = (accountId, assetKey, quantity) =>
 // A property is described by its size and what a square meter is worth, in
 // millions of Toman — never by a bare "quantity". `newPropertyName` mints a new
 // one; passing `assetKey` instead revalues a property already held.
-export const addProperty = (accountId, { name, areaSqm, pricePerSqmMillion, mortgageTomans }) =>
+export const addProperty = (accountId, { name, areaSqm, pricePerSqmMillion, mortgageTomans, occurredAt }) =>
   api(`/api/accounts/${accountId}/holdings/`, {
     method: "POST",
     body: {
@@ -168,6 +168,7 @@ export const addProperty = (accountId, { name, areaSqm, pricePerSqmMillion, mort
       area_sqm: Number(areaSqm),
       price_per_sqm_million: Number(pricePerSqmMillion),
       ...(mortgageTomans ? { mortgage_deduction_tomans: Number(mortgageTomans) } : {}),
+      ...(occurredAt ? { occurred_at: occurredAt } : {}),
     },
   });
 
@@ -177,7 +178,7 @@ const numeric = (key, value) =>
 export const updateHolding = (
   accountId,
   id,
-  { quantity, unitPriceTomans, areaSqm, pricePerSqmMillion, displayName, isHidden } = {}
+  { quantity, unitPriceTomans, areaSqm, pricePerSqmMillion, displayName, isHidden, occurredAt } = {}
 ) =>
   api(`/api/accounts/${accountId}/holdings/${id}/`, {
     method: "PATCH",
@@ -188,6 +189,7 @@ export const updateHolding = (
       ...numeric("price_per_sqm_million", pricePerSqmMillion),
       ...(displayName != null ? { display_name: displayName } : {}),
       ...(isHidden != null ? { is_hidden: isHidden } : {}),
+      ...(occurredAt ? { occurred_at: occurredAt } : {}),
     },
   });
 export const removeHolding = (accountId, id) =>

@@ -8,7 +8,7 @@ one table could not answer both.
 The reason this module exists at all is quota arithmetic. `quota.live_reserve_remaining`
 has to know what live will spend between now and the Tehran day rollover before it
 can tell the archive what it may have. It used to simulate only the 2-minute price
-loop, so the 5-minute snapshot beats (crypto, commodity, ETF NAV, TSE options, IME
+loop, so the snapshot beats (crypto, commodity, TSE options, IME
 futures/options) spent from the live bucket entirely unaccounted for. Pricing the
 plan from the same rows the scheduler claims from is what keeps the two honest.
 """
@@ -23,7 +23,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from . import market_state
-from .models import LiveFetchState, MarketInstrument
+from .models import LiveFetchState
 
 logger = logging.getLogger(__name__)
 
@@ -39,31 +39,17 @@ _MARKET_WIDE_SEEDS = {
     "ime_options": (900, True),
 }
 
-# Nav.php is one fund per request and there are ~417 of them. Once per trading day
-# guarantees every fund a fresh NAV for its daily bar at ~417 requests/day; the
-# rotating-cursor batch it replaces guaranteed nothing.
-_ETF_NAV_CADENCE = 86_400
-
-
 def ensure_live_states():
-    """Create missing rows and retire catalog-managed stale ETF rows.
+    """Create missing market-wide rows. Cadence is operator-tunable.
 
-    Cadence is an operator-tunable column, so re-seeding must not silently revert
-    a hand-tuned value the way a blanket update_or_create would.
+    Nav.php is retired: the payload never produced a usable NAV series (zero
+    snapshots in production, zero eligible funds in the catalog), and enabling
+    it would spend ~417 TSETMC live requests a day for nothing. Leftover
+    `etf_nav` rows, if any, stay disabled.
     """
-    eligible_etfs = set(
-        MarketInstrument.objects.filter(
-            category=MarketInstrument.Category.ETF, eligible=True
-        ).values_list("symbol", flat=True)
+    LiveFetchState.objects.filter(endpoint_key="etf_nav", enabled=True).update(
+        enabled=False, last_error="retired"
     )
-    etf_states = LiveFetchState.objects.filter(endpoint_key="etf_nav")
-    etf_states.filter(enabled=True).exclude(scope__in=eligible_etfs).update(
-        enabled=False, last_error="stale_catalog"
-    )
-    etf_states.filter(
-        enabled=False, last_error="stale_catalog", scope__in=eligible_etfs
-    ).update(enabled=True, last_error="")
-
     rows = [
         LiveFetchState(
             endpoint_key=key,
@@ -72,15 +58,6 @@ def ensure_live_states():
             session_only=session_only,
         )
         for key, (cadence, session_only) in _MARKET_WIDE_SEEDS.items()
-    ]
-    rows += [
-        LiveFetchState(
-            endpoint_key="etf_nav",
-            scope=symbol,
-            cadence_seconds=_ETF_NAV_CADENCE,
-            session_only=True,
-        )
-        for symbol in sorted(eligible_etfs)
     ]
     existing = set(LiveFetchState.objects.values_list("endpoint_key", "scope"))
     missing = [r for r in rows if (r.endpoint_key, r.scope) not in existing]
@@ -92,10 +69,9 @@ def ensure_live_states():
 def _firings_until(state, start, end):
     """How many times one state fires in [start, end), honouring session gating.
 
-    Counted on the calendar rather than stepped one cadence at a time: ETF NAV
-    alone is ~417 rows, and a per-row simulation loop at 900s granularity would
-    run millions of iterations every time the reserve is read -- and the reserve
-    is read on every single archive request.
+    Counted on the calendar rather than stepped one cadence at a time: a
+    per-row simulation loop at 900s granularity would be far heavier than a
+    closed-form count, and the reserve is read on every archive request.
     """
     if not state.enabled or end <= start:
         return 0

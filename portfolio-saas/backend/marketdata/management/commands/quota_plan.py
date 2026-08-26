@@ -68,6 +68,15 @@ class Command(BaseCommand):
         plan = total + self._price_loop()
         self.stdout.write(f"  {'TOTAL':<20} {'':<24} ~{plan}/day")
         self.stdout.write("  (TOTAL is not a shared wallet -- compare each plan below.)")
+        self.stdout.write(self.style.MIGRATE_HEADING("\nLocked 24h live reserve (static per wallet)"))
+        today = quota.quota_day()
+        for p in quota.PLANS:
+            row = ApiRequestQuota.objects.filter(day=today, plan=p).first()
+            cost = quota.live_day_cost(p, row)
+            leftover = quota.archive_day_ceiling(p, row)
+            self.stdout.write(
+                f"  {p:<8} live={cost:<6} archive leftover today={leftover}"
+            )
 
         for p in quota.PLANS:
             loop = self._price_loop(p)

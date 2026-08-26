@@ -740,6 +740,40 @@ def record_house_mark(
     )
 
 
+def backfill_house_into_snapshots(account, asset, *, before=None) -> int:
+    """Add this house's mark-accurate value to snapshots taken before it existed.
+
+    Stored totals are a photograph of the book at fetch time. A years-ago
+    purchase entered today was missing from every photograph, which is the
+    cliff on add-day. Points stamped at or after `before` already include the
+    holding and must not be incremented again.
+    """
+    from django.db.models import Q
+    from portfolio.models import Snapshot
+    from portfolio.services.timeline import house_area_as_of, house_marks_as_of
+    from portfolio.services.valuation import _house_value
+
+    before = before or timezone.now()
+    key = asset.key
+    updated = 0
+    qs = (
+        Snapshot.objects.filter(user_id=account.user_id, timestamp__lt=before)
+        .filter(Q(account=account) | Q(account__isnull=True))
+        .order_by("timestamp")
+    )
+    for snap in qs.iterator():
+        qty = house_marks_as_of(account, snap.timestamp).get(key)
+        if not qty:
+            continue
+        area = house_area_as_of(account, snap.timestamp).get(key)
+        snap.total_value_tomans = (snap.total_value_tomans or 0) + _house_value(
+            qty, area_sqm=area if area is not None else HOUSE_AREA_SQM
+        )
+        snap.save(update_fields=["total_value_tomans"])
+        updated += 1
+    return updated
+
+
 @transaction.atomic
 def retire_house(*, user, account_id: int, holding: Holding) -> None:
     """Remove a property by reversing every mark that states its value.

@@ -157,7 +157,9 @@ class HoldingListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         from .services.ledger import (
             LedgerError,
+            backfill_house_into_snapshots,
             create_ledger_entry,
+            record_house_mark,
             record_manual_price,
             set_orphan_holding,
         )
@@ -173,16 +175,18 @@ class HoldingListCreateView(generics.ListCreateAPIView):
             raise ValidationError("This asset already exists in the account.")
         try:
             if data["asset"].is_house:
-                create_ledger_entry(
-                    account=account,
-                    kind=LedgerEntry.Kind.OPENING_POSITION,
+                record_house_mark(
+                    user=self.request.user,
+                    account_id=account.id,
                     asset=data["asset"],
                     quantity=data["quantity"],
                     area_sqm=data.get("area_sqm"),
                     mortgage_deduction_tomans=data.get("mortgage_deduction_tomans"),
-                    occurred_at=account.tracking_started_at or timezone.now(),
-                    source="manual",
-                    note="Real-estate opening position",
+                    occurred_at=data.get("occurred_at"),
+                )
+                holding = Holding.objects.get(account=account, asset=data["asset"])
+                backfill_house_into_snapshots(
+                    account, data["asset"], before=holding.created_at,
                 )
             elif data["asset"].is_manual:
                 set_orphan_holding(

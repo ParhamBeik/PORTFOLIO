@@ -49,7 +49,7 @@ npx playwright test          # e2e, needs E2E_EMAIL / E2E_PASSWORD
 ```
 portfolio-saas/
 ├── docker-compose.yml            # dev (Vite + gunicorn/uvicorn)
-├── docker-compose.prod.yml       # prod (Caddy TLS + built frontend)
+├── docker-compose.prod.yml       # prod (frontend joins vps-edge)
 ├── docs/REFERENCE.md             # price units, warehouse safeguards, data provenance
 ├── backend/
 │   ├── config/                   # Django project: settings, urls, celery,
@@ -145,16 +145,15 @@ services.
 ## Production
 
 Portfolio keeps its own private database, Redis, backend, frontend and Celery
-workers. Only its frontend joins `vps-edge`; the independent edge stack under
-`deploy/edge/` terminates TLS and routes each domain to its own frontend.
+workers. Only its frontend joins the existing `vps-edge` Docker network. TLS
+termination is a VPS-wide reverse proxy at `/opt/apps/vps-edge` and is not
+shipped from this repository.
 
 ```bash
 cp .env.production.example .env.production
-cp deploy/edge/.env.example deploy/edge/.env
-chmod 600 .env.production deploy/edge/.env
+chmod 600 .env.production
 
-# The edge owns public ports 80/443; each application stays a separate stack.
-deploy/edge/deploy.sh
+# The reverse proxy must already be running (docker network vps-edge).
 BACKUP_PASSPHRASE_FILE=/root/secrets/portfolio-backup-passphrase scripts/deploy.sh
 docker compose -f docker-compose.prod.yml exec backend python manage.py seed_assets
 curl https://portfolio.example.com/api/health/            # -> ok

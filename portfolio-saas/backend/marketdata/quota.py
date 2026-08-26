@@ -409,41 +409,42 @@ def _simulate_price_loop(start, end, plan=None):
     return needed
 
 
-def live_reserve_remaining(plan, row=None, now=None):
-    """Requests to hold back for live on `plan` between now and the day rollover.
+def live_day_cost(plan, row=None):
+    """Static 24h live spend for this wallet, from Tehran midnight to the next.
 
-    The static floor reserved the same 600 at 23:00 as at 08:00, so the archive
-    could never touch the tail of a quiet day. This asks the only question that
-    matters: how many requests can live still spend before the quota day ends?
-
-    Two lanes are summed, because both bill the live bucket: the price loop
-    (simulated above) and the cadence-driven snapshot endpoints in
-    `LiveFetchState`. Pricing only the first is what let crypto, commodity, ETF
-    NAV, options and futures spend ~350/day that nothing had reserved for.
-
-    Scoped to one plan: reserving TSETMC's live need out of the BRS wallet is
-    exactly the cross-plan confusion this module now exists to prevent.
+    Archive leftover is this number subtracted from the plan ceiling, paced
+    across the day. The slice does not shrink after the session closes: unused
+    live headroom is not lent to backfill until the next quota day.
     """
-    now = now or timezone.now()
-    local = now.astimezone(ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE))
-    rollover = (local + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    needed = _simulate_price_loop(local, rollover, plan=plan)
-    try:
-        from . import live_states
+    from . import endpoints, live_states
+    from .models import LiveFetchState
 
-        needed += live_states.planned_requests(now, rollover, plan=plan)
+    start = live_states.day_start()
+    needed = _simulate_price_loop(start, start + timedelta(days=1), plan=plan)
+    try:
+        keys = [key for key, ep in endpoints.REGISTRY.items() if ep.plan == plan]
+        states = list(
+            LiveFetchState.objects.filter(enabled=True, endpoint_key__in=keys)
+        )
+        needed += live_states.full_day_cost(states)
     except Exception:
-        # An unreadable plan must not silently release the reserve.
-        # Under-reserving is the failure that gets live requests refused;
-        # over-reserving only slows the backfill.
         logger.warning("live plan unavailable; reserving the price loop only")
-    if row is not None:
-        # Live cannot borrow, so reserving beyond its own ceiling would protect
-        # requests nobody is allowed to make. Shrinks to zero at rollover.
-        needed = min(needed, bucket_budget(LIVE, plan) - row.live_used)
+    cap = bucket_budget(LIVE, plan, row)
+    if cap is not None:
+        needed = min(needed, cap)
     return max(0, needed)
+
+
+def live_reserve_remaining(plan, row=None, now=None):
+    """Unused portion of the static 24h live slice on `plan`.
+
+    `now` is accepted for call-site compatibility; the slice itself does not
+    depend on the time of day. Live already spent today is subtracted so a
+    live overrun cannot be reserved twice.
+    """
+    del now  # the 24h slice is static; wall-clock does not release it
+    spent = getattr(row, "live_used", 0) or 0
+    return max(0, live_day_cost(plan, row) - spent)
 
 
 def _day_elapsed_fraction(now=None):
@@ -457,14 +458,10 @@ def _day_elapsed_fraction(now=None):
 def archive_day_ceiling(plan, row=None, now=None):
     """Total requests ARCHIVE may spend on `plan` across the whole quota day.
 
-    Live is subtracted first and is never negotiable: what it has already spent,
-    plus what it will still need before rollover. Whatever remains, minus a
-    safety margin so the wallet is never actually emptied, belongs to backfill.
-
-    Dynamic by construction: `live_reserve_remaining` shrinks as the day burns
-    down, so live headroom that went unused is handed back to backfill late in
-    the day rather than stranded. The live share is the static part; this is the
-    part that moves.
+    Live is subtracted first and is never negotiable: the static 24h live
+    slice (`live_day_cost`), of which `live_reserve_remaining` is the unused
+    part. Whatever remains, minus a safety margin so the wallet is never
+    actually emptied, belongs to backfill and is paced across the Tehran day.
 
     None means "no ceiling known for this plan" -- only possible if the plan has
     neither a disclosed limit nor a configured expectation.

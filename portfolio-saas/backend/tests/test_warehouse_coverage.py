@@ -1004,11 +1004,13 @@ class TestLiveReserve:
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
         assert quota.live_reserve_remaining(quota.BRS, self._row(), now=midnight_tehran) == 192
 
-    def test_the_reserve_shrinks_as_the_day_closes(self, settings):
+    def test_the_reserve_does_not_shrink_as_the_day_closes(self, settings):
+        """Static 24h slice: evening leftover is not released to archive."""
         self._configure(settings)
-        # Overnight gold only: one job every 5 minutes for the last two hours.
+        midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
         two_hours_left = datetime(2026, 7, 27, 18, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=two_hours_left) == 12
+        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=two_hours_left) == 192
+        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=midnight_tehran) == 192
 
     def test_the_reserve_never_exceeds_what_live_could_still_spend(self, settings):
         """Live cannot borrow, so holding more than its bucket protects nothing."""
@@ -1045,9 +1047,11 @@ class TestLiveReserve:
         """Thursday/Friday is the Iranian weekend; no session runs to pay for."""
         self._configure(settings, tse=True)
         settings.MARKETDATA_LIVE_INTERVAL_OPEN = 120
-        # 1405-05-09 is a Friday (jdatetime weekday 6).
+        # 1405-05-09 is a Friday (jdatetime weekday 6). Freeze wall clock so
+        # the static 24h slice is that Friday, not whatever today is.
         friday_midnight = datetime(2026, 7, 30, 20, 30, tzinfo=dt_timezone.utc)
-        assert self._both_plans(friday_midnight) == 192
+        with patch("django.utils.timezone.now", return_value=friday_midnight):
+            assert self._both_plans(friday_midnight) == 192
 
     def test_no_credentials_means_no_phantom_reserve(self, settings):
         self._configure(settings)
@@ -1462,29 +1466,6 @@ def test_ingest_market_snapshots_flattens_dict_of_lists_payload():
     assert set(MarketSnapshot.objects.values_list("symbol", flat=True)) == {"XAUUSD", "WTI"}
 
 
-def test_ingest_etf_nav_snapshot_stores_real_payload_shape():
-    """Tsetmc/Nav.php's actual response -- confirmed live 2026-08-19 -- never
-    echoes the symbol back, unlike the batch Market/* endpoints
-    ingest_market_snapshots handles. The caller (capture_market_snapshots)
-    supplies it."""
-    payload = {"date": "1405-05-28", "time": "18:04:12", "psubtran": 66928, "predtran": 65914}
-
-    created = ingest.ingest_etf_nav_snapshot("اهرم", payload)
-
-    assert created is True
-    snap = MarketSnapshot.objects.get(asset_class="etf_nav", symbol="اهرم")
-    assert snap.last_price == 66928
-    assert snap.bid_price == 65914
-    assert snap.provider_payload == payload
-
-
-def test_ingest_etf_nav_snapshot_rejects_non_positive_price():
-    created = ingest.ingest_etf_nav_snapshot("طلا", {"psubtran": 0, "predtran": 0})
-
-    assert created is False
-    assert not MarketSnapshot.objects.filter(asset_class="etf_nav", symbol="طلا").exists()
-
-
 def test_aggregate_market_daily_bars_builds_ohlc_from_snapshots():
     date = jalali.today()
     start = jalali.to_datetime(date)
@@ -1864,28 +1845,26 @@ class TestLiveFetchPlan:
         tuned.refresh_from_db()
         assert tuned.cadence_seconds == 60, "re-seeding must not revert operator tuning"
 
-    def test_seeding_disables_stale_catalog_etfs_without_overriding_manual_disable(self):
+    def test_seeding_disables_leftover_etf_nav_rows_without_reenable(self):
         from marketdata import live_states
-        from marketdata.models import LiveFetchState, MarketInstrument
+        from marketdata.models import LiveFetchState
 
-        MarketInstrument.objects.create(
-            source="tsetmc", symbol="ETF1", category="etf", eligible=True
-        )
-        managed = LiveFetchState.objects.create(
+        leftover = LiveFetchState.objects.create(
             endpoint_key="etf_nav", scope="OLD", cadence_seconds=86400
         )
-        manual = LiveFetchState.objects.create(
+        already_off = LiveFetchState.objects.create(
             endpoint_key="etf_nav", scope="MANUAL", cadence_seconds=86400,
-            enabled=False,
+            enabled=False, last_error="operator",
         )
 
         live_states.ensure_live_states()
 
-        managed.refresh_from_db()
-        manual.refresh_from_db()
-        assert managed.enabled is False
-        assert managed.last_error == "stale_catalog"
-        assert manual.enabled is False
+        leftover.refresh_from_db()
+        already_off.refresh_from_db()
+        assert leftover.enabled is False
+        assert leftover.last_error == "retired"
+        assert already_off.enabled is False
+        assert already_off.last_error == "operator"
 
     def test_a_claim_leases_the_row_so_a_second_worker_cannot_double_spend(self):
         from marketdata import live_states

@@ -270,6 +270,7 @@ export default function AddTransactionDialog({
           name: form.name,
           areaSqm: form.areaSqm,
           pricePerSqmMillion: form.pricePerSqm,
+          ...(occurredAt ? { occurredAt } : {}),
         });
       } else if (asset?.is_house && action === "valuation_mark") {
         // A revaluation is a dated mark on the holding, not a trade — houses are
@@ -277,6 +278,7 @@ export default function AddTransactionDialog({
         await updateHolding(targetAccountId, holding.id, {
           pricePerSqmMillion: form.pricePerSqm,
           areaSqm: form.areaSqm || holding.area_sqm,
+          ...(occurredAt ? { occurredAt } : {}),
         });
       } else if (action === "opening_position" || action === "valuation_mark") {
         await createLedgerEntry(targetAccountId, {

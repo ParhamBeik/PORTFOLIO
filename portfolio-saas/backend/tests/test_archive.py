@@ -1083,10 +1083,8 @@ def test_catalog_accepts_all_provider_currencies(settings):
 
 def test_catalog_classifies_irt_isin_rows_as_etf_not_excluded(settings):
     """IRT-prefixed ISINs (funds) used to fall through to EXCLUDED here, which
-    is why MarketInstrument had zero ETF rows and the (now-fixed) per-symbol
-    etf_nav fetch had nothing to iterate. This is the only place ETF
-    instruments are discovered -- Tsetmc/Nav.php requires `l18` and cannot
-    enumerate its own universe (see marketdata/endpoints.py)."""
+    is why MarketInstrument had zero ETF rows. Funds are classified from the
+    catalog, not from a Nav.php poll."""
     settings.TSETMC_API_KEY = "test-key"
     settings.BRS_API_KEY = "test-key"
     with (
@@ -1923,12 +1921,8 @@ def test_archive_is_paced_across_the_day(settings):
         assert archive_allowance_now(TSETMC, row, now=six_pm) == 7_500
 
 
-def test_unused_live_headroom_returns_to_archive_late_in_the_day(settings):
-    """Live is static; the *leftover* must be dynamic.
-
-    As the reserve burns down toward rollover, whatever live did not use is
-    released to backfill rather than stranded.
-    """
+def test_live_slice_stays_reserved_after_the_session(settings):
+    """The 24h live reservation is static; leftover does not grow after close."""
     from marketdata.quota import TSETMC, archive_day_ceiling
 
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 5_000
@@ -1937,10 +1931,8 @@ def test_unused_live_headroom_returns_to_archive_late_in_the_day(settings):
 
     with patch.object(quota, "live_reserve_remaining", return_value=1_200):
         early = archive_day_ceiling(TSETMC, row)
-    with patch.object(quota, "live_reserve_remaining", return_value=50):
         late = archive_day_ceiling(TSETMC, row)
-    assert early == 3_800 and late == 4_950
-    assert late > early
+    assert early == late == 3_800
 
 
 def test_live_budget_never_exceeds_the_wallet_it_spends(settings):
@@ -1955,3 +1947,20 @@ def test_live_budget_never_exceeds_the_wallet_it_spends(settings):
 
     assert bucket_budget(LIVE, TSETMC) == 1_700      # fits, unchanged
     assert bucket_budget(LIVE, BRS) == 1_350         # clamped to 1500 - 150
+
+def test_live_day_cost_does_not_shrink_in_the_evening(settings):
+    """Unit: the 24h live slice is counted from midnight, not from now."""
+    from marketdata.quota import TSETMC, live_day_cost, live_reserve_remaining
+
+    settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
+    settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
+    with (
+        patch.object(quota, "_simulate_price_loop", return_value=144),
+        patch("marketdata.live_states.full_day_cost", return_value=54),
+    ):
+        assert live_day_cost(TSETMC, row) == 198
+        assert live_reserve_remaining(TSETMC, row) == 198
+        row.live_used = 50
+        assert live_reserve_remaining(TSETMC, row) == 148
+

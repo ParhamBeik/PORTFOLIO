@@ -1480,10 +1480,13 @@ def test_daily_bar_fallback_skips_a_row_the_warehouse_rejected():
 # looked saved and was not.
 
 
-def _add_property(account, name="Apartment", area="91", price="100"):
+def _add_property(account, name="Apartment", area="91", price="100", occurred_at=None):
+    body = {"new_property_name": name, "area_sqm": area, "price_per_sqm_million": price}
+    if occurred_at is not None:
+        body["occurred_at"] = occurred_at
     return _client(account.user).post(
         f"/api/accounts/{account.id}/holdings/",
-        {"new_property_name": name, "area_sqm": area, "price_per_sqm_million": price},
+        body,
         format="json",
     )
 
@@ -1625,3 +1628,29 @@ def test_deleting_a_revalued_property_removes_it(account, asset_catalog):
 
     assert response.status_code in (200, 204), getattr(response, "data", response)
     assert not Holding.objects.filter(account=account, asset_id=asset_id).exists()
+
+@pytest.mark.django_db
+def test_property_create_stamps_the_purchase_date_not_today(account, asset_catalog):
+    """Unit/API: the create path is the trust boundary for occurred_at."""
+    when = timezone.now() - datetime.timedelta(days=3650)
+    response = _add_property(account, occurred_at=when.isoformat())
+    assert response.status_code == 201, response.data
+    holding = Holding.objects.get(pk=response.data["id"])
+    entry = LedgerEntry.objects.get(account=account, asset=holding.asset)
+    assert entry.timestamp.date() == when.date()
+
+
+@pytest.mark.django_db
+def test_backdated_property_is_written_into_older_snapshots(account, asset_catalog):
+    """Unit: snapshots taken before the holding existed must include the house."""
+    old = timezone.now() - datetime.timedelta(days=30)
+    snap = Snapshot.objects.create(
+        user=account.user, account=account, total_value_tomans=Decimal("100"),
+        timestamp=old,
+    )
+    when = timezone.now() - datetime.timedelta(days=3650)
+    response = _add_property(account, occurred_at=when.isoformat())
+    assert response.status_code == 201, response.data
+    snap.refresh_from_db()
+    assert snap.total_value_tomans == Decimal("9100000100")
+

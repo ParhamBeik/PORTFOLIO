@@ -17,6 +17,33 @@ _HOUSE_MARK_KINDS = (
 )
 
 
+def load_house_marks(account):
+    """All live house marks for `account`, oldest first. One query."""
+    return list(
+        LedgerEntry.objects.filter(
+            account=account,
+            asset__is_house=True,
+            kind__in=_HOUSE_MARK_KINDS,
+            reversal_of__isnull=True,
+            reversed_by__isnull=True,
+        )
+        .select_related("asset")
+        .order_by("timestamp", "pk")
+    )
+
+
+def house_state_as_of(marks, target) -> tuple:
+    """Price-per-sqm and area in force at `target`, from a preloaded mark list."""
+    qty: Dict[str, Decimal] = {}
+    area: Dict[str, Decimal] = {}
+    for mark in marks:
+        if mark.timestamp <= target:
+            qty[mark.asset.key] = _q(mark.quantity)
+            if mark.area_sqm is not None:
+                area[mark.asset.key] = _q(mark.area_sqm)
+    return qty, area
+
+
 def house_marks_as_of(account, target) -> Dict[str, Decimal]:
     """Price-per-sqm in force for each house asset at `target`.
 
@@ -26,44 +53,14 @@ def house_marks_as_of(account, target) -> Dict[str, Decimal]:
     resolved here instead: take the most recent non-reversed mark at or before
     the target date.
     """
-    marks = (
-        LedgerEntry.objects.filter(
-            account=account,
-            asset__is_house=True,
-            kind__in=_HOUSE_MARK_KINDS,
-            timestamp__lte=target,
-            reversal_of__isnull=True,
-            reversed_by__isnull=True,
-        )
-        .select_related("asset")
-        .order_by("asset_id", "-timestamp", "-pk")
-    )
-    resolved: Dict[str, Decimal] = {}
-    for mark in marks:
-        # Ordering puts the newest mark per asset first; keep only that one.
-        resolved.setdefault(mark.asset.key, _q(mark.quantity))
-    return resolved
+    qty, _area = house_state_as_of(load_house_marks(account), target)
+    return qty
 
 
 def house_area_as_of(account, target) -> Dict[str, Decimal]:
     """Area travelling with the mark in force, so history is not re-measured."""
-    marks = (
-        LedgerEntry.objects.filter(
-            account=account,
-            asset__is_house=True,
-            kind__in=_HOUSE_MARK_KINDS,
-            timestamp__lte=target,
-            reversal_of__isnull=True,
-            reversed_by__isnull=True,
-        )
-        .select_related("asset")
-        .order_by("asset_id", "-timestamp", "-pk")
-    )
-    resolved: Dict[str, Decimal] = {}
-    for mark in marks:
-        if mark.asset.key not in resolved and mark.area_sqm is not None:
-            resolved[mark.asset.key] = _q(mark.area_sqm)
-    return resolved
+    _qty, area = house_state_as_of(load_house_marks(account), target)
+    return area
 
 
 def holdings_as_of(user, account, date) -> Dict[str, Decimal]:

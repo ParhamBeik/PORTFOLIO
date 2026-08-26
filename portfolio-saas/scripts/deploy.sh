@@ -7,7 +7,7 @@ compose=(docker compose -f "${project_dir}/docker-compose.prod.yml" --env-file "
 
 [[ -r "${env_file}" ]] || { echo "Create ${env_file} from .env.production.example" >&2; exit 1; }
 [[ "$(stat -c '%a' "${env_file}")" =~ ^[46]00$ ]] || { echo "${env_file} must have mode 400 or 600" >&2; exit 1; }
-docker network inspect vps-edge >/dev/null 2>&1 || { echo "Deploy deploy/edge first; Docker network vps-edge is missing" >&2; exit 1; }
+docker network inspect vps-edge >/dev/null 2>&1 || { echo "Docker network vps-edge is missing; the VPS reverse proxy at /opt/apps/vps-edge must already be running" >&2; exit 1; }
 domain="$(awk -F= '$1=="PORTFOLIO_DOMAIN"{print $2; exit}' "${env_file}")"
 [[ -n "${domain}" ]] || { echo "PORTFOLIO_DOMAIN is missing from ${env_file}" >&2; exit 1; }
 

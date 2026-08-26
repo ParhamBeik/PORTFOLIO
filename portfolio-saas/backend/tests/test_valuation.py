@@ -1411,13 +1411,24 @@ def test_archive_is_behind_protection_holds_without_an_explicit_session_map(
 
 
 def _house_holding(account, asset, *, price_per_sqm_million, area_sqm, hidden=False):
-    return Holding.objects.create(
-        account=account,
+    """Holding plus a mark dated well before typical chart windows.
+
+    History reads marks, not current qty. Without a past opening, hide cannot
+    Y-shift recorded snapshots (the house did not exist on those days).
+    """
+    record_house_mark(
+        user=account.user,
+        account_id=account.id,
         asset=asset,
         quantity=Decimal(str(price_per_sqm_million)),
         area_sqm=Decimal(str(area_sqm)),
-        is_hidden=hidden,
+        occurred_at=timezone.now() - timedelta(days=400),
     )
+    holding = Holding.objects.get(account=account, asset=asset)
+    if hidden:
+        holding.is_hidden = True
+        holding.save(update_fields=["is_hidden"])
+    return holding
 
 
 def test_house_value_is_area_times_price_per_sqm_in_millions(asset_catalog, make_user):
@@ -1845,3 +1856,29 @@ def test_a_backdated_entry_never_overwrites_a_newer_manual_price(
     assert resp.status_code == 201, resp.data
     # Still valued at the current 5,000,000 mark, not the 2020 purchase price.
     assert value_account(account)["total"] == Decimal("5000000")
+
+@pytest.mark.django_db
+def test_house_series_is_zero_before_the_purchase_mark(asset_catalog, make_user):
+    """Unit: chart days before the mark must not carry today's house value."""
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+
+    user = make_user(email="househist@test.test")
+    account = Account.objects.create(user=user, name="Property")
+    house = asset_catalog["house_asset"]
+    purchased = timezone.now() - timedelta(days=5)
+    record_house_mark(
+        user=user,
+        account_id=account.id,
+        asset=house,
+        quantity=Decimal("100"),
+        area_sqm=Decimal("91"),
+        occurred_at=purchased,
+    )
+    series = compute_dynamic_net_worth_series(user, account, days=10)
+    valued = Decimal("9100000000")
+    before = [row for row in series if row["date"] < purchased.date().isoformat()]
+    after = [row for row in series if row["date"] >= purchased.date().isoformat()]
+    assert before and after
+    assert all(Decimal(row["total"]) == 0 for row in before)
+    assert all(Decimal(row["total"]) == valued for row in after)
+

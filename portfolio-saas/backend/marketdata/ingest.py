@@ -822,7 +822,7 @@ def ingest_market_index(payload) -> tuple[int, int]:
 
 
 def ingest_market_snapshots(asset_class, payload) -> tuple[int, int]:
-    """Persist a live poll of crypto/commodity/etf_nav as raw snapshots.
+    """Persist a live poll of crypto/commodity as raw snapshots.
 
     Index is deliberately not one of these: `MarketIndexData` already
     captures every index live tick via the existing `ingest_market_index`
@@ -834,7 +834,7 @@ def ingest_market_snapshots(asset_class, payload) -> tuple[int, int]:
     turns repeated snapshots into a proper daily series. Field names are
     defensive across both BrsApi payload families seen elsewhere in this
     module: `symbol`/`price` (Market/* endpoints, e.g. gold/currency/crypto)
-    and `l18`/`pl`/`pc` (Tsetmc/* endpoints, e.g. ETF NAV).
+    and `l18`/`pl`/`pc` (Tsetmc/* endpoints).
     """
     from django.utils import timezone
 
@@ -878,46 +878,6 @@ def ingest_market_snapshots(asset_class, payload) -> tuple[int, int]:
         asset_class, created, skipped, len(rows),
     )
     return created, skipped
-
-
-def ingest_etf_nav_snapshot(symbol, payload) -> bool:
-    """Persist one ETF's NAV as a MarketSnapshot row.
-
-    Separate from ingest_market_snapshots: Tsetmc/Nav.php is a per-symbol call
-    (see fetch_etf_nav) whose response -- {"date","time","psubtran","predtran"}
-    -- never echoes back the symbol it was fetched for, so the caller must
-    supply it. `psubtran` (issuance/subscription NAV, what a buyer pays to
-    create a unit) is stored as last_price -- the standard "current price"
-    reference for valuing a held ETF; `predtran` (redemption NAV) as bid_price,
-    matching how the other Market/* fetchers populate that field for a
-    buy/sell spread. No unit conversion: stored verbatim per this module's
-    Rial-storage policy (see marketdata/currency.py:to_toman, the sole
-    conversion point, never called from here).
-    """
-    from django.utils import timezone
-
-    if not isinstance(payload, dict) or "psubtran" not in payload:
-        logger.warning(
-            "ingest_etf_nav_snapshot(%s): unexpected payload shape, keys=%s",
-            symbol, sorted(payload.keys()) if isinstance(payload, dict) else type(payload),
-        )
-        return False
-    price = _number(payload.get("psubtran"))
-    if price <= 0:
-        logger.warning(
-            "ingest_etf_nav_snapshot(%s): non-positive psubtran=%r, skipping",
-            symbol, payload.get("psubtran"),
-        )
-        return False
-    MarketSnapshot.objects.create(
-        asset_class="etf_nav",
-        symbol=symbol[:64],
-        observed_at=timezone.now(),
-        last_price=price,
-        bid_price=_number(payload.get("predtran")),
-        provider_payload=payload,
-    )
-    return True
 
 
 def aggregate_market_daily_bars(asset_class, jalali_date, *, symbols=None) -> tuple[int, int]:

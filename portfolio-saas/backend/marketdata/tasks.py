@@ -89,16 +89,10 @@ def capture_derivative_snapshots():
 
 @shared_task
 def capture_market_snapshots():
-    """Poll the live endpoints that are registered but were never called until
-    recently: crypto, commodity (batch, one call each) and ETF NAV (per-symbol,
-    see _capture_etf_nav_batch below -- Tsetmc/Nav.php has no batch form).
+    """Poll crypto and commodity (one Market/* call each).
 
-    Same failure-domain-per-endpoint shape as `capture_derivative_snapshots`.
-    `Market/*` paths (crypto, commodity) use `BRS_API_KEY`; `Tsetmc/*` paths
-    (etf_nav) use `TSETMC_API_KEY` -- same split the existing gold/currency
-    vs. index/option fetchers already follow.
-
-    Cadence comes from `LiveFetchState` (see capture_derivative_snapshots).
+    Nav.php is retired -- it never produced a usable series and billed TSETMC.
+    Cadence comes from `LiveFetchState`.
     """
     from . import live_states
     from .fetchers import fetch_derivatives
@@ -130,69 +124,7 @@ def capture_market_snapshots():
             live_states.record_result(state, ok=False, error=err)
             _finish_fail(outcome, err)
 
-    results["etf_nav"] = _capture_etf_nav_batch()
     return results
-
-
-def _capture_etf_nav_batch():
-    """Fetch NAV for whichever funds are due this tick.
-
-    Nav.php is one request per ETF (see fetch_etf_nav) and there are ~417 of them
-    (marketdata.catalog's IRT-ISIN discovery). This used to rotate through them
-    with a cache-held cursor, which bounded the cost but guaranteed no fund any
-    particular freshness -- coverage depended on how often the beat happened to
-    fire between catalog changes. Each fund now owns a `LiveFetchState` row on a
-    once-per-trading-day cadence, so every fund gets exactly one NAV per session
-    and the reserve can price that in advance instead of guessing.
-    """
-    from . import live_states
-    from .fetchers import fetch_etf_nav
-    from .fetchers import PermanentMarketDataError, TransientMarketDataError
-
-    # Bounded per tick so one beat cannot claim all ~417 at once and blow through
-    # the 5-minute window limiter; the rest stay due and land on the next tick.
-    due = live_states.claim_due("etf_nav", limit=settings.ETF_NAV_BATCH_SIZE)
-    if not due:
-        return (0, 0)
-
-    outcome = _ledgered(
-        "capture_market_snapshots:etf_nav",
-        endpoint="etf_nav",
-        destination_table="MarketSnapshot",
-    )
-    created = failed = 0
-    permanent_failures = []
-    for state in due:
-        symbol = state.scope
-        try:
-            payload = fetch_etf_nav(settings.TSETMC_API_KEY, symbol)
-            if ingest.ingest_etf_nav_snapshot(symbol, payload):
-                created += 1
-                live_states.record_result(state, ok=True)
-            else:
-                failed += 1
-                live_states.record_result(state, ok=False, error="empty_payload")
-        except PermanentMarketDataError as exc:
-            # A specific symbol rejected (e.g. delisted, per endpoints.py's
-            # "non-ETF symbol returns 502" note) must not abort the rest of
-            # the batch -- log it and keep going, same as the other per-item
-            # loops in this module (ingest_market_snapshots et al).
-            failed += 1
-            permanent_failures.append(symbol)
-            live_states.record_result(state, ok=False, error=exc)
-            logger.warning("capture_market_snapshots(etf_nav): %s permanently failed: %s", symbol, exc)
-        except TransientMarketDataError as exc:
-            failed += 1
-            live_states.record_result(state, ok=False, error=exc)
-            logger.warning("capture_market_snapshots(etf_nav): %s transient failure: %s", symbol, exc)
-
-    logger.info(
-        "capture_market_snapshots(etf_nav): created %d, failed %d of %d due "
-        "(permanent_failures=%s)",
-        created, failed, len(due), permanent_failures or None,
-    )
-    _finish_ok(outcome, rows_created=created, rows_rejected=failed)
-    return (created, failed)
 
 
 @shared_task(ignore_result=True)
@@ -205,7 +137,7 @@ def aggregate_market_daily_bars_task(jalali_date=None):
     target_date = jalali_date or jalali.today()
     results = {}
     for asset_class in (
-        "crypto", "commodity", "etf_nav", "index",
+        "crypto", "commodity", "index",
         "tse_option", "ime_future", "ime_option",
     ):
         outcome = _ledgered(
