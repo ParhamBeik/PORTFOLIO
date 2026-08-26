@@ -67,14 +67,18 @@ class Command(BaseCommand):
         self.stdout.write(f"  {'price loop':<20} {'':<24} ~{self._price_loop()}/day")
         plan = total + self._price_loop()
         self.stdout.write(f"  {'TOTAL':<20} {'':<24} ~{plan}/day")
+        self.stdout.write("  (TOTAL is not a shared wallet -- compare each plan below.)")
 
-        ceiling = quota.bucket_budget(quota.LIVE)
-        if plan > ceiling:
-            self.stdout.write(self.style.ERROR(
-                f"  PLAN EXCEEDS THE LIVE CEILING ({plan} > {ceiling}). Live fetches will "
-                f"be refused once the bucket is spent -- raise "
-                f"MARKETDATA_LIVE_REQUEST_FLOOR or slow a cadence."
-            ))
+        for p in quota.PLANS:
+            loop = self._price_loop(p)
+            cap = quota.bucket_budget(quota.LIVE, p)
+            self.stdout.write(f"  price loop {p:<8} ~{loop}/day  live cap={cap}")
+            if loop > cap:
+                self.stdout.write(self.style.ERROR(
+                    f"  {p} PRICE LOOP EXCEEDS ITS LIVE CAP ({loop} > {cap}). "
+                    f"Live fetches on that wallet will be refused once the bucket "
+                    f"is spent -- raise MARKETDATA_LIVE_REQUEST_FLOOR or slow a cadence."
+                ))
 
     @staticmethod
     def _price_loop(plan=None):
@@ -82,15 +86,23 @@ class Command(BaseCommand):
         return quota._simulate_price_loop(start, start + timedelta(days=1), plan=plan)
 
     def _budgets(self, plan, row):
-        blocked = quota.is_plan_blocked(plan)
-        ceiling = row.limit or "unknown (not yet reported by provider)"
+        live_blocked = quota.is_plan_blocked(plan, bucket=quota.LIVE)
+        archive_blocked = quota.is_plan_blocked(plan, bucket=quota.ARCHIVE)
+        disclosed = row.limit or 0
+        assumed = quota.effective_limit(plan, row)
+        ceiling = disclosed if disclosed else f"assumed {assumed}"
+        if live_blocked:
+            tag = " [LIVE BLOCKED until reset]"
+        elif archive_blocked:
+            tag = " [ARCHIVE BLOCKED until reset]"
+        else:
+            tag = ""
         self.stdout.write(self.style.MIGRATE_HEADING(
-            f"\nPlan {plan} -- used {row.used}/{ceiling}"
-            + (" [BLOCKED until reset]" if blocked else "")
+            f"\nPlan {plan} -- used {row.used}/{ceiling}{tag}"
         ))
         for bucket in (quota.LIVE, quota.ARCHIVE, quota.OTHER):
             used = getattr(row, f"{bucket}_used", 0)
-            budget = quota.bucket_budget(bucket)
+            budget = quota.bucket_budget(bucket, plan)
             self.stdout.write(
                 f"  {bucket:<10} budget={str(budget if budget is not None else 'uncapped'):<9} "
                 f"used={used:<7} remaining={quota.remaining_requests(bucket, plan)}"
@@ -98,6 +110,11 @@ class Command(BaseCommand):
         self.stdout.write(
             f"  reserved for live between now and rollover: "
             f"{quota.live_reserve_remaining(plan, row)}"
+        )
+        self.stdout.write(
+            f"  archive paced now/day: "
+            f"{quota.archive_allowance_now(plan, row)}/"
+            f"{quota.archive_day_ceiling(plan, row)}"
         )
 
     def _preview(self, limit):

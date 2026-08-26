@@ -6,6 +6,7 @@ Merged from 7 files; each section keeps its original banner.
 from datetime import timedelta
 import datetime
 from decimal import Decimal
+import os
 from unittest import mock
 from unittest.mock import patch
 
@@ -2398,3 +2399,70 @@ def test_calmar_none_when_window_too_short():
     calmar, window_days = _calmar(series)
     assert calmar is None
     assert window_days < 1095
+
+
+# ---------- BLAS kernel dispatch: the solver stack must not SIGILL -----------
+#
+# cvxpy pulls in scs, which bundles its own OpenBLAS (0.3.15) alongside numpy's
+# and scipy's. On the deployed QEMU vCPU that copy auto-detects an AMD
+# "Opteron" and dispatches dgemm_oncopy_OPTERON_SSE3, whose 9th byte is 0f 0e --
+# FEMMS, a 3DNow! instruction the vCPU does not implement. Result: SIGILL on
+# every matrix multiply that lands in it, ~46k killed pool workers/day
+# (2026-08-26). scs's and scipy's both export an unsuffixed dgemm_, so whichever
+# is dlopen'd first wins for the whole process; that is why the live worker
+# crashed and the archive worker, same image, did not.
+#
+# OPENBLAS_CORETYPE (set in docker-compose.prod.yml) pins the kernel and skips
+# the broken detection. This guards that: a base-image or wheel bump that
+# reintroduces a bad auto-detect fails here instead of in production.
+
+
+def _bundled_openblas_libs():
+    import pathlib
+    import sysconfig
+
+    root = pathlib.Path(sysconfig.get_paths()["purelib"])
+    return sorted(root.glob("*.libs/libopenblas*.so*"))
+
+
+# Must run out-of-process: SIGILL is not catchable, it would take pytest with it.
+_DGEMM_PROBE = r"""
+import ctypes, os, sys
+lib = ctypes.CDLL(sys.argv[1])
+N = 128
+d = ctypes.c_double
+A = (d * (N * N))(*([1.0] * (N * N)))
+B = (d * (N * N))(*([2.0] * (N * N)))
+C = (d * (N * N))()
+n = ctypes.c_int(N)
+alpha, beta = d(1.0), d(0.0)
+t = ctypes.c_char(b'N')
+lib.dgemm_(ctypes.byref(t), ctypes.byref(t), ctypes.byref(n), ctypes.byref(n),
+           ctypes.byref(n), ctypes.byref(alpha), A, ctypes.byref(n), B,
+           ctypes.byref(n), ctypes.byref(beta), C, ctypes.byref(n))
+assert C[0] == 256.0, C[0]
+print("ok")
+"""
+
+
+@pytest.mark.parametrize("lib", _bundled_openblas_libs(), ids=lambda p: p.parent.name)
+def test_bundled_openblas_dgemm_does_not_sigill(lib):
+    """Every bundled OpenBLAS must survive a real dgemm under the deployed env."""
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    # The libs sit beside their libgfortran/libquadmath dependencies.
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(
+        filter(None, [str(lib.parent), env.get("LD_LIBRARY_PATH", "")])
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", _DGEMM_PROBE, str(lib)],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    # -4/132 is SIGILL: the Opteron kernel executing FEMMS.
+    assert proc.returncode == 0, (
+        f"{lib.name} exited {proc.returncode} (SIGILL is -4/132). "
+        f"OPENBLAS_CORETYPE={env.get('OPENBLAS_CORETYPE', '<unset>')}. "
+        f"stderr={proc.stderr[-500:]}"
+    )

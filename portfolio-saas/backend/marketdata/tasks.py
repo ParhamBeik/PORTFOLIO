@@ -647,7 +647,7 @@ def run_archive_state(state_id):
     except QuotaExhausted as err:
         outcome.finish(
             WorkflowRun.Outcome.RETRY,
-            error_code="quota_exhausted",
+            error_code=getattr(err, "reason", None) or "quota_exhausted",
             metadata={"reason": str(err)},
         )
         return
@@ -702,13 +702,21 @@ def archive_tick():
         return
     try:
         from .models import ArchiveFetchState
-        from .quota import archive_capacity
+        from .quota import PLANS, archive_capacity, archive_idle_reason
         capacity = archive_capacity()
         if not any(value > 0 for value in capacity.values()):
+            reasons = {plan: archive_idle_reason(plan) for plan in PLANS}
+            paced = bool(reasons) and all(
+                reason == "archive_paced" for reason in reasons.values()
+            )
             outcome.finish(
                 WorkflowRun.Outcome.SKIPPED,
-                error_code="quota_exhausted",
-                metadata={"reason": "archive_budget_empty", **capacity},
+                error_code="archive_paced" if paced else "quota_exhausted",
+                metadata={
+                    "reason": "archive_paced" if paced else "archive_budget_empty",
+                    **capacity,
+                    "idle": reasons,
+                },
             )
             return
         slots, depth = _queue_slots(

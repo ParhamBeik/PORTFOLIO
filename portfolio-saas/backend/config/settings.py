@@ -235,6 +235,24 @@ MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
 MARKETDATA_LIVE_REQUEST_FLOOR = int(os.getenv("MARKETDATA_LIVE_REQUEST_FLOOR", "1200"))
 MARKETDATA_LIVE_REQUEST_HEADROOM = int(os.getenv("MARKETDATA_LIVE_REQUEST_HEADROOM", "500"))
 MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET", "200"))
+
+# What each plan's daily ceiling is EXPECTED to be, per subscription. Used only
+# to size the live reserve and the archive cap until the provider discloses its
+# own number, which then wins (see quota.effective_limit).
+#
+# This is not the ceiling the 2026-08-24 outage was about. That was one SHARED
+# counter across two wallets, so spending either drained both. These are
+# per-plan and they are not a spend cap -- the provider's refusal and the
+# circuit breaker still decide when to stop. Without them the reserve cannot be
+# computed at all before the provider first errors, and `row.limit` is 0 on 8 of
+# any 10 days: that gap is what let archive spend 10,034 of 10,000 requests
+# before dawn on 2026-08-26 while live_used sat at 0.
+MARKETDATA_PLAN_LIMIT_TSETMC = int(os.getenv("MARKETDATA_PLAN_LIMIT_TSETMC", "10000"))
+MARKETDATA_PLAN_LIMIT_BRS = int(os.getenv("MARKETDATA_PLAN_LIMIT_BRS", "1500"))
+# Archive stops this far short of the ceiling so the wallet is never actually
+# exhausted. Exhaustion trips the breaker, and the breaker is what took the live
+# lane down with it.
+MARKETDATA_PLAN_SAFETY_MARGIN = int(os.getenv("MARKETDATA_PLAN_SAFETY_MARGIN", "150"))
 MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "120"))
 # Pending work, not active workers. Sized to keep archive workers busy between
 # scheduler ticks without exceeding the archive slice of the 5-minute window

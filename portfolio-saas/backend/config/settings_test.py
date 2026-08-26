@@ -52,6 +52,10 @@ SECURE_SSL_REDIRECT = False
 # multiply the provider's allowance by the worker count); the suite is one
 # process, so let it fall back to the local window and exercise the counters.
 MARKETDATA_REQUIRE_SHARED_WINDOW = False
+# Production keeps a 150-request gap so archive cannot empty a wallet. The
+# suite uses 5–20 request ceilings to pin the reserve arithmetic; that gap
+# would zero those wallets and hide the behaviour under test.
+MARKETDATA_PLAN_SAFETY_MARGIN = 0
 
 # Run Celery tasks synchronously in-process. This removes the hard dependency on
 # a running Redis broker during tests — views that call `.delay()` (e.g.

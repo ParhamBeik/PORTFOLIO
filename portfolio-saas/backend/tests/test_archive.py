@@ -4,10 +4,13 @@ Merged from 8 files; each section keeps its original banner.
 """
 
 from datetime import timedelta
+import datetime
 from decimal import Decimal
 from unittest import mock
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -39,6 +42,7 @@ from marketdata.models import ArchiveFetchState, MarketCandle
 from marketdata.models import ArchiveFetchState, RejectedRecord
 from marketdata.models import DailyStockHistory, MarketCandle
 from marketdata.models import RealLegalHistory, RejectedRecord
+from marketdata import quota
 from marketdata.quota import (
     ARCHIVE,
     LIVE,
@@ -1837,3 +1841,117 @@ def test_apply_refuses_while_the_session_is_open():
     ):
         with pytest.raises(CommandError, match="session is open"):
             call_command("resync_symbol_from_provider", "کاما", apply=True)
+
+
+# ---------- live is static, leftover is dynamic ------------------------------
+#
+# The 2026-08-26 production failure: archive spent 10,034 of 10,000 TSETMC
+# requests between Tehran midnight and 03:43 with live_used at exactly 0, then
+# the breaker tripped and silenced live for the remaining twenty hours. Three
+# defects combined, and each gets a test below.
+
+
+def test_live_reserve_holds_when_provider_has_not_disclosed_a_limit(settings):
+    """THE bug: the reserve was gated on `row.limit`, which is 0 on most days.
+
+    `limit` only rides along on provider *error* responses, so on a healthy day
+    it is never set -- and `if bucket != LIVE and row.limit:` then skipped the
+    live reserve entirely, leaving archive completely unthrottled.
+    """
+    from marketdata.quota import TSETMC
+
+    settings.MARKETDATA_PLAN_LIMIT_TSETMC = 300
+    settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+
+    row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
+    assert row.limit == 0, "precondition: the provider has told us nothing"
+
+    # Open the pacing gate fully so this exercises the reserve gate alone.
+    with (
+        patch.object(quota, "live_reserve_remaining", return_value=290),
+        patch.object(quota, "_day_elapsed_fraction", return_value=1.0),
+    ):
+        # 300 ceiling - 290 reserved for live = 10 for archive.
+        for _ in range(10):
+            reserve_request(ARCHIVE, TSETMC)
+        with pytest.raises(QuotaExhausted, match="reserved for live"):
+            reserve_request(ARCHIVE, TSETMC)
+
+
+def test_archive_trip_does_not_silence_live(settings):
+    """The breaker ran before any bucket distinction, so archive took live down.
+
+    Live has its own reserved headroom; an archive overrun must not spend it.
+    A live-triggered trip is different and still stops live.
+    """
+    from marketdata.quota import (
+        ARCHIVE as _A, LIVE as _L, TSETMC, is_plan_blocked, trip_plan_breaker,
+    )
+
+    trip_plan_breaker(TSETMC, reason="http_429", bucket=_A)
+    assert is_plan_blocked(TSETMC)                      # plan-wide: yes
+    assert is_plan_blocked(TSETMC, bucket=_A)           # archive: stopped
+    assert not is_plan_blocked(TSETMC, bucket=_L)       # live: still allowed
+    reserve_request(_L, TSETMC)                         # and it really can spend
+    with pytest.raises(QuotaExhausted):
+        reserve_request(_A, TSETMC)
+
+    cache.clear()
+    trip_plan_breaker(TSETMC, reason="http_429", bucket=_L)
+    assert is_plan_blocked(TSETMC, bucket=_L), "a live 429 must still stop live"
+
+
+def test_archive_is_paced_across_the_day(settings):
+    """Leftover is spread over 24h instead of burned before the market opens."""
+    from marketdata.quota import TSETMC, archive_allowance_now, archive_day_ceiling
+
+    settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
+    settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    settings.MARKETDATA_ARCHIVE_BATCH_SIZE = 0
+    row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
+    tehran = ZoneInfo("Asia/Tehran")
+    midnight = datetime.datetime(2026, 8, 26, 0, 0, tzinfo=tehran)
+
+    with patch.object(quota, "live_reserve_remaining", return_value=0):
+        ceiling = archive_day_ceiling(TSETMC, row, now=midnight)
+        assert ceiling == 10_000
+        # Pro rata: a quarter of the day buys a quarter of the budget.
+        assert archive_allowance_now(TSETMC, row, now=midnight) == 0
+        six_am = midnight + datetime.timedelta(hours=6)
+        assert archive_allowance_now(TSETMC, row, now=six_am) == 2_500
+        six_pm = midnight + datetime.timedelta(hours=18)
+        assert archive_allowance_now(TSETMC, row, now=six_pm) == 7_500
+
+
+def test_unused_live_headroom_returns_to_archive_late_in_the_day(settings):
+    """Live is static; the *leftover* must be dynamic.
+
+    As the reserve burns down toward rollover, whatever live did not use is
+    released to backfill rather than stranded.
+    """
+    from marketdata.quota import TSETMC, archive_day_ceiling
+
+    settings.MARKETDATA_PLAN_LIMIT_TSETMC = 5_000
+    settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
+
+    with patch.object(quota, "live_reserve_remaining", return_value=1_200):
+        early = archive_day_ceiling(TSETMC, row)
+    with patch.object(quota, "live_reserve_remaining", return_value=50):
+        late = archive_day_ceiling(TSETMC, row)
+    assert early == 3_800 and late == 4_950
+    assert late > early
+
+
+def test_live_budget_never_exceeds_the_wallet_it_spends(settings):
+    """BRS's whole subscription is 1,500; a flat 1,700 live budget cannot bind."""
+    from marketdata.quota import BRS, LIVE, TSETMC, bucket_budget
+
+    settings.MARKETDATA_LIVE_REQUEST_FLOOR = 1_200
+    settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 500
+    settings.MARKETDATA_PLAN_LIMIT_BRS = 1_500
+    settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
+    settings.MARKETDATA_PLAN_SAFETY_MARGIN = 150
+
+    assert bucket_budget(LIVE, TSETMC) == 1_700      # fits, unchanged
+    assert bucket_budget(LIVE, BRS) == 1_350         # clamped to 1500 - 150

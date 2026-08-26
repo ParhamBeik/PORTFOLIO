@@ -51,6 +51,23 @@ x-backend-env: &backend-env
   QUEUE_BACKLOG_THRESHOLD: ${QUEUE_BACKLOG_THRESHOLD:-100}
   APPLICATION_ERROR_THRESHOLD: ${APPLICATION_ERROR_THRESHOLD:-20}
   PRICE_STALE_THRESHOLD_SECONDS: ${PRICE_STALE_THRESHOLD_SECONDS:-900}
+  # The quota day rolls at Tehran midnight. This is the settings default too,
+  # but it decides which row every request is billed to, so it is pinned here
+  # rather than left to an implicit fallback.
+  MARKETDATA_QUOTA_TIMEZONE: ${MARKETDATA_QUOTA_TIMEZONE:-Asia/Tehran}
+  MARKETDATA_PLAN_LIMIT_TSETMC: ${MARKETDATA_PLAN_LIMIT_TSETMC:-10000}
+  MARKETDATA_PLAN_LIMIT_BRS: ${MARKETDATA_PLAN_LIMIT_BRS:-1500}
+  MARKETDATA_PLAN_SAFETY_MARGIN: ${MARKETDATA_PLAN_SAFETY_MARGIN:-150}
+  # Three OpenBLAS copies ship in this image (numpy's, scipy's, and scs's via
+  # cvxpy). scs bundles 0.3.15, which reads this QEMU vCPU as an AMD "Opteron"
+  # and dispatches dgemm_oncopy_OPTERON_SSE3 -- whose 9th byte is 0f 0e (FEMMS,
+  # a 3DNow! instruction). The vCPU advertises 3dnowprefetch but NOT 3dnow, so
+  # it traps: SIGILL, ~46k pool deaths/day on the live worker (2026-08-26).
+  # scs's and scipy's both export unsuffixed dgemm_, so whichever dlopens first
+  # wins process-wide -- which is why live crashed and archive did not.
+  # Pinning the kernel skips the broken auto-detection. Haswell is safe (the
+  # vCPU has avx2/fma/bmi2) and faster than the Core2 scipy otherwise picks.
+  OPENBLAS_CORETYPE: ${OPENBLAS_CORETYPE:-Haswell}
 
 x-logging: &logging
   driver: json-file

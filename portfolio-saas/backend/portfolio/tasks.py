@@ -36,12 +36,13 @@ from django.db.models.functions import TruncDate
 from django.utils import timezone
 
 from portfolio.optimization_models import OptimizationSnapshot
-from portfolio.services.optimization import (
-    MixedUnitUniverseBlocked,
-    SolverError,
-    UniverseTooSmall,
-    optimize,
-)
+
+# `portfolio.services.optimization` imports cvxpy, which drags in scs and its
+# bundled OpenBLAS. Importing it here put that library into every process that
+# loads this module -- including the live price worker, which never solves
+# anything. Both optimizer tasks below import it inside the function instead.
+# See the OPENBLAS_CORETYPE note in docker-compose.prod.yml for why that
+# library is hazardous on the deployed vCPU.
 
 logger = logging.getLogger(__name__)
 
@@ -593,6 +594,12 @@ SCENARIOS = ("max_sharpe", "min_volatility")
 def run_best_overall_snapshots():
     """One global (account=None) OptimizationSnapshot per (window, scenario)."""
     from marketdata.universe import get_candidate_universe
+    from portfolio.services.optimization import (
+        MixedUnitUniverseBlocked,
+        SolverError,
+        UniverseTooSmall,
+        optimize,
+    )
 
     universe, _ = get_candidate_universe()
     if len(universe) < 3:

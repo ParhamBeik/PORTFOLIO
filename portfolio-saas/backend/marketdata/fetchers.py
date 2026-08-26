@@ -137,10 +137,15 @@ def fetch_json(
         # that response used to fall straight through to `response.json()` and be
         # returned as if it were data -- a 500 was never handled at all.
         if looks_like_quota_error(response.status_code, response.text):
-            trip_plan_breaker(quota_plan, reason=f"http_{response.status_code}")
+            trip_plan_breaker(
+                quota_plan,
+                reason=f"http_{response.status_code}",
+                bucket=quota_bucket,
+            )
             raise QuotaExhausted(
                 f"Provider reports the {quota_plan} plan exhausted "
-                f"(HTTP {response.status_code}); paused until reset."
+                f"(HTTP {response.status_code}); paused until reset.",
+                reason="plan_blocked",
             )
 
         if 400 <= response.status_code < 500 and response.status_code != 429:
