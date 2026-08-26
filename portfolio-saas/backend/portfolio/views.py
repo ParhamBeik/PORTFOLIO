@@ -949,7 +949,13 @@ def _subtract_hidden_holdings(user, account, series, now) -> None:
         beyond_reach = adjustment is None
         if beyond_reach:
             adjustment = by_date[oldest]
-        net = Decimal(row["total"]) - Decimal(adjustment["total"])
+        snap_total = Decimal(row["total"])
+        hidden_total = Decimal(adjustment["total"])
+        # A photograph taken before those holdings existed cannot contain them.
+        # Subtracting anyway floors every such day at zero -- the Aug 2026 hole.
+        if snap_total < hidden_total:
+            continue
+        net = snap_total - hidden_total
         row["total"] = str(max(net, Decimal("0")))
         row["approximated"] = beyond_reach or bool(adjustment["approximated"])
 

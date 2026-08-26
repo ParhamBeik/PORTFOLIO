@@ -1624,6 +1624,42 @@ def test_recorded_history_is_netted_of_switched_off_holdings(
         assert Decimal(str(point["total"])) == Decimal("200")
 
 
+def test_hidden_house_not_in_the_photograph_does_not_zero_the_line(
+    asset_catalog, make_user, write_prices
+):
+    """Integration: hide must not subtract a house the snapshot never recorded.
+
+    A property typed in today with a purchase date last week is absent from
+    last week's photographs. Subtracting its value anyway floors those days
+    at zero and puts a cliff on the day it was entered.
+    """
+    write_prices({"emami_coin": Decimal("100")})
+    user = make_user(email="unbacked@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("2")
+    )
+    _house_holding(
+        account, asset_catalog["house_asset"],
+        price_per_sqm_million=100, area_sqm=91, hidden=True,
+    )
+    for days_ago in (2, 1):
+        Snapshot.objects.create(
+            user=user,
+            account=account,
+            total_value_tomans=Decimal("200"),
+            timestamp=timezone.now() - timedelta(days=days_ago),
+        )
+
+    client = APIClient()
+    client.force_authenticate(user=user)
+    resp = client.get(f"/api/snapshots/?days=30&account={account.id}")
+
+    assert resp.status_code == 200, resp.data
+    for point in resp.data["series"]:
+        assert Decimal(str(point["total"])) == Decimal("200")
+
+
 def test_history_older_than_the_recompute_bound_is_still_netted(
     asset_catalog, make_user, write_prices, monkeypatch
 ):

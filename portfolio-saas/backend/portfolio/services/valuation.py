@@ -800,7 +800,7 @@ def compute_dynamic_net_worth_series(
     close to read and its live price stood in. On the hidden series that is the
     signal the chart uses to say the adjustment is an estimate.
     """
-    from datetime import timedelta
+    from datetime import datetime as dt, time as dtime, timedelta
     import jdatetime
     from django.utils import timezone
     from marketdata.calendars import (
@@ -945,6 +945,12 @@ def compute_dynamic_net_worth_series(
         # date is the mark that was in force, not a market print.
         approximated = False
 
+        # Marks are "in force that calendar day", not at today's clock on that
+        # date. A purchase at 17:40 was missing from the 16:30 reading of Aug 9.
+        day_end = timezone.make_aware(
+            dt.combine(target_date.date(), dtime.max),
+            timezone.get_current_timezone(),
+        )
         house_areas = {}
         if constant_holdings:
             # Today's house qty is the current mark, not history. Painting it
@@ -954,7 +960,7 @@ def compute_dynamic_net_worth_series(
             }
             for acc in accounts:
                 qty_map, area_map = house_state_as_of(
-                    house_histories.get(acc.pk, []), target_date
+                    house_histories.get(acc.pk, []), day_end
                 )
                 for k, v in qty_map.items():
                     day_holdings[k] = day_holdings.get(k, Decimal("0")) + v
@@ -962,10 +968,10 @@ def compute_dynamic_net_worth_series(
         else:
             day_holdings = {}
             for acc in accounts:
-                for k, v in holdings_as_of(user, acc, target_date).items():
+                for k, v in holdings_as_of(user, acc, day_end).items():
                     day_holdings[k] = day_holdings.get(k, Decimal("0")) + v
                 _qty, area_map = house_state_as_of(
-                    house_histories.get(acc.pk, []), target_date
+                    house_histories.get(acc.pk, []), day_end
                 )
                 house_areas.update(area_map)
 
