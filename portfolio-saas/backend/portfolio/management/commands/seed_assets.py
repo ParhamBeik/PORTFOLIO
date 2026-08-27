@@ -71,7 +71,10 @@ class Command(BaseCommand):
         # Global catalog only. A user's own real-estate rows are not in ASSETS by
         # construction, so an unscoped sweep would switch every property off on
         # the next boot -- this command runs on every container start.
-        Asset.objects.filter(owner__isnull=True).exclude(
+        # Catalog-backed rows (a ticker the user added from the market list) are
+        # also kept: they are not in ASSETS, and wiping them on boot made the
+        # add-holding wizard forget every stock except the seeded one.
+        Asset.objects.filter(owner__isnull=True, tse_symbol="", brs_symbol="").exclude(
             key__in=[row[0] for row in ASSETS]
         ).update(is_active=False)
         self.stdout.write(self.style.SUCCESS(

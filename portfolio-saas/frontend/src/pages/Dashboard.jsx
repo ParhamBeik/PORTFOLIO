@@ -74,7 +74,7 @@ const BENCH_RANGES = [
 
 const QUALITY_BADGE = { complete: "good", manual: "warn", partial: "warn", unavailable: "critical" };
 const QUALITY_LABEL = { complete: "Live", manual: "Manual", partial: "Mixed", unavailable: "Unavailable" };
-const ITEM_BADGE = { live: "good", manual: "warn", stale: "warn", fallback: "serious", unavailable: "critical" };
+const ITEM_BADGE = { live: "good", manual: "warn", stale: "warn", quota: "serious", fallback: "serious", unavailable: "critical" };
 
 // Groups valuation items by asset class for the donut. Palette has 8 fixed
 // slots (charts.jsx SERIES), so anything past the top 7 folds into "Other"
@@ -469,11 +469,13 @@ const inlineInputClass = "w-full min-w-[5rem] rounded-md border border-border bg
 
 function PricingGlossaryDisclosure() {
   return (
-    <Disclosure summary="What do Live / Manual / Mixed mean?" testId="dashboard-pricing-glossary">
+    <Disclosure summary="What do Live / Manual / Stale / Quota mean?" testId="dashboard-pricing-glossary">
       <ul className="space-y-1">
-        <li><strong className="text-text">Live</strong> — every holding priced within the last 5 minutes.</li>
+        <li><strong className="text-text">Live</strong> — priced within the last 5 minutes, or the last print from the latest session while that market is shut.</li>
         <li><strong className="text-text">Manual</strong> — house or real-estate marks updated within the last 90 days.</li>
-        <li><strong className="text-text">Mixed</strong> — some holdings are stale or falling back to an archived price.</li>
+        <li><strong className="text-text">Stale</strong> — the quote is from a previous session; a fresher one should have arrived.</li>
+        <li><strong className="text-text">Quota</strong> — the provider refused further requests today; showing the last known price, which is not current.</li>
+        <li><strong className="text-text">Mixed</strong> — some holdings are stale, quota-blocked, or falling back to an archived price.</li>
         <li><strong className="text-text">Real Toman</strong> — inflation-adjusted using SCI's CPI series through 1404.</li>
       </ul>
     </Disclosure>

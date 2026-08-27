@@ -259,7 +259,12 @@ export function Async({ data, error, loading, reload, children, empty, testId })
  * `footer` is pinned below the scrolling body: a stepper's Back/Next must stay
  * reachable when the step is taller than the viewport.
  */
-export function Modal({ title, subtitle, onClose, children, footer, testId }) {
+/** Panel widths. `wide` is for dialogs that browse a list rather than confirm
+ *  one thing -- the asset picker scrolls a market catalog and 32rem left it
+ *  showing roughly three rows. */
+const MODAL_WIDTHS = { default: "max-w-lg", wide: "max-w-3xl" };
+
+export function Modal({ title, subtitle, onClose, children, footer, testId, size = "default" }) {
   const panel = useRef(null);
 
   useEffect(() => {
@@ -292,7 +297,7 @@ export function Modal({ title, subtitle, onClose, children, footer, testId }) {
         aria-modal="true"
         aria-label={title}
         data-testid={testId}
-        className="flex max-h-[calc(100vh-2rem)] w-full max-w-lg flex-col rounded-xl border border-border bg-panel shadow-2xl"
+        className={`flex max-h-[calc(100vh-2rem)] w-full flex-col rounded-xl border border-border bg-panel shadow-2xl ${MODAL_WIDTHS[size] || MODAL_WIDTHS.default}`}
       >
         <header className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
           <div>

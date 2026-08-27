@@ -27,7 +27,7 @@ from marketdata.models import MarketInstrument
 from marketdata.models import RejectedRecord, GoldCurrencyHistory, MarketCandle
 from marketdata.models import WorkflowRun
 from marketdata.tasks import capture_derivative_snapshots
-from portfolio.live.extractor import extract_standard_prices
+from portfolio.live.extractor import apply_instrument_prices, extract_standard_prices
 from portfolio.management.commands.clean_mispriced_data import audit_and_repair_prices
 from portfolio.models import Account, Asset, Price, Snapshot
 from portfolio.models import Account, Holding, Price
@@ -698,7 +698,8 @@ def test_closed_tse_fetch_persists_archive_close(asset_catalog, raw_market_sampl
     assert latest.price == Decimal("5200")
     assert latest.source == "ARCHIVE"
     snapshot = Snapshot.objects.get(user=user, account=None)
-    assert snapshot.total_value_tomans == Decimal("52000")
+    # The archive close is Rial; the snapshot is Toman. 10 shares x 5,200 Rial.
+    assert snapshot.total_value_tomans == Decimal("5200")
     assert snapshot.is_session_close is True
 
 
@@ -1105,6 +1106,205 @@ def test_seed_assets_includes_formula_valued_house(db):
     assert house.asset_class == Asset.AssetClass.REAL_ESTATE
 
 
+def test_seed_assets_keeps_catalog_backed_rows(db):
+    extra = Asset.objects.create(
+        key="tse-iro1shpn0001",
+        name="Shapna",
+        asset_class=Asset.AssetClass.STOCK,
+        tse_symbol="شپنا",
+    )
+    orphan = Asset.objects.create(
+        key="orphan_tmp",
+        name="Orphan",
+        asset_class=Asset.AssetClass.GOLD,
+    )
+    call_command("seed_assets")
+    extra.refresh_from_db()
+    orphan.refresh_from_db()
+    assert extra.is_active
+    assert not orphan.is_active
+
+
+# ----------------------------------------------------------------------
+# test_asset_catalog_search.py
+# Integration tests: the wizard lists MarketInstrument rows, not only the seed.
+
+
+def _catalog_client(make_user):
+    user = make_user(email="catalog@test.test")
+    client = APIClient()
+    client.force_authenticate(user=user)
+    return client
+
+
+def _stock_instruments():
+    return [
+        MarketInstrument(
+            source="tsetmc",
+            symbol="کاما",
+            name="bama",
+            category=MarketInstrument.Category.STOCK,
+            eligible=True,
+            isin="IRO1KAMA0001",
+        ),
+        MarketInstrument(
+            source="tsetmc",
+            symbol="شپنا",
+            name="shapna",
+            category=MarketInstrument.Category.STOCK,
+            eligible=True,
+            isin="IRO1SHPN0001",
+        ),
+        MarketInstrument(
+            source="tsetmc",
+            symbol="خگستر",
+            name="khegstar",
+            category=MarketInstrument.Category.STOCK,
+            eligible=True,
+            isin="IRO1KGST0001",
+        ),
+        MarketInstrument(
+            source="tsetmc",
+            symbol="FOO",
+            name="ineligible",
+            category=MarketInstrument.Category.STOCK,
+            eligible=False,
+        ),
+        MarketInstrument(
+            source="brs",
+            symbol="BTC",
+            name="bitcoin",
+            category=MarketInstrument.Category.CRYPTO,
+            eligible=True,
+        ),
+        MarketInstrument(
+            source="brs",
+            symbol="IR_COIN_EMAMI",
+            name="emami",
+            category=MarketInstrument.Category.GOLD,
+            provider_group="gold",
+            eligible=True,
+        ),
+        MarketInstrument(
+            source="brs",
+            symbol="USD",
+            name="dollar",
+            category=MarketInstrument.Category.GOLD,
+            provider_group="currency",
+            eligible=True,
+        ),
+    ]
+
+
+def test_asset_catalog_lists_stocks_and_other_classes(make_user):
+    MarketInstrument.objects.bulk_create(_stock_instruments())
+    client = _catalog_client(make_user)
+
+    stocks = client.get("/api/assets/catalog/", {"asset_class": "Stock"}).json()
+    symbols = {row["symbol"] for row in stocks}
+    assert {"کاما", "شپنا", "خگستر"} <= symbols
+    assert "FOO" not in symbols
+
+    found = client.get(
+        "/api/assets/catalog/", {"asset_class": "Stock", "q": "شپنا"}
+    ).json()
+    assert [row["symbol"] for row in found] == ["شپنا"]
+
+    gold = client.get("/api/assets/catalog/", {"asset_class": "Gold"}).json()
+    assert any(row["symbol"] == "IR_COIN_EMAMI" for row in gold)
+    assert all(row["symbol"] != "USD" for row in gold)
+
+    cash = client.get("/api/assets/catalog/", {"asset_class": "Cash"}).json()
+    assert any(row["symbol"] == "USD" for row in cash)
+
+    crypto = client.get("/api/assets/catalog/", {"asset_class": "Crypto"}).json()
+    assert any(row["symbol"] == "BTC" for row in crypto)
+
+
+def test_ensure_asset_mints_then_reuses(make_user):
+    MarketInstrument.objects.bulk_create(_stock_instruments())
+    client = _catalog_client(make_user)
+
+    first = client.post(
+        "/api/assets/ensure/",
+        {"source": "tsetmc", "symbol": "شپنا"},
+        format="json",
+    )
+    assert first.status_code == 200
+    body = first.json()
+    assert body["asset_class"] == "Stock"
+    assert body["key"]
+
+    second = client.post(
+        "/api/assets/ensure/",
+        {"source": "tsetmc", "symbol": "شپنا"},
+        format="json",
+    )
+    assert second.json()["key"] == body["key"]
+    assert Asset.objects.filter(tse_symbol="شپنا").count() == 1
+
+    denied = client.post(
+        "/api/assets/ensure/",
+        {"source": "tsetmc", "symbol": "FOO"},
+        format="json",
+    )
+    assert denied.status_code == 400
+
+
+def test_crypto_asset_can_be_verified_against_catalog(db):
+    MarketInstrument.objects.create(
+        source="brs",
+        symbol="BTC",
+        category=MarketInstrument.Category.CRYPTO,
+        eligible=True,
+    )
+    asset = Asset.objects.create(
+        key="brs-btc",
+        name="Bitcoin",
+        asset_class=Asset.AssetClass.CRYPTO,
+        brs_symbol="BTC",
+    )
+    assert asset.is_active
+
+
+def test_fetch_writes_price_for_catalog_stock(asset_catalog, monkeypatch):
+    MarketInstrument.objects.create(
+        source="tsetmc",
+        symbol="شپنا",
+        category=MarketInstrument.Category.STOCK,
+        eligible=True,
+    )
+    Asset.objects.create(
+        key="tse-shapna",
+        name="Shapna",
+        asset_class=Asset.AssetClass.STOCK,
+        tse_symbol="شپنا",
+    )
+    _patch_fetch(
+        monkeypatch,
+        {"brsapi": {"items": []}, "tsetmc": [{"l18": "شپنا", "pl": 4321, "pc": 4300}]},
+    )
+    out = run_price_fetch()
+    assert out["priced"].get("tse-shapna") == 4321
+    assert Price.objects.filter(asset__key="tse-shapna", price=4321).exists()
+
+
+def test_apply_instrument_prices_leaves_seed_quote(raw_market_sample):
+    prices = extract_standard_prices(raw_market_sample)
+    kama = prices["kama_stock"]
+    filled = apply_instrument_prices(
+        {
+            **raw_market_sample,
+            "tsetmc": raw_market_sample["tsetmc"]
+            + [{"l18": "شپنا", "pl": 1111, "pc": 1100}],
+        },
+        [("kama_stock", "کاما", ""), ("tse-shapna", "شپنا", "")],
+        prices,
+    )
+    assert filled["kama_stock"] == kama
+    assert filled["tse-shapna"] == Decimal("1111")
+
+
 # ----------------------------------------------------------------------
 # test_derivative_snapshot_split.py
 # capture_derivative_snapshots: each of tse_option/ime_future/ime_option is
@@ -1311,3 +1511,93 @@ def test_finishing_a_workflow_closes_and_resets_attempt_context():
         assert outcome._counters.quota == 0
     finally:
         counters_var.reset(token)
+
+
+def test_a_dollar_quoted_catalog_symbol_is_never_stored_as_toman():
+    """`to_toman` matched only the ASCII "usd"/"dollar" while BrsApi says
+    "دلار"/"تتر", so a dollar quote fell through and was returned verbatim --
+    then persisted as verified Toman. One Bitcoin at ~64,500 Toman.
+    """
+    from marketdata.currency import to_toman
+
+    # Declared in Persian, no rate available: refuse rather than mislabel.
+    assert to_toman("BTC", 64500, "دلار") == Decimal("0")
+    assert to_toman("USDT", 1, "تتر") == Decimal("0")
+    # With a rate, convert.
+    assert to_toman("BTC", 64500, "دلار", usd_rate=63200) == Decimal("64500") * Decimal("63200")
+    # Local units are unaffected.
+    assert to_toman("IR_GOLD_18K", 7_000_000, "تومان") == Decimal("7000000")
+    assert to_toman("کاما", 10000, "ریال") == Decimal("1000")
+
+
+def test_catalog_search_always_leaves_room_for_new_instruments(db, make_user):
+    """Existing assets filled the whole page, so a class holding SEARCH_LIMIT
+    of them could never surface a new ticker again.
+    """
+    from marketdata.models import MarketInstrument
+    from portfolio.models import Asset
+    from portfolio.services.catalog import SEARCH_LIMIT, search_catalog
+
+    user = make_user(email="catalog-share@test.test")
+    for i in range(SEARCH_LIMIT + 5):
+        symbol = f"سهم{i}"
+        MarketInstrument.objects.create(
+            source=MarketInstrument.Source.TSETMC, symbol=symbol,
+            name=symbol, category=MarketInstrument.Category.STOCK, eligible=True,
+        )
+        Asset.objects.create(
+            key=f"owned-{i}", name=symbol, asset_class=Asset.AssetClass.STOCK,
+            tse_symbol=symbol, is_active=True,
+        )
+    # One instrument nobody owns yet -- it must still be reachable.
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.TSETMC, symbol="خگستر", name="خگستر",
+        category=MarketInstrument.Category.STOCK, eligible=True,
+    )
+
+    rows = search_catalog(asset_class=Asset.AssetClass.STOCK, q="", user=user)
+
+    assert len(rows) <= SEARCH_LIMIT
+    assert any(r.get("symbol") == "خگستر" for r in rows), (
+        "an unowned instrument must never be crowded out by owned assets"
+    )
+
+
+def test_ensure_asset_is_safe_against_a_double_click(db):
+    """Check-then-create: the picker fires this straight from a click, and the
+    second of two concurrent calls used to die on the unique `key` as a 500.
+    """
+    from marketdata.models import MarketInstrument
+    from portfolio.services.catalog import ensure_asset
+
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.TSETMC, symbol="خگستر", name="خگستر",
+        category=MarketInstrument.Category.STOCK, eligible=True,
+    )
+    first = ensure_asset(source="tsetmc", symbol="خگستر")
+    second = ensure_asset(source="tsetmc", symbol="خگستر")
+    assert first.pk == second.pk
+
+
+def test_picking_usdt_reuses_the_seeded_asset_instead_of_minting_a_twin(db, asset_catalog):
+    """Ingest canonicalizes USDT -> USDT_IRT on write, but the catalog sync
+    leaves the raw "USDT" eligible, so both are pickable. Minting on the raw
+    symbol produced a second asset with no history at all, which the archive
+    spike guard then valued at 1 Toman.
+    """
+    from marketdata.models import MarketInstrument
+    from portfolio.models import Asset
+    from portfolio.services.catalog import ensure_asset
+
+    seeded = asset_catalog["usdt_irt"]
+    seeded.brs_symbol = "USDT_IRT"
+    seeded.save(update_fields=["brs_symbol"])
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.BRS, symbol="USDT", name="Tether",
+        category=MarketInstrument.Category.CRYPTO, eligible=True,
+    )
+
+    minted = ensure_asset(source="brs", symbol="USDT")
+
+    assert minted.pk == seeded.pk, "must resolve to the seeded Tether asset"
+    assert Asset.objects.filter(brs_symbol="USDT").count() == 0

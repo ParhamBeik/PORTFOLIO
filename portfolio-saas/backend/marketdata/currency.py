@@ -7,7 +7,7 @@ Authoritative storage units:
 | marketdata_marketcandle, _dailystockhistory, _stocktransactiontick | Rial, provider-verbatim |
 | marketdata_goldcurrencyhistory | Toman for IRR-denominated; provider-native for USD/Tether (XAUUSD=دلار, BTC=تتر) |
 | marketdata_cryptohistory | close_price_usd USD, close_price_toman Toman |
-| portfolio_price (TSE stocks / `tse_symbol`) | **Rial** (deliberate: holdings qty is 1/10 of broker shares so qty×rial ≈ Toman value) |
+| portfolio_price (TSE stocks / `tse_symbol`) | **Rial**, provider-verbatim (see below) |
 | portfolio_price (gold/FX/manual), Snapshot, LedgerEntry amounts | Toman for non-TSE; TSE ledger unit prices follow portfolio_price (Rial) |
 | marketdata_reallegalhistory (buy_*/sell_*_value) | Rial, provider-verbatim (same TSE feed) |
 | marketdata_marketindexdata (market_value, trade_value) | Rial; index_* are points, not money |
@@ -16,10 +16,26 @@ Authoritative storage units:
 | marketdata_optioncontracthistory (strike, settlement, notional) | Rial (TSE feed); table currently empty |
 | marketdata_commodityhistory (close_price) | provider-native; the sibling `unit` string is the only label |
 
-`tse_close_to_toman()` remains for **analytics** readers that need a pure-Toman
-panel (returns matrix, universe) when combining TSE closes with gold Toman.
-Portfolio live valuation / `portfolio_price` for stocks must NOT convert — keep
-Rial so the share-count hack stays consistent.
+**The TSE unit boundary: divide the product, never the price.**
+TSE quotes Rial; every portfolio total is Toman. `Holding.quantity` and
+`LedgerEntry.quantity` hold the TRUE broker share count, and the Rial price is
+stored and displayed verbatim, so `quantity x price` is a Rial amount that is
+divided by ten exactly once, at the point it becomes money —
+`holding_value_to_toman()`. Every such site must use it.
+
+This replaced a hack (removed 2026-08-27, migration portfolio/0002) in which
+quantities were stored at 1/10 of the real share count so that
+`qty x rial_price` landed on Toman with no conversion at all. It kept totals
+right and everything else wrong: share counts were a tenth of reality
+everywhere they were shown, and the moment the add-holding wizard offered more
+than one stock, a user typing their real share count was valued 10x high.
+`x10` on the quantity and `/10` on the product are value-preserving in
+combination, which is why that migration needs no snapshot rewrite.
+
+`tse_close_to_toman()` is the sibling for **analytics** readers that need a
+pure-Toman panel (returns matrix, universe) when combining TSE closes with gold
+Toman. It converts a PRICE, and is correct there only because those readers
+compute returns (ratios), never `quantity x price`.
 
 Non-monetary conventions that bite just as hard:
   * Warehouse dates are Jalali STRINGS ("1403-10-19"); user-land time
@@ -55,9 +71,11 @@ SYMBOL_ALIASES = {
 # Transaction.php) quotes Rial, and ingest stores that number verbatim.
 TSE_PRICE_UNIT = "rial"
 
-IRR_QUOTE_UNITS = frozenset({
-    "ریال".casefold(), "rial", "irr", "تومان".casefold(), "toman",
-})
+#: Units that mean "this number is Rial" -- the only ones that get divided.
+RIAL_QUOTE_UNITS = frozenset({"ریال".casefold(), "rial", "irr"})
+#: Units that mean "this number is already Toman" -- returned as-is.
+TOMAN_QUOTE_UNITS = frozenset({"تومان".casefold(), "toman"})
+IRR_QUOTE_UNITS = RIAL_QUOTE_UNITS | TOMAN_QUOTE_UNITS
 FOREIGN_QUOTE_UNITS = frozenset({
     "دلار".casefold(), "dollar", "usd", "تتر".casefold(), "tether", "usdt",
 })
@@ -100,17 +118,55 @@ def tse_close_to_toman(value):
     return Decimal(str(value)) / Decimal("10")
 
 
+#: Rial per Toman. TSE quotes Rial; portfolio money is Toman.
+TSE_RIAL_PER_TOMAN = Decimal("10")
+
+
+def is_tse_priced(asset) -> bool:
+    """Whether this asset's unit price is TSE Rial rather than Toman.
+
+    Keyed strictly on `tse_symbol` -- the presence of a TSE feed is what makes
+    the quote Rial. Deliberately NOT `asset_class == STOCK`: a manual stock has
+    no TSE symbol and is priced by an operator in Toman, so dividing it would
+    report a tenth of its worth.
+    """
+    return bool(getattr(asset, "tse_symbol", ""))
+
+
+def holding_value_to_toman(asset, value):
+    """`quantity x unit price` -> Toman, for any asset.
+
+    The ONE place the TSE Rial->Toman division happens on a monetary amount.
+    Applied to the product, never to the price: dividing the price first would
+    round away a fraction of a rial per share and, worse, would change the price
+    the user sees -- TSE prices are shown in Rial on purpose.
+    """
+    amount = value if isinstance(value, Decimal) else Decimal(str(value))
+    if is_tse_priced(asset):
+        return amount / TSE_RIAL_PER_TOMAN
+    return amount
+
+
 def to_toman(symbol, price, unit="", *, usd_rate=None):
-    """Convert a provider quote to Tomans using declared units, never magnitude."""
+    """Convert a provider quote to Tomans using declared units, never magnitude.
+
+    A foreign-quoted value with no `usd_rate` returns 0 -- the "no price yet"
+    sentinel -- rather than the foreign number itself. It previously fell
+    through to `return value`, and because the dollar branch matched only the
+    ASCII "usd"/"dollar" while the provider says "دلار"/"تتر", a dollar quote
+    was handed back verbatim and stored as verified Toman: one Bitcoin valued
+    at ~64,500 Toman, one Tether at 1. Refusing to answer is the only safe
+    reading of "I know this is dollars and I have no rate".
+    """
     value = Decimal(str(price or 0))
     if value <= 0:
         return Decimal("0")
     symbol = canonical_symbol(symbol)
     unit = str(unit or "").strip().casefold()
-    if unit in {"ریال".casefold(), "rial", "irr"}:
+    if unit in RIAL_QUOTE_UNITS:
         return value / Decimal("10")
-    if unit in {"usd", "dollar"} and usd_rate:
-        return value * Decimal(str(usd_rate))
+    if unit in FOREIGN_QUOTE_UNITS:
+        return value * Decimal(str(usd_rate)) if usd_rate else Decimal("0")
     return value
 
 

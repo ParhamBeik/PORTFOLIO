@@ -139,7 +139,12 @@ def test_value_user_aggregates_across_accounts(asset_catalog, write_prices, make
     Holding.objects.create(account=cash, asset=asset_catalog["kama_stock"], quantity=Decimal("100"))
 
     valuation = value_user(user)
-    assert valuation["total"] == Decimal("480000000") + Decimal("5230") * Decimal("100")
+    # The gold coin is quoted in Toman, the stock in Rial: 100 shares at 5,230
+    # Rial is 523,000 Rial, which is 52,300 Toman. Mixing the two without that
+    # division is the bug `holding_value_to_toman` exists to prevent.
+    assert valuation["total"] == (
+        Decimal("480000000") + Decimal("5230") * Decimal("100") / Decimal("10")
+    )
     assert {a["name"] for a in valuation["accounts"]} == {"Brokerage", "Cash"}
 
 
@@ -442,9 +447,13 @@ def test_quality_status_not_stale_when_tse_closed(asset_catalog, write_prices, m
     kama.tse_symbol = "کاما"
     kama.save(update_fields=["tse_symbol"])
 
+    from datetime import datetime, timezone as dt_timezone
+    frozen = datetime(2026, 8, 26, 16, 30, tzinfo=dt_timezone.utc)
+    _freeze_valuation_now(monkeypatch, frozen)
     write_prices({"kama_stock": Decimal("5230")})
-    old_at = timezone.now() - timedelta(hours=8)
-    Price.objects.filter(asset__key="kama_stock").update(fetched_at=old_at)
+    Price.objects.filter(asset__key="kama_stock").update(
+        fetched_at=frozen - timedelta(hours=8)
+    )
 
     monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
     user = make_user(email="tse-closed@test.test")
@@ -482,19 +491,23 @@ def test_quality_status_follows_each_market_not_one_symbol(
     crypto.brs_symbol = "BTC"
     crypto.save(update_fields=["brs_symbol"])
 
+    from datetime import datetime, timezone as dt_timezone
+    # 23:15 Tehran Wednesday -- overnight, gold desks shut, last print still current.
+    frozen = datetime(2026, 8, 26, 19, 45, tzinfo=dt_timezone.utc)
+    _freeze_valuation_now(monkeypatch, frozen)
     write_prices({
         "khodro_stock": Decimal("2800"),
         "emami_coin": Decimal("480000000"),
         "bitcoin_usd": Decimal("900"),
     })
     Price.objects.filter(asset__key="khodro_stock").update(
-        fetched_at=timezone.now() - timedelta(hours=8),
+        fetched_at=frozen - timedelta(hours=8),
     )
     Price.objects.filter(asset__key="emami_coin").update(
-        fetched_at=timezone.now() - timedelta(hours=8),
+        fetched_at=frozen - timedelta(hours=8),
     )
     Price.objects.filter(asset__key="bitcoin_usd").update(
-        fetched_at=timezone.now() - timedelta(minutes=20),
+        fetched_at=frozen - timedelta(minutes=20),
     )
 
     monkeypatch.setattr("marketdata.market_state.market_state", lambda: "overnight")
@@ -532,6 +545,75 @@ def test_quality_status_stale_when_tse_open_and_price_did_not_refresh(
 
     monkeypatch.setattr("marketdata.market_state.market_state", lambda: "open")
     user = make_user(email="tse-open@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    Holding.objects.create(account=account, asset=kama, quantity=Decimal("1"))
+
+    result = value_account(account)
+    item = next(i for i in result["items"] if i["key"] == "kama_stock")
+    assert item["quality_status"] == "stale"
+
+
+def _freeze_valuation_now(monkeypatch, when):
+    monkeypatch.setattr("portfolio.services.valuation.timezone.now", lambda: when)
+
+
+def test_quality_status_quota_when_live_lane_blocked_and_session_was_missed(
+    asset_catalog, write_prices, make_user, monkeypatch
+):
+    """Unit test: this is a pure badge decision over a frozen clock, which is
+    where the pyramid puts it. A day-old TSE quote after today's session, with
+    the live lane refused, must not stay green Live.
+    """
+    from datetime import datetime, timezone as dt_timezone
+
+    from marketdata.quota import TSETMC, trip_plan_breaker
+    from portfolio.models import Price
+
+    # Wednesday 26 Aug 2026, 20:00 Tehran (16:30 UTC) -- TSE shut, session done.
+    frozen = datetime(2026, 8, 26, 16, 30, tzinfo=dt_timezone.utc)
+    _freeze_valuation_now(monkeypatch, frozen)
+
+    kama = asset_catalog["kama_stock"]
+    kama.tse_symbol = "کاما"
+    kama.save(update_fields=["tse_symbol"])
+    write_prices({"kama_stock": Decimal("5230")})
+    Price.objects.filter(asset__key="kama_stock").update(
+        fetched_at=frozen - timedelta(days=1)
+    )
+    trip_plan_breaker(TSETMC, reason="http_429")
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
+
+    user = make_user(email="tse-quota@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    Holding.objects.create(account=account, asset=kama, quantity=Decimal("1"))
+
+    result = value_account(account)
+    item = next(i for i in result["items"] if i["key"] == "kama_stock")
+    assert item["quality_status"] == "quota"
+    assert result["quality_status"] == "partial"
+
+
+def test_quality_status_stale_when_session_missed_without_quota_block(
+    asset_catalog, write_prices, make_user, monkeypatch
+):
+    """Same missed session, provider not refused: still not Live, just Stale."""
+    from datetime import datetime, timezone as dt_timezone
+
+    from portfolio.models import Price
+
+    frozen = datetime(2026, 8, 26, 16, 30, tzinfo=dt_timezone.utc)
+    _freeze_valuation_now(monkeypatch, frozen)
+
+    kama = asset_catalog["kama_stock"]
+    kama.tse_symbol = "کاما"
+    kama.save(update_fields=["tse_symbol"])
+    write_prices({"kama_stock": Decimal("5230")})
+    Price.objects.filter(asset__key="kama_stock").update(
+        fetched_at=frozen - timedelta(days=1)
+    )
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
+
+    user = make_user(email="tse-missed@test.test")
     account = Account.objects.create(user=user, name="Main")
     Holding.objects.create(account=account, asset=kama, quantity=Decimal("1"))
 
@@ -1918,3 +2000,140 @@ def test_house_series_is_zero_before_the_purchase_mark(asset_catalog, make_user)
     assert all(Decimal(row["total"]) == 0 for row in before)
     assert all(Decimal(row["total"]) == valued for row in after)
 
+
+
+# ----------------------------------------------------------------------
+# The TSE unit boundary: quantities are true broker share counts, prices are
+# Rial, and the PRODUCT is divided by ten exactly once.
+#
+# Unit tests for the helper (pure arithmetic), then integration tests for the
+# three price-resolution paths, because the bug this replaced was precisely that
+# those three disagreed with each other.
+
+
+def test_holding_value_divides_the_product_not_the_price():
+    from marketdata.currency import holding_value_to_toman, is_tse_priced
+
+    class _A:
+        def __init__(self, tse_symbol=""):
+            self.tse_symbol = tse_symbol
+
+    tse, gold = _A("کاما"), _A()
+    assert is_tse_priced(tse) and not is_tse_priced(gold)
+    # 26,000,000 shares x 5,330 Rial = 138,580,000,000 Rial = 13,858,000,000 Toman.
+    assert holding_value_to_toman(
+        tse, Decimal("26000000") * Decimal("5330")
+    ) == Decimal("13858000000")
+    # A Toman-quoted asset is returned untouched.
+    assert holding_value_to_toman(gold, Decimal("480000000")) == Decimal("480000000")
+
+
+def test_a_manual_stock_is_not_divided():
+    """`is_tse_priced` keys on the symbol, not the asset class. A manual stock
+    has no TSE feed and is priced by an operator in Toman; dividing it would
+    report a tenth of its worth.
+    """
+    from marketdata.currency import holding_value_to_toman
+
+    class _A:
+        tse_symbol = ""
+        asset_class = "Stock"
+
+    assert holding_value_to_toman(_A(), Decimal("1000")) == Decimal("1000")
+
+
+def test_every_valuation_path_agrees_on_a_tse_holding(
+    asset_catalog, write_prices, make_user
+):
+    """value_account, value_as_of and the net-worth series must return the same
+    Toman figure for the same holding on the same day. They each own a separate
+    TSE branch, so a divisor added to one and missed by another is invisible
+    until two screens disagree.
+    """
+    from portfolio.services.valuation import (
+        compute_dynamic_net_worth_series,
+        value_account,
+        value_as_of,
+    )
+
+    import jdatetime
+    from marketdata.models import MarketCandle
+
+    write_prices({"kama_stock": Decimal("5330")})
+    user = make_user(email="tse-agree@test.test")
+    account = Account.objects.create(user=user, name="Broker")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["kama_stock"], quantity=Decimal("26000000")
+    )
+    # value_as_of reads the warehouse, not the live price map, so it needs a
+    # close of its own -- same Rial number, so all three must land on one figure.
+    today_jalali = jdatetime.date.fromgregorian(date=timezone.now().date()).strftime(
+        "%Y-%m-%d"
+    )
+    MarketCandle.objects.create(
+        symbol="کاما", timeframe=MarketCandle.ADJUSTED,
+        date_time=today_jalali, close_price=Decimal("5330"),
+        open_price=Decimal("5330"), high_price=Decimal("5330"),
+        low_price=Decimal("5330"), volume=1,
+    )
+    expected = Decimal("13858000000")
+
+    assert Decimal(value_account(account)["total"]) == expected
+    series = compute_dynamic_net_worth_series(user, account, days=2)
+    assert Decimal(series[-1]["total"]) == expected
+    assert Decimal(value_as_of(user, account, as_of=timezone.now())["total"]) == expected
+
+
+def test_a_pre_open_quote_does_not_stay_live_through_its_own_session(
+    asset_catalog, monkeypatch
+):
+    """The session walk began at quote_date + 1, so a print taken BEFORE the
+    open was never measured against its own day's session: it stayed green all
+    day and, under closed-market grace, into the evening too.
+    """
+    from datetime import datetime, timezone as dt_timezone
+
+    from portfolio.services.valuation import _clock_sessions_elapsed
+
+    kama = asset_catalog["kama_stock"]
+    # Wednesday 26 Aug 2026 is a TSE trading day. 07:00 Tehran = 03:30 UTC,
+    # ninety minutes before the 08:30 open; read back at 20:00 Tehran.
+    quote = datetime(2026, 8, 26, 3, 30, tzinfo=dt_timezone.utc)
+    evening = datetime(2026, 8, 26, 16, 30, tzinfo=dt_timezone.utc)
+
+    assert _clock_sessions_elapsed(kama, quote, evening) == 1
+
+    # Read back before the open, nothing has been missed yet.
+    pre_open = datetime(2026, 8, 26, 4, 0, tzinfo=dt_timezone.utc)
+    assert _clock_sessions_elapsed(kama, quote, pre_open) == 0
+
+
+def test_a_market_wide_closure_is_not_counted_as_a_missed_session(
+    asset_catalog, monkeypatch
+):
+    """Wall-clock counting alone flips every holding to Stale on day one of a
+    Nowruz shutdown, because a shut exchange looks exactly like a missed session.
+    """
+    from datetime import datetime, timezone as dt_timezone
+
+    from portfolio.services import valuation as val
+
+    kama = asset_catalog["kama_stock"]
+    # Two TSE trading weekdays after the quote, both of which the exchange shut.
+    quote = datetime(2026, 8, 23, 16, 30, tzinfo=dt_timezone.utc)
+    later = datetime(2026, 8, 26, 16, 30, tzinfo=dt_timezone.utc)
+
+    monkeypatch.setattr(val, "_known_closure_days", lambda *a, **k: frozenset())
+    without_calendar = val._clock_sessions_elapsed(kama, quote, later)
+    assert without_calendar == 3, "24th, 25th and 26th all look like sessions"
+
+    # 1405-06-02 and -03 are 2026-08-24 and -25. The current day is deliberately
+    # NOT in the closure set -- a missing candle for today is the quota-starvation
+    # case, not evidence the exchange was shut -- so today's session still counts.
+    monkeypatch.setattr(
+        val, "_known_closure_days",
+        lambda *a, **k: frozenset({"1405-06-02", "1405-06-03"}),
+    )
+    with_calendar = val._clock_sessions_elapsed(kama, quote, later)
+
+    assert with_calendar == 1, "only the un-vouched-for current day is counted"

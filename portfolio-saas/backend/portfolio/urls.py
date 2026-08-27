@@ -12,6 +12,8 @@ from .views import (
     AccountValuationView,
     AnalyticsView,
     AssetListView,
+    AssetCatalogView,
+    EnsureAssetView,
     AssetReturnsView,
     AssetRankingView,
     BenchmarkSeriesView,
@@ -50,6 +52,8 @@ from .views import (
 urlpatterns = [
     # Catalog + account/holding CRUD (FREE)
     path("assets/", AssetListView.as_view(), name="asset-list"),
+    path("assets/catalog/", AssetCatalogView.as_view(), name="asset-catalog"),
+    path("assets/ensure/", EnsureAssetView.as_view(), name="asset-ensure"),
     path("accounts/", AccountListCreateView.as_view(), name="account-list"),
     path("accounts/<int:pk>/", AccountDetailView.as_view(), name="account-detail"),
     path("accounts/<int:account_id>/holdings/", HoldingListCreateView.as_view(),

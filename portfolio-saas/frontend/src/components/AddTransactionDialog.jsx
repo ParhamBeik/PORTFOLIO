@@ -10,17 +10,23 @@
 //
 // Domain kinds never reach the screen. `ACTIONS` is the only place a plain-
 // language choice is mapped onto a LedgerEntry kind.
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   addProperty,
   createLedgerEntry,
+  ensureAsset,
   listAssets,
+  searchAssetCatalog,
   trade,
   updateHolding,
 } from "../api.js";
 import { useApi } from "../useApi.js";
 import { Badge, Button, ErrorState, Input, Loading, Modal, Select } from "./ui.jsx";
 import { area, assetLabel, holdingLabel, perSqm, toman } from "../format.js";
+
+// Mirrors SEARCH_LIMIT in backend/portfolio/services/catalog.py. Only used to
+// decide whether to tell the user the list was cut short.
+const CATALOG_PAGE_SIZE = 40;
 
 // Asset classes as the user thinks of them, in the order they are usually held.
 // `match` reads the catalog's `asset_class`, which is the API's own vocabulary.
@@ -67,14 +73,18 @@ const stepsFor = (isCashMove) =>
     : ["category", "asset", "action", "amount", "review"];
 
 /** A big, obvious choice tile — the step-1 and step-3 control. */
-function Choice({ label, hint, selected, onClick, testId }) {
+function Choice({ label, hint, selected, onClick, testId, disabled = false }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      // Picking a catalog row POSTs to mint the asset. Leaving the tile live
+      // during that round trip let a double-click fire two creates for one
+      // instrument, and the second came back a 500.
+      disabled={disabled}
       aria-pressed={selected}
       data-testid={testId}
-      className={`w-full rounded-lg border px-4 py-3 text-left transition-colors ${
+      className={`w-full rounded-lg border px-4 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
         selected
           ? "border-accent bg-accent/10"
           : "border-border bg-panel-2 hover:border-accent/50"
@@ -118,6 +128,9 @@ export default function AddTransactionDialog({
   const assets = useApi(listAssets, []);
   const [step, setStep] = useState(0);
   const [category, setCategory] = useState("");
+  const [query, setQuery] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [picked, setPicked] = useState(null);
   const [assetKey, setAssetKey] = useState("");
   const [newProperty, setNewProperty] = useState(false);
   const [action, setAction] = useState("");
@@ -139,8 +152,20 @@ export default function AddTransactionDialog({
   const targetAccountId = accountId ?? (formAccount ? Number(formAccount) : null);
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(query.trim()), 200);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  const searchingCatalog = !!category && category !== "Real Estate" && category !== "__cash_move";
+  const catalogHits = useApi(
+    () => searchAssetCatalog(category, debounced),
+    [category, debounced],
+    { enabled: searchingCatalog },
+  );
+
   const catalog = assets.data || [];
-  const asset = catalog.find((a) => a.key === assetKey) || null;
+  const asset = picked || catalog.find((a) => a.key === assetKey) || null;
   const isCashMove = category === "__cash_move";
   const isProperty = category === "Real Estate";
   const holding = holdings.find(
@@ -152,14 +177,19 @@ export default function AddTransactionDialog({
   // revalued here -- the others have no holding row to write the mark against.
   const options = useMemo(() => {
     const inClass = catalog.filter((a) => a.asset_class === category);
-    if (category !== "Real Estate") return inClass;
-    const held = new Set(
-      holdings
-        .filter((h) => (h.account_id ?? accountId) === targetAccountId)
-        .map((h) => h.asset_key)
-    );
-    return inClass.filter((a) => held.has(a.key));
-  }, [catalog, category, holdings, accountId, targetAccountId]);
+    if (category === "Real Estate") {
+      const held = new Set(
+        holdings
+          .filter((h) => (h.account_id ?? accountId) === targetAccountId)
+          .map((h) => h.asset_key)
+      );
+      return inClass.filter((a) => held.has(a.key));
+    }
+    if (searchingCatalog && catalogHits.loading) return [];
+    const remote = catalogHits.data;
+    if (Array.isArray(remote)) return remote;
+    return inClass;
+  }, [catalog, category, holdings, accountId, targetAccountId, searchingCatalog, catalogHits.data, catalogHits.loading]);
   const available = actionsFor(asset, newProperty);
 
   // Manual assets have no feed, so their price is something only the user knows.
@@ -181,6 +211,9 @@ export default function AddTransactionDialog({
 
   const reset = () => {
     setAssetKey("");
+    setPicked(null);
+    setQuery("");
+    setDebounced("");
     setNewProperty(false);
     setAction("");
     setOwnPrice(false);
@@ -199,12 +232,30 @@ export default function AddTransactionDialog({
     setStep(1);
   };
 
-  const pickAsset = (key, asNewProperty = false) => {
+  const pickAsset = (key, asNewProperty = false, row = null) => {
     setAssetKey(key);
+    setPicked(row && row.key === key ? row : null);
     setNewProperty(asNewProperty);
-    const next = actionsFor(catalog.find((a) => a.key === key), asNewProperty);
+    const next = actionsFor(row || catalog.find((a) => a.key === key), asNewProperty);
     setAction(next[0]);
     setStep(steps.indexOf("action"));
+  };
+
+  const chooseRow = async (row) => {
+    if (row.key) {
+      pickAsset(row.key, false, row);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await ensureAsset(row.source, row.symbol);
+      pickAsset(created.key, false, created);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const canContinue = () => {
@@ -316,6 +367,7 @@ export default function AddTransactionDialog({
       subtitle="Record something you bought, sold, or already own."
       onClose={onClose}
       testId="add-transaction"
+      size="wide"
       footer={
         <>
           <Button onClick={back} disabled={step === 0 || busy} data-testid="add-transaction-back">
@@ -380,8 +432,29 @@ export default function AddTransactionDialog({
 
         {current === "asset" && (
           <Step n={stepNumber} of={totalSteps} title="Which one?">
-            {assets.loading && <Loading />}
-            <div className="space-y-2">
+            {searchingCatalog && (
+              <Input
+                label="Search the catalog"
+                placeholder="Type a ticker or name"
+                className="w-full"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                data-testid="add-transaction-asset-search"
+              />
+            )}
+            {(assets.loading || (searchingCatalog && catalogHits.loading)) && <Loading />}
+            {searchingCatalog && catalogHits.error && (
+              <ErrorState
+                error={catalogHits.error}
+                onRetry={catalogHits.reload}
+                testId="add-transaction-catalog-error"
+              />
+            )}
+            {/* No scroller of its own: Modal's body already scrolls, and
+                nesting a second one here left ~3 visible rows behind two
+                scrollbars, with the search box sliding away from its results.
+                Two columns because these rows are short and the list is long. */}
+            <div className="grid gap-2 sm:grid-cols-2">
               {isProperty && (
                 <Choice
                   label="Add a new property"
@@ -393,18 +466,36 @@ export default function AddTransactionDialog({
               )}
               {options.map((a) => (
                 <Choice
-                  key={a.key}
+                  key={a.key || `${a.source}:${a.symbol}`}
                   label={assetLabel(a)}
-                  hint={a.is_manual ? "You set the price yourself" : "Priced from the market"}
-                  selected={assetKey === a.key}
-                  onClick={() => pickAsset(a.key)}
-                  testId={`add-transaction-asset-${a.key}`}
+                  hint={
+                    a.is_manual
+                      ? "You set the price yourself"
+                      : a.symbol
+                        ? `${a.symbol} — priced from the market`
+                        : "Priced from the market"
+                  }
+                  selected={!!a.key && assetKey === a.key}
+                  onClick={() => chooseRow(a)}
+                  disabled={busy}
+                  testId={`add-transaction-asset-${a.key || `${a.source}-${a.symbol}`}`}
                 />
               ))}
-              {!assets.loading && !options.length && !isProperty && (
-                <p className="text-sm text-muted">Nothing in this category yet.</p>
+              {!assets.loading && !(searchingCatalog && catalogHits.loading) && !options.length && !isProperty && (
+                <p className="text-sm text-muted" data-testid="add-transaction-asset-empty">
+                  {debounced ? "Nothing matches that search." : "Nothing in this category yet."}
+                </p>
               )}
             </div>
+            {/* The catalog is thousands of tickers and the response is capped.
+                Without saying so, a full page reads as "this is everything"
+                and the user concludes their stock is not supported. */}
+            {searchingCatalog && options.length >= CATALOG_PAGE_SIZE && (
+              <p className="text-xs text-muted" data-testid="add-transaction-asset-truncated">
+                Showing the first {CATALOG_PAGE_SIZE} matches. Type a ticker or
+                name to narrow it down.
+              </p>
+            )}
           </Step>
         )}
 

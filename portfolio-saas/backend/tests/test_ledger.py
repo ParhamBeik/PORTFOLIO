@@ -1654,3 +1654,160 @@ def test_backdated_property_is_written_into_older_snapshots(account, asset_catal
     snap.refresh_from_db()
     assert snap.total_value_tomans == Decimal("9100000100")
 
+
+
+@pytest.mark.django_db
+def test_restamping_a_property_does_not_double_count_existing_snapshots(
+    account, asset_catalog
+):
+    """`backfill_house_into_snapshots` ADDS to each row in place and keeps no
+    record that it ran. Snapshots from the day the house first became visible
+    already contain it -- from the Holding row if the price loop photographed
+    it, or from the backfill that ran when the property was created. Passing a
+    later bound (holding.created_at) re-adds the house to every one of those.
+    """
+    from portfolio.services.ledger import HOUSE_MARK_KINDS
+
+    added = _add_property(account, name="Tehran", area="100", price="350")
+    assert added.status_code == 201, added.data
+    holding = Holding.objects.get(pk=added.data["id"])
+    mark = LedgerEntry.objects.get(
+        account=account, asset=holding.asset, kind__in=HOUSE_MARK_KINDS,
+        reversal_of__isnull=True, reversed_by__isnull=True,
+    )
+    house_value = Decimal("350") * Decimal("1000000") * Decimal("100")
+
+    # One snapshot from before the house existed, one from after.
+    old = Snapshot.objects.create(
+        user=account.user, account=account, total_value_tomans=Decimal("1000"),
+    )
+    Snapshot.objects.filter(pk=old.pk).update(
+        timestamp=mark.timestamp - dt.timedelta(days=30)
+    )
+    recent = Snapshot.objects.create(
+        user=account.user, account=account,
+        total_value_tomans=Decimal("1000") + house_value,
+    )
+    Snapshot.objects.filter(pk=recent.pk).update(
+        timestamp=mark.timestamp + dt.timedelta(days=1)
+    )
+
+    target = (mark.timestamp - dt.timedelta(days=60)).date().isoformat()
+    call_command(
+        "restamp_house_marks", holding_id=holding.id, occurred_at=target,
+    )
+
+    old.refresh_from_db()
+    recent.refresh_from_db()
+    assert old.total_value_tomans == Decimal("1000") + house_value, (
+        "a snapshot predating the house must gain it once"
+    )
+    assert recent.total_value_tomans == Decimal("1000") + house_value, (
+        "a snapshot that already contained the house must not gain it again"
+    )
+
+    mark.refresh_from_db()
+    assert mark.timestamp.date().isoformat() == target
+    assert mark.kind in HOUSE_MARK_KINDS
+
+
+@pytest.mark.django_db
+def test_restamping_an_opening_converts_it_to_a_valuation_mark(account, asset_catalog):
+    """Every opening on an account must share `tracking_started_at`
+    (create_ledger_entry enforces it). Moving one property's opening to its real
+    purchase date would desynchronise it from the account's other openings and
+    make the next opening write fail. For a house the two kinds are equivalent --
+    `_projection_state` and `house_state_as_of` both REPLACE on either -- so the
+    moved mark becomes a valuation mark instead.
+    """
+    from portfolio.services.ledger import HOUSE_MARK_KINDS
+
+    account.refresh_from_db()
+    baseline = account.tracking_started_at
+    assert baseline is not None, "the fixture's opening-cash baseline"
+
+    added = _add_property(
+        account, name="Lahijan", area="74", price="100",
+        occurred_at=baseline.isoformat(),
+    )
+    assert added.status_code == 201, added.data
+    holding = Holding.objects.get(pk=added.data["id"])
+    mark = LedgerEntry.objects.get(
+        account=account, asset=holding.asset, kind__in=HOUSE_MARK_KINDS,
+        reversal_of__isnull=True, reversed_by__isnull=True,
+    )
+    assert mark.kind == LedgerEntry.Kind.OPENING_POSITION, "precondition"
+
+    call_command(
+        "restamp_house_marks", holding_id=holding.id,
+        occurred_at=(baseline - dt.timedelta(days=100)).date().isoformat(),
+    )
+
+    mark.refresh_from_db()
+    assert mark.kind == LedgerEntry.Kind.VALUATION_MARK
+    account.refresh_from_db()
+    assert account.tracking_started_at == baseline, (
+        "the account's own baseline must not move with one property"
+    )
+
+
+@pytest.mark.django_db
+def test_a_stock_buy_debits_cash_in_toman_not_rial(account, asset_catalog, write_prices):
+    """`amount_tomans` is a quantity x price product, and TSE prices are Rial.
+
+    Under the old 1/10-share convention `qty x rial` happened to land on Toman,
+    so this column was correct without ever converting -- which is why it did
+    not look like a product. With true share counts an unconverted amount is
+    Rial, and it is read as Toman by the cash replay, by `timeline.cash_as_of`,
+    and therefore by every TWR cash-flow boundary. Ten times too much money
+    leaves the account on every stock purchase.
+    """
+    write_prices({"kama_stock": Decimal("5330")})
+    account.track_cash = True
+    account.save(update_fields=["track_cash"])
+    account.refresh_from_db()
+    opening_cash = account.cash_balance_tomans
+
+    entry = create_ledger_entry(
+        account=account,
+        kind=LedgerEntry.Kind.BUY,
+        asset=asset_catalog["kama_stock"],
+        quantity=Decimal("1000"),
+        unit_price_tomans=Decimal("5330"),
+    )
+
+    # 1,000 shares x 5,330 Rial = 5,330,000 Rial = 533,000 Toman.
+    assert entry.amount_tomans == Decimal("533000.0000")
+    account.refresh_from_db()
+    assert account.cash_balance_tomans == opening_cash - Decimal("533000")
+
+
+@pytest.mark.django_db
+def test_ledger_and_performance_report_the_same_stock_pnl(
+    account, asset_catalog, write_prices
+):
+    """Both compute quantity x price-delta. Only one of them converted, so the
+    Ledger page and the Performance page disagreed ten-fold on one position.
+    """
+    from portfolio.services.ledger import entry_pnl_map
+    from portfolio.services.performance import _position_metrics
+
+    write_prices({"kama_stock": Decimal("5430")})
+    entry = create_ledger_entry(
+        account=account,
+        kind=LedgerEntry.Kind.BUY,
+        asset=asset_catalog["kama_stock"],
+        quantity=Decimal("1000"),
+        unit_price_tomans=Decimal("5330"),
+    )
+
+    pnl = entry_pnl_map(
+        list(account.transactions.select_related("asset").order_by("timestamp", "pk")),
+        {"kama_stock": Decimal("5430")},
+    )[entry.pk]
+    metrics = _position_metrics(account)["kama_stock"]
+
+    assert pnl["pnl_kind"] == "unrealized"
+    # 1,000 x (5,430 - 5,330) Rial = 100,000 Rial = 10,000 Toman.
+    assert Decimal(pnl["pnl_tomans"]) == Decimal("10000")
+    assert Decimal(metrics["unrealized_pnl_tomans"]) == Decimal(pnl["pnl_tomans"])

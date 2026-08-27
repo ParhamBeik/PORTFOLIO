@@ -6,6 +6,8 @@ from django.core.cache import cache
 from django.db.models import Count, Max, Sum
 from django.utils import timezone
 
+from marketdata.currency import holding_value_to_toman
+
 from ..models import LedgerEntry
 from .deflator import cpi_for_date, normalize_basis
 from .timeline import xirr
@@ -126,14 +128,24 @@ def _position_metrics(account) -> dict:
                     realized += qty * (price - average_cost)
                 quantity -= qty
         current_price = Decimal(str(prices.get(asset.key, 0) or 0))
+        # `average_cost` is a UNIT price and stays in the asset's own quote unit
+        # (Rial for TSE), matching what the UI shows next to the live price.
+        # Everything below it is money, so each one is a quantity x price
+        # product and converts exactly once -- see currency.holding_value_to_toman.
         result[asset.key] = {
             "asset_name": asset.name,
             "quantity": str(quantity),
             "cost_basis_known": not unknown_basis,
             "average_cost_tomans": str(average_cost) if not unknown_basis else None,
-            "total_cost_basis_tomans": str(average_cost * quantity) if not unknown_basis else None,
-            "realized_pnl_tomans": str(realized) if not unknown_basis else None,
-            "unrealized_pnl_tomans": str((current_price - average_cost) * quantity) if not unknown_basis else None,
+            "total_cost_basis_tomans": str(
+                holding_value_to_toman(asset, average_cost * quantity)
+            ) if not unknown_basis else None,
+            "realized_pnl_tomans": str(
+                holding_value_to_toman(asset, realized)
+            ) if not unknown_basis else None,
+            "unrealized_pnl_tomans": str(
+                holding_value_to_toman(asset, (current_price - average_cost) * quantity)
+            ) if not unknown_basis else None,
         }
     cache.set(cache_key, result, timeout=3600)
     return result

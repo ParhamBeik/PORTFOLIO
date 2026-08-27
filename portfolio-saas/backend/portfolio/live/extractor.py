@@ -236,3 +236,37 @@ def extract_standard_prices(raw_data, last_prices=None):
             logger.info("KAMA using last-known price %s", fallback)
 
     return prices
+
+
+def apply_instrument_prices(raw_data, instruments, prices):
+    """Fill quotes for catalog-backed assets the seed map does not know.
+
+    AllSymbols is already in `raw_data["tsetmc"]`; this only looks extra
+    symbols up. Leaves any positive seed price untouched (oracle parity).
+    `instruments` is an iterable of (key, tse_symbol, brs_symbol).
+    """
+    raw_data = raw_data if isinstance(raw_data, dict) else {}
+    prices = dict(prices or {})
+    lookup = None
+    tsetmc = raw_data.get("tsetmc")
+    for key, tse_symbol, brs_symbol in instruments:
+        if prices.get(key, Decimal("0")) > 0:
+            continue
+        if tse_symbol:
+            value = _price_from_tsetmc_record(_find_tsetmc_symbol(tsetmc, tse_symbol))
+            if value > 0:
+                prices[key] = value
+            continue
+        if brs_symbol:
+            if lookup is None:
+                lookup = _build_lookup(raw_data.get("brsapi"))
+            # The rate matters: catalog symbols include dollar- and tether-quoted
+            # instruments (BTC, XAUUSD, USDT), and `to_toman` now refuses to
+            # answer for those without it rather than passing dollars off as
+            # Toman. Without this a minted Bitcoin holding priced at ~64,500.
+            value = _lookup_toman(
+                lookup, [brs_symbol], usd_rate=prices.get("usd_cash")
+            )
+            if value > 0:
+                prices[key] = value
+    return prices

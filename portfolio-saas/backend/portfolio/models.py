@@ -106,8 +106,15 @@ class Asset(models.Model):
 
         if not MarketInstrument.objects.exists():
             return
-        if self.asset_class not in (self.AssetClass.GOLD, self.AssetClass.STOCK, self.AssetClass.CASH):
-            raise ValidationError("Active assets must be verified stocks, gold, or cash/currency instruments.")
+        if self.asset_class not in (
+            self.AssetClass.GOLD,
+            self.AssetClass.STOCK,
+            self.AssetClass.CASH,
+            self.AssetClass.CRYPTO,
+        ):
+            raise ValidationError(
+                "Active assets must be verified stocks, gold, cash/currency, or crypto instruments."
+            )
         source = "tsetmc" if self.asset_class == self.AssetClass.STOCK else "brs"
         symbol = self.tse_symbol if source == "tsetmc" else self.brs_symbol
         if not symbol:

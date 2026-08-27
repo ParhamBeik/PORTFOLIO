@@ -4,6 +4,8 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
+from marketdata.currency import holding_value_to_toman
+
 from ..models import HOUSE_AREA_SQM, Account, Asset, Holding, LedgerEntry
 
 
@@ -137,7 +139,16 @@ def create_ledger_entry(
                 unit_price = resolve_historical_price(asset, occurred_at)
             except PriceResolutionError as exc:
                 raise LedgerError(str(exc)) from exc
-        amount = (quantity * unit_price).quantize(Decimal("0.0001"))
+        # A quantity x price product, so it crosses the TSE Rial/Toman boundary
+        # exactly like a valuation does. It reads as Toman everywhere
+        # downstream -- `_projection_state` debits `Account.cash_balance_tomans`
+        # with it, `timeline.cash_as_of` feeds TWR boundaries from it. Under the
+        # old 1/10-share convention `qty x rial` happened to land on Toman with
+        # no conversion, which is why this was correct and why it did not look
+        # like a product.
+        amount = holding_value_to_toman(
+            asset, quantity * unit_price
+        ).quantize(Decimal("0.0001"))
     if area is not None or mortgage is not None:
         # A revaluation carries the same terms as the opening it supersedes, so
         # both house mark kinds may set them. Anything else still may not.
@@ -259,7 +270,9 @@ def update_ledger_entry(
         price = entry.price_tomans
         if qty is None or price is None:
             raise LedgerError("Buy/sell entries need quantity and unit price.")
-        entry.amount_tomans = (qty * price).quantize(Decimal("0.0001"))
+        entry.amount_tomans = holding_value_to_toman(
+            entry.asset, qty * price
+        ).quantize(Decimal("0.0001"))
     entry.save()
     _commit_projections(entry.account)
     return entry
@@ -1011,6 +1024,7 @@ def entry_pnl_map(entries, prices: dict) -> dict[int, dict]:
             lots[entry.asset_id].append({
                 "id": entry.pk,
                 "key": entry.asset.key,
+                "asset": entry.asset,
                 "remaining": qty,
                 "price": price,
             })
@@ -1033,8 +1047,12 @@ def entry_pnl_map(entries, prices: dict) -> dict[int, dict]:
             if remaining > 0:
                 known = False
             if known:
+                # quantity x price-delta: a product, so it crosses the same
+                # Rial/Toman boundary `_position_metrics` already converts.
+                # Leaving it raw made the Ledger page and the Performance page
+                # report the same position's P&L ten-fold apart.
                 result[entry.pk] = {
-                    "pnl_tomans": str(realized),
+                    "pnl_tomans": str(holding_value_to_toman(entry.asset, realized)),
                     "pnl_kind": "realized",
                 }
 
@@ -1047,7 +1065,11 @@ def entry_pnl_map(entries, prices: dict) -> dict[int, dict]:
             if lot_price is None or lot_price <= 0 or current <= 0:
                 continue
             result[lot["id"]] = {
-                "pnl_tomans": str(lot["remaining"] * (current - lot_price)),
+                "pnl_tomans": str(
+                    holding_value_to_toman(
+                        lot["asset"], lot["remaining"] * (current - lot_price)
+                    )
+                ),
                 "pnl_kind": "unrealized",
             }
     return result

@@ -25,7 +25,7 @@ from portfolio.services.valuation import (
     fetch_sessions,
     guard_price_map,
 )
-from portfolio.live.extractor import extract_standard_prices
+from portfolio.live.extractor import apply_instrument_prices, extract_standard_prices
 from portfolio.live.fetcher import api_settings_from_django, fetch_all_markets
 from portfolio.live.redis_client import get_redis
 import datetime as dt
@@ -105,6 +105,13 @@ def run_price_fetch(*, dry_run=False):
         raw = fetch_all_markets(api_settings_from_django())
         prices = extract_standard_prices(raw)
         prices = _overlay_usdt_irt_from_warehouse(prices)
+        prices = apply_instrument_prices(
+            raw,
+            Asset.objects.filter(is_active=True, is_house=False).values_list(
+                "key", "tse_symbol", "brs_symbol"
+            ),
+            prices,
+        )
         active_keys = set(
             Asset.objects.filter(is_active=True, is_house=False).values_list("key", flat=True)
         )

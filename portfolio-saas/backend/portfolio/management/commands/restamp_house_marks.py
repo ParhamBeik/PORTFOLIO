@@ -19,6 +19,13 @@ class Command(BaseCommand):
         parser.add_argument("--list", action="store_true")
         parser.add_argument("--holding-id", type=int)
         parser.add_argument("--occurred-at", help="ISO date or datetime (purchase date)")
+        parser.add_argument(
+            "--backfill-before",
+            help="Only add this house to snapshots older than this instant. "
+                 "Defaults to the earlier of the holding's creation and its "
+                 "current first mark -- the point from which snapshots already "
+                 "contain it. Widening this double-counts.",
+        )
         parser.add_argument("--dry-run", action="store_true")
 
     def handle(self, *args, **options):
@@ -68,14 +75,54 @@ class Command(BaseCommand):
         if not marks:
             raise CommandError("No live house marks to restamp.")
         first = marks[0]
+
+        # `backfill_house_into_snapshots` ADDS to each row in place and has no
+        # marker saying it already ran, so the bound decides between a correct
+        # history and a silently doubled one. A snapshot already contains this
+        # house from whichever came first:
+        #   * the Holding row existing -- the price loop photographs
+        #     `account.holdings.all()`, marks not consulted; or
+        #   * the earliest live mark -- HoldingListCreateView backfilled from
+        #     there when the property was created.
+        # Passing `holding.created_at` alone double-counted every day between a
+        # backdated mark and the day the property was typed in.
+        boundary = options.get("backfill_before")
+        if boundary:
+            cutoff = parse_datetime(boundary) or parse_date(boundary)
+            if cutoff is None:
+                raise CommandError(f"Could not parse backfill-before: {boundary}")
+            if not isinstance(cutoff, datetime):
+                cutoff = datetime(cutoff.year, cutoff.month, cutoff.day, tzinfo=dt_timezone.utc)
+            if timezone.is_naive(cutoff):
+                cutoff = timezone.make_aware(cutoff, timezone.get_current_timezone())
+        else:
+            cutoff = min(holding.created_at, first.timestamp)
+
+        # An opening carries the account's baseline (`tracking_started_at`), and
+        # `create_ledger_entry` refuses any later opening stamped differently.
+        # Moving one off that instant desynchronises it from every other opening
+        # on the account, so the mark becomes a valuation mark -- which for a
+        # house `_projection_state` and `house_state_as_of` treat identically.
+        baseline = holding.account.tracking_started_at
+        rekind = (
+            first.kind == LedgerEntry.Kind.OPENING_POSITION
+            and baseline is not None
+            and when != baseline
+        )
         self.stdout.write(
             f"holding={holding.id} {first.kind} {first.timestamp} -> {when}"
+            + (f" (kind -> {LedgerEntry.Kind.VALUATION_MARK})" if rekind else "")
+            + f"; backfill snapshots before {cutoff}"
         )
         if options["dry_run"]:
             return
         first.timestamp = when
-        first.save(update_fields=["timestamp"])
+        fields = ["timestamp"]
+        if rekind:
+            first.kind = LedgerEntry.Kind.VALUATION_MARK
+            fields.append("kind")
+        first.save(update_fields=fields)
         n = backfill_house_into_snapshots(
-            holding.account, holding.asset, before=holding.created_at,
+            holding.account, holding.asset, before=cutoff,
         )
         self.stdout.write(f"updated mark; backfilled {n} snapshot rows")

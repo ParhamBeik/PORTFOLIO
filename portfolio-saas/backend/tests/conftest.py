@@ -49,11 +49,15 @@ def asset_catalog(db):
         ("usd_cash", "Cash", "USD", False, False),
         ("usdt_irt", "Cash", "IRT", False, False),
         ("euro_cash", "Cash", "IRT", False, False),
-        ("kama_stock", "Stock", "IRT", False, False),
+        # Carries its real TSE symbol on purpose: `tse_symbol` is what makes a
+        # quote Rial and puts the holding on the /10 value boundary. A blank one
+        # here made every stock in the suite behave like a Toman-quoted asset,
+        # which is exactly the difference a unit bug hides in.
+        ("kama_stock", "Stock", "IRT", False, False, "کاما"),
         ("bitcoin_usd", "Crypto", "USD", False, False),
         ("house_asset", "Real Estate", "IRT", False, True),
     ]
-    for key, cls, cur, manual, house in entries:
+    for key, cls, cur, manual, house, *rest in entries:
         Asset.objects.get_or_create(
             key=key,
             defaults={
@@ -62,6 +66,7 @@ def asset_catalog(db):
                 "currency": cur,
                 "is_manual": manual,
                 "is_house": house,
+                "tse_symbol": rest[0] if rest else "",
             },
         )
     return {a.key: a for a in Asset.objects.all()}

@@ -59,6 +59,7 @@ from .services.imports import (
     commit_ledger_import,
     preview_ledger_import,
 )
+from .services.catalog import ensure_asset, search_catalog
 from .services.deflator import cpi_for_date, normalize_basis
 from .services.performance import account_performance
 from .services.diagnostics import portfolio_diagnostics
@@ -85,6 +86,30 @@ class AssetListView(generics.ListAPIView):
         return Asset.objects.filter(is_active=True).filter(
             Q(owner__isnull=True) | Q(owner=self.request.user)
         )
+
+
+class AssetCatalogView(APIView):
+    """Search the market catalog for the add-holding wizard."""
+
+    def get(self, request):
+        return Response(
+            search_catalog(
+                asset_class=request.query_params.get("asset_class", ""),
+                q=request.query_params.get("q", ""),
+                user=request.user,
+            )
+        )
+
+
+class EnsureAssetView(APIView):
+    """Mint (or reuse) a shared Asset for an eligible catalog instrument."""
+
+    def post(self, request):
+        asset = ensure_asset(
+            source=request.data.get("source", ""),
+            symbol=request.data.get("symbol", ""),
+        )
+        return Response(AssetSerializer(asset).data)
 
 
 class AccountListCreateView(generics.ListCreateAPIView):

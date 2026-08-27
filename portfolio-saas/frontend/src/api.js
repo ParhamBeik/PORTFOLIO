@@ -148,6 +148,10 @@ export const login = (email, password) =>
   api("/api/auth/login/", { method: "POST", body: { email, password } });
 export const me = () => api("/api/auth/me/");
 export const listAssets = () => api("/api/assets/");
+export const searchAssetCatalog = (assetClass, q = "") =>
+  api(`/api/assets/catalog/${qs({ asset_class: assetClass, q })}`);
+export const ensureAsset = (source, symbol) =>
+  api("/api/assets/ensure/", { method: "POST", body: { source, symbol } });
 export const listAccounts = () => api("/api/accounts/");
 export const createAccount = (name, broker = "") =>
   api("/api/accounts/", { method: "POST", body: { name, broker } });

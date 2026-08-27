@@ -432,14 +432,15 @@ def test_analytics_scoped_to_one_account(asset_catalog, write_prices, make_user)
     assert resp_b.status_code == 200
     body_b = resp_b.json()
     assert set(body_b["current_weights"]) == {"kama_stock"}
-    assert Decimal(body_b["total_value_tomans"]) == Decimal("523000")
+    # Rial quote, Toman total: 100 shares x 5,230 Rial = 52,300 Toman.
+    assert Decimal(body_b["total_value_tomans"]) == Decimal("52300")
 
     # No param: aggregate across both accounts.
     resp_all = client.get("/api/analytics/")
     assert resp_all.status_code == 200
     body_all = resp_all.json()
     assert set(body_all["current_weights"]) == {"emami_coin", "kama_stock"}
-    assert Decimal(body_all["total_value_tomans"]) == Decimal("960523000")
+    assert Decimal(body_all["total_value_tomans"]) == Decimal("960052300")
 
 
 def test_analytics_rejects_account_owned_by_another_user(asset_catalog, write_prices, make_user):

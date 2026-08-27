@@ -12,6 +12,8 @@ from decimal import Decimal
 from django.core.cache import cache
 from django.utils import timezone
 
+from marketdata.currency import holding_value_to_toman, is_tse_priced
+
 from ..models import HOUSE_AREA_SQM, HOUSE_PRICE_SCALE, Account, Asset, Holding, Price
 
 logger = logging.getLogger(__name__)
@@ -475,23 +477,147 @@ def _archive_replacements(
     return replacements
 
 
-def _live_quality_status(asset, age_seconds: int, state: str) -> str:
-    """"live" vs "stale" for a fresh Price row, aware of whether the asset's
-    market/desk is even open right now.
+def _is_tse_asset(asset) -> bool:
+    """Whether this asset's LIVE LANE is the TSETMC subscription.
 
-    Applies to every asset class, not one symbol: a price older than
-    `_FRESH_SECONDS` is only "stale" if a fresher one should have arrived —
-    i.e. that asset's market is open. Crypto never closes, so it always uses
-    the freshness window. Closed TSE / gold-FX desks keep the last print as
-    the current price until it ages past the grace window (a missed session,
-    a real problem) rather than every evening/weekend by design.
+    Deliberately the same test as `currency.is_tse_priced`, and it must stay
+    that way. It briefly also matched `asset_class == STOCK`, which is the
+    predicate `is_tse_priced` exists to reject -- two names for one concept,
+    disagreeing on manual stocks, in the same file. The unit boundary is the
+    consequence that matters: route a divisor through a wider predicate and a
+    manual stock silently loses 90% of its value.
+    """
+    return is_tse_priced(asset)
+
+
+def _live_plan_blocked(asset) -> bool:
+    """Whether this asset's live provider lane cannot currently fetch.
+
+    Two distinct ways for that to be true, and asking only the first is why this
+    badge could not fire in the incident it was written for:
+
+      * the breaker is open ON THE LIVE BUCKET -- `is_plan_blocked(..., LIVE)`
+        deliberately answers False for an archive-tripped breaker, since archive
+        exhausting itself must never silence live;
+      * live has simply run out of its own slice, which is what actually happened
+        when archive drained a whole wallet before dawn with `live_used=0`.
+        There the breaker was never live-tripped at all, so the first check alone
+        falls through to "Stale" and the operator gets no quota signal.
+    """
+    from marketdata.quota import BRS, LIVE, TSETMC, is_plan_blocked, remaining_requests
+
+    plan = TSETMC if _is_tse_asset(asset) else BRS
+    if is_plan_blocked(plan, bucket=LIVE):
+        return True
+    try:
+        # `remaining_requests` is the same accounting `reserve_request` uses, so
+        # the badge cannot disagree with what the fetcher is actually allowed.
+        return remaining_requests(LIVE, plan) <= 0
+    except Exception:  # noqa: BLE001 -- a badge must never break valuation
+        return False
+
+
+def _clock_sessions_elapsed(asset, fetched_at, now) -> int:
+    """Sessions that have OPENED since this quote, by the wall clock.
+
+    Warehouse calendars cannot answer this when the same quota block that
+    starved the live loop also starved today's candles -- `sessions_between`
+    would report 0 and keep the badge on Live. So the weekly rhythm is counted
+    from the clock, but known past closures still come from the calendar: only
+    the current day can be missing from it for the reason above, and without
+    that a two-week Nowruz shutdown flips every holding to Stale on day one.
+
+    A session counts when it opened strictly after the quote and at or before
+    `now` -- which is the whole point. Starting the walk at quote_date + 1 meant
+    a 07:00 print, taken before the 08:30 open, was never measured against its
+    own day's session and stayed green through and after the session it missed.
+    """
+    from datetime import datetime, time as dtime, timedelta
+
+    import jdatetime
+
+    from marketdata.market_state import (
+        DAYTIME_START,
+        SESSION_START,
+        TEHRAN,
+        TRADING_WEEKDAYS,
+    )
+
+    now_local = now.astimezone(TEHRAN)
+    quote_local = fetched_at.astimezone(TEHRAN)
+    end = now_local.date()
+    tse = _is_tse_asset(asset)
+    open_at = dtime(*(SESSION_START if tse else DAYTIME_START))
+    closed = _known_closure_days(tse, quote_local.date(), end)
+
+    elapsed = 0
+    day = quote_local.date()
+    while day <= end:
+        jalali_day = jdatetime.date.fromgregorian(date=day)
+        session_day = (not tse) or jalali_day.weekday() in TRADING_WEEKDAYS
+        if session_day and jalali_day.strftime("%Y-%m-%d") not in closed:
+            opened = datetime.combine(day, open_at, tzinfo=TEHRAN)
+            if quote_local < opened <= now_local:
+                elapsed += 1
+        day += timedelta(days=1)
+    return elapsed
+
+
+def _known_closure_days(tse: bool, start, end) -> frozenset:
+    """Jalali days the exchange was shut, for days the warehouse can vouch for.
+
+    TSE only -- `market_closure_days` reads whole-market volume, which the
+    gold/FX desk has no equivalent of, and that desk publishes on almost every
+    calendar day anyway.
+
+    Excludes today: a missing candle for the current day is exactly the
+    quota-starvation case this whole function exists to see through, so it must
+    never be read as "the market was closed".
+    """
+    from datetime import timedelta
+
+    import jdatetime
+
+    from marketdata.calendars import market_closure_days
+
+    if not tse or start >= end:
+        return frozenset()
+    try:
+        return frozenset(
+            market_closure_days(
+                start=jdatetime.date.fromgregorian(date=start).strftime("%Y-%m-%d"),
+                end=jdatetime.date.fromgregorian(
+                    date=end - timedelta(days=1)
+                ).strftime("%Y-%m-%d"),
+            )
+        )
+    except Exception:  # noqa: BLE001 -- fall back to the pure clock
+        return frozenset()
+
+
+def _live_quality_status(
+    asset, age_seconds: int, state: str, *, fetched_at=None, now=None
+) -> str:
+    """live / stale / quota for a stored Price row.
+
+    A quote older than `_FRESH_SECONDS` is only still "live" if no newer one
+    should have arrived -- that asset's market is shut AND this print is from
+    the latest session. A quota-blocked live lane, or a trading session that
+    has started since the quote, means the number on screen is last-known,
+    not current. Closed-market grace must not launder a missed session into
+    a green Live badge.
     """
     if age_seconds <= _FRESH_SECONDS:
         return "live"
+    degraded = "quota" if _live_plan_blocked(asset) else "stale"
     if _asset_market_is_open(asset, state):
-        return "stale"
+        return degraded
+    if fetched_at is not None:
+        as_of = now or timezone.now()
+        if _clock_sessions_elapsed(asset, fetched_at, as_of) > 0:
+            return degraded
     grace = (
-        _CLOSED_TSE_GRACE_SECONDS if asset.tse_symbol else _CLOSED_BRS_GRACE_SECONDS
+        _CLOSED_TSE_GRACE_SECONDS if _is_tse_asset(asset) else _CLOSED_BRS_GRACE_SECONDS
     )
     return "live" if age_seconds <= grace else "stale"
 
@@ -519,10 +645,12 @@ def _house_value(price_per_sqm_million: Decimal, area_sqm: Decimal = HOUSE_AREA_
 
 
 def asset_value(holding: Holding, price: Decimal) -> Decimal:
-    """Quantity x unit price, or the house formula for real estate."""
+    """Quantity x unit price in Toman, or the house formula for real estate."""
     if holding.asset.is_house:
         return _house_value(holding.quantity, area_sqm=getattr(holding, "area_sqm", HOUSE_AREA_SQM))
-    return _q(holding.quantity) * _q(price)
+    return holding_value_to_toman(
+        holding.asset, _q(holding.quantity) * _q(price)
+    )
 
 
 
@@ -530,7 +658,7 @@ def _quality_rollup(items, excluded, total_assets, priced_assets):
     if total_assets and priced_assets == 0:
         return "unavailable"
     statuses = {item["quality_status"] for item in items}
-    if excluded or statuses & {"unavailable", "stale", "fallback"}:
+    if excluded or statuses & {"unavailable", "stale", "fallback", "quota"}:
         return "partial"
     if statuses <= {"live"}:
         return "complete"
@@ -619,7 +747,13 @@ def value_account(
                 source = row.source
                 priced_at = row.fetched_at
                 age_seconds = max(0, int((now - row.fetched_at).total_seconds()))
-                quality_status = _live_quality_status(holding.asset, age_seconds, market_state_now)
+                quality_status = _live_quality_status(
+                    holding.asset,
+                    age_seconds,
+                    market_state_now,
+                    fetched_at=row.fetched_at,
+                    now=now,
+                )
             else:
                 source = "archive"
                 priced_at = None
@@ -1006,7 +1140,7 @@ def compute_dynamic_net_worth_series(
                         # available, and only for a position we actually hold.
                         approximated = approximated or qty > 0
                     p = last_known_prices[key]
-                total += qty * p
+                total += holding_value_to_toman(asset, qty * p)
 
         total -= total_liabilities
         val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
@@ -1162,7 +1296,7 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
 
             # Apply basis
             if not asset.is_house:
-                val = qty * price
+                val = holding_value_to_toman(asset, qty * price)
             if basis in ("usd_denominated", "usdt_denominated") and usd_rate > 0:
                 val = val / usd_rate
                 price = price / usd_rate
