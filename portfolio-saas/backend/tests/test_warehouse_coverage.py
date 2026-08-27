@@ -1020,6 +1020,32 @@ class TestLiveReserve:
         row = self._row(live_used=70)
         assert quota.live_reserve_remaining(quota.BRS, row, now=midnight_tehran) == 30
 
+    def test_the_reserve_prices_the_day_it_is_asked_about(self, settings):
+        """The TSE lane costs nothing on a weekend -- and that must be decided
+        by the day passed in, not by the day the test happens to run.
+
+        `live_day_cost` read the wall clock instead of `now`, so every reserve
+        answered for today. `test_a_faster_cadence_reserves_more` below then
+        passed Monday-to-Wednesday and failed on Thursday and Friday, when there
+        is no session for a faster cadence to poll -- which is how a red CI run
+        blocked an unrelated deploy while the archive was down.
+        """
+        self._configure(settings, tse=True)
+        trading_day = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)  # Mon
+        weekend = datetime(2026, 8, 26, 20, 30, tzinfo=dt_timezone.utc)  # Thu
+
+        tse_trading = quota.live_reserve_remaining(
+            quota.TSETMC, self._row(), now=trading_day
+        )
+        tse_weekend = quota.live_reserve_remaining(
+            quota.TSETMC, self._row(), now=weekend
+        )
+
+        assert tse_trading > 0, "a session day must reserve for the TSE lane"
+        assert tse_weekend == 0, "no session, nothing to poll, nothing to reserve"
+        # BRS polls gold/FX every daytime hour regardless of the TSE calendar.
+        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=weekend) > 0
+
     def test_a_faster_cadence_reserves_more(self, settings):
         """But only for the hours the fast cadence actually runs.
 

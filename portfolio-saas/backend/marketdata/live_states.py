@@ -134,14 +134,21 @@ def planned_requests(start, end, plan=None):
     return sum(_firings_until(state, start, end) for state in states)
 
 
-def day_start():
-    """Midnight Tehran for the current quota day, as an aware datetime."""
+def day_start(now=None):
+    """Midnight Tehran for `now`'s quota day (default: the current one).
+
+    `now` is not decoration. The live reserve simulates a whole day of the price
+    loop, and what that costs depends on WHICH day: the TSE lane bills nothing
+    on a Thursday or Friday because there is no session to poll. Reading the
+    wall clock here regardless of the caller's `now` made `live_day_cost`
+    answer for today no matter which day it was asked about.
+    """
     from datetime import time as dtime
     from zoneinfo import ZoneInfo
 
     zone = ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE)
     return datetime.combine(
-        timezone.now().astimezone(zone).date(), dtime.min, tzinfo=zone
+        (now or timezone.now()).astimezone(zone).date(), dtime.min, tzinfo=zone
     )
 
 

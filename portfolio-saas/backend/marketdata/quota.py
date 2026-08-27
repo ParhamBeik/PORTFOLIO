@@ -409,17 +409,21 @@ def _simulate_price_loop(start, end, plan=None):
     return needed
 
 
-def live_day_cost(plan, row=None):
+def live_day_cost(plan, row=None, now=None):
     """Static 24h live spend for this wallet, from Tehran midnight to the next.
 
     Archive leftover is this number subtracted from the plan ceiling, paced
     across the day. The slice does not shrink after the session closes: unused
     live headroom is not lent to backfill until the next quota day.
+
+    Static within a day, but NOT the same every day: on a Thursday or Friday the
+    TSE lane costs nothing because there is no session to poll, which is why
+    `now` selects the day being priced instead of the wall clock always winning.
     """
     from . import endpoints, live_states
     from .models import LiveFetchState
 
-    start = live_states.day_start()
+    start = live_states.day_start(now)
     needed = _simulate_price_loop(start, start + timedelta(days=1), plan=plan)
     try:
         keys = [key for key, ep in endpoints.REGISTRY.items() if ep.plan == plan]
@@ -438,13 +442,14 @@ def live_day_cost(plan, row=None):
 def live_reserve_remaining(plan, row=None, now=None):
     """Unused portion of the static 24h live slice on `plan`.
 
-    `now` is accepted for call-site compatibility; the slice itself does not
-    depend on the time of day. Live already spent today is subtracted so a
-    live overrun cannot be reserved twice.
+    The slice does not depend on the TIME of day -- evening leftover is not
+    released to archive -- but it does depend on WHICH day, since a weekend has
+    no TSE session to poll. `now` therefore selects the day, never the fraction
+    of it. Live already spent today is subtracted so a live overrun cannot be
+    reserved twice.
     """
-    del now  # the 24h slice is static; wall-clock does not release it
     spent = getattr(row, "live_used", 0) or 0
-    return max(0, live_day_cost(plan, row) - spent)
+    return max(0, live_day_cost(plan, row, now=now) - spent)
 
 
 def _day_elapsed_fraction(now=None):
