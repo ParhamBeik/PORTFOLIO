@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
+from django.db import DataError
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.utils import timezone
@@ -361,7 +362,7 @@ def test_quota_exhausted_defers_to_tehran_day_rollover_not_one_minute():
     assert sibling.last_error == "Daily quota unavailable."
 
 
-def test_grow_tick_windows_widens_completed_states_without_limit():
+def test_grow_tick_windows_widens_completed_states():
     from marketdata.archive import grow_tick_windows
 
     done = _state(
@@ -403,6 +404,36 @@ def test_grow_tick_windows_stops_at_the_symbol_listing_date():
     assert already_at_listing.verified_complete is True, (
         "already backfilled to the symbol's own listing date -- stays done"
     )
+
+
+def test_grow_tick_windows_clamps_instead_of_overflowing_the_column():
+    """A symbol with no listing record used to grow forever. `forever` is
+    32,767 -- PositiveSmallIntegerField -- and the 32,768th day raised a
+    database error that took the whole archive down for 13h on 2026-08-27.
+    """
+    from marketdata.archive import MAX_TICK_WINDOW_DAYS, grow_tick_windows
+    from marketdata.models import ArchiveFetchState
+
+    assert MAX_TICK_WINDOW_DAYS < 32767, "must stay inside the column's range"
+    near = _state(
+        "no_listing_record", Endpoint.STOCK_TRANSACTION_TICKS,
+        verified_complete=True, target_window_days=MAX_TICK_WINDOW_DAYS - 10,
+    )
+
+    assert grow_tick_windows(step_days=90) == 1
+    near.refresh_from_db()
+    assert near.target_window_days == MAX_TICK_WINDOW_DAYS
+
+    # At the clamp it must go quiet, not churn: re-flagging `verified_complete`
+    # on a window that cannot widen is what produced 10,615 claim-fetch-nothing-
+    # reclaim no-ops in one day.
+    near.verified_complete = True
+    near.save(update_fields=["verified_complete"])
+    assert grow_tick_windows(step_days=90) == 0
+    near.refresh_from_db()
+    assert near.target_window_days == MAX_TICK_WINDOW_DAYS
+    assert near.verified_complete is True
+    assert ArchiveFetchState.objects.filter(target_window_days__gt=MAX_TICK_WINDOW_DAYS).count() == 0
 
 
 # ----------------------------------------------------------------------
@@ -591,6 +622,29 @@ def test_archive_tick_claims_only_free_queue_slots(monkeypatch):
     monkeypatch.setattr(tasks, "get_redis", lambda: client)
     monkeypatch.setattr(tasks, "_queue_slots", lambda *_args: (3, 1))
     monkeypatch.setattr(tasks, "grow_tick_windows", mock.Mock())
+    claim = mock.Mock(return_value=[])
+    monkeypatch.setattr(tasks, "claim_archive_batch", claim)
+
+    archive_tick()
+
+    claim.assert_called_once_with(limit=3)
+
+
+def test_archive_tick_still_claims_when_window_growth_fails(monkeypatch):
+    """Widening a window is bookkeeping; claiming work is the job. These shared
+    a `try`, so when growth started raising, dispatch stopped too and the
+    archive sat idle for 13h with 89% of the day's TSETMC wallet unspent.
+    """
+    import marketdata.tasks as tasks
+
+    client = mock.Mock()
+    client.set.return_value = True
+    monkeypatch.setattr(tasks, "get_redis", lambda: client)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda *_args: (3, 1))
+    monkeypatch.setattr(
+        tasks, "grow_tick_windows",
+        mock.Mock(side_effect=DataError("smallint out of range")),
+    )
     claim = mock.Mock(return_value=[])
     monkeypatch.setattr(tasks, "claim_archive_batch", claim)
 

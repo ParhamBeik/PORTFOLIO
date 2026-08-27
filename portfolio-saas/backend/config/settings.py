@@ -369,7 +369,14 @@ CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
-CELERY_TIMEZONE = TIME_ZONE  # defined above; Celery needs its own copy
+# NOT `TIME_ZONE`. Django stores UTC, but every crontab in config/celery.py is
+# declared in Tehran wall-clock time and says so. `config_from_object(...,
+# namespace="CELERY")` resolves after `app.conf.update(timezone=...)`, so this
+# name -- not the one in celery.py -- is what beat actually runs on, and setting
+# it to UTC fired every job 3.5h off its own comment: "Tehran midnight" integrity
+# ran at 03:30, and the 23:59 daily price rollup ran at 03:29 the NEXT Tehran day,
+# rolling up the wrong day's ticks. Verified in prod: app.conf.timezone == 'UTC'.
+CELERY_TIMEZONE = "Asia/Tehran"
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True  # survive a broker restart
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")

@@ -6,7 +6,8 @@ logger = logging.getLogger(__name__)
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import F, Max, Q, Sum
+from django.db.models import F, IntegerField, Max, Q, Sum, Value
+from django.db.models.functions import Least
 from django.utils import timezone
 
 from . import ingest, jalali, market_state, validation
@@ -49,6 +50,13 @@ STOCK_ENDPOINTS = (
 # calendar day, so the trailing window is bounded to keep cost finite. Trading
 # days only -- a non-trading day has no daily candle, so it is never requested.
 TICK_WINDOW_DAYS = getattr(settings, "MARKETDATA_TICK_WINDOW_DAYS", 90)
+
+# Hard ceiling for `grow_tick_windows`. The TSE's oldest listings reach back to
+# the mid-1370s (کاما's first candle is 1382-12-26), so ~33 years covers every
+# symbol that has ever traded with room to spare. It must also stay well inside
+# ArchiveFetchState.target_window_days' PositiveSmallIntegerField range (32,767)
+# -- exceeding that is a database error, not a saturating add.
+MAX_TICK_WINDOW_DAYS = 12_000
 
 # Endpoints that return an entire history in one request. Used to tag the
 # per-day `historical_full` counter, which is how "we spent the day re-downloading
@@ -1092,9 +1100,19 @@ def grow_tick_windows(step_days=90):
     frozen after that. Now recurring and universal: a state grows again the
     moment it reports `verified_complete`, floored at the symbol's own listing
     date (`InstrumentListingHistory.first_seen`) so it stops once the window
-    already reaches back to when the symbol started trading, and symbols with
-    no listing record on file grow indefinitely (missing metadata is not a
-    reason to stop backfilling).
+    already reaches back to when the symbol started trading.
+
+    "No listing record on file" used to mean "grow indefinitely", on the
+    reasoning that missing metadata is not a reason to stop backfilling. There
+    is no such thing as indefinitely: `target_window_days` is a
+    PositiveSmallIntegerField, so on 2026-08-27 thirty-one such states reached
+    32,760 and the next `+90` raised a hard database error -- inside the same
+    `try` that dispatches work, which took the whole archive down for thirteen
+    hours while the TSETMC wallet sat at 11% spent. Growth is now clamped to
+    MAX_TICK_WINDOW_DAYS, and a state already at the clamp is left alone rather
+    than being re-flagged incomplete: rewriting `verified_complete=False` on a
+    window that cannot widen is what produced 10,615 claim-fetch-nothing-
+    reclaim no-ops in a single day.
 
     Growth strictly increases `target_window_days`, and `claim_archive_batch`'s
     tick branch already orders by `target_window_days` ascending -- a state
@@ -1120,6 +1138,8 @@ def grow_tick_windows(step_days=90):
     today = jalali.to_gregorian(jalali.today())
     to_grow = []
     for symbol, window in done:
+        if window >= MAX_TICK_WINDOW_DAYS:
+            continue  # at the clamp: no wider window exists to fetch into
         listed = first_seen.get(symbol)
         if listed:
             span_to_listing = (today - jalali.to_gregorian(listed)).days
@@ -1131,7 +1151,10 @@ def grow_tick_windows(step_days=90):
     return ArchiveFetchState.objects.filter(
         endpoint=tick_endpoint, symbol__in=to_grow, verified_complete=True
     ).update(
-        target_window_days=F("target_window_days") + step_days,
+        target_window_days=Least(
+            F("target_window_days") + step_days,
+            Value(MAX_TICK_WINDOW_DAYS, output_field=IntegerField()),
+        ),
         verified_complete=False,
         next_attempt_at=timezone.now(),
     )

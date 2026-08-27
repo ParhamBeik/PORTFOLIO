@@ -91,8 +91,17 @@ def notify(event, details, *, dedupe_seconds=900):
     from django.core.cache import cache
 
     safe_details = _redact(details)
-    logger.warning("alert:%s %s", event, json.dumps(safe_details, sort_keys=True, default=str)[:500])
     url = getattr(settings, "ALERT_WEBHOOK_URL", "")
+    # Say whether this reached a human. On 2026-08-27 the archive was dead for
+    # 13h having raised stale-archive-progress 49 times, and every one of those
+    # lines looked exactly like a delivered alert -- ALERT_WEBHOOK_URL is set to
+    # the empty string on the VPS. `undelivered=1` is the greppable difference.
+    logger.warning(
+        "alert:%s undelivered=%d %s",
+        event,
+        0 if url else 1,
+        json.dumps(safe_details, sort_keys=True, default=str)[:500],
+    )
     if not url:
         return False
     digest = hashlib.sha256(

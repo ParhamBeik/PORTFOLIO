@@ -666,7 +666,18 @@ def archive_tick():
             return
         if not ArchiveFetchState.objects.exists():
             ensure_archive_states(tracked_tse_symbols(), tracked_brs_symbols())
-        grow_tick_windows()
+        # Bookkeeping, not dispatch. It shares the `try` below with the claim,
+        # so when it started raising on 2026-08-27 every scheduling attempt --
+        # one per 15s, 3,300+ of them -- died before claiming a single state and
+        # the archive went dark for thirteen hours with 89% of the day's TSETMC
+        # wallet unspent. Widening a window is never worth not fetching.
+        try:
+            grow_tick_windows()
+        except Exception as err:  # noqa: BLE001 -- must not reach the claim
+            logger.error(
+                "grow_tick_windows failed correlation_id=%s error=%s: %s",
+                outcome.correlation_id, type(err).__name__, err,
+            )
         claim_limit = min(settings.MARKETDATA_ARCHIVE_BATCH_SIZE, slots)
         batch = claim_archive_batch(limit=claim_limit)
         if not batch:

@@ -27,7 +27,10 @@ app.autodiscover_tasks()
 # Global reliability defaults. Per-task retry policy (autoretry_for) belongs in
 # the individual tasks (e.g. portfolio/tasks.py), not here.
 app.conf.update(
-    timezone=str(TEHRAN),
+    # `timezone` is deliberately NOT set here. It is declared once, as
+    # CELERY_TIMEZONE in config/settings.py, because config_from_object resolves
+    # after this update() and silently wins -- setting it in both places is what
+    # let the schedule run on UTC while this file claimed Tehran.
     task_acks_late=True,  # ack after the task runs, not on receipt: a killed worker redelivers the task
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,  # pair with acks_late so one worker doesn't hoard several long tasks
@@ -84,9 +87,10 @@ app.conf.beat_schedule = {
     },
 
     # Symbol fundamentals refresh weekly on Friday (TSE closed, API quiet).
+    # Celery numbers days from Sunday=0, so Friday is 5; this said 4 (Thursday).
     "marketdata-weekly-meta": {
         "task": "marketdata.tasks.weekly_metadata_sync",
-        "schedule": crontab(day_of_week=4, hour=9, minute=30),
+        "schedule": crontab(day_of_week=5, hour=9, minute=30),
     },
     "marketdata-daily-catalog": {
         "task": "marketdata.tasks.catalog_sync",
