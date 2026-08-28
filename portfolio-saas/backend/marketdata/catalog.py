@@ -140,6 +140,23 @@ def sync_provider_catalog(limit=None):
     if not rows:
         return {"seen": 0, "eligible": 0}
 
+    # The provider's universe is not ours to keep unique: its crypto feed lists
+    # two different coins both named "Ellipsis", and the name is the only symbol
+    # that endpoint gives. Postgres refuses an upsert whose own batch proposes
+    # one key twice ("cannot affect row a second time"), which takes down the
+    # whole sync rather than one row. First occurrence wins, and the collision
+    # is logged so a real provider change is visible rather than absorbed.
+    seen_keys = {}
+    for row in rows:
+        seen_keys.setdefault((row.source, row.symbol), row)
+    if len(seen_keys) != len(rows):
+        logger.warning(
+            "sync_provider_catalog: provider sent %d duplicate (source, symbol) "
+            "pair(s); keeping the first of each",
+            len(rows) - len(seen_keys),
+        )
+    rows = list(seen_keys.values())
+
     # Bulk create or update MarketInstrument
     MarketInstrument.objects.bulk_create(
         rows,

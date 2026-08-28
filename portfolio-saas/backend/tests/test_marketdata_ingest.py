@@ -1846,3 +1846,35 @@ def test_the_catalog_and_the_snapshot_ingest_read_a_symbol_the_same_way(db):
     # to the bars distilled from those snapshots.
     assert instrument.symbol == stored.symbol
     assert instrument.eligible is True
+
+
+def test_a_provider_duplicate_does_not_take_down_the_whole_catalog_sync(db):
+    """The crypto feed lists two different coins both named "Ellipsis", and the
+    name is the only symbol that endpoint gives. Postgres refuses an upsert
+    whose own batch proposes one key twice, so one duplicate row aborted the
+    entire sync -- every stock, every currency, nothing written.
+    """
+    from unittest.mock import patch
+
+    from marketdata import catalog
+    from marketdata.models import MarketInstrument
+
+    payload = [
+        {"name_en": "Ellipsis", "id": 1, "price": 1},
+        {"name_en": "Ellipsis", "id": 2, "price": 2},
+        {"name_en": "Bitcoin", "id": 3, "price": 3},
+    ]
+    with patch.object(catalog, "fetch_all_symbols", return_value=[]), \
+         patch.object(catalog, "fetch_gold_currency_free", return_value={}), \
+         patch.object(
+             catalog, "fetch_derivatives",
+             side_effect=lambda _key, endpoint: payload if endpoint == "crypto" else [],
+         ):
+        catalog.sync_provider_catalog()
+
+    coins = set(
+        MarketInstrument.objects.filter(
+            category=MarketInstrument.Category.CRYPTO
+        ).values_list("symbol", flat=True)
+    )
+    assert coins == {"Ellipsis", "Bitcoin"}
