@@ -1156,8 +1156,19 @@ def test_a_tether_quoted_bar_converts_at_the_rate_of_its_own_day(db):
     from decimal import Decimal
 
     from marketdata.models import GoldCurrencyHistory, MarketDailyBar, MarketSnapshot
-    from portfolio.services.returns import _live_only_toman_closes
+    from marketdata.provenance import daily_bar_toman
 
+    from marketdata.models import MarketInstrument
+    from portfolio.models import Asset
+
+    coin = Asset.objects.create(
+        key="btc-panel", name="Bitcoin", asset_class=Asset.AssetClass.CRYPTO,
+        brs_symbol="BTC", is_active=True,
+    )
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.BRS, symbol="BTC", name="Bitcoin",
+        category=MarketInstrument.Category.CRYPTO, eligible=True,
+    )
     MarketSnapshot.objects.create(
         asset_class="crypto", symbol="BTC", observed_at=timezone.now(),
         last_price=Decimal("1"), provider_payload={"unit": "تتر"},
@@ -1177,7 +1188,7 @@ def test_a_tether_quoted_bar_converts_at_the_rate_of_its_own_day(db):
     )
 
     rows = dict(
-        (date, price) for _symbol, date, price in _live_only_toman_closes(["BTC"])
+        (date, price) for _symbol, date, price in daily_bar_toman([coin])
     )
     assert rows == {
         "1404-01-01": Decimal("500000"),
@@ -1190,8 +1201,19 @@ def test_a_bar_with_no_dollar_rate_yet_yields_no_row(db):
     from decimal import Decimal
 
     from marketdata.models import GoldCurrencyHistory, MarketDailyBar, MarketSnapshot
-    from portfolio.services.returns import _live_only_toman_closes
+    from marketdata.provenance import daily_bar_toman
 
+    from marketdata.models import MarketInstrument
+    from portfolio.models import Asset
+
+    coin = Asset.objects.create(
+        key="btc-panel", name="Bitcoin", asset_class=Asset.AssetClass.CRYPTO,
+        brs_symbol="BTC", is_active=True,
+    )
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.BRS, symbol="BTC", name="Bitcoin",
+        category=MarketInstrument.Category.CRYPTO, eligible=True,
+    )
     MarketSnapshot.objects.create(
         asset_class="crypto", symbol="BTC", observed_at=timezone.now(),
         last_price=Decimal("1"), provider_payload={"unit": "تتر"},
@@ -1207,5 +1229,5 @@ def test_a_bar_with_no_dollar_rate_yet_yields_no_row(db):
         symbol="USD", date="1404-01-03", close_price=Decimal("50000"), unit="تومان",
     )
 
-    rows = _live_only_toman_closes(["BTC"])
+    rows = daily_bar_toman([coin])
     assert [date for _symbol, date, _price in rows] == ["1404-01-05"]

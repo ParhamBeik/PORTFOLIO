@@ -422,6 +422,11 @@ class LedgerListCreateView(APIView):
                 data["kind"] == LedgerEntry.Kind.OPENING_POSITION
                 and asset is not None
                 and not asset.is_house
+                # Real-estate fields on a non-house asset are a client error
+                # that `create_ledger_entry` rejects by name. Routing around it
+                # would answer 201 and drop them silently.
+                and data.get("area_sqm") is None
+                and data.get("mortgage_deduction_tomans") is None
             ):
                 entry = record_existing_position(
                     account=account,
@@ -2214,16 +2219,14 @@ class ComparisonView(APIView):
 
     def get(self, request):
         from portfolio.services.comparison import (
-            ComparisonError, comparable_assets, compare,
+            MAX_WINDOW_DAYS, ComparisonError, comparable_assets, compare,
         )
 
         account = _scope(request)
         mode = request.query_params.get("mode")
         if not mode:
             return Response(comparable_assets(request.user, account))
-        days, error = _int_param(
-            request, "days", 0, clamp=(0, comparison_max_window())
-        )
+        days, error = _int_param(request, "days", 0, clamp=(0, MAX_WINDOW_DAYS))
         if error:
             return error
         try:
@@ -2241,9 +2244,3 @@ class ComparisonView(APIView):
             return Response(
                 {"detail": exc.detail, "reason": exc.reason, **exc.extra}, status=400
             )
-
-
-def comparison_max_window() -> int:
-    from portfolio.services.comparison import MAX_WINDOW_DAYS
-
-    return MAX_WINDOW_DAYS

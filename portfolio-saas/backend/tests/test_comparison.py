@@ -237,3 +237,76 @@ def test_a_benchmark_window_longer_than_the_replay_says_so(compared):
 
     assert capped["summary"]["truncated_to_days"] == SYNTHETIC_HISTORY_MAX_DAYS
     assert within["summary"]["truncated_to_days"] is None
+
+
+def test_a_dollar_quoted_target_is_not_reported_as_toman(compared, asset_catalog):
+    """`_load_price_panel` leaves USD_QUOTED_KEYS in dollars -- the conversion
+    runs later, inside daily_returns_matrix. Every other consumer takes
+    pct_change() next, where a constant factor cancels, so nothing noticed. This
+    page prints the number, so it must read the converted panel.
+    """
+    import jdatetime
+    from marketdata.models import GoldCurrencyHistory
+    from portfolio.models import Price
+
+    coin = asset_catalog["bitcoin_usd"]
+    coin.brs_symbol = ""
+    coin.save(update_fields=["brs_symbol"])
+    start = timezone.now() - datetime.timedelta(days=60)
+    for offset in range(61):
+        day = (start + datetime.timedelta(days=offset)).date()
+        jalali = _jalali(day)
+        GoldCurrencyHistory.objects.create(
+            symbol="USD", date=jalali, unit="تومان", close_price=Decimal("100000"),
+        )
+        Price.objects.create(
+            asset=coin, price=Decimal("1000"), source="TEST",
+            fetched_at=timezone.now() - datetime.timedelta(days=60 - offset),
+        )
+    asset_catalog["usd_cash"].brs_symbol = "USD"
+    asset_catalog["usd_cash"].save(update_fields=["brs_symbol"])
+
+    response = _get(
+        compared, mode="counterfactual", subject="kama_stock", target="bitcoin_usd"
+    )
+    if response.status_code != 200:
+        # An honest refusal is acceptable; silently pricing dollars as Toman
+        # is not, which is what the assertion below is really guarding.
+        assert response.data["reason"] in {
+            "missing_price_history", "stale_price_history",
+        }
+        return
+    end = response.data["summary"]["alternative_end_tomans"]
+    invested = response.data["summary"]["invested_tomans"]
+    # At 1,000 dollars a coin and 100,000 Toman a dollar, 250,000 Toman buys
+    # 0.0025 of one. Read as Toman it would buy 250 -- a factor of 100,000.
+    assert end == pytest.approx(invested, rel=0.01)
+
+
+def test_a_target_whose_price_series_stopped_is_refused(compared, asset_catalog):
+    """A halted or delisted target used to draw a flat line from its last close
+    to today, and the summary reported that stale number as what you would have
+    made. This is the forward-fill bound the whole codebase is built around.
+    """
+    from marketdata.models import GoldCurrencyHistory
+
+    dead = asset_catalog["euro_cash"]
+    dead.brs_symbol = "EUR"
+    dead.save(update_fields=["brs_symbol"])
+    # Priced daily for a month, then nothing for the last 40 days.
+    start = timezone.now() - datetime.timedelta(days=70)
+    for offset in range(31):
+        day = (start + datetime.timedelta(days=offset)).date()
+        GoldCurrencyHistory.objects.create(
+            symbol="EUR", date=_jalali(day), unit="تومان",
+            close_price=Decimal("50000"),
+        )
+
+    response = _get(
+        compared, mode="counterfactual", subject="kama_stock", target="euro_cash"
+    )
+
+    assert response.status_code == 400
+    assert response.data["reason"] in {
+        "stale_price_history", "missing_price_history",
+    }

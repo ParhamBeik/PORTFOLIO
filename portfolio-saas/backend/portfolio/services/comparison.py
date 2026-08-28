@@ -120,41 +120,81 @@ def _window(flows, days) -> tuple[int, dt.datetime]:
     return load, now - dt.timedelta(days=min(shown, load))
 
 
-def _panel(keys, days, start) -> pd.DataFrame:
-    """Toman close per key per day, forward-filled onto a daily index.
+def _panel(keys, days, held) -> pd.DataFrame:
+    """Toman close per key per day, gap-gated, forward-filled onto a daily index.
 
-    Forward-filling here is not the 5-session valuation fill and does not need
-    its bound: the panel has already dropped anything the gap gate rejected, so
-    what is left are non-trading days between real closes -- a curve has to draw
-    through Thursday somehow.
+    Reads the PUBLIC panel: `_load_price_panel` is ratio-safe but not
+    money-safe, and this page prints money. Its USD-quoted columns are still
+    dollars and its live-Price fallback column is Rial for a TSE symbol -- both
+    invisible to every other consumer because they all take `pct_change()`
+    next, where a constant factor cancels.
+
+    `_build_returns_matrix` is then run for its verdicts only, because that is
+    where `price_gap_exceeded` is decided (CLAUDE.md: all eligibility gating
+    lives there). Without it a halted or delisted target draws a flat line from
+    its last close to today and the summary reports that stale number as what
+    you would have made.
+
+    The fill onto a daily index afterwards is a DRAWING bound, not the 5-session
+    staleness bound -- the gate above already owns that verdict. Its job is to
+    bridge the non-trading days between real closes, so it is counted in
+    calendar days on a calendar index and sized to the longest legitimate
+    closure (Nowruz shuts the exchange for about two weeks). Using the session
+    number here would have refused every March.
     """
-    from .returns import _load_price_panel
+    from marketdata.integrity import MAX_OUTAGE_CALENDAR_DAYS
 
-    panel, excluded, _warnings = _load_price_panel(
-        history_days=days, universe=list(keys), held_keys=frozenset(keys)
+    from .returns import _build_returns_matrix, toman_price_panel
+
+    keys = list(keys)
+    panel, excluded, warnings = toman_price_panel(
+        history_days=days, universe=keys, held_keys=frozenset(held)
     )
-    missing = [row["key"] for row in excluded if row["key"] in keys]
-    if missing:
-        raise ComparisonError(
-            "missing_price_history",
-            f"No usable price history for {', '.join(sorted(missing))}.",
-            keys=sorted(missing),
-        )
     absent = [key for key in keys if key not in panel.columns]
-    if absent:
-        raise ComparisonError(
-            "missing_price_history",
-            f"No usable price history for {', '.join(sorted(absent))}.",
-            keys=sorted(absent),
-        )
-    panel = panel[list(keys)].sort_index()
+    _refuse(absent, "missing_price_history", "No usable price history")
+    panel = panel[keys].sort_index()
+
+    _, gap_excluded, gap_warnings = _build_returns_matrix(panel, frozenset(held))
+    excluded = [row for row in [*excluded, *gap_excluded] if row.get("key") in keys]
+    _refuse(
+        [row["key"] for row in excluded],
+        "missing_price_history",
+        "No usable price history",
+    )
+    panel.attrs["warnings"] = [
+        row for row in [*warnings, *gap_warnings] if row.get("key") in keys
+    ]
+
     # The FULL loaded span, not the visible window: the curves are built over
-    # this and sliced to `start` only at the end, so a purchase older than the
-    # window still buys at its own day's price.
+    # this and sliced later, so a purchase older than the window still buys at
+    # its own day's price.
     index = pd.date_range(
         start=panel.index.min(), end=timezone.now(), freq="D", tz="UTC"
     )
-    return panel.reindex(panel.index.union(index)).ffill().reindex(index).dropna()
+    filled = (
+        panel.reindex(panel.index.union(index))
+        .ffill(limit=MAX_OUTAGE_CALENDAR_DAYS)
+        .reindex(index)
+    )
+    stale = [key for key in keys if pd.isna(filled[key].iloc[-1])]
+    if stale:
+        raise ComparisonError(
+            "stale_price_history",
+            f"{', '.join(sorted(stale))} has no recent price, so there is "
+            "nothing to compare against today.",
+            keys=sorted(stale),
+        )
+    result = filled.dropna()
+    result.attrs["warnings"] = panel.attrs["warnings"]
+    return result
+
+
+def _refuse(keys, reason, detail) -> None:
+    if keys:
+        raise ComparisonError(
+            reason, f"{detail} for {', '.join(sorted(set(keys)))}.",
+            keys=sorted(set(keys)),
+        )
 
 
 def _units_held(flows, index) -> pd.Series:
@@ -164,6 +204,29 @@ def _units_held(flows, index) -> pd.Series:
         at = pd.Timestamp(flow["at"]).tz_convert("UTC")
         units[index >= at] += float(flow["units"])
     return units
+
+
+def _assert_covered(flows, index) -> None:
+    """Refuse when a purchase predates the price history being replayed into.
+
+    `_panel` drops leading rows where either series is NaN, so the index starts
+    at the LATER of the two. A flow older than that would otherwise match the
+    first available day and buy at its price -- reporting a 2024 opening price
+    as the cost of a 2022 purchase, which is the exact thing the load-vs-show
+    split exists to prevent.
+    """
+    if not flows or index.empty:
+        return
+    first = pd.Timestamp(flows[0]["at"]).tz_convert("UTC")
+    if first < index[0].normalize():
+        raise ComparisonError(
+            "history_starts_after_purchase",
+            "The price history does not reach back to "
+            f"{first.date().isoformat()}, when the first purchase was made, so "
+            "there is no honest price to have bought at.",
+            first_purchase=first.date().isoformat(),
+            history_starts=index[0].date().isoformat(),
+        )
 
 
 def _counterfactual_units(flows, prices: pd.Series, index) -> pd.Series:
@@ -249,18 +312,20 @@ def _counterfactual(user, account, subject_key, target_key, days) -> dict:
             "no_purchase_history",
             f"There are no recorded {_label(subject)} purchases to replay.",
         )
-    if not any(flow["spent"] > 0 for flow in flows):
+    if sum(flow["spent"] for flow in flows) <= 0:
         # Every position came in as an opening or a price-less row, so there is
         # no amount to move. Reporting zero would look like a real answer.
         raise ComparisonError(
             "no_recorded_cost",
-            f"Your {_label(subject)} position has no purchase prices recorded, "
-            "so there is no amount of money to invest elsewhere.",
+            f"Your {_label(subject)} position has no net money in it -- either "
+            "no purchase prices are recorded, or the sales returned more than "
+            "the purchases cost -- so there is no amount to invest elsewhere.",
         )
     days, start = _window(flows, days)
-    panel = _panel({subject.key, target.key}, days, start)
+    panel = _panel([subject.key, target.key], days, held=[subject.key])
     index = panel.index
 
+    _assert_covered(flows, index)
     actual = _shown(_units_held(flows, index) * panel[subject.key], start)
     alternative = _shown(
         _counterfactual_units(flows, panel[target.key], index) * panel[target.key],
@@ -274,6 +339,7 @@ def _counterfactual(user, account, subject_key, target_key, days) -> dict:
             _curve(target.key, f"Instead: {_label(target)}", alternative),
         ],
         "summary": _summary(actual, alternative, invested=invested),
+        "warnings": panel.attrs["warnings"],
     }
 
 
@@ -290,7 +356,7 @@ def _holdings(user, account, subject_key, target_key, days) -> dict:
                 f"You have no recorded {_label(asset)} position to show.",
             )
     days, start = _window(subject_flows + target_flows, days)
-    panel = _panel({subject.key, target.key}, days, start)
+    panel = _panel([subject.key, target.key], days, held=[subject.key, target.key])
     index = panel.index
 
     left = _shown(_units_held(subject_flows, index) * panel[subject.key], start)
@@ -302,6 +368,7 @@ def _holdings(user, account, subject_key, target_key, days) -> dict:
             _curve(target.key, _label(target), right),
         ],
         "summary": _summary(left, right),
+        "warnings": panel.attrs["warnings"],
     }
 
 
@@ -328,7 +395,7 @@ def _benchmark(user, account, target_key, days) -> dict:
         [float(point["total"]) for point in series],
         index=pd.to_datetime([point["date"] for point in series], utc=True),
     ).sort_index()
-    panel = _panel({target.key}, capped, portfolio.index.min())
+    panel = _panel([target.key], capped, held=[])
     index = portfolio.index.intersection(panel.index)
     if index.empty:
         raise ComparisonError(
@@ -354,6 +421,7 @@ def _benchmark(user, account, target_key, days) -> dict:
             "end_date": index[-1].date().isoformat(),
             "truncated_to_days": truncated,
         },
+        "warnings": panel.attrs["warnings"],
     }
 
 
@@ -371,13 +439,31 @@ def _lump_sum(user, account, subject_key, target_key, days) -> dict:
             f"There is no recorded amount invested in {_label(subject)}.",
         )
     days, start = _window(flows, days)
-    panel = _panel({subject.key, target.key}, days, start)
+    panel = _panel([subject.key, target.key], days, held=[subject.key])
 
-    # Everything on the first day the story starts -- the day of the earliest
-    # real purchase -- in each asset, and left alone. Buying at the visible
-    # window's edge instead would answer a question nobody asked.
-    left = _shown(invested / float(panel[subject.key].iloc[0]) * panel[subject.key], start)
-    right = _shown(invested / float(panel[target.key].iloc[0]) * panel[target.key], start)
+    # Bought on the day of the earliest REAL purchase, not on the first day of
+    # the loaded panel. The panel deliberately reaches back further than the
+    # visible window (and further again when a range button asks for more days
+    # than the position has existed), so `iloc[0]` would deploy the money before
+    # it existed -- a year of growth on ten-day-old money, and not comparable to
+    # the drip mode it sits beside.
+    index = panel.index
+    _assert_covered(flows, index)
+    opened = index[index >= pd.Timestamp(flows[0]["at"]).tz_convert("UTC")]
+    if opened.empty:
+        raise ComparisonError(
+            "no_price_on_purchase_date",
+            "There is no price on or after the first purchase date.",
+        )
+    day = opened[0]
+    left = _shown(
+        invested / float(panel[subject.key].loc[day]) * panel[subject.key].loc[day:],
+        start,
+    )
+    right = _shown(
+        invested / float(panel[target.key].loc[day]) * panel[target.key].loc[day:],
+        start,
+    )
     return {
         "mode": "lump_sum",
         "series": [
@@ -385,6 +471,7 @@ def _lump_sum(user, account, subject_key, target_key, days) -> dict:
             _curve(target.key, f"All at once: {_label(target)}", right),
         ],
         "summary": _summary(left, right, invested=invested),
+        "warnings": panel.attrs["warnings"],
     }
 
 
@@ -424,12 +511,21 @@ def comparable_assets(user, account=None) -> dict:
 
     accounts = _accounts(user, account)
     hidden = hidden_asset_ids(accounts)
-    held_ids = set(
-        LedgerEntry.objects.filter(
-            account__in=accounts, kind__in=_POSITION_KINDS
-        ).values_list("asset_id", flat=True)
-    )
-    assets = Asset.objects.filter(is_active=True, is_house=False).order_by("name")
+    # Netted, like `_flows`. A raw query leaves an asset whose only purchase was
+    # reversed in the picker, where choosing it always answers
+    # "no_purchase_history".
+    held_ids = {
+        entry.asset_id
+        for entry in active_entries(accounts, kinds=_POSITION_KINDS)
+        if entry.asset_id
+    }
+    # `is_manual` assets are excluded from targets: they carry a `proxy_key`,
+    # so their panel column is a DIFFERENT asset's price series (a Swiss bar
+    # priced off gold_18k_gram). Drawing that curve under the bar's own name
+    # would answer a question about an instrument the user never saw.
+    assets = Asset.objects.filter(
+        is_active=True, is_house=False, is_manual=False
+    ).order_by("name")
     rows = [
         {
             "key": asset.key,

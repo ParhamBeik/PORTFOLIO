@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import bisect
+
 from .calendars import candle_close_qs
 from .models import (
     ArchiveFetchState,
@@ -14,6 +16,13 @@ from .models import (
 # The endpoints that feed MarketDailyBar. A rejected row is one the warehouse
 # has already judged bad; every reader of these bars must skip the same set or
 # a price valuation refuses can still reach the ledger as a trade price.
+#: Classes the provider never quotes in Toman, so an unresolved unit on one of
+#: them is a refusal rather than a pass-through. See `daily_bar_toman`.
+_NEVER_TOMAN_CLASSES = frozenset({
+    MarketDailyBar.AssetClass.CRYPTO,
+    MarketDailyBar.AssetClass.COMMODITY,
+})
+
 DAILY_BAR_ENDPOINTS = (
     ArchiveFetchState.Endpoint.CRYPTO_DAILY,
     ArchiveFetchState.Endpoint.COMMODITY_DAILY,
@@ -95,7 +104,131 @@ def latest_market_daily_bar(asset, *, as_of: str | None = None):
     return queryset.order_by("-date", "-id").first()
 
 
-def daily_bar_units(symbols) -> dict[str, str]:
+def toman_per_dollar(dates=None) -> dict:
+    """Toman-per-dollar by Jalali date, plus a sorted key list for bisecting.
+
+    Returns `(rates, sorted_dates)`. Callers convert a row dated D at the newest
+    rate on or before D -- never at today's. A foreign series flattened by one
+    fixed rate is a different asset's returns: it erases every move the rial
+    itself made, which for a 90-day window of a depreciating rial restates the
+    whole history by the drift.
+    """
+    from .models import GoldCurrencyHistory
+
+    queryset = GoldCurrencyHistory.objects.filter(symbol="USD", close_price__gt=0)
+    if dates:
+        queryset = queryset.filter(date__lte=max(dates))
+    rates = dict(queryset.order_by("date").values_list("date", "close_price"))
+    return rates, sorted(rates)
+
+
+def rate_on(rates, sorted_dates, date):
+    """The newest dollar rate at or before `date`, or None."""
+    index = bisect.bisect_right(sorted_dates, date) - 1
+    return rates[sorted_dates[index]] if index >= 0 else None
+
+
+def daily_bar_toman(assets, *, since=None, as_of=None) -> list[tuple]:
+    """(symbol, jalali date, Toman close) for the live-only classes.
+
+    THE reader for `MarketDailyBar`. Crypto, commodities, ETF NAV and indexes
+    have no provider history endpoint, so these bars are their only close
+    series -- and the table stores the provider's number verbatim in whatever
+    currency it was quoted, with no unit column of its own.
+
+    Getting a bar to Toman takes three things that were, until this existed,
+    re-derived independently by five callers that reached four different
+    answers: the class guard (a coin and an index can both be "BTC", so the
+    symbol alone is not a key), the rejected-row filter (a day the warehouse
+    already judged bad must not become a portfolio price), and the unit, read
+    from the originating snapshot and converted at the rate of the row's OWN
+    date. A quote that cannot be converted yields no row rather than a foreign
+    number dressed up as Toman.
+    """
+    from .currency import to_toman
+    from .models import MarketDailyBar
+
+    assets = list(assets)
+    classes_by_symbol = daily_bar_classes_by_symbol(assets)
+    if not classes_by_symbol:
+        return []
+    symbols = list(classes_by_symbol)
+    queryset = MarketDailyBar.objects.filter(symbol__in=symbols, close_price__gt=0)
+    if since is not None:
+        queryset = queryset.filter(date__gte=since)
+    if as_of is not None:
+        queryset = queryset.filter(date__lte=as_of)
+    rows = list(
+        queryset.order_by("symbol", "date").values(
+            "symbol", "date", "close_price", "asset_class"
+        )
+    )
+    if not rows:
+        return []
+    rejected = set(
+        RejectedRecord.objects.filter(
+            symbol__in=symbols, endpoint__in=DAILY_BAR_ENDPOINTS
+        ).values_list("symbol", "date")
+    )
+    units = daily_bar_units(
+        symbols,
+        asset_classes={cls for classes in classes_by_symbol.values() for cls in classes},
+    )
+    rates, rate_dates = toman_per_dollar([row["date"] for row in rows])
+    out = []
+    for row in rows:
+        symbol = row["symbol"]
+        if row["asset_class"] not in classes_by_symbol.get(symbol, set()):
+            continue
+        if (symbol, row["date"]) in rejected:
+            continue
+        unit = units.get(symbol, "")
+        if not unit and row["asset_class"] in _NEVER_TOMAN_CLASSES:
+            # Fail closed. `to_toman` passes an unlabelled number through
+            # unchanged, which is right for a class that IS quoted in Toman and
+            # catastrophic for these two, which never are: a provider that stops
+            # sending the label would put a dollar figure into net worth as
+            # Toman. Every other unit decision in this codebase refuses rather
+            # than assumes, and so does this one.
+            continue
+        price = to_toman(
+            symbol, row["close_price"], unit,
+            usd_rate=rate_on(rates, rate_dates, row["date"]),
+        )
+        if price > 0:
+            out.append((symbol, row["date"], price))
+    return out
+
+
+def daily_bar_classes_by_symbol(assets) -> dict:
+    """{symbol: {usable MarketDailyBar class}} for many assets, in one query.
+
+    Keyed by symbol because every consumer has only the bar row to match, and
+    `MarketDailyBar` records no source -- the class set is what keeps another
+    feed's same-named row out.
+    """
+    lookups = {}
+    for asset in assets:
+        lookup = instrument_lookup(asset)
+        if lookup is not None:
+            lookups[asset] = lookup
+    if not lookups:
+        return {}
+    categories = {
+        (source, symbol): category
+        for source, symbol, category in MarketInstrument.objects.filter(
+            symbol__in=[symbol for _source, symbol in lookups.values()]
+        ).values_list("source", "symbol", "category")
+    }
+    result = {}
+    for asset, lookup in lookups.items():
+        classes = daily_bar_classes(asset, instrument_category=categories.get(lookup))
+        if classes:
+            result[lookup[1]] = classes
+    return result
+
+
+def daily_bar_units(symbols, *, asset_classes=None) -> dict[str, str]:
     """The provider's declared quote unit per symbol, for reading daily bars.
 
     `MarketDailyBar` has no unit column: `aggregate_market_daily_bars` distils
@@ -117,9 +250,16 @@ def daily_bar_units(symbols) -> dict[str, str]:
     if not symbols:
         return {}
     units = {}
+    queryset = MarketSnapshot.objects.filter(symbol__in=symbols)
+    if asset_classes:
+        # Not just a narrowing: `MarketSnapshot` is indexed on
+        # (asset_class, symbol, -observed_at), so without the class this cannot
+        # use that index and falls back to sorting a million-row table. It also
+        # reintroduces the cross-class symbol collision this module exists to
+        # prevent -- a coin and an index can both be "BTC".
+        queryset = queryset.filter(asset_class__in=list(asset_classes))
     rows = (
-        MarketSnapshot.objects.filter(symbol__in=symbols)
-        .order_by("symbol", "-observed_at")
+        queryset.order_by("symbol", "-observed_at")
         .distinct("symbol")
         .values_list("symbol", "provider_payload")
     )

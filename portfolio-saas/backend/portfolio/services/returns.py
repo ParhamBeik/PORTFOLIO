@@ -467,57 +467,6 @@ def _returns_cache_key(
 
 
 
-def _live_only_toman_closes(symbols, *, as_of_jalali=None) -> list[tuple]:
-    """(symbol, jalali date, Toman close) for crypto and commodities.
-
-    Their only close series is `MarketDailyBar`, distilled from live snapshots,
-    and the provider quotes them in Tether and dollars. The bar has no unit
-    column; the snapshot payload it came from does. Conversion is per DATE, not
-    at today's rate: the Toman series is the one the holder actually lived
-    through, and a foreign series flattened by one fixed rate is a different
-    asset's returns.
-
-    A date with no dollar rate at or before it yields no row, the same refusal
-    `currency.to_toman` makes -- a gap the coverage gate can see beats a
-    silently mispriced day.
-    """
-    from marketdata.currency import to_toman
-    from marketdata.models import GoldCurrencyHistory, MarketDailyBar
-    from marketdata.provenance import daily_bar_units
-
-    symbols = list(symbols)
-    if not symbols:
-        return []
-    queryset = MarketDailyBar.objects.filter(
-        asset_class__in=(
-            MarketDailyBar.AssetClass.CRYPTO, MarketDailyBar.AssetClass.COMMODITY,
-        ),
-        symbol__in=symbols,
-        close_price__gt=0,
-    )
-    if as_of_jalali is not None:
-        queryset = queryset.filter(date__lte=as_of_jalali)
-    bars = list(queryset.order_by("symbol", "date").values_list(
-        "symbol", "date", "close_price"
-    ))
-    if not bars:
-        return []
-    units = daily_bar_units({symbol for symbol, _date, _close in bars})
-    usd_by_date = dict(
-        GoldCurrencyHistory.objects.filter(symbol="USD", close_price__gt=0)
-        .order_by("date").values_list("date", "close_price")
-    )
-    usd_dates = sorted(usd_by_date)
-    rows = []
-    for symbol, date, close in bars:
-        index = bisect.bisect_right(usd_dates, date) - 1
-        rate = usd_by_date[usd_dates[index]] if index >= 0 else None
-        price = to_toman(symbol, close, units.get(symbol, ""), usd_rate=rate)
-        if price > 0:
-            rows.append((symbol, date, price))
-    return rows
-
-
 def _load_price_panel(
     history_days: int,
     as_of: dt.datetime | None = None,
@@ -649,7 +598,32 @@ def _load_price_panel(
         if as_of_jalali is not None:
             qs_brs = qs_brs.filter(date__lte=as_of_jalali)
         brs_rows = list(qs_brs.order_by("symbol", "date").values_list("symbol", "date", "close_price"))
-        brs_rows.extend(_live_only_toman_closes(brs_symbols, as_of_jalali=as_of_jalali))
+        # Crypto and commodities have no provider history endpoint, so their
+        # only close series is MarketDailyBar. `provenance.daily_bar_toman` is
+        # the one reader that class-guards, drops rejected rows and converts at
+        # each row's own dollar rate. Rows the gold/currency table already
+        # covers are skipped rather than appended: that table stores XAUUSD and
+        # BTC in their FOREIGN units deliberately, so letting list order decide
+        # would splice two unit conventions into one column and read the join
+        # as a real return.
+        from marketdata.provenance import daily_bar_toman
+
+        covered = {(symbol, date) for symbol, date, _close in brs_rows}
+        # USD_QUOTED_KEYS are excluded: `_convert_usd_to_toman` multiplies those
+        # columns wholesale on the assumption they are dollars, and these rows
+        # are already Toman. Splicing them in would convert the bar days twice
+        # and put a ~100,000x step in the column at the join. Those keys have a
+        # gold/currency history series of their own, which is why they are on
+        # that list at all, so they lose nothing here.
+        brs_assets = [
+            item["asset"] for item in resolved_univ
+            if item.get("asset") and item["source"] == "brs"
+            and item["key"] not in USD_QUOTED_KEYS
+        ]
+        brs_rows.extend(
+            row for row in daily_bar_toman(brs_assets, as_of=as_of_jalali)
+            if (row[0], row[1]) not in covered
+        )
 
     cutoff_jalali = to_jalali_str(cutoff)
     rejections = set(
@@ -1040,6 +1014,30 @@ def periods_per_year(index: pd.Index) -> float:
     return 365.25 / mean_spacing
 
 
+def toman_price_panel(
+    *, history_days: int, universe: list[str] | None = None,
+    held_keys: frozenset[str] = frozenset(), as_of: dt.datetime | None = None,
+) -> tuple[pd.DataFrame, list[dict], list[dict]]:
+    """Daily close panel in Toman. The supported reader for absolute prices.
+
+    `_load_price_panel` is deliberately NOT that reader and must not be called
+    from outside this module. What it returns is ratio-safe, not money-safe:
+    the USD-quoted columns (`USD_QUOTED_KEYS`) are still dollars, and the
+    live-Price fallback column is Rial for a TSE symbol. Every consumer so far
+    took `pct_change()` immediately, where a constant factor cancels -- so the
+    mismatch was invisible until something printed a value instead of a ratio.
+
+    This applies the dollar conversion, then hands back the same
+    `(panel, excluded, warnings)` triple. Callers that need the forward-fill
+    bound as well should read `excluded` for `price_gap_exceeded`, which is
+    decided in `_build_returns_matrix` against the same panel.
+    """
+    panel, excluded, warnings = _load_price_panel(
+        history_days, as_of=as_of, universe=universe, held_keys=held_keys
+    )
+    return _convert_usd_to_toman(panel), excluded, warnings
+
+
 def daily_returns_matrix(
     *,
     history_days: int = DEFAULT_HISTORY_DAYS,
@@ -1082,10 +1080,10 @@ def daily_returns_matrix(
         )
         return df, cached["excluded"]
 
-    panel, gate_excluded, panel_warnings = _load_price_panel(
-        history_days, as_of=as_of_dt, universe=universe, held_keys=held_keys
+    panel, gate_excluded, panel_warnings = toman_price_panel(
+        history_days=history_days, as_of=as_of_dt, universe=universe,
+        held_keys=held_keys,
     )
-    panel = _convert_usd_to_toman(panel)
 
     # Apply basis conversion. real_toman raises deflator.CpiUnavailable (see
     # config/settings.py) when the window reaches a Jalali year with no

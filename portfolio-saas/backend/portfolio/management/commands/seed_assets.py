@@ -86,6 +86,15 @@ class Command(BaseCommand):
         )
         for prefix in CATALOG_KEY_PREFIXES:
             sweep = sweep.exclude(key__startswith=prefix)
+        # Never retire something somebody owns or has traded, whatever its key
+        # looks like. The picker is not the only minting path -- `trades
+        # .provision_asset` creates keys like `khgostar_stock` with no prefix at
+        # all -- and enumerating minters is a race this command keeps losing.
+        # Being referenced is the durable fact; the key shape is a guess about
+        # provenance.
+        sweep = sweep.exclude(holdings__isnull=False).exclude(
+            transactions__isnull=False
+        )
         sweep.update(is_active=False)
         self.stdout.write(self.style.SUCCESS(
             f"Asset catalog ready ({created} new, {len(ASSETS)} total)."

@@ -144,15 +144,21 @@ def sync_provider_catalog(limit=None):
     # two different coins both named "Ellipsis", and the name is the only symbol
     # that endpoint gives. Postgres refuses an upsert whose own batch proposes
     # one key twice ("cannot affect row a second time"), which takes down the
-    # whole sync rather than one row. First occurrence wins, and the collision
-    # is logged so a real provider change is visible rather than absorbed.
+    # whole sync rather than one row.
+    #
+    # LAST wins. The gold/currency block is appended before the crypto/commodity
+    # one and writes anything outside its own groups as EXCLUDED/ineligible, so
+    # keeping the first would catalogue a coin from the gold payload as
+    # ineligible -- `daily_bar_classes` would then refuse its bars and the
+    # instrument would exist and still be unpriceable. The collision is logged
+    # so a real provider change stays visible rather than absorbed.
     seen_keys = {}
     for row in rows:
-        seen_keys.setdefault((row.source, row.symbol), row)
+        seen_keys[(row.source, row.symbol)] = row
     if len(seen_keys) != len(rows):
         logger.warning(
             "sync_provider_catalog: provider sent %d duplicate (source, symbol) "
-            "pair(s); keeping the first of each",
+            "pair(s); keeping the last (most specific) of each",
             len(rows) - len(seen_keys),
         )
     rows = list(seen_keys.values())

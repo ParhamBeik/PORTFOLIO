@@ -1906,7 +1906,9 @@ def test_adding_an_owned_asset_after_the_baseline_is_not_refused(
     assert baseline.status_code == 201, baseline.data
     assert baseline.data["kind"] == "opening_position"
 
-    # Acquired during the tracked window: a real event, so it must carry a flow.
+    # Declared after the baseline: still an opening, snapped onto the baseline.
+    # NOT a buy -- a buy is a funded purchase and would debit cash that never
+    # moved on any account that tracks a balance.
     later = _post(client, ledger_account, {
         "kind": "opening_position",
         "asset_key": "half_coin",
@@ -1914,7 +1916,7 @@ def test_adding_an_owned_asset_after_the_baseline_is_not_refused(
         "occurred_at": (timezone.now() - datetime.timedelta(days=2)).isoformat(),
     })
     assert later.status_code == 201, later.data
-    assert later.data["kind"] == "buy"
+    assert later.data["kind"] == "opening_position"
 
     # Predates tracking: still part of the baseline, so it snaps onto it rather
     # than desynchronising the account's other openings.
@@ -1937,3 +1939,40 @@ def test_adding_an_owned_asset_after_the_baseline_is_not_refused(
         "emami_coin": Decimal("2"), "half_coin": Decimal("3"),
         "quarter_coin": Decimal("5"),
     }
+
+
+def test_declaring_a_holding_you_already_own_never_spends_cash(
+    ledger_account, asset_catalog, write_prices
+):
+    """Booking it as a buy would settle against the balance the moment an
+    account tracks cash -- draining money that never moved, or failing the
+    replay outright. Nothing entered the portfolio; only the record of it did.
+    """
+    write_prices({"emami_coin": Decimal("100"), "half_coin": Decimal("1000")})
+    client = _client(ledger_account.user)
+    started_at = (timezone.now() - datetime.timedelta(days=10)).isoformat()
+
+    assert _post(client, ledger_account, {
+        "kind": "opening_cash", "amount_tomans": "5000", "occurred_at": started_at,
+    }).status_code == 201
+    assert _post(client, ledger_account, {
+        "kind": "opening_position", "asset_key": "emami_coin",
+        "quantity": "2", "occurred_at": started_at,
+    }).status_code == 201
+
+    ledger_account.refresh_from_db()
+    before = ledger_account.cash_balance_tomans
+
+    # 3 half-coins at 1,000 would be 3,000 Toman of the 5,000 balance.
+    declared = _post(client, ledger_account, {
+        "kind": "opening_position", "asset_key": "half_coin",
+        "quantity": "3",
+        "occurred_at": (timezone.now() - datetime.timedelta(days=1)).isoformat(),
+    })
+
+    assert declared.status_code == 201, declared.data
+    ledger_account.refresh_from_db()
+    assert ledger_account.cash_balance_tomans == before
+    assert Holding.objects.get(
+        account=ledger_account, asset=asset_catalog["half_coin"]
+    ).quantity == Decimal("3")

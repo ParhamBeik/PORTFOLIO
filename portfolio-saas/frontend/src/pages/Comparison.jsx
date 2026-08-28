@@ -11,7 +11,7 @@ import {
   StatTile,
   Tabs,
 } from "../components/ui.jsx";
-import { indexPoint, num, signedToman, toman } from "../format.js";
+import { humanize, indexPoint, num, signedToman, toman } from "../format.js";
 import { useApi } from "../useApi.js";
 
 const MODES = [
@@ -151,6 +151,15 @@ function Chart({ result }) {
           not the amount of money in each.
         </p>
       )}
+      {(result.warnings || []).map((w) => (
+        <p
+          key={`${w.key}-${w.reason}`}
+          className="mt-1 text-xs text-muted"
+          data-testid="comparison-warning"
+        >
+          {w.key}: {humanize(w.reason)}.
+        </p>
+      ))}
       {result.summary.truncated_to_days && (
         <p className="mt-1 text-xs text-muted" data-testid="comparison-truncated">
           Showing the last {result.summary.truncated_to_days} days — your

@@ -213,40 +213,37 @@ def record_existing_position(
     unit_price_tomans=None, note: str = "", source: str = "manual",
     external_id: str = "", import_batch=None,
 ) -> LedgerEntry:
-    """Record something the user says they already own, in the kind the
-    account's baseline can actually accept.
+    """Record something the user says they already own.
 
-    Every opening shares `tracking_started_at`: the baseline is one moment, and
-    a quantity that appears mid-window with no flow behind it reads to TWR as a
-    gain out of nowhere. So the date decides the kind, and the two cases are
-    genuinely different events:
+    Always an opening, stamped at the account's baseline. Openings must share
+    `tracking_started_at` -- the baseline is one moment -- and answering the
+    request with a 400 saying so was useless to the user, since nothing they
+    could type would satisfy it.
 
-      * on or before the baseline (or before there is one) the holding predates
-        tracking, so it IS baseline -- written as an opening stamped at the
-        baseline itself, with cost basis unknown, which is the truth;
-      * after it, something entered the portfolio during the tracked window.
-        That is a buy, priced from the user or, failing that, from the market
-        close of the day they gave.
+    Booking it as a BUY instead was tried and is worse. A buy is a funded
+    purchase: once an account has recorded any cash movement, `_projection_state`
+    settles trades against the balance, so declaring a position you already held
+    would debit money that never moved -- draining the balance, or failing the
+    replay outright with "negative cash". Nothing entered the portfolio; only
+    the record of it did.
 
-    Previously the second case reached the constraint and came back as a 400
-    reading "Opening entries must share the tracking start timestamp" -- an
-    accurate sentence about an invariant, and nothing the user could act on.
+    So the date is clamped rather than the kind changed. What is lost is the
+    acquisition date, which for a holding whose cost basis is unknown anyway was
+    never carrying weight: `performance._position_metrics` reads every opening
+    as unknown basis regardless. The caller is told which timestamp was used.
+
+    A price may still be supplied and is passed through, for a different job --
+    `create_ledger_entry` uses it to seed the first `Price` row of a MANUAL
+    asset, which has no feed and is otherwise worth nothing at all.
     House marks do not come through here; `record_house_mark` owns that pair.
     """
     occurred_at = occurred_at or timezone.now()
-    baseline = account.tracking_started_at
-    if baseline is not None and occurred_at > baseline:
-        return create_ledger_entry(
-            account=account, asset=asset, kind=LedgerEntry.Kind.BUY,
-            quantity=quantity, unit_price_tomans=unit_price_tomans,
-            occurred_at=occurred_at, source=source, note=note,
-            external_id=external_id, import_batch=import_batch,
-        )
     return create_ledger_entry(
         account=account, asset=asset, kind=LedgerEntry.Kind.OPENING_POSITION,
         quantity=quantity, unit_price_tomans=unit_price_tomans,
-        occurred_at=baseline or occurred_at, source=source, note=note,
-        external_id=external_id, import_batch=import_batch,
+        occurred_at=account.tracking_started_at or occurred_at,
+        source=source, note=note, external_id=external_id,
+        import_batch=import_batch,
     )
 
 
@@ -962,11 +959,15 @@ def _daily_bar_or_live_price(asset: Asset, j_date: str) -> Decimal:
     live row is missing. The bar is distilled from the same provider field the
     live price is read from, so both sides of this fallback share a unit.
     """
-    from marketdata.provenance import latest_market_daily_bar
+    from marketdata.provenance import daily_bar_toman
 
-    bar = latest_market_daily_bar(asset, as_of=j_date)
-    if bar and bar.close_price and bar.close_price > 0:
-        return Decimal(str(bar.close_price))
+    # Converted, not raw. This is the only branch that turns a bar into DURABLE
+    # user data -- `LedgerEntry.price_tomans` -- and it used to return the
+    # provider's number verbatim, so a crypto buy saved with the price field
+    # blank persisted dollars as Toman. Same reader the valuations use.
+    bars = daily_bar_toman([asset], as_of=j_date)
+    if bars:
+        return max(bars, key=lambda row: row[1])[2]
     price = _latest_live_price(asset)
     if price is None:
         raise PriceResolutionError(

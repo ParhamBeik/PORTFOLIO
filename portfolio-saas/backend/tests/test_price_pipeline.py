@@ -1644,3 +1644,31 @@ def test_the_seed_sweep_retires_its_own_rows_and_spares_the_pickers(db):
     assert Asset.objects.get(key="tse-irouston0001").is_active is True
     assert Asset.objects.get(key="house-1").is_active is True
     assert Asset.objects.get(key=seeded_key).is_active is True
+
+
+def test_the_seed_sweep_never_retires_an_asset_somebody_owns(db, make_user):
+    """The picker is not the only minting path -- `trades.provision_asset`
+    creates unprefixed keys like `khgostar_stock`. Enumerating minters is a race
+    this command keeps losing, so being referenced is what protects a row.
+    """
+    from django.core.management import call_command
+
+    from portfolio.models import Account, Asset, Holding
+
+    owned = Asset.objects.create(
+        key="khgostar_stock", name="خگستر", asset_class=Asset.AssetClass.STOCK,
+        tse_symbol="خگستر", is_active=True,
+    )
+    orphan = Asset.objects.create(
+        key="nobody_stock", name="Nobody", asset_class=Asset.AssetClass.STOCK,
+        tse_symbol="هیچ", is_active=True,
+    )
+    account = Account.objects.create(
+        user=make_user(email="sweep-owner@test.test"), name="Broker"
+    )
+    Holding.objects.create(account=account, asset=owned, quantity=Decimal("10"))
+
+    call_command("seed_assets")
+
+    assert Asset.objects.get(key="khgostar_stock").is_active is True
+    assert Asset.objects.get(key="nobody_stock").is_active is False
