@@ -1145,3 +1145,67 @@ class TestTrackD(APITestCase):
         assert res.status_code == status.HTTP_200_OK
         # We seeded 3 SymbolIntegrity rows in setUp
         assert len(res.data["integrity"]) == 3
+
+
+def test_a_tether_quoted_bar_converts_at_the_rate_of_its_own_day(db):
+    """Crypto and commodity closes are the provider's foreign numbers. Converting
+    the whole series at today's dollar rate would be a scalar multiple -- correct
+    for magnitude and wrong for returns, because it flattens out every move the
+    rial itself made. The holder lived through the Toman series.
+    """
+    from decimal import Decimal
+
+    from marketdata.models import GoldCurrencyHistory, MarketDailyBar, MarketSnapshot
+    from portfolio.services.returns import _live_only_toman_closes
+
+    MarketSnapshot.objects.create(
+        asset_class="crypto", symbol="BTC", observed_at=timezone.now(),
+        last_price=Decimal("1"), provider_payload={"unit": "تتر"},
+    )
+    for date, close in (("1404-01-01", "10"), ("1404-01-02", "10")):
+        MarketDailyBar.objects.create(
+            asset_class=MarketDailyBar.AssetClass.CRYPTO, symbol="BTC", date=date,
+            open_price=Decimal(close), high_price=Decimal(close),
+            low_price=Decimal(close), close_price=Decimal(close),
+        )
+    # The coin did not move; the dollar did.
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date="1404-01-01", close_price=Decimal("50000"), unit="تومان",
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date="1404-01-02", close_price=Decimal("60000"), unit="تومان",
+    )
+
+    rows = dict(
+        (date, price) for _symbol, date, price in _live_only_toman_closes(["BTC"])
+    )
+    assert rows == {
+        "1404-01-01": Decimal("500000"),
+        "1404-01-02": Decimal("600000"),
+    }
+
+
+def test_a_bar_with_no_dollar_rate_yet_yields_no_row(db):
+    """A gap the coverage gate can see beats a day priced in the wrong currency."""
+    from decimal import Decimal
+
+    from marketdata.models import GoldCurrencyHistory, MarketDailyBar, MarketSnapshot
+    from portfolio.services.returns import _live_only_toman_closes
+
+    MarketSnapshot.objects.create(
+        asset_class="crypto", symbol="BTC", observed_at=timezone.now(),
+        last_price=Decimal("1"), provider_payload={"unit": "تتر"},
+    )
+    for date in ("1404-01-01", "1404-01-05"):
+        MarketDailyBar.objects.create(
+            asset_class=MarketDailyBar.AssetClass.CRYPTO, symbol="BTC", date=date,
+            open_price=Decimal("10"), high_price=Decimal("10"),
+            low_price=Decimal("10"), close_price=Decimal("10"),
+        )
+    # The rate series starts after the first bar.
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date="1404-01-03", close_price=Decimal("50000"), unit="تومان",
+    )
+
+    rows = _live_only_toman_closes(["BTC"])
+    assert [date for _symbol, date, _price in rows] == ["1404-01-05"]

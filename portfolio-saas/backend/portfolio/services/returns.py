@@ -26,6 +26,7 @@ Two conventions matter here:
 """
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 
 import jdatetime
@@ -466,6 +467,57 @@ def _returns_cache_key(
 
 
 
+def _live_only_toman_closes(symbols, *, as_of_jalali=None) -> list[tuple]:
+    """(symbol, jalali date, Toman close) for crypto and commodities.
+
+    Their only close series is `MarketDailyBar`, distilled from live snapshots,
+    and the provider quotes them in Tether and dollars. The bar has no unit
+    column; the snapshot payload it came from does. Conversion is per DATE, not
+    at today's rate: the Toman series is the one the holder actually lived
+    through, and a foreign series flattened by one fixed rate is a different
+    asset's returns.
+
+    A date with no dollar rate at or before it yields no row, the same refusal
+    `currency.to_toman` makes -- a gap the coverage gate can see beats a
+    silently mispriced day.
+    """
+    from marketdata.currency import to_toman
+    from marketdata.models import GoldCurrencyHistory, MarketDailyBar
+    from marketdata.provenance import daily_bar_units
+
+    symbols = list(symbols)
+    if not symbols:
+        return []
+    queryset = MarketDailyBar.objects.filter(
+        asset_class__in=(
+            MarketDailyBar.AssetClass.CRYPTO, MarketDailyBar.AssetClass.COMMODITY,
+        ),
+        symbol__in=symbols,
+        close_price__gt=0,
+    )
+    if as_of_jalali is not None:
+        queryset = queryset.filter(date__lte=as_of_jalali)
+    bars = list(queryset.order_by("symbol", "date").values_list(
+        "symbol", "date", "close_price"
+    ))
+    if not bars:
+        return []
+    units = daily_bar_units({symbol for symbol, _date, _close in bars})
+    usd_by_date = dict(
+        GoldCurrencyHistory.objects.filter(symbol="USD", close_price__gt=0)
+        .order_by("date").values_list("date", "close_price")
+    )
+    usd_dates = sorted(usd_by_date)
+    rows = []
+    for symbol, date, close in bars:
+        index = bisect.bisect_right(usd_dates, date) - 1
+        rate = usd_by_date[usd_dates[index]] if index >= 0 else None
+        price = to_toman(symbol, close, units.get(symbol, ""), usd_rate=rate)
+        if price > 0:
+            rows.append((symbol, date, price))
+    return rows
+
+
 def _load_price_panel(
     history_days: int,
     as_of: dt.datetime | None = None,
@@ -556,14 +608,13 @@ def _load_price_panel(
         # Rial per ingest_etf_nav_snapshot's documented policy, so it needs
         # the same tse_close_to_toman() conversion as every other row here.
         #
-        # ponytail: crypto/commodity have the identical no-history problem
-        # but are deliberately NOT wired in here -- their ingest path
-        # (ingest_market_snapshots) never captures the provider's per-row unit
-        # string, so their MarketDailyBar closes are of genuinely unverified
-        # currency (could be USD, Toman, or Rial depending on the row) and
-        # wiring them in would be guessing magnitude, which this project
-        # explicitly never does (see marketdata/currency.py:to_toman). Fix at
-        # the ingest layer (store the payload's unit field) before adding them.
+        # Crypto and commodity have the identical no-history problem and are
+        # handled below, in the BRS block they belong to. They were left out
+        # for a long time because a MarketDailyBar carries no unit of its own
+        # and guessing currency from magnitude is something this project never
+        # does -- but the unit was never actually lost: `ingest_market_snapshots`
+        # stores the whole provider row, unit string included, and
+        # `provenance.daily_bar_units` reads it back.
         from marketdata.models import MarketDailyBar, MarketInstrument
 
         etf_symbols = list(
@@ -598,6 +649,7 @@ def _load_price_panel(
         if as_of_jalali is not None:
             qs_brs = qs_brs.filter(date__lte=as_of_jalali)
         brs_rows = list(qs_brs.order_by("symbol", "date").values_list("symbol", "date", "close_price"))
+        brs_rows.extend(_live_only_toman_closes(brs_symbols, as_of_jalali=as_of_jalali))
 
     cutoff_jalali = to_jalali_str(cutoff)
     rejections = set(
