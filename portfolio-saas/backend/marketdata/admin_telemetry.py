@@ -511,12 +511,24 @@ def _workflow_15m():
         .annotate(accepted=Sum("rows_accepted"), runs=Count("id"))
         .order_by("-accepted")[:12]
     )
+    # The breakdown drops runs that wrote to no table and keeps only the top 12,
+    # so it cannot add up to the totals beside it -- the panel read "126 runs,
+    # 9,849 accepted" over a list summing to 66 and 9,801, with nothing saying
+    # where the rest went. Carry the remainder instead of leaving it implied.
+    total_runs = sum(outcomes.values())
+    accepted = int(sums["accepted"] or 0)
+    listed_runs = sum(int(row["runs"] or 0) for row in by_table)
+    listed_accepted = sum(int(row["accepted"] or 0) for row in by_table)
     return {
         "outcomes": outcomes,
-        "rows_accepted": int(sums["accepted"] or 0),
+        "rows_accepted": accepted,
         "rows_rejected": int(sums["rejected"] or 0),
-        "total_runs": sum(outcomes.values()),
+        "total_runs": total_runs,
         "by_destination": by_table,
+        "unattributed": {
+            "runs": max(0, total_runs - listed_runs),
+            "accepted": max(0, accepted - listed_accepted),
+        },
     }
 
 

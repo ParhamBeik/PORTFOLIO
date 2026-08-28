@@ -715,6 +715,17 @@ function WorkflowsPanel({ overview, wf, wfPage, setWfPage }) {
                   <span className="tabular text-muted">{num(row.accepted)} rows · {num(row.runs)} runs</span>
                 </li>
               ))}
+              {/* Runs that wrote to no table, plus anything past the top 12.
+                  Without this the list summed to 66 runs under a header that
+                  said 126, and nothing accounted for the difference. */}
+              {ingest.unattributed?.runs > 0 && (
+                <li className="flex justify-between gap-3 border-t border-border pt-2 text-muted">
+                  <span>No destination table</span>
+                  <span className="tabular">
+                    {num(ingest.unattributed.accepted)} rows · {num(ingest.unattributed.runs)} runs
+                  </span>
+                </li>
+              )}
             </ul>
           ) : (
             <p className="text-sm text-muted">No ingest in the last 15 minutes.</p>

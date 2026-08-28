@@ -583,7 +583,25 @@ def comparable_assets(user, account=None) -> dict:
         for asset in assets
         if asset.id not in hidden
     ]
+    # Held assets the pickers cannot offer, and why. Dropping them silently left
+    # a reader hunting for their own house and Swiss bars in a list that never
+    # mentioned them -- four of this account's holdings were absent with no
+    # explanation anywhere on the page.
+    omitted = [
+        {
+            "key": asset.key,
+            "label": _label(asset),
+            "reason": (
+                "valued from a mark you set, not a market price series"
+                if asset.is_house
+                else "tracked against a proxy price, so it has no curve of its own"
+            ),
+        }
+        for asset in Asset.objects.filter(id__in=held_ids, is_active=True).order_by("name")
+        if asset.id not in hidden and (asset.is_house or asset.is_manual)
+    ]
     return {
         "holdings": [row for row in rows if row["held"]],
         "targets": rows,
+        "omitted_holdings": omitted,
     }
