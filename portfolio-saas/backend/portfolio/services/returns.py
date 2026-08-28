@@ -599,14 +599,14 @@ def _load_price_panel(
             qs_brs = qs_brs.filter(date__lte=as_of_jalali)
         brs_rows = list(qs_brs.order_by("symbol", "date").values_list("symbol", "date", "close_price"))
         # Crypto and commodities have no provider history endpoint, so their
-        # only close series is MarketDailyBar. `provenance.daily_bar_toman` is
+        # only close series is MarketDailyBar. `provenance.daily_bar_price` is
         # the one reader that class-guards, drops rejected rows and converts at
         # each row's own dollar rate. Rows the gold/currency table already
         # covers are skipped rather than appended: that table stores XAUUSD and
         # BTC in their FOREIGN units deliberately, so letting list order decide
         # would splice two unit conventions into one column and read the join
         # as a real return.
-        from marketdata.provenance import daily_bar_toman
+        from marketdata.provenance import daily_bar_price
 
         covered = {(symbol, date) for symbol, date, _close in brs_rows}
         # USD_QUOTED_KEYS are excluded: `_convert_usd_to_toman` multiplies those
@@ -621,7 +621,7 @@ def _load_price_panel(
             and item["key"] not in USD_QUOTED_KEYS
         ]
         brs_rows.extend(
-            row for row in daily_bar_toman(brs_assets, as_of=as_of_jalali)
+            row for row in daily_bar_price(brs_assets, as_of=as_of_jalali)
             if (row[0], row[1]) not in covered
         )
 
@@ -1017,6 +1017,7 @@ def periods_per_year(index: pd.Index) -> float:
 def toman_price_panel(
     *, history_days: int, universe: list[str] | None = None,
     held_keys: frozenset[str] = frozenset(), as_of: dt.datetime | None = None,
+    gate: bool = False,
 ) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Daily close panel in Toman. The supported reader for absolute prices.
 
@@ -1035,7 +1036,12 @@ def toman_price_panel(
     panel, excluded, warnings = _load_price_panel(
         history_days, as_of=as_of, universe=universe, held_keys=held_keys
     )
-    return _convert_usd_to_toman(panel), excluded, warnings
+    panel = _convert_usd_to_toman(panel)
+    if gate:
+        _, gate_excluded, gate_warnings = _build_returns_matrix(panel, held_keys)
+        excluded = [*excluded, *gate_excluded]
+        warnings = [*warnings, *gate_warnings]
+    return panel, excluded, warnings
 
 
 def daily_returns_matrix(

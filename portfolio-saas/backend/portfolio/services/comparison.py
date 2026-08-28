@@ -142,28 +142,26 @@ def _panel(keys, days, held) -> pd.DataFrame:
     closure (Nowruz shuts the exchange for about two weeks). Using the session
     number here would have refused every March.
     """
-    from marketdata.integrity import MAX_OUTAGE_CALENDAR_DAYS
+    from marketdata.calendars import market_for_asset, sessions_between
+    from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS, MAX_OUTAGE_CALENDAR_DAYS
 
-    from .returns import _build_returns_matrix, toman_price_panel
+    from .returns import to_jalali_str, toman_price_panel
 
     keys = list(keys)
+    # The gate's verdicts arrive as CAVEATS here, not exclusions. It screens
+    # assets for investability over a trailing window -- the right question for
+    # the optimizer, the wrong one for "what would this have been worth", and it
+    # would throw away four years of real history over an eleven-session halt in
+    # year two. The invariant it enforces is about TODAY's number not being a
+    # dead price, and that is the trailing check at the end of this function.
     panel, excluded, warnings = toman_price_panel(
-        history_days=days, universe=keys, held_keys=frozenset(held)
+        history_days=days, universe=keys, held_keys=frozenset(keys), gate=True
     )
     absent = [key for key in keys if key not in panel.columns]
     _refuse(absent, "missing_price_history", "No usable price history")
     panel = panel[keys].sort_index()
-
-    # The gate's verdicts are CAVEATS here, not exclusions. It screens assets
-    # for investability over a trailing window -- the right question for the
-    # optimizer, the wrong one for "what would this have been worth", and it
-    # would throw away four years of real history over an eleven-session halt in
-    # year two. The valuation invariant it enforces is about TODAY's number not
-    # being a dead price, and that is the trailing check below.
-    _, gap_excluded, gap_warnings = _build_returns_matrix(panel, frozenset(held))
     panel.attrs["warnings"] = [
-        row for row in [*warnings, *gap_excluded, *gap_warnings]
-        if row.get("key") in keys
+        row for row in [*excluded, *warnings] if row.get("key") in keys
     ]
 
     # The FULL loaded span, not the visible window: the curves are built over
@@ -177,7 +175,28 @@ def _panel(keys, days, held) -> pd.DataFrame:
         .ffill(limit=MAX_OUTAGE_CALENDAR_DAYS)
         .reindex(index)
     )
-    stale = [key for key in keys if pd.isna(filled[key].iloc[-1])]
+    # Trailing staleness is the real invariant, and it is counted in SESSIONS on
+    # the asset's own market calendar -- not in the calendar days the drawing
+    # fill above uses. Reusing that constant would have let a target that
+    # stopped printing three weeks ago report its last close as today's outcome.
+    assets = {
+        asset.key: asset
+        for asset in Asset.objects.filter(key__in=keys, is_active=True)
+    }
+    today = to_jalali_str(timezone.now())
+    stale = []
+    for key in keys:
+        real = panel[key].dropna()
+        if real.empty:
+            stale.append(key)
+            continue
+        asset = assets.get(key)
+        gap = sessions_between(
+            to_jalali_str(real.index[-1]), today,
+            market=market_for_asset(asset) if asset else "gold_currency",
+        )
+        if gap > MAX_FORWARD_FILL_SESSIONS or pd.isna(filled[key].iloc[-1]):
+            stale.append(key)
     if stale:
         raise ComparisonError(
             "stale_price_history",

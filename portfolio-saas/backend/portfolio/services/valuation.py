@@ -237,9 +237,9 @@ def _daily_bar_as_of(asset, jalali_str) -> tuple[Decimal, int]:
     forward-fill bound applies to it too.
     """
     from marketdata.calendars import market_for_asset, sessions_between
-    from marketdata.provenance import daily_bar_toman
+    from marketdata.provenance import daily_bar_price
 
-    rows = daily_bar_toman([asset], as_of=jalali_str)
+    rows = daily_bar_price([asset], as_of=jalali_str, latest_only=True)
     if not rows:
         return Decimal("0"), 0
     _symbol, date, price = max(rows, key=lambda row: row[1])
@@ -258,7 +258,7 @@ def _latest_archive_closes(assets) -> tuple[dict, dict]:
     """
     from marketdata.calendars import candle_close_qs
     from marketdata.models import GoldCurrencyHistory, RejectedRecord
-    from marketdata.provenance import daily_bar_toman
+    from marketdata.provenance import daily_bar_price
 
     stock_symbols = {
         asset.tse_symbol: asset.key
@@ -317,11 +317,11 @@ def _latest_archive_closes(assets) -> tuple[dict, dict]:
 
     # Live-only feeds converge into MarketDailyBar, which stores the provider's
     # number in whatever currency it was quoted and carries no unit column.
-    # `provenance.daily_bar_toman` is the one reader that resolves all of that
+    # `provenance.daily_bar_price` is the one reader that resolves all of that
     # -- class guard, rejected rows, and the unit converted at each row's own
     # date. Four callers used to re-derive it and reached four different answers.
     bar_newest = {}
-    for symbol, date, price in daily_bar_toman(assets):
+    for symbol, date, price in daily_bar_price(assets, latest_only=True):
         if date > bar_newest.get(symbol, ("",))[0]:
             bar_newest[symbol] = (date, price)
     for symbol, key in {**stock_symbols, **brs_symbols}.items():
@@ -924,7 +924,7 @@ def compute_dynamic_net_worth_series(
         sessions_between,
     )
     from marketdata.models import GoldCurrencyHistory
-    from marketdata.provenance import daily_bar_toman
+    from marketdata.provenance import daily_bar_price
     from portfolio.models import Holding, Liability
     from portfolio.services.timeline import (
         holdings_as_of,
@@ -1006,8 +1006,10 @@ def compute_dynamic_net_worth_series(
     keys_by_symbol = {
         (a.tse_symbol or a.brs_symbol): a.key for a in assets.values()
     }
-    for symbol, date, price in daily_bar_toman(assets.values(), since=bars_since):
-        gold_closes.setdefault(date, {}).setdefault(keys_by_symbol[symbol], price)
+    for symbol, date, price in daily_bar_price(assets.values(), since=bars_since):
+        key = keys_by_symbol.get(symbol)
+        if key is not None:
+            gold_closes.setdefault(date, {}).setdefault(key, price)
 
     latest_prices = get_latest_prices()
     usd_rate = Decimal(latest_prices.get("usd_cash", 0) or 0)
@@ -1284,9 +1286,9 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                         )
 
                 if price <= 0:
-                    # Crypto, commodities, ETF NAV and indexes have no provider
-                    # history endpoint at all, so neither branch above can ever
-                    # find them a close. Without this, a crypto holding the
+                    # Crypto, commodities and ETF NAV have no provider history
+                    # endpoint at all, so neither branch above can ever find
+                    # them a close. Without this, a crypto holding the
                     # dashboard prices happily is `missing_price` in every
                     # as-of valuation -- which is also every TWR cash-flow
                     # boundary, so one such holding made performance

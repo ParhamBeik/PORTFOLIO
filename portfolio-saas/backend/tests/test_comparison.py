@@ -294,8 +294,10 @@ def test_a_target_whose_price_series_stopped_is_refused(compared, asset_catalog)
     dead = asset_catalog["euro_cash"]
     dead.brs_symbol = "EUR"
     dead.save(update_fields=["brs_symbol"])
-    # Priced daily for a month, then nothing for the last 40 days.
-    start = timezone.now() - datetime.timedelta(days=70)
+    # Priced daily for a month, then nothing for the last 12 days -- inside the
+    # 21-calendar-day drawing fill, outside the 5-session staleness bound. The
+    # earlier 40-day gap passed under either, so nothing pinned the difference.
+    start = timezone.now() - datetime.timedelta(days=42)
     for offset in range(31):
         day = (start + datetime.timedelta(days=offset)).date()
         GoldCurrencyHistory.objects.create(
@@ -307,7 +309,5 @@ def test_a_target_whose_price_series_stopped_is_refused(compared, asset_catalog)
         compared, mode="counterfactual", subject="kama_stock", target="euro_cash"
     )
 
-    assert response.status_code == 400
-    assert response.data["reason"] in {
-        "stale_price_history", "missing_price_history",
-    }
+    assert response.status_code == 400, response.data
+    assert response.data["reason"] == "stale_price_history"

@@ -959,13 +959,13 @@ def _daily_bar_or_live_price(asset: Asset, j_date: str) -> Decimal:
     live row is missing. The bar is distilled from the same provider field the
     live price is read from, so both sides of this fallback share a unit.
     """
-    from marketdata.provenance import daily_bar_toman
+    from marketdata.provenance import daily_bar_price
 
     # Converted, not raw. This is the only branch that turns a bar into DURABLE
     # user data -- `LedgerEntry.price_tomans` -- and it used to return the
     # provider's number verbatim, so a crypto buy saved with the price field
     # blank persisted dollars as Toman. Same reader the valuations use.
-    bars = daily_bar_toman([asset], as_of=j_date)
+    bars = daily_bar_price([asset], as_of=j_date, latest_only=True)
     if bars:
         return max(bars, key=lambda row: row[1])[2]
     price = _latest_live_price(asset)
@@ -1014,6 +1014,7 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
     """Warehouse close on `when`, else latest live Price. Raises if none."""
     from marketdata.currency import to_toman
     from marketdata.models import GoldCurrencyHistory, MarketCandle
+    from marketdata.provenance import rate_on, toman_per_dollar
 
     assert_not_before_history(asset, when)
     if asset.is_manual or asset.is_house:
@@ -1062,18 +1063,14 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
                 .first()
             )
         if history and history.close_price > 0:
-            usd_row = (
-                GoldCurrencyHistory.objects.filter(
-                    symbol="USD", date__lte=history.date, close_price__gt=0
-                )
-                .order_by("-date")
-                .first()
-            )
+            # Shared helper, not a fourth copy: this branch writes a durable
+            # `LedgerEntry.price_tomans`, so a divergent answer here becomes
+            # permanent rather than merely displayed.
             converted = to_toman(
                 asset.brs_symbol,
                 history.close_price,
                 history.unit,
-                usd_rate=usd_row.close_price if usd_row else None,
+                usd_rate=rate_on(*toman_per_dollar([history.date]), history.date),
             )
             if converted > 0:
                 return Decimal(str(converted))
