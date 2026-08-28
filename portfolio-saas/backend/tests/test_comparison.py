@@ -274,6 +274,7 @@ def test_a_dollar_quoted_target_is_not_reported_as_toman(compared, asset_catalog
         # is not, which is what the assertion below is really guarding.
         assert response.data["reason"] in {
             "missing_price_history", "stale_price_history",
+            "history_starts_after_purchase",
         }
         return
     end = response.data["summary"]["alternative_end_tomans"]

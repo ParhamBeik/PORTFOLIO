@@ -129,11 +129,11 @@ def _panel(keys, days, held) -> pd.DataFrame:
     invisible to every other consumer because they all take `pct_change()`
     next, where a constant factor cancels.
 
-    `_build_returns_matrix` is then run for its verdicts only, because that is
-    where `price_gap_exceeded` is decided (CLAUDE.md: all eligibility gating
-    lives there). Without it a halted or delisted target draws a flat line from
-    its last close to today and the summary reports that stale number as what
-    you would have made.
+    `_build_returns_matrix` is run for its verdicts, which are attached as
+    caveats rather than acted on -- see below. What actually refuses a dead
+    series is the trailing check: a halted or delisted target must not draw a
+    flat line from its last close to today and have the summary report that
+    stale number as what you would have made.
 
     The fill onto a daily index afterwards is a DRAWING bound, not the 5-session
     staleness bound -- the gate above already owns that verdict. Its job is to
@@ -154,15 +154,16 @@ def _panel(keys, days, held) -> pd.DataFrame:
     _refuse(absent, "missing_price_history", "No usable price history")
     panel = panel[keys].sort_index()
 
+    # The gate's verdicts are CAVEATS here, not exclusions. It screens assets
+    # for investability over a trailing window -- the right question for the
+    # optimizer, the wrong one for "what would this have been worth", and it
+    # would throw away four years of real history over an eleven-session halt in
+    # year two. The valuation invariant it enforces is about TODAY's number not
+    # being a dead price, and that is the trailing check below.
     _, gap_excluded, gap_warnings = _build_returns_matrix(panel, frozenset(held))
-    excluded = [row for row in [*excluded, *gap_excluded] if row.get("key") in keys]
-    _refuse(
-        [row["key"] for row in excluded],
-        "missing_price_history",
-        "No usable price history",
-    )
     panel.attrs["warnings"] = [
-        row for row in [*warnings, *gap_warnings] if row.get("key") in keys
+        row for row in [*warnings, *gap_excluded, *gap_warnings]
+        if row.get("key") in keys
     ]
 
     # The FULL loaded span, not the visible window: the curves are built over
