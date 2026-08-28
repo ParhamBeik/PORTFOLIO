@@ -95,6 +95,41 @@ def latest_market_daily_bar(asset, *, as_of: str | None = None):
     return queryset.order_by("-date", "-id").first()
 
 
+def daily_bar_units(symbols) -> dict[str, str]:
+    """The provider's declared quote unit per symbol, for reading daily bars.
+
+    `MarketDailyBar` has no unit column: `aggregate_market_daily_bars` distils
+    it from `MarketSnapshot.last_price` verbatim, and the label the provider
+    sent survives only in that snapshot's `provider_payload`. The live-only
+    classes these bars serve are exactly the ones NOT quoted in Toman -- crypto
+    comes in Tether, commodities in dollars -- so reading a bar as Toman merely
+    because its column carries no unit is a 100,000x error. Every reader of
+    these bars resolves the unit through here and converts with
+    `currency.to_toman`, which returns 0 (the "no price yet" sentinel) rather
+    than a foreign number when no rate is available.
+
+    An unknown or absent unit maps to nothing, and `to_toman` then passes the
+    value through unchanged -- the same reading as before this existed.
+    """
+    from .models import MarketSnapshot
+
+    symbols = list(symbols)
+    if not symbols:
+        return {}
+    units = {}
+    rows = (
+        MarketSnapshot.objects.filter(symbol__in=symbols)
+        .order_by("symbol", "-observed_at")
+        .distinct("symbol")
+        .values_list("symbol", "provider_payload")
+    )
+    for symbol, payload in rows:
+        unit = (payload or {}).get("unit")
+        if unit:
+            units[symbol] = unit
+    return units
+
+
 def latest_archive_close(asset):
     """Return the latest class-correct archive close for ops and valuation."""
     if asset is None:

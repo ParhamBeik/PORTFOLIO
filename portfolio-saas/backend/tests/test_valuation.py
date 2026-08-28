@@ -2084,6 +2084,105 @@ def test_every_valuation_path_agrees_on_a_tse_holding(
     assert Decimal(value_as_of(user, account, as_of=timezone.now())["total"]) == expected
 
 
+def test_a_live_only_class_is_priced_by_every_valuation_path(
+    asset_catalog, write_prices, make_user
+):
+    """Crypto has no provider history endpoint, so the candle and gold-history
+    branches can never find it a close. It used to be `missing_price` in every
+    as-of valuation -- and every as-of is a TWR cash-flow boundary, so one coin
+    made performance permanently unavailable for the whole account.
+    """
+    import jdatetime
+    from marketdata.models import (
+        GoldCurrencyHistory, MarketDailyBar, MarketInstrument, MarketSnapshot,
+    )
+    from portfolio.services.valuation import (
+        compute_dynamic_net_worth_series,
+        value_account,
+        value_as_of,
+    )
+
+    coin = asset_catalog["bitcoin_usd"]
+    coin.brs_symbol = "BTC"
+    coin.save(update_fields=["brs_symbol"])
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.BRS, symbol="BTC", name="Bitcoin",
+        category=MarketInstrument.Category.CRYPTO, eligible=True,
+    )
+    today_jalali = jdatetime.date.fromgregorian(date=timezone.now().date()).strftime(
+        "%Y-%m-%d"
+    )
+    # The provider quotes crypto in Tether and the bar table has no unit column,
+    # so the unit comes off the snapshot payload and the rate off the USD close.
+    MarketSnapshot.objects.create(
+        asset_class="crypto", symbol="BTC", observed_at=timezone.now(),
+        last_price=Decimal("2"), provider_payload={"unit": "تتر"},
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date=today_jalali, close_price=Decimal("100000"),
+        unit="تومان",
+    )
+    MarketDailyBar.objects.create(
+        asset_class=MarketDailyBar.AssetClass.CRYPTO, symbol="BTC",
+        date=today_jalali, open_price=Decimal("2"), high_price=Decimal("2"),
+        low_price=Decimal("2"), close_price=Decimal("2"),
+    )
+    write_prices({"bitcoin_usd": Decimal("200000")})
+
+    user = make_user(email="live-only-class@test.test")
+    account = Account.objects.create(user=user, name="Wallet")
+    Holding.objects.create(
+        account=account, asset=coin, quantity=Decimal("3")
+    )
+
+    # 3 coins x 2 Tether x 100,000 Toman/dollar.
+    expected = Decimal("600000")
+    as_of = value_as_of(user, account, as_of=timezone.now())
+    assert as_of["excluded"] == []
+    assert Decimal(as_of["total"]) == expected
+    assert Decimal(value_account(account)["total"]) == expected
+    series = compute_dynamic_net_worth_series(user, account, days=2)
+    assert Decimal(series[-1]["total"]) == expected
+
+
+def test_a_dollar_quoted_bar_is_never_read_as_toman(asset_catalog, make_user):
+    """With no dollar rate to convert it, a Tether-quoted close must yield no
+    price at all. Returning the foreign number is how one Bitcoin came to be
+    worth ~64,500 Toman.
+    """
+    import jdatetime
+    from marketdata.models import MarketDailyBar, MarketInstrument, MarketSnapshot
+    from portfolio.services.valuation import value_as_of
+
+    coin = asset_catalog["bitcoin_usd"]
+    coin.brs_symbol = "BTC"
+    coin.save(update_fields=["brs_symbol"])
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.BRS, symbol="BTC", name="Bitcoin",
+        category=MarketInstrument.Category.CRYPTO, eligible=True,
+    )
+    today_jalali = jdatetime.date.fromgregorian(date=timezone.now().date()).strftime(
+        "%Y-%m-%d"
+    )
+    MarketSnapshot.objects.create(
+        asset_class="crypto", symbol="BTC", observed_at=timezone.now(),
+        last_price=Decimal("64500"), provider_payload={"unit": "تتر"},
+    )
+    MarketDailyBar.objects.create(
+        asset_class=MarketDailyBar.AssetClass.CRYPTO, symbol="BTC",
+        date=today_jalali, open_price=Decimal("64500"), high_price=Decimal("64500"),
+        low_price=Decimal("64500"), close_price=Decimal("64500"),
+    )
+
+    user = make_user(email="no-rate@test.test")
+    account = Account.objects.create(user=user, name="Wallet")
+    Holding.objects.create(account=account, asset=coin, quantity=Decimal("1"))
+
+    result = value_as_of(user, account, as_of=timezone.now())
+    assert Decimal(result["total"]) == Decimal("0")
+    assert [e["reason"] for e in result["excluded"]] == ["missing_price"]
+
+
 def test_a_pre_open_quote_does_not_stay_live_through_its_own_session(
     asset_catalog, monkeypatch
 ):

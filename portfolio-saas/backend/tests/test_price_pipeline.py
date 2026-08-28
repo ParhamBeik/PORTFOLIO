@@ -1565,7 +1565,8 @@ def test_catalog_search_always_leaves_room_for_new_instruments(db, make_user):
     # absent the label silently reads "Toman" for a Rial-quoted stock and the
     # user types a 10x wrong cost basis.
     assert all("tse_symbol" in r for r in rows)
-    assert all(r["tse_symbol"] for r in rows if r["asset_class"] == "stock")
+    stock_rows = [r for r in rows if r["asset_class"] == Asset.AssetClass.STOCK]
+    assert stock_rows and all(r["tse_symbol"] for r in stock_rows)
 
 
 def test_ensure_asset_is_safe_against_a_double_click(db):

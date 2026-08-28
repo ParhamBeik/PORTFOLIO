@@ -228,6 +228,126 @@ def fetch_sessions(live_prices: dict, *, fetched_at) -> dict:
     return sessions
 
 
+def _daily_bar_classes_by_symbol(assets) -> dict:
+    """{symbol: {usable MarketDailyBar class}} for many assets, in one query.
+
+    The bulk twin of `provenance.daily_bar_classes` for a single asset. Keyed
+    by symbol rather than by (source, symbol) because every consumer below has
+    only the bar row, and `MarketDailyBar` records no source -- the class set
+    is what keeps another feed's same-named row out.
+    """
+    from marketdata.models import MarketInstrument
+    from marketdata.provenance import daily_bar_classes, instrument_lookup
+
+    lookups = {asset.key: instrument_lookup(asset) for asset in assets}
+    categories = {
+        (source, symbol): category
+        for source, symbol, category in MarketInstrument.objects.filter(
+            symbol__in=[lookup[1] for lookup in lookups.values() if lookup]
+        ).values_list("source", "symbol", "category")
+    }
+    result = {}
+    for asset in assets:
+        lookup = lookups[asset.key]
+        if lookup is None:
+            continue
+        classes = daily_bar_classes(
+            asset, instrument_category=categories.get(lookup)
+        )
+        if classes:
+            result[lookup[1]] = classes
+    return result
+
+
+def _daily_bar_closes(assets, *, since=None) -> list[tuple[str, str, Decimal]]:
+    """(jalali date, asset key, Toman close) from the live-only bar series.
+
+    Converted through `to_toman` against the unit the provider declared for the
+    symbol -- these classes are quoted in Tether and dollars, and the bar table
+    has no unit column of its own. A quote we cannot convert yields nothing
+    rather than a foreign number dressed up as Toman.
+    """
+    from marketdata.currency import to_toman
+    from marketdata.models import MarketDailyBar, RejectedRecord
+    from marketdata.provenance import DAILY_BAR_ENDPOINTS, daily_bar_units
+
+    classes_by_symbol = _daily_bar_classes_by_symbol(assets)
+    if not classes_by_symbol:
+        return []
+    keys_by_symbol = {
+        (asset.tse_symbol or asset.brs_symbol): asset.key
+        for asset in assets
+        if (asset.tse_symbol or asset.brs_symbol) in classes_by_symbol
+    }
+    symbols = list(classes_by_symbol)
+    queryset = MarketDailyBar.objects.filter(symbol__in=symbols, close_price__gt=0)
+    if since is not None:
+        queryset = queryset.filter(date__gte=since)
+    rejections = set(
+        RejectedRecord.objects.filter(
+            symbol__in=symbols, endpoint__in=DAILY_BAR_ENDPOINTS
+        ).values_list("symbol", "date")
+    )
+    units = daily_bar_units(symbols)
+    usd_rate = _latest_usd_close()
+    rows = []
+    for row in queryset.values("symbol", "date", "close_price", "asset_class"):
+        symbol = row["symbol"]
+        if row["asset_class"] not in classes_by_symbol.get(symbol, set()):
+            continue
+        if (symbol, row["date"]) in rejections:
+            continue
+        price = to_toman(
+            symbol, row["close_price"], units.get(symbol, ""), usd_rate=usd_rate
+        )
+        if price > 0:
+            rows.append((row["date"], keys_by_symbol[symbol], _q(price)))
+    return rows
+
+
+def _daily_bar_as_of(asset, jalali_str) -> tuple[Decimal, int]:
+    """(Toman close, sessions stale) from the live-only daily-bar series.
+
+    Returns (0, 0) when there is no usable bar, so the caller's existing
+    `missing_price` branch handles it. The staleness count is deliberately
+    still produced here rather than skipped: a bar is a price like any other
+    and the 5-session forward-fill bound applies to it too.
+    """
+    from marketdata.calendars import market_for_asset, sessions_between
+    from marketdata.currency import to_toman
+    from marketdata.provenance import daily_bar_units, latest_market_daily_bar
+
+    bar = latest_market_daily_bar(asset, as_of=jalali_str)
+    if bar is None or not bar.close_price or bar.close_price <= 0:
+        return Decimal("0"), 0
+    price = to_toman(
+        bar.symbol, bar.close_price,
+        daily_bar_units([bar.symbol]).get(bar.symbol, ""),
+        usd_rate=_latest_usd_close(as_of=jalali_str),
+    )
+    if price <= 0:
+        return Decimal("0"), 0
+    return _q(price), sessions_between(
+        bar.date, jalali_str, market=market_for_asset(asset)
+    )
+
+
+def _latest_usd_close(as_of: str | None = None) -> Decimal | None:
+    """Toman-per-dollar from the warehouse, for converting foreign quotes.
+
+    The same row `resolve_historical_price` and `value_as_of` use, so a
+    dollar-quoted holding is worth the same number on the dashboard, in an
+    as-of valuation and on a ledger line.
+    """
+    from marketdata.models import GoldCurrencyHistory
+
+    queryset = GoldCurrencyHistory.objects.filter(symbol="USD", close_price__gt=0)
+    if as_of is not None:
+        queryset = queryset.filter(date__lte=as_of)
+    row = queryset.order_by("-date").first()
+    return Decimal(str(row.close_price)) if row else None
+
+
 def _latest_archive_closes(assets) -> tuple[dict, dict]:
     """Newest usable warehouse close per asset key, as (prices, jalali dates).
 
@@ -237,10 +357,9 @@ def _latest_archive_closes(assets) -> tuple[dict, dict]:
     Rows the warehouse recorded as rejected are excluded from all three.
     """
     from marketdata.calendars import candle_close_qs
-    from marketdata.models import (
-        GoldCurrencyHistory, MarketDailyBar, MarketInstrument, RejectedRecord,
-    )
-    from marketdata.provenance import daily_bar_classes, instrument_lookup
+    from marketdata.currency import to_toman
+    from marketdata.models import GoldCurrencyHistory, MarketDailyBar, RejectedRecord
+    from marketdata.provenance import daily_bar_units
 
     stock_symbols = {
         asset.tse_symbol: asset.key
@@ -301,24 +420,7 @@ def _latest_archive_closes(assets) -> tuple[dict, dict]:
     # the lookup key so a same-symbol row from another feed cannot be used.
     # This is the bulk twin of `provenance.latest_market_daily_bar` -- same
     # usability rules, resolved in two queries instead of two per asset.
-    # Keyed by (source, symbol) because that is what MarketInstrument is unique
-    # on -- see provenance.instrument_lookup.
-    instrument_categories = {
-        (source, symbol): category
-        for source, symbol, category in MarketInstrument.objects.filter(
-            symbol__in=all_symbols
-        ).values_list("source", "symbol", "category")
-    }
-    live_bar_classes = {}
-    for asset in assets:
-        lookup = instrument_lookup(asset)
-        if lookup is None:
-            continue
-        classes = daily_bar_classes(
-            asset, instrument_category=instrument_categories.get(lookup)
-        )
-        if classes:
-            live_bar_classes[lookup[1]] = classes
+    live_bar_classes = _daily_bar_classes_by_symbol(assets)
     live_bar_symbols = list(live_bar_classes)
     live_bar_rows = (
         MarketDailyBar.objects.filter(
@@ -328,6 +430,11 @@ def _latest_archive_closes(assets) -> tuple[dict, dict]:
         .order_by("symbol", "-date")
         .values("symbol", "date", "close_price", "asset_class")
     )
+    # A daily bar carries no unit of its own, and these live-only classes are
+    # exactly the ones the provider does NOT quote in Toman. See
+    # provenance.daily_bar_units.
+    bar_units = daily_bar_units(live_bar_symbols)
+    usd_rate = _latest_usd_close()
     bar_prices = {}
     bar_dates = {}
     for row in live_bar_rows:
@@ -336,7 +443,13 @@ def _latest_archive_closes(assets) -> tuple[dict, dict]:
         lookup = (row["symbol"], row["asset_class"])
         if (row["symbol"], row["date"]) in rejections:
             continue
-        bar_prices.setdefault(lookup, _q(row["close_price"]))
+        toman = to_toman(
+            row["symbol"], row["close_price"],
+            bar_units.get(row["symbol"], ""), usd_rate=usd_rate,
+        )
+        if toman <= 0:
+            continue
+        bar_prices.setdefault(lookup, _q(toman))
         bar_dates.setdefault(lookup, row["date"])
     for symbol, key in {**stock_symbols, **brs_symbols}.items():
         if key in archive_prices:
@@ -1008,6 +1121,23 @@ def compute_dynamic_net_worth_series(
             key = brs_symbols[r["symbol"]]
             gold_closes.setdefault(r["date"], {})[key] = Decimal(str(r["close_price"]))
 
+    # Crypto and the other live-only classes have no provider history endpoint,
+    # so neither query above can see them and they used to be pinned at today's
+    # live price for the whole window -- a flat line, and every point flagged
+    # approximated. Their distilled daily bars go into the same map, which is
+    # what gives them the same priming, staleness bound and forward-fill as
+    # every other asset. Third of the three price-resolution paths that must
+    # agree; `value_as_of` reads the same bars via `_daily_bar_as_of`.
+    #
+    # Bounded a month before the window so the priming pass below still finds a
+    # close at-or-before it. Reaching further back is pointless: past
+    # MAX_FORWARD_FILL_SESSIONS the staleness guard drops the asset anyway.
+    bars_since = jdatetime.date.fromgregorian(
+        date=(now - timedelta(days=days + 30)).date()
+    ).strftime("%Y-%m-%d")
+    for date, key, price in _daily_bar_closes(assets.values(), since=bars_since):
+        gold_closes.setdefault(date, {}).setdefault(key, price)
+
     latest_prices = get_latest_prices()
     usd_rate = Decimal(latest_prices.get("usd_cash", 0) or 0)
 
@@ -1281,6 +1411,18 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                         stale_sessions = sessions_between(
                             hist.date, jalali_str, market="gold_currency"
                         )
+
+                if price <= 0:
+                    # Crypto, commodities, ETF NAV and indexes have no provider
+                    # history endpoint at all, so neither branch above can ever
+                    # find them a close. Without this, a crypto holding the
+                    # dashboard prices happily is `missing_price` in every
+                    # as-of valuation -- which is also every TWR cash-flow
+                    # boundary, so one such holding made performance
+                    # permanently unavailable for the whole account.
+                    # `ledger._daily_bar_or_live_price` is the trade-price twin
+                    # of this; both read the same distilled bar.
+                    price, stale_sessions = _daily_bar_as_of(asset, jalali_str)
 
                 if price <= 0:
                     excluded.append({"asset_key": key, "reason": "missing_price"})
