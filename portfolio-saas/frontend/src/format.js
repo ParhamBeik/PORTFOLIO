@@ -28,6 +28,43 @@ export const num = (n, d = 2) =>
 export const toman = (n) =>
   bad(n) ? "—" : Number(n).toLocaleString("en-US", nf(0)) + " T";
 
+export const rial = (n) =>
+  bad(n) ? "—" : Number(n).toLocaleString("en-US", nf(0)) + " ﷼";
+
+/**
+ * Money in the basis the user picked, which is NOT always Toman.
+ *
+ * The API converts the figures; only the label was left behind, so a portfolio
+ * switched to USD read "167,579 T" and a $1 note priced at "1 T". Toman rounds to
+ * whole units because a single Toman is noise; the foreign bases keep cents,
+ * where rounding to the unit is a visible 0.5% error on a small holding.
+ */
+const BASIS_MONEY = {
+  nominal_toman: (v) => v.toLocaleString("en-US", nf(0)) + " T",
+  real_toman: (v) => v.toLocaleString("en-US", nf(0)) + " T",
+  usd_denominated: (v) => "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+  usdt_denominated: (v) => v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " USDT",
+};
+
+export const money = (n, basis) =>
+  bad(n) ? "—" : (BASIS_MONEY[basis] || BASIS_MONEY.nominal_toman)(Number(n));
+
+/**
+ * A unit price in whatever currency the server says it is quoted in.
+ *
+ * A TSE quote is Rial and is shown that way on purpose (`holding_value_to_toman`
+ * divides the product, never the price). Everything else is Toman. Suffixing
+ * every price " T" made `quantity x price` come out ten times the Toman `value`
+ * printed beside it, so the currency has to come from the payload's
+ * `unit_price_currency` rather than from the asset class or the magnitude.
+ */
+export const unitPrice = (n, currency, basis = "nominal_toman") => {
+  // Under a foreign basis the server has already converted the quote, so the
+  // Rial/Toman distinction no longer applies -- it is dollars either way.
+  if (basis === "usd_denominated" || basis === "usdt_denominated") return money(n, basis);
+  return currency === "rial" ? rial(n) : toman(n);
+};
+
 /** @param {number} f fraction, e.g. 0.12 → "12.0%" */
 export const pct = (f, d = 1) =>
   bad(f) ? "—" : (Number(f) * 100).toLocaleString("en-US", nf(d)) + "%";

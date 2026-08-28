@@ -311,3 +311,143 @@ def test_a_target_whose_price_series_stopped_is_refused(compared, asset_catalog)
 
     assert response.status_code == 400, response.data
     assert response.data["reason"] == "stale_price_history"
+
+
+# ----------------------------------------------------------------------
+# Time-weighted index: money arriving is not money earned.
+#
+# `_twr_index` is pure arithmetic over the series dicts, so these are unit tests
+# despite the module-level django_db mark -- the whole failure mode lives in the
+# chaining rule and needs no warehouse to reproduce.
+
+
+def _point(date, total, ex_flows):
+    return {"date": date, "total": str(total), "total_ex_flows": str(ex_flows)}
+
+
+def test_twr_index_tracks_price_moves_when_the_book_does_not_change():
+    from portfolio.services.comparison import _twr_index
+
+    # No quantity ever changes, so each day is already valued at yesterday's
+    # book and the index must follow the totals exactly: 100 -> 110 -> 121.
+    series = [
+        _point("2026-01-01", 1000, 1000),
+        _point("2026-01-02", 1100, 1100),
+        _point("2026-01-03", 1210, 1210),
+    ]
+    index = _twr_index(series)
+
+    assert list(index) == pytest.approx([100.0, 110.0, 121.0])
+
+
+def test_recording_a_position_you_already_owned_is_not_a_gain():
+    from portfolio.services.comparison import _twr_index
+
+    # Day 2 doubles the total, but every Toman of it arrived as a book entry:
+    # valued at yesterday's quantities the day is worth exactly yesterday's
+    # 1000. This is the 2026-08-09 shape that read as +108% in one day.
+    series = [
+        _point("2026-01-01", 1000, 1000),
+        _point("2026-01-02", 2000, 1000),
+        _point("2026-01-03", 2200, 2200),
+    ]
+    index = _twr_index(series)
+
+    # Flat across the opening, then the real +10% price move on day 3.
+    assert list(index) == pytest.approx([100.0, 100.0, 110.0])
+    assert float(index.iloc[-1]) - 100 == pytest.approx(10.0)
+
+
+def test_twr_index_survives_a_zero_starting_day_without_dividing_by_it():
+    from portfolio.services.comparison import _twr_index
+
+    series = [
+        _point("2026-01-01", 0, 0),
+        _point("2026-01-02", 500, 0),
+        _point("2026-01-03", 550, 550),
+    ]
+    index = _twr_index(series)
+
+    assert list(index) == pytest.approx([100.0, 100.0, 110.0])
+
+
+def test_twr_index_falls_back_to_total_when_the_companion_figure_is_absent():
+    from portfolio.services.comparison import _twr_index
+
+    series = [{"date": "2026-01-01", "total": "1000"}, {"date": "2026-01-02", "total": "1100"}]
+    index = _twr_index(series)
+
+    assert list(index) == pytest.approx([100.0, 110.0])
+
+
+# ----------------------------------------------------------------------
+# Time-weighted return: a bookkeeping entry is not a gain.
+#
+# `compute_dynamic_net_worth_series` walks quantities backwards through the
+# ledger, so the day an "already owned" position is first recorded, net worth
+# steps up by the whole position. Rebasing that raw series to 100 read the step
+# as performance: the family account's openings on 2026-08-09 showed as a +108%
+# day and reported +120.7% for a quarter in which the portfolio grew 40.4%.
+#
+# Unit test: pure arithmetic over a small list of dicts, no DB and no prices, so
+# the chain-linking is pinned directly where the error was.
+
+
+def _point(date, total, ex_flows):
+    return {"date": date, "total": str(total), "total_ex_flows": str(ex_flows)}
+
+
+def test_twr_ignores_a_position_being_recorded_for_the_first_time():
+    from portfolio.services.comparison import _twr_index
+
+    series = [
+        _point("2026-08-06", 100, 100),
+        # Prices up 10%; the book did not change.
+        _point("2026-08-07", 110, 110),
+        # The book DOUBLES because an already-owned position was written down.
+        # Priced at yesterday's quantities the day was flat, so it earned nothing.
+        _point("2026-08-08", 220, 110),
+        # Prices up 10% again, now on the larger book.
+        _point("2026-08-09", 242, 242),
+    ]
+
+    index = _twr_index(series)
+
+    assert list(index) == pytest.approx([100.0, 110.0, 110.0, 121.0], abs=1e-9)
+    # 1.10 * 1.00 * 1.10 - 1 = 21%, not the 142% the raw totals imply.
+    assert float(index.iloc[-1]) - 100 == pytest.approx(21.0, abs=1e-9)
+
+
+def test_twr_still_counts_real_price_moves():
+    from portfolio.services.comparison import _twr_index
+
+    series = [
+        _point("2026-08-06", 100, 100),
+        _point("2026-08-07", 150, 150),
+    ]
+    index = _twr_index(series)
+    assert float(index.iloc[-1]) == pytest.approx(150.0, abs=1e-9)
+
+
+def test_twr_restarts_the_chain_instead_of_dividing_by_an_empty_book():
+    from portfolio.services.comparison import _twr_index
+
+    # An empty portfolio cannot carry a return; the next day must not divide by 0.
+    series = [
+        _point("2026-08-06", 0, 0),
+        _point("2026-08-07", 500, 0),
+        _point("2026-08-08", 550, 550),
+    ]
+    index = _twr_index(series)
+    assert float(index.iloc[0]) == pytest.approx(100.0, abs=1e-9)
+    assert float(index.iloc[1]) == pytest.approx(100.0, abs=1e-9)
+    # Only the genuine 10% move after the book existed is counted.
+    assert float(index.iloc[2]) == pytest.approx(110.0, abs=1e-9)
+
+
+def test_twr_falls_back_to_total_when_the_companion_figure_is_absent():
+    from portfolio.services.comparison import _twr_index
+
+    series = [{"date": "2026-08-06", "total": "100"}, {"date": "2026-08-07", "total": "110"}]
+    index = _twr_index(series)
+    assert float(index.iloc[-1]) == pytest.approx(110.0, abs=1e-9)

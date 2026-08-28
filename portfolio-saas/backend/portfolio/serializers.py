@@ -194,18 +194,28 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
     # A property's `quantity` is a price per square meter, not a count, so the
     # client has to know which convention to render before it prints the number.
     is_house = serializers.BooleanField(source="asset.is_house", read_only=True, default=False)
+    # `unit_price_tomans` is misnamed for TSE rows: the stored quote is Rial, and
+    # `amount_tomans`/`pnl_tomans` are Toman because the division lands on the
+    # product. Say which currency the price is in so the client stops suffixing
+    # every row " T" and printing a price that does not divide into the value.
+    unit_price_currency = serializers.SerializerMethodField()
 
     class Meta:
         model = LedgerEntry
         fields = (
             "id", "kind", "asset_key", "asset_name", "asset_name_fa", "label",
-            "is_house", "quantity", "unit_price_tomans",
+            "is_house", "quantity", "unit_price_tomans", "unit_price_currency",
             "amount_tomans", "area_sqm", "mortgage_deduction_tomans",
             "occurred_at", "source", "note", "external_id", "reversal_of",
             "created_at", "pnl_tomans", "pnl_kind",
             "account_id", "account_name", "is_synthetic",
         )
         read_only_fields = fields
+
+    def get_unit_price_currency(self, obj):
+        from marketdata.currency import is_tse_priced
+
+        return "rial" if is_tse_priced(obj.asset) else "toman"
 
     def _pnl(self, obj):
         return (self.context.get("pnl") or {}).get(obj.pk) or {}

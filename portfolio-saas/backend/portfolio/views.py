@@ -1263,11 +1263,18 @@ def _current_weights_and_total(
     total = _total(items)
     if total <= 0:
         return {}, Decimal("0"), valuation
-    weights = {
-        i["key"]: float(i["value"] / total)
-        for i in items
-        if i["value"] > 0
-    }
+    # Sum across portfolios: `_liquid_items` flattens every account into one list,
+    # so an asset held in two of them appears twice. Keying a dict comprehension on
+    # `i["key"]` kept only the LAST row and silently discarded the rest, while
+    # `total` still counted them -- the weights then summed to less than 1 and the
+    # optimizer rebalanced a book it believed was smaller than it is. On the family
+    # account that hid 580,300,000 T (2.4%) held as usd_cash and quarter_coin in
+    # both portfolios, and made every rebalance plan buy more than it sold.
+    by_key: dict[str, Decimal] = {}
+    for i in items:
+        if i["value"] > 0:
+            by_key[i["key"]] = by_key.get(i["key"], Decimal("0")) + i["value"]
+    weights = {key: float(value / total) for key, value in by_key.items()}
     return weights, total, valuation
 
 

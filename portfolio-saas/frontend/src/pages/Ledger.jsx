@@ -29,6 +29,7 @@ import {
   perSqm,
   signedToman,
   toman,
+  unitPrice,
 } from "../format.js";
 import { useApi } from "../useApi.js";
 
@@ -262,7 +263,8 @@ export default function Ledger() {
       key: "price",
       header: "Price",
       align: "right",
-      render: (r) => (r.is_house ? "—" : toman(r.unit_price_tomans)),
+      render: (r) =>
+        r.is_house ? "—" : unitPrice(r.unit_price_tomans, r.unit_price_currency),
     },
     { key: "amt", header: "Value", align: "right", render: (r) => toman(r.amount_tomans) },
     {
