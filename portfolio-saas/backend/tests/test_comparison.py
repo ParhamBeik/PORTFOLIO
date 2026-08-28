@@ -170,3 +170,27 @@ def test_comparing_an_asset_with_itself_is_refused(compared):
 
     assert response.status_code == 400
     assert response.data["reason"] == "same_asset"
+
+
+def test_a_short_window_still_prices_an_older_purchase_at_its_own_day(compared):
+    """The window says how much to LOOK at, never how far back to replay. A
+    30-day view of a 60-day-old purchase must still buy the alternative at the
+    price on the day the money was actually spent -- buying it at the window's
+    opening price instead would silently rewrite the cost.
+    """
+    full = _get(
+        compared, mode="counterfactual", subject="kama_stock",
+        target="gold_18k_gram", days=0,
+    ).data
+    short = _get(
+        compared, mode="counterfactual", subject="kama_stock",
+        target="gold_18k_gram", days=30,
+    ).data
+
+    assert len(short["series"][0]["points"]) < len(full["series"][0]["points"])
+    # Same money, same replay -- only the visible slice differs, so today's
+    # value of the alternative is identical either way.
+    assert short["summary"]["alternative_end_tomans"] == pytest.approx(
+        full["summary"]["alternative_end_tomans"]
+    )
+    assert short["summary"]["invested_tomans"] == full["summary"]["invested_tomans"]

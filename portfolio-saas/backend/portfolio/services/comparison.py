@@ -104,13 +104,20 @@ def _flows(accounts, asset) -> list[dict]:
 
 
 def _window(flows, days) -> tuple[int, dt.datetime]:
-    """(history days to load, window start). Defaults to the whole real story."""
+    """(days of history to LOAD, first day to SHOW).
+
+    These are deliberately different numbers. Every purchase has to be replayed
+    at the price on the day it happened, so the panel always reaches back to the
+    oldest one no matter how short a window the user asked to look at. Loading
+    only the visible window would buy a 2022 purchase at this year's opening
+    price and quietly report that as the alternative's cost.
+    """
     now = timezone.now()
-    if days is None:
-        first = flows[0]["at"] if flows else now - dt.timedelta(days=365)
-        days = (now - first).days + 1
-    days = max(MIN_WINDOW_DAYS, min(int(days), MAX_WINDOW_DAYS))
-    return days, now - dt.timedelta(days=days)
+    first = flows[0]["at"] if flows else now - dt.timedelta(days=365)
+    span = (now - first).days + 1
+    shown = span if days is None else max(MIN_WINDOW_DAYS, int(days))
+    load = min(max(span, shown, MIN_WINDOW_DAYS), MAX_WINDOW_DAYS)
+    return load, now - dt.timedelta(days=min(shown, load))
 
 
 def _panel(keys, days, start) -> pd.DataFrame:
@@ -141,8 +148,11 @@ def _panel(keys, days, start) -> pd.DataFrame:
             keys=sorted(absent),
         )
     panel = panel[list(keys)].sort_index()
+    # The FULL loaded span, not the visible window: the curves are built over
+    # this and sliced to `start` only at the end, so a purchase older than the
+    # window still buys at its own day's price.
     index = pd.date_range(
-        start=max(start, panel.index.min()), end=timezone.now(), freq="D", tz="UTC"
+        start=panel.index.min(), end=timezone.now(), freq="D", tz="UTC"
     )
     return panel.reindex(panel.index.union(index)).ffill().reindex(index).dropna()
 
@@ -183,6 +193,16 @@ def _counterfactual_units(flows, prices: pd.Series, index) -> pd.Series:
         held = max(0.0, held + change)
         units[index >= at] = position
     return units
+
+
+def _shown(series: pd.Series, start) -> pd.Series:
+    """Clip a finished curve to the visible window.
+
+    Applied last, never before: the curve's VALUE on the first visible day
+    depends on every purchase that came before it.
+    """
+    clipped = series[series.index >= pd.Timestamp(start)]
+    return clipped if len(clipped) else series.tail(1)
 
 
 def _points(series: pd.Series) -> list[dict]:
@@ -241,10 +261,11 @@ def _counterfactual(user, account, subject_key, target_key, days) -> dict:
     panel = _panel({subject.key, target.key}, days, start)
     index = panel.index
 
-    actual = _units_held(flows, index) * panel[subject.key]
-    alternative = _counterfactual_units(flows, panel[target.key], index) * panel[
-        target.key
-    ]
+    actual = _shown(_units_held(flows, index) * panel[subject.key], start)
+    alternative = _shown(
+        _counterfactual_units(flows, panel[target.key], index) * panel[target.key],
+        start,
+    )
     invested = sum(float(flow["spent"]) for flow in flows)
     return {
         "mode": "counterfactual",
@@ -272,8 +293,8 @@ def _holdings(user, account, subject_key, target_key, days) -> dict:
     panel = _panel({subject.key, target.key}, days, start)
     index = panel.index
 
-    left = _units_held(subject_flows, index) * panel[subject.key]
-    right = _units_held(target_flows, index) * panel[target.key]
+    left = _shown(_units_held(subject_flows, index) * panel[subject.key], start)
+    right = _shown(_units_held(target_flows, index) * panel[target.key], start)
     return {
         "mode": "holdings",
         "series": [
@@ -345,9 +366,11 @@ def _lump_sum(user, account, subject_key, target_key, days) -> dict:
     days, start = _window(flows, days)
     panel = _panel({subject.key, target.key}, days, start)
 
-    # Everything on the first day of the window, in each asset, and left alone.
-    left = invested / float(panel[subject.key].iloc[0]) * panel[subject.key]
-    right = invested / float(panel[target.key].iloc[0]) * panel[target.key]
+    # Everything on the first day the story starts -- the day of the earliest
+    # real purchase -- in each asset, and left alone. Buying at the visible
+    # window's edge instead would answer a question nobody asked.
+    left = _shown(invested / float(panel[subject.key].iloc[0]) * panel[subject.key], start)
+    right = _shown(invested / float(panel[target.key].iloc[0]) * panel[target.key], start)
     return {
         "mode": "lump_sum",
         "series": [
