@@ -1811,3 +1811,38 @@ def test_ledger_and_performance_report_the_same_stock_pnl(
     # 1,000 x (5,430 - 5,330) Rial = 100,000 Rial = 10,000 Toman.
     assert Decimal(pnl["pnl_tomans"]) == Decimal("10000")
     assert Decimal(metrics["unrealized_pnl_tomans"]) == Decimal(pnl["pnl_tomans"])
+
+
+@pytest.mark.django_db
+def test_a_house_backfill_can_be_undone_exactly(account, asset_catalog):
+    """`backfill_house_into_snapshots` has no marker recording that it ran, so
+    applying it to rows that already contained the house doubles it. Synthetic
+    gap-fill snapshots value the THEN-CURRENT holdings, so they hold every
+    property that existed when the gap-fill ran, whatever their date. The
+    inverse has to land back on the original number to the rial.
+    """
+    from portfolio.services.ledger import (
+        backfill_house_into_snapshots, remove_house_from_snapshots,
+    )
+
+    added = _add_property(account, name="Tehran", area="100", price="350")
+    holding = Holding.objects.get(pk=added.data["id"])
+    original = Decimal("1000")
+    snap = Snapshot.objects.create(
+        user=account.user, account=account, total_value_tomans=original,
+    )
+    cutoff = timezone.now() + dt.timedelta(days=1)
+
+    added_rows = backfill_house_into_snapshots(
+        account, holding.asset, before=cutoff,
+    )
+    snap.refresh_from_db()
+    assert added_rows == 1
+    assert snap.total_value_tomans > original
+
+    removed_rows = remove_house_from_snapshots(
+        account, holding.asset, before=cutoff,
+    )
+    snap.refresh_from_db()
+    assert removed_rows == added_rows
+    assert snap.total_value_tomans == original, "the inverse must be exact"

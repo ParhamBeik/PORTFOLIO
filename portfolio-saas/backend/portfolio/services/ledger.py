@@ -753,13 +753,22 @@ def record_house_mark(
     )
 
 
-def backfill_house_into_snapshots(account, asset, *, before=None) -> int:
-    """Add this house's mark-accurate value to snapshots taken before it existed.
+def _apply_house_to_snapshots(account, asset, *, before, sign) -> int:
+    """Add (`sign=+1`) or remove (`sign=-1`) a house's mark value from snapshots.
 
     Stored totals are a photograph of the book at fetch time. A years-ago
     purchase entered today was missing from every photograph, which is the
     cliff on add-day. Points stamped at or after `before` already include the
-    holding and must not be incremented again.
+    holding and must not be touched.
+
+    There is no marker on `Snapshot` recording that a house was folded in, so
+    this is NOT idempotent in either direction and `before` is the only thing
+    standing between a correct history and a silently doubled one. The trap that
+    actually fired: synthetic gap-fill rows (`is_estimated=True`) were generated
+    by valuing the THEN-CURRENT holdings, so they already contain every house
+    whose Holding row existed when the gap-fill ran -- even for dates long
+    before the property was bought. Adding such a house again double-counts it
+    across the entire invented history, which is what `sign=-1` exists to undo.
     """
     from django.db.models import Q
     from portfolio.models import Snapshot
@@ -779,12 +788,22 @@ def backfill_house_into_snapshots(account, asset, *, before=None) -> int:
         if not qty:
             continue
         area = house_area_as_of(account, snap.timestamp).get(key)
-        snap.total_value_tomans = (snap.total_value_tomans or 0) + _house_value(
-            qty, area_sqm=area if area is not None else HOUSE_AREA_SQM
-        )
+        delta = _house_value(qty, area_sqm=area if area is not None else HOUSE_AREA_SQM)
+        snap.total_value_tomans = (snap.total_value_tomans or 0) + sign * delta
         snap.save(update_fields=["total_value_tomans"])
         updated += 1
     return updated
+
+
+def backfill_house_into_snapshots(account, asset, *, before=None) -> int:
+    """Add this house's mark-accurate value to snapshots taken before it existed."""
+    return _apply_house_to_snapshots(account, asset, before=before, sign=1)
+
+
+def remove_house_from_snapshots(account, asset, *, before=None) -> int:
+    """Exact inverse of `backfill_house_into_snapshots`, for undoing one that
+    should not have run -- e.g. against synthetic rows that already held it."""
+    return _apply_house_to_snapshots(account, asset, before=before, sign=-1)
 
 
 @transaction.atomic

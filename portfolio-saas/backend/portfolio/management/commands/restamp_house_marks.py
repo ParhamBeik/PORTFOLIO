@@ -6,7 +6,11 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime, parse_date
 
 from portfolio.models import Holding, LedgerEntry
-from portfolio.services.ledger import HOUSE_MARK_KINDS, backfill_house_into_snapshots
+from portfolio.services.ledger import (
+    HOUSE_MARK_KINDS,
+    backfill_house_into_snapshots,
+    remove_house_from_snapshots,
+)
 
 
 class Command(BaseCommand):
@@ -25,6 +29,14 @@ class Command(BaseCommand):
                  "Defaults to the earlier of the holding's creation and its "
                  "current first mark -- the point from which snapshots already "
                  "contain it. Widening this double-counts.",
+        )
+        parser.add_argument(
+            "--unbackfill",
+            action="store_true",
+            help="Do not move any mark. Instead SUBTRACT this house's mark value "
+                 "from snapshots older than --backfill-before, undoing a backfill "
+                 "that should not have run (e.g. against synthetic gap-fill rows "
+                 "that already contained the holding).",
         )
         parser.add_argument("--dry-run", action="store_true")
 
@@ -49,6 +61,8 @@ class Command(BaseCommand):
 
         holding_id = options["holding_id"]
         raw = options["occurred_at"]
+        if options["unbackfill"]:
+            return self._unbackfill(holding_id, options)
         if not holding_id or not raw:
             raise CommandError("Pass --holding-id and --occurred-at, or --list.")
         when = parse_datetime(raw)
@@ -126,3 +140,36 @@ class Command(BaseCommand):
             holding.account, holding.asset, before=cutoff,
         )
         self.stdout.write(f"updated mark; backfilled {n} snapshot rows")
+
+    def _unbackfill(self, holding_id, options):
+        """Subtract a house's mark value from snapshots older than the bound.
+
+        The inverse of the backfill this command normally performs, for when it
+        was applied to rows that already contained the house -- synthetic
+        gap-fill snapshots value the then-current holdings, so a property that
+        existed when the gap-fill ran is in every one of them regardless of date.
+        """
+        raw = options.get("backfill_before")
+        if not holding_id or not raw:
+            raise CommandError("--unbackfill needs --holding-id and --backfill-before.")
+        cutoff = parse_datetime(raw) or parse_date(raw)
+        if cutoff is None:
+            raise CommandError(f"Could not parse backfill-before: {raw}")
+        if not isinstance(cutoff, datetime):
+            cutoff = datetime(cutoff.year, cutoff.month, cutoff.day, tzinfo=dt_timezone.utc)
+        if timezone.is_naive(cutoff):
+            cutoff = timezone.make_aware(cutoff, timezone.get_current_timezone())
+
+        holding = Holding.objects.select_related("account", "asset").get(pk=holding_id)
+        if not holding.asset.is_house:
+            raise CommandError("Holding is not a property.")
+        self.stdout.write(
+            f"holding={holding.id} {holding.asset.name!r}: subtracting its mark "
+            f"value from snapshots before {cutoff}"
+        )
+        if options["dry_run"]:
+            return
+        n = remove_house_from_snapshots(
+            holding.account, holding.asset, before=cutoff,
+        )
+        self.stdout.write(f"corrected {n} snapshot rows")
