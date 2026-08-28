@@ -201,17 +201,13 @@ def account_performance(account, *, basis=None) -> dict:
         }
 
     # Dividends are portfolio-generated return, not external investor capital.
-    # A reversal pair nets to nothing: drop both the reversal row and the row
-    # it reverses (same pattern as ledger.py:_active_entries), or a reversed
-    # deposit still shows up as a real cash flow into TWR/XIRR.
-    flow_entries = list(account.transactions.filter(
-        kind__in=[LedgerEntry.Kind.DEPOSIT, LedgerEntry.Kind.WITHDRAWAL],
-    ).order_by("timestamp", "pk"))
-    reversed_ids = {e.reversal_of_id for e in flow_entries if e.reversal_of_id}
-    flows = [
-        e for e in flow_entries
-        if e.reversal_of_id is None and e.pk not in reversed_ids
-    ]
+    # Reversal pairs net to nothing, or a reversed deposit shows up as a real
+    # cash flow into TWR/XIRR -- `ledger.active_entries` owns that rule.
+    from .ledger import active_entries
+
+    flows = active_entries(
+        account, kinds=[LedgerEntry.Kind.DEPOSIT, LedgerEntry.Kind.WITHDRAWAL]
+    )
     factor = Decimal("1")
     segment_start = start_value
     investor_cashflows = [(start.date(), -start_value)]

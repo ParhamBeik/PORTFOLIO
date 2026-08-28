@@ -19,6 +19,7 @@ import {
   assetLabel,
   holdingLabel,
   humanize,
+  indexPoint,
   num,
   pct,
   perfLabel,
@@ -197,6 +198,8 @@ function TrendCard({ activeId, basis }) {
                   series={keys.map((k) => ({ key: k, name: bench.labels[k] }))}
                   data={bench.series}
                   longTicks={longTicks}
+                  formatValue={indexPoint}
+                  formatAxis={indexPoint}
                   label="Your portfolio against gold and the dollar, indexed to 100"
                 />
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-bench-note">

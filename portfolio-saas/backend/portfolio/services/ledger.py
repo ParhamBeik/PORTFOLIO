@@ -482,12 +482,26 @@ def _commit_projections(account: Account) -> None:
         raise
 
 
-def _active_entries(account: Account) -> list[LedgerEntry]:
-    """Ledger rows that still affect projections (reversal pairs net out)."""
+def active_entries(accounts, *, kinds=None, asset_ids=None) -> list[LedgerEntry]:
+    """Ledger rows that still affect projections (reversal pairs net out).
+
+    A reversal and the row it reverses net to nothing, so both must go -- and
+    dropping only the reversal (the easy half) leaves the original still
+    counted, which is worse than doing nothing. That pairing was independently
+    re-implemented in the projection replay, in performance's cash flows and in
+    the per-asset cost basis; this is the one copy.
+
+    `accounts` is one Account or an iterable of them.
+    """
+    if isinstance(accounts, Account):
+        accounts = [accounts]
+    queryset = LedgerEntry.objects.filter(account__in=list(accounts))
+    if kinds is not None:
+        queryset = queryset.filter(kind__in=list(kinds))
+    if asset_ids is not None:
+        queryset = queryset.filter(asset_id__in=list(asset_ids))
     entries = list(
-        LedgerEntry.objects.filter(account=account)
-        .select_related("asset")
-        .order_by("timestamp", "pk")
+        queryset.select_related("asset").order_by("timestamp", "pk")
     )
     reversed_ids = {entry.reversal_of_id for entry in entries if entry.reversal_of_id}
     return [
@@ -495,6 +509,10 @@ def _active_entries(account: Account) -> list[LedgerEntry]:
         for entry in entries
         if entry.reversal_of_id is None and entry.pk not in reversed_ids
     ]
+
+
+def _active_entries(account: Account) -> list[LedgerEntry]:
+    return active_entries(account)
 
 
 def _projection_state(account: Account) -> dict:

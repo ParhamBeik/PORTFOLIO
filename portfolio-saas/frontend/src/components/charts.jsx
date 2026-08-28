@@ -363,12 +363,19 @@ export function AreaTrend({ data, height = 260, label = "Portfolio value over ti
  * Several portfolio net-worth series on one axis.
  * `series` = [{ key, name }], `data` = [{ x, [key]: number }].
  */
+/**
+ * `formatValue` / `formatAxis` default to Toman because most callers plot money.
+ * Rebased-to-100 series are not money, and printing "۱۰۰ ت" on an index axis
+ * says the portfolio is worth a hundred Tomans.
+ */
 export function MultiLineTrend({
   series,
   data,
   height = 280,
   label = "Portfolio values over time",
   longTicks,
+  formatValue = toman,
+  formatAxis = tomanCompact,
 }) {
   const t = useChartTokens();
   const option = useMemo(() => {
@@ -384,7 +391,7 @@ export function MultiLineTrend({
         trigger: "axis",
         ...c.tooltipBase,
         axisPointer: { type: "line", lineStyle: { color: t.axis, type: "dashed" } },
-        formatter: (p) => header(date(p[0].axisValue), t) + tipRows(p, t, (v) => toman(v)),
+        formatter: (p) => header(date(p[0].axisValue), t) + tipRows(p, t, (v) => formatValue(v)),
       },
       legend: c.legend(),
       xAxis: {
@@ -397,7 +404,7 @@ export function MultiLineTrend({
       },
       yAxis: {
         type: "value", min, max, interval, ...c.valueAxis,
-        axisLabel: { ...c.valueAxis.axisLabel, formatter: tomanCompact },
+        axisLabel: { ...c.valueAxis.axisLabel, formatter: formatAxis },
       },
       series: (series || []).map((s, i) => ({
         type: "line",
@@ -414,7 +421,7 @@ export function MultiLineTrend({
       })),
       animation: false,
     };
-  }, [series, data, t, longTicks]);
+  }, [series, data, t, longTicks, formatValue, formatAxis]);
 
   return <EChart option={option} height={height} label={label} />;
 }

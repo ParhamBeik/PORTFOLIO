@@ -265,6 +265,21 @@ export const snapshots = (days = 30, account = null, basis = null) => {
 };
 
 // Portfolio against what you could have held instead, indexed to 100.
+/**
+ * With no `mode`, answers what the pickers may offer; with one, runs that
+ * comparison. `days` omitted means "as far back as my own history goes".
+ */
+export const comparison = (account = null, { mode, subject, target, days } = {}) => {
+  const params = new URLSearchParams();
+  if (account) params.set("account", account);
+  if (mode) params.set("mode", mode);
+  if (subject) params.set("subject", subject);
+  if (target) params.set("target", target);
+  if (days != null) params.set("days", String(days));
+  const qs = params.toString();
+  return api(`/api/comparison/${qs ? `?${qs}` : ""}`);
+};
+
 export const benchmarks = (account = null, { basis, window } = {}) => {
   const params = new URLSearchParams();
   if (account) params.set("account", account);

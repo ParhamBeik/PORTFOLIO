@@ -14,6 +14,7 @@ const Onboarding = lazy(() => import("./pages/Onboarding.jsx"));
 const Ops = lazy(() => import("./pages/Ops.jsx"));
 const Ledger = lazy(() => import("./pages/Ledger.jsx"));
 const Family = lazy(() => import("./pages/Family.jsx"));
+const Comparison = lazy(() => import("./pages/Comparison.jsx"));
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -83,6 +84,7 @@ export default function App() {
               <Route path="/onboarding" element={<Onboarding />} />
               <Route path="/ledger" element={<Ledger />} />
               <Route path="/family" element={<Family />} />
+              <Route path="/comparison" element={<Comparison />} />
               <Route path="/ops" element={<Ops user={user} />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>

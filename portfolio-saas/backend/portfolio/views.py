@@ -2198,3 +2198,52 @@ class OptimizationSnapshotLatestView(APIView):
             return Response({"detail": "Not found."}, status=404)
         serializer = OptimizationSnapshotSerializer(snap)
         return Response(serializer.data)
+
+
+class ComparisonView(APIView):
+    """Counterfactuals: what the same money would have done somewhere else.
+
+    `GET` with no `mode` answers what the picker can offer; with one, it runs
+    that comparison. Every refusal comes back as a `reason` code the page
+    renders as a sentence, because most of them are data limits the user can
+    act on -- property has no market series, a position with no recorded prices
+    has no amount to move, a coin's history may not reach back to 2022.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from portfolio.services.comparison import (
+            ComparisonError, comparable_assets, compare,
+        )
+
+        account = _scope(request)
+        mode = request.query_params.get("mode")
+        if not mode:
+            return Response(comparable_assets(request.user, account))
+        days, error = _int_param(
+            request, "days", 0, clamp=(0, comparison_max_window())
+        )
+        if error:
+            return error
+        try:
+            return Response(compare(
+                request.user,
+                account=account,
+                mode=mode,
+                subject=request.query_params.get("subject"),
+                target=request.query_params.get("target"),
+                # 0 is "as far back as my own history goes", which is the
+                # answer this page is usually asked for.
+                days=days or None,
+            ))
+        except ComparisonError as exc:
+            return Response(
+                {"detail": exc.detail, "reason": exc.reason, **exc.extra}, status=400
+            )
+
+
+def comparison_max_window() -> int:
+    from portfolio.services.comparison import MAX_WINDOW_DAYS
+
+    return MAX_WINDOW_DAYS

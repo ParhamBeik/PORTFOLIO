@@ -17,6 +17,7 @@ from .views import (
     AssetReturnsView,
     AssetRankingView,
     BenchmarkSeriesView,
+    ComparisonView,
     BestOverallView,
     DiversifierCandidatesView,
     FrontierView,
@@ -106,6 +107,7 @@ urlpatterns = [
     path("assets/returns/", AssetReturnsView.as_view(), name="assets-returns"),
     path("optimization/best-overall/", BestOverallView.as_view(), name="optimization-best-overall"),
     path("performance/", PerformanceView.as_view(), name="performance"),
+    path("comparison/", ComparisonView.as_view(), name="comparison"),
     path("integrity/", IntegrityView.as_view(), name="integrity"),
 
     # Webhook for brsapi to notify of new prices (triggers optimization run)

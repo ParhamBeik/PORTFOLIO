@@ -38,6 +38,12 @@ const signed = (fn) => (v) =>
 export const signedPct = signed(pct);
 export const signedToman = signed(toman);
 
+/**
+ * A rebased index point: unitless by construction, so it must not carry the
+ * Toman suffix. 100 is the window's start; 130 means up 30%.
+ */
+export const indexPoint = (n) => (bad(n) ? "—" : num(n, 1));
+
 /** Compact Toman for chart axes so ticks stay readable. */
 export function tomanCompact(n) {
   if (bad(n)) return "—";
