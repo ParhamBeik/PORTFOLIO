@@ -1607,3 +1607,40 @@ def test_picking_usdt_reuses_the_seeded_asset_instead_of_minting_a_twin(db, asse
 
     assert minted.pk == seeded.pk, "must resolve to the seeded Tether asset"
     assert Asset.objects.filter(brs_symbol="USDT").count() == 0
+
+
+def test_the_seed_sweep_retires_its_own_rows_and_spares_the_pickers(db):
+    """It runs on every container boot, so both halves matter: a row dropped
+    from the seed list must actually go, and a ticker the user added from the
+    market picker must survive. Keying the sweep on "has a provider symbol"
+    got the second right and the first wrong -- almost every seeded asset
+    carries one, so nothing could ever be retired.
+    """
+    from django.core.management import call_command
+
+    from portfolio.models import Asset
+    from portfolio.management.commands.seed_assets import ASSETS
+
+    seeded_key = ASSETS[0][0]
+    # A seed row that is no longer in the list, still carrying its BRS symbol.
+    Asset.objects.create(
+        key="retired_coin", name="Retired Coin", asset_class=Asset.AssetClass.GOLD,
+        brs_symbol="IR_COIN_GONE", is_active=True,
+    )
+    # Minted by the picker; not in ASSETS and must not be touched.
+    Asset.objects.create(
+        key="tse-irouston0001", name="خگستر", asset_class=Asset.AssetClass.STOCK,
+        tse_symbol="خگستر", is_active=True,
+    )
+    # A property, which is never in ASSETS by construction.
+    Asset.objects.create(
+        key="house-1", name="Home", asset_class=Asset.AssetClass.REAL_ESTATE,
+        is_house=True, is_active=True,
+    )
+
+    call_command("seed_assets")
+
+    assert Asset.objects.get(key="retired_coin").is_active is False
+    assert Asset.objects.get(key="tse-irouston0001").is_active is True
+    assert Asset.objects.get(key="house-1").is_active is True
+    assert Asset.objects.get(key=seeded_key).is_active is True

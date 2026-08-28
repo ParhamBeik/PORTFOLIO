@@ -57,6 +57,12 @@ def _class_for(inst: MarketInstrument) -> str:
     raise ValidationError("This instrument cannot be added to a portfolio.")
 
 
+#: What `_key_for` stamps on every Asset minted from the market catalog. It is
+#: the only durable mark of "this row came from the picker, not the seed list",
+#: which is what `seed_assets` needs to know before it retires anything.
+CATALOG_KEY_PREFIXES = ("tse-", "brs-")
+
+
 def _key_for(inst: MarketInstrument) -> str:
     isin = (inst.isin or "").strip()
     if re.fullmatch(r"[A-Za-z0-9]{5,32}", isin):

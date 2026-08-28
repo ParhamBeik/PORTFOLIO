@@ -5,6 +5,7 @@ portfolio.live.extractor.
 """
 from django.core.management.base import BaseCommand
 from portfolio.models import Asset
+from portfolio.services.catalog import CATALOG_KEY_PREFIXES
 
 ASSETS = [
     # key, name, fa, class, currency, manual, house, tse_symbol, brs_symbol, proxy_key
@@ -68,15 +69,24 @@ class Command(BaseCommand):
                 for field in dirty:
                     setattr(asset, field, changes[field])
                 asset.save(update_fields=dirty)
-        # Global catalog only. A user's own real-estate rows are not in ASSETS by
-        # construction, so an unscoped sweep would switch every property off on
-        # the next boot -- this command runs on every container start.
-        # Catalog-backed rows (a ticker the user added from the market list) are
-        # also kept: they are not in ASSETS, and wiping them on boot made the
-        # add-holding wizard forget every stock except the seeded one.
-        Asset.objects.filter(owner__isnull=True, tse_symbol="", brs_symbol="").exclude(
+        # Global catalog only, and only rows this command is actually the
+        # authority for. This runs on every container start, so an unscoped
+        # sweep switches things off on boot: it once wiped every property, and
+        # then every stock the user had added from the market list.
+        #
+        # Which rows are ours is decided by the KEY, not by whether a row has a
+        # provider symbol. Keying on the symbol was the earlier repair and it
+        # over-corrected -- it kept the picker's tickers, but it also made every
+        # seeded asset that carries a symbol (which is nearly all of them)
+        # permanently unretirable, so dropping one from ASSETS silently did
+        # nothing. `catalog.CATALOG_KEY_PREFIXES` is what the picker stamps on
+        # the rows it mints, and is the honest discriminator.
+        sweep = Asset.objects.filter(owner__isnull=True, is_house=False).exclude(
             key__in=[row[0] for row in ASSETS]
-        ).update(is_active=False)
+        )
+        for prefix in CATALOG_KEY_PREFIXES:
+            sweep = sweep.exclude(key__startswith=prefix)
+        sweep.update(is_active=False)
         self.stdout.write(self.style.SUCCESS(
             f"Asset catalog ready ({created} new, {len(ASSETS)} total)."
         ))
