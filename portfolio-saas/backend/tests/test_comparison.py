@@ -194,3 +194,46 @@ def test_a_short_window_still_prices_an_older_purchase_at_its_own_day(compared):
         full["summary"]["alternative_end_tomans"]
     )
     assert short["summary"]["invested_tomans"] == full["summary"]["invested_tomans"]
+
+
+def test_both_modes_report_the_same_amount_invested(compared, asset_catalog):
+    """A sale returns money, so it reduces what you put in. Counting gross buys
+    in one mode and net in the other made the same portfolio report two
+    different totals depending on which tab was open.
+    """
+    from portfolio.services.ledger import create_ledger_entry
+
+    create_ledger_entry(
+        account=compared, kind=LedgerEntry.Kind.SELL,
+        asset=asset_catalog["kama_stock"], quantity=Decimal("500"),
+        unit_price_tomans=Decimal("2000"),
+        occurred_at=timezone.now() - datetime.timedelta(days=5),
+    )
+    drip = _get(
+        compared, mode="counterfactual", subject="kama_stock", target="gold_18k_gram"
+    ).data
+    lump = _get(
+        compared, mode="lump_sum", subject="kama_stock", target="gold_18k_gram"
+    ).data
+
+    # 250,000 put in, then 500 x 2,000 Rial = 100,000 Toman taken back out.
+    assert drip["summary"]["invested_tomans"] == pytest.approx(150000, rel=1e-6)
+    assert lump["summary"]["invested_tomans"] == drip["summary"]["invested_tomans"]
+
+
+def test_a_benchmark_window_longer_than_the_replay_says_so(compared):
+    """The net-worth series is capped, so "All" cannot mean all. Saying nothing
+    would let the axis imply a range the data does not cover.
+    """
+    from portfolio.services.valuation import SYNTHETIC_HISTORY_MAX_DAYS
+
+    capped = _get(
+        compared, mode="benchmark", target="gold_18k_gram",
+        days=SYNTHETIC_HISTORY_MAX_DAYS + 200,
+    ).data
+    within = _get(
+        compared, mode="benchmark", target="gold_18k_gram", days=30
+    ).data
+
+    assert capped["summary"]["truncated_to_days"] == SYNTHETIC_HISTORY_MAX_DAYS
+    assert within["summary"]["truncated_to_days"] is None

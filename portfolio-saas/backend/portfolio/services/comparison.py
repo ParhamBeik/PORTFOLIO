@@ -309,13 +309,16 @@ def _benchmark(user, account, target_key, days) -> dict:
     from .valuation import SYNTHETIC_HISTORY_MAX_DAYS, compute_dynamic_net_worth_series
 
     target = _resolve_asset(target_key, field="target")
-    days, start = _window([], days)
-    # The net-worth series is bounded on purpose: every extra day is another
-    # full ledger replay. Asking for more than it will give would silently
-    # return a shorter window than the caller asked for, so say so instead.
-    series = compute_dynamic_net_worth_series(
-        user, account, days=min(days, SYNTHETIC_HISTORY_MAX_DAYS)
-    )
+    # No per-asset flows to reach back for here, so unlike the other modes the
+    # requested window IS the whole request. The net-worth series is bounded on
+    # purpose -- every extra day is another full ledger replay -- so asking for
+    # more than it gives returns a shorter window than the caller asked for,
+    # and the answer says so rather than letting the axis imply a range the
+    # data does not cover. "All" means "whatever the replay reaches", which is
+    # the bound itself and therefore not a truncation.
+    capped = min(days or SYNTHETIC_HISTORY_MAX_DAYS, SYNTHETIC_HISTORY_MAX_DAYS)
+    truncated = capped if days and days > capped else None
+    series = compute_dynamic_net_worth_series(user, account, days=capped)
     if not series:
         raise ComparisonError(
             "no_portfolio_history",
@@ -325,7 +328,7 @@ def _benchmark(user, account, target_key, days) -> dict:
         [float(point["total"]) for point in series],
         index=pd.to_datetime([point["date"] for point in series], utc=True),
     ).sort_index()
-    panel = _panel({target.key}, days, portfolio.index.min())
+    panel = _panel({target.key}, capped, portfolio.index.min())
     index = portfolio.index.intersection(panel.index)
     if index.empty:
         raise ComparisonError(
@@ -349,6 +352,7 @@ def _benchmark(user, account, target_key, days) -> dict:
             "alternative_change_pct": round(float(_rebase(prices).iloc[-1]) - 100, 2),
             "start_date": index[0].date().isoformat(),
             "end_date": index[-1].date().isoformat(),
+            "truncated_to_days": truncated,
         },
     }
 
@@ -357,7 +361,10 @@ def _lump_sum(user, account, subject_key, target_key, days) -> dict:
     subject = _resolve_asset(subject_key, field="subject")
     target = _resolve_asset(target_key, field="target")
     flows = _flows(_accounts(user, account), subject)
-    invested = sum(float(flow["spent"]) for flow in flows if flow["spent"] > 0)
+    # Net of sales, the same figure the drip-fed comparison reports. Summing
+    # only the buys answers "how much passed through" rather than "how much you
+    # put in", and the two modes would disagree about the same portfolio.
+    invested = sum(float(flow["spent"]) for flow in flows)
     if invested <= 0:
         raise ComparisonError(
             "no_recorded_cost",

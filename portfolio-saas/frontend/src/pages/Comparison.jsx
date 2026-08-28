@@ -151,6 +151,13 @@ function Chart({ result }) {
           not the amount of money in each.
         </p>
       )}
+      {result.summary.truncated_to_days && (
+        <p className="mt-1 text-xs text-muted" data-testid="comparison-truncated">
+          Showing the last {result.summary.truncated_to_days} days — your
+          portfolio's value is rebuilt day by day from the ledger, and that is as
+          far back as it goes.
+        </p>
+      )}
     </>
   );
 }
