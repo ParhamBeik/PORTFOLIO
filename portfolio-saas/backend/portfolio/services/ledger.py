@@ -108,7 +108,8 @@ def create_ledger_entry(
         raise LedgerError("occurred_at cannot be in the future.")
 
     quantity = _decimal(quantity, "quantity", required=kind in {
-        LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL
+        LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL,
+        LedgerEntry.Kind.RIGHTS_ISSUE,
     })
     unit_price = _decimal(unit_price_tomans, "unit_price_tomans")
     amount = _decimal(
@@ -131,6 +132,7 @@ def create_ledger_entry(
         LedgerEntry.Kind.BUY,
         LedgerEntry.Kind.SELL,
         LedgerEntry.Kind.DIVIDEND,
+        LedgerEntry.Kind.RIGHTS_ISSUE,
     } and asset is None:
         raise LedgerError("asset_key is required for this entry kind.")
     if kind in {LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL}:
@@ -491,6 +493,7 @@ def _projection_state(account: Account) -> dict:
         elif entry.kind in {
             LedgerEntry.Kind.OPENING_POSITION,
             LedgerEntry.Kind.BUY,
+            LedgerEntry.Kind.RIGHTS_ISSUE,
         } and entry.asset_id:
             holdings[entry.asset_id] = holdings.get(entry.asset_id, Decimal("0")) + qty
         elif entry.kind == LedgerEntry.Kind.SELL and entry.asset_id:

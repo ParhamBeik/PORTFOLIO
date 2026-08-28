@@ -1846,3 +1846,40 @@ def test_a_house_backfill_can_be_undone_exactly(account, asset_catalog):
     snap.refresh_from_db()
     assert removed_rows == added_rows
     assert snap.total_value_tomans == original, "the inverse must be exact"
+
+
+@pytest.mark.django_db
+def test_a_rights_issue_dilutes_cost_basis_instead_of_voiding_it(
+    account, asset_catalog, write_prices
+):
+    """افزایش سرمایه hands over free shares. The money already spent now buys
+    more of them, so the average cost per share falls and the basis stays known.
+
+    Recording it as an opening_position would mark the basis unknown and throw
+    away the real purchase history; recording it as a zero-price buy trips the
+    `price_tomans <= 0` "no price recorded" sentinel to the same effect. Either
+    one loses the breakeven price, which is the number the owner actually wants.
+    """
+    from portfolio.services.performance import _position_metrics
+
+    write_prices({"kama_stock": Decimal("5330")})
+    kama = asset_catalog["kama_stock"]
+    create_ledger_entry(
+        account=account, kind=LedgerEntry.Kind.BUY, asset=kama,
+        quantity=Decimal("1000"), unit_price_tomans=Decimal("4000"),
+    )
+    create_ledger_entry(
+        account=account, kind=LedgerEntry.Kind.RIGHTS_ISSUE, asset=kama,
+        quantity=Decimal("1000"), note="افزایش سرمایه",
+    )
+
+    account.refresh_from_db()
+    holding = account.holdings.get(asset=kama)
+    assert holding.quantity == Decimal("2000"), "free shares still count as shares"
+
+    metrics = _position_metrics(account)["kama_stock"]
+    assert metrics["cost_basis_known"] is True
+    # 1,000 x 4,000 Rial spread over 2,000 shares = 2,000 Rial each.
+    assert Decimal(metrics["average_cost_tomans"]) == Decimal("2000")
+    # Cash basis is unchanged by the issue: 4,000,000 Rial = 400,000 Toman.
+    assert Decimal(metrics["total_cost_basis_tomans"]) == Decimal("400000")

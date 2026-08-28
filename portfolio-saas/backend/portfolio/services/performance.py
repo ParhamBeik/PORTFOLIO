@@ -111,6 +111,15 @@ def _position_metrics(account) -> dict:
             if entry.kind == LedgerEntry.Kind.OPENING_POSITION:
                 quantity += qty
                 unknown_basis = True
+            elif entry.kind == LedgerEntry.Kind.RIGHTS_ISSUE:
+                # Free shares: the money already spent now buys more of them, so
+                # the average cost falls and the basis stays KNOWN. Treating this
+                # as an opening would void the basis of every purchase before it,
+                # and treating it as a zero-price buy would trip the "no price
+                # recorded" sentinel to the same effect.
+                if not unknown_basis and quantity + qty > 0:
+                    average_cost = average_cost * quantity / (quantity + qty)
+                quantity += qty
             elif entry.kind == LedgerEntry.Kind.BUY:
                 if price <= 0:
                     # price_tomans == 0/NULL is the model's sentinel for "no

@@ -368,6 +368,14 @@ class LedgerEntry(models.Model):
         # convention used by Holding.quantity; `area_sqm` travels with it.
         # Marks REPLACE rather than accumulate -- see timeline.house_marks_as_of.
         VALUATION_MARK = "valuation_mark", "Valuation mark"
+        # افزایش سرمایه: the company issues shares to existing holders for no
+        # money. Deliberately NOT an opening_position (which declares cost basis
+        # unknown and would void the real basis of everything bought before it)
+        # and NOT a zero-price buy (`price_tomans <= 0` is the "no price
+        # recorded" sentinel, same problem). Quantity rises, cash does not move,
+        # and the average cost per share falls -- which is the whole point:
+        # 4.2bn Toman spread over 26M shares instead of 11.6M.
+        RIGHTS_ISSUE = "rights_issue", "Rights issue (افزایش سرمایه)"
 
     account = models.ForeignKey(
         Account, on_delete=models.CASCADE, related_name="transactions"
