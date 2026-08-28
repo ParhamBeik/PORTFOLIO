@@ -1617,11 +1617,21 @@ class MyOptimalView(APIView):
             for scenario_key in ("max_sharpe", "min_volatility", "risk_parity", "hrp", "min_cvar"):
                 scenario_payload = entry.get(scenario_key)
                 if scenario_payload:
-                    scenario_payload["diagnostics"] = portfolio_diagnostics(
+                    scenario_diagnostics = portfolio_diagnostics(
                         scenario_payload["target_weights"], total,
                         user=request.user, history_days=window_days,
                         universe=universe, valuation=valuation, basis=basis_used,
                     )
+                    # Only the summary metrics, which is all this block was ever
+                    # for. The full payload carries per-day rolling windows and a
+                    # per-asset breakdown of a HYPOTHETICAL book -- 41 KB against
+                    # the 625 bytes of `metrics` -- and shipping it for every
+                    # scenario in every window made this response 1.6 MB and left
+                    # the page blank for ten seconds. `actual` below stays whole:
+                    # the risk and diversification panels genuinely read it.
+                    scenario_payload["diagnostics"] = {
+                        "metrics": scenario_diagnostics.get("metrics", {})
+                    }
             entry["status"] = "ok"
             windows.append(entry)
         body = {"windows": windows, "basis_requested": requested_basis}

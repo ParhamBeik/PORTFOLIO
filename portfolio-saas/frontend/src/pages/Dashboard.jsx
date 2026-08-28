@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import AddTransactionDialog from "../components/AddTransactionDialog.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { useApi } from "../useApi.js";
@@ -88,6 +89,27 @@ const BASIS_LABEL = {
   usd_denominated: "US Dollar",
   usdt_denominated: "Tether (USDT)",
 };
+
+// What this card measures, said out loud when it has nothing to show.
+//
+// It reports the return on YOUR money -- cash-flow-boundary TWR and investor
+// XIRR -- which needs a tracked opening baseline and enough elapsed time. The
+// price-based returns on My Optimal and Comparison need neither, so those pages
+// happily printed a 1-year return and a 90-day comparison while this one said
+// "available after 71 more days", and the three read as a contradiction.
+function PerformanceUnavailable({ detail }) {
+  return (
+    <Empty testId="dashboard-performance-empty">
+      <span>{detail || PERF_UNLOCK_HINT}</span>
+      <span className="mt-2 block text-xs text-muted">
+        This is the return on the money you put in, which needs a tracked opening
+        balance. Price-based returns for the same holdings are already available
+        on <Link to="/optimal" className="underline hover:text-text">My Optimal</Link>{" "}
+        and <Link to="/comparison" className="underline hover:text-text">Comparison</Link>.
+      </span>
+    </Empty>
+  );
+}
 
 const QUALITY_BADGE = { complete: "good", manual: "warn", partial: "warn", unavailable: "critical" };
 const QUALITY_LABEL = { complete: "Live", manual: "Manual", partial: "Mixed", unavailable: "Unavailable" };
@@ -211,7 +233,12 @@ function TrendCard({ activeId, basis }) {
       <Async {...state} testId="dashboard-trend-body" empty="No history yet.">
         {(data) => {
           const points = (data.series || []).map((s) => ({ x: s.date, y: Number(s.total) }));
-          const hasEstimated = (data.series || []).some((s) => s.is_estimated);
+          // Counted, not just detected. "Some points are estimated" reads like a
+          // footnote when 47 of 66 points are reconstructed rather than recorded,
+          // which is a different chart from the one that phrasing implies.
+          const estimatedCount = (data.series || []).filter((s) => s.is_estimated).length;
+          const pointCount = (data.series || []).length;
+          const hasEstimated = estimatedCount > 0;
           // Set when a switched-off holding had no recorded close for that day and
           // its current price stood in while netting it out of the history.
           const hasApproximated = (data.series || []).some((s) => s.approximated);
@@ -284,7 +311,8 @@ function TrendCard({ activeId, basis }) {
               )}
               {hasEstimated && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-note">
-                  Some points are estimated where a daily snapshot was missing.
+                  {estimatedCount} of {pointCount} points are rebuilt from prices
+                  because no daily snapshot was recorded for those days.
                 </p>
               )}
               {hasApproximated && (
@@ -373,11 +401,7 @@ function PerformanceCard({ activeId, basis, accounts }) {
           if (data.aggregate) {
             const ready = data.accounts.filter((row) => row.performance_available);
             if (!ready.length) {
-              return (
-                <Empty testId="dashboard-performance-empty">
-                  {data.accounts[0]?.detail || PERF_UNLOCK_HINT}
-                </Empty>
-              );
+              return <PerformanceUnavailable detail={data.accounts[0]?.detail} />;
             }
             return (
               <>
@@ -418,11 +442,7 @@ function PerformanceCard({ activeId, basis, accounts }) {
             );
           }
           if (!data.performance_available) {
-            return (
-              <Empty testId="dashboard-performance-empty">
-                {data.detail || PERF_UNLOCK_HINT}
-              </Empty>
-            );
+            return <PerformanceUnavailable detail={data.detail} />;
           }
           const rows = Object.entries(data.assets || {}).map(([key, v]) => ({ key, ...v }));
           return (
