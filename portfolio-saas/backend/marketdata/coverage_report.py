@@ -246,7 +246,10 @@ def build_coverage_report(*, database_rows: list[dict]) -> dict:
 
 ARCHIVE_STATUS_PRIORITY = {"failed": 0, "partial": 1, "not_tried": 2, "complete": 3}
 LIVE_STATUS_SORT = {"fresh": 0, "stale": 1, "missing": 2, "manual": 3, "formula": 4, "no_source": 5}
-INTEGRITY_SORT = {"fail": 0, "not_assessed": 1, "pass": 2, "n_a": 3}
+# Spelled out rather than abbreviated: the console renders reason codes straight
+# through `humanize()`, which turned "n_a" into the meaningless "N a" in the
+# 179-day gate column. Its sibling here was already "not_assessed".
+INTEGRITY_SORT = {"fail": 0, "not_assessed": 1, "pass": 2, "not_applicable": 3}
 
 
 def _asset_symbols(asset: Asset) -> list[str]:
@@ -266,7 +269,7 @@ def _worst_archive_status(states: list[ArchiveFetchState]) -> str | None:
 
 def _integrity_status(symbols: list[str], integrity_map: dict[str, SymbolIntegrity]) -> str:
     if not symbols:
-        return "n_a"
+        return "not_applicable"
     rows = [integrity_map[sym] for sym in symbols if sym in integrity_map]
     if not rows:
         return "not_assessed"

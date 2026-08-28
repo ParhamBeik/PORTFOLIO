@@ -753,7 +753,7 @@ function ErrorsPanel({ overview, wf, logPage, setLogPage }) {
     <div className="space-y-4" data-testid="ops-errors-panel">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
         <StatTile label="Error codes (24h)" value={num(codes.length)} sub="Distinct codes" valueTone={codes.length ? "warn" : "good"} />
-        <StatTile label="Failed runs (page)" value={num(rows.length)} sub={`${num(wf.count)} total failures`} valueTone={wf.count ? "critical" : "good"} />
+        <StatTile label="Unsuccessful (page)" value={num(rows.length)} sub={`${num(wf.count)} total, incl. retries`} valueTone={wf.count ? "critical" : "good"} />
         <StatTile label="Top code count" value={codes[0] ? num(codes[0].count) : "0"} sub={codes[0]?.error_code || "none"} />
       </div>
 
@@ -781,7 +781,13 @@ function ErrorsPanel({ overview, wf, logPage, setLogPage }) {
         </Card>
       </div>
 
-      <Card title="Failed workflow runs" subtitle="Paginated list of runs with failure outcomes.">
+      {/* `failed_only=true` selects FAILED, BLOCKED_* and RETRY, so calling this
+          "failed runs" put rows badged Retry under a heading that said failure,
+          next to a tile reporting 3 failures in 24h. Name what it lists. */}
+      <Card
+        title="Runs that did not succeed"
+        subtitle="Failed, blocked, and retried runs — newest first."
+      >
         <Table
           testId="ops-logs"
           rows={rows}
@@ -1201,7 +1207,11 @@ function InfraPanel({ overview, depths, queueTotal, gb }) {
   return (
     <div className="space-y-5" data-testid="ops-infra-panel">
       <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-panel-2 px-3 py-2.5">
-        <span className="text-sm text-muted">Overall</span>
+        {/* Scoped, because the Jobs tab grades something else entirely and the
+            two disagreed in the bare: this reads workers, queues, disk and the
+            price feed, and said "Healthy" while "Process health" said
+            "Unhealthy" about failed archive jobs. Both were right. */}
+        <span className="text-sm text-muted">Workers, queues, disk &amp; feed</span>
         <Badge variant={tone(overview.status)} testId="ops-infra-overall">{humanize(overview.status)}</Badge>
       </div>
 
@@ -1224,7 +1234,17 @@ function InfraPanel({ overview, depths, queueTotal, gb }) {
             pct={pct}
             tone={plan.blocked ? "critical" : infraMeterTone(pct, { warn: 75, critical: 92 })}
             segments={segments}
-            sub={`${num(used)} used of ${limit ? num(limit) : "unknown"} · archive ${num(plan.archive_used || 0)} · live ${num(plan.live_used || 0)}`}
+            // Every bucket, or the breakdown does not reconcile with the total:
+            // listing only archive and live left 53 of tsetmc's 1,588 calls
+            // apparently unaccounted for, when they were simply `other`. "of
+            // unknown" also read as a failure rather than as a provider that
+            // only discloses its ceiling on an error response.
+            sub={[
+              limit ? `${num(used)} used of ${num(limit)}` : `${num(used)} used · daily limit not disclosed yet`,
+              `archive ${num(plan.archive_used || 0)}`,
+              `live ${num(plan.live_used || 0)}`,
+              `other ${num(plan.other_used || 0)}`,
+            ].join(" · ")}
             testId={`ops-infra-quota-${plan.plan}`}
           />
         );

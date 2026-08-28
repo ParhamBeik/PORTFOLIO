@@ -80,6 +80,27 @@ def _iso(value):
     return value
 
 
+def _latest_iso(value):
+    """One calendar for the "latest data" column, whatever the table keys on.
+
+    Half the tables in `database_rows` are keyed on a real timestamp and half on
+    a Jalali date STRING ("1405-06-04"), and passing the string through meant the
+    console printed a Jalali year under a Gregorian month name -- "04 Jun 1405" --
+    next to genuinely Gregorian rows in the same column. An operator could not
+    tell which of two rows was fresher. Jalali dates become the Gregorian instant
+    they name, so every value in the field is comparable and the client keeps
+    formatting one way.
+    """
+    if isinstance(value, str):
+        from . import jalali
+
+        # Returns None for anything that is not a Jalali date, in which case the
+        # string is already Gregorian (or not a date at all) and stands as it is.
+        gregorian = jalali.to_gregorian(value)
+        return gregorian.isoformat() if gregorian is not None else value
+    return _iso(value)
+
+
 def _hypertables():
     """Names of tables that are TimescaleDB hypertables, or an empty set.
 
@@ -303,10 +324,21 @@ def _workflow_history():
 
 
 def _error_code_breakdown(since=None):
+    """Failure signatures in the window -- not every run that set a reason code.
+
+    A SKIPPED run carries `error_code` to say WHY it stood down, and the archive
+    stands down constantly by design: `archive_paced` is the pacer spreading a
+    day's budget across Tehran daytime, which is the system working. Counting it
+    here made it 99% of the "error distribution" and buried the signatures an
+    operator actually needs -- MarketDataFetchError at 60 and QuotaExhausted at 1
+    rounded to 0.9% and 0%. Outcomes that did not fail are excluded; PARTIAL
+    stays, because a run that half-worked failed at something.
+    """
     since = since or timezone.now() - timedelta(hours=24)
     rows = (
         WorkflowRun.objects.filter(created_at__gte=since)
         .exclude(error_code="")
+        .exclude(outcome__in=(WorkflowRun.Outcome.SUCCESS, WorkflowRun.Outcome.SKIPPED))
         .values("error_code")
         .annotate(count=Count("id"))
         .order_by("-count")[:12]
@@ -771,8 +803,7 @@ def get_ops_overview():
         "users": ctx["users"],
         "database_counts": {"approximate": True, "counts": get_cached_db_counts()},
         "database_rows": [
-            {**row, "latest": _iso(row["latest"]) if not isinstance(row["latest"], str) else row["latest"]}
-            for row in ctx["database_rows"]
+            {**row, "latest": _latest_iso(row["latest"])} for row in ctx["database_rows"]
         ],
         "database_history": ctx["database_history"],
         "workflow_history": ctx["workflow_history"],

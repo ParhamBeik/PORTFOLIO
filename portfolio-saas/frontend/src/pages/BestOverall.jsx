@@ -220,13 +220,24 @@ function GapModule({ valuation: v, target, labelFor }) {
   for (const i of v.items) {
     currentByKey.set(i.key, (currentByKey.get(i.key) ?? 0) + Number(i.value) / total);
   }
+  // What the owner calls their own copy, when they hold one. The shared catalog
+  // name for a property is the class ("Real Estate"), so a row for someone's
+  // house read "Real Estate" here while every other page called it خونه کرج.
+  const ownLabel = new Map(v.items.filter((i) => i.label).map((i) => [i.key, i.label]));
   const keys = new Set([...currentByKey.keys(), ...Object.keys(target)]);
   const rows = [...keys]
     .map((key) => {
       const current = currentByKey.get(key) ?? 0;
       const targetWeight = target[key] ?? 0;
       const deltaWeight = targetWeight - current;
-      return { key, label: labelFor(key), current, target: targetWeight, deltaWeight, deltaValue: deltaWeight * total };
+      return {
+        key,
+        label: ownLabel.get(key) || labelFor(key),
+        current,
+        target: targetWeight,
+        deltaWeight,
+        deltaValue: deltaWeight * total,
+      };
     })
     .sort((a, b) => Math.abs(b.deltaValue) - Math.abs(a.deltaValue));
 
