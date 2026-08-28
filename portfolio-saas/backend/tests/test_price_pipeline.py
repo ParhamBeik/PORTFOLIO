@@ -1561,6 +1561,11 @@ def test_catalog_search_always_leaves_room_for_new_instruments(db, make_user):
     assert any(r.get("symbol") == "خگستر" for r in rows), (
         "an unowned instrument must never be crowded out by owned assets"
     )
+    # The dialog labels its price field Rial vs Toman off this key. If it is
+    # absent the label silently reads "Toman" for a Rial-quoted stock and the
+    # user types a 10x wrong cost basis.
+    assert all("tse_symbol" in r for r in rows)
+    assert all(r["tse_symbol"] for r in rows if r["asset_class"] == "stock")
 
 
 def test_ensure_asset_is_safe_against_a_double_click(db):

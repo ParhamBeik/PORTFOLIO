@@ -196,6 +196,14 @@ export default function AddTransactionDialog({
   // Everything else is priced from the market for the chosen date unless the user
   // explicitly overrides it.
   const priceIsMine = !!asset?.is_manual || ownPrice;
+  // The exchange quotes stocks in Rial and the backend stores that verbatim;
+  // every other asset is Toman. `tse_symbol` is the same discriminator the
+  // server uses (marketdata.currency.is_tse_priced), so the two cannot drift.
+  // Stocks are quoted in Rial on the exchange and stored that way; everything
+  // else is Toman. Labelling both "Toman" made a user type a tenth of the real
+  // price, and the cost basis came out 10x low against a Rial market price.
+  const priceIsRial = !!asset?.tse_symbol;
+  const priceUnitLabel = priceIsRial ? "Rial" : "Toman";
   // A manual asset is asked for its price even when nothing was traded: it has
   // no feed, so if the user does not state a value it has none at all and lands
   // in the portfolio worth nothing. Market-priced assets skip the question on
@@ -294,8 +302,13 @@ export default function AddTransactionDialog({
       )} — ${toman(value)}, as of ${when}.`;
     }
     const verb = { buy: "Buy", sell: "Sell", opening_position: "Record" }[action];
+    // A stock's unit price is Rial, so the total is Rial/10. Printing both with
+    // toman() overstated a stock purchase tenfold on the confirmation screen.
+    const lineTotal = priceIsRial
+      ? (Number(form.quantity) * Number(form.price)) / 10
+      : Number(form.quantity) * Number(form.price);
     const priced = priceIsMine && form.price
-      ? ` at ${toman(form.price)} each — ${toman(Number(form.quantity) * Number(form.price))}`
+      ? ` at ${Number(form.price).toLocaleString()} ${priceUnitLabel} each — ${toman(lineTotal)}`
       : " at the market price for that date";
     if (action === "opening_position") {
       return `${verb} that you already hold ${form.quantity} ${name} — as of ${when}.`;
@@ -626,7 +639,7 @@ export default function AddTransactionDialog({
                     </label>
                   )}
                   {priceIsMine ? (
-                    <Field label="Price for one (Toman)">
+                    <Field label={`Price for one (${priceUnitLabel})`}>
                       <Input
                         label="Unit price"
                         type="number"

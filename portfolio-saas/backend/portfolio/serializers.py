@@ -21,8 +21,12 @@ from .services.ledger import (
 class AssetSerializer(serializers.ModelSerializer):
     class Meta:
         model = Asset
+        # `tse_symbol` is exposed because it is the unit discriminator, not just
+        # a join key: a non-empty one means this asset's prices are quoted in
+        # Rial. The add-transaction dialog labels its price field from it, and
+        # must use the same test the server does (currency.is_tse_priced).
         fields = ("id", "key", "name", "name_fa", "asset_class", "currency",
-                  "is_manual", "is_house", "is_active")
+                  "is_manual", "is_house", "is_active", "tse_symbol")
 
 
 class HoldingSerializer(serializers.ModelSerializer):

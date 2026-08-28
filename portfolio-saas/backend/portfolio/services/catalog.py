@@ -79,6 +79,8 @@ def _row_from_asset(asset: Asset) -> dict:
             else MarketInstrument.Source.BRS if asset.brs_symbol else ""
         ),
         "symbol": asset.tse_symbol or asset.brs_symbol or "",
+        # The unit discriminator, not just a join key: non-empty means Rial.
+        "tse_symbol": asset.tse_symbol,
         "name": asset.name,
         "name_fa": asset.name_fa,
         "asset_class": asset.asset_class,
@@ -96,6 +98,9 @@ def _row_from_instrument(inst: MarketInstrument, asset: Asset | None) -> dict:
         "key": None,
         "source": inst.source,
         "symbol": inst.symbol,
+        "tse_symbol": (
+            inst.symbol if inst.source == MarketInstrument.Source.TSETMC else ""
+        ),
         "name": inst.name or inst.symbol,
         "name_fa": inst.name or inst.symbol,
         "asset_class": _class_for(inst),
