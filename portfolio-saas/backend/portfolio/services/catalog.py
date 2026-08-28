@@ -10,6 +10,7 @@ import re
 from django.db.models import Q
 from rest_framework.exceptions import ValidationError
 
+from marketdata.catalog import CASH_LIKE_SYMBOLS
 from marketdata.currency import canonical_symbol
 from marketdata.models import MarketInstrument
 from portfolio.models import Asset
@@ -31,17 +32,21 @@ _CLASS_FILTER = {
         source=MarketInstrument.Source.BRS,
         eligible=True,
     ),
+    # Currency shares the GOLD stamp (one provider payload, see
+    # marketdata.catalog), and Tether rides in on the same endpoint. Both have to
+    # come out here or "Gold & coins" offers the user Tether -- and it did.
     Asset.AssetClass.GOLD: Q(
         category=MarketInstrument.Category.GOLD,
         source=MarketInstrument.Source.BRS,
         eligible=True,
     )
-    & ~Q(provider_group="currency"),
+    & ~Q(provider_group="currency")
+    & ~Q(symbol__in=tuple(CASH_LIKE_SYMBOLS)),
     Asset.AssetClass.CASH: Q(
         source=MarketInstrument.Source.BRS,
         eligible=True,
     )
-    & (Q(provider_group="currency") | Q(symbol__in=("USDT", "USDT_IRT", "USD", "EUR"))),
+    & (Q(provider_group="currency") | Q(symbol__in=tuple(CASH_LIKE_SYMBOLS))),
 }
 
 
@@ -50,7 +55,7 @@ def _class_for(inst: MarketInstrument) -> str:
         return Asset.AssetClass.STOCK
     if inst.category == MarketInstrument.Category.CRYPTO:
         return Asset.AssetClass.CRYPTO
-    if inst.provider_group == "currency" or inst.symbol in ("USDT", "USDT_IRT", "USD", "EUR"):
+    if inst.provider_group == "currency" or inst.symbol in CASH_LIKE_SYMBOLS:
         return Asset.AssetClass.CASH
     if inst.category == MarketInstrument.Category.GOLD:
         return Asset.AssetClass.GOLD

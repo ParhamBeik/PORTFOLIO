@@ -18,6 +18,15 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# Symbols the BRS "gold" payload carries that are not gold. Declared once here
+# because three separate places used to spell the same list out by hand and they
+# had already drifted -- the catalog search, its class mapper, and this ingest.
+#
+# Tether is deliberately cash-like rather than crypto: it is how the local market
+# holds dollars, and `portfolio.services.catalog` files it under Currency & cash.
+CASH_LIKE_SYMBOLS = frozenset({"USDT", "USDT_IRT", "USD", "EUR"})
+CRYPTO_SYMBOLS = frozenset({"BTC"})
+
 
 def is_ordinary_stock(record):
     """The live catalog identifies shares with IRO-prefixed ISINs.
@@ -86,7 +95,7 @@ def sync_provider_catalog(limit=None):
                 symbol = str(record.get("symbol", "")).strip()
                 if not symbol:
                     continue
-                eligible = provider_group in ("gold", "currency") or symbol in ("USDT", "BTC")
+                eligible = provider_group in ("gold", "currency") or symbol in CASH_LIKE_SYMBOLS or symbol in CRYPTO_SYMBOLS
                 gold_items.append((symbol, record, provider_group, eligible))
 
     if limit is not None:
@@ -97,9 +106,16 @@ def sync_provider_catalog(limit=None):
             source=MarketInstrument.Source.BRS,
             symbol=symbol,
             name=str(record.get("name", "") or ""),
+            # The BRS "gold" endpoint is a mixed bag -- bullion, coins, hard
+            # currency and a couple of coins-in-the-other-sense all arrive in one
+            # payload. Stamping every eligible row GOLD put Bitcoin and Tether in
+            # the "Gold & coins" step of the add-holding wizard. Currency keeps
+            # the GOLD stamp on purpose: `provider_group` is what separates it,
+            # and the Cash filter already reads that.
             category=(
-                MarketInstrument.Category.GOLD
-                if eligible else MarketInstrument.Category.EXCLUDED
+                MarketInstrument.Category.EXCLUDED if not eligible
+                else MarketInstrument.Category.CRYPTO if symbol in CRYPTO_SYMBOLS
+                else MarketInstrument.Category.GOLD
             ),
             provider_group=provider_group,
             eligible=eligible,

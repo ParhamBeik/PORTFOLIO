@@ -75,9 +75,12 @@ export default function App() {
       <PortfolioProvider key={user.id} enabled>
         <Suspense fallback={<Loading testId="route-loading" />}>
           <Routes>
-            <Route path="/privacy" element={<Legal kind="privacy" />} />
-            <Route path="/terms" element={<Legal kind="terms" />} />
               <Route element={<Shell user={user} onLogout={() => setUser(null)} />}>
+              {/* Inside the shell: these are reached from the footer of every
+                  page, and rendering them outside it dropped a signed-in reader
+                  onto a bare page whose only way out said "Back to sign in". */}
+              <Route path="/privacy" element={<Legal kind="privacy" authed />} />
+              <Route path="/terms" element={<Legal kind="terms" authed />} />
               <Route index element={<RequireHoldings><Dashboard user={user} /></RequireHoldings>} />
               <Route path="/optimal" element={<MyOptimal />} />
               <Route path="/universe" element={<BestOverall />} />
