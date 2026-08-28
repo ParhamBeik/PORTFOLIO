@@ -2236,3 +2236,49 @@ def test_a_market_wide_closure_is_not_counted_as_a_missed_session(
     with_calendar = val._clock_sessions_elapsed(kama, quote, later)
 
     assert with_calendar == 1, "only the un-vouched-for current day is counted"
+
+
+def test_a_crypto_quote_is_dollars_even_with_no_unit_label(asset_catalog, make_user):
+    """Cryptocurrency.php sends no unit string. It sends the quote twice --
+    `price` in dollars and `price_toman` converted -- and the snapshot ingest
+    stores the first. Without reading that pair, Bitcoin valued at 79,606 Toman
+    instead of 15.9 billion.
+    """
+    import jdatetime
+    from marketdata.models import (
+        GoldCurrencyHistory, MarketDailyBar, MarketInstrument, MarketSnapshot,
+    )
+    from portfolio.services.valuation import value_as_of
+
+    coin = asset_catalog["bitcoin_usd"]
+    coin.brs_symbol = "Bitcoin"
+    coin.save(update_fields=["brs_symbol"])
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.BRS, symbol="Bitcoin", name="Bitcoin",
+        category=MarketInstrument.Category.CRYPTO, eligible=True,
+    )
+    today_jalali = jdatetime.date.fromgregorian(date=timezone.now().date()).strftime(
+        "%Y-%m-%d"
+    )
+    MarketSnapshot.objects.create(
+        asset_class="crypto", symbol="Bitcoin", observed_at=timezone.now(),
+        last_price=Decimal("79606"),
+        provider_payload={"price": "79606", "price_toman": "15961436042"},
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date=today_jalali, close_price=Decimal("200000"), unit="تومان",
+    )
+    MarketDailyBar.objects.create(
+        asset_class=MarketDailyBar.AssetClass.CRYPTO, symbol="Bitcoin",
+        date=today_jalali, open_price=Decimal("79606"), high_price=Decimal("79606"),
+        low_price=Decimal("79606"), close_price=Decimal("79606"),
+    )
+
+    user = make_user(email="btc-unit@test.test")
+    account = Account.objects.create(user=user, name="Wallet")
+    Holding.objects.create(account=account, asset=coin, quantity=Decimal("1"))
+
+    result = value_as_of(user, account, as_of=timezone.now())
+    assert result["excluded"] == []
+    # 79,606 dollars x 200,000 Toman, not 79,606 Toman.
+    assert Decimal(result["total"]) == Decimal("15921200000")

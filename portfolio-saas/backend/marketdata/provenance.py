@@ -124,10 +124,29 @@ def daily_bar_units(symbols) -> dict[str, str]:
         .values_list("symbol", "provider_payload")
     )
     for symbol, payload in rows:
-        unit = (payload or {}).get("unit")
+        unit = _declared_unit(payload or {})
         if unit:
             units[symbol] = unit
     return units
+
+
+def _declared_unit(payload) -> str:
+    """The quote unit a BrsApi snapshot declares, by label or by construction.
+
+    Commodity rows carry `unit: "دلار"` outright. Cryptocurrency.php carries no
+    unit string at all -- it states the same quote TWICE, `price` in dollars
+    beside `price_toman` converted, and `ingest_market_snapshots` stores the
+    first. Two fields for one number is the provider naming the unit as plainly
+    as a label would, and reading the pair is not the same thing as guessing
+    from magnitude: without it Bitcoin priced at 79,606 TOMAN instead of 15.9
+    billion, a factor of two hundred thousand.
+    """
+    unit = payload.get("unit")
+    if unit:
+        return str(unit)
+    if payload.get("price_toman") and payload.get("price"):
+        return "usd"
+    return ""
 
 
 def latest_archive_close(asset):
