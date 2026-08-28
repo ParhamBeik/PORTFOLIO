@@ -208,6 +208,48 @@ def create_ledger_entry(
     return entry
 
 
+def record_existing_position(
+    *, account: Account, asset: Asset, quantity, occurred_at=None,
+    unit_price_tomans=None, note: str = "", source: str = "manual",
+    external_id: str = "", import_batch=None,
+) -> LedgerEntry:
+    """Record something the user says they already own, in the kind the
+    account's baseline can actually accept.
+
+    Every opening shares `tracking_started_at`: the baseline is one moment, and
+    a quantity that appears mid-window with no flow behind it reads to TWR as a
+    gain out of nowhere. So the date decides the kind, and the two cases are
+    genuinely different events:
+
+      * on or before the baseline (or before there is one) the holding predates
+        tracking, so it IS baseline -- written as an opening stamped at the
+        baseline itself, with cost basis unknown, which is the truth;
+      * after it, something entered the portfolio during the tracked window.
+        That is a buy, priced from the user or, failing that, from the market
+        close of the day they gave.
+
+    Previously the second case reached the constraint and came back as a 400
+    reading "Opening entries must share the tracking start timestamp" -- an
+    accurate sentence about an invariant, and nothing the user could act on.
+    House marks do not come through here; `record_house_mark` owns that pair.
+    """
+    occurred_at = occurred_at or timezone.now()
+    baseline = account.tracking_started_at
+    if baseline is not None and occurred_at > baseline:
+        return create_ledger_entry(
+            account=account, asset=asset, kind=LedgerEntry.Kind.BUY,
+            quantity=quantity, unit_price_tomans=unit_price_tomans,
+            occurred_at=occurred_at, source=source, note=note,
+            external_id=external_id, import_batch=import_batch,
+        )
+    return create_ledger_entry(
+        account=account, asset=asset, kind=LedgerEntry.Kind.OPENING_POSITION,
+        quantity=quantity, unit_price_tomans=unit_price_tomans,
+        occurred_at=baseline or occurred_at, source=source, note=note,
+        external_id=external_id, import_batch=import_batch,
+    )
+
+
 @transaction.atomic
 def reverse_ledger_entry(*, user, account_id: int, entry_id: int) -> LedgerEntry:
     entry = (

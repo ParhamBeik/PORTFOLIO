@@ -49,6 +49,7 @@ from .services.ledger import (
     delete_ledger_entry,
     delete_orphan_holding,
     entry_pnl_map,
+    record_existing_position,
     reverse_ledger_entry,
     set_orphan_holding,
     synthetic_position_rows,
@@ -413,6 +414,26 @@ class LedgerListCreateView(APIView):
             if asset is None:
                 return Response({"detail": "Unknown asset_key."}, status=400)
         try:
+            # "I already own this" is an intent, not a kind: which row it
+            # becomes depends on whether the date falls inside the tracked
+            # window. See ledger.record_existing_position. Houses keep their own
+            # path -- a property is a series of marks, not a position.
+            if (
+                data["kind"] == LedgerEntry.Kind.OPENING_POSITION
+                and asset is not None
+                and not asset.is_house
+            ):
+                entry = record_existing_position(
+                    account=account,
+                    asset=asset,
+                    quantity=data.get("quantity"),
+                    unit_price_tomans=data.get("unit_price_tomans"),
+                    occurred_at=data["occurred_at"],
+                    source=data["source"],
+                    note=data.get("note", ""),
+                    external_id=data.get("external_id", ""),
+                )
+                return Response(LedgerEntrySerializer(entry).data, status=201)
             entry = create_ledger_entry(
                 account=account,
                 asset=asset,

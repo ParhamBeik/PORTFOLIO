@@ -1883,3 +1883,57 @@ def test_a_rights_issue_dilutes_cost_basis_instead_of_voiding_it(
     assert Decimal(metrics["average_cost_tomans"]) == Decimal("2000")
     # Cash basis is unchanged by the issue: 4,000,000 Rial = 400,000 Toman.
     assert Decimal(metrics["total_cost_basis_tomans"]) == Decimal("400000")
+
+
+def test_adding_an_owned_asset_after_the_baseline_is_not_refused(
+    ledger_account, asset_catalog, write_prices
+):
+    """"I already own this" used to 400 with "Opening entries must share the
+    tracking start timestamp" on any account that had a baseline -- accurate
+    about the invariant, and nothing the user could act on. The date now picks
+    the kind: at-or-before the baseline it is baseline, after it is a buy.
+    """
+    write_prices({"emami_coin": Decimal("100"), "half_coin": Decimal("50")})
+    client = _client(ledger_account.user)
+    started_at = timezone.now() - datetime.timedelta(days=10)
+
+    baseline = _post(client, ledger_account, {
+        "kind": "opening_position",
+        "asset_key": "emami_coin",
+        "quantity": "2",
+        "occurred_at": started_at.isoformat(),
+    })
+    assert baseline.status_code == 201, baseline.data
+    assert baseline.data["kind"] == "opening_position"
+
+    # Acquired during the tracked window: a real event, so it must carry a flow.
+    later = _post(client, ledger_account, {
+        "kind": "opening_position",
+        "asset_key": "half_coin",
+        "quantity": "3",
+        "occurred_at": (timezone.now() - datetime.timedelta(days=2)).isoformat(),
+    })
+    assert later.status_code == 201, later.data
+    assert later.data["kind"] == "buy"
+
+    # Predates tracking: still part of the baseline, so it snaps onto it rather
+    # than desynchronising the account's other openings.
+    earlier = _post(client, ledger_account, {
+        "kind": "opening_position",
+        "asset_key": "quarter_coin",
+        "quantity": "5",
+        "occurred_at": (started_at - datetime.timedelta(days=30)).isoformat(),
+    })
+    assert earlier.status_code == 201, earlier.data
+    assert earlier.data["kind"] == "opening_position"
+
+    ledger_account.refresh_from_db()
+    assert ledger_account.tracking_started_at == started_at
+    holdings = {
+        h.asset.key: h.quantity
+        for h in Holding.objects.filter(account=ledger_account).select_related("asset")
+    }
+    assert holdings == {
+        "emami_coin": Decimal("2"), "half_coin": Decimal("3"),
+        "quarter_coin": Decimal("5"),
+    }
