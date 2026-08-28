@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from .currency import canonical_symbol
 from .fetchers import fetch_all_symbols, fetch_derivatives, fetch_gold_currency_free
-from .ingest import flatten_records
+from .ingest import flatten_records, provider_symbol
 from . import jalali
 from .models import (
     GoldCurrencyHistory,
@@ -120,9 +120,10 @@ def sync_provider_catalog(limit=None):
         if limit is not None:
             records = records[:limit]
         for record in records:
-            symbol = str(
-                record.get("symbol") or record.get("l18") or record.get("code") or ""
-            ).strip()
+            # Same reader the snapshot ingest uses: Cryptocurrency.php has no
+            # symbol field, and reading it without the name_en fallback is why
+            # this loop catalogued zero coins.
+            symbol = provider_symbol(record)
             if not symbol:
                 continue
             if asset_class in ("crypto", "commodity"):

@@ -1812,3 +1812,37 @@ def test_backfill_validation_default_manifest_is_secure(monkeypatch, tmp_path):
 
     assert manifest.exists()
     assert manifest.stat().st_mode & 0o777 == 0o600
+
+
+def test_the_catalog_and_the_snapshot_ingest_read_a_symbol_the_same_way(db):
+    """Market/Cryptocurrency.php sends no symbol field -- only name_en. The
+    snapshot ingest grew a fallback for it after skipping 100% of every payload;
+    the catalog sync never did, so the warehouse held a million crypto snapshots
+    and not one instrument, and the add-holding wizard's Crypto tab was empty.
+    """
+    from unittest.mock import patch
+
+    from marketdata import catalog
+    from marketdata.ingest import ingest_market_snapshots, provider_symbol
+    from marketdata.models import MarketInstrument, MarketSnapshot
+
+    payload = [{"name_en": "Bitcoin", "id": 1, "price": 100, "unit": "تتر"}]
+    assert provider_symbol(payload[0]) == "Bitcoin"
+
+    created, skipped = ingest_market_snapshots("crypto", payload)
+    assert (created, skipped) == (1, 0)
+    stored = MarketSnapshot.objects.get(asset_class="crypto")
+
+    with patch.object(catalog, "fetch_all_symbols", return_value=[]), \
+         patch.object(catalog, "fetch_gold_currency_free", return_value={}), \
+         patch.object(
+             catalog, "fetch_derivatives",
+             side_effect=lambda _key, endpoint: payload if endpoint == "crypto" else [],
+         ):
+        catalog.sync_provider_catalog()
+
+    instrument = MarketInstrument.objects.get(category=MarketInstrument.Category.CRYPTO)
+    # Both sides must land on the SAME string, or the instrument can never join
+    # to the bars distilled from those snapshots.
+    assert instrument.symbol == stored.symbol
+    assert instrument.eligible is True

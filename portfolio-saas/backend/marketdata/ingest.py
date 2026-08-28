@@ -121,6 +121,26 @@ def flatten_records(payload) -> list:
     return [payload]
 
 
+def provider_symbol(record) -> str:
+    """The symbol a BrsApi record is keyed on, across every payload family.
+
+    `symbol` on Market/*, `l18`/`code` on Tsetmc/*, and `name_en` on
+    Market/Cryptocurrency.php, which carries no symbol field at all -- only an
+    English name and a numeric id. The snapshot ingest learned that the hard
+    way (0 rows created, 100% skipped, every cycle) and grew the fallback; the
+    catalog sync did not, so crypto had 1.1M snapshots and 32k daily bars in the
+    warehouse and not one MarketInstrument row, which left the add-holding
+    wizard's Crypto tab permanently empty. One reader now, so the next payload
+    family cannot be learned in one place and missed in the other.
+    """
+    if not isinstance(record, dict):
+        return ""
+    return str(
+        record.get("symbol") or record.get("l18") or record.get("code")
+        or record.get("name_en") or ""
+    ).strip()
+
+
 def _lineage():
     from django.utils import timezone
     from .workflows import current_correlation_id
@@ -842,15 +862,7 @@ def ingest_market_snapshots(asset_class, payload) -> tuple[int, int]:
     observed_at = timezone.now()
     created = skipped = 0
     for row in rows:
-        # `Market/Cryptocurrency.php` (unlike the other Market/* endpoints)
-        # carries no symbol/l18/code field at all -- only `name_en` (e.g.
-        # "Bitcoin") and a numeric `id`. Without this fallback every crypto
-        # row's symbol comes out empty and the whole payload is silently
-        # skipped (confirmed live: 0 created, 100% skipped every cycle).
-        symbol = str(
-            row.get("symbol") or row.get("l18") or row.get("code")
-            or row.get("name_en") or ""
-        ).strip()
+        symbol = provider_symbol(row)
         if not symbol:
             skipped += 1
             logger.warning(
