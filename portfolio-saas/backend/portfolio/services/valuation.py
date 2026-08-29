@@ -23,7 +23,10 @@ _LATEST_PRICES_STATE_KEY = "prices:latest:market-state"
 _ARCHIVE_DROP_FLOOR = Decimal("0.50")
 _ARCHIVE_SPIKE_CEILING = Decimal("2.00")
 
-_FRESH_SECONDS = 300
+# One definition, shared with the Ops console rather than restated. Two literal
+# 300s for "how old is too old" is how the console and the valuation drift into
+# disagreeing about the same price.
+from marketdata.evidence import LIVE_PRICE_FRESH_SECONDS as _FRESH_SECONDS
 # The live loop only fetches TSE prices while the market session is OPEN, and
 # gold/currency/crypto prices during OPEN or CLOSED_DAYTIME, pausing only
 # OVERNIGHT (marketdata.market_state.live_job_keys). Outside those windows the

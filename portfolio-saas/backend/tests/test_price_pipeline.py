@@ -1672,3 +1672,33 @@ def test_the_seed_sweep_never_retires_an_asset_somebody_owns(db, make_user):
 
     assert Asset.objects.get(key="khgostar_stock").is_active is True
     assert Asset.objects.get(key="nobody_stock").is_active is False
+
+
+# ----------------------------------------------------------------------
+# The poll cadence must stay inside the freshness bar.
+#
+# `_FRESH_SECONDS` and MARKETDATA_LIVE_INTERVAL_DAYTIME were both 300, so a
+# price crossed from fresh to stale at the same instant its replacement became
+# due: every held asset flipped between Fresh and Stale all day and the Ops
+# console's headline freshness never settled (measured at 244s and 568s minutes
+# apart on the same assets). These are two numbers in two modules that only work
+# if they disagree, which is exactly the pair worth pinning.
+#
+# Unit test: reads settings, no I/O.
+
+
+def test_live_poll_interval_leaves_margin_under_the_freshness_bar():
+    from django.conf import settings
+
+    from portfolio.services.valuation import _FRESH_SECONDS
+
+    for name in (
+        "MARKETDATA_LIVE_INTERVAL_OPEN",
+        "MARKETDATA_LIVE_INTERVAL_DAYTIME",
+        "MARKETDATA_LIVE_INTERVAL_OVERNIGHT",
+    ):
+        interval = getattr(settings, name)
+        assert interval < _FRESH_SECONDS, (
+            f"{name}={interval} is not below the {_FRESH_SECONDS}s freshness bar, "
+            "so a healthy loop still reports its own prices as stale."
+        )

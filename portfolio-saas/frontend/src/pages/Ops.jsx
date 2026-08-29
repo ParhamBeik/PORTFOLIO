@@ -634,7 +634,29 @@ function TablesPanel({ overview }) {
       key: "delta_7d",
       header: "7d Δ",
       align: "right",
-      render: (r) => (r.delta_7d == null ? "—" : <Delta value={r.delta_7d} format={(v) => num(v)} />),
+      // A table cannot shed more rows than it holds through ordinary churn, so a
+      // delta that large is a deletion -- a purge or a migration -- not a
+      // collapsing ingest. Candles showed -5,786,949 against 1,734,366 stored
+      // and read as a catastrophe with nothing to say otherwise.
+      render: (r) =>
+        r.delta_7d == null ? (
+          "—"
+        ) : (
+          <span
+            title={
+              Number(r.delta_7d) < -Number(r.count || 0)
+                ? "Larger than the table itself — rows were deleted in bulk (a purge or migration), not lost by the ingest."
+                : undefined
+            }
+          >
+            <Delta value={r.delta_7d} format={(v) => num(v)} />
+            {Number(r.delta_7d) < -Number(r.count || 0) && (
+              <span className="ml-1 text-muted" data-testid="ops-tables-bulk-delete">
+                (bulk delete)
+              </span>
+            )}
+          </span>
+        ),
     },
     { key: "latest", header: "Latest data", render: (r) => dateTime(r.latest) },
   ];

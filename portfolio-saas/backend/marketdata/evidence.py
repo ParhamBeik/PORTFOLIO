@@ -21,7 +21,17 @@ from .models import (
 )
 from .provenance import latest_archive_close
 
+# How old a live quote may be before it stops counting as current.
+#
+# THE one definition: `portfolio.services.valuation._FRESH_SECONDS` used to keep
+# a second literal 300 for the same question, and two constants for one concept
+# is how thresholds drift apart. The poll cadence must stay strictly under this
+# (see MARKETDATA_LIVE_INTERVAL_* and the guard in test_price_pipeline) -- when
+# the off-hours interval also sat at 300 a price went stale exactly as its
+# replacement fell due, so held assets flipped Fresh/Stale all day on a feed that
+# was working perfectly.
 LIVE_PRICE_FRESH_SECONDS = 300
+
 WORKFLOW_LIMIT = 25
 REJECT_SAMPLE = 15
 
