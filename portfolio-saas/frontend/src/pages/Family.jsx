@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { getPerformance, snapshots, valuation } from "../api.js";
 import { Donut, MultiLineTrend, StackedShareTrend } from "../components/charts.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
@@ -212,6 +213,7 @@ function PerformanceTable({ accounts, basis }) {
     <Card title="Performance by portfolio" testId="breakdown-performance">
       <Async {...state} testId="breakdown-performance-body">
         {(rows) => (
+          <>
           <Table
             testId="breakdown-performance-table"
             rowKey={(r) => r.id}
@@ -252,6 +254,20 @@ function PerformanceTable({ accounts, basis }) {
               },
             ]}
           />
+          {/* The same explanation the dashboard card carries. Without it this
+              table said "available after 71 more days" while My Optimal printed
+              a 1-year return and Comparison a 90-day one for the same holdings,
+              and the three read as three answers to one question. */}
+          {rows.some((r) => !r.performance_available) && (
+            <p className="mt-3 text-xs text-muted" data-testid="breakdown-performance-note">
+              These measure the return on the money put in, which needs a tracked
+              opening balance. Price-based returns for the same holdings are
+              already available on{" "}
+              <Link to="/optimal" className="underline hover:text-text">My Optimal</Link>{" "}
+              and <Link to="/comparison" className="underline hover:text-text">Comparison</Link>.
+            </p>
+          )}
+          </>
         )}
       </Async>
     </Card>
