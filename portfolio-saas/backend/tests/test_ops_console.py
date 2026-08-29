@@ -1238,3 +1238,30 @@ def test_a_property_is_listed_by_its_owners_name_not_its_class(db):
     assert names["re-abc123"] == "خونه کرج"
     # A shared catalog row has no owner and keeps the catalog's own name.
     assert names["usd_cash"] == "US Dollar"
+
+
+def test_a_stale_baseline_reports_unknown_rather_than_a_longer_delta(db):
+    """Only the upper bound was set, so "24h change" had no lower bound.
+
+    Let snapshot capture stall and the panel went on calling the change since
+    whenever-it-last-ran a one-day figure -- sized like several, on the widget
+    whose only job is to say whether ingest is moving.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from marketdata.admin_telemetry import _fill_rates
+    from marketdata.models import OperationalMetricSnapshot
+
+    now = timezone.now()
+    # Eight days old: a valid 7-day baseline, far too old to be a 24-hour one.
+    OperationalMetricSnapshot.objects.create(
+        captured_at=now - timedelta(days=8),
+        database_counts={"candles": 1_000_000}, table_bytes={"candles": 10},
+    )
+
+    rates = _fill_rates({"candles": 1_500_000}, {"candles": 20})
+
+    assert rates["candles"]["delta_24h"] is None
+    assert rates["candles"]["delta_7d"] == 500_000

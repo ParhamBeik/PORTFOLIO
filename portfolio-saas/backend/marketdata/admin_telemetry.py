@@ -541,18 +541,29 @@ def _workflow_15m():
     }
 
 
+def _baseline_snapshot(now, age, tolerance):
+    """Newest snapshot at least `age` old, but not so old it answers a different question.
+
+    Only the upper bound used to be set, so the query took the newest row at or
+    before the cutoff with nothing saying how far before. Let snapshot capture
+    stall over a weekend and the "24h change" silently became the change since
+    whenever it last ran -- a figure the operator reads as one day, sized like
+    several, on the panel whose whole job is to say whether ingest is moving.
+    With no baseline close enough to the age asked for, there is no honest
+    answer and the delta is reported as unknown.
+    """
+    return (
+        OperationalMetricSnapshot.objects
+        .filter(captured_at__lte=now - age, captured_at__gte=now - age - tolerance)
+        .order_by("-captured_at")
+        .first()
+    )
+
+
 def _fill_rates(counts, table_bytes):
     now = timezone.now()
-    snap_24h = (
-        OperationalMetricSnapshot.objects.filter(captured_at__lte=now - timedelta(hours=24))
-        .order_by("-captured_at")
-        .first()
-    )
-    snap_7d = (
-        OperationalMetricSnapshot.objects.filter(captured_at__lte=now - timedelta(days=7))
-        .order_by("-captured_at")
-        .first()
-    )
+    snap_24h = _baseline_snapshot(now, timedelta(hours=24), timedelta(hours=24))
+    snap_7d = _baseline_snapshot(now, timedelta(days=7), timedelta(days=7))
     rates = {}
     for key in DATABASE_MODELS:
         prev24 = (snap_24h.database_counts or {}).get(key) if snap_24h else None
