@@ -937,6 +937,20 @@ def _rescale(valuation, factor, *, to_foreign_currency=False):
                 if item.get(field) is not None:
                     item[field] = float(Decimal(str(item[field])) / factor)
 
+    def scale_liabilities(rows):
+        # `total_liabilities` below is the sum of exactly these rows. Converting
+        # the sum and not its addends is the same trap one line further down,
+        # one level deeper: an itemised debt list that does not add up to the
+        # total printed above it, in a payload that has declared its basis.
+        # `value_user` rebuilds these as fresh dicts per account, so the root
+        # list and the per-account lists are separate objects and each is
+        # divided exactly once.
+        for row in rows or []:
+            if row.get("amount_tomans") is not None:
+                row["amount_tomans"] = float(
+                    Decimal(str(row["amount_tomans"])) / factor
+                )
+
     valuation["total"] = Decimal(str(valuation.get("total", 0) or 0)) / factor
     if valuation.get("total_usd") is not None:
         valuation["total_usd"] = Decimal(str(valuation["total_usd"])) / factor
@@ -952,6 +966,7 @@ def _rescale(valuation, factor, *, to_foreign_currency=False):
     # the counted ones even though they are absent from the total.
     scale_items(valuation.get("items"))
     scale_items(valuation.get("hidden_items"))
+    scale_liabilities(valuation.get("liabilities"))
     for account in valuation.get("accounts") or []:
         if account.get("total") is not None:
             account["total"] = Decimal(str(account["total"])) / factor
@@ -964,6 +979,7 @@ def _rescale(valuation, factor, *, to_foreign_currency=False):
             )
         scale_items(account.get("items"))
         scale_items(account.get("hidden_items"))
+        scale_liabilities(account.get("liabilities"))
     return valuation
 
 

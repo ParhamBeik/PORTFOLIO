@@ -893,6 +893,41 @@ def test_liability_netting_in_valuation(db, make_user):
     assert val["total_liabilities"] == 300000.0
 
 
+def test_itemised_debts_convert_with_the_total_they_add_up_to(
+    db, make_user, asset_catalog, write_prices
+):
+    """Under a foreign basis, `liabilities[]` must not stay in Toman.
+
+    `_rescale` converted `total_liabilities` but not the rows it is the sum of,
+    so a dollar-denominated payload carried an itemised debt list that did not
+    add up to the total printed above it -- the "deflated on one basis but not
+    the other" trap that walk exists to close, one level deeper than it reached.
+    """
+    user = make_user(email="debtbasis@test.test")
+    account = Account.objects.create(name="Leveraged", user=user)
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("1")
+    )
+    Liability.objects.create(
+        account=account, label="Mortgage", amount_tomans=Decimal("420000000")
+    )
+    Liability.objects.create(
+        account=account, label="Car loan", amount_tomans=Decimal("42000000")
+    )
+    write_prices({"emami_coin": Decimal("1000000000"), "usd_cash": Decimal("420000")})
+
+    client = APIClient()
+    client.force_authenticate(user=user)
+    payload = client.get("/api/valuation/?basis=usd_denominated").json()
+
+    assert payload["basis"] == "usd_denominated"
+    rows = payload["liabilities"]
+    assert sorted(round(r["amount_tomans"], 2) for r in rows) == [100.0, 1000.0]
+    assert round(sum(r["amount_tomans"] for r in rows), 2) == round(
+        payload["total_liabilities"], 2
+    )
+
+
 def test_house_mortgage_is_deducted_exactly_once(db, make_user):
     """A mortgage lives in Liability now, so the house must be valued gross."""
     user = make_user(email="house@test.test")
