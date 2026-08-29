@@ -479,7 +479,7 @@ function PerformanceCard({ activeId, basis, accounts }) {
                   columns={[
                     { key: "asset", header: "Asset", render: (r) => r.asset_name },
                     { key: "qty", header: "Quantity", align: "right", render: (r) => num(r.quantity, 4) },
-                    { key: "avg", header: "Avg cost", align: "right", render: (r) => toman(r.average_cost_tomans) },
+                    { key: "avg", header: "Avg cost", align: "right", render: (r) => unitPrice(r.average_cost_tomans, r.average_cost_currency) },
                     { key: "basis", header: "Cost basis", align: "right", render: (r) => toman(r.total_cost_basis_tomans) },
                     { key: "realized", header: "Realized P&L", align: "right", render: (r) => <Delta value={r.realized_pnl_tomans} format={signedToman} /> },
                     { key: "unrealized", header: "Unrealized P&L", align: "right", render: (r) => <Delta value={r.unrealized_pnl_tomans} format={signedToman} /> },

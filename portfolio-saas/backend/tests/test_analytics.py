@@ -120,6 +120,52 @@ def test_buy_entry_with_null_price_never_reports_numeric_unrealized_pnl(
     assert row["unrealized_pnl_tomans"] is None
 
 
+def test_average_cost_declares_rial_while_its_own_cost_basis_is_toman(
+    make_user, asset_catalog
+):
+    """A TSE row's unit cost and its cost basis are ten apart, and must say so.
+
+    `average_cost_tomans` is not Toman for a TSE share: it is the Rial quote the
+    user typed, left alone because it is a unit price. `total_cost_basis_tomans`
+    beside it is a product and has been divided. Rendering the pair with one
+    Toman suffix printed the average cost ten times over and put two columns
+    that cannot be multiplied out next to each other.
+    """
+    account = Account.objects.create(
+        user=make_user(email="rialcost@test.test"), name="Test"
+    )
+    create_ledger_entry(
+        account=account,
+        kind=LedgerEntry.Kind.BUY,
+        asset=asset_catalog["kama_stock"],
+        quantity=Decimal("100"),
+        unit_price_tomans=Decimal("46348"),  # Rial, as TSE quotes it
+        occurred_at=timezone.now() - dt.timedelta(days=200),
+    )
+
+    row = _position_metrics(account)["kama_stock"]
+
+    assert row["average_cost_currency"] == "rial"
+    assert Decimal(row["average_cost_tomans"]) == Decimal("46348")
+    # The product converted; the unit price did not.
+    assert Decimal(row["total_cost_basis_tomans"]) == Decimal("463480")
+
+    gold = Account.objects.create(
+        user=make_user(email="tomancost@test.test"), name="Gold"
+    )
+    create_ledger_entry(
+        account=gold,
+        kind=LedgerEntry.Kind.BUY,
+        asset=asset_catalog["emami_coin"],
+        quantity=Decimal("2"),
+        unit_price_tomans=Decimal("500000000"),
+        occurred_at=timezone.now() - dt.timedelta(days=200),
+    )
+    gold_row = _position_metrics(gold)["emami_coin"]
+    assert gold_row["average_cost_currency"] == "toman"
+    assert Decimal(gold_row["total_cost_basis_tomans"]) == Decimal("1000000000")
+
+
 def test_reversed_deposit_is_fully_excluded_from_cashflows(make_user):
     account = _cash_account(make_user, "reversal@test.test", opened_days_ago=100)
     deposit = create_ledger_entry(
