@@ -941,12 +941,67 @@ def _jalali_date(when) -> str:
 
 
 def _latest_live_price(asset: Asset) -> Decimal | None:
+    """Newest live row for `asset`, in the unit a ledger entry stores.
+
+    Every caller writes the answer to `LedgerEntry.price_tomans`, so the one
+    conversion the Price table needs has to happen here. `bitcoin_usd` and
+    `gold_ounce_usd` are quoted in DOLLARS by the provider and stored that way
+    (`returns.USD_QUOTED_KEYS` is where that convention is declared, and the
+    returns panel converts them by hand for the same reason). Returned verbatim,
+    a Bitcoin buy saved with the price field blank persisted about 95,000 as a
+    Toman price -- the identical mistake `currency.to_toman` was written to stop
+    ("one Bitcoin valued at ~64,500 Toman"), reached by a path that never calls
+    it. TSE rows are deliberately NOT converted: a stock's stored price is Rial
+    on purpose and `holding_value_to_toman` divides the product instead.
+
+    With no rate to convert by, this answers None rather than the dollar figure.
+    Refusing is the only safe reading of "I know this is dollars and I have no
+    rate"; the caller already raises a clear PriceResolutionError from None.
+    """
     from portfolio.models import Price
 
+    from .returns import USD_QUOTED_KEYS
+
     row = Price.objects.filter(asset=asset).order_by("-fetched_at").first()
-    if row and row.price > 0:
-        return Decimal(str(row.price))
-    return None
+    if not row or row.price <= 0:
+        return None
+    price = Decimal(str(row.price))
+    if asset.key in USD_QUOTED_KEYS:
+        rate = _latest_usd_toman_rate()
+        return price * rate if rate else None
+    return price
+
+
+def _live_price_fetched_today(asset: Asset) -> Decimal | None:
+    """The live price, but only if it was actually observed today.
+
+    "Today" rather than the 5-minute freshness bar on purpose: with the market
+    shut, the last tick of the session is the right price for a trade dated
+    today, and it is hours old by design. A price from a previous day is not --
+    that is a dead feed, and the warehouse close is the better answer.
+    """
+    from portfolio.models import Price
+
+    row = (
+        Price.objects.filter(asset=asset, price__gt=0)
+        .order_by("-fetched_at")
+        .first()
+    )
+    if row is None or _jalali_date(row.fetched_at) != _jalali_date(timezone.now()):
+        return None
+    return _latest_live_price(asset)
+
+
+def _latest_usd_toman_rate() -> Decimal | None:
+    """Live Toman-per-dollar, from the same `usd_cash` row the panel uses."""
+    from portfolio.models import Price
+
+    row = (
+        Price.objects.filter(asset__key="usd_cash", price__gt=0)
+        .order_by("-fetched_at")
+        .first()
+    )
+    return Decimal(str(row.price)) if row else None
 
 
 def _daily_bar_or_live_price(asset: Asset, j_date: str) -> Decimal:
@@ -1026,6 +1081,20 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
         return price
 
     j_date = _jalali_date(when)
+    # Today has no close yet. The warehouse backfills a session after the bell,
+    # so asking it for today's price answers with YESTERDAY's -- and the wizard
+    # promises "the market price" while the dashboard, a second later, values the
+    # new holding at the live one. That is the coin booked at 30,000,000 and
+    # shown at 31,000,000: a cost basis that is wrong the moment it is written,
+    # and a phantom gain on a position bought seconds ago. Between the bell and
+    # the backfill the last live tick IS the price, which is the rule the
+    # valuation paths already follow. Only for a price fetched today, so a dead
+    # feed still falls through to the warehouse rather than booking a stale tick.
+    if j_date == _jalali_date(timezone.now()):
+        live = _live_price_fetched_today(asset)
+        if live is not None:
+            return live
+
     if asset.asset_class == Asset.AssetClass.STOCK and asset.tse_symbol:
         candle = MarketCandle.objects.filter(
             symbol=asset.tse_symbol,

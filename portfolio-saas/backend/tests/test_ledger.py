@@ -19,7 +19,7 @@ from rest_framework.test import APIClient
 import config.settings as settings_module
 from marketdata.models import MarketCandle, GoldCurrencyHistory
 from marketdata.models import MarketCandle, RejectedRecord
-from portfolio.models import Account, Asset, Holding, Transaction
+from portfolio.models import Account, Asset, Holding, Price, Transaction
 from portfolio.models import Account, Holding, LedgerEntry
 from portfolio.models import Account, Holding, LedgerEntry, Snapshot, Transaction
 from portfolio.serializers import TradeInputSerializer
@@ -1976,3 +1976,84 @@ def test_declaring_a_holding_you_already_own_never_spends_cash(
     assert Holding.objects.get(
         account=ledger_account, asset=asset_catalog["half_coin"]
     ).quantity == Decimal("3")
+
+
+def test_a_dollar_quoted_live_price_is_converted_before_it_becomes_a_ledger_price():
+    """Unit test: one conversion rule, checked where it turns into durable data.
+
+    `bitcoin_usd` is quoted and stored in DOLLARS (see `returns.USD_QUOTED_KEYS`).
+    With no daily bar to fall back on, the resolver reached the raw Price row and
+    wrote ~95,000 into `LedgerEntry.price_tomans` -- the same mistake
+    `currency.to_toman` exists to refuse, on a path that never calls it.
+    """
+    from portfolio.services.ledger import resolve_historical_price
+
+    asset = Asset.objects.create(
+        key="bitcoin_usd", name="Bitcoin", is_active=True,
+        asset_class=Asset.AssetClass.CRYPTO,
+    )
+    usd = Asset.objects.create(
+        key="usd_cash", name="US Dollar", is_active=True,
+        asset_class=Asset.AssetClass.CASH,
+    )
+    Price.objects.create(asset=asset, price=Decimal("95000"), source="API")
+    Price.objects.create(asset=usd, price=Decimal("60000"), source="API")
+
+    assert resolve_historical_price(asset, timezone.now()) == Decimal("5700000000")
+
+
+def test_a_dollar_quote_with_no_rate_refuses_rather_than_storing_dollars():
+    from portfolio.services.ledger import PriceResolutionError, resolve_historical_price
+
+    asset = Asset.objects.create(
+        key="gold_ounce_usd", name="Gold Ounce", is_active=True,
+        asset_class=Asset.AssetClass.GOLD,
+    )
+    Price.objects.create(asset=asset, price=Decimal("2400"), source="API")
+
+    with pytest.raises(PriceResolutionError):
+        resolve_historical_price(asset, timezone.now())
+
+
+def test_a_trade_dated_today_books_at_the_live_price_not_yesterdays_close():
+    """Unit test: the warehouse has no close for today until after the bell.
+
+    The wizard promises "the market price", then the dashboard values the new
+    holding at the live one -- so booking yesterday's close wrote a cost basis
+    that was wrong on arrival and showed a gain on a position seconds old.
+    """
+    from portfolio.services.ledger import resolve_historical_price
+
+    asset = Asset.objects.create(
+        key="quarter_coin", name="Quarter coin", is_active=True,
+        asset_class=Asset.AssetClass.GOLD, brs_symbol="IR_COIN_QUARTER",
+    )
+    yesterday = jdatetime.date.fromgregorian(
+        date=(timezone.now() - dt.timedelta(days=1)).date()
+    ).strftime("%Y-%m-%d")
+    GoldCurrencyHistory.objects.create(
+        symbol="IR_COIN_QUARTER", date=yesterday,
+        close_price=Decimal("30000000"), unit="تومان",
+    )
+    Price.objects.create(asset=asset, price=Decimal("31000000"), source="API")
+
+    assert resolve_historical_price(asset, timezone.now()) == Decimal("31000000")
+
+
+def test_a_backdated_trade_still_reads_the_warehouse():
+    from portfolio.services.ledger import resolve_historical_price
+
+    asset = Asset.objects.create(
+        key="half_coin", name="Half coin", is_active=True,
+        asset_class=Asset.AssetClass.GOLD, brs_symbol="IR_COIN_HALF",
+    )
+    when = timezone.now() - dt.timedelta(days=3)
+    j_when = jdatetime.date.fromgregorian(date=when.date()).strftime("%Y-%m-%d")
+    GoldCurrencyHistory.objects.create(
+        symbol="IR_COIN_HALF", date=j_when,
+        close_price=Decimal("50000000"), unit="تومان",
+    )
+    # A live row exists but says nothing about a day three days gone.
+    Price.objects.create(asset=asset, price=Decimal("99000000"), source="API")
+
+    assert resolve_historical_price(asset, when) == Decimal("50000000")
