@@ -61,7 +61,23 @@ export const money = (n, basis) =>
 export const unitPrice = (n, currency, basis = "nominal_toman") => {
   // Under a foreign basis the server has already converted the quote, so the
   // Rial/Toman distinction no longer applies -- it is dollars either way.
-  if (basis === "usd_denominated" || basis === "usdt_denominated") return money(n, basis);
+  if (basis === "usd_denominated" || basis === "usdt_denominated") {
+    const v = Number(n);
+    // Two decimals is right for a $154 coin and wrong for a 4.6-cent share: a
+    // TSE stock converted to dollars rounds $0.046348 to "$0.05", and the 100,000
+    // shares beside it turn that 8% into $5,000 against a value column reading
+    // $4,634.78. Columns that do not multiply out is the very complaint the
+    // Rial/Toman labelling was added to answer, so a sub-unit price keeps enough
+    // digits to survive the quantity it is multiplied by.
+    if (!bad(v) && v !== 0 && Math.abs(v) < 1) {
+      const digits = v.toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 6,
+      });
+      return basis === "usd_denominated" ? "$" + digits : digits + " USDT";
+    }
+    return money(n, basis);
+  }
   return currency === "rial" ? rial(n) : toman(n);
 };
 
