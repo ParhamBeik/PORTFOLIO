@@ -1152,6 +1152,10 @@ def compute_dynamic_net_worth_series(
         # on both sides too; a debt whose asset sat the day out sits it out with
         # the asset it is secured on.
         paired_keys: set[str] = set()
+        # Yesterday's WHOLE book at yesterday's prices, pair or no pair. The
+        # denominator for spreading an unsecured loan, which is charged against
+        # all of it rather than against the part that happened to price twice.
+        held_base = Decimal("0")
         # The same day priced with YESTERDAY's quantities. `total` moves for two
         # unrelated reasons -- prices moved, or the book changed -- and only the
         # first is performance. Recording a position you already owned is a
@@ -1220,8 +1224,15 @@ def compute_dynamic_net_worth_series(
                     total_ex_flows += house_value
                     total_ex_flows_at_prior_prices += prev_house_value
                     paired_keys.add(key)
+                    held_base += prev_house_value
                 house_values[key] = house_value
             else:
+                # Yesterday's value of this holding, counted whether or not today
+                # prices out. The pair may drop it; the unsecured loan is still
+                # charged against it, so it belongs in that denominator.
+                prev_p = prev_day_prices.get(key)
+                if prev_qty > 0 and prev_p is not None:
+                    held_base += holding_value_to_toman(asset, prev_qty * prev_p)
                 p = stock_closes.get(jalali_str, {}).get(key)
                 if p is None:
                     p = gold_closes.get(jalali_str, {}).get(key)
@@ -1251,7 +1262,6 @@ def compute_dynamic_net_worth_series(
                 # dropped by the forward-fill guard cannot book a one-day loss
                 # equal to its whole weight and, the index being a running
                 # product, never recover from it.
-                prev_p = prev_day_prices.get(key)
                 if prev_qty > 0 and prev_p is not None:
                     total_ex_flows += holding_value_to_toman(asset, prev_qty * p)
                     total_ex_flows_at_prior_prices += holding_value_to_toman(
@@ -1267,10 +1277,27 @@ def compute_dynamic_net_worth_series(
         # 16.7% gain to them -- reporting 10% understates every leveraged day.
         # The debt is constant across the window (one figure read once, above),
         # so carrying it on both sides cannot invent a flow.
-        paired_liabilities = unattached_liabilities + sum(
+        #
+        # A secured debt rides with its own asset, so it is in the pair exactly
+        # when that asset is. An UNSECURED loan is against the whole book, and
+        # the pair is only ever part of it -- an asset bought today, or dropped
+        # by the forward-fill guard, is in neither side. Charging the whole loan
+        # to that smaller base levers the day up: 1,500 + 500 against a loan of
+        # 800 reads +1.25% on a 1% move, but +2.14% on a day the 500 has no
+        # price, and the index is a running product that never gives it back.
+        # Pro-rated to the share of yesterday's book that the pair represents.
+        # This does not claim to be the return on a book we cannot fully price;
+        # it keeps the leverage proportionate to the part we can.
+        secured = sum(
             (liability_by_key[key] for key in paired_keys if key in liability_by_key),
             Decimal("0"),
         )
+        unsecured = unattached_liabilities
+        if unsecured > 0 and held_base > 0:
+            unsecured = unsecured * (total_ex_flows_at_prior_prices / held_base)
+        elif unsecured > 0:
+            unsecured = Decimal("0")
+        paired_liabilities = secured + unsecured
         total_ex_flows -= paired_liabilities
         total_ex_flows_at_prior_prices -= paired_liabilities
         val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None

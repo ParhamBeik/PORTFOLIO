@@ -486,7 +486,7 @@ def tracked_tse_symbols() -> list[str]:
 
 
 def tracked_brs_symbols() -> list[str]:
-    """BrsApi gold/currency symbols to sync: active portfolio assets + all catalog-eligible BRS symbols."""
+    """BrsApi gold/currency symbols to sync: active portfolio assets + all catalog-eligible BRS gold/currency symbols."""
     from portfolio.models import Asset
     from .models import MarketInstrument
 
@@ -501,6 +501,7 @@ def tracked_brs_symbols() -> list[str]:
     catalog_symbols = list(
         MarketInstrument.objects.filter(
             source=MarketInstrument.Source.BRS,
+            category__in=("gold", "currency"),
             eligible=True,
         ).values_list("symbol", flat=True)
     )

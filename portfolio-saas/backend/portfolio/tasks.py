@@ -187,18 +187,29 @@ def _write_prices(priced: dict, *, sources: dict | None = None) -> None:
         a.key: a
         for a in Asset.objects.filter(key__in=priced.keys(), is_active=True)
     }
-    latest_prices = {
-        row.asset.key: Decimal(str(row.price))
+    latest_rows = {
+        row.asset.key: row
         for row in Price.objects.select_related("asset")
         .filter(asset__key__in=priced.keys(), price__gt=0)
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     }
+    latest_prices = {key: Decimal(str(row.price)) for key, row in latest_rows.items()}
     rows = []
     for key, value in priced.items():
         if key not in assets:
             continue
         source = sources.get(key, "API")
+        # The owner's own mark outranks the settings default. `MANUAL_PRICES` is
+        # a fallback for a bar nobody has priced by hand, but the extractor
+        # injects it into the live map on EVERY cycle, so editing a Swiss bar on
+        # the dashboard saved and was overwritten by the constant about four
+        # minutes later -- the edit box worked and the number would not stay.
+        # `record_manual_price` writes source "manual"; this path writes
+        # "MANUAL", so the two are distinguishable.
+        held = latest_rows.get(key)
+        if source == "MANUAL" and held is not None and held.source == "manual":
+            continue
         # A repeat of a price nobody re-observed is not an observation. Archive
         # replays and manual constants both re-present the same number every
         # cycle, so writing a row for them restamped `fetched_at` and made the

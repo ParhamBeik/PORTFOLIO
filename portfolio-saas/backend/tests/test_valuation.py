@@ -2343,3 +2343,46 @@ def test_a_bitcoin_holding_is_worth_billions_not_thousands(asset_catalog, make_u
     }))
 
     assert result["total"] == Decimal("11400000000")
+
+
+def test_an_unsecured_loan_is_spread_over_the_book_not_charged_to_the_pair(
+    asset_catalog, write_prices, make_user
+):
+    """A loan secured on nothing is charged against the WHOLE book.
+
+    The matched pair is only ever part of it -- an asset bought today, or one
+    dropped by the forward-fill guard, is in neither side. Charging the whole
+    loan to that smaller base levers the day up, and `_twr_index` is a running
+    product that never gives it back. Pro-rated to the share of yesterday's book
+    the pair represents, so the leverage stays proportionate to what is measured.
+    """
+    from portfolio.models import Liability
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+
+    write_prices({
+        "emami_coin": Decimal("1000000"),
+        "half_coin": Decimal("500000"),
+        "usd_cash": Decimal("60000"),
+    })
+    user = make_user(email="unsecured-loan@test.test")
+    account = Account.objects.create(user=user, name="Levered")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("1"),
+    )
+    Holding.objects.create(
+        account=account, asset=asset_catalog["half_coin"], quantity=Decimal("1"),
+    )
+    Liability.objects.create(
+        account=account, label="Personal loan", amount_tomans=Decimal("800000"),
+    )
+
+    series = compute_dynamic_net_worth_series(user, account, days=4)
+
+    # Net worth is assets minus the loan, on every day of the window.
+    assert Decimal(series[-1]["total"]) == Decimal("700000")
+    for point in series[1:]:
+        base = Decimal(point["total_ex_flows_base"])
+        paired = Decimal(point["total_ex_flows"])
+        # The loan never exceeds the book it is spread over, so neither side of
+        # the pair can go negative and flip the index through zero.
+        assert base >= 0 and paired >= 0

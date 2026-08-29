@@ -96,9 +96,11 @@ export default function App() {
               <Route index element={<RequireHoldings><Dashboard user={user} /></RequireHoldings>} />
               <Route path="/optimal" element={<MyOptimal />} />
               <Route path="/universe" element={<BestOverall />} />
+              <Route path="/best-overall" element={<Navigate to="/universe" replace />} />
               <Route path="/onboarding" element={<Onboarding />} />
               <Route path="/ledger" element={<Ledger />} />
               <Route path="/family" element={<Family />} />
+              <Route path="/breakdown" element={<Navigate to="/family" replace />} />
               <Route path="/comparison" element={<Comparison />} />
               <Route path="/ops" element={<Ops user={user} />} />
               <Route path="*" element={<Navigate to="/" replace />} />

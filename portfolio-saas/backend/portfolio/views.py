@@ -955,6 +955,13 @@ def _rescale(valuation, factor, *, to_foreign_currency=False):
     for account in valuation.get("accounts") or []:
         if account.get("total") is not None:
             account["total"] = Decimal(str(account["total"])) / factor
+        # `value_user` puts a `total_liabilities` on every account as well as on
+        # the root, so converting only the root left the aggregate debt in
+        # dollars beside each account's debt in Toman, in one payload.
+        if account.get("total_liabilities") is not None:
+            account["total_liabilities"] = float(
+                Decimal(str(account["total_liabilities"])) / factor
+            )
         scale_items(account.get("items"))
         scale_items(account.get("hidden_items"))
     return valuation
@@ -968,7 +975,15 @@ def _express_usd_real(valuation: dict, basis: str = "usd_denominated") -> dict:
         _rescale(valuation, rate, to_foreign_currency=True)
         # Past this point the total *is* the USD/USDT figure.
         valuation["total_usd"] = valuation["total"]
-    valuation["basis"] = basis
+        valuation["basis"] = basis
+    else:
+        # No rate -- currency fetch down, or a cold cache -- so nothing was
+        # converted and the figures are still Toman. Stamping the requested
+        # basis anyway was survivable while the client read the picker and was
+        # wrong in the same direction; now that it trusts this field, saying
+        # "usd_denominated" over Toman renders a 33-billion-Toman portfolio as
+        # $33,600,000,000. The snapshot endpoint answers the same way.
+        valuation["basis"] = "nominal_toman"
     valuation["conversion_source"] = source
     return valuation
 

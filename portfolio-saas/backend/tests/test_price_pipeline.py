@@ -1748,3 +1748,51 @@ def test_an_unchanged_manual_price_is_not_restamped(db):
 
     assert Price.objects.filter(asset=asset).count() == 2
     assert first.source == "MANUAL"
+
+
+def test_an_owners_manual_price_is_not_overwritten_by_the_settings_default(db, settings):
+    """`MANUAL_PRICES` is a fallback, not an override.
+
+    The extractor injects the constant into the live map on every cycle, so a
+    Swiss bar edited on the dashboard saved and was overwritten about four
+    minutes later. The edit box worked; the number just would not stay.
+    """
+    from decimal import Decimal
+
+    from portfolio.models import Asset, Price
+    from portfolio.services.ledger import record_manual_price
+    from portfolio.tasks import _write_prices
+
+    asset = Asset.objects.create(
+        key="swiss_gold_bar_1g", name="Swiss bar 1g", is_active=True,
+        asset_class=Asset.AssetClass.GOLD, is_manual=True,
+    )
+    record_manual_price(asset, Decimal("31000000"))
+
+    # One ordinary fetch cycle, carrying the unchanged settings constant.
+    _write_prices(
+        {"swiss_gold_bar_1g": Decimal("25900000")},
+        sources={"swiss_gold_bar_1g": "MANUAL"},
+    )
+
+    latest = Price.objects.filter(asset=asset).order_by("-fetched_at", "-id").first()
+    assert latest.price == Decimal("31000000")
+    assert latest.source == "manual"
+
+
+def test_the_settings_default_still_prices_a_bar_nobody_has_marked(db):
+    from decimal import Decimal
+
+    from portfolio.models import Asset, Price
+    from portfolio.tasks import _write_prices
+
+    asset = Asset.objects.create(
+        key="swiss_gold_bar_2_5g", name="Swiss bar 2.5g", is_active=True,
+        asset_class=Asset.AssetClass.GOLD, is_manual=True,
+    )
+    _write_prices(
+        {"swiss_gold_bar_2_5g": Decimal("61610000")},
+        sources={"swiss_gold_bar_2_5g": "MANUAL"},
+    )
+
+    assert Price.objects.get(asset=asset).price == Decimal("61610000")

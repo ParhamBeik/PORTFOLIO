@@ -350,7 +350,16 @@ function AllocationCard({ state }) {
         {(data) => {
           const groups = groupByClass(data.items || []);
           if (!groups.length) return <Empty>No priced holdings yet.</Empty>;
-          return <Donut data={groups} testId="dashboard-donut" />;
+          // `Donut` defaults its tooltip to Toman, so this was the last panel on
+          // the page still suffixing a converted dollar amount " T" after the
+          // hero, the rows and the trend chart were relabelled.
+          return (
+            <Donut
+              data={groups}
+              testId="dashboard-donut"
+              valueFormat={(v) => money(v, data.basis)}
+            />
+          );
         }}
       </Async>
     </Card>
