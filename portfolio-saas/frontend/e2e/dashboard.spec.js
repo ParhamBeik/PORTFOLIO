@@ -1,6 +1,23 @@
 import { test, expect } from "@playwright/test";
 import { clickTab, requireLogin } from "./helpers.js";
 
+/**
+ * `toBeVisible()` is not enough for a cell in a horizontally scrolling table.
+ *
+ * The holdings table is 12 columns wide and overflows its card, so a Save or
+ * Delete button appended as the LAST column sat hundreds of pixels past the
+ * right edge — present, non-empty, "visible" to Playwright, and unreachable to
+ * the reader, who concluded the buttons did nothing. This asserts the thing the
+ * user actually needs: the control is inside the scrolled viewport, unscrolled.
+ */
+async function expectWithinScrollView(locator, containerTestId, page) {
+  const box = await locator.boundingBox();
+  const container = await page.getByTestId(containerTestId).boundingBox();
+  expect(box, "control has no box").not.toBeNull();
+  expect(box.x).toBeGreaterThanOrEqual(container.x - 1);
+  expect(box.x + box.width).toBeLessThanOrEqual(container.x + container.width + 1);
+}
+
 test.describe("dashboard", () => {
   test.beforeEach(async ({ page }) => {
     await requireLogin(page, test);
@@ -37,6 +54,26 @@ test.describe("dashboard", () => {
     }
   });
 
+  test("the vs-inflation view names the rate it divided by", async ({ page }) => {
+    if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
+      test.skip(true, "account has no holdings (onboarding)");
+    }
+    await page.getByTestId("nav-portfolio").click();
+    await expect(page.getByTestId("dashboard-trend-basis")).toBeVisible({ timeout: 20000 });
+    await clickTab(page, "dashboard-trend-basis", "real");
+
+    // Two diverging lines and no number is unfalsifiable: a projection running
+    // at triple the published pace draws the same picture as a correct one.
+    // Either the rate is on screen, or the series honestly refused to compute.
+    const note = page.getByTestId("dashboard-trend-real-note");
+    const failed = page.getByTestId("dashboard-trend-real-error");
+    await expect(note.or(failed).first()).toBeVisible({ timeout: 20000 });
+    if (await note.count()) {
+      await expect.soft(note).toContainText("%");
+      await expect.soft(page.getByTestId("dashboard-trend-cpi-source")).toBeVisible();
+    }
+  });
+
   test("all-portfolios exposes edit and delete controls from card header", async ({ page }) => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
@@ -53,8 +90,14 @@ test.describe("dashboard", () => {
     const qtyEdit = page.getByTestId("dashboard-holdings-edit-qty").first();
     if (await qtyEdit.count()) {
       await expect.soft(qtyEdit).toBeVisible();
-      await expect.soft(page.getByTestId("dashboard-holdings-save").first()).toBeVisible();
+      const save = page.getByTestId("dashboard-holdings-save").first();
+      await expect.soft(save).toBeVisible();
+      await expectWithinScrollView(save, "dashboard-holdings", page);
     }
+    // Every holding is renamable, not just house and manual rows.
+    await expect
+      .soft(page.getByTestId("dashboard-holdings-edit-name").first())
+      .toBeVisible();
   });
 
   test("basis switch if present", async ({ page }) => {
@@ -105,10 +148,33 @@ test.describe("dashboard", () => {
     if (await priceEdit.count()) {
       await expect.soft(priceEdit).toBeVisible();
     }
+
+    // The quantity spinner has to move in whole units for a counted asset. A
+    // step of "any" walked stock positions in fractions of a share, and the
+    // arrow key is the fastest way to prove which one the box is offering:
+    // a counted row goes 12 -> 13, never 12 -> 12.0001.
+    if (await qtyEdit.count()) {
+      const step = await qtyEdit.getAttribute("step");
+      expect.soft(step, "quantity box declares a step").not.toBe("any");
+      if (step === "1") {
+        const before = Number(await qtyEdit.inputValue());
+        await qtyEdit.press("ArrowUp");
+        const after = Number(await qtyEdit.inputValue());
+        expect.soft(after).toBe(before + 1);
+        await qtyEdit.press("ArrowDown");
+        expect.soft(Number(await qtyEdit.inputValue())).toBe(before);
+      }
+    }
+
     await page.getByTestId("dashboard-holdings-manage-delete").click();
+    // Deleting is destructive, so the mode says what it does before you click.
+    await expect
+      .soft(page.getByTestId("dashboard-holdings-delete-hint"))
+      .toBeVisible();
     const del = page.getByTestId("dashboard-holdings-delete").first();
     if (await del.count()) {
       await expect.soft(del).toBeVisible();
+      await expectWithinScrollView(del, "dashboard-holdings", page);
     }
   });
 });

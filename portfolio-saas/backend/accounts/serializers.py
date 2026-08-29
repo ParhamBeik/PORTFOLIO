@@ -62,12 +62,20 @@ class UserSerializer(serializers.ModelSerializer):
             "last_name",
             "is_staff",
             "is_superuser",
+            # What the account panel needs to say "member since" and to show
+            # whether this person can reach the operator console. Both were
+            # already decided server-side and simply never told to the client,
+            # so the app could not answer "am I an admin?" from its own UI.
+            "date_joined",
+            "last_login",
         )
         read_only_fields = (
             "id",
             "email",
             "is_staff",
             "is_superuser",
+            "date_joined",
+            "last_login",
         )
 
 

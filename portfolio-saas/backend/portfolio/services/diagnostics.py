@@ -851,6 +851,19 @@ def portfolio_diagnostics(
     # it deliberately -- a decomposition over 60% of the book must not be read as
     # if it covered all of it.
     cov_annual = annualized_cov(returns, weights_used, frequency)
+    # How many days that covariance was actually estimated on. It is the panel
+    # INTERSECTION (annualized_cov drops any day where a weighted asset is
+    # missing), so it is smaller than the panel and smaller than the portfolio
+    # series -- and it is the binding sample size for every number derived from
+    # the matrix: the risk shares, the effective-bet count, the heatmap. A
+    # correlation's standard error is ~1/sqrt(n) of THIS n, not of the window
+    # the user asked for, and reporting the larger figure overstates how
+    # separable the top of the ranking is.
+    cov_observations = (
+        int(len(returns[list(cov_annual.index)].dropna(how="any").index))
+        if cov_annual is not None
+        else 0
+    )
     class_map = {h["key"]: h["asset_class"] for h in holdings}
     diversification_block = (
         diversification.diversification_report(weights_used, cov_annual, class_map)
@@ -913,7 +926,13 @@ def portfolio_diagnostics(
         "data_window": {
             "start": returns.index.min().isoformat() if not returns.empty else None,
             "end": returns.index.max().isoformat() if not returns.empty else None,
-            "observations": len(port_series.index),
+            # Days the RISK numbers were estimated on, which is the intersection
+            # the covariance saw -- not the panel's span and not the portfolio
+            # series, both of which are longer. Falls back to the portfolio
+            # series when there is no covariance to speak of (a single asset).
+            "observations": cov_observations or len(port_series.index),
+            "portfolio_observations": len(port_series.index),
+            "panel_observations": int(len(returns.index)),
         },
         "asset_warnings": warnings,
         "periods_per_year": frequency,

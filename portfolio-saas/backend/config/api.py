@@ -44,7 +44,7 @@ def handle(exc, context):
                 "last_verified_jalali_year": exc.last_verified_year,
                 "remedy": (
                     "Set CPI_BY_JALALI_YEAR_EXTRA to the published index for "
-                    "that year, or CPI_ESTIMATED_MONTHLY_RATE to project one "
+                    "that year, or CPI_ESTIMATED_ANNUAL_RATE to project one "
                     "forward as a labelled estimate."
                 ),
             },

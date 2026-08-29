@@ -18,15 +18,18 @@ import {
   ago,
   area,
   assetLabel,
+  date,
   holdingLabel,
   humanize,
   indexPoint,
+  isWholeUnit,
   money,
   num,
   pct,
   perfLabel,
   perSqm,
   PERF_UNLOCK_HINT,
+  quantity,
   signedToman,
   toman,
   unitPrice,
@@ -111,8 +114,6 @@ function PerformanceUnavailable({ detail }) {
   );
 }
 
-const QUALITY_BADGE = { complete: "good", manual: "warn", partial: "warn", unavailable: "critical" };
-const QUALITY_LABEL = { complete: "Live", manual: "Manual", partial: "Mixed", unavailable: "Unavailable" };
 const ITEM_BADGE = { live: "good", manual: "warn", stale: "warn", quota: "serious", fallback: "serious", unavailable: "critical" };
 
 // Groups valuation items by asset class for the donut. Palette has 8 fixed
@@ -150,7 +151,11 @@ function HeroRow({ state, basis: selected }) {
           data.total_usd !== undefined &&
           data.total_usd !== null;
         return (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4" data-testid="dashboard-hero">
+          // The "priced holdings N/N" tile was removed: it read "14/14 Manual"
+          // on a fully priced book, and the pricing story is already told where
+          // it is actionable -- per row in the Status column, and in aggregate
+          // by `dashboard-stale-banner` when half the book is not live.
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3" data-testid="dashboard-hero">
             <div className="sm:col-span-2">
               <StatTile
                 label="Total value"
@@ -165,20 +170,50 @@ function HeroRow({ state, basis: selected }) {
               value={showUsd ? "$" + num(Number(data.total_usd)) : BASIS_LABEL[basis]}
               testId="dashboard-usd"
             />
-            <StatTile
-              label="Priced holdings"
-              value={`${data.priced_assets}/${data.total_assets}`}
-              sub={
-                <Badge variant={QUALITY_BADGE[data.quality_status] || "neutral"} testId="dashboard-quality-badge">
-                  {QUALITY_LABEL[data.quality_status] || humanize(data.quality_status)}
-                </Badge>
-              }
-              testId="dashboard-coverage"
-            />
           </div>
         );
       }}
     </Async>
+  );
+}
+
+/**
+ * The rate this chart divided by, and where that rate came from.
+ *
+ * "After inflation" is a claim about a number the reader could not see: two
+ * lines diverged and the size of the gap had to be taken on faith. A projected
+ * index running at triple the published pace draws the same picture as one
+ * running at the right pace, and for a while that is exactly what shipped — the
+ * default projection was 6.5%/month (+112%/year) against a verified series that
+ * has never left the 31-46%/year band. Printing the applied rate is what makes
+ * that visible from the page instead of from the settings file.
+ */
+function InflationNote({ realGrowth, nominalGrowth, cpi }) {
+  if (realGrowth == null) return null;
+  const rate = cpi?.applied_annual_rate;
+  const estimated = (cpi?.estimated_jalali_years || []).length > 0;
+  return (
+    <div className="mt-2 space-y-1 text-xs text-muted" data-testid="dashboard-trend-real-note">
+      <p>
+        {nominalGrowth != null && (
+          <>Nominal {nominalGrowth >= 0 ? "+" : "−"}{pct(Math.abs(nominalGrowth))} over this
+          window{rate != null ? ", " : ". "}</>
+        )}
+        {rate != null && (
+          <>{nominalGrowth == null ? "Prices" : "prices"} rose {pct(rate)} a year
+          over the same days, so </>
+        )}
+        in constant Tomans your net worth is {realGrowth >= 0 ? "up" : "down"}{" "}
+        {pct(Math.abs(realGrowth))}. The gap between the two lines is inflation,
+        not performance.
+      </p>
+      {cpi?.source && (
+        <p data-testid="dashboard-trend-cpi-source">
+          Inflation index: {cpi.source}.
+          {estimated && " The current year has no published figure yet, so that part of the line is a projection."}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -284,6 +319,12 @@ function TrendCard({ activeId, basis }) {
             const first = merged.find((m) => m.real != null);
             const last = [...merged].reverse().find((m) => m.real != null);
             const realGrowth = first && last && first.real ? last.real / first.real - 1 : null;
+            // Measured between the SAME two days as the real figure, so the two
+            // are subtractable. Reading the nominal ends off `points` instead
+            // would compare a longer span against a shorter one whenever the
+            // real series is missing a day at either end.
+            const nominalGrowth =
+              first && last && first.nominal ? last.nominal / first.nominal - 1 : null;
             return (
               <>
                 <MultiLineTrend
@@ -295,13 +336,11 @@ function TrendCard({ activeId, basis }) {
                   longTicks={longTicks}
                   label="Net worth, nominal versus after inflation"
                 />
-                {realGrowth != null && (
-                  <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-real-note">
-                    In constant Tomans your net worth is {realGrowth >= 0 ? "up" : "down"}{" "}
-                    {pct(Math.abs(realGrowth))} over this window. The gap between the two
-                    lines is inflation, not performance.
-                  </p>
-                )}
+                <InflationNote
+                  realGrowth={realGrowth}
+                  nominalGrowth={nominalGrowth}
+                  cpi={realState.data.cpi}
+                />
               </>
             );
           }
@@ -400,6 +439,59 @@ function PerformanceMetrics({ data }) {
   );
 }
 
+/** `assets` map -> rows, plus the account name when several are merged. */
+function positionRows(assets, accountName) {
+  return Object.entries(assets || {}).map(([key, v]) => ({
+    key: accountName ? `${accountName}:${key}` : key,
+    account_name: accountName,
+    ...v,
+  }));
+}
+
+/**
+ * What you paid, and what it is worth now.
+ *
+ * Deliberately separate from TWR/XIRR: those are annualized and are noise
+ * before 90 tracked days, but cost basis and P&L are neither annualized nor
+ * time-weighted -- they are the recorded trades against today's price, correct
+ * from the first buy. Rendering them only in the unlocked branch left this
+ * panel blank for the first three months of an account's life, which is
+ * exactly when someone most wants to know what they paid.
+ */
+function PositionsTable({ rows, showAccount }) {
+  const columns = [
+    { key: "asset", header: "Asset", render: (r) => r.asset_name },
+    { key: "qty", header: "Quantity", align: "right", render: (r) => quantity(r.quantity, r.quantity_step) },
+    { key: "avg", header: "Avg cost", align: "right", render: (r) => toman(r.average_cost_tomans) },
+    { key: "basis", header: "Cost basis", align: "right", render: (r) => toman(r.total_cost_basis_tomans) },
+    { key: "realized", header: "Realized P&L", align: "right", render: (r) => <Delta value={r.realized_pnl_tomans} format={signedToman} /> },
+    { key: "unrealized", header: "Unrealized P&L", align: "right", render: (r) => <Delta value={r.unrealized_pnl_tomans} format={signedToman} /> },
+  ];
+  if (showAccount) {
+    columns.splice(1, 0, { key: "portfolio", header: "Portfolio", render: (r) => r.account_name || "—" });
+  }
+  return (
+    <Table
+      testId="dashboard-performance-table"
+      rowKey={(r) => r.key}
+      rows={rows}
+      columns={columns}
+    />
+  );
+}
+
+/** The two annualized numbers are still locked; say so above the table. */
+function PerformanceLockedNote({ detail }) {
+  return (
+    <p className="mb-3 text-xs text-muted" data-testid="dashboard-performance-locked-note">
+      {detail || PERF_UNLOCK_HINT} Until then, what you paid and what it is worth
+      now are shown below — those need no tracking history. Price-based returns
+      are on <Link to="/optimal" className="underline hover:text-text">My Optimal</Link>{" "}
+      and <Link to="/comparison" className="underline hover:text-text">Comparison</Link>.
+    </p>
+  );
+}
+
 function PerformanceCard({ activeId, basis, accounts }) {
   const targets = performanceTargets(activeId, accounts);
   const accountKey = accounts.map((a) => `${a.id}:${a.ledger_complete}`).join("|");
@@ -424,7 +516,21 @@ function PerformanceCard({ activeId, basis, accounts }) {
           if (data.aggregate) {
             const ready = data.accounts.filter((row) => row.performance_available);
             if (!ready.length) {
-              return <PerformanceUnavailable detail={data.accounts[0]?.detail} />;
+              // Same rule as the single-account branch: the returns are locked,
+              // the positions are not. Rows are tagged with their portfolio,
+              // because two accounts can hold the same asset at different costs.
+              const positions = data.accounts.flatMap((row) =>
+                positionRows(row.assets, row.name)
+              ).filter((r) => r.cost_basis_known);
+              if (!positions.length) {
+                return <PerformanceUnavailable detail={data.accounts[0]?.detail} />;
+              }
+              return (
+                <>
+                  <PerformanceLockedNote detail={data.accounts[0]?.detail} />
+                  <PositionsTable rows={positions} showAccount />
+                </>
+              );
             }
             return (
               <>
@@ -464,27 +570,22 @@ function PerformanceCard({ activeId, basis, accounts }) {
               </>
             );
           }
+          const rows = positionRows(data.assets);
           if (!data.performance_available) {
-            return <PerformanceUnavailable detail={data.detail} />;
+            const priced = rows.filter((r) => r.cost_basis_known);
+            if (!priced.length) return <PerformanceUnavailable detail={data.detail} />;
+            return (
+              <>
+                <PerformanceLockedNote detail={data.detail} />
+                <PositionsTable rows={priced} />
+              </>
+            );
           }
-          const rows = Object.entries(data.assets || {}).map(([key, v]) => ({ key, ...v }));
           return (
             <>
               <PerformanceMetrics data={data} />
               <div className="mt-4">
-                <Table
-                  testId="dashboard-performance-table"
-                  rowKey={(r) => r.key}
-                  rows={rows}
-                  columns={[
-                    { key: "asset", header: "Asset", render: (r) => r.asset_name },
-                    { key: "qty", header: "Quantity", align: "right", render: (r) => num(r.quantity, 4) },
-                    { key: "avg", header: "Avg cost", align: "right", render: (r) => toman(r.average_cost_tomans) },
-                    { key: "basis", header: "Cost basis", align: "right", render: (r) => toman(r.total_cost_basis_tomans) },
-                    { key: "realized", header: "Realized P&L", align: "right", render: (r) => <Delta value={r.realized_pnl_tomans} format={signedToman} /> },
-                    { key: "unrealized", header: "Unrealized P&L", align: "right", render: (r) => <Delta value={r.unrealized_pnl_tomans} format={signedToman} /> },
-                  ]}
-                />
+                <PositionsTable rows={rows} />
               </div>
             </>
           );
@@ -535,10 +636,11 @@ function hasDraftChanges(row, draft) {
   return isManualPriceEditable(row) && draft.price.trim() !== origPrice;
 }
 
-/** Manual and real-estate rows are the ones whose name is the user's to choose. */
-function isRenamable(row) {
-  return !!(row.is_house || row.is_manual);
-}
+// Every holding is renamable. `display_name` lives on the HOLDING, not on the
+// shared Asset (see models.Holding.display_name), so naming your copy "Dad's
+// gold" or "کاما - بلندمدت" cannot rename anything for another user. Restricting
+// it to house/manual rows was a guess at where nicknames were wanted, and it
+// left most of the book with a name the owner could not change.
 
 const inlineInputClass = "w-full min-w-[5rem] rounded-md border border-border bg-panel px-2 py-1 text-right text-sm tabular";
 
@@ -551,7 +653,7 @@ function PricingGlossaryDisclosure() {
         <li><strong className="text-text">Stale</strong> — the quote is from a previous session; a fresher one should have arrived.</li>
         <li><strong className="text-text">Quota</strong> — the provider refused further requests today; showing the last known price, which is not current.</li>
         <li><strong className="text-text">Mixed</strong> — some holdings are stale, quota-blocked, or falling back to an archived price.</li>
-        <li><strong className="text-text">Real Toman</strong> — inflation-adjusted using SCI's CPI series through 1404.</li>
+        <li><strong className="text-text">Real Toman</strong> — inflation-adjusted using the Statistical Center of Iran's published CPI. The year in progress has no release yet, so that stretch is a labelled projection; the "vs inflation" view prints the rate it used.</li>
       </ul>
     </Disclosure>
   );
@@ -608,6 +710,18 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
     const qty = draft.qty.trim();
     if (!qty) return;
     if (!hasDraftChanges(row, draft)) return;
+    // A counted asset typed as a fraction is refused, not rounded. The spinner
+    // already steps by one; someone who types 3.5 shares means something, and
+    // quietly saving 3 or 4 of them is the kind of silent correction that makes
+    // a portfolio stop matching the brokerage statement it came from.
+    if (!row.is_house && isWholeUnit(row.quantity_step) && !Number.isInteger(Number(qty))) {
+      setActionError(
+        new Error(
+          `${holdingLabel(row)} is counted in whole units — enter a whole number.`
+        )
+      );
+      return;
+    }
     const key = holdingsRowKey(row);
     setSavingKey(key);
     setActionError(null);
@@ -730,12 +844,14 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
               header: "Asset",
               render: (r) => {
                 const holding = resolveHolding(r);
-                if (manageMode === "edit" && holding && isRenamable(r)) {
+                if (manageMode === "edit" && holding) {
                   return (
                     <input
                       className={`${inlineInputClass} text-left`}
                       defaultValue={r.display_name || ""}
-                      placeholder={r.name_fa || r.asset}
+                      // The name it falls back to when cleared — the ticker for
+                      // a stock, the catalog name otherwise.
+                      placeholder={r.symbol || r.name_fa || r.asset}
                       aria-label={`Name for ${holdingLabel(r)}`}
                       data-testid="dashboard-holdings-edit-name"
                       disabled={savingKey === holdingsRowKey(r)}
@@ -748,7 +864,10 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
                     />
                   );
                 }
-                return holdingLabel(r);
+                // A stock reads as its ticker (`Holding.label`); the registered
+                // company name is long enough to break the row and is not how
+                // anyone refers to it, so it lives in the tooltip.
+                return <span title={r.name_fa || r.asset}>{holdingLabel(r)}</span>;
               },
             },
             { key: "class", header: "Class", render: (r) => humanize(r.class) },
@@ -780,20 +899,31 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
                   );
                 }
                 if (editing) {
+                  // `step` comes from the server, so the arrow keys and the
+                  // spinner move by one share / one coin / one note instead of
+                  // offering a fraction of something you cannot hold a fraction
+                  // of. Crypto, gold by the gram and tether keep a fine step.
+                  const step = r.quantity_step || "any";
                   return (
                     <input
                       type="number"
-                      step="any"
+                      step={step}
+                      min="0"
                       className={inlineInputClass}
                       value={draft.qty}
                       aria-label={`Quantity for ${holdingLabel(r)}`}
+                      title={
+                        isWholeUnit(step)
+                          ? "Counted in whole units"
+                          : "This asset can be held in fractions"
+                      }
                       data-testid="dashboard-holdings-edit-qty"
                       disabled={savingKey === rk}
                       onChange={(e) => setDraftField(r, "qty", e.target.value)}
                     />
                   );
                 }
-                return num(r.quantity, 4);
+                return quantity(r.quantity, r.quantity_step);
               },
             },
             {
@@ -837,7 +967,23 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
                     />
                   );
                 }
-                return unitPrice(r.unit_price, r.unit_price_currency, rowBasis);
+                const shown = unitPrice(r.unit_price, r.unit_price_currency, rowBasis);
+                // Say WHY this one is not a box. A market-priced asset takes its
+                // quote from the feed, and any number typed here would be
+                // overwritten by the next fetch while quietly mispricing the
+                // portfolio in the meantime — so the field stays read-only and
+                // explains itself instead of looking broken.
+                if (manageMode === "edit" && holding) {
+                  return (
+                    <span
+                      className="text-muted"
+                      title="Priced from the market feed — not editable. Only manual assets and property take a price you type."
+                    >
+                      {shown}
+                    </span>
+                  );
+                }
+                return shown;
               },
             },
             {
@@ -890,11 +1036,17 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
             });
           }
 
+          // Save/Delete go FIRST, not last. This table is 12 columns wide and
+          // already overflows its card on any normal screen, so a button
+          // appended at the end landed hundreds of pixels off the right edge
+          // behind a horizontal scrollbar nobody looks for -- which is why
+          // clicking Edit or Delete read as "nothing happened". Playwright's
+          // toBeVisible() passes on an off-screen cell inside a scroll
+          // container, so the e2e suite never caught it either.
           if (manageMode === "edit") {
-            columns.push({
+            columns.unshift({
               key: "actions",
               header: "",
-              align: "right",
               render: (r) => {
                 const holding = resolveHolding(r);
                 if (!holding) return <span className="text-xs text-muted">—</span>;
@@ -916,10 +1068,9 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
           }
 
           if (manageMode === "delete") {
-            columns.push({
+            columns.unshift({
               key: "actions",
               header: "",
-              align: "right",
               render: (r) => {
                 const holding = resolveHolding(r);
                 if (!holding) return null;
@@ -952,10 +1103,17 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
                 </p>
               )}
               {manageMode === "edit" && (
-                <p className="mb-3 text-xs text-muted">
-                  Change any quantity and click Save. Manual assets also take a unit price; a
-                  property takes its size and what a square meter is worth, in millions of Toman.
-                  Names of your own assets save as soon as you click away.
+                <p className="mb-3 text-xs text-muted" data-testid="dashboard-holdings-edit-hint">
+                  Rename any holding — the name is yours and saves as soon as you click away.
+                  Change a quantity and click Save on the left. A manual asset also takes a unit
+                  price, and a property takes its size plus what a square meter is worth, in
+                  millions of Toman. Market-priced assets keep the feed's price.
+                </p>
+              )}
+              {manageMode === "delete" && (
+                <p className="mb-3 text-xs text-muted" data-testid="dashboard-holdings-delete-hint">
+                  Delete removes the holding and reverses its ledger entries. To keep a holding
+                  but leave it out of every figure, untick its box instead.
                 </p>
               )}
               <Table
@@ -1088,6 +1246,63 @@ function RiskCorrelationView({ data, labelFor }) {
   );
 }
 
+/**
+ * What was actually measured, under controls that imply something else.
+ *
+ * Two gaps, both invisible until printed. The window buttons ask for 90/180/365
+ * days, but the panel starts after the last gap in the warehouse
+ * (`returns._trim_to_contiguous`), so on a history that reopened three months
+ * ago all three buttons can resolve to the same rows. And every correlation
+ * here carries a standard error of roughly 1/sqrt(n) — at n≈65 that is ±0.12,
+ * wide enough that the top of a ranking is not distinguishable from its middle.
+ * Printing n is what lets a reader tell an ordering from a coin flip.
+ */
+function MeasurementNote({ window, requestedDays, children, testId }) {
+  if (!window?.observations) return null;
+  const se = 1 / Math.sqrt(window.observations);
+  // Two thirds of what was asked for is the point where "90d" stops describing
+  // the answer. Below it, say so; above it the button and the data agree.
+  const truncated = requestedDays > 0 && window.observations < requestedDays * 0.66;
+  return (
+    <p className="mt-2 text-xs text-muted" data-testid={testId}>
+      Measured on {window.observations} shared trading days ({date(window.start)} –{" "}
+      {date(window.end)})
+      {truncated
+        ? ", which is as far back as the price history reaches — not the window selected above"
+        : ""}
+      . At this sample size a correlation is good to about ±{se.toFixed(2)}, so
+      treat the ordering near the top as a shortlist rather than a ranking.
+      {children}
+    </p>
+  );
+}
+
+/**
+ * Which part of the book these shares are shares OF.
+ *
+ * Every number in this card is normalized over the assets that have usable
+ * daily price history — property never does, and neither does anything newly
+ * listed, halted, or gated by the integrity check. So an asset's "share of your
+ * money" here is not the Weight column in Holdings, which is a share of
+ * everything listed. Both are right; only the denominators differ, and until
+ * this said so the two columns simply disagreed on the same screen.
+ */
+function CoverageNote({ coverage }) {
+  if (!coverage) return null;
+  const analyzed = coverage.analyzable_holdings;
+  const total = coverage.total_holdings;
+  if (!total || analyzed === total) return null;
+  return (
+    <p className="mb-3 text-xs text-muted" data-testid="dashboard-risk-coverage-note">
+      Based on {analyzed} of your {total} holdings — {pct(coverage.value_analyzable_pct)} of
+      what the portfolio is worth. Property and anything without enough price
+      history cannot be given a volatility, so they are left out and the shares
+      below are shares of what remains. That is why these percentages do not
+      match the Weight column in Holdings.
+    </p>
+  );
+}
+
 function RiskAddView({ activeId, basis, window, labelFor }) {
   const state = useApi(
     () => diversifiers(activeId, { basis, window: Number(window) }),
@@ -1112,6 +1327,18 @@ function RiskAddView({ activeId, basis, window, labelFor }) {
               held={(data.held || []).map((row) => ({ ...row, key: labelFor(row.key) }))}
               testId="risk-diversifier-scatter"
             />
+            <MeasurementNote
+              window={data.data_window}
+              requestedDays={data.window}
+              testId="dashboard-risk-add-window"
+            />
+            {data.basis_requested && data.basis !== data.basis_requested && (
+              <p className="mt-1 text-xs text-muted" data-testid="dashboard-risk-add-basis-note">
+                Scored in nominal Toman: the inflation index does not yet cover
+                every year this window spans, and a half-deflated panel would
+                rank candidates on the calendar rather than on their prices.
+              </p>
+            )}
           </div>
         );
       }}
@@ -1168,6 +1395,7 @@ function RiskCard({ activeId, basis, valuationState }) {
         <Async {...state} testId="dashboard-risk-body">
           {(data) => (
             <>
+              <CoverageNote coverage={data.coverage} />
               <RiskPanel
                 title="Risk by class"
                 caption="Two dots per row: the share of your money in that class, and the share of your portfolio's swings it accounts for. A risk dot far right of the money dot means that class moves the portfolio more than its size suggests."
@@ -1185,6 +1413,17 @@ function RiskCard({ activeId, basis, valuationState }) {
                 caption="How closely each pair moves together. Warm cells move in lockstep and give you less protection than owning two things suggests; cool cells pull against each other."
               >
                 <RiskCorrelationView data={data} labelFor={labelFor} />
+                {/* The same n governs all three panels above — they are one
+                    covariance estimate viewed three ways — so the caveat is
+                    stated once, under the chart it is most obviously about. */}
+                <MeasurementNote
+                  window={data.data_window}
+                  requestedDays={data.history_days}
+                  testId="dashboard-risk-window-note"
+                >
+                  {" "}
+                  Every panel above this one is built from the same days.
+                </MeasurementNote>
               </RiskPanel>
             </>
           )}
@@ -1193,7 +1432,7 @@ function RiskCard({ activeId, basis, valuationState }) {
             response must not hold up the three panels above it. */}
         <RiskPanel
           title="Where diversification would come from"
-          caption="Each dot is an asset you could add. Further right means it would calm the portfolio more; higher means it also returned more over the window."
+          caption="Each dot is an asset you could ADD at a 5% position — not a swap for something you hold. Further right means it would calm the portfolio more; higher means it also returned more over the days measured. Ranking is by the calming effect only; past return never enters it."
         >
           <RiskAddView
             activeId={activeId}

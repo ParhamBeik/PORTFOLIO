@@ -1641,6 +1641,162 @@ def test_seed_assets_leaves_user_properties_active(asset_catalog, make_user):
     assert mine.is_active is True
 
 
+def test_a_stock_holding_is_named_by_its_ticker_not_the_company(
+    asset_catalog, make_user, write_prices
+):
+    """`name_fa` on a TSE row is the REGISTERED COMPANY name.
+
+    خگستر is seeded with name_fa="گسترش‌سرمایه‌گذاری‌ایران‌خودرو" and
+    tse_symbol="خگستر". Reading `name_fa` first put the company name in the
+    holdings table, the ledger and every chart tooltip -- long enough to break
+    the row, and not what anyone calls the stock. A nickname the owner typed
+    still outranks both.
+    """
+    stock = asset_catalog["kama_stock"]
+    stock.name_fa = "سهام کاما"
+    stock.save()
+    write_prices({"kama_stock": Decimal("50000")})
+    user = make_user(email="ticker@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    holding = Holding.objects.create(
+        account=account, asset=stock, quantity=Decimal("100")
+    )
+
+    assert holding.label == "کاما"
+
+    item = next(i for i in value_account(account)["items"] if i["key"] == "kama_stock")
+    assert item["label"] == "کاما"
+    # The company name is still carried, for the tooltip beside the ticker.
+    assert item["name_fa"] == "سهام کاما"
+    assert item["symbol"] == "کاما"
+
+    holding.display_name = "کاما - بلندمدت"
+    holding.save()
+    assert holding.label == "کاما - بلندمدت"
+
+    # A gold row has no ticker and must keep reading as its Persian name.
+    gold = asset_catalog["emami_coin"]
+    gold.name_fa = "سکه امامی"
+    gold.save()
+    coin = Holding.objects.create(
+        account=account, asset=gold, quantity=Decimal("1")
+    )
+    assert coin.label == "سکه امامی"
+
+
+def test_a_counted_asset_steps_by_one_and_a_divisible_one_does_not(asset_catalog):
+    """Unit test: a pure model property, no I/O and no request to make.
+
+    Almost everything in this catalog is COUNTED -- a share, a coin, a bar, a
+    banknote -- and the holdings editor offered every one of them a step of
+    "any", so its spinner walked a stock position in fractions of a share. The
+    three units that genuinely divide have to keep their decimals; getting that
+    backwards would round somebody's gold down to the nearest gram.
+    """
+    counted = ["kama_stock", "emami_coin", "swiss_gold_bar_1g", "usd_cash", "euro_cash"]
+    for key in counted:
+        assert asset_catalog[key].quantity_step == "1", key
+
+    for key in ["bitcoin_usd", "gold_18k_gram", "usdt_irt"]:
+        assert asset_catalog[key].quantity_step == "0.000001", key
+
+    # A property's `quantity` column is not a count at all: it holds the price of
+    # a square meter in millions of Toman, so it steps freely.
+    assert asset_catalog["house_asset"].quantity_step == "any"
+
+
+def test_the_valuation_row_says_what_one_of_the_asset_is(
+    asset_catalog, make_user, write_prices
+):
+    """Integration: the client cannot infer this, so the payload must carry it.
+
+    One Gold row is sold by the gram and the rest are coins you count -- the
+    asset class does not separate them, and neither does the price. Declared by
+    the server for the same reason `unit_price_currency` is.
+    """
+    write_prices({"kama_stock": Decimal("5000"), "gold_18k_gram": Decimal("90000")})
+    user = make_user(email="steps@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["kama_stock"], quantity=Decimal("120")
+    )
+    Holding.objects.create(
+        account=account, asset=asset_catalog["gold_18k_gram"], quantity=Decimal("12.5")
+    )
+
+    rows = {i["key"]: i for i in value_account(account)["items"]}
+    assert rows["kama_stock"]["quantity_step"] == "1"
+    assert rows["gold_18k_gram"]["quantity_step"] == "0.000001"
+
+
+def test_projected_inflation_stays_in_the_band_the_published_series_lives_in():
+    """Unit test: configuration arithmetic, no I/O.
+
+    The projection for the unpublished year shipped at 6.5%/MONTH, which
+    compounds to +112%/year -- roughly triple every published year in the table
+    (31-46%) and triple the CBI deposit rate this same file carries for the same
+    year. At that pace the "vs inflation" line halves a portfolio's real value
+    over twelve months regardless of how it performed, and nothing on the page
+    said the rate was a guess. The band below is deliberately wide: it is a
+    tripwire against another order-of-magnitude slip, not a second opinion on
+    the operator's number.
+    """
+    from django.conf import settings
+
+    if not settings.CPI_ESTIMATED_YEARS:
+        pytest.skip("estimation disabled via CPI_ESTIMATED_ANNUAL_RATE=0")
+
+    annual = settings.CPI_ESTIMATED_ANNUAL_RATE_EFFECTIVE
+    assert 0.15 <= annual <= 0.60, (
+        f"projected inflation is {annual:.0%}/year; every published year in "
+        f"CPI_BY_JALALI_YEAR sits between 31% and 46%"
+    )
+    # And it must still be legible as an estimate wherever it is printed.
+    assert "ESTIMATE" in settings.CPI_SOURCE
+    assert f"{annual:.0%}/year" in settings.CPI_SOURCE
+
+
+def test_the_inflation_chart_reports_the_rate_it_divided_by(make_user, asset_catalog):
+    """Integration: the claim is about a rate, so the payload has to carry it.
+
+    Two diverging lines and no number is unfalsifiable -- a projection running
+    at triple the published pace draws the same picture as a correct one. The
+    endpoint reports the pace implied by the CPI at the two ends of the drawn
+    window, which is what the line is actually made of.
+    """
+    user = make_user(email="cpi-window@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("1")
+    )
+    now = timezone.now()
+    for days_ago, total in ((300, "1000000"), (0, "1500000")):
+        Snapshot.objects.create(
+            user=user,
+            account=account,
+            total_value_tomans=Decimal(total),
+            timestamp=now - timedelta(days=days_ago),
+        )
+
+    res = _client(user).get(
+        f"/api/snapshots/?days=365&basis=real_toman&account={account.id}"
+    )
+    # A window this long can outrun the CPI table, and refusing is the correct
+    # answer when it does -- but it must never answer with a rate it cannot back.
+    if res.status_code == 503:
+        assert res.json()["reason"] == "cpi_unavailable"
+        return
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["basis"] == "real_toman"
+    cpi = body["cpi"]
+    assert cpi["verified_through_jalali_year"] >= 1404
+    assert cpi["source"]
+    # Same tripwire as the settings test, now on the number the chart prints.
+    assert 0.05 <= cpi["applied_annual_rate"] <= 0.75
+
+
 def test_nickname_and_visibility_save_without_touching_the_ledger(
     asset_catalog, make_user, write_prices
 ):

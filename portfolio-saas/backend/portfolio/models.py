@@ -34,6 +34,13 @@ HOUSE_AREA_SQM = Decimal("90.2")
 # and the API serializers both scale by it rather than repeating a literal.
 HOUSE_PRICE_SCALE = Decimal("1000000")
 
+# Catalog rows whose UNIT is itself divisible, keyed rather than classed because
+# the class does not decide it: `gold_18k_gram` is sold by the gram while every
+# other Gold row is a coin or a bar you count, and `usdt_irt` is a token divisible
+# to six places while the other Cash rows are banknotes. See `Asset.quantity_step`,
+# which is the one place this question is answered.
+DIVISIBLE_QUANTITY_KEYS = frozenset({"gold_18k_gram", "usdt_irt"})
+
 
 
 class Asset(models.Model):
@@ -126,6 +133,33 @@ class Asset(models.Model):
             eligible=True,
         ).exists():
             raise ValidationError("Asset is not eligible in the verified provider catalog.")
+
+    @property
+    def quantity_step(self) -> str:
+        """The smallest amount of this asset it makes sense to hold one of.
+
+        Nearly everything in this catalog is COUNTED -- a share, a coin, a bar,
+        a banknote -- and an editor that steps those by 0.0001 offers a quantity
+        that cannot exist. Three units genuinely divide: crypto, gold sold by
+        the gram, and the tether token. `Holding.quantity` stores six decimal
+        places, so that is the floor for the divisible ones.
+
+        A property is not measured in units at all -- its `quantity` column
+        holds the price of a square meter in millions of Toman -- so it steps
+        freely and the editor labels that field as a price, not a count.
+
+        Advisory: this is what the editor offers, not a constraint the API
+        enforces. A holding that is already fractional keeps its value; nothing
+        here rounds one.
+        """
+        if self.is_house:
+            return "any"
+        if (
+            self.asset_class == self.AssetClass.CRYPTO
+            or self.key in DIVISIBLE_QUANTITY_KEYS
+        ):
+            return "0.000001"
+        return "1"
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -220,8 +254,22 @@ class Holding(models.Model):
     @property
     def label(self) -> str:
         """What to call this holding on screen: the owner's name for it, else the
-        catalog's. Persian first, because that is how TSE symbols are recognized."""
-        return self.display_name or self.asset.name_fa or self.asset.name or self.asset.key
+        catalog's. Persian first, because that is how TSE symbols are recognized.
+
+        For a stock the ticker comes BEFORE `name_fa`: a TSE holding is known by
+        its symbol (کاما, خگستر), not by the registered company name, and
+        `name_fa` carries the latter -- "گسترش‌سرمایه‌گذاری‌ایران‌خودرو" where the
+        owner is looking for "خگستر". Only `tse_symbol` is used; `brs_symbol` is
+        a provider code (IR_COIN_EMAMI) nobody says out loud, and gold/FX
+        `name_fa` is already the recognizable name.
+        """
+        return (
+            self.display_name
+            or self.asset.tse_symbol
+            or self.asset.name_fa
+            or self.asset.name
+            or self.asset.key
+        )
 
     @property
     def price_per_sqm_tomans(self) -> Decimal | None:

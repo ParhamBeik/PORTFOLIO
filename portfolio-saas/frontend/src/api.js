@@ -147,6 +147,57 @@ export const register = (email, password) =>
 export const login = (email, password) =>
   api("/api/auth/login/", { method: "POST", body: { email, password } });
 export const me = () => api("/api/auth/me/");
+export const updateProfile = ({ firstName, lastName }) =>
+  api("/api/auth/me/", {
+    method: "PATCH",
+    body: { first_name: firstName, last_name: lastName },
+  });
+export const changePassword = ({ oldPassword, newPassword, confirmPassword }) =>
+  api("/api/auth/change-password/", {
+    method: "POST",
+    body: {
+      old_password: oldPassword,
+      new_password: newPassword,
+      confirm_password: confirmPassword,
+    },
+  }).then((data) => {
+    // The server rotates every token when a password changes, so the access
+    // token in hand is dead the moment this returns. Adopting the fresh pair it
+    // hands back is what keeps the user signed in instead of bouncing them to
+    // the login screen for having successfully changed their password.
+    auth.tokens = data;
+    return data;
+  });
+export const deleteAccount = (password) =>
+  api("/api/auth/me/", {
+    method: "DELETE",
+    body: { password, confirmation: "DELETE" },
+  });
+
+/**
+ * Everything this account holds, as a zip.
+ *
+ * Not routed through `api()`: the response is a binary archive, and that helper
+ * ends in `res.json()`. Refresh-on-401 is not replicated here either — this is
+ * a deliberate click, and asking the user to click it again beats a second
+ * download path that can silently diverge from the first.
+ */
+export async function downloadExport() {
+  const res = await fetch(`${API_BASE}/api/auth/export/`, {
+    credentials: "include",
+    headers: auth.token ? { Authorization: `Bearer ${auth.token}` } : {},
+  });
+  if (!res.ok) throw apiError(`Export failed (${res.status}).`, res.status);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "lattice-export.zip";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
 export const listAssets = () => api("/api/assets/");
 export const searchAssetCatalog = (assetClass, q = "") =>
   api(`/api/assets/catalog/${qs({ asset_class: assetClass, q })}`);

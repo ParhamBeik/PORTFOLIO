@@ -142,8 +142,13 @@ def _position_metrics(account) -> dict:
         # Everything below it is money, so each one is a quantity x price
         # product and converts exactly once -- see currency.holding_value_to_toman.
         result[asset.key] = {
-            "asset_name": asset.name,
+            # Same naming rule as `Holding.label`: a TSE position is known by its
+            # ticker, not by the registered company name.
+            "asset_name": asset.tse_symbol or asset.name_fa or asset.name,
             "quantity": str(quantity),
+            # Same declaration the valuation rows carry, so this table and the
+            # holdings table print the same count to the same precision.
+            "quantity_step": asset.quantity_step,
             "cost_basis_known": not unknown_basis,
             "average_cost_tomans": str(average_cost) if not unknown_basis else None,
             "total_cost_basis_tomans": str(
@@ -179,6 +184,13 @@ def account_performance(account, *, basis=None) -> dict:
             "detail": f"Performance available after {remaining} more day(s) of tracking.",
             "tracking_started_at": start.isoformat(),
             "days_tracked": days_tracked,
+            # TWR and XIRR are the only things the 90-day bar protects: they are
+            # annualized, so they are noise before then. Cost basis and P&L are
+            # not annualized and not time-weighted -- they are just the recorded
+            # trades against today's price, and they are correct from the first
+            # buy. Withholding them left the panel with nothing on it for the
+            # first three months of every account's life.
+            "assets": _position_metrics(account),
         }
 
     start_payload = value_as_of(

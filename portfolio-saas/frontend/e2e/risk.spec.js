@@ -51,4 +51,31 @@ test.describe("risk", () => {
     await page.getByTestId("dashboard-risk-window-365").click();
     await expect(page.getByTestId("dashboard-risk-window-365")).toHaveAttribute("aria-pressed", "true");
   });
+
+  test("the card says how many days it measured and how much of the book", async ({ page }) => {
+    if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
+      test.skip(true, "account has no holdings (onboarding)");
+    }
+
+    await page.getByTestId("nav-portfolio").click();
+    await expect(page.getByTestId("dashboard-risk")).toBeVisible({ timeout: 20000 });
+
+    // The window buttons ask for 90/180/365 days and the panel starts after the
+    // last hole in the warehouse, so what was asked for and what was measured
+    // routinely differ. Silence there is what let three buttons that cannot
+    // change the answer look like three that can.
+    const note = page.getByTestId("dashboard-risk-window-note");
+    const correlationEmpty = page.getByTestId("dashboard-risk-correlation-empty");
+    await expect(note.or(correlationEmpty).first()).toBeVisible({ timeout: 20000 });
+    if (await note.count()) {
+      await expect.soft(note).toContainText(/\d+ shared trading days/);
+    }
+
+    // Coverage only appears when part of the book is unmeasurable, which is the
+    // only time it says anything — a fully covered portfolio needs no caveat.
+    const coverage = page.getByTestId("dashboard-risk-coverage-note");
+    if (await coverage.count()) {
+      await expect.soft(coverage).toContainText("holdings");
+    }
+  });
 });

@@ -796,12 +796,21 @@ def value_account(
             # or clearing the field looks like a rename to the catalog name.
             "label": holding.label,
             "display_name": holding.display_name,
+            # The ticker, so the UI can offer it as the rename placeholder and
+            # keep `name_fa` (the registered company name) for the tooltip.
+            "symbol": holding.asset.tse_symbol or "",
             "key": holding.asset.key,
             "class": holding.asset.asset_class,
             "is_manual": holding.asset.is_manual,
             "is_house": holding.asset.is_house,
             "is_hidden": is_hidden,
             "quantity": holding.quantity,
+            # What one of this asset is. Declared by the server for the same
+            # reason `unit_price_currency` is: the client cannot infer it from
+            # the asset class (one Gold row is grams, the rest are coins) and
+            # guessing produced a quantity editor that offered fractions of a
+            # share. See `Asset.quantity_step`.
+            "quantity_step": holding.asset.quantity_step,
             "unit_price": unit_price,
             "value": value,
             "source": source,

@@ -19,6 +19,11 @@ from .services.ledger import (
 
 
 class AssetSerializer(serializers.ModelSerializer):
+    # What one of this asset is, so the wizard's quantity box steps by a share
+    # rather than by a fraction of one. Same declaration the valuation rows and
+    # the catalog search carry; see `Asset.quantity_step`.
+    quantity_step = serializers.CharField(read_only=True)
+
     class Meta:
         model = Asset
         # `tse_symbol` is exposed because it is the unit discriminator, not just
@@ -26,7 +31,8 @@ class AssetSerializer(serializers.ModelSerializer):
         # Rial. The add-transaction dialog labels its price field from it, and
         # must use the same test the server does (currency.is_tse_priced).
         fields = ("id", "key", "name", "name_fa", "asset_class", "currency",
-                  "is_manual", "is_house", "is_active", "tse_symbol")
+                  "is_manual", "is_house", "is_active", "tse_symbol",
+                  "quantity_step")
 
 
 class HoldingSerializer(serializers.ModelSerializer):

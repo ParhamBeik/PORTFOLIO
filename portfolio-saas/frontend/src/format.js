@@ -212,8 +212,17 @@ export function ago(seconds) {
   return `${d}d ago`;
 }
 
-/** Prefer the Persian name — that is how TSE symbols are recognized. */
-export const assetLabel = (a) => a?.name_fa || a?.name || a?.key || "—";
+/**
+ * Prefer the Persian name — that is how TSE symbols are recognized.
+ *
+ * The ticker comes first for a stock: `name_fa` holds the REGISTERED COMPANY
+ * name ("گسترش‌سرمایه‌گذاری‌ایران‌خودرو"), which nobody uses and which is long
+ * enough to break a table row, while `tse_symbol` holds what the owner
+ * actually calls it ("خگستر"). Mirrors `Holding.label` on the server, so the
+ * catalog pickers and the holdings rows print the same string.
+ */
+export const assetLabel = (a) =>
+  a?.tse_symbol || a?.name_fa || a?.name || a?.key || "—";
 
 /**
  * What to call a row in the catalog picker.
@@ -245,6 +254,24 @@ export const nativeName = (a) => {
 export const holdingLabel = (row) =>
   row?.label || row?.name_fa || row?.asset_name_fa || row?.asset ||
   row?.name || row?.asset_name || row?.key || row?.asset_key || "—";
+
+/**
+ * A held quantity, printed to the precision the asset can actually be held in.
+ *
+ * `quantity_step` is the server's declaration of what one unit is (see
+ * `Asset.quantity_step`): "1" for anything counted — a share, a coin, a bar, a
+ * banknote — and a fractional step for the three units that genuinely divide.
+ * Printing four decimals on all of them turned 1,200 shares into "1,200.0000"
+ * and implied a fraction of a share was a thing you could own.
+ */
+export const isWholeUnit = (step) => String(step ?? "") === "1";
+
+export const quantity = (n, step) => {
+  if (isWholeUnit(step)) return num(n, 0);
+  const s = String(step ?? "");
+  const dot = s.indexOf(".");
+  return num(n, dot < 0 ? 4 : Math.min(8, s.length - dot - 1));
+};
 
 /** Floor area, e.g. "91 m²". */
 export const area = (sqm) => (bad(sqm) ? "—" : num(sqm, 2) + " m²");

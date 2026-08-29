@@ -521,7 +521,7 @@ class CpiUnavailable(Exception):
             f"inventing the missing inflation. Nominal Toman, USD and USDT are "
             f"unaffected. Two ways to resolve it: set CPI_BY_JALALI_YEAR_EXTRA "
             f"to the published figure (JSON, e.g. '{{\"{jalali_year}\": 950.0}}'), "
-            f"or set CPI_ESTIMATED_MONTHLY_RATE to an estimated monthly "
+            f"or set CPI_ESTIMATED_ANNUAL_RATE to an estimated annual "
             f"inflation rate, which projects forward from {last_verified_year} "
             f"and is labelled as an estimate everywhere it is used."
         )
@@ -565,12 +565,27 @@ CPI_VERIFIED_THROUGH_YEAR = max(CPI_BY_JALALI_YEAR)
 # Operator estimate for years SCI has not published yet. Set to 0.0 to restore
 # strict behaviour (any unpublished year raises CpiUnavailable).
 #
-# 6.5%/month compounds to +112%/year. That is roughly TRIPLE the pace of the
-# verified series above, whose annual steps run 36.4 / 40.2 / 45.8 / 40.7 /
-# 32.5 / 31.0 percent -- about 2.5%/month. This figure is an operator judgement
-# that the regime broke, not a continuation of the trend, and it is deliberately
-# separated from the verified table so nothing downstream can mistake it for one.
-CPI_ESTIMATED_MONTHLY_RATE = float(os.environ.get("CPI_ESTIMATED_MONTHLY_RATE", "0.065"))
+# Stated ANNUALLY, because that is the unit the figure is actually known in:
+# nobody quotes Iranian inflation per month, and the two knobs that used to
+# exist here disagreed by a factor of three without either of them looking
+# wrong. The previous default was 6.5%/MONTH, which compounds to +112%/year --
+# roughly triple both the verified series above (annual steps of 36.4 / 40.2 /
+# 45.8 / 40.7 / 32.5 / 31.0 percent) and the CBI deposit rate this file already
+# carries for the same year (RISK_FREE_RATE_BY_JALALI_YEAR[1405] = 0.38). At
+# that pace one year of "vs inflation" halves a portfolio's real value on the
+# chart no matter how it performed, which is what shipped.
+#
+# 37% is the middle of the 35-40% band the operator confirmed for 1405 and sits
+# inside the range every published year has landed in. It remains a projection,
+# not a release, and is kept out of CPI_VERIFIED_THROUGH_YEAR so nothing
+# downstream can mistake it for one.
+CPI_ESTIMATED_ANNUAL_RATE = float(os.environ.get("CPI_ESTIMATED_ANNUAL_RATE", "0.37"))
+# The monthly form the anchors compound in. Still overridable on its own for an
+# operator who has a monthly figure in hand; setting it wins over the annual one.
+CPI_ESTIMATED_MONTHLY_RATE = float(os.environ.get(
+    "CPI_ESTIMATED_MONTHLY_RATE",
+    str((1.0 + CPI_ESTIMATED_ANNUAL_RATE) ** (1.0 / 12) - 1.0),
+))
 # How far past the verified table the estimate may run.
 #
 # Two years is the minimum that makes the *current* year deflate at all: the
@@ -609,13 +624,22 @@ if _cpi_extra_raw:
         year for year in CPI_BY_JALALI_YEAR if year not in CPI_ESTIMATED_YEARS
     )
 
+# The annual pace the projection actually runs at, derived from the monthly rate
+# in force so a monthly override is reported honestly rather than as the annual
+# default it overrode. This is the number the UI prints; nobody reads a monthly
+# CPI step and knows what it means for a year of their net worth.
+CPI_ESTIMATED_ANNUAL_RATE_EFFECTIVE = (
+    (1.0 + CPI_ESTIMATED_MONTHLY_RATE) ** 12 - 1.0
+    if CPI_ESTIMATED_MONTHLY_RATE > 0
+    else 0.0
+)
 CPI_SOURCE = (
     f"Statistical Center of Iran annual CPI releases, verified through "
     f"{CPI_VERIFIED_THROUGH_YEAR}"
     + (
         f"; {'/'.join(str(year) for year in sorted(CPI_ESTIMATED_YEARS))} are an "
-        f"OPERATOR ESTIMATE at {CPI_ESTIMATED_MONTHLY_RATE:.1%}/month, not a "
-        f"published figure"
+        f"OPERATOR ESTIMATE at {CPI_ESTIMATED_ANNUAL_RATE_EFFECTIVE:.0%}/year, "
+        f"not a published figure"
         if CPI_ESTIMATED_YEARS
         else ""
     )

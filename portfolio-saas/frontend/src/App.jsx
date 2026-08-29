@@ -87,7 +87,15 @@ export default function App() {
       <PortfolioProvider key={user.id} enabled>
         <Suspense fallback={<Loading testId="route-loading" />}>
           <Routes>
-              <Route element={<Shell user={user} onLogout={() => setUser(null)} />}>
+              <Route
+              element={
+                <Shell
+                  user={user}
+                  onLogout={() => setUser(null)}
+                  onUserChange={setUser}
+                />
+              }
+            >
               {/* Inside the shell: these are reached from the footer of every
                   page, and rendering them outside it dropped a signed-in reader
                   onto a bare page whose only way out said "Back to sign in". */}

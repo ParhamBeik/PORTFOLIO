@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import { logoutSession } from "../api.js";
+import AccountMenu from "./AccountMenu.jsx";
 import Logo from "./Logo.jsx";
 import { usePortfolio } from "./PortfolioContext.jsx";
 import { Button, ErrorState, Select } from "./ui.jsx";
@@ -49,16 +49,10 @@ function NavItem({ to, end, testId, children, onClick }) {
   );
 }
 
-export default function Shell({ user, onLogout }) {
+export default function Shell({ user, onLogout, onUserChange }) {
   const { accounts, activeId, setActive, basis, setBasis, error, reload } = usePortfolio();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  const doLogout = async () => {
-    await logoutSession();
-    onLogout();
-  };
-
-  const initial = (user?.email || "?").charAt(0).toUpperCase();
   const closeMobile = () => setMobileOpen(false);
 
   // An opened menu covers the page it was opened from, so it has to be
@@ -165,10 +159,16 @@ export default function Shell({ user, onLogout }) {
               )}
             </nav>
 
-            <div className="app-user-chip flex md:hidden" data-testid="user-email-mobile">
-              <span className="app-user-avatar" aria-hidden="true">{initial}</span>
-              <span className="max-w-[11rem] truncate text-sm text-muted">{user.email}</span>
-            </div>
+            {/* Same menu, reachable on a phone: account settings that only
+                exist above the md breakpoint are account settings most people
+                never find. */}
+            <AccountMenu
+              user={user}
+              onLogout={onLogout}
+              onUserChange={onUserChange}
+              triggerClass="flex md:hidden"
+              testId="user-email-mobile"
+            />
 
             {/* The icon that opened this turns into a close cross, which is easy
                 to miss once the panel has pushed the page down. Escape works too. */}
@@ -183,14 +183,9 @@ export default function Shell({ user, onLogout }) {
           </div>
 
           <div className="order-2 ml-auto flex items-center gap-2 sm:gap-3 lg:order-4 lg:ml-0">
-            <div className="app-user-chip hidden md:flex" data-testid="user-email">
-              <span className="app-user-avatar" aria-hidden="true">{initial}</span>
-              <span className="max-w-[11rem] truncate text-sm text-muted">{user.email}</span>
-            </div>
-
-            <Button variant="ghost" className="app-header-btn" onClick={doLogout} data-testid="logout">
-              Log out
-            </Button>
+            {/* Log out moved INSIDE this menu, next to the rest of the account
+                actions it belongs with — it was the only one that had a home. */}
+            <AccountMenu user={user} onLogout={onLogout} onUserChange={onUserChange} />
 
             <button
               type="button"

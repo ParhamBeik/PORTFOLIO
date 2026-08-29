@@ -1181,7 +1181,11 @@ export function DiversifierScatter({
       },
       yAxis: {
         type: "value", ...c.valueAxis, scale: true,
-        name: "Return over the window", nameLocation: "middle",
+        // NOT "over the window": `diversifier_candidates` compounds each
+        // candidate over the days it SHARES with the portfolio series, so two
+        // dots can cover slightly different day sets. The caption underneath
+        // prints how many days that is.
+        name: "Return over the measured days", nameLocation: "middle",
         nameGap: 52, nameTextStyle: axisName,
         axisLabel: { ...c.valueAxis.axisLabel, formatter: (v) => pct(v, 0) },
       },

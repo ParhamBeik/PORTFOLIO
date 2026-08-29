@@ -1064,6 +1064,41 @@ def _subtract_hidden_holdings(user, account, series, now) -> None:
         row["approximated"] = beyond_reach or bool(adjustment["approximated"])
 
 
+def _cpi_window_provenance(series: list[dict]) -> dict:
+    """The inflation this chart actually divided by, and where it came from.
+
+    "After inflation" is a claim about a rate, and until now the rate itself
+    never appeared: the reader saw two diverging lines and had to take the size
+    of the gap on faith. A projection running at triple the published pace looks
+    exactly like a projection running at the right one.
+
+    `applied_annual_rate` is the pace implied by the CPI at the two ends of the
+    drawn window, annualized -- not the configured knob, which is only one of
+    the inputs (a window spanning Nowruz interpolates between two anchors, one
+    of which may be a published figure). That is the number the line is made of,
+    so that is the number to show.
+    """
+    provenance = {
+        "source": settings.CPI_SOURCE,
+        "base_jalali_year": min(settings.CPI_BY_JALALI_YEAR),
+        "verified_through_jalali_year": settings.CPI_VERIFIED_THROUGH_YEAR,
+        "estimated_jalali_years": sorted(settings.CPI_ESTIMATED_YEARS),
+        "applied_annual_rate": None,
+    }
+    if len(series) < 2:
+        return provenance
+    first = datetime.strptime(series[0]["date"], "%Y-%m-%d").date()
+    last = datetime.strptime(series[-1]["date"], "%Y-%m-%d").date()
+    span_days = (last - first).days
+    if span_days <= 0:
+        return provenance
+    start_cpi = cpi_for_date(first)
+    end_cpi = cpi_for_date(last)
+    if start_cpi > 0 and end_cpi > 0:
+        provenance["applied_annual_rate"] = (end_cpi / start_cpi) ** (365.0 / span_days) - 1.0
+    return provenance
+
+
 class SnapshotListView(APIView):
     """Per-user net-worth history for the FREE trend chart, plus trade markers.
 
@@ -1259,11 +1294,14 @@ class SnapshotListView(APIView):
         # for -- the client keeps the previous series on screen while the next one
         # loads, so a basis switch drew Toman under a dollar axis until it landed.
         applied_basis = basis if divisor else "nominal_toman"
-        return Response({
+        payload = {
             "series": series,
             "trades": markers,
             "basis": applied_basis,
-        })
+        }
+        if applied_basis == "real_toman":
+            payload["cpi"] = _cpi_window_provenance(series)
+        return Response(payload)
 
 
 class LatestPricesView(APIView):
@@ -1990,6 +2028,19 @@ class DiversifierCandidatesView(APIView):
             "window": window,
             "entry_weight": 0.05,
             "periods_per_year": frequency,
+            # What was ACTUALLY measured, which is rarely the window asked for.
+            # `_trim_to_contiguous` starts the panel after the last ingest
+            # outage, so on this warehouse 90d, 180d and 365d all resolve to the
+            # same ~65 rows since the 1404-1405 reopening -- three buttons that
+            # cannot change the answer, with nothing on screen saying so. Every
+            # correlation here carries a standard error of about 1/sqrt(n), so
+            # the observation count is not a footnote: it is what decides
+            # whether the ranking's top few are distinguishable at all.
+            "data_window": {
+                "start": returns.index[0].date().isoformat(),
+                "end": returns.index[-1].date().isoformat(),
+                "observations": int(len(returns.index)),
+            },
             # The current book on the same axes, so the scatter can show where
             # the holdings already sit rather than plotting candidates in a void.
             "held": diversifier_candidates(

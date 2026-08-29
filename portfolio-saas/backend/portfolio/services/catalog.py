@@ -99,6 +99,7 @@ def _row_from_asset(asset: Asset) -> dict:
         "is_manual": asset.is_manual,
         "is_house": asset.is_house,
         "is_active": asset.is_active,
+        "quantity_step": asset.quantity_step,
     }
 
 
@@ -119,6 +120,13 @@ def _row_from_instrument(inst: MarketInstrument, asset: Asset | None) -> dict:
         "is_manual": False,
         "is_house": False,
         "is_active": True,
+        # Asked of an unsaved row rather than re-derived here: the rule for what
+        # one unit of something is lives on the model and must have exactly one
+        # implementation, or the wizard and the holdings editor start disagreeing
+        # about whether a share divides.
+        "quantity_step": Asset(
+            key="", asset_class=_class_for(inst), is_house=False
+        ).quantity_step,
     }
 
 

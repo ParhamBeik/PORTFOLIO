@@ -31,7 +31,7 @@ import {
   Modal,
   Select,
 } from "./ui.jsx";
-import { area, catalogLabel, nativeName, perSqm, toman } from "../format.js";
+import { area, catalogLabel, isWholeUnit, nativeName, perSqm, toman } from "../format.js";
 import { jalaliLabel, toJalali } from "../jalali.js";
 
 // Mirrors SEARCH_LIMIT in backend/portfolio/services/catalog.py. Only used to
@@ -133,17 +133,24 @@ const positive = (v) => v !== "" && Number(v) > 0;
 const QUANTITY_MIN = 0.000001;
 const QUANTITY_MAX = 1e14; // max_digits 20 - decimal_places 6
 
-const quantityError = (v) => {
+const quantityError = (v, step) => {
   if (v === "") return "";
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return "Enter a quantity greater than zero.";
+  // Caught here rather than rounded on save, for the same reason as the holdings
+  // editor: a share, a coin and a banknote are counted, and half of one is not a
+  // thing the market can settle. `quantity_step` is the server's declaration of
+  // which units divide (see Asset.quantity_step).
+  if (isWholeUnit(step) && !Number.isInteger(n)) {
+    return "This one is counted in whole units — enter a whole number.";
+  }
   if (n < QUANTITY_MIN) return `The smallest quantity we record is ${QUANTITY_MIN}.`;
   if (n >= QUANTITY_MAX) return "That quantity is larger than we can record.";
   if ((String(v).split(".")[1] || "").length > 6) return "At most 6 decimal places.";
   return "";
 };
 
-const validQuantity = (v) => positive(v) && !quantityError(v);
+const validQuantity = (v, step) => positive(v) && !quantityError(v, step);
 
 export default function AddTransactionDialog({
   accountId,
@@ -302,7 +309,7 @@ export default function AddTransactionDialog({
         return !!form.name.trim() && positive(form.areaSqm) && positive(form.pricePerSqm);
       }
       if (asset?.is_house) return positive(form.pricePerSqm);
-      return validQuantity(form.quantity);
+      return validQuantity(form.quantity, asset?.quantity_step);
     }
     return true;
   };
@@ -631,19 +638,19 @@ export default function AddTransactionDialog({
                   <Input
                     label="Quantity"
                     type="number"
-                    step="any"
-                    min={QUANTITY_MIN}
+                    step={asset?.quantity_step || "any"}
+                    min={isWholeUnit(asset?.quantity_step) ? 1 : QUANTITY_MIN}
                     className="w-full"
                     value={form.quantity}
                     onChange={set("quantity")}
                     data-testid="add-transaction-quantity"
                   />
-                  {quantityError(form.quantity) && (
+                  {quantityError(form.quantity, asset?.quantity_step) && (
                     <p
                       className="mt-1 text-xs text-critical"
                       data-testid="add-transaction-quantity-error"
                     >
-                      {quantityError(form.quantity)}
+                      {quantityError(form.quantity, asset?.quantity_step)}
                     </p>
                   )}
                 </Field>
