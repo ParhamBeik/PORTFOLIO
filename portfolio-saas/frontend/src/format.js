@@ -10,6 +10,8 @@
 //
 // Money is Toman. The backend serializes Decimals as strings — Number() them.
 
+import { jalaliLabel, toJalali } from "./jalali.js";
+
 /** User-facing performance metric names (API fields remain twr / xirr). */
 export const perfLabel = {
   twr: "Portfolio return",
@@ -140,6 +142,19 @@ export function date(iso) {
   return dtf({ year: "numeric", month: "short", day: "2-digit" }).format(d);
 }
 
+/**
+ * The same instant on the calendar the reader keeps: "7 Shahrivar 1405".
+ *
+ * Entries are dated on a Persian calendar when they are recorded, so they are
+ * read back on one. `dateTime` stays for the hover, where the Gregorian date and
+ * the time of day still answer "which of these two came first".
+ */
+export function jalaliDate(iso) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return "—";
+  return jalaliLabel(toJalali(d));
+}
+
 export function dateTime(iso) {
   const d = new Date(iso);
   if (!iso || isNaN(d)) return "—";
@@ -199,6 +214,24 @@ export function ago(seconds) {
 
 /** Prefer the Persian name — that is how TSE symbols are recognized. */
 export const assetLabel = (a) => a?.name_fa || a?.name || a?.key || "—";
+
+/**
+ * What to call a row in the catalog picker.
+ *
+ * Crypto reads the other way round from everything else. The provider's coin
+ * feed carries no symbol field at all — the ingest keys those rows on `name_en`,
+ * so the row's `symbol` IS the English name of the coin and its `name` is the
+ * Persian one. A Persian ticker is how a share is recognized; a coin is known as
+ * Bitcoin, not as بیت کوین, so the two are not labelled by the same rule.
+ */
+export const catalogLabel = (a) =>
+  a?.asset_class === "Crypto" ? a?.symbol || a?.name || a?.key || "—" : assetLabel(a);
+
+/** The row's other name, for a hover. Empty when it would only repeat the label. */
+export const nativeName = (a) => {
+  const other = a?.name_fa || a?.name || "";
+  return other === catalogLabel(a) ? "" : other;
+};
 
 /**
  * What to call one row of someone's portfolio.

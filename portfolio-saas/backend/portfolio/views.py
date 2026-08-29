@@ -376,17 +376,18 @@ def _ledger_payload(user, account=None):
         (h.account_id, h.asset_id): h.display_name
         for h in Holding.objects.filter(account__in=accounts).exclude(display_name="")
     }
+    prices = get_latest_prices()
     data = list(
         LedgerEntrySerializer(
             rows,
             many=True,
             context={
-                "pnl": entry_pnl_map(rows, get_latest_prices()),
+                "pnl": entry_pnl_map(rows, prices),
                 "labels": labels,
             },
         ).data
     )
-    data.extend(synthetic_position_rows(accounts, rows))
+    data.extend(synthetic_position_rows(accounts, rows, prices))
     return data
 
 

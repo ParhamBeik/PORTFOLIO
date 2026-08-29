@@ -1585,6 +1585,34 @@ def test_ensure_asset_is_safe_against_a_double_click(db):
     assert first.pk == second.pk
 
 
+def test_a_coin_is_named_in_english_from_the_picker_to_the_ledger(db):
+    """Market/Cryptocurrency.php carries no symbol field, so `provider_symbol`
+    keys those rows on `name_en` and the provider's `name` arrives Persian.
+    Minting stored that Persian name as the asset's own and the ledger labelled
+    from `name_fa`, so a coin chosen as "Bitcoin" appeared on the ledger under a
+    name the picker never showed. The Persian one is kept for the hover.
+    """
+    from marketdata.models import MarketInstrument
+    from portfolio.services.catalog import ensure_asset
+    from portfolio.services.ledger import ledger_label
+
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.BRS,
+        symbol="Bitcoin",
+        name="بیت کوین",
+        category=MarketInstrument.Category.CRYPTO,
+        provider_group="crypto",
+        eligible=True,
+    )
+
+    coin = ensure_asset(source="brs", symbol="Bitcoin")
+
+    assert coin.name == "Bitcoin"
+    assert coin.name_fa == "بیت کوین"
+    assert ledger_label(coin) == "Bitcoin"
+    assert ledger_label(coin, "Long-term stack") == "Long-term stack", "nickname wins"
+
+
 def test_picking_usdt_reuses_the_seeded_asset_instead_of_minting_a_twin(db, asset_catalog):
     """Ingest canonicalizes USDT -> USDT_IRT on write, but the catalog sync
     leaves the raw "USDT" eligible, so both are pickable. Minting on the raw

@@ -241,6 +241,20 @@ table,
   background: var(--c-border);
 }
 
+/* Below `lg` the scope controls own a full-width row of their own (they are no
+   longer inside the collapsible menu), so the two selects share it evenly
+   instead of standing on a fixed width that overflows a narrow phone. */
+@media (max-width: 1023px) {
+  .app-toolbar-label {
+    flex: 1 1 8rem;
+  }
+
+  .app-toolbar-select {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
 @media (min-width: 640px) {
   .app-toolbar-divider {
     display: block;

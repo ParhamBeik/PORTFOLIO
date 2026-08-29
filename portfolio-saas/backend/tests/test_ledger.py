@@ -1751,6 +1751,67 @@ def test_restamping_an_opening_converts_it_to_a_valuation_mark(account, asset_ca
     )
 
 
+# --- What the ledger's Amount / Price / Value columns are worth --------------
+#
+# Integration, not unit: the defect was in what the LIST endpoint assembles out
+# of the serializer and the synthetic-holding rows, and neither half was wrong on
+# its own. `amount_tomans` is only stored for the kinds that move money, so every
+# position the user merely declared -- a property, a manual gold bar, an opening
+# -- printed a quantity and a price with an empty Value beside them.
+
+
+def _ledger_rows(account):
+    response = _client(account.user).get(f"/api/accounts/{account.id}/ledger/")
+    assert response.status_code == 200, response.data
+    return {row["asset_key"]: row for row in response.data if row.get("asset_key")}
+
+
+@pytest.mark.django_db
+def test_ledger_columns_multiply_out_for_declared_positions(
+    account, asset_catalog, write_prices
+):
+    write_prices({"swiss_gold_bar_1g": Decimal("7500000")})
+    account.refresh_from_db()  # the fixture's opening-cash baseline
+    client = _client(account.user)
+    # A property: 91 sqm at 100 million Toman/sqm.
+    property_holding = Holding.objects.get(pk=_add_property(account).data["id"])
+    # A manual asset entered from the holdings screen, which writes no ledger row.
+    bar = client.post(
+        f"/api/accounts/{account.id}/holdings/",
+        {"asset_key": "swiss_gold_bar_1g", "quantity": "4",
+         "unit_price_tomans": "7500000"},
+        format="json",
+    )
+    assert bar.status_code == 201, bar.data
+    # A stock the user already owned, quoted in Rial.
+    create_ledger_entry(
+        account=account,
+        kind=LedgerEntry.Kind.OPENING_POSITION,
+        asset=asset_catalog["kama_stock"],
+        quantity=Decimal("100"),
+        unit_price_tomans=Decimal("5330"),
+        occurred_at=account.tracking_started_at,
+    )
+
+    rows = _ledger_rows(account)
+
+    house = rows[property_holding.asset.key]
+    assert Decimal(house["value_tomans"]) == Decimal("91") * Decimal("100") * 10**6
+    assert Decimal(house["area_sqm"]) == Decimal("91"), "the Amount column"
+    assert Decimal(house["quantity"]) == Decimal("100"), "the Price column, per sqm"
+
+    gold = rows["swiss_gold_bar_1g"]
+    assert Decimal(gold["unit_price_tomans"]) == Decimal("7500000")
+    assert Decimal(gold["value_tomans"]) == Decimal("4") * Decimal("7500000")
+
+    # Rial price, Toman value: the division lands on the product, so the column
+    # is a tenth of the number the two beside it multiply to.
+    stock = rows["kama_stock"]
+    assert stock["unit_price_currency"] == "rial"
+    assert Decimal(stock["value_tomans"]) == Decimal("100") * Decimal("5330") / 10
+    assert stock["label"] == "کاما", "the ticker, not the company name"
+
+
 @pytest.mark.django_db
 def test_a_stock_buy_debits_cash_in_toman_not_rial(account, asset_catalog, write_prices):
     """`amount_tomans` is a quantity x price product, and TSE prices are Rial.

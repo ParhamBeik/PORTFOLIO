@@ -5,7 +5,19 @@
 // rendered as `data-testid`. Naming convention: "<page>-<thing>", lowercase and
 // hyphenated, e.g. "dashboard-total", "optimal-window-tabs".
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+
+import {
+  JALALI_MONTHS,
+  JALALI_WEEKDAYS,
+  firstColumn,
+  jalaliLabel,
+  jalaliToIso,
+  monthLength,
+  sameDay,
+  shiftMonth,
+  toJalali,
+} from "../jalali.js";
 
 const tone = {
   neutral: "text-text",
@@ -124,6 +136,110 @@ export function Input({ label, className = "", ...props }) {
   );
 }
 
+/**
+ * A day, chosen on the calendar the reader actually uses.
+ *
+ * `<input type="datetime-local">` renders whatever calendar the browser's locale
+ * says — Gregorian, in an app whose users date everything in Farvardin and Esfand
+ * — and it renders it in a chrome we cannot theme. This is a plain grid instead:
+ * one month at a time, Saturday first, no popover to clip against the dialog's
+ * own scroller.
+ *
+ * `value` is an ISO instant or "" (meaning "when it is saved"); `onChange` gets
+ * the same. A day is recorded at its own midnight in Tehran. Days after today are
+ * dead: the server refuses a future entry, so offering one is offering a 400.
+ */
+export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" }) {
+  const today = toJalali(Date.now());
+  const selected = value ? toJalali(new Date(value)) : null;
+  const [view, setView] = useState(() => selected || today);
+
+  const days = monthLength(view.jy, view.jm);
+  const blanks = firstColumn(view.jy, view.jm);
+  const isFuture = (jd) =>
+    view.jy > today.jy ||
+    (view.jy === today.jy &&
+      (view.jm > today.jm || (view.jm === today.jm && jd > today.jd)));
+
+  const pick = (jd) => onChange(sameDay(selected, { ...view, jd }) ? "" : jalaliToIso(view.jy, view.jm, jd));
+  const step = (by) => setView((v) => shiftMonth(v, by));
+
+  return (
+    <div
+      data-testid={testId}
+      className="rounded-lg border border-border bg-panel-2 p-3"
+    >
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <Button
+          onClick={() => step(-1)}
+          aria-label="Previous month"
+          data-testid={testId ? `${testId}-prev` : undefined}
+        >
+          ‹
+        </Button>
+        <span className="text-sm font-medium" data-testid={testId ? `${testId}-month` : undefined}>
+          {JALALI_MONTHS[view.jm - 1]} {view.jy}
+        </span>
+        <Button
+          onClick={() => step(1)}
+          aria-label="Next month"
+          data-testid={testId ? `${testId}-next` : undefined}
+        >
+          ›
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-7 gap-1 text-center text-[0.625rem] font-semibold tracking-wide text-muted uppercase">
+        {JALALI_WEEKDAYS.map((d) => (
+          <span key={d}>{d}</span>
+        ))}
+      </div>
+
+      <div className="mt-1 grid grid-cols-7 gap-1">
+        {Array.from({ length: blanks }, (_, i) => <span key={`b${i}`} />)}
+        {Array.from({ length: days }, (_, i) => i + 1).map((jd) => {
+          const isSelected = sameDay(selected, { ...view, jd });
+          const isToday = sameDay(today, { ...view, jd });
+          return (
+            <button
+              key={jd}
+              type="button"
+              disabled={isFuture(jd)}
+              aria-pressed={isSelected}
+              onClick={() => pick(jd)}
+              data-testid={testId ? `${testId}-day-${jd}` : undefined}
+              className={`rounded-md border py-1.5 text-sm transition-colors disabled:cursor-not-allowed disabled:border-transparent disabled:text-muted/40 ${
+                isSelected
+                  ? "border-accent bg-accent text-white"
+                  : isToday
+                    ? "border-accent/50 bg-panel text-text"
+                    : "border-transparent text-text hover:bg-panel"
+              }`}
+            >
+              {jd}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="mt-3 flex items-center justify-between gap-2 border-t border-border pt-2">
+        <span className="text-xs text-muted" data-testid={testId ? `${testId}-summary` : undefined}>
+          {selected ? jalaliLabel(selected) : todayLabel}
+        </span>
+        {selected && (
+          <Button
+            variant="link"
+            onClick={() => onChange("")}
+            data-testid={testId ? `${testId}-clear` : undefined}
+          >
+            Clear
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** Segmented control. `options` is [{ value, label, disabled }]. */
 export function Tabs({ options, value, onChange, label, testId }) {
   return (
@@ -205,6 +321,22 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+/**
+ * Previous / next over a paged list. `count` is the TOTAL number of rows, not
+ * the number on this page. Works for a server-paged table (Ops) and a
+ * client-sliced one (Ledger) alike -- the caller owns which rows it shows.
+ */
+export function Pager({ page, count, pageSize = 25, onPage, testId }) {
+  const pages = Math.max(1, Math.ceil((count || 0) / pageSize));
+  return (
+    <div data-testid={testId} className="mt-3 flex items-center gap-2 text-sm">
+      <Button disabled={page <= 1} onClick={() => onPage(page - 1)}>Previous</Button>
+      <span className="text-muted">Page {page} / {pages}</span>
+      <Button disabled={page >= pages} onClick={() => onPage(page + 1)}>Next</Button>
     </div>
   );
 }

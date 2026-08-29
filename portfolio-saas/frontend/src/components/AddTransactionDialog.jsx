@@ -21,8 +21,18 @@ import {
   updateHolding,
 } from "../api.js";
 import { useApi } from "../useApi.js";
-import { Badge, Button, ErrorState, Input, Loading, Modal, Select } from "./ui.jsx";
-import { area, assetLabel, holdingLabel, perSqm, toman } from "../format.js";
+import {
+  Badge,
+  Button,
+  ErrorState,
+  Input,
+  JalaliDateField,
+  Loading,
+  Modal,
+  Select,
+} from "./ui.jsx";
+import { area, catalogLabel, nativeName, perSqm, toman } from "../format.js";
+import { jalaliLabel, toJalali } from "../jalali.js";
 
 // Mirrors SEARCH_LIMIT in backend/portfolio/services/catalog.py. Only used to
 // decide whether to tell the user the list was cut short.
@@ -73,11 +83,14 @@ const stepsFor = (isCashMove) =>
     : ["category", "asset", "action", "amount", "review"];
 
 /** A big, obvious choice tile — the step-1 and step-3 control. */
-function Choice({ label, hint, selected, onClick, testId, disabled = false }) {
+function Choice({ label, hint, title, selected, onClick, testId, disabled = false }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      // The coin's own name, for the reader who knows it in Persian and not in
+      // English. Only set when it says something the label does not.
+      title={title || undefined}
       // Picking a catalog row POSTs to mint the asset. Leaving the tile live
       // during that round trip let a double-click fire two creates for one
       // instrument, and the second came back a 500.
@@ -109,12 +122,6 @@ function Step({ n, of, title, children }) {
     </div>
   );
 }
-
-const toIso = (local) => {
-  if (!local) return null;
-  const d = new Date(local);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
-};
 
 const positive = (v) => v !== "" && Number(v) > 0;
 
@@ -308,8 +315,11 @@ export default function AddTransactionDialog({
   };
 
   const summary = () => {
-    const when = form.when ? new Date(form.when).toLocaleString("en-GB") : "now";
-    const name = newProperty ? form.name || "the property" : holdingLabel(asset || {});
+    // `form.when` is already the instant the chosen day starts in Tehran, so it
+    // is printed back on the calendar it was picked on, not the browser's.
+    const when = form.when ? jalaliLabel(toJalali(new Date(form.when))) : "now";
+    // Named exactly as the tile the user just clicked, coin included.
+    const name = newProperty ? form.name || "the property" : catalogLabel(asset || {});
     if (isCashMove) {
       const verb = action === "deposit" ? "Add" : "Take out";
       return `${verb} ${toman(form.amount)} — ${when}.`;
@@ -340,7 +350,7 @@ export default function AddTransactionDialog({
     if (!targetAccountId || busy) return;
     setBusy(true);
     setError(null);
-    const occurredAt = toIso(form.when);
+    const occurredAt = form.when || null;
     try {
       if (isCashMove) {
         await createLedgerEntry(targetAccountId, {
@@ -500,11 +510,12 @@ export default function AddTransactionDialog({
               {options.map((a) => (
                 <Choice
                   key={a.key || `${a.source}:${a.symbol}`}
-                  label={assetLabel(a)}
+                  label={catalogLabel(a)}
+                  title={nativeName(a)}
                   hint={
                     a.is_manual
                       ? "You set the price yourself"
-                      : a.symbol
+                      : a.symbol && a.symbol !== catalogLabel(a)
                         ? `${a.symbol} — priced from the market`
                         : "Priced from the market"
                   }
@@ -637,14 +648,12 @@ export default function AddTransactionDialog({
                   )}
                 </Field>
               )}
-              <Field label="When? (leave blank for now)">
-                <Input
-                  label="Date"
-                  type="datetime-local"
-                  className="w-full"
+              <Field label="When? (leave it on today for now)">
+                <JalaliDateField
                   value={form.when}
-                  onChange={set("when")}
-                  data-testid="add-transaction-when"
+                  onChange={(iso) => setForm((f) => ({ ...f, when: iso }))}
+                  todayLabel="Recorded as of today"
+                  testId="add-transaction-when"
                 />
               </Field>
             </div>

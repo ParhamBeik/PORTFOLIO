@@ -422,8 +422,72 @@ def delete_orphan_holding(*, user, account_id: int, holding_id: int) -> None:
     holding.delete()
 
 
-def synthetic_position_rows(accounts, ledger_rows) -> list[dict]:
-    """Holdings with no ledger history, shown as editable position rows."""
+def ledger_label(asset, nickname: str = "") -> str:
+    """What to call an asset on the ledger.
+
+    The owner's own nickname first, then the TICKER a stock is recognized by --
+    `ensure_asset` stores the full company name in `name_fa`, which is not what
+    anybody calls a share. Non-stock symbols (`IR_COIN_EMAMI`) are provider join
+    keys, not names, so those rows keep the catalog name.
+
+    Crypto is the one place the join key IS the name: the provider's coin feed
+    carries no symbol field, so `ingest.provider_symbol` keys those rows on
+    `name_en` and the Persian name lands in `name_fa`. A coin is known as
+    Bitcoin, so it is labelled from the symbol the way a share is -- and the
+    picker that offered it labels it the same way (format.js `catalogLabel`).
+    """
+    if asset.asset_class == Asset.AssetClass.CRYPTO:
+        return nickname or asset.brs_symbol or asset.name or asset.key
+    return (
+        nickname
+        or asset.tse_symbol
+        or asset.name_fa
+        or asset.name
+        or asset.key
+    )
+
+
+def entry_value_tomans(entry) -> Decimal | None:
+    """What one ledger row is worth, in Toman.
+
+    `amount_tomans` is only ever STORED for the kinds that move money (trades and
+    cash events), so every position a user merely declared -- a property mark, an
+    opening position, a manual asset priced by hand -- printed a quantity and a
+    price with an empty Value beside them, and a property printed its size and
+    its price-per-sqm in the one Amount column. This is the derivation, once.
+
+    A quantity x price product crosses the TSE Rial/Toman boundary, so it goes
+    through the same helper the P&L column uses: divide the product, never the
+    price.
+    """
+    from portfolio.services.valuation import _house_value
+
+    if entry.amount_tomans is not None:
+        return entry.amount_tomans
+    asset = entry.asset if entry.asset_id else None
+    if asset is None or entry.quantity is None:
+        return None
+    if asset.is_house:
+        return _house_value(
+            entry.quantity,
+            area_sqm=entry.area_sqm if entry.area_sqm is not None else HOUSE_AREA_SQM,
+        )
+    if not entry.price_tomans:
+        return None
+    return holding_value_to_toman(asset, entry.quantity * entry.price_tomans)
+
+
+def synthetic_position_rows(accounts, ledger_rows, prices: dict | None = None) -> list[dict]:
+    """Holdings with no ledger history, shown as editable position rows.
+
+    `prices` is the live map (`get_latest_prices()`, provider scale). Without it
+    these rows carried a quantity and nothing else: a manual gold bar whose price
+    the owner had typed in showed "—" for both its price and its value.
+    """
+    from marketdata.currency import is_tse_priced
+    from portfolio.services.valuation import asset_value
+
+    prices = prices or {}
     covered = {
         (entry.account_id, entry.asset_id)
         for entry in ledger_rows
@@ -437,6 +501,14 @@ def synthetic_position_rows(accounts, ledger_rows) -> list[dict]:
     for holding in holdings:
         if (holding.account_id, holding.asset_id) in covered:
             continue
+        price = prices.get(holding.asset.key)
+        # A house is valued by its own formula and needs no quote; anything else
+        # is worth nothing we can state until a price exists.
+        value = (
+            asset_value(holding, price)
+            if holding.asset.is_house or price is not None
+            else None
+        )
         rows.append({
             "id": f"h-{holding.id}",
             "kind": "position",
@@ -447,13 +519,16 @@ def synthetic_position_rows(accounts, ledger_rows) -> list[dict]:
             "asset_key": holding.asset.key,
             "asset_name": holding.asset.name,
             "asset_name_fa": holding.asset.name_fa,
-            "label": holding.label,
+            "asset_symbol": holding.asset.tse_symbol or holding.asset.brs_symbol,
+            "label": ledger_label(holding.asset, holding.display_name),
             "is_hidden": holding.is_hidden,
             "is_house": holding.asset.is_house,
             "area_sqm": str(holding.area_sqm) if holding.asset.is_house else None,
             "quantity": str(holding.quantity),
-            "unit_price_tomans": None,
+            "unit_price_tomans": None if price is None else str(price),
+            "unit_price_currency": "rial" if is_tse_priced(holding.asset) else "toman",
             "amount_tomans": None,
+            "value_tomans": None if value is None else str(value),
             "occurred_at": holding.updated_at.isoformat() if holding.updated_at else None,
             "source": "holding",
             "note": "",

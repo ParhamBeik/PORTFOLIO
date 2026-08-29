@@ -224,8 +224,16 @@ def ensure_asset(*, source: str, symbol: str) -> Asset:
 
     asset_class = _class_for(inst)
     display = (inst.name or inst.symbol)[:120]
+    # A share is known by its ticker and a coin by its English name, and the
+    # provider hands both of those over as `symbol` -- the crypto feed has no
+    # symbol field at all, so ingest keys those rows on `name_en`. The provider's
+    # `name` is Persian either way, which is what `name_fa` is for.
     fields = {
-        "name": inst.symbol[:120] if asset_class == Asset.AssetClass.STOCK else display,
+        "name": (
+            inst.symbol[:120]
+            if asset_class in (Asset.AssetClass.STOCK, Asset.AssetClass.CRYPTO)
+            else display
+        ),
         "name_fa": display,
         "asset_class": asset_class,
         "currency": Asset.Currency.IRT,

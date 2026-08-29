@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { logoutSession } from "../api.js";
 import Logo from "./Logo.jsx";
@@ -61,6 +61,17 @@ export default function Shell({ user, onLogout }) {
   const initial = (user?.email || "?").charAt(0).toUpperCase();
   const closeMobile = () => setMobileOpen(false);
 
+  // An opened menu covers the page it was opened from, so it has to be
+  // dismissable the way every other overlay is.
+  useEffect(() => {
+    if (!mobileOpen) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape") setMobileOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [mobileOpen]);
+
   return (
     <div className="flex min-h-full flex-col">
       <a
@@ -74,7 +85,7 @@ export default function Shell({ user, onLogout }) {
         <div className="flex min-h-[4.25rem] flex-wrap items-center gap-x-5 gap-y-3 px-5 py-3 lg:px-6">
           <NavLink
             to="/"
-            className="app-brand group shrink-0"
+            className="app-brand group order-1 shrink-0"
             aria-label={`${APP_NAME} home`}
             data-testid="app-brand"
           >
@@ -87,14 +98,57 @@ export default function Shell({ user, onLogout }) {
             </span>
           </NavLink>
 
-          {/* Below `lg` this row wraps to a new line only when opened — the nav
-              rail and toolbar are wide enough (6 tabs + 2 selects) that showing
-              them inline always eats most of the viewport on a phone. */}
+          {/* Which portfolio, priced in what: these two say what every number on
+              the page MEANS, so they sit outside the collapsible panel and stay
+              on screen at every width. Inside it, a phone read a whole screen of
+              figures without ever saying whose money it was. Below `lg` they
+              take a row of their own, under the brand. */}
+          <div
+            className="app-toolbar order-3 w-full lg:ml-auto lg:w-auto"
+            data-testid="header-toolbar"
+          >
+            <label className="app-toolbar-label">
+              <span className="app-toolbar-caption">Portfolio</span>
+              <Select
+                label="Active portfolio"
+                data-testid="scope-account"
+                className="app-toolbar-select"
+                value={activeId ?? ""}
+                onChange={(e) => setActive(e.target.value === "" ? null : Number(e.target.value))}
+              >
+                <option value="">All portfolios</option>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                    {a.goal ? ` · ${a.goal}` : ""}
+                  </option>
+                ))}
+              </Select>
+            </label>
+            <span className="app-toolbar-divider" aria-hidden="true" />
+            <label className="app-toolbar-label">
+              <span className="app-toolbar-caption">Basis</span>
+              <Select
+                label="Valuation basis"
+                data-testid="scope-basis"
+                className="app-toolbar-select"
+                value={basis}
+                onChange={(e) => setBasis(e.target.value)}
+              >
+                {BASES.map(([v, l]) => (
+                  <option key={v} value={v}>{l}</option>
+                ))}
+              </Select>
+            </label>
+          </div>
+
+          {/* Below `lg` the page links wrap to a line of their own, and only when
+              opened — six tabs inline eat most of a phone's viewport. */}
           <div
             id="app-nav-panel"
-            className={`${mobileOpen ? "flex" : "hidden"} w-full flex-col gap-3 lg:contents`}
+            className={`${mobileOpen ? "flex" : "hidden"} order-4 w-full flex-col gap-3 lg:contents`}
           >
-            <nav aria-label="Primary" className="app-nav-rail" data-testid="nav">
+            <nav aria-label="Primary" className="app-nav-rail lg:order-2" data-testid="nav">
               {PAGES.map((p) => (
                 <NavItem
                   key={p.to}
@@ -111,49 +165,24 @@ export default function Shell({ user, onLogout }) {
               )}
             </nav>
 
-            <div className="app-toolbar lg:ml-auto" data-testid="header-toolbar">
-              <label className="app-toolbar-label">
-                <span className="app-toolbar-caption">Portfolio</span>
-                <Select
-                  label="Active portfolio"
-                  data-testid="scope-account"
-                  className="app-toolbar-select"
-                  value={activeId ?? ""}
-                  onChange={(e) => setActive(e.target.value === "" ? null : Number(e.target.value))}
-                >
-                  <option value="">All portfolios</option>
-                  {accounts.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name}
-                      {a.goal ? ` · ${a.goal}` : ""}
-                    </option>
-                  ))}
-                </Select>
-              </label>
-              <span className="app-toolbar-divider" aria-hidden="true" />
-              <label className="app-toolbar-label">
-                <span className="app-toolbar-caption">Basis</span>
-                <Select
-                  label="Valuation basis"
-                  data-testid="scope-basis"
-                  className="app-toolbar-select"
-                  value={basis}
-                  onChange={(e) => setBasis(e.target.value)}
-                >
-                  {BASES.map(([v, l]) => (
-                    <option key={v} value={v}>{l}</option>
-                  ))}
-                </Select>
-              </label>
-            </div>
-
             <div className="app-user-chip flex md:hidden" data-testid="user-email-mobile">
               <span className="app-user-avatar" aria-hidden="true">{initial}</span>
               <span className="max-w-[11rem] truncate text-sm text-muted">{user.email}</span>
             </div>
+
+            {/* The icon that opened this turns into a close cross, which is easy
+                to miss once the panel has pushed the page down. Escape works too. */}
+            <Button
+              variant="ghost"
+              className="app-header-btn w-full lg:hidden"
+              onClick={closeMobile}
+              data-testid="nav-close"
+            >
+              Close menu
+            </Button>
           </div>
 
-          <div className="ml-auto flex items-center gap-2 sm:gap-3">
+          <div className="order-2 ml-auto flex items-center gap-2 sm:gap-3 lg:order-4 lg:ml-0">
             <div className="app-user-chip hidden md:flex" data-testid="user-email">
               <span className="app-user-avatar" aria-hidden="true">{initial}</span>
               <span className="max-w-[11rem] truncate text-sm text-muted">{user.email}</span>

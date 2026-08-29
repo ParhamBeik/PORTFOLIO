@@ -199,13 +199,19 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
     # product. Say which currency the price is in so the client stops suffixing
     # every row " T" and printing a price that does not divide into the value.
     unit_price_currency = serializers.SerializerMethodField()
+    # The ticker, for the rows whose catalog name is a company name nobody uses.
+    asset_symbol = serializers.SerializerMethodField()
+    # `amount_tomans` is only stored for the kinds that move money. This is what
+    # the row is WORTH, derived when nothing was stored -- see entry_value_tomans.
+    value_tomans = serializers.SerializerMethodField()
 
     class Meta:
         model = LedgerEntry
         fields = (
             "id", "kind", "asset_key", "asset_name", "asset_name_fa", "label",
+            "asset_symbol",
             "is_house", "quantity", "unit_price_tomans", "unit_price_currency",
-            "amount_tomans", "area_sqm", "mortgage_deduction_tomans",
+            "amount_tomans", "value_tomans", "area_sqm", "mortgage_deduction_tomans",
             "occurred_at", "source", "note", "external_id", "reversal_of",
             "created_at", "pnl_tomans", "pnl_kind",
             "account_id", "account_name", "is_synthetic",
@@ -216,6 +222,17 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
         from marketdata.currency import is_tse_priced
 
         return "rial" if is_tse_priced(obj.asset) else "toman"
+
+    def get_asset_symbol(self, obj):
+        if not obj.asset_id:
+            return None
+        return obj.asset.tse_symbol or obj.asset.brs_symbol or None
+
+    def get_value_tomans(self, obj):
+        from .services.ledger import entry_value_tomans
+
+        value = entry_value_tomans(obj)
+        return None if value is None else str(value)
 
     def _pnl(self, obj):
         return (self.context.get("pnl") or {}).get(obj.pk) or {}
@@ -234,16 +251,14 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
 
         Supplied by the view as a {(account_id, asset_id): name} map rather than
         looked up per row -- the alternative is one query per ledger line. Falls
-        back to the catalog name when the holding is gone (a fully sold position
-        keeps its history)."""
+        back to the ticker, then the catalog name, when the holding is gone (a
+        fully sold position keeps its history)."""
         if not obj.asset_id:
             return None
+        from .services.ledger import ledger_label
+
         names = self.context.get("labels") or {}
-        return (
-            names.get((obj.account_id, obj.asset_id))
-            or obj.asset.name_fa
-            or obj.asset.name
-        )
+        return ledger_label(obj.asset, names.get((obj.account_id, obj.asset_id), ""))
 
 
 class LedgerEntryPatchSerializer(serializers.Serializer):

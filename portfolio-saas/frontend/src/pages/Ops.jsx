@@ -18,6 +18,7 @@ import {
   Card,
   Delta,
   PageHeader,
+  Pager,
   StatTile,
   Table,
   Tabs,
@@ -43,17 +44,6 @@ const tone = (value) => TONE[value] || "neutral";
 function gb(bytes) {
   if (bytes == null) return "—";
   return `${(Number(bytes) / 1024 ** 3).toFixed(2)} GB`;
-}
-
-function Pager({ page, count, pageSize = 25, onPage }) {
-  const pages = Math.max(1, Math.ceil((count || 0) / pageSize));
-  return (
-    <div className="mt-3 flex items-center gap-2 text-sm">
-      <Button disabled={page <= 1} onClick={() => onPage(page - 1)}>Previous</Button>
-      <span className="text-muted">Page {page} / {pages}</span>
-      <Button disabled={page >= pages} onClick={() => onPage(page + 1)}>Next</Button>
-    </div>
-  );
 }
 
 function archiveJobVariant(row) {

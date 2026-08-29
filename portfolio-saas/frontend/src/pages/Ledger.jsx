@@ -19,12 +19,15 @@ import {
   Loading,
   Modal,
   PageHeader,
+  Pager,
+  Select,
   Table,
 } from "../components/ui.jsx";
 import {
   area,
   dateTime,
   holdingLabel,
+  jalaliDate,
   humanize,
   perSqm,
   signedToman,
@@ -47,6 +50,11 @@ const KIND_LABEL = {
   valuation_mark: "Revalued",
   position: "Owned",
 };
+
+// A full history is thousands of pixels of table. 25 keeps the card about one
+// screen tall; "All" is still there for anyone scanning the whole thing.
+const ALL = "all";
+const PAGE_SIZES = [10, 25, 50, 100, ALL];
 
 function PlusIcon() {
   return (
@@ -74,19 +82,27 @@ function kindBadge(row) {
  * How much of the asset the row moved.
  *
  * A property's quantity is a price per square meter in millions of Toman, not a
- * count of anything, so printing the raw number ("100") was meaningless. It reads
- * as the two figures a property is actually described by.
+ * count of anything, so printing the raw number ("100") was meaningless. Its size
+ * is the "how much", and the price per square meter belongs in the Price column
+ * beside it -- printing both here left Price and Value empty and made a property
+ * the one row whose columns did not match their headers.
  */
 function quantityCell(row) {
+  if (row.is_house) return area(row.area_sqm);
   if (row.quantity == null) return "—";
+  return Number(row.quantity).toLocaleString("en-US", { maximumFractionDigits: 6 });
+}
+
+/** What one unit cost: a square meter for a property, one share/gram otherwise. */
+function priceCell(row) {
   if (row.is_house) {
     return (
       <span className="whitespace-nowrap">
-        {area(row.area_sqm)} @ {perSqm(Number(row.quantity) * 1e6)}
+        {row.quantity == null ? "—" : perSqm(Number(row.quantity) * 1e6)}
       </span>
     );
   }
-  return Number(row.quantity).toLocaleString("en-US", { maximumFractionDigits: 6 });
+  return unitPrice(row.unit_price_tomans, row.unit_price_currency);
 }
 
 /**
@@ -132,7 +148,7 @@ function EditEntryDialog({ row, onClose, onSaved }) {
   return (
     <Modal
       title={`Edit ${holdingLabel(row)}`}
-      subtitle={dateTime(row.occurred_at)}
+      subtitle={`${jalaliDate(row.occurred_at)} · ${dateTime(row.occurred_at)}`}
       onClose={onClose}
       testId="ledger-edit-dialog"
       footer={
@@ -208,6 +224,8 @@ export default function Ledger() {
 
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -255,18 +273,33 @@ export default function Ledger() {
   const showPortfolio = accountId == null;
 
   const columns = [
-    { key: "when", header: "When", render: (r) => dateTime(r.occurred_at) },
-    { key: "kind", header: "What", render: kindBadge },
-    { key: "asset", header: "Asset", render: (r) => (r.asset_key ? holdingLabel(r) : "—") },
-    { key: "qty", header: "Amount", align: "right", render: quantityCell },
     {
-      key: "price",
-      header: "Price",
-      align: "right",
-      render: (r) =>
-        r.is_house ? "—" : unitPrice(r.unit_price_tomans, r.unit_price_currency),
+      key: "when",
+      header: "When",
+      // Dated on a Persian calendar when it was recorded, so read back on one.
+      // The Gregorian date and the time of day stay on the hover.
+      render: (r) => (
+        <span className="whitespace-nowrap" title={dateTime(r.occurred_at)}>
+          {jalaliDate(r.occurred_at)}
+        </span>
+      ),
     },
-    { key: "amt", header: "Value", align: "right", render: (r) => toman(r.amount_tomans) },
+    { key: "kind", header: "What", render: kindBadge },
+    {
+      key: "asset",
+      header: "Asset",
+      // The label is the ticker a share is recognized by, not the company's full
+      // name; the full name stays reachable on hover.
+      render: (r) =>
+        r.asset_key ? (
+          <span title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</span>
+        ) : (
+          "—"
+        ),
+    },
+    { key: "qty", header: "Amount", align: "right", render: quantityCell },
+    { key: "price", header: "Price", align: "right", render: priceCell },
+    { key: "amt", header: "Value", align: "right", render: (r) => toman(r.value_tomans) },
     {
       key: "pnl",
       header: "P/L",
@@ -356,15 +389,57 @@ export default function Ledger() {
         />
       )}
 
-      <Card title="History" testId="ledger-history-card">
+      <Card
+        title="History"
+        testId="ledger-history-card"
+        actions={
+          <label className="flex items-center gap-2 text-sm text-muted">
+            Rows
+            <Select
+              label="Rows per page"
+              value={pageSize}
+              onChange={(e) => { setPageSize(e.target.value); setPage(1); }}
+              data-testid="ledger-page-size"
+            >
+              {PAGE_SIZES.map((s) => (
+                <option key={s} value={s}>{s === ALL ? "All" : s}</option>
+              ))}
+            </Select>
+          </label>
+        }
+      >
         <Async
           {...ledger}
           testId="ledger-history"
           empty="Nothing recorded yet. Use Add to record your first buy, sale, or holding."
         >
-          {(rows) => (
-            <Table testId="ledger-table" rowKey={(r) => r.id} rows={rows} columns={columns} />
-          )}
+          {(rows) => {
+            // Clamped rather than corrected in state: deleting the last row of
+            // the last page, or switching to a shorter portfolio, would
+            // otherwise leave the table showing an empty page.
+            const size = pageSize === ALL ? rows.length || 1 : Number(pageSize);
+            const pages = Math.max(1, Math.ceil(rows.length / size));
+            const current = Math.min(page, pages);
+            return (
+              <>
+                <Table
+                  testId="ledger-table"
+                  rowKey={(r) => r.id}
+                  rows={rows.slice((current - 1) * size, current * size)}
+                  columns={columns}
+                />
+                {pages > 1 && (
+                  <Pager
+                    page={current}
+                    count={rows.length}
+                    pageSize={size}
+                    onPage={setPage}
+                    testId="ledger-pager"
+                  />
+                )}
+              </>
+            );
+          }}
         </Async>
       </Card>
     </div>
