@@ -23,7 +23,10 @@ _LATEST_PRICES_STATE_KEY = "prices:latest:market-state"
 _ARCHIVE_DROP_FLOOR = Decimal("0.50")
 _ARCHIVE_SPIKE_CEILING = Decimal("2.00")
 
-_FRESH_SECONDS = 300
+# One definition, shared with the Ops console rather than restated. Two literal
+# 300s for "how old is too old" is how the console and the valuation drift into
+# disagreeing about the same price.
+from marketdata.evidence import LIVE_PRICE_FRESH_SECONDS as _FRESH_SECONDS
 # The live loop only fetches TSE prices while the market session is OPEN, and
 # gold/currency/crypto prices during OPEN or CLOSED_DAYTIME, pausing only
 # OVERNIGHT (marketdata.market_state.live_job_keys). Outside those windows the
@@ -769,6 +772,14 @@ def value_account(
             "age_seconds": age_seconds,
             "quality_status": quality_status,
             "price_unit_status": price_unit_status,
+            # Which currency `unit_price` is quoted in. `value` is ALWAYS Toman --
+            # `holding_value_to_toman` divides the product, never the price, because
+            # a TSE quote is shown in Rial on purpose. The client cannot infer this
+            # from the asset class (a manual stock has no TSE feed and is priced in
+            # Toman), and inferring it from magnitude is how unit bugs start, so the
+            # server declares it. Without it the UI suffixed every price "T" and a
+            # reader multiplying price x quantity got ten times the value shown.
+            "unit_price_currency": "rial" if is_tse_priced(holding.asset) else "toman",
         }
         if holding.asset.is_house:
             # The two numbers a property is actually described by. Sent from here
@@ -1071,12 +1082,25 @@ def compute_dynamic_net_worth_series(
     total_liabilities = sum(l.amount_tomans for l in liabilities)
 
     series = []
+    # Yesterday's quantities, carried so each day can also be valued as if the
+    # book had not changed. See `total_ex_flows` below.
+    prev_day_holdings: dict | None = None
     for i in range(days - 1, -1, -1):
         target_date = now - timedelta(days=i)
         date_str = target_date.strftime("%Y-%m-%d")
         jalali_str = jdatetime.date.fromgregorian(date=target_date.date()).strftime("%Y-%m-%d")
 
         total = Decimal("0")
+        # The same day priced with YESTERDAY's quantities. `total` moves for two
+        # unrelated reasons -- prices moved, or the book changed -- and only the
+        # first is performance. Recording a position you already owned is a
+        # bookkeeping entry, yet it lands in `total` as if the money appeared:
+        # the family account's openings on 2026-08-09 doubled the series in one
+        # day and the benchmark comparison read that as a +108% gain. Chaining
+        # `total_ex_flows[t] / total[t-1]` neutralises every quantity change --
+        # openings, buys and sells alike -- which is what time-weighted return
+        # means and what "both lines start at 100" already claims to show.
+        total_ex_flows = Decimal("0")
         # True once some asset this day had no real close anywhere and its live
         # price had to stand in. A property is never approximate: its worth on a
         # date is the mark that was in force, not a market print.
@@ -1114,12 +1138,22 @@ def compute_dynamic_net_worth_series(
 
         for key, asset in assets.items():
             qty = day_holdings.get(key, Decimal("0"))
+            prev_qty = (
+                qty if prev_day_holdings is None
+                else prev_day_holdings.get(key, Decimal("0"))
+            )
             if asset.is_house:
                 holding = next((h for h in holdings if h.asset_id == asset.id), None)
                 area = house_areas.get(key)
                 if area is None:
                     area = holding.area_sqm if holding else HOUSE_AREA_SQM
-                total += _house_value(qty, area_sqm=area)
+                house_value = _house_value(qty, area_sqm=area)
+                total += house_value
+                # A property's "quantity" IS its price per square meter, so a new
+                # mark is a revaluation -- performance, and it must stay in the
+                # return. Only the day the property first appears is a flow.
+                if prev_qty > 0:
+                    total_ex_flows += house_value
             else:
                 p = stock_closes.get(jalali_str, {}).get(key)
                 if p is None:
@@ -1144,17 +1178,21 @@ def compute_dynamic_net_worth_series(
                         approximated = approximated or qty > 0
                     p = last_known_prices[key]
                 total += holding_value_to_toman(asset, qty * p)
+                total_ex_flows += holding_value_to_toman(asset, prev_qty * p)
 
         total -= total_liabilities
+        total_ex_flows -= total_liabilities
         val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
         series.append({
             "timestamp": target_date.isoformat(),
             "date": date_str,
             "total": str(round(total, 4)),
+            "total_ex_flows": str(round(total_ex_flows, 4)),
             "total_usd": val_usd,
             "is_estimated": True,
             "approximated": approximated,
         })
+        prev_day_holdings = day_holdings
 
     return series
 

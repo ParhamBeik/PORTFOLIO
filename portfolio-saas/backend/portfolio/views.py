@@ -1263,11 +1263,18 @@ def _current_weights_and_total(
     total = _total(items)
     if total <= 0:
         return {}, Decimal("0"), valuation
-    weights = {
-        i["key"]: float(i["value"] / total)
-        for i in items
-        if i["value"] > 0
-    }
+    # Sum across portfolios: `_liquid_items` flattens every account into one list,
+    # so an asset held in two of them appears twice. Keying a dict comprehension on
+    # `i["key"]` kept only the LAST row and silently discarded the rest, while
+    # `total` still counted them -- the weights then summed to less than 1 and the
+    # optimizer rebalanced a book it believed was smaller than it is. On the family
+    # account that hid 580,300,000 T (2.4%) held as usd_cash and quarter_coin in
+    # both portfolios, and made every rebalance plan buy more than it sold.
+    by_key: dict[str, Decimal] = {}
+    for i in items:
+        if i["value"] > 0:
+            by_key[i["key"]] = by_key.get(i["key"], Decimal("0")) + i["value"]
+    weights = {key: float(value / total) for key, value in by_key.items()}
     return weights, total, valuation
 
 
@@ -1610,11 +1617,21 @@ class MyOptimalView(APIView):
             for scenario_key in ("max_sharpe", "min_volatility", "risk_parity", "hrp", "min_cvar"):
                 scenario_payload = entry.get(scenario_key)
                 if scenario_payload:
-                    scenario_payload["diagnostics"] = portfolio_diagnostics(
+                    scenario_diagnostics = portfolio_diagnostics(
                         scenario_payload["target_weights"], total,
                         user=request.user, history_days=window_days,
                         universe=universe, valuation=valuation, basis=basis_used,
                     )
+                    # Only the summary metrics, which is all this block was ever
+                    # for. The full payload carries per-day rolling windows and a
+                    # per-asset breakdown of a HYPOTHETICAL book -- 41 KB against
+                    # the 625 bytes of `metrics` -- and shipping it for every
+                    # scenario in every window made this response 1.6 MB and left
+                    # the page blank for ten seconds. `actual` below stays whole:
+                    # the risk and diversification panels genuinely read it.
+                    scenario_payload["diagnostics"] = {
+                        "metrics": scenario_diagnostics.get("metrics", {})
+                    }
             entry["status"] = "ok"
             windows.append(entry)
         body = {"windows": windows, "basis_requested": requested_basis}

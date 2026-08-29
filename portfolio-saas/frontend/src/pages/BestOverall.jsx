@@ -211,14 +211,33 @@ function GapModule({ valuation: v, target, labelFor }) {
     );
   }
 
-  const currentByKey = new Map(v.items.map((i) => [i.key, Number(i.value) / total]));
+  // Sum across portfolios. `v.items` is every account flattened into one list, so
+  // an asset held in two of them appears twice; `new Map(...)` kept only the last
+  // copy and dropped the rest while `total` still counted them, so the "Yours"
+  // column summed to less than 100% and the trade sizes were overstated by the
+  // difference (703m T of quarter_coin against a true gap of ~215m).
+  const currentByKey = new Map();
+  for (const i of v.items) {
+    currentByKey.set(i.key, (currentByKey.get(i.key) ?? 0) + Number(i.value) / total);
+  }
+  // What the owner calls their own copy, when they hold one. The shared catalog
+  // name for a property is the class ("Real Estate"), so a row for someone's
+  // house read "Real Estate" here while every other page called it خونه کرج.
+  const ownLabel = new Map(v.items.filter((i) => i.label).map((i) => [i.key, i.label]));
   const keys = new Set([...currentByKey.keys(), ...Object.keys(target)]);
   const rows = [...keys]
     .map((key) => {
       const current = currentByKey.get(key) ?? 0;
       const targetWeight = target[key] ?? 0;
       const deltaWeight = targetWeight - current;
-      return { key, label: labelFor(key), current, target: targetWeight, deltaWeight, deltaValue: deltaWeight * total };
+      return {
+        key,
+        label: ownLabel.get(key) || labelFor(key),
+        current,
+        target: targetWeight,
+        deltaWeight,
+        deltaValue: deltaWeight * total,
+      };
     })
     .sort((a, b) => Math.abs(b.deltaValue) - Math.abs(a.deltaValue));
 

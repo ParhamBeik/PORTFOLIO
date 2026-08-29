@@ -330,10 +330,22 @@ WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "30"))
 # Live poll cadence by market state (seconds). Beat still ticks every minute; the
 # task itself decides whether enough time has passed, so the cadence can change
 # without a beat restart. See marketdata/market_state.py for the arithmetic.
-# Open: 2 min; daytime/overnight: 5 min (frees quota for archive).
+# Open: 2 min; daytime/overnight: 4 min (still frees quota for archive).
+#
+# The daytime interval MUST stay below `valuation._FRESH_SECONDS` (300). At 300
+# it equalled the freshness bar, so a price aged past "fresh" at the same moment
+# its replacement became due and every held asset oscillated between Fresh and
+# Stale all day -- measured at 244s and 568s minutes apart, with the console's
+# headline freshness never settling. 240 leaves a one-minute margin, so an asset
+# on a healthy loop never reads stale.
+#
+# Cost: daytime polls rise ~200 -> ~250/day and overnight ~36 -> ~45, taking the
+# live lane from ~780 to ~835 against an ~800 expectation. That is deliberate --
+# a freshness signal nobody can trust is worth less than the calls it saves --
+# but it is env-overridable per deployment if the BRS wallet gets tight.
 MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "120"))
-MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "300"))
-MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "300"))
+MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "240"))
+MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "240"))
 
 MARKETDATA_QUOTA_TIMEZONE = os.getenv("MARKETDATA_QUOTA_TIMEZONE", "Asia/Tehran")
 MARKETDATA_IGNORE_MARKET_HOURS = os.getenv("MARKETDATA_IGNORE_MARKET_HOURS", "False").lower() in ("true", "1")

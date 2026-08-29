@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import AddTransactionDialog from "../components/AddTransactionDialog.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { useApi } from "../useApi.js";
@@ -20,6 +21,7 @@ import {
   holdingLabel,
   humanize,
   indexPoint,
+  money,
   num,
   pct,
   perfLabel,
@@ -27,6 +29,7 @@ import {
   PERF_UNLOCK_HINT,
   signedToman,
   toman,
+  unitPrice,
 } from "../format.js";
 import {
   AreaTrend,
@@ -73,6 +76,41 @@ const BENCH_RANGES = [
   { value: "365", label: "1y" },
 ];
 
+// ponytail: the CPI table is `base 1398=100` (config/settings.py), and a rebase
+// is a once-a-decade SCI event, so the base year is a literal here rather than a
+// new field on every valuation payload. If it ever moves, serve it from the API.
+// Without it "Real Toman" was a number with no unit: 33.6bn nominal showed as
+// 1.55bn with nothing on screen saying which year's money that is.
+const REAL_BASIS_BASE_YEAR = "1398";
+const REAL_BASIS_NOTE = `In constant ${REAL_BASIS_BASE_YEAR} Tomans`;
+const BASIS_LABEL = {
+  nominal_toman: "Nominal Toman",
+  real_toman: `Constant ${REAL_BASIS_BASE_YEAR} Toman`,
+  usd_denominated: "US Dollar",
+  usdt_denominated: "Tether (USDT)",
+};
+
+// What this card measures, said out loud when it has nothing to show.
+//
+// It reports the return on YOUR money -- cash-flow-boundary TWR and investor
+// XIRR -- which needs a tracked opening baseline and enough elapsed time. The
+// price-based returns on My Optimal and Comparison need neither, so those pages
+// happily printed a 1-year return and a 90-day comparison while this one said
+// "available after 71 more days", and the three read as a contradiction.
+function PerformanceUnavailable({ detail }) {
+  return (
+    <Empty testId="dashboard-performance-empty">
+      <span>{detail || PERF_UNLOCK_HINT}</span>
+      <span className="mt-2 block text-xs text-muted">
+        This is the return on the money you put in, which needs a tracked opening
+        balance. Price-based returns for the same holdings are already available
+        on <Link to="/optimal" className="underline hover:text-text">My Optimal</Link>{" "}
+        and <Link to="/comparison" className="underline hover:text-text">Comparison</Link>.
+      </span>
+    </Empty>
+  );
+}
+
 const QUALITY_BADGE = { complete: "good", manual: "warn", partial: "warn", unavailable: "critical" };
 const QUALITY_LABEL = { complete: "Live", manual: "Manual", partial: "Mixed", unavailable: "Unavailable" };
 const ITEM_BADGE = { live: "good", manual: "warn", stale: "warn", quota: "serious", fallback: "serious", unavailable: "critical" };
@@ -94,24 +132,32 @@ function groupByClass(items) {
   return [...groups.slice(0, 7), { name: "Other", value: rest }];
 }
 
-function HeroRow({ state }) {
+function HeroRow({ state, basis }) {
   return (
     <Async {...state} testId="dashboard-hero">
       {(data) => {
-        const hasUsd = data.total_usd !== undefined && data.total_usd !== null;
+        // Under a USD/USDT basis the total IS the dollar figure, so repeating it
+        // as an "equivalent" is noise. Under real Toman it is worse than noise:
+        // deflated Tomans divided by today's nominal rate is not a dollar amount
+        // anyone holds, and it read $7,732 for a portfolio worth $167,578.
+        const showUsd =
+          basis === "nominal_toman" &&
+          data.total_usd !== undefined &&
+          data.total_usd !== null;
         return (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-4" data-testid="dashboard-hero">
             <div className="sm:col-span-2">
               <StatTile
                 label="Total value"
-                value={toman(Number(data.total))}
+                value={money(Number(data.total), basis)}
                 size="lg"
+                sub={basis === "real_toman" ? REAL_BASIS_NOTE : undefined}
                 testId="dashboard-total"
               />
             </div>
             <StatTile
-              label="USD equivalent"
-              value={hasUsd ? "$" + num(Number(data.total_usd)) : "—"}
+              label={showUsd ? "USD equivalent" : "Valued in"}
+              value={showUsd ? "$" + num(Number(data.total_usd)) : BASIS_LABEL[basis]}
               testId="dashboard-usd"
             />
             <StatTile
@@ -134,7 +180,18 @@ function HeroRow({ state }) {
 function TrendCard({ activeId, basis }) {
   const [range, setRange] = useState("30");
   const [mode, setMode] = useState("nominal");
-  const days = range === "all" ? "all" : Number(range);
+  // Ranges differ per mode, so a range the current mode cannot honour falls back
+  // rather than silently showing a different window than the one selected.
+  // EVERY series on this chart has to follow that fallback, not just the tab
+  // highlight and the benchmark fetch: deriving `days` from the raw `range` left
+  // the net-worth line on 30 days while the gold/USD lines covered 90, and both
+  // were rebased to 100 on the same axis, so the "relative growth" gap compared
+  // three months of benchmark against one month of portfolio.
+  const rangeOptions = mode === "benchmarks" ? BENCH_RANGES : RANGES;
+  const effectiveRange = rangeOptions.some((r) => r.value === range)
+    ? range
+    : rangeOptions[0].value;
+  const days = effectiveRange === "all" ? "all" : Number(effectiveRange);
   const state = useApi(() => snapshots(days, activeId, basis), [days, activeId, basis]);
   // The same net worth measured in constant Tomans. Fetched only when asked,
   // because it needs a CPI figure for every Jalali year the window spans and
@@ -144,12 +201,6 @@ function TrendCard({ activeId, basis }) {
     [days, activeId],
     { enabled: mode === "real" }
   );
-  // Ranges differ per mode, so a range the current mode cannot honour falls back
-  // rather than silently showing a different window than the one selected.
-  const rangeOptions = mode === "benchmarks" ? BENCH_RANGES : RANGES;
-  const effectiveRange = rangeOptions.some((r) => r.value === range)
-    ? range
-    : rangeOptions[0].value;
   const benchState = useApi(
     () => benchmarks(activeId, { window: Number(effectiveRange) }),
     [activeId, effectiveRange],
@@ -182,11 +233,16 @@ function TrendCard({ activeId, basis }) {
       <Async {...state} testId="dashboard-trend-body" empty="No history yet.">
         {(data) => {
           const points = (data.series || []).map((s) => ({ x: s.date, y: Number(s.total) }));
-          const hasEstimated = (data.series || []).some((s) => s.is_estimated);
+          // Counted, not just detected. "Some points are estimated" reads like a
+          // footnote when 47 of 66 points are reconstructed rather than recorded,
+          // which is a different chart from the one that phrasing implies.
+          const estimatedCount = (data.series || []).filter((s) => s.is_estimated).length;
+          const pointCount = (data.series || []).length;
+          const hasEstimated = estimatedCount > 0;
           // Set when a switched-off holding had no recorded close for that day and
           // its current price stood in while netting it out of the history.
           const hasApproximated = (data.series || []).some((s) => s.approximated);
-          const longTicks = range === "365" || range === "all";
+          const longTicks = effectiveRange === "365" || effectiveRange === "all";
 
           if (mode === "benchmarks" && benchState.data?.series?.length) {
             const bench = benchState.data;
@@ -255,7 +311,8 @@ function TrendCard({ activeId, basis }) {
               )}
               {hasEstimated && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-note">
-                  Some points are estimated where a daily snapshot was missing.
+                  {estimatedCount} of {pointCount} points are rebuilt from prices
+                  because no daily snapshot was recorded for those days.
                 </p>
               )}
               {hasApproximated && (
@@ -344,11 +401,7 @@ function PerformanceCard({ activeId, basis, accounts }) {
           if (data.aggregate) {
             const ready = data.accounts.filter((row) => row.performance_available);
             if (!ready.length) {
-              return (
-                <Empty testId="dashboard-performance-empty">
-                  {data.accounts[0]?.detail || PERF_UNLOCK_HINT}
-                </Empty>
-              );
+              return <PerformanceUnavailable detail={data.accounts[0]?.detail} />;
             }
             return (
               <>
@@ -389,11 +442,7 @@ function PerformanceCard({ activeId, basis, accounts }) {
             );
           }
           if (!data.performance_available) {
-            return (
-              <Empty testId="dashboard-performance-empty">
-                {data.detail || PERF_UNLOCK_HINT}
-              </Empty>
-            );
+            return <PerformanceUnavailable detail={data.detail} />;
           }
           const rows = Object.entries(data.assets || {}).map(([key, v]) => ({ key, ...v }));
           return (
@@ -762,7 +811,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
                     />
                   );
                 }
-                return toman(r.unit_price);
+                return unitPrice(r.unit_price, r.unit_price_currency, portfolio.basis);
               },
             },
             {
@@ -771,9 +820,9 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
               align: "right",
               render: (r) =>
                 r.is_hidden ? (
-                  <span className="line-through">{toman(r.value)}</span>
+                  <span className="line-through">{money(r.value, portfolio.basis)}</span>
                 ) : (
-                  toman(r.value)
+                  money(r.value, portfolio.basis)
                 ),
             },
             {
@@ -1185,7 +1234,7 @@ export default function Dashboard({ user }) {
     <div>
       <PageHeader title="Portfolio" subtitle="Your holdings, valued live, with performance and risk alongside." />
       <div className="space-y-6">
-        <HeroRow state={valuationState} />
+        <HeroRow state={valuationState} basis={basis} />
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
           <div className="lg:col-span-2">
             <TrendCard activeId={activeId} basis={basis} />

@@ -227,8 +227,12 @@ function MyOptimalBody({ data, frontierState, label, windowLabel, setWindowLabel
       key: "action", header: "Action",
       render: (t) => <Badge variant={t.action === "buy" ? "good" : "critical"}>{t.action.toUpperCase()}</Badge>,
     },
-    { key: "current", header: "Current %", align: "right", render: (t) => pct(currentW[t.key]) },
-    { key: "target", header: "Target %", align: "right", render: (t) => pct(targetW[t.key]) },
+    // Absent from these maps means "none of it", which is 0% -- the same answer
+    // an explicit zero gives. Passing `undefined` to `pct` printed "—" on some
+    // rows and "0%" on others for one meaning, beside a SELL badge and a
+    // negative delta that had both already assumed zero.
+    { key: "current", header: "Current %", align: "right", render: (t) => pct(currentW[t.key] ?? 0) },
+    { key: "target", header: "Target %", align: "right", render: (t) => pct(targetW[t.key] ?? 0) },
     {
       key: "delta_w", header: "Δ weight", align: "right",
       render: (t) => {

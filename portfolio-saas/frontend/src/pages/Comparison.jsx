@@ -181,6 +181,7 @@ export default function Comparison() {
   const choices = useApi(() => comparison(activeId), [activeId]);
   const holdings = choices.data?.holdings || [];
   const targets = choices.data?.targets || [];
+  const omitted = choices.data?.omitted_holdings || [];
 
   // Switching portfolio can strip the holding that was selected; leaving a stale
   // key in place would ask the server about something this portfolio never held.
@@ -261,6 +262,21 @@ export default function Comparison() {
                 <p className="text-sm text-muted" data-testid="comparison-no-holdings">
                   This portfolio has no priced positions to compare yet. Record a
                   purchase in the Ledger first.
+                </p>
+              )}
+              {/* Named rather than simply absent: a reader who owns a house and
+                  three gold bars was scanning a list that never mentioned them
+                  and had no way to tell whether that was a bug. */}
+              {!!omitted.length && (
+                <p className="text-xs text-muted" data-testid="comparison-omitted">
+                  Not available to compare:{" "}
+                  {omitted.map((o, i) => (
+                    <span key={o.key}>
+                      {i > 0 && "; "}
+                      <span className="text-text">{o.label}</span> — {o.reason}
+                    </span>
+                  ))}
+                  .
                 </p>
               )}
               {ready ? (

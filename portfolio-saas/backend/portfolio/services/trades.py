@@ -202,8 +202,15 @@ def execute_trade(
     new_qty = _q(holding.quantity) if holding else Decimal("0")
 
     if not skip_snapshots:
-        valuation = _stamp_snapshots(account.user, account)
-        total_value = str(valuation["total"])
+        _stamp_snapshots(account.user, account)
+        # What the caller is told is what the caller can see. The snapshot writer
+        # stores the hidden-inclusive total on purpose (see `_stamp_snapshots`),
+        # but reusing that figure here reported a portfolio 46,961,000,000 T
+        # larger than the dashboard on an account with two switched-off houses.
+        # `include_hidden=True` blanks the per-item `is_hidden` flag, so the
+        # visible total cannot be subtracted back out of it and has to be its own
+        # pass -- cheap, because `get_latest_prices()` is already cached.
+        total_value = str(value_user(account.user)["total"])
     else:
         total_value = "0"
 

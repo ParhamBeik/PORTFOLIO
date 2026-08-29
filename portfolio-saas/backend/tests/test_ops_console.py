@@ -1061,3 +1061,116 @@ def test_quota_plan_command_runs_read_only():
     assert "PREVIEW" in text, "the preview must show what would be claimed next"
     state.refresh_from_db()
     assert state.next_attempt_at is None, "preview must not lease the state"
+
+
+# ----------------------------------------------------------------------
+# One calendar in the "latest data" column.
+#
+# Half of `database_rows` is keyed on a real timestamp and half on a Jalali date
+# string, and passing the string through printed a Jalali year under a Gregorian
+# month name -- "04 Jun 1405" sitting next to "28 Aug 2026" in one column, with
+# no way to tell which row was fresher.
+#
+# Unit tests: pure value mapping, no DB.
+
+
+def test_jalali_latest_becomes_the_gregorian_instant_it_names():
+    import datetime as dt
+
+    from marketdata.admin_telemetry import _latest_iso
+
+    # 1405-06-04 is 2026-08-26.
+    assert _latest_iso("1405-06-04") == dt.date(2026, 8, 26).isoformat()
+
+
+def test_gregorian_latest_is_unchanged():
+    import datetime as dt
+
+    from marketdata.admin_telemetry import _latest_iso
+
+    when = dt.datetime(2026, 8, 28, 22, 55)
+    assert _latest_iso(when) == when.isoformat()
+    assert _latest_iso(None) is None
+
+
+def test_a_non_date_string_is_left_alone_rather_than_dropped():
+    from marketdata.admin_telemetry import _latest_iso
+
+    assert _latest_iso("not-a-date") == "not-a-date"
+
+
+# ----------------------------------------------------------------------
+# The error panel counts failures, not reasons.
+#
+# A SKIPPED run sets `error_code` to say why it stood down, and the archive
+# stands down constantly by design (`archive_paced` is the pacer spreading the
+# day's budget). Counting those made pacing 99% of the error distribution and
+# rounded the real signatures to 0%.
+#
+# Integration test: the rule is a queryset filter, so it is only true if the ORM
+# actually applies it -- a pure-function test would prove nothing here.
+
+
+def test_paced_skips_are_not_counted_as_errors(db):
+    from marketdata.admin_telemetry import _error_code_breakdown
+    from marketdata.models import WorkflowRun
+
+    for _ in range(50):
+        WorkflowRun.objects.create(
+            workflow="archive_tick",
+            outcome=WorkflowRun.Outcome.SKIPPED,
+            error_code="archive_paced",
+        )
+    WorkflowRun.objects.create(
+        workflow="archive_state",
+        outcome=WorkflowRun.Outcome.RETRY,
+        error_code="MarketDataFetchError",
+    )
+    WorkflowRun.objects.create(
+        workflow="archive_state",
+        outcome=WorkflowRun.Outcome.FAILED,
+        error_code="QuotaExhausted",
+    )
+
+    codes = {row["error_code"]: row["count"] for row in _error_code_breakdown()}
+
+    assert "archive_paced" not in codes
+    # The two that matter are now the whole list, not 0.9% of it.
+    assert codes == {"MarketDataFetchError": 1, "QuotaExhausted": 1}
+
+
+def test_a_partial_run_still_reports_its_error_code(db):
+    from marketdata.admin_telemetry import _error_code_breakdown
+    from marketdata.models import WorkflowRun
+
+    # Half-worked is still failed at something, so it keeps its signature.
+    WorkflowRun.objects.create(
+        workflow="archive_state",
+        outcome=WorkflowRun.Outcome.PARTIAL,
+        error_code="MarketDataFetchError",
+    )
+    assert _error_code_breakdown() == [{"error_code": "MarketDataFetchError", "count": 1}]
+
+
+# ----------------------------------------------------------------------
+# 100% is reserved for complete.
+#
+# Rounding 99.96 to "100%" put a complete row fill on the same line as 1,313
+# jobs still carrying gaps. Unit tests: one pure function, no DB.
+
+
+def test_an_incomplete_fill_never_rounds_up_to_complete():
+    from marketdata.coverage_report import _pct
+
+    # 9,548,784 of 9,554,746 rows is 99.94%, which used to print as 100%.
+    assert _pct(9_548_784, 9_554_746) == 99.9
+    assert _pct(9_999, 10_000) == 99.9
+
+
+def test_a_genuinely_complete_fill_is_still_100():
+    from marketdata.coverage_report import _pct
+
+    assert _pct(10, 10) == 100.0
+    assert _pct(11, 10) == 100.0
+    assert _pct(0, 0) == 0.0
+    assert _pct(1, 4) == 25.0

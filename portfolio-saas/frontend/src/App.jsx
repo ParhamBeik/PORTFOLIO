@@ -24,8 +24,13 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        await restoreSession();
-        setUser(await me());
+        // `restoreSession` RESOLVES with null when there is no session rather
+        // than throwing, so calling `me()` regardless sent a request that could
+        // only 401 -- a second red line in the console of every signed-out
+        // visitor. The refresh attempt itself is unavoidable: the cookie is
+        // httpOnly, so asking is the only way to find out.
+        const token = await restoreSession();
+        setUser(token ? await me() : null);
       } catch {
         setUser(null); // Anonymous is a normal state, not an error.
       } finally {
@@ -75,9 +80,12 @@ export default function App() {
       <PortfolioProvider key={user.id} enabled>
         <Suspense fallback={<Loading testId="route-loading" />}>
           <Routes>
-            <Route path="/privacy" element={<Legal kind="privacy" />} />
-            <Route path="/terms" element={<Legal kind="terms" />} />
               <Route element={<Shell user={user} onLogout={() => setUser(null)} />}>
+              {/* Inside the shell: these are reached from the footer of every
+                  page, and rendering them outside it dropped a signed-in reader
+                  onto a bare page whose only way out said "Back to sign in". */}
+              <Route path="/privacy" element={<Legal kind="privacy" authed />} />
+              <Route path="/terms" element={<Legal kind="terms" authed />} />
               <Route index element={<RequireHoldings><Dashboard user={user} /></RequireHoldings>} />
               <Route path="/optimal" element={<MyOptimal />} />
               <Route path="/universe" element={<BestOverall />} />

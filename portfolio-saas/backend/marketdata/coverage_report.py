@@ -48,7 +48,18 @@ def _count_statuses(rows, classifier) -> dict[str, int]:
 
 
 def _pct(part: int, whole: int) -> float:
-    return round(part / whole * 100, 1) if whole else 0.0
+    """Percentage that reserves 100 for actually complete.
+
+    Plain rounding turned 99.96% into "100%", so the endpoint table reported
+    100% row fill on the same line as 1,313 jobs still carrying gaps -- which
+    reads as a contradiction rather than as "nearly there". Only part == whole
+    earns 100; anything short of it stops at 99.9.
+    """
+    if not whole:
+        return 0.0
+    if part >= whole:
+        return 100.0
+    return min(round(part / whole * 100, 1), 99.9)
 
 
 def _latest_prices_by_asset() -> dict[int, Price]:
@@ -246,7 +257,10 @@ def build_coverage_report(*, database_rows: list[dict]) -> dict:
 
 ARCHIVE_STATUS_PRIORITY = {"failed": 0, "partial": 1, "not_tried": 2, "complete": 3}
 LIVE_STATUS_SORT = {"fresh": 0, "stale": 1, "missing": 2, "manual": 3, "formula": 4, "no_source": 5}
-INTEGRITY_SORT = {"fail": 0, "not_assessed": 1, "pass": 2, "n_a": 3}
+# Spelled out rather than abbreviated: the console renders reason codes straight
+# through `humanize()`, which turned "n_a" into the meaningless "N a" in the
+# 179-day gate column. Its sibling here was already "not_assessed".
+INTEGRITY_SORT = {"fail": 0, "not_assessed": 1, "pass": 2, "not_applicable": 3}
 
 
 def _asset_symbols(asset: Asset) -> list[str]:
@@ -266,7 +280,7 @@ def _worst_archive_status(states: list[ArchiveFetchState]) -> str | None:
 
 def _integrity_status(symbols: list[str], integrity_map: dict[str, SymbolIntegrity]) -> str:
     if not symbols:
-        return "n_a"
+        return "not_applicable"
     rows = [integrity_map[sym] for sym in symbols if sym in integrity_map]
     if not rows:
         return "not_assessed"

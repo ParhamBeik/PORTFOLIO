@@ -2466,3 +2466,59 @@ def test_bundled_openblas_dgemm_does_not_sigill(lib):
         f"OPENBLAS_CORETYPE={env.get('OPENBLAS_CORETYPE', '<unset>')}. "
         f"stderr={proc.stderr[-500:]}"
     )
+
+
+# ----------------------------------------------------------------------
+# Holdings shared by two portfolios must be summed, not overwritten.
+#
+# `_liquid_items` flattens every account into one list, so an asset owned in two
+# portfolios appears twice. Building the weight map with a dict comprehension
+# keyed on the asset kept only the LAST row while `total` still counted both, so
+# the weights quietly summed to less than 1 and every consumer -- the optimizer,
+# the rebalance plan, the risk breakdown -- worked on a book smaller than the one
+# the user actually holds.
+#
+# Unit tests: with the valuation injected there is no I/O left, so pinning the
+# function boundary is the cheapest place to catch a regression in the math.
+
+
+def _dup_valuation():
+    """Two portfolios that both hold usd_cash and quarter_coin."""
+    return {
+        "total": Decimal("1000"),
+        "accounts": [
+            {"items": [
+                {"key": "usd_cash", "class": "Cash", "value": Decimal("100")},
+                {"key": "quarter_coin", "class": "Gold", "value": Decimal("400")},
+                {"key": "kama_stock", "class": "Stock", "value": Decimal("300")},
+            ]},
+            {"items": [
+                {"key": "usd_cash", "class": "Cash", "value": Decimal("150")},
+                {"key": "quarter_coin", "class": "Gold", "value": Decimal("50")},
+            ]},
+        ],
+    }
+
+
+def test_weights_sum_to_one_when_an_asset_is_held_in_two_portfolios(monkeypatch):
+    from portfolio import views as views_mod
+
+    monkeypatch.setattr(views_mod, "value_user", lambda user: _dup_valuation())
+    weights, total, _ = views_mod._current_weights_and_total(user=object())
+
+    assert total == Decimal("1000")
+    # The whole book is accounted for; nothing fell out of the map.
+    assert sum(weights.values()) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_shared_holdings_are_summed_not_overwritten(monkeypatch):
+    from portfolio import views as views_mod
+
+    monkeypatch.setattr(views_mod, "value_user", lambda user: _dup_valuation())
+    weights, _, _ = views_mod._current_weights_and_total(user=object())
+
+    # 100 + 150, not the last row's 150 alone.
+    assert weights["usd_cash"] == pytest.approx(0.25, abs=1e-9)
+    # 400 + 50, not the last row's 50 alone -- the shape that hid 580,300,000 T.
+    assert weights["quarter_coin"] == pytest.approx(0.45, abs=1e-9)
+    assert weights["kama_stock"] == pytest.approx(0.30, abs=1e-9)

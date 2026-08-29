@@ -392,6 +392,36 @@ def _holdings(user, account, subject_key, target_key, days) -> dict:
     }
 
 
+def _twr_index(series: list[dict]) -> pd.Series:
+    """Chain-linked time-weighted index of a net-worth series, starting at 100.
+
+    The raw `total` moves when prices move AND when the book changes, and only
+    the first is performance: recording a position you already owned, or funding
+    a purchase, adds money without earning any. Rebasing `total` straight to 100
+    read those steps as return -- the family account's openings on 2026-08-09
+    showed as a +108% day and turned a real +40% quarter into "+120.7%".
+
+    `total_ex_flows` is the same day valued at the previous day's quantities, so
+    `total_ex_flows[t] / total[t-1]` is the pure price move and the product of
+    those factors is the time-weighted return. A day whose starting value is zero
+    or negative cannot carry a return; it restarts the chain rather than dividing
+    by it.
+    """
+    dates = pd.to_datetime([point["date"] for point in series], utc=True)
+    totals = [float(point["total"]) for point in series]
+    # Older payloads (and any caller that has not been redeployed) lack the
+    # companion figure; falling back to `total` reproduces the old curve rather
+    # than raising on a key that is merely absent.
+    ex_flows = [float(point.get("total_ex_flows", point["total"])) for point in series]
+
+    index, level = [], 100.0
+    for position in range(len(totals)):
+        if position > 0 and totals[position - 1] > 0:
+            level *= ex_flows[position] / totals[position - 1]
+        index.append(level)
+    return pd.Series(index, index=dates).sort_index()
+
+
 def _benchmark(user, account, target_key, days) -> dict:
     from .valuation import SYNTHETIC_HISTORY_MAX_DAYS, compute_dynamic_net_worth_series
 
@@ -411,10 +441,7 @@ def _benchmark(user, account, target_key, days) -> dict:
             "no_portfolio_history",
             "This portfolio has no value history to compare yet.",
         )
-    portfolio = pd.Series(
-        [float(point["total"]) for point in series],
-        index=pd.to_datetime([point["date"] for point in series], utc=True),
-    ).sort_index()
+    portfolio = _twr_index(series)
     panel = _panel([target.key], capped, held=[])
     index = portfolio.index.intersection(panel.index)
     if index.empty:
@@ -556,7 +583,25 @@ def comparable_assets(user, account=None) -> dict:
         for asset in assets
         if asset.id not in hidden
     ]
+    # Held assets the pickers cannot offer, and why. Dropping them silently left
+    # a reader hunting for their own house and Swiss bars in a list that never
+    # mentioned them -- four of this account's holdings were absent with no
+    # explanation anywhere on the page.
+    omitted = [
+        {
+            "key": asset.key,
+            "label": _label(asset),
+            "reason": (
+                "valued from a mark you set, not a market price series"
+                if asset.is_house
+                else "tracked against a proxy price, so it has no curve of its own"
+            ),
+        }
+        for asset in Asset.objects.filter(id__in=held_ids, is_active=True).order_by("name")
+        if asset.id not in hidden and (asset.is_house or asset.is_manual)
+    ]
     return {
         "holdings": [row for row in rows if row["held"]],
         "targets": rows,
+        "omitted_holdings": omitted,
     }
