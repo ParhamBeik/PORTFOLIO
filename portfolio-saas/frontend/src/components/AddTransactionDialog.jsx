@@ -23,6 +23,7 @@ import {
 import { useApi } from "../useApi.js";
 import { Badge, Button, ErrorState, Input, Loading, Modal, Select } from "./ui.jsx";
 import { area, assetLabel, holdingLabel, perSqm, toman } from "../format.js";
+import { QUANTITY_MIN, positive, quantityError, validQuantity } from "../quantity.js";
 
 // Mirrors SEARCH_LIMIT in backend/portfolio/services/catalog.py. Only used to
 // decide whether to tell the user the list was cut short.
@@ -116,27 +117,6 @@ const toIso = (local) => {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 };
 
-const positive = (v) => v !== "" && Number(v) > 0;
-
-// What the server will actually take: `DecimalField(max_digits=20,
-// decimal_places=6, min_value=0.000001)`. The wizard only asked for "> 0", so a
-// quantity of 0.0000001 passed every step, reached the review screen and was
-// refused at Save -- the same shape as the future date that used to be caught
-// only by the server. Stated here as one rule so the two cannot drift.
-const QUANTITY_MIN = 0.000001;
-const QUANTITY_MAX = 1e14; // max_digits 20 - decimal_places 6
-
-const quantityError = (v) => {
-  if (v === "") return "";
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return "Enter a quantity greater than zero.";
-  if (n < QUANTITY_MIN) return `The smallest quantity we record is ${QUANTITY_MIN}.`;
-  if (n >= QUANTITY_MAX) return "That quantity is larger than we can record.";
-  if ((String(v).split(".")[1] || "").length > 6) return "At most 6 decimal places.";
-  return "";
-};
-
-const validQuantity = (v) => positive(v) && !quantityError(v);
 
 export default function AddTransactionDialog({
   accountId,
