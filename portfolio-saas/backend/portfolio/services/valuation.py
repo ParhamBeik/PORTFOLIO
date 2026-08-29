@@ -1079,7 +1079,22 @@ def compute_dynamic_net_worth_series(
         if only_hidden
         else liabilities.exclude(asset_id__in=hidden_ids)
     )
+    liabilities = list(liabilities)
     total_liabilities = sum(l.amount_tomans for l in liabilities)
+    # A debt secured on an asset rides with that asset, exactly as the hidden-row
+    # rule above already has it: a mortgaged property leaves value and mortgage
+    # together or not at all. An unsecured loan is attached to nothing, so it is
+    # simply always there. Both are needed by the matched pair below -- see
+    # `paired_liabilities`.
+    asset_key_by_id = {asset.id: key for key, asset in assets.items()}
+    liability_by_key: dict[str, Decimal] = {}
+    unattached_liabilities = Decimal("0")
+    for l in liabilities:
+        key = asset_key_by_id.get(l.asset_id) if l.asset_id else None
+        if key is None:
+            unattached_liabilities += l.amount_tomans
+        else:
+            liability_by_key[key] = liability_by_key.get(key, Decimal("0")) + l.amount_tomans
 
     series = []
     # Yesterday's quantities, carried so each day can also be valued as if the
@@ -1096,6 +1111,10 @@ def compute_dynamic_net_worth_series(
         day_prices: dict = {}
         house_values: dict = {}
         total_ex_flows_at_prior_prices = Decimal("0")
+        # Which assets made it onto BOTH sides of the day's pair. Their debts go
+        # on both sides too; a debt whose asset sat the day out sits it out with
+        # the asset it is secured on.
+        paired_keys: set[str] = set()
         # The same day priced with YESTERDAY's quantities. `total` moves for two
         # unrelated reasons -- prices moved, or the book changed -- and only the
         # first is performance. Recording a position you already owned is a
@@ -1163,6 +1182,7 @@ def compute_dynamic_net_worth_series(
                 if prev_qty > 0 and prev_house_value is not None:
                     total_ex_flows += house_value
                     total_ex_flows_at_prior_prices += prev_house_value
+                    paired_keys.add(key)
                 house_values[key] = house_value
             else:
                 p = stock_closes.get(jalali_str, {}).get(key)
@@ -1200,9 +1220,22 @@ def compute_dynamic_net_worth_series(
                     total_ex_flows_at_prior_prices += holding_value_to_toman(
                         asset, prev_qty * prev_p
                     )
+                    paired_keys.add(key)
                 day_prices[key] = p
 
         total -= total_liabilities
+        # The pair has to net out debt for the same reason `total` does: the
+        # chart is the return on what the family OWNS. Assets 100 against a
+        # mortgage of 40 is 60 of net worth, and a 10% rise in the assets is a
+        # 16.7% gain to them -- reporting 10% understates every leveraged day.
+        # The debt is constant across the window (one figure read once, above),
+        # so carrying it on both sides cannot invent a flow.
+        paired_liabilities = unattached_liabilities + sum(
+            (liability_by_key[key] for key in paired_keys if key in liability_by_key),
+            Decimal("0"),
+        )
+        total_ex_flows -= paired_liabilities
+        total_ex_flows_at_prior_prices -= paired_liabilities
         val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
         series.append({
             "timestamp": target_date.isoformat(),

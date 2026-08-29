@@ -427,7 +427,12 @@ def _twr_index(series: list[dict]) -> pd.Series:
             if legacy:
                 if totals[position - 1] > 0:
                     level *= ex_flows[position] / totals[position - 1]
-            elif ex_base[position] > 0:
+            # Both sides net out debt, so an account whose borrowing exceeds the
+            # assets that were priced that day has negative equity on one or both
+            # -- a ratio that would flip the whole curve through zero and take
+            # every later day with it. There is no return on nothing owned; the
+            # day is carried flat and the chain resumes when equity is positive.
+            elif ex_base[position] > 0 and ex_flows[position] > 0:
                 level *= ex_flows[position] / ex_base[position]
         index.append(level)
     return pd.Series(index, index=dates).sort_index()

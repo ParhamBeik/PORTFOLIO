@@ -402,3 +402,35 @@ def test_twr_index_falls_back_to_total_when_the_companion_figure_is_absent():
     index = _twr_index(series)
 
     assert list(index) == pytest.approx([100.0, 110.0])
+
+
+def test_a_mortgage_is_carried_on_both_sides_so_leverage_shows():
+    from portfolio.services.comparison import _twr_index
+
+    # Assets 1000 against a 400 mortgage is 600 of net worth. The assets rise
+    # 10%, to 1100, so what the family owns went 600 -> 700: +16.7%, not +10%.
+    # Reporting the gross-asset move understates every leveraged day.
+    series = [
+        _point("2026-01-01", 600, 600, 600),
+        _point("2026-01-02", 700, 700, 600),
+    ]
+    index = _twr_index(series)
+
+    assert list(index) == pytest.approx([100.0, 116.666667], rel=1e-5)
+
+
+def test_negative_equity_carries_the_day_flat_instead_of_inverting_the_curve():
+    from portfolio.services.comparison import _twr_index
+
+    # Both sides net out debt, so an account underwater on the assets priced
+    # that day yields a negative pair. Dividing would flip the level through
+    # zero and every later day inherits the sign.
+    series = [
+        _point("2026-01-01", 100, 100, 100),
+        _point("2026-01-02", -50, -50, -40),
+        _point("2026-01-03", 110, 110, 100),
+    ]
+    index = _twr_index(series)
+
+    assert list(index) == pytest.approx([100.0, 100.0, 110.0])
+    assert all(level > 0 for level in index)
