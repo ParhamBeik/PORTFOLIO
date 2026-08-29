@@ -92,6 +92,29 @@ export function tomanCompact(n) {
   return String(Math.round(v));
 }
 
+/**
+ * Compact money for chart axes, in the basis the points are actually in.
+ *
+ * `tomanCompact` is unconditional, so a chart of a portfolio switched to USD
+ * drew converted dollars against a Toman axis and a "T" tooltip — the same
+ * relabelling gap that was closed on the total and the holdings rows. Foreign
+ * bases keep two decimals below a thousand, where a $154.54 coin rounding to
+ * "155" is a visible error rather than noise.
+ */
+export function moneyCompact(n, basis = "nominal_toman") {
+  if (bad(n)) return "—";
+  const foreign = basis === "usd_denominated" || basis === "usdt_denominated";
+  if (!foreign) return tomanCompact(n);
+  const v = Number(n);
+  const a = Math.abs(v);
+  const mark = basis === "usd_denominated" ? "$" : "";
+  const tail = basis === "usdt_denominated" ? " USDT" : "";
+  if (a >= 1e9) return mark + (v / 1e9).toFixed(1) + "B" + tail;
+  if (a >= 1e6) return mark + (v / 1e6).toFixed(1) + "M" + tail;
+  if (a >= 1e3) return mark + (v / 1e3).toFixed(1) + "K" + tail;
+  return money(v, basis);
+}
+
 // Gregorian, Tehran wall clock — the backend stores UTC, the reader is in Iran.
 const dtf = (opts) => new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Tehran", ...opts });
 

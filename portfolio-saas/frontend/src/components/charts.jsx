@@ -13,7 +13,7 @@ import {
   VisualMapComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
-import { date, dateTime, dateTick, pct, toman, tomanCompact, trendAxisTick } from "../format.js";
+import { date, dateTime, dateTick, money, moneyCompact, pct, toman, tomanCompact, trendAxisTick } from "../format.js";
 
 use([
   BarChart, HeatmapChart, LineChart, PieChart, ScatterChart,
@@ -308,7 +308,12 @@ function header(label, t) {
  * Net-worth over time. One series, so no legend — the panel title names it.
  * `data` is [{ x: ISO date, y: number }].
  */
-export function AreaTrend({ data, height = 260, label = "Portfolio value over time", longTicks }) {
+/**
+ * `basis` says which currency `data.y` is already denominated in. The server
+ * converts the points and used to leave the label behind, so a portfolio
+ * switched to USD drew dollars against a Toman axis under a "T" tooltip.
+ */
+export function AreaTrend({ data, height = 260, label = "Portfolio value over time", longTicks, basis = "nominal_toman" }) {
   const t = useChartTokens();
   const option = useMemo(() => {
     if (!t) return null;
@@ -322,7 +327,7 @@ export function AreaTrend({ data, height = 260, label = "Portfolio value over ti
         trigger: "axis",
         ...c.tooltipBase,
         axisPointer: { type: "line", lineStyle: { color: t.axis, type: "dashed" } },
-        formatter: (p) => header(date(p[0].axisValue), t) + tipRows(p, t, (v) => toman(v)),
+        formatter: (p) => header(date(p[0].axisValue), t) + tipRows(p, t, (v) => money(v, basis)),
       },
       xAxis: {
         type: "category",
@@ -334,7 +339,7 @@ export function AreaTrend({ data, height = 260, label = "Portfolio value over ti
       },
       yAxis: {
         type: "value", min, max, interval, ...c.valueAxis,
-        axisLabel: { ...c.valueAxis.axisLabel, formatter: tomanCompact },
+        axisLabel: { ...c.valueAxis.axisLabel, formatter: (v) => moneyCompact(v, basis) },
       },
       series: [{
         type: "line",
@@ -354,7 +359,7 @@ export function AreaTrend({ data, height = 260, label = "Portfolio value over ti
       }],
       animation: false,
     };
-  }, [data, t, longTicks]);
+  }, [data, t, longTicks, basis]);
 
   return <EChart option={option} height={height} label={label} />;
 }

@@ -308,7 +308,16 @@ function TrendCard({ activeId, basis }) {
 
           return (
             <>
-              <AreaTrend data={points} longTicks={longTicks} />
+              {/* The basis the POINTS are in, not the one the picker shows: the
+                  previous series stays on screen while the next one loads, and
+                  the server answers `nominal_toman` when it had no rate to
+                  convert by. Reading it off the data keeps the axis, the tooltip
+                  and the numbers describing the same currency. */}
+              <AreaTrend
+                data={points}
+                longTicks={longTicks}
+                basis={data.basis || basis}
+              />
               {mode === "real" && realState.error && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-real-error">
                   No inflation-adjusted series for this window: {realState.error.message}

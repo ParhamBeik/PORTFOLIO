@@ -1236,7 +1236,18 @@ class SnapshotListView(APIView):
                 for field in ("total", "total_usd"):
                     if row.get(field) is not None:
                         row[field] = float(Decimal(str(row[field])) / divisor(row))
-        return Response({"series": series, "trades": markers})
+        # The basis these points are actually IN, which is not always the one that
+        # was asked for: with no FX rate available `divisor` is None and the series
+        # stays in Toman, and the chart would have gone on labelling it dollars.
+        # It also closes the same race the valuation payload carries this field
+        # for -- the client keeps the previous series on screen while the next one
+        # loads, so a basis switch drew Toman under a dollar axis until it landed.
+        applied_basis = basis if divisor else "nominal_toman"
+        return Response({
+            "series": series,
+            "trades": markers,
+            "basis": applied_basis,
+        })
 
 
 class LatestPricesView(APIView):
