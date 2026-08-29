@@ -104,16 +104,13 @@ def provision_asset(symbol_or_key: str) -> Asset:
             f"No matching eligible MarketInstrument found for symbol: {symbol_or_key}"
         )
 
-    asset_class = Asset.AssetClass.STOCK
-    if mi.category == MarketInstrument.Category.STOCK:
-        asset_class = Asset.AssetClass.STOCK
-    elif mi.category == MarketInstrument.Category.GOLD:
-        asset_class = Asset.AssetClass.GOLD
-    else:
-        if mi.symbol.upper() in ["USD", "EUR", "GBP", "AED", "TRY"]:
-            asset_class = Asset.AssetClass.CASH
-        else:
-            asset_class = Asset.AssetClass.GOLD
+    # The same classifier the picker uses, not a second copy of the rules. This
+    # branch had its own hard-coded FX list and fell through to GOLD for anything
+    # else, so a Bitcoin position created by symbol became a Gold asset while the
+    # identical instrument added from the wizard became Crypto.
+    from .catalog import _class_for
+
+    asset_class = _class_for(mi)
 
     import re
     clean_sym = re.sub(r"[^a-zA-Z0-9_]", "", mi.symbol).lower()

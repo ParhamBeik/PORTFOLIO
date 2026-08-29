@@ -132,10 +132,15 @@ function groupByClass(items) {
   return [...groups.slice(0, 7), { name: "Other", value: rest }];
 }
 
-function HeroRow({ state, basis }) {
+function HeroRow({ state, basis: selected }) {
   return (
     <Async {...state} testId="dashboard-hero">
       {(data) => {
+        // The basis the NUMBERS were fetched with, not the one the picker shows.
+        // `useApi` keeps the previous payload on screen while the next loads, so
+        // reading the picker rendered a Toman total under a dollar sign for the
+        // length of the request -- $33,600,000,000 for a portfolio worth $167k.
+        const basis = data.basis || selected;
         // Under a USD/USDT basis the total IS the dollar figure, so repeating it
         // as an "equivalent" is noise. Under real Toman it is worse than noise:
         // deflated Tomans divided by today's nominal rate is not a dollar amount
@@ -658,6 +663,9 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
     <Card title="Holdings" testId="dashboard-holdings" actions={cardActions}>
       <Async {...valuationState} testId="dashboard-holdings-body">
         {(data) => {
+          // The basis these rows were priced in, not the one the picker shows:
+          // the previous payload stays on screen while the next loads.
+          const rowBasis = data.basis || portfolio.basis;
           const visible = data.items || [];
           const hidden = data.hidden_items || [];
           // Switched-off rows stay on screen, dimmed, so the user can see what
@@ -811,7 +819,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
                     />
                   );
                 }
-                return unitPrice(r.unit_price, r.unit_price_currency, portfolio.basis);
+                return unitPrice(r.unit_price, r.unit_price_currency, rowBasis);
               },
             },
             {
@@ -820,9 +828,9 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
               align: "right",
               render: (r) =>
                 r.is_hidden ? (
-                  <span className="line-through">{money(r.value, portfolio.basis)}</span>
+                  <span className="line-through">{money(r.value, rowBasis)}</span>
                 ) : (
-                  money(r.value, portfolio.basis)
+                  money(r.value, rowBasis)
                 ),
             },
             {

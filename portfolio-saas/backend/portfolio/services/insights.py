@@ -55,7 +55,20 @@ def concentration_risk(valuation: dict) -> dict:
     total = _total(items) or Decimal("1")
     if not items:
         return {"severity": "info", "share": 0, "message": "No holdings to assess."}
-    top = max(items, key=lambda i: i["value"])
+    # One row per asset before taking the biggest. `_liquid_items` flattens every
+    # portfolio into one list, so an asset held in two of them appeared twice and
+    # `max()` judged it on whichever single slice was larger -- a position split
+    # 400/50 out of 1,000 read as 40% concentration when the real exposure is
+    # 45%, which is the side of the threshold that decides whether a warning
+    # fires at all.
+    merged: dict[str, dict] = {}
+    for item in items:
+        existing = merged.get(item["key"])
+        if existing is None:
+            merged[item["key"]] = {**item}
+        else:
+            existing["value"] += item["value"]
+    top = max(merged.values(), key=lambda i: i["value"])
     share = float(top["value"] / total)
     severity = (
         "high" if share >= float(CONCENTRATION_THRESHOLD) + 0.2

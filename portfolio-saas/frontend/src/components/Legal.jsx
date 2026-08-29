@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 
 
-export default function Legal({ kind }) {
+export default function Legal({ kind, authed = false }) {
   const privacy = kind === "privacy";
   return (
     <main data-testid="legal-page" className="mx-auto max-w-2xl px-4 py-10">
@@ -36,12 +36,16 @@ export default function Legal({ kind }) {
           </>
         )}
       </div>
+      {/* A signed-in reader reaches these from the footer of every page, and
+          "Back to sign in" pointed them at /login -- not a route in the
+          authenticated tree, so it fell through to `*` and bounced them to the
+          dashboard without explanation. */}
       <Link
-        to="/login"
+        to={authed ? "/" : "/login"}
         data-testid="legal-back-link"
         className="mt-6 inline-block rounded-md border border-border bg-panel-2 px-3 py-1.5 text-sm font-medium text-text hover:bg-border"
       >
-        Back to sign in
+        {authed ? "Back to portfolio" : "Back to sign in"}
       </Link>
     </main>
   );

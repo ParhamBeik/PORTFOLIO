@@ -321,19 +321,25 @@ def test_a_target_whose_price_series_stopped_is_refused(compared, asset_catalog)
 # chaining rule and needs no warehouse to reproduce.
 
 
-def _point(date, total, ex_flows):
-    return {"date": date, "total": str(total), "total_ex_flows": str(ex_flows)}
+def _point(date, total, ex_flows, ex_base=None):
+    """`ex_base` is the same book at the PREVIOUS day's prices; default: flat."""
+    return {
+        "date": date,
+        "total": str(total),
+        "total_ex_flows": str(ex_flows),
+        "total_ex_flows_base": str(ex_flows if ex_base is None else ex_base),
+    }
 
 
 def test_twr_index_tracks_price_moves_when_the_book_does_not_change():
     from portfolio.services.comparison import _twr_index
 
-    # No quantity ever changes, so each day is already valued at yesterday's
-    # book and the index must follow the totals exactly: 100 -> 110 -> 121.
+    # Nothing is bought or sold, so each day's pair is just yesterday's holdings
+    # at today's price over the same holdings at yesterday's price: +10%, +10%.
     series = [
-        _point("2026-01-01", 1000, 1000),
-        _point("2026-01-02", 1100, 1100),
-        _point("2026-01-03", 1210, 1210),
+        _point("2026-01-01", 1000, 1000, 1000),
+        _point("2026-01-02", 1100, 1100, 1000),
+        _point("2026-01-03", 1210, 1210, 1100),
     ]
     index = _twr_index(series)
 
@@ -344,27 +350,43 @@ def test_recording_a_position_you_already_owned_is_not_a_gain():
     from portfolio.services.comparison import _twr_index
 
     # Day 2 doubles the total, but every Toman of it arrived as a book entry:
-    # valued at yesterday's quantities the day is worth exactly yesterday's
-    # 1000. This is the 2026-08-09 shape that read as +108% in one day.
+    # priced at yesterday's quantities the day was flat. This is the 2026-08-09
+    # shape that read as +108% in one day.
     series = [
-        _point("2026-01-01", 1000, 1000),
-        _point("2026-01-02", 2000, 1000),
-        _point("2026-01-03", 2200, 2200),
+        _point("2026-01-01", 1000, 1000, 1000),
+        _point("2026-01-02", 2000, 1000, 1000),
+        _point("2026-01-03", 2200, 2200, 2000),
     ]
     index = _twr_index(series)
 
-    # Flat across the opening, then the real +10% price move on day 3.
     assert list(index) == pytest.approx([100.0, 100.0, 110.0])
     assert float(index.iloc[-1]) - 100 == pytest.approx(10.0)
+
+
+def test_an_asset_dropped_for_a_price_gap_does_not_book_a_loss():
+    from portfolio.services.comparison import _twr_index
+
+    # Day 2 loses a holding to the forward-fill guard: it is absent from BOTH
+    # sides of the pair, so the day reads flat on what remains. Dividing by the
+    # previous day's full total instead subtracted that holding's whole weight
+    # and, the index being a running product, never gave it back.
+    series = [
+        _point("2026-01-01", 1000, 1000, 1000),
+        _point("2026-01-02", 600, 400, 400),
+        _point("2026-01-03", 660, 660, 600),
+    ]
+    index = _twr_index(series)
+
+    assert list(index) == pytest.approx([100.0, 100.0, 110.0])
 
 
 def test_twr_index_survives_a_zero_starting_day_without_dividing_by_it():
     from portfolio.services.comparison import _twr_index
 
     series = [
-        _point("2026-01-01", 0, 0),
-        _point("2026-01-02", 500, 0),
-        _point("2026-01-03", 550, 550),
+        _point("2026-01-01", 0, 0, 0),
+        _point("2026-01-02", 500, 0, 0),
+        _point("2026-01-03", 550, 550, 500),
     ]
     index = _twr_index(series)
 
@@ -374,8 +396,9 @@ def test_twr_index_survives_a_zero_starting_day_without_dividing_by_it():
 def test_twr_index_falls_back_to_total_when_the_companion_figure_is_absent():
     from portfolio.services.comparison import _twr_index
 
+    # A payload from before the fix: no pair to work with, so the old curve is
+    # reproduced rather than raising on a key that is merely missing.
     series = [{"date": "2026-01-01", "total": "1000"}, {"date": "2026-01-02", "total": "1100"}]
     index = _twr_index(series)
 
     assert list(index) == pytest.approx([100.0, 110.0])
-

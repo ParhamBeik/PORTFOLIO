@@ -787,6 +787,13 @@ class ValuationView(APIView):
             valuation = _express_usd_real(valuation, basis)
         elif basis == "real_toman":
             valuation = _express_real_toman(valuation)
+        else:
+            # Stamped on every path, not just the converted ones. The client keeps
+            # the previous payload on screen while the next one loads, so a basis
+            # switch briefly rendered Toman figures under a dollar sign -- reading
+            # the basis off the DATA rather than off the picker keeps the number
+            # and its currency describing the same thing.
+            valuation["basis"] = "nominal_toman"
         return Response(valuation)
 
 
@@ -816,6 +823,8 @@ class AccountValuationView(APIView):
             result = _express_usd_real(result, basis)
         elif basis == "real_toman":
             result = _express_real_toman(result)
+        else:
+            result["basis"] = "nominal_toman"
         return Response({
             "id": account.id,
             "name": account.name,
@@ -893,15 +902,35 @@ def _fx_rate(prices, basis):
     return Decimal(prices.get("usd_cash", 0) or 0), "USD"
 
 
-def _rescale(valuation, factor):
+def _rescale(valuation, factor, *, to_foreign_currency=False):
     """Divide every monetary field of a valuation payload by `factor`, in place.
 
     One walk for both re-expressions below (FX and CPI) -- they differ only in
     where the divisor comes from, and a second copy of this traversal is how a
     newly added money field ends up deflated on one basis but not the other.
+
+    `to_foreign_currency` says the result is no longer denominated in Iranian
+    money, which is the one case where a Rial-quoted TSE price has to be brought
+    onto the Toman scale before the divide. Deflating to constant Tomans does
+    not: real Rial is still Rial, and the label stays honest.
     """
     def scale_items(items):
         for item in items or []:
+            # A TSE quote is Rial while its `value` is Toman -- the division lands
+            # on the product, never the price. Dividing that Rial price straight
+            # by an FX rate produces a "dollar" price ten times too big, so
+            # `quantity x unit_price` came out at ten times the `value` beside it:
+            # the very mismatch the Rial label was added to remove, moved onto the
+            # foreign bases. Normalise the price to Toman FIRST, then convert, and
+            # say that it is no longer Rial.
+            from marketdata.currency import TSE_RIAL_PER_TOMAN
+
+            if to_foreign_currency and item.get("unit_price_currency") == "rial":
+                if item.get("unit_price") is not None:
+                    item["unit_price"] = float(
+                        Decimal(str(item["unit_price"])) / TSE_RIAL_PER_TOMAN
+                    )
+                item["unit_price_currency"] = "toman"
             # `price_per_sqm_tomans` is money too: a property left in Toman while
             # its own value column converted would read as an absurd unit price.
             for field in ("value", "unit_price", "price_per_sqm_tomans"):
@@ -928,7 +957,7 @@ def _express_usd_real(valuation: dict, basis: str = "usd_denominated") -> dict:
     basis = normalize_basis(basis)
     rate, source = _fx_rate(valuation.get("prices", {}), basis)
     if rate > 0:
-        _rescale(valuation, rate)
+        _rescale(valuation, rate, to_foreign_currency=True)
         # Past this point the total *is* the USD/USDT figure.
         valuation["total_usd"] = valuation["total"]
     valuation["basis"] = basis

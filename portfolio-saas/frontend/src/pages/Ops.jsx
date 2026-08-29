@@ -737,12 +737,13 @@ function WorkflowsPanel({ overview, wf, wfPage, setWfPage }) {
                   <span className="tabular text-muted">{num(row.accepted)} rows · {num(row.runs)} runs</span>
                 </li>
               ))}
-              {/* Runs that wrote to no table, plus anything past the top 12.
-                  Without this the list summed to 66 runs under a header that
-                  said 126, and nothing accounted for the difference. */}
+              {/* Runs that wrote to no table, PLUS any destination past the top
+                  twelve. Without this the list summed to 66 runs under a header
+                  that said 126 and nothing accounted for the difference; calling
+                  it "no destination" would mislabel the 13th real table. */}
               {ingest.unattributed?.runs > 0 && (
                 <li className="flex justify-between gap-3 border-t border-border pt-2 text-muted">
-                  <span>No destination table</span>
+                  <span>Other destinations</span>
                   <span className="tabular">
                     {num(ingest.unattributed.accepted)} rows · {num(ingest.unattributed.runs)} runs
                   </span>

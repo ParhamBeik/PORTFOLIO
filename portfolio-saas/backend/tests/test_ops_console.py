@@ -1111,7 +1111,7 @@ def test_a_non_date_string_is_left_alone_rather_than_dropped():
 # actually applies it -- a pure-function test would prove nothing here.
 
 
-def test_paced_skips_are_not_counted_as_errors(db):
+def test_pacing_is_not_counted_as_an_error(db):
     from marketdata.admin_telemetry import _error_code_breakdown
     from marketdata.models import WorkflowRun
 
@@ -1174,3 +1174,35 @@ def test_a_genuinely_complete_fill_is_still_100():
     assert _pct(11, 10) == 100.0
     assert _pct(0, 0) == 0.0
     assert _pct(1, 4) == 25.0
+
+
+def test_a_skipped_run_that_really_failed_still_reports(db):
+    """Excluding the SKIPPED outcome wholesale would silence a dead pipeline.
+
+    `quota_exhausted` (the wallet is genuinely empty) and `origin_unreachable`
+    (Codal cannot be reached at all) are both recorded SKIPPED alongside the
+    pacer, so the filter has to name the pacing code, not the outcome.
+    """
+    from marketdata.admin_telemetry import _error_code_breakdown
+    from marketdata.models import WorkflowRun
+
+    WorkflowRun.objects.create(
+        workflow="archive_tick",
+        outcome=WorkflowRun.Outcome.SKIPPED,
+        error_code="archive_paced",
+    )
+    WorkflowRun.objects.create(
+        workflow="archive_tick",
+        outcome=WorkflowRun.Outcome.SKIPPED,
+        error_code="quota_exhausted",
+    )
+    WorkflowRun.objects.create(
+        workflow="codal_extract",
+        outcome=WorkflowRun.Outcome.SKIPPED,
+        error_code="origin_unreachable",
+    )
+
+    codes = {row["error_code"]: row["count"] for row in _error_code_breakdown()}
+
+    assert "archive_paced" not in codes
+    assert codes == {"quota_exhausted": 1, "origin_unreachable": 1}

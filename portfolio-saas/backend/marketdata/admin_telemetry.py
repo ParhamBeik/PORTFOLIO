@@ -323,22 +323,31 @@ def _workflow_history():
     return result
 
 
+# Reason codes a run sets when it stood down on purpose. Pacing is the archive
+# spreading its budget across the day; neither is a failure, and neither belongs
+# in the operator's error distribution.
+NON_FAILURE_REASON_CODES = ("archive_paced",)
+
+
 def _error_code_breakdown(since=None):
     """Failure signatures in the window -- not every run that set a reason code.
 
-    A SKIPPED run carries `error_code` to say WHY it stood down, and the archive
-    stands down constantly by design: `archive_paced` is the pacer spreading a
-    day's budget across Tehran daytime, which is the system working. Counting it
-    here made it 99% of the "error distribution" and buried the signatures an
-    operator actually needs -- MarketDataFetchError at 60 and QuotaExhausted at 1
-    rounded to 0.9% and 0%. Outcomes that did not fail are excluded; PARTIAL
-    stays, because a run that half-worked failed at something.
+    `archive_paced` is the pacer spreading a day's budget across Tehran daytime,
+    which is the system working, and it fired 6,350 times in 24h: counting it
+    made pacing 99% of the "error distribution" and rounded the signatures an
+    operator actually needs -- MarketDataFetchError at 60, QuotaExhausted at 1 --
+    to 0.9% and 0%.
+
+    Excluded BY CODE, not by outcome. The obvious filter is "drop SKIPPED runs",
+    but `quota_exhausted` (the wallet is genuinely empty) and `origin_unreachable`
+    (Codal cannot be reached at all) are also recorded SKIPPED, and dropping the
+    outcome would leave the panel silent on the day the pipeline actually died.
     """
     since = since or timezone.now() - timedelta(hours=24)
     rows = (
         WorkflowRun.objects.filter(created_at__gte=since)
         .exclude(error_code="")
-        .exclude(outcome__in=(WorkflowRun.Outcome.SUCCESS, WorkflowRun.Outcome.SKIPPED))
+        .exclude(error_code__in=NON_FAILURE_REASON_CODES)
         .values("error_code")
         .annotate(count=Count("id"))
         .order_by("-count")[:12]

@@ -1085,12 +1085,17 @@ def compute_dynamic_net_worth_series(
     # Yesterday's quantities, carried so each day can also be valued as if the
     # book had not changed. See `total_ex_flows` below.
     prev_day_holdings: dict | None = None
+    prev_day_prices: dict = {}
+    prev_house_values: dict = {}
     for i in range(days - 1, -1, -1):
         target_date = now - timedelta(days=i)
         date_str = target_date.strftime("%Y-%m-%d")
         jalali_str = jdatetime.date.fromgregorian(date=target_date.date()).strftime("%Y-%m-%d")
 
         total = Decimal("0")
+        day_prices: dict = {}
+        house_values: dict = {}
+        total_ex_flows_at_prior_prices = Decimal("0")
         # The same day priced with YESTERDAY's quantities. `total` moves for two
         # unrelated reasons -- prices moved, or the book changed -- and only the
         # first is performance. Recording a position you already owned is a
@@ -1151,9 +1156,14 @@ def compute_dynamic_net_worth_series(
                 total += house_value
                 # A property's "quantity" IS its price per square meter, so a new
                 # mark is a revaluation -- performance, and it must stay in the
-                # return. Only the day the property first appears is a flow.
-                if prev_qty > 0:
+                # return. Only the day the property first appears is a flow. Both
+                # sides of the ratio carry it, so a mark that drops to zero reads
+                # as the loss it is instead of the position vanishing.
+                prev_house_value = prev_house_values.get(key)
+                if prev_qty > 0 and prev_house_value is not None:
                     total_ex_flows += house_value
+                    total_ex_flows_at_prior_prices += prev_house_value
+                house_values[key] = house_value
             else:
                 p = stock_closes.get(jalali_str, {}).get(key)
                 if p is None:
@@ -1178,21 +1188,38 @@ def compute_dynamic_net_worth_series(
                         approximated = approximated or qty > 0
                     p = last_known_prices[key]
                 total += holding_value_to_toman(asset, qty * p)
-                total_ex_flows += holding_value_to_toman(asset, prev_qty * p)
+                # Both sides of the day's ratio, over the SAME asset at the SAME
+                # quantity -- only the price differs. An asset priced today but
+                # not yesterday (or the reverse) enters neither, so a holding
+                # dropped by the forward-fill guard cannot book a one-day loss
+                # equal to its whole weight and, the index being a running
+                # product, never recover from it.
+                prev_p = prev_day_prices.get(key)
+                if prev_qty > 0 and prev_p is not None:
+                    total_ex_flows += holding_value_to_toman(asset, prev_qty * p)
+                    total_ex_flows_at_prior_prices += holding_value_to_toman(
+                        asset, prev_qty * prev_p
+                    )
+                day_prices[key] = p
 
         total -= total_liabilities
-        total_ex_flows -= total_liabilities
         val_usd = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
         series.append({
             "timestamp": target_date.isoformat(),
             "date": date_str,
             "total": str(round(total, 4)),
+            # The day's price move on an unchanged book, as a matched pair: the
+            # ratio between them is the return, and it needs no reference to any
+            # other day's total.
             "total_ex_flows": str(round(total_ex_flows, 4)),
+            "total_ex_flows_base": str(round(total_ex_flows_at_prior_prices, 4)),
             "total_usd": val_usd,
             "is_estimated": True,
             "approximated": approximated,
         })
         prev_day_holdings = day_holdings
+        prev_day_prices = day_prices
+        prev_house_values = house_values
 
     return series
 

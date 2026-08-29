@@ -409,15 +409,26 @@ def _twr_index(series: list[dict]) -> pd.Series:
     """
     dates = pd.to_datetime([point["date"] for point in series], utc=True)
     totals = [float(point["total"]) for point in series]
-    # Older payloads (and any caller that has not been redeployed) lack the
-    # companion figure; falling back to `total` reproduces the old curve rather
-    # than raising on a key that is merely absent.
+    # A matched pair: the same holdings at the same quantities, priced today and
+    # priced yesterday. Their ratio is the day's return over one asset set, so an
+    # asset that is priced on only one of the two days sits out of BOTH and
+    # cannot book a phantom move. Dividing by the previous day's `total` instead
+    # did exactly that -- a holding dropped by the forward-fill guard subtracted
+    # its whole weight for a day, and a running product never recovers from it.
     ex_flows = [float(point.get("total_ex_flows", point["total"])) for point in series]
+    ex_base = [float(point.get("total_ex_flows_base", 0) or 0) for point in series]
+    # Older payloads carry neither field. Falling back to the raw totals
+    # reproduces the pre-fix curve rather than raising on a key that is absent.
+    legacy = not any(point.get("total_ex_flows_base") for point in series)
 
     index, level = [], 100.0
     for position in range(len(totals)):
-        if position > 0 and totals[position - 1] > 0:
-            level *= ex_flows[position] / totals[position - 1]
+        if position > 0:
+            if legacy:
+                if totals[position - 1] > 0:
+                    level *= ex_flows[position] / totals[position - 1]
+            elif ex_base[position] > 0:
+                level *= ex_flows[position] / ex_base[position]
         index.append(level)
     return pd.Series(index, index=dates).sort_index()
 
