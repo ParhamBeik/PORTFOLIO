@@ -13,14 +13,27 @@ export const QUANTITY_MAX = 1e14; // max_digits 20 - decimal_places 6
 
 export const positive = (v) => v !== "" && Number(v) > 0;
 
-export const quantityError = (v) => {
+/**
+ * `allowZero` mirrors the server's own `_decimal(allow_zero=)` flag, and exists
+ * for exactly the case the server allows it: a holding with no ledger history is
+ * disposed of by setting it to nothing. Everywhere else zero is meaningless —
+ * a buy of no shares, a property worth nothing per square meter — and the server
+ * answers "quantity must be positive" after a round trip.
+ */
+export const quantityError = (v, { allowZero = false } = {}) => {
   if (v === "") return "";
   const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return "Enter a quantity greater than zero.";
-  if (n < QUANTITY_MIN) return `The smallest quantity we record is ${QUANTITY_MIN}.`;
+  if (!Number.isFinite(n)) return "Enter a number.";
+  if (allowZero ? n < 0 : n <= 0) {
+    return allowZero
+      ? "Enter a quantity of zero or more."
+      : "Enter a quantity greater than zero.";
+  }
+  if (n !== 0 && n < QUANTITY_MIN) return `The smallest quantity we record is ${QUANTITY_MIN}.`;
   if (n >= QUANTITY_MAX) return "That quantity is larger than we can record.";
   if ((String(v).split(".")[1] || "").length > 6) return "At most 6 decimal places.";
   return "";
 };
 
-export const validQuantity = (v) => positive(v) && !quantityError(v);
+export const validQuantity = (v, opts) =>
+  v !== "" && !quantityError(v, opts);

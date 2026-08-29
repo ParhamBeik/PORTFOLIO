@@ -32,6 +32,7 @@ import {
   unitPrice,
 } from "../format.js";
 import { useApi } from "../useApi.js";
+import { quantityError, validQuantity } from "../quantity.js";
 
 // Plain-language names for the ledger's own vocabulary. The page never shows a
 // kind string: "opening_position" told the user nothing about what they did.
@@ -106,6 +107,13 @@ function EditEntryDialog({ row, onClose, onSaved }) {
   const [note, setNote] = useState(row.note || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // A row with no ledger history is disposed of by setting it to nothing, which
+  // is the one place the server takes a zero; a real entry, and a property's
+  // price per square meter, must be positive. This dialog previously asked only
+  // that the box not be blank, so "0", "-2" and seven decimal places all reached
+  // the server and came back as a failed save with the reason in a red banner.
+  const qtyOpts = { allowZero: Boolean(row.is_synthetic) };
+  const qtyMessage = quantityError(quantity, qtyOpts);
 
   const save = async () => {
     setBusy(true);
@@ -140,7 +148,7 @@ function EditEntryDialog({ row, onClose, onSaved }) {
           <Button onClick={onClose} disabled={busy}>Cancel</Button>
           <Button
             variant="primary"
-            disabled={busy || !quantity.trim()}
+            disabled={busy || !validQuantity(quantity, qtyOpts)}
             onClick={save}
             data-testid="ledger-edit-save"
           >
@@ -164,6 +172,11 @@ function EditEntryDialog({ row, onClose, onSaved }) {
             onChange={(e) => setQuantity(e.target.value)}
             data-testid="ledger-edit-qty"
           />
+          {qtyMessage && (
+            <span className="mt-1 block text-xs text-critical" data-testid="ledger-edit-qty-error">
+              {qtyMessage}
+            </span>
+          )}
         </div>
         {row.is_house && !row.is_synthetic && (
           <div>
