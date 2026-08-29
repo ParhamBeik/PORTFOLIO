@@ -22,10 +22,15 @@ test.describe("comparison", () => {
     }
 
     const target = page.getByTestId("comparison-target");
-    const options = await target.locator("option").all();
-    // [0] is the "Choose…" placeholder.
-    const pick = await options[1].getAttribute("value");
-    await target.selectOption(pick);
+    await expect(target.locator("option").nth(1)).toBeAttached({ timeout: 15000 });
+    const subjectVal = await subject.inputValue().catch(() => "");
+    const pick = await target.locator("option").evaluateAll((opts, subj) => {
+      const valid = opts.map(o => o.value).filter(v => v && v !== subj);
+      return valid.length > 0 ? valid[0] : (opts[1] ? opts[1].value : "");
+    }, subjectVal);
+    if (pick) {
+      await target.selectOption(pick);
+    }
 
     // Either a verdict or a stated reason — both are answers. A silent empty
     // panel is the only outcome this page must never produce.
