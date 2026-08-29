@@ -70,6 +70,24 @@ def _overlay_usdt_irt_from_warehouse(prices: dict) -> dict:
     return prices
 
 
+def _source_for(key, archive_replacements):
+    """Which of the three things a price actually is.
+
+    The Swiss bars have no provider, so `extract_standard_prices` fills them from
+    `settings.MANUAL_PRICES` -- a constant, injected into the live map on every
+    cycle like any quote. Labelling that "API" made an operator-typed number read
+    as a working feed: the Ops console showed the bars sourced API and 244s old,
+    against a dashboard that called the same holdings a 3-day-old manual
+    valuation. Worse, a constant can never look stale, so the freshness panel
+    could not have reported those two assets going dark.
+    """
+    if key in archive_replacements:
+        return "ARCHIVE"
+    if key in settings.MANUAL_PRICES:
+        return "MANUAL"
+    return "API"
+
+
 def _persistable_prices(live_prices, resolved_prices, archive_replacements):
     """Return fresh provider/archive observations, excluding forward-filled values."""
     priced = {
@@ -77,10 +95,7 @@ def _persistable_prices(live_prices, resolved_prices, archive_replacements):
         for key, value in resolved_prices.items()
         if value > 0 and (Decimal(str(live_prices[key])) > 0 or key in archive_replacements)
     }
-    return priced, {
-        key: "ARCHIVE" if key in archive_replacements else "API"
-        for key in priced
-    }
+    return priced, {key: _source_for(key, archive_replacements) for key in priced}
 
 
 def run_price_fetch(*, dry_run=False):
@@ -184,7 +199,12 @@ def _write_prices(priced: dict, *, sources: dict | None = None) -> None:
         if key not in assets:
             continue
         source = sources.get(key, "API")
-        if source == "ARCHIVE" and latest_prices.get(key) == value:
+        # A repeat of a price nobody re-observed is not an observation. Archive
+        # replays and manual constants both re-present the same number every
+        # cycle, so writing a row for them restamped `fetched_at` and made the
+        # age column mean "when we last looped" rather than "when this price last
+        # moved" -- which is the whole question the freshness panel asks.
+        if source in ("ARCHIVE", "MANUAL") and latest_prices.get(key) == value:
             continue
         asset = assets[key]
         # BRS gold/FX and manuals are Toman. TSE stocks are stored as **Rial**

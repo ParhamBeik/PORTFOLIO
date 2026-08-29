@@ -717,6 +717,39 @@ _PREREQ_ERROR_MARKERS = (
     "Real/legal payload has no matching daily price rows",
 )
 
+# A prereq that has not landed yet is not the state's fault, so the retry stays a
+# flat 3h rather than escalating to the 24h cap -- but it is still a pass that did
+# not converge, and that has to be counted.
+PREREQ_DEFER_INTERVAL = timedelta(hours=3)
+
+
+def _defer_for_prereq(state, *, now, error=""):
+    """Hold a state whose dependency endpoint has not landed, and count the pass.
+
+    Everything that can notice a stuck state -- the Ops "Wedged" tile, the
+    `wedged-archive-states` alert and `suspension`'s outlier detector -- reads
+    `consecutive_failures` and nothing else. This branch used to leave it alone,
+    on the reasoning that waiting for candles is not a failure, which made a
+    symbol whose prereq NEVER lands invisible to all three: it retried on the
+    flat 3h cadence, eight provider calls a day, forever, with a counter frozen
+    at zero saying it was fine.
+
+    Counting it is safe precisely because suspension is peer-relative. On a cold
+    warehouse every state on the endpoint is waiting, so the outage guard
+    (`OUTAGE_SHARE_THRESHOLD`) suspends nobody; when six symbols out of hundreds
+    are the only ones still waiting, that is the outlier it is meant to catch.
+    Either way the count clears the moment the state stores a row.
+    """
+    state.consecutive_failures += 1
+    state.last_attempt_at = now
+    state.next_attempt_at = now + PREREQ_DEFER_INTERVAL
+    state.last_error = error[:500]
+    state.verified_complete = False
+    state.save(update_fields=[
+        "consecutive_failures", "last_attempt_at", "next_attempt_at",
+        "last_error", "verified_complete",
+    ])
+
 
 def next_quota_day_start(now=None):
     """UTC datetime of the next Tehran midnight (provider quota day boundary)."""
@@ -771,15 +804,10 @@ def run_archive_state(state_id):
         message = str(exc)
 
         if any(marker in message for marker in _PREREQ_ERROR_MARKERS):
-            # Candles / unadj history must land first. Failing and backing off
-            # burned claim slots and wedged counters without spending useful quota.
-            state.last_attempt_at = now
-            state.next_attempt_at = now + timedelta(hours=3)
-            state.last_error = f"{type(exc).__name__}: {exc}"[:500]
-            state.verified_complete = False
-            state.save(update_fields=[
-                "last_attempt_at", "next_attempt_at", "last_error", "verified_complete",
-            ])
+            # Candles / unadj history must land first, so the cadence stays flat
+            # instead of escalating to the 24h cap -- but this pass already spent
+            # a provider call and converged on nothing, so it counts.
+            _defer_for_prereq(state, now=now, error=f"{type(exc).__name__}: {exc}")
             logger.info(
                 "Archive prereq defer for %s (%s): %s",
                 state.symbol, state.endpoint, exc,
@@ -951,8 +979,12 @@ def _pick_ready_states(candidates, limit, now, deferred_pks):
             ready.append(state)
         else:
             deferred_pks.add(state.pk)
-            ArchiveFetchState.objects.filter(pk=state.pk).update(
-                next_attempt_at=now + timedelta(hours=3),
+            # The same hold as the post-fetch prereq branch, decided before the
+            # call rather than after it. It costs no quota, but a state parked
+            # here is just as stuck and was just as invisible, so it is counted
+            # the same way -- one rule, not two that drift.
+            _defer_for_prereq(
+                state, now=now, error="Waiting on prerequisite endpoint.",
             )
     return ready
 

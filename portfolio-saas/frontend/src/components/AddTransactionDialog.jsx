@@ -118,6 +118,26 @@ const toIso = (local) => {
 
 const positive = (v) => v !== "" && Number(v) > 0;
 
+// What the server will actually take: `DecimalField(max_digits=20,
+// decimal_places=6, min_value=0.000001)`. The wizard only asked for "> 0", so a
+// quantity of 0.0000001 passed every step, reached the review screen and was
+// refused at Save -- the same shape as the future date that used to be caught
+// only by the server. Stated here as one rule so the two cannot drift.
+const QUANTITY_MIN = 0.000001;
+const QUANTITY_MAX = 1e14; // max_digits 20 - decimal_places 6
+
+const quantityError = (v) => {
+  if (v === "") return "";
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return "Enter a quantity greater than zero.";
+  if (n < QUANTITY_MIN) return `The smallest quantity we record is ${QUANTITY_MIN}.`;
+  if (n >= QUANTITY_MAX) return "That quantity is larger than we can record.";
+  if ((String(v).split(".")[1] || "").length > 6) return "At most 6 decimal places.";
+  return "";
+};
+
+const validQuantity = (v) => positive(v) && !quantityError(v);
+
 export default function AddTransactionDialog({
   accountId,
   accounts = [],
@@ -275,7 +295,7 @@ export default function AddTransactionDialog({
         return !!form.name.trim() && positive(form.areaSqm) && positive(form.pricePerSqm);
       }
       if (asset?.is_house) return positive(form.pricePerSqm);
-      return positive(form.quantity);
+      return validQuantity(form.quantity);
     }
     return true;
   };
@@ -601,11 +621,20 @@ export default function AddTransactionDialog({
                     label="Quantity"
                     type="number"
                     step="any"
+                    min={QUANTITY_MIN}
                     className="w-full"
                     value={form.quantity}
                     onChange={set("quantity")}
                     data-testid="add-transaction-quantity"
                   />
+                  {quantityError(form.quantity) && (
+                    <p
+                      className="mt-1 text-xs text-critical"
+                      data-testid="add-transaction-quantity-error"
+                    >
+                      {quantityError(form.quantity)}
+                    </p>
+                  )}
                 </Field>
               )}
               <Field label="When? (leave blank for now)">

@@ -1702,3 +1702,49 @@ def test_live_poll_interval_leaves_margin_under_the_freshness_bar():
             f"{name}={interval} is not below the {_FRESH_SECONDS}s freshness bar, "
             "so a healthy loop still reports its own prices as stale."
         )
+
+
+# ----------------------------------------------------------------------
+# A constant is not a feed.
+#
+# The Swiss bars have no provider, so the extractor fills them from
+# `settings.MANUAL_PRICES` and they travelled through the writer labelled "API"
+# like any quote, restamped every cycle. The Ops console read them as sourced
+# API and 244s old while the dashboard called the same holdings a 3-day-old
+# manual valuation -- and a number that is rewritten every four minutes can
+# never go stale, so the freshness panel could not have reported them going dark.
+#
+# Unit test on the labelling rule, then one integration pass proving the writer
+# stops restamping an unchanged constant.
+
+
+def test_a_manual_constant_is_not_labelled_as_a_provider_quote():
+    from portfolio.tasks import _source_for
+
+    assert _source_for("swiss_gold_bar_1g", set()) == "MANUAL"
+    assert _source_for("usd_cash", set()) == "API"
+    assert _source_for("kama_stock", {"kama_stock"}) == "ARCHIVE"
+
+
+def test_an_unchanged_manual_price_is_not_restamped(db):
+    from decimal import Decimal
+
+    from portfolio.models import Asset, Price
+    from portfolio.tasks import _write_prices
+
+    asset = Asset.objects.create(
+        key="swiss_gold_bar_1g", name="Swiss bar 1g",
+        asset_class=Asset.AssetClass.GOLD, is_manual=True, is_active=True,
+    )
+    priced = {"swiss_gold_bar_1g": Decimal("25900000")}
+    sources = {"swiss_gold_bar_1g": "MANUAL"}
+
+    _write_prices(priced, sources=sources)
+    _write_prices(priced, sources=sources)
+    first = Price.objects.get(asset=asset)
+
+    # The operator edits the constant: that IS a new observation.
+    _write_prices({"swiss_gold_bar_1g": Decimal("26500000")}, sources=sources)
+
+    assert Price.objects.filter(asset=asset).count() == 2
+    assert first.source == "MANUAL"

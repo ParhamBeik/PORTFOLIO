@@ -335,6 +335,43 @@ def test_repeated_transients_escalate():
     assert state.next_attempt_at - timezone.now() > timedelta(minutes=10)
 
 
+def test_a_prereq_that_never_lands_becomes_visible_instead_of_looping_forever():
+    """The one failure branch that used to leave `consecutive_failures` alone.
+
+    Waiting on candles is not the state's fault, so the retry stays a flat 3h --
+    but the wedged tile, the operator alert and the suspension detector all read
+    that counter and nothing else, so a symbol whose prereq never lands sat at
+    zero forever while spending eight provider calls a day.
+    """
+    from marketdata.fetchers import MarketDataFetchError
+
+    state = _state("بتهران", endpoint=Endpoint.STOCK_TRANSACTION_TICKS)
+    with patch(
+        "marketdata.archive._fetch_and_ingest",
+        side_effect=MarketDataFetchError("No trading days known for this symbol yet"),
+    ):
+        for _ in range(4):
+            run_archive_state(state.pk)
+
+    state.refresh_from_db()
+    assert state.consecutive_failures == 4
+    # Counted, but never escalated: an ordinary failure would be at 2**3 = 8h.
+    assert timedelta(hours=2) < state.next_attempt_at - timezone.now() < timedelta(hours=4)
+
+
+def test_a_prereq_deferral_clears_once_the_state_stores_a_row():
+    state = _state("بپردیس", missing_rows=5, consecutive_failures=4)
+
+    with patch(
+        "marketdata.archive._fetch_and_ingest",
+        return_value=((1, 0), {"a", "b", "c"}, {"a", "b"}),
+    ):
+        run_archive_state(state.pk)
+
+    state.refresh_from_db()
+    assert state.consecutive_failures == 0
+
+
 def test_quota_exhausted_defers_to_tehran_day_rollover_not_one_minute():
     from marketdata.archive import next_quota_day_start
     from marketdata.quota import QuotaExhausted
@@ -1201,7 +1238,14 @@ def test_real_legal_without_price_rows_never_verifies(settings):
 
     Reported as a missing dependency rather than a row-level gap: re-fetching
     *this* endpoint can never produce a price row, so the unadjusted pass has to
-    land first. Soft-defer without wedging consecutive_failures.
+    land first, and the retry stays a flat 3h instead of escalating to the 24h
+    cap the way an ordinary failure does.
+
+    It is still counted. This branch used to leave `consecutive_failures` at
+    zero on the reasoning that waiting is not failing -- but the Ops "Wedged"
+    tile, the `wedged-archive-states` alert and `suspension`'s outlier detector
+    all read that one counter, so a symbol whose prereq NEVER lands was invisible
+    to every one of them while spending eight provider calls a day forever.
     """
     settings.TSETMC_API_KEY = "test-key"
     state = ArchiveFetchState.objects.create(
@@ -1212,7 +1256,7 @@ def test_real_legal_without_price_rows_never_verifies(settings):
         state = run_archive_state(state.pk)
     assert not state.verified_complete
     assert "no matching daily price rows" in state.last_error
-    assert state.consecutive_failures == 0
+    assert state.consecutive_failures == 1
     assert state.next_attempt_at is not None
 
 
