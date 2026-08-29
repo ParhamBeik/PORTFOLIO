@@ -339,7 +339,10 @@ def test_crypto_keeps_its_live_price_overnight(asset_catalog, write_prices, monk
     asset = asset_catalog["bitcoin_usd"]
     asset.brs_symbol = "BTC"
     asset.save(update_fields=["brs_symbol"])
-    write_prices({"bitcoin_usd": Decimal("900")})
+    # `bitcoin_usd` is quoted in dollars, so the price map converts it before
+    # anything compares it to a Toman archive bar. A rate of 1 leaves it on its
+    # own scale and keeps this test about market state rather than units.
+    write_prices({"bitcoin_usd": Decimal("900"), "usd_cash": Decimal("1")})
     MarketDailyBar.objects.create(
         asset_class=MarketDailyBar.AssetClass.CRYPTO,
         symbol="BTC",
@@ -499,6 +502,9 @@ def test_quality_status_follows_each_market_not_one_symbol(
         "khodro_stock": Decimal("2800"),
         "emami_coin": Decimal("480000000"),
         "bitcoin_usd": Decimal("900"),
+        # Dollar-quoted, so the map converts it. A rate of 1 keeps this test
+        # about which market is open rather than about units.
+        "usd_cash": Decimal("1"),
     })
     Price.objects.filter(asset__key="khodro_stock").update(
         fetched_at=frozen - timedelta(hours=8),
@@ -2282,3 +2288,58 @@ def test_a_crypto_quote_is_dollars_even_with_no_unit_label(asset_catalog, make_u
     assert result["excluded"] == []
     # 79,606 dollars x 200,000 Toman, not 79,606 Toman.
     assert Decimal(result["total"]) == Decimal("15921200000")
+
+
+# ----------------------------------------------------------------------
+# The dollar-quoted keys reach the valuation on the Toman scale.
+#
+# `bitcoin_usd` and `gold_ounce_usd` are stored in dollars -- the provider
+# quotes them that way. Every consumer of `get_latest_prices()` multiplies the
+# price by a quantity and calls the product Toman, so two Bitcoin worth 11.4bn
+# valued at 190,000. This is the same defect 0e13739 fixed on the daily-bar
+# path, still live on the primary one.
+#
+# Unit test on the conversion rule, then one integration pass through the
+# valuation that actually consumed it.
+
+
+def test_a_dollar_quoted_price_is_brought_onto_the_toman_scale():
+    from portfolio.services.valuation import _dollar_quotes_to_toman
+
+    out = _dollar_quotes_to_toman({
+        "bitcoin_usd": Decimal("95000"),
+        "usd_cash": Decimal("60000"),
+        "emami_coin": Decimal("900000000"),
+    })
+
+    assert out["bitcoin_usd"] == Decimal("5700000000")
+    # A dollar bill is USD too, and its price is already Toman per dollar.
+    assert out["usd_cash"] == Decimal("60000")
+    assert out["emami_coin"] == Decimal("900000000")
+
+
+def test_a_dollar_quote_with_no_rate_is_zeroed_rather_than_left_in_dollars():
+    """Zero, not deleted: it is this map's "no live price" sentinel, so the key
+    stays present and the archive close -- already Toman -- can still fill it."""
+    from portfolio.services.valuation import _dollar_quotes_to_toman
+
+    out = _dollar_quotes_to_toman({"bitcoin_usd": Decimal("95000")})
+
+    assert out["bitcoin_usd"] == Decimal("0")
+
+
+def test_a_bitcoin_holding_is_worth_billions_not_thousands(asset_catalog, make_user):
+    user = make_user(email="btc-scale@test.test")
+    account = Account.objects.create(user=user, name="BTC")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["bitcoin_usd"], quantity=Decimal("2"),
+    )
+
+    # The map the valuation receives has already been normalised.
+    from portfolio.services.valuation import _dollar_quotes_to_toman
+
+    result = value_account(account, prices=_dollar_quotes_to_toman({
+        "bitcoin_usd": Decimal("95000"), "usd_cash": Decimal("60000"),
+    }))
+
+    assert result["total"] == Decimal("11400000000")

@@ -86,6 +86,42 @@ def _q(value) -> Decimal:
         return Decimal("0")
 
 
+def _dollar_quotes_to_toman(prices: dict) -> dict:
+    """Bring the two dollar-quoted keys onto the Toman scale the map promises.
+
+    `bitcoin_usd` and `gold_ounce_usd` are stored in DOLLARS -- the provider
+    quotes them that way and `returns.USD_QUOTED_KEYS` is where that is
+    declared. Every consumer of this map is a money path that multiplies the
+    price by a quantity and calls the product Toman, so two Bitcoin genuinely
+    worth 11.4bn were valued at 190,000: the same 0e13739 fixed on the daily-bar
+    path ("Bitcoin came out at 79,606 Toman. It is 15.9 billion"), still live on
+    the primary one. The returns matrix is untouched by this -- it reads the
+    Price table directly and converts these columns itself.
+
+    `Asset.currency` cannot answer this. It says what the asset IS, not what its
+    price is quoted in: `usd_cash` is also USD and its price is Toman per
+    dollar, so converting by that field would inflate every dollar bill held.
+
+    Without a rate the price becomes 0 rather than staying in dollars -- passing
+    the foreign number through is the failure `currency.to_toman` refuses. Zero
+    and not deletion, because zero is this map's established "no live price"
+    sentinel: the key stays present, so `_archive_replacements` can still offer
+    the archive close, which is already Toman and needs no rate. Deleting it
+    would take that fallback away too, and a momentarily missing `usd_cash`
+    would drop the holding entirely rather than pricing it from history.
+    """
+    from .returns import USD_QUOTED_KEYS
+
+    quoted = [key for key in USD_QUOTED_KEYS if key in prices]
+    if not quoted:
+        return prices
+    rate = prices.get("usd_cash") or Decimal("0")
+    out = dict(prices)
+    for key in quoted:
+        out[key] = out[key] * rate if rate > 0 else Decimal("0")
+    return out
+
+
 def get_latest_prices() -> dict:
     """Return cached provider-scale prices keyed by asset.
 
@@ -117,6 +153,7 @@ def get_latest_prices() -> dict:
     latest = list(latest)
     prices = {row.asset.key: _q(row.price) for row in latest}
     fetched_at = {row.asset.key: row.fetched_at for row in latest}
+    prices = _dollar_quotes_to_toman(prices)
     # Replace only what is already priced. Filling assets that have no Price row
     # at all is the write path's job; doing it here would turn "unpriced" into a
     # silent archive value and hide the gap the valuation layer reports.
