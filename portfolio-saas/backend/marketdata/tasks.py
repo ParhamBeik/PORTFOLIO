@@ -501,7 +501,12 @@ def tracked_brs_symbols() -> list[str]:
     catalog_symbols = list(
         MarketInstrument.objects.filter(
             source=MarketInstrument.Source.BRS,
-            category__in=("gold", "currency"),
+            # GOLD is the whole gold_daily universe: bullion, coins AND hard
+            # currency, which `sync_provider_catalog` stamps GOLD on purpose and
+            # separates by `provider_group` instead (see catalog.py). There is no
+            # CURRENCY category -- filtering for one matches nothing, so pairing
+            # it with a literal "gold" only looks like it covers USD/EUR.
+            category=MarketInstrument.Category.GOLD,
             eligible=True,
         ).values_list("symbol", flat=True)
     )
