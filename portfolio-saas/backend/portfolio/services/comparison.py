@@ -25,7 +25,7 @@ from django.utils import timezone
 
 from marketdata.currency import holding_value_to_toman
 
-from ..models import Asset, LedgerEntry
+from ..models import Asset, LedgerEntry, owner_display_names
 from .ledger import active_entries
 
 MODES = ("counterfactual", "holdings", "benchmark", "lump_sum")
@@ -419,7 +419,11 @@ def _twr_index(series: list[dict]) -> pd.Series:
     ex_base = [float(point.get("total_ex_flows_base", 0) or 0) for point in series]
     # Older payloads carry neither field. Falling back to the raw totals
     # reproduces the pre-fix curve rather than raising on a key that is absent.
-    legacy = not any(point.get("total_ex_flows_base") for point in series)
+    # Absence is asked about by key, not by truthiness: a book whose assets are
+    # never priced on two consecutive days reports a base of 0 every day, which
+    # is a real answer, and reading it as "no such field" quietly restored the
+    # very chaining this replaced.
+    legacy = not any("total_ex_flows_base" in point for point in series)
 
     index, level = [], 100.0
     for position in range(len(totals)):
@@ -603,10 +607,14 @@ def comparable_assets(user, account=None) -> dict:
     # a reader hunting for their own house and Swiss bars in a list that never
     # mentioned them -- four of this account's holdings were absent with no
     # explanation anywhere on the page.
+    # The omitted list is the one place a property is certain to appear, so it is
+    # also where "Real Estate" was least useful: it told the reader an asset they
+    # have never called that was left out, and could not distinguish two houses.
+    owned = owner_display_names(accounts)
     omitted = [
         {
             "key": asset.key,
-            "label": _label(asset),
+            "label": owned.get(asset.id) or _label(asset),
             "reason": (
                 "valued from a mark you set, not a market price series"
                 if asset.is_house

@@ -230,6 +230,27 @@ class Holding(models.Model):
         return Decimal(self.quantity) * HOUSE_PRICE_SCALE
 
 
+def owner_display_names(accounts=None) -> dict[int, str]:
+    """Nicknames for owner-minted assets, keyed by asset id.
+
+    `Holding.label` answers this for a row you already have. Screens that list
+    ASSETS rather than holdings -- the Ops console, the Comparison pickers, the
+    Best Overall gap table -- have no holding in hand and read the catalog name
+    instead. For a property that name is the asset class, because a property is
+    minted per owner and `_mint_property_asset` has nothing else to put there.
+    So all three independently showed someone's house as "Real Estate", and each
+    was fixed on its own page as it was noticed. This is the rule, once.
+
+    Only owner-minted rows are answered. A shared catalog asset is the same
+    instrument for everybody and keeps the name everybody knows it by, whatever
+    one holder happens to have nicknamed their slice.
+    """
+    holdings = Holding.objects.filter(asset__owner__isnull=False).exclude(display_name="")
+    if accounts is not None:
+        holdings = holdings.filter(account__in=accounts)
+    return dict(holdings.values_list("asset_id", "display_name"))
+
+
 class Price(models.Model):
     """Global, append-only live price series in Toman (`price_unit=IRT`).
 

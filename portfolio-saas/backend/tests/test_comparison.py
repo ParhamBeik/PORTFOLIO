@@ -434,3 +434,19 @@ def test_negative_equity_carries_the_day_flat_instead_of_inverting_the_curve():
 
     assert list(index) == pytest.approx([100.0, 100.0, 110.0])
     assert all(level > 0 for level in index)
+
+
+def test_an_all_zero_base_is_an_answer_not_a_missing_field():
+    from portfolio.services.comparison import _twr_index
+
+    # Nothing was priced on two consecutive days, so every base is a real 0.
+    # Read as "the field is absent" this fell back to chaining against the
+    # previous day's total -- restoring the bug the pair replaced, on the one
+    # book least able to survive it.
+    series = [
+        _point("2026-01-01", 1000, 0, 0),
+        _point("2026-01-02", 2000, 0, 0),
+    ]
+    index = _twr_index(series)
+
+    assert list(index) == pytest.approx([100.0, 100.0])

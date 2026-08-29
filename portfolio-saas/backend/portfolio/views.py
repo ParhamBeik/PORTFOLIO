@@ -940,6 +940,14 @@ def _rescale(valuation, factor, *, to_foreign_currency=False):
     valuation["total"] = Decimal(str(valuation.get("total", 0) or 0)) / factor
     if valuation.get("total_usd") is not None:
         valuation["total_usd"] = Decimal(str(valuation["total_usd"])) / factor
+    # Debt is money. It is already netted out of `total`, so leaving it in Toman
+    # only shows up when something reads the field on its own -- which is exactly
+    # the "deflated on one basis but not the other" trap this single walk exists
+    # to close, and it would report a mortgage at 42,000x under a dollar basis.
+    if valuation.get("total_liabilities") is not None:
+        valuation["total_liabilities"] = float(
+            Decimal(str(valuation["total_liabilities"])) / factor
+        )
     # Switched-off rows are still displayed, so they are re-expressed alongside
     # the counted ones even though they are absent from the total.
     scale_items(valuation.get("items"))
