@@ -18,6 +18,18 @@ test.describe("auth", () => {
     await expect(page.getByTestId("auth-toggle-register")).toBeVisible();
   });
 
+  // A privacy policy nobody can read without an account is not a privacy
+  // policy. The signed-out route tree was a single catch-all, so both legal
+  // URLs answered with the sign-in form.
+  for (const [path, back] of [["/privacy", "Back to sign in"], ["/terms", "Back to sign in"]]) {
+    test(`${path} is readable without signing in`, async ({ page }) => {
+      await page.goto(path);
+      await expect(page.getByTestId("legal-page")).toBeVisible();
+      await expect(page.getByTestId("auth-card")).toHaveCount(0);
+      await expect(page.getByTestId("legal-back-link")).toHaveText(back);
+    });
+  }
+
   test("register toggle shows strength meter path", async ({ page }) => {
     await page.goto("/");
     await page.getByTestId("auth-toggle-register").click();

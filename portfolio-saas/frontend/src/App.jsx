@@ -59,6 +59,13 @@ export default function App() {
           </p>
         )}
         <Routes>
+          {/* A privacy policy nobody can read without an account is not a
+              privacy policy. The signed-out tree was a single catch-all, so
+              /privacy and /terms both answered with the sign-in form -- which
+              is also why `Legal`'s signed-out branch, and its "Back to sign in"
+              link, had never once rendered. */}
+          <Route path="/privacy" element={<Legal kind="privacy" />} />
+          <Route path="/terms" element={<Legal kind="terms" />} />
           <Route
             path="*"
             element={
