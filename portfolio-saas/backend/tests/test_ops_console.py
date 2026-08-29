@@ -1206,3 +1206,35 @@ def test_a_skipped_run_that_really_failed_still_reports(db):
 
     assert "archive_paced" not in codes
     assert codes == {"quota_exhausted": 1, "origin_unreachable": 1}
+
+
+def test_a_property_is_listed_by_its_owners_name_not_its_class(db):
+    """An owner-minted asset's catalog `name` is the class, never the property.
+
+    `_mint_property_asset` fills `name` from what the owner typed at creation,
+    but the name they go on to see everywhere else is the holding nickname, and
+    the console read only the catalog row -- so a house listed as "Real Estate",
+    which also cannot tell two properties apart.
+    """
+    from accounts.models import User
+    from marketdata.coverage_report import build_live_coverage
+    from portfolio.models import Account, Asset, Holding
+
+    user = User.objects.create_user(email="owner@test.local", password="x")
+    account = Account.objects.create(user=user, name="Mine")
+    house = Asset.objects.create(
+        key="re-abc123", name="Real Estate", asset_class=Asset.AssetClass.REAL_ESTATE,
+        is_house=True, is_active=True, owner=user,
+    )
+    shared = Asset.objects.create(
+        key="usd_cash", name="US Dollar", asset_class=Asset.AssetClass.CASH,
+        is_active=True,
+    )
+    Holding.objects.create(account=account, asset=house, quantity=1, display_name="خونه کرج")
+    Holding.objects.create(account=account, asset=shared, quantity=5, display_name="")
+
+    names = {row["key"]: row["name"] for row in build_live_coverage()["assets"]}
+
+    assert names["re-abc123"] == "خونه کرج"
+    # A shared catalog row has no owner and keeps the catalog's own name.
+    assert names["usd_cash"] == "US Dollar"

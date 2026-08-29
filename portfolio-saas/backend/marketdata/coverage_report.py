@@ -70,6 +70,22 @@ def _latest_prices_by_asset() -> dict[int, Price]:
     return out
 
 
+def _owner_labels() -> dict[int, str]:
+    """Nicknames for owner-minted assets, keyed by asset id.
+
+    A property is minted per owner and its catalog `name` is the asset class, so
+    the console listed someone's house as "Real Estate" while every other screen
+    called it خونه کرج. For an owned row the nickname is the only name that says
+    WHICH property, which is what an operator needs on an account holding two.
+    Shared catalog rows are untouched: they have no owner and no nickname.
+    """
+    return dict(
+        Holding.objects.filter(asset__owner__isnull=False)
+        .exclude(display_name="")
+        .values_list("asset_id", "display_name")
+    )
+
+
 def classify_live_asset(asset: Asset, price: Price | None, *, now) -> str:
     if asset.is_house:
         return "formula"
@@ -91,6 +107,7 @@ def build_live_coverage(*, held_only: bool = False) -> dict:
         assets_qs = assets_qs.filter(id__in=held_ids)
     assets = list(assets_qs.order_by("asset_class", "name"))
     latest = _latest_prices_by_asset()
+    owned_labels = _owner_labels()
 
     by_status: dict[str, list] = {k: [] for k in LIVE_STATUSES}
     rows = []
@@ -102,7 +119,7 @@ def build_live_coverage(*, held_only: bool = False) -> dict:
             age_seconds = max(0, int((now - price.fetched_at).total_seconds()))
         entry = {
             "key": asset.key,
-            "name": asset.name_fa or asset.name,
+            "name": owned_labels.get(asset.id) or asset.name_fa or asset.name,
             "asset_class": asset.asset_class,
             "status": status,
             "tse_symbol": asset.tse_symbol or "",
@@ -318,6 +335,7 @@ def list_ops_assets(
     assets = list(qs.order_by("asset_class", "name"))
     held_ids = set(Holding.objects.values_list("asset_id", flat=True).distinct())
     latest = _latest_prices_by_asset()
+    owned_labels = _owner_labels()
 
     symbols = {
         sym
@@ -356,7 +374,7 @@ def list_ops_assets(
             "key": asset.key,
             "name": asset.name,
             "name_fa": asset.name_fa or "",
-            "display_name": asset.name_fa or asset.name,
+            "display_name": owned_labels.get(asset.id) or asset.name_fa or asset.name,
             "asset_class": asset.asset_class,
             "tse_symbol": asset.tse_symbol or "",
             "brs_symbol": asset.brs_symbol or "",

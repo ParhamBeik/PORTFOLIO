@@ -213,6 +213,25 @@ function MyOptimalBody({ data, frontierState, label, windowLabel, setWindowLabel
     { key: "m", header: "Measure", render: (r) => r.m },
     { key: "cur", header: "Current", align: "right", render: (r) => r.fmt(r.cur) },
     { key: "tgt", header: "Target", align: "right", render: (r) => r.fmt(r.tgt) },
+    {
+      // Two bare columns under a page called "My Optimal" read as "the right
+      // column is the better one". On this account the target holds FEWER
+      // effective bets than the book it is recommending replaced (1.84 vs 1.99),
+      // and nothing on screen said so. Higher is more diversified on all three.
+      key: "delta",
+      header: "Change",
+      align: "right",
+      render: (r) => {
+        if (r.cur == null || r.tgt == null) return "—";
+        const d = Number(r.tgt) - Number(r.cur);
+        if (Math.abs(d) < 0.005) return <span className="text-muted">no change</span>;
+        return (
+          <span className={d > 0 ? "text-good" : "text-critical"}>
+            {d > 0 ? "+" : ""}{num(d, 2)} {d > 0 ? "more spread" : "more concentrated"}
+          </span>
+        );
+      },
+    },
   ];
 
   // Risk contributions sum to 100%, so the gap against weight share reads
@@ -351,6 +370,13 @@ function MyOptimalBody({ data, frontierState, label, windowLabel, setWindowLabel
                 <p className="text-sm">
                   Effective bets counts positions after correlation: assets that move together
                   collapse into one. A diversification ratio of 1.0 means nothing cancels out.
+                  Higher is more spread out on all three rows.
+                </p>
+                <p className="mt-2 text-sm">
+                  These describe the target — they are not what it was chosen for. The optimiser
+                  maximises return for the risk you allow, so it can and does concentrate when
+                  concentrating pays. A "more concentrated" row is that trade being made, not a
+                  mistake; it is worth asking whether you want it.
                 </p>
               </Disclosure>
             </Card>
