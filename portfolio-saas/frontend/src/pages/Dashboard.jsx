@@ -197,7 +197,16 @@ function TrendCard({ activeId, basis }) {
     ? range
     : rangeOptions[0].value;
   const days = effectiveRange === "all" ? "all" : Number(effectiveRange);
-  const state = useApi(() => snapshots(days, activeId, basis), [days, activeId, basis]);
+  // "After inflation" is a Toman question -- the other line is fetched as
+  // `real_toman` and cannot be anything else. Leaving the nominal line on the
+  // user's chosen basis drew a dollar series against a constant-Toman one on a
+  // single axis: the dollar line flattens onto zero and the Toman axis labels
+  // it. In that mode both lines are asked for in Toman and the caption says so.
+  const trendBasis = mode === "real" ? "nominal_toman" : basis;
+  const state = useApi(
+    () => snapshots(days, activeId, trendBasis),
+    [days, activeId, trendBasis]
+  );
   // The same net worth measured in constant Tomans. Fetched only when asked,
   // because it needs a CPI figure for every Jalali year the window spans and
   // fails loudly rather than silently reusing last year's index.
@@ -300,6 +309,10 @@ function TrendCard({ activeId, basis }) {
                     In constant Tomans your net worth is {realGrowth >= 0 ? "up" : "down"}{" "}
                     {pct(Math.abs(realGrowth))} over this window. The gap between the two
                     lines is inflation, not performance.
+                    {basis !== "nominal_toman" && basis !== "real_toman" && (
+                      <> Both lines are shown in Tomans — an inflation comparison
+                      only means something in the currency being inflated.</>
+                    )}
                   </p>
                 )}
               </>
@@ -1035,7 +1048,7 @@ function RiskPanel({ title, caption, children }) {
   );
 }
 
-function RiskClassView({ data, valueByClass }) {
+function RiskClassView({ data, valueByClass, basis }) {
   const div = data.diversification || {};
   const rows = riskShareRows(div.weight_by_class, div.risk_by_class);
   if (!rows.length) return <Empty testId="dashboard-risk-class-empty">No class risk data.</Empty>;
@@ -1046,13 +1059,14 @@ function RiskClassView({ data, valueByClass }) {
         label="Share of money versus share of risk by asset class"
         coverage={div.mean_weight_covered}
         valueFor={(key) => valueByClass[key]}
+        basis={basis}
         testId="risk-money-vs-risk-class"
       />
     </div>
   );
 }
 
-function RiskAssetView({ data, labelFor, valueByLabel }) {
+function RiskAssetView({ data, labelFor, valueByLabel, basis }) {
   const div = data.diversification || {};
   const rows = (div.concentration_gap || []).map((row) => ({
     ...row,
@@ -1066,6 +1080,7 @@ function RiskAssetView({ data, labelFor, valueByLabel }) {
         label="Share of money versus share of risk by asset"
         coverage={div.mean_weight_covered}
         valueFor={(key) => valueByLabel[key]}
+        basis={basis}
         testId="risk-money-vs-risk"
       />
     </div>
@@ -1134,6 +1149,10 @@ function RiskCard({ activeId, basis, valuationState }) {
     [activeId, basis, window]
   );
   const items = valuationState?.data?.items || [];
+  // The amounts below are these items' `value`, which the valuation endpoint has
+  // already re-expressed, so they are labelled with the basis it says it applied
+  // rather than with the one this card requested for its risk window.
+  const itemBasis = valuationState?.data?.basis || basis;
   const labelFor = (key) => {
     const item = items.find((i) => i.key === key);
     return item ? holdingLabel(item) : assetLabel({ key });
@@ -1172,13 +1191,13 @@ function RiskCard({ activeId, basis, valuationState }) {
                 title="Risk by class"
                 caption="Two dots per row: the share of your money in that class, and the share of your portfolio's swings it accounts for. A risk dot far right of the money dot means that class moves the portfolio more than its size suggests."
               >
-                <RiskClassView data={data} valueByClass={valueByClass} />
+                <RiskClassView data={data} valueByClass={valueByClass} basis={itemBasis} />
               </RiskPanel>
               <RiskPanel
                 title="Risk by asset"
                 caption="The same comparison, one row per holding. The widest gaps are the positions worth trimming first."
               >
-                <RiskAssetView data={data} labelFor={labelFor} valueByLabel={valueByLabel} />
+                <RiskAssetView data={data} labelFor={labelFor} valueByLabel={valueByLabel} basis={itemBasis} />
               </RiskPanel>
               <RiskPanel
                 title="Correlations"

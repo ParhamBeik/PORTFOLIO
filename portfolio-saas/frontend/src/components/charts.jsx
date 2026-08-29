@@ -830,6 +830,7 @@ export function MoneyVsRisk({
   label = "Share of money versus share of risk",
   coverage,
   valueFor,
+  basis = "nominal_toman",
   testId,
 }) {
   const t = useChartTokens();
@@ -838,7 +839,11 @@ export function MoneyVsRisk({
   const option = useMemo(() => {
     if (!t || !ordered.length) return null;
     const c = chrome(t);
-    const money = t.series[0];
+    // Named for the colour it is, not shadowing the `money` formatter imported
+    // at the top of this file -- the tooltip below needs that formatter, because
+    // the amounts come from the valuation payload the server has already
+    // converted and printing them as Toman mislabels a dollar figure.
+    const moneyColor = t.series[0];
     const risk = t.series[1];
     return {
       ...c,
@@ -872,11 +877,11 @@ export function MoneyVsRisk({
               : `Carries ${points} points less of the risk than of the money`;
           return (
             header(row.key, t) +
-            line(money, "Share of your money", pct(row.weight_share)) +
+            line(moneyColor, "Share of your money", pct(row.weight_share)) +
             line(risk, "Share of your risk", pct(row.risk_share)) +
             `<div style="margin-top:4px;color:${t.muted}">` +
             verdict +
-            (amount ? ` · ${toman(amount)}` : "") +
+            (amount ? ` · ${money(amount, basis)}` : "") +
             `</div>`
           );
         },
@@ -948,7 +953,7 @@ export function MoneyVsRisk({
       ],
       animation: false,
     };
-  }, [ordered, t, valueFor]);
+  }, [ordered, t, valueFor, basis]);
 
   const rowHeight = 34;
   return (
