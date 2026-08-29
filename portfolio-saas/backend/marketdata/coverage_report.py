@@ -48,7 +48,18 @@ def _count_statuses(rows, classifier) -> dict[str, int]:
 
 
 def _pct(part: int, whole: int) -> float:
-    return round(part / whole * 100, 1) if whole else 0.0
+    """Percentage that reserves 100 for actually complete.
+
+    Plain rounding turned 99.96% into "100%", so the endpoint table reported
+    100% row fill on the same line as 1,313 jobs still carrying gaps -- which
+    reads as a contradiction rather than as "nearly there". Only part == whole
+    earns 100; anything short of it stops at 99.9.
+    """
+    if not whole:
+        return 0.0
+    if part >= whole:
+        return 100.0
+    return min(round(part / whole * 100, 1), 99.9)
 
 
 def _latest_prices_by_asset() -> dict[int, Price]:

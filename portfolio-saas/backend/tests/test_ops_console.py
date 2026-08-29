@@ -1150,3 +1150,27 @@ def test_a_partial_run_still_reports_its_error_code(db):
         error_code="MarketDataFetchError",
     )
     assert _error_code_breakdown() == [{"error_code": "MarketDataFetchError", "count": 1}]
+
+
+# ----------------------------------------------------------------------
+# 100% is reserved for complete.
+#
+# Rounding 99.96 to "100%" put a complete row fill on the same line as 1,313
+# jobs still carrying gaps. Unit tests: one pure function, no DB.
+
+
+def test_an_incomplete_fill_never_rounds_up_to_complete():
+    from marketdata.coverage_report import _pct
+
+    # 9,548,784 of 9,554,746 rows is 99.94%, which used to print as 100%.
+    assert _pct(9_548_784, 9_554_746) == 99.9
+    assert _pct(9_999, 10_000) == 99.9
+
+
+def test_a_genuinely_complete_fill_is_still_100():
+    from marketdata.coverage_report import _pct
+
+    assert _pct(10, 10) == 100.0
+    assert _pct(11, 10) == 100.0
+    assert _pct(0, 0) == 0.0
+    assert _pct(1, 4) == 25.0
