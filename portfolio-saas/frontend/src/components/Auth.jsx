@@ -64,6 +64,16 @@ export default function Auth({ onAuthed }) {
   const emailValid = EMAIL_RE.test(email.trim());
   const checks = getPasswordChecks(password, confirmPassword, registering);
   const strength = calculateStrength(password, checks);
+  // Memberships are closed, and `registering` is how that is said here: the
+  // sign-up tab shows the notice below and its button never enables. This reads
+  // like a bug -- a complete form, a working submit handler, and a button that
+  // can never be pressed -- so: it is deliberate, and it mirrors
+  // `REGISTRATION_OPEN = False` in the server's settings. If memberships reopen,
+  // BOTH must change, plus the notice; none of the three reads the other.
+  // Signing up would also need every requirement in the checklist to pass,
+  // including the confirmation match, which is what `checks` is already for.
+  const registrationClosed = registering;
+  const canSubmit = emailValid && Boolean(password) && !registrationClosed;
 
   const switchMode = (next) => {
     setMode(next);
@@ -294,6 +304,7 @@ export default function Auth({ onAuthed }) {
             <div className="flex items-center gap-2">
               <Input
                 id="auth-confirm-password"
+                data-testid="auth-confirm-password-input"
                 type={showConfirmPw ? "text" : "password"}
                 required
                 autoComplete="new-password"
@@ -335,7 +346,7 @@ export default function Auth({ onAuthed }) {
           type="submit"
           variant="primary"
           data-testid="auth-submit"
-          disabled={busy || registering || !(emailValid && password)}
+          disabled={busy || !canSubmit}
           className="w-full py-1.5"
         >
           {busy ? "Working…" : registering ? "Create account" : "Sign in"}
