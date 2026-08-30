@@ -361,10 +361,7 @@ def test_admin_overview_includes_fill_completeness_disk(staff_user, monkeypatch)
     assert "coverage" in body
     assert "live" in body["coverage"]
     assert "warehouse" in body["coverage"]
-    assert set(body["coverage"]["warehouse"]["counts"].keys()) == {
-        "complete", "refresh_due", "partial", "failed", "awaiting_data", "not_tried",
-    }
-    assert "refresh_backlog" in body["coverage"]["warehouse"]
+    assert set(body["coverage"]["warehouse"]["counts"].keys()) == {"complete", "partial", "failed", "not_tried"}
 
 
 def test_pipelines_write_workflow_runs(settings, monkeypatch):
@@ -1303,28 +1300,3 @@ def test_a_stale_baseline_reports_unknown_rather_than_a_longer_delta(db):
 
     assert rates["candles"]["delta_24h"] is None
     assert rates["candles"]["delta_7d"] == 500_000
-
-
-# The growth charts read this series directly, so its two failure modes are
-# unit-testable without a browser: an unmeasured hour must not become a zero,
-# and an append-only table must not appear to shrink when the row-count
-# ESTIMATOR wobbles (these counts are pg_class reltuples, not COUNT(*)).
-def test_growth_history_keeps_gaps_as_gaps_and_never_shrinks_an_append_only_table():
-    from marketdata.admin_telemetry import _clean_count_history
-
-    rows = [
-        {"counts": {"stock_transaction_ticks": 100, "accounts": 5}},
-        {"counts": {"accounts": 5}},                                  # collector skipped
-        {"counts": {"stock_transaction_ticks": 90, "accounts": 4}},   # estimator dipped
-        {"counts": {"stock_transaction_ticks": 140, "accounts": 4}},
-    ]
-    cleaned = _clean_count_history(rows, ("stock_transaction_ticks", "accounts"))
-    ticks = [r["counts"]["stock_transaction_ticks"] for r in cleaned]
-
-    assert ticks[1] is None, "a missing measurement must stay missing, not become 0"
-    assert ticks[2] == 100, "an append-only table cannot shrink; that dip is estimator noise"
-    assert ticks == [100, None, 100, 140]
-
-    # A user really can delete a portfolio, so user-owned tables are passed
-    # through untouched -- flattening a real deletion would hide it.
-    assert [r["counts"]["accounts"] for r in cleaned] == [5, 5, 4, 4]

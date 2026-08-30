@@ -17,8 +17,8 @@ from datetime import timedelta
 from django.conf import settings
 from django.core.cache import cache
 from django.db import connection, transaction
-from django.db.models import Avg, Count, Max, Min, Q, Sum, Value
-from django.db.models.functions import NullIf, TruncDate
+from django.db.models import Count, Max, Min, Q, Sum
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -261,63 +261,6 @@ def _codal_volume_bytes():
     return int(total)
 
 
-# Warehouse and price tables only ever gain rows: nothing in the codebase
-# deletes from them (`workflow_retention` prunes WorkflowRun, and the metric
-# snapshot task prunes its own table -- neither is charted here). User-owned
-# tables are excluded because a person really can delete a portfolio, and a
-# genuine deletion must stay visible.
-APPEND_ONLY_COUNT_KEYS = frozenset({
-    "prices", "snapshots", "market_instruments", "stock_history_rows",
-    "gold_currency_rows", "candles", "stock_transaction_ticks",
-    "announcements", "shareholders",
-})
-
-
-def _clean_count_history(rows, keys):
-    """Make the growth series say only true things.
-
-    Two distinct falsehoods came out of this series, and they need different
-    answers:
-
-    1. **A missing measurement is not zero.** 54 of the last 1,294 snapshots
-       carry no tick count at all (the collector skipped or timed out), and 4
-       recorded a literal 0. The client read an absent key as the number 0, so
-       4.5% of points drew a spike to the floor and back on a table that had
-       simply grown all day. Absent stays `None` here, and the chart renders a
-       break in the line instead of inventing a value.
-
-    2. **A decrease on an append-only table is estimator noise, not data loss.**
-       These counts come from `pg_class.reltuples` (and `approximate_row_count`
-       for the tick hypertable) rather than COUNT(*), which is what keeps the
-       Ops page from scanning 58M rows on every render. Those estimates are
-       resampled by autovacuum and wobble by a few percent in both directions:
-       the tick count "fell" 59.36M -> 56.25M in one hour today while the table
-       only gained rows. For tables that cannot shrink, the running maximum is
-       strictly closer to the truth than the raw estimate, so it is what we
-       plot. Tables that CAN shrink are passed through untouched.
-
-    ponytail: a running max, not a proper estimator-error model. It is exact
-    at every new high (the common case on a growing table) and conservative in
-    between. If a warehouse table ever gains a retention policy, drop its key
-    from APPEND_ONLY_COUNT_KEYS or real deletions will be silently flattened.
-    """
-    running = {}
-    for row in rows:
-        counts = row["counts"]
-        for key in keys:
-            value = counts.get(key)
-            if value is None:
-                continue
-            value = int(value)
-            if key in APPEND_ONLY_COUNT_KEYS:
-                value = max(value, running.get(key, 0))
-                running[key] = value
-            counts[key] = value
-        for key in keys:
-            counts.setdefault(key, None)
-    return rows
-
-
 def _database_history():
     cached = cache.get("admin_database_history")
     if cached is not None:
@@ -345,18 +288,15 @@ def _database_history():
     sampled = hourly[::step]
     if hourly and sampled[-1] != hourly[-1]:
         sampled.append(hourly[-1])
-    result = _clean_count_history(
-        [
-            {
-                "captured_at": row["captured_at"].isoformat(),
-                "counts": dict(row["database_counts"] or {}),
-                "bytes": row["table_bytes"] or {},
-                "disk": row["disk"] or {},
-            }
-            for row in sampled
-        ],
-        DATABASE_MODELS.keys(),
-    )
+    result = [
+        {
+            "captured_at": row["captured_at"].isoformat(),
+            "counts": row["database_counts"] or {},
+            "bytes": row["table_bytes"] or {},
+            "disk": row["disk"] or {},
+        }
+        for row in sampled
+    ]
     cache.set("admin_database_history", result, 300)
     return result
 
@@ -516,27 +456,13 @@ def _tick_coverage():
     summary = qs.aggregate(
         total=Count("id"),
         complete=Count("id", filter=Q(verified_complete=True)),
-        # NULLIF, because `first_date` is a CharField and 195 states carry "".
-        # The empty string sorts before every Jalali date, so a bare Min() made
-        # this field permanently blank while the real floor was 1394-07-27.
-        oldest=Min(NullIf("first_date", Value(""))),
+        oldest=Min("first_date"),
         newest=Max("last_date"),
-        # The seed window, not the lived one: `MARKETDATA_TICK_WINDOW_DAYS` is
-        # where a state STARTS, and `promote_priority_tick_windows` grows it
-        # from there up to MAX_TICK_WINDOW_DAYS. Reporting the setting told the
-        # operator "90 days" while 31 symbols were already at the 12,000-day
-        # clamp across 29 distinct widths. Report what the states actually hold.
-        window_min=Min("target_window_days"),
-        window_max=Max("target_window_days"),
-        window_avg=Avg("target_window_days"),
     )
     total = summary["total"] or 0
     complete = summary["complete"] or 0
     return {
-        "window_days_seed": settings.MARKETDATA_TICK_WINDOW_DAYS,
-        "window_days_min": summary["window_min"] or 0,
-        "window_days_max": summary["window_max"] or 0,
-        "window_days_avg": round(summary["window_avg"] or 0),
+        "window_days": settings.MARKETDATA_TICK_WINDOW_DAYS,
         "total": total,
         "complete": complete,
         "progress_pct": round(complete / total * 100, 1) if total else 0,

@@ -14,9 +14,7 @@ from .archive import _RETIRED_ARCHIVE_ENDPOINTS
 from .evidence import LIVE_PRICE_FRESH_SECONDS
 from .models import ArchiveFetchState, SymbolIntegrity
 
-ARCHIVE_STATUSES = (
-    "complete", "refresh_due", "partial", "failed", "awaiting_data", "not_tried",
-)
+ARCHIVE_STATUSES = ("complete", "partial", "failed", "not_tried")
 LIVE_STATUSES = ("fresh", "stale", "missing", "manual", "formula", "no_source")
 
 LIVE_TABLE_KEYS = ("prices", "snapshots")
@@ -32,51 +30,13 @@ WAREHOUSE_TABLE_KEYS = (
 
 
 def classify_archive_state(state: ArchiveFetchState) -> str:
-    """Six states, because "not verified" is four different situations.
-
-    `verified_complete` is deliberately re-armed to False whenever a state is
-    due for another pass -- new sessions print every day, so a payload that was
-    complete last night is stale tonight. That is the design working, not a
-    defect, and it must not read as damage.
-
-    This used to be a four-way ladder whose last rung was a bare `return
-    "partial"`, labelled "tried -- gaps remain". Everything that was not
-    complete, not untried and not failing fell into it, so a state re-armed for
-    refresh and then parked by the daily quota ceiling -- attempted, zero
-    failures, zero missing rows -- was reported as carrying gaps. 5,978 of
-    6,383 "partial" jobs (52.8% of the whole warehouse) were in that position:
-    stored_rows == expected_rows exactly, nothing missing, waiting only for
-    tomorrow's budget.
-
-    So the two honest questions are asked separately: does this state owe rows
-    (`missing_rows`), and has it ever landed a payload (`last_success_at`)?
-    Failures are tested before either, because a failing state is the operator's
-    problem whatever its row counts say.
-    """
     if state.verified_complete:
         return "complete"
-    if state.consecutive_failures > 0:
-        return "failed"
     if state.last_attempt_at is None:
         return "not_tried"
-    if state.last_success_at is None:
-        return "awaiting_data"
-    if state.missing_rows == 0:
-        return "refresh_due"
+    if state.consecutive_failures > 0:
+        return "failed"
     return "partial"
-
-
-def state_stale_days(state: ArchiveFetchState, *, now) -> int | None:
-    """Whole days since this state last landed a payload, or None if never.
-
-    This is the number the refresh queue is ordered by: the point of re-arming
-    a complete state is to fetch whichever symbol has gone longest without an
-    update, so "how far behind is it" has to be a visible quantity rather than
-    an implicit consequence of `next_attempt_at`.
-    """
-    if state.last_success_at is None:
-        return None
-    return max(0, (now - state.last_success_at).days)
 
 
 def _count_statuses(rows, classifier) -> dict[str, int]:
@@ -201,41 +161,7 @@ def build_live_coverage(*, held_only: bool = False) -> dict:
     }
 
 
-def _refresh_backlog(states, *, now, limit: int = 10) -> dict:
-    """How far behind the refresh queue is, and which symbols are worst.
-
-    Only states that have landed a payload can be "behind" -- one that has never
-    succeeded is not stale, it is unstarted, and mixing the two would put a
-    brand-new symbol at the top of a queue meant to surface neglected ones.
-    """
-    aged = [
-        (state, days)
-        for state in states
-        for days in (state_stale_days(state, now=now),)
-        if days is not None
-    ]
-    if not aged:
-        return {"tracked": 0, "median_days": 0, "max_days": 0, "oldest": []}
-    aged.sort(key=lambda pair: pair[1], reverse=True)
-    days_sorted = sorted(days for _, days in aged)
-    return {
-        "tracked": len(aged),
-        "median_days": days_sorted[len(days_sorted) // 2],
-        "max_days": aged[0][1],
-        "oldest": [
-            {
-                "symbol": state.symbol,
-                "endpoint": state.endpoint,
-                "stale_days": days,
-                "status": classify_archive_state(state),
-            }
-            for state, days in aged[:limit]
-        ],
-    }
-
-
 def build_warehouse_coverage() -> dict:
-    now = timezone.now()
     states = list(ArchiveFetchState.objects.all())
     overall = _count_statuses(states, classify_archive_state)
     total = len(states)
@@ -273,19 +199,13 @@ def build_warehouse_coverage() -> dict:
             "total": endpoint_total,
             "counts": counts,
             "complete_pct": _pct(counts["complete"], endpoint_total),
-            # "Healthy" is complete plus refresh-due: both hold every row they
-            # expect, and the only difference is whether another pass is owed.
-            "healthy_pct": _pct(counts["complete"] + counts["refresh_due"], endpoint_total),
-            "refresh_due_pct": _pct(counts["refresh_due"], endpoint_total),
             "partial_pct": _pct(counts["partial"], endpoint_total),
             "failed_pct": _pct(counts["failed"], endpoint_total),
-            "awaiting_data_pct": _pct(counts["awaiting_data"], endpoint_total),
             "not_tried_pct": _pct(counts["not_tried"], endpoint_total),
             "stored_rows": endpoint_stored,
             "expected_rows": endpoint_expected,
             "missing_rows": endpoint_missing,
             "row_fill_pct": _pct(endpoint_stored, endpoint_expected) if endpoint_expected else None,
-            "refresh_backlog": _refresh_backlog(bucket, now=now, limit=5),
         })
 
     by_endpoint.sort(key=lambda row: (-row["total"], row["label"]))
@@ -294,11 +214,8 @@ def build_warehouse_coverage() -> dict:
         "total_jobs": total,
         "counts": overall,
         "complete_pct": _pct(overall["complete"], total),
-        "healthy_pct": _pct(overall["complete"] + overall["refresh_due"], total),
-        "refresh_due_pct": _pct(overall["refresh_due"], total),
         "partial_pct": _pct(overall["partial"], total),
         "failed_pct": _pct(overall["failed"], total),
-        "awaiting_data_pct": _pct(overall["awaiting_data"], total),
         "not_tried_pct": _pct(overall["not_tried"], total),
         "stored_rows": stored_rows,
         "expected_rows": expected_rows,
@@ -307,13 +224,10 @@ def build_warehouse_coverage() -> dict:
         "row_fill_pct": _pct(stored_rows, expected_rows) if expected_rows else None,
         "by_endpoint": by_endpoint,
         "live_sourced": live_sourced,
-        "refresh_backlog": _refresh_backlog(states, now=now),
         "status_labels": {
-            "complete": "Verified complete",
-            "refresh_due": "Complete — refresh due",
-            "partial": "Rows still missing",
-            "failed": "Failing — needs attention",
-            "awaiting_data": "Attempted — no payload yet",
+            "complete": "Payload verified complete",
+            "partial": "Tried — gaps remain (not verified)",
+            "failed": "Tried — consecutive failures",
             "not_tried": "Never attempted",
         },
     }
@@ -342,10 +256,7 @@ def build_coverage_report(*, database_rows: list[dict]) -> dict:
         "tables": build_table_coverage(database_rows),
     }
 
-ARCHIVE_STATUS_PRIORITY = {
-    "failed": 0, "partial": 1, "awaiting_data": 2, "not_tried": 3,
-    "refresh_due": 4, "complete": 5,
-}
+ARCHIVE_STATUS_PRIORITY = {"failed": 0, "partial": 1, "not_tried": 2, "complete": 3}
 LIVE_STATUS_SORT = {"fresh": 0, "stale": 1, "missing": 2, "manual": 3, "formula": 4, "no_source": 5}
 # Spelled out rather than abbreviated: the console renders reason codes straight
 # through `humanize()`, which turned "n_a" into the meaningless "N a" in the

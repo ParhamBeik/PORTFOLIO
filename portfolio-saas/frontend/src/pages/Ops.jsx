@@ -33,42 +33,30 @@ const POLL_MS = 10000;
 // guessing -- including "complete", which has always read as neutral here.
 const TONE = {
   healthy: "good", fresh: "good", success: "good", pass: "good",
-  // `refresh_due` is a HEALTHY state: the archive deliberately re-arms a
-  // completed job so it picks up the sessions printed since, and one parked
-  // behind the daily quota ceiling holds every row it expects. Grading it as a
-  // problem is what made 52.8% of the warehouse look broken.
-  refresh_due: "good",
   degraded: "warn", stale: "warn", partial: "warn", retry: "warn",
-  skipped: "warn", not_assessed: "warn", awaiting_data: "warn",
+  skipped: "warn", not_assessed: "warn",
   critical: "critical", failed: "critical", fail: "critical",
   missing: "critical", blocked_network: "critical", blocked_storage: "critical",
 };
 
 const tone = (value) => TONE[value] || "neutral";
 
-// A measurement the collector never took is not the number zero. `|| 0` here is
-// what drew a spike to the floor and back on a table that only ever grows.
-const nullable = (value) => (value == null ? null : Number(value));
-
 function gb(bytes) {
   if (bytes == null) return "—";
   return `${(Number(bytes) / 1024 ** 3).toFixed(2)} GB`;
 }
 
-// Mirrors `coverage_report.classify_archive_state`. Kept in step with it: a
-// re-armed job that owes no rows is healthy, not partial.
 function archiveJobVariant(row) {
   if (row.verified_complete) return "complete";
   if ((row.consecutive_failures || 0) > 0) return "failed";
-  if ((row.missing_rows || 0) > 0) return "partial";
-  if ((row.stored_rows || 0) > 0) return "refresh_due";
-  return "awaiting_data";
+  if ((row.missing_rows || 0) > 0 || (row.stored_rows || 0) > 0) return "partial";
+  return "not_tried";
 }
 
 function historySeries(history, key) {
   return (history || []).map((row) => ({
     x: row.captured_at,
-    y: nullable(row.counts?.[key]),
+    y: Number(row.counts?.[key] || 0),
   }));
 }
 
@@ -475,10 +463,8 @@ function AssetInspector() {
 
 const WAREHOUSE_SERIES = [
   { key: "complete", name: "Complete" },
-  { key: "refresh_due", name: "Refresh due" },
-  { key: "partial", name: "Rows missing" },
-  { key: "failed", name: "Failing" },
-  { key: "awaiting_data", name: "No payload yet" },
+  { key: "partial", name: "Partial" },
+  { key: "failed", name: "Failed" },
   { key: "not_tried", name: "Not tried" },
 ];
 
@@ -564,64 +550,19 @@ function WarehouseCoveragePanel({ warehouse }) {
     .map((row) => ({
       name: row.label.replace(/^Stock /, "").slice(0, 28),
       complete: row.counts?.complete || 0,
-      refresh_due: row.counts?.refresh_due || 0,
       partial: row.counts?.partial || 0,
       failed: row.counts?.failed || 0,
-      awaiting_data: row.counts?.awaiting_data || 0,
       not_tried: row.counts?.not_tried || 0,
     }));
-  const backlog = warehouse.refresh_backlog || {};
 
   return (
     <div className="space-y-4" data-testid="ops-warehouse">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatTile
-          label="Holding every row"
-          value={`${warehouse.healthy_pct ?? 0}%`}
-          sub={`${num(warehouse.counts?.complete)} verified · ${num(warehouse.counts?.refresh_due)} refresh due`}
-          valueTone={(warehouse.healthy_pct ?? 0) >= 90 ? "good" : "warn"}
-        />
-        <StatTile
-          label="Rows missing"
-          value={num(warehouse.counts?.partial)}
-          sub={`${warehouse.partial_pct || 0}% of jobs · ${num(warehouse.missing_rows)} rows`}
-          valueTone={(warehouse.counts?.partial || 0) > 0 ? "warn" : "good"}
-        />
-        <StatTile
-          label="Failing"
-          value={num(warehouse.counts?.failed)}
-          sub={`${warehouse.failed_pct || 0}% consecutive failures`}
-          valueTone={(warehouse.counts?.failed || 0) > 0 ? "critical" : "good"}
-        />
-        <StatTile
-          label="No payload yet"
-          value={num((warehouse.counts?.awaiting_data || 0) + (warehouse.counts?.not_tried || 0))}
-          sub={`${num(warehouse.counts?.awaiting_data)} attempted · ${num(warehouse.counts?.not_tried)} never tried`}
-        />
+        <StatTile label="Archive jobs" value={num(warehouse.total_jobs)} sub={`${warehouse.complete_pct || 0}% verified complete`} />
+        <StatTile label="Partial" value={num(warehouse.counts?.partial)} sub={`${warehouse.partial_pct || 0}% tried, gaps remain`} />
+        <StatTile label="Failed" value={num(warehouse.counts?.failed)} sub={`${warehouse.failed_pct || 0}% consecutive failures`} />
+        <StatTile label="Not tried" value={num(warehouse.counts?.not_tried)} sub={`${warehouse.not_tried_pct || 0}% never attempted`} />
       </div>
-      {/* The refresh queue's own health. A completed job is deliberately
-          re-armed so it picks up newly printed sessions, so the question that
-          matters is not "is anything unverified" but "how far behind is the
-          furthest-behind symbol". */}
-      <Card
-        title="Refresh backlog"
-        subtitle="Days since each job last landed a payload — the order the re-fetch queue drains in."
-        testId="ops-warehouse-backlog"
-      >
-        <p className="text-sm">
-          {num(backlog.tracked)} jobs tracked · median {num(backlog.median_days)}d behind · oldest {num(backlog.max_days)}d
-        </p>
-        {(backlog.oldest || []).length > 0 && (
-          <ul className="mt-2 space-y-1 text-xs" data-testid="ops-warehouse-backlog-list">
-            {backlog.oldest.map((row) => (
-              <li key={`${row.symbol}:${row.endpoint}`} className="flex items-center justify-between gap-3">
-                <span className="truncate">{row.symbol} · <span className="text-muted">{humanize(row.endpoint)}</span></span>
-                <Badge variant={tone(row.status)}>{num(row.stale_days)}d</Badge>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
       <Card title="Row fill (honest)" subtitle="Per-symbol historical backfill. Commodities, crypto, index, and options live on the Live pipeline tab." testId="ops-warehouse-rows">
         <p className="text-sm">
           {num(warehouse.stored_rows)} stored / {num(warehouse.expected_rows)} expected ({warehouse.row_fill_pct ?? 0}%)
@@ -646,10 +587,9 @@ function WarehouseCoveragePanel({ warehouse }) {
           { key: "label", header: "Endpoint" },
           { key: "total", header: "Jobs", align: "right", render: (r) => num(r.total) },
           { key: "complete", header: "Complete", align: "right", render: (r) => num(r.counts?.complete) },
-          { key: "refresh_due", header: "Refresh due", align: "right", render: (r) => num(r.counts?.refresh_due) },
-          { key: "partial", header: "Rows missing", align: "right", render: (r) => num(r.counts?.partial) },
-          { key: "failed", header: "Failing", align: "right", render: (r) => num(r.counts?.failed) },
-          { key: "awaiting_data", header: "No payload", align: "right", render: (r) => num((r.counts?.awaiting_data || 0) + (r.counts?.not_tried || 0)) },
+          { key: "partial", header: "Partial", align: "right", render: (r) => num(r.counts?.partial) },
+          { key: "failed", header: "Failed", align: "right", render: (r) => num(r.counts?.failed) },
+          { key: "not_tried", header: "Not tried", align: "right", render: (r) => num(r.counts?.not_tried) },
           { key: "row_fill", header: "Row fill", align: "right", render: (r) => (r.row_fill_pct != null ? `${r.row_fill_pct}%` : "—") },
         ]}
       />
@@ -913,7 +853,7 @@ function ArchiveJobsPanel({
     <div className="space-y-4" data-testid="ops-archives-panel">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatTile label="Failed jobs" value={num(wh?.counts?.failed)} sub={`${wh?.failed_pct ?? 0}% of ${num(wh?.total_jobs)}`} valueTone={(wh?.counts?.failed || 0) > 0 ? "critical" : "good"} />
-        <StatTile label="Rows missing" value={num(wh?.counts?.partial)} sub={`${num(wh?.missing_rows)} rows short`} valueTone={(wh?.counts?.partial || 0) > 0 ? "warn" : "good"} />
+        <StatTile label="Partial jobs" value={num(wh?.counts?.partial)} sub="Tried, gaps remain" valueTone={(wh?.counts?.partial || 0) > 0 ? "warn" : "good"} />
         <StatTile label="Wedged" value={num(overview?.archive?.wedged)} sub="Over failure threshold" />
         <StatTile label="Missing rows" value={num(wh?.missing_rows)} sub={`${wh?.row_fill_pct ?? 0}% row fill overall`} />
       </div>
@@ -1065,9 +1005,9 @@ function JobsHealthPanel({
             valueTone={(wh?.counts?.failed || 0) > 0 ? "critical" : "good"}
           />
           <StatTile
-            label="Archive rows missing"
+            label="Archive partial"
             value={num(wh?.counts?.partial)}
-            sub="Jobs genuinely short of rows"
+            sub="Gaps remain in backfill"
             valueTone={(wh?.counts?.partial || 0) > 0 ? "warn" : "good"}
           />
           <StatTile
@@ -1261,125 +1201,19 @@ function InfraWorkers({ workers }) {
   );
 }
 
-// What each subscription actually buys. The plan codes alone ("tsetmc", "brs")
-// do not say that one of them is the gold/FX/crypto wallet, which is the whole
-// reason the two are not interchangeable.
-const QUOTA_PLAN_META = {
-  tsetmc: { title: "TSETMC wallet", scope: "Stocks, Codal filings, IME" },
-  brs: { title: "Market wallet", scope: "Gold, FX, crypto, commodities" },
-};
-
-/** One panel per provider subscription. They are separate wallets, not one pool.
- *
- * The previous version read `plan.limit` -- the ceiling the PROVIDER discloses,
- * which only rides along on error responses and is therefore 0 on an ordinary
- * day. Every consequence followed from that zero: the bar computed 0% and sat
- * empty at 6,273/10,000, the tone never left green so it could not warn, and
- * the archive/live/other segments were suppressed entirely because the code
- * guarded them behind `limit > 0`. The backend already computes
- * `effective_limit` for exactly this -- disclosed if known, else the configured
- * per-plan expectation -- and the console was throwing it away.
- */
-function QuotaWallets({ quota }) {
-  const plans = Object.values(quota?.plans || {});
-  if (!plans.length) return <p className="text-sm text-muted">No quota data.</p>;
-  return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2" data-testid="ops-quota-wallets">
-      {plans.map((plan) => {
-        const meta = QUOTA_PLAN_META[plan.plan] || { title: plan.plan, scope: "" };
-        const ceiling = plan.effective_limit || 0;
-        const used = plan.used || 0;
-        const archive = plan.archive_used || 0;
-        const live = plan.live_used || 0;
-        const other = plan.other_used || 0;
-        const left = Math.max(0, ceiling - used);
-        const pct = pctOf(used, ceiling);
-        const disclosed = (plan.limit || 0) > 0;
-        const meterTone = plan.blocked ? "critical" : infraMeterTone(pct, { warn: 75, critical: 92 });
-        return (
-          <div
-            key={plan.plan}
-            className="space-y-2.5 rounded-lg border border-border bg-panel-2 p-3.5"
-            data-testid={`ops-quota-plan-${plan.plan}`}
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0">
-                <div className="text-sm font-medium">{meta.title}</div>
-                <div className="truncate text-xs text-muted">{meta.scope}</div>
-              </div>
-              <Badge variant={plan.blocked ? "critical" : meterTone}>
-                {plan.blocked ? "Provider blocked" : `${pct.toFixed(0)}%`}
-              </Badge>
-            </div>
-
-            <div className="flex items-baseline gap-1.5">
-              <span className="text-xl font-semibold tabular">{num(used)}</span>
-              <span className="text-sm text-muted">/ {num(ceiling)} today</span>
-            </div>
-
-            <div
-              className="flex h-2.5 overflow-hidden rounded-full bg-panel"
-              role="progressbar"
-              aria-label={`${meta.title} quota used`}
-              aria-valuenow={Math.round(pct)}
-              aria-valuemin={0}
-              aria-valuemax={100}
-            >
-              {/* Every bucket, always: listing only archive and live left 53 of
-                  tsetmc's calls apparently unaccounted for when they were
-                  simply `other`. */}
-              <div className="h-full bg-[var(--c-s3)]" style={{ width: `${pctOf(archive, ceiling)}%` }} title={`Archive ${num(archive)}`} />
-              <div className="h-full bg-[var(--c-good)]" style={{ width: `${pctOf(live, ceiling)}%` }} title={`Live ${num(live)}`} />
-              <div className="h-full bg-muted" style={{ width: `${pctOf(other, ceiling)}%` }} title={`Other ${num(other)}`} />
-            </div>
-
-            <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-              <div className="flex justify-between gap-2">
-                <dt className="text-muted">Archive</dt><dd className="tabular">{num(archive)}</dd>
-              </div>
-              <div className="flex justify-between gap-2">
-                <dt className="text-muted">Live</dt><dd className="tabular">{num(live)}</dd>
-              </div>
-              <div className="flex justify-between gap-2">
-                <dt className="text-muted">Other</dt><dd className="tabular">{num(other)}</dd>
-              </div>
-              <div className="flex justify-between gap-2">
-                <dt className="text-muted">Remaining</dt><dd className="tabular">{num(left)}</dd>
-              </div>
-            </dl>
-
-            {/* The two numbers that explain why the archive stopped while the
-                wallet still had budget: quota held back for the live loop, and
-                how much of the rest today's pacing has released so far. */}
-            <div className="border-t border-border pt-2 text-xs text-muted">
-              <div className="flex justify-between gap-2">
-                <span>Reserved for live prices</span>
-                <span className="tabular">{num(plan.live_reserve)}</span>
-              </div>
-              <div className="flex justify-between gap-2">
-                <span>Archive may spend now</span>
-                <span className="tabular">{num(plan.archive_allowance_now)}</span>
-              </div>
-              <p className="mt-1.5">
-                {disclosed
-                  ? "Ceiling disclosed by the provider."
-                  : "Ceiling is our configured expectation — the provider only states it on an error response."}
-              </p>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 function InfraPanel({ overview, depths, queueTotal, gb }) {
+  const quota = overview.quota || {};
   const disk = overview.disk || {};
   const priceFeed = overview.checks?.price_feed || overview.price_feed || {};
   const priceAge = priceFeed.latest_price_age_seconds;
   const priceThreshold = priceFeed.threshold_seconds || 900;
   const pricePct = priceAge != null ? pctOf(priceAge, priceThreshold) : 0;
   const priceTone = priceFeed.status === "fresh" ? "good" : priceFeed.status === "stale" ? "warn" : "critical";
+
+  // One bar per provider plan. The two subscriptions are metered separately and
+  // are not fungible, so a single combined meter hid the failure it should have
+  // shown: a fully spent TSETMC wallet while the BRS one sat 79% unused.
+  const quotaPlans = Object.values(quota.plans || {});
 
   const liveQ = Number(depths?.live || 0);
   const archiveQ = Number(depths?.archive || 0);
@@ -1404,6 +1238,41 @@ function InfraPanel({ overview, depths, queueTotal, gb }) {
         <span className="text-sm text-muted">Workers, queues, disk &amp; feed</span>
         <Badge variant={tone(overview.status)} testId="ops-infra-overall">{humanize(overview.status)}</Badge>
       </div>
+
+      {quotaPlans.map((plan) => {
+        const limit = plan.limit || 0;
+        const used = plan.used || 0;
+        const pct = pctOf(used, limit);
+        const segments = limit > 0 ? [
+          { key: "archive", pct: pctOf(plan.archive_used || 0, limit), color: "bg-[var(--c-s3)]", title: `Archive ${num(plan.archive_used || 0)}` },
+          { key: "live", pct: pctOf(plan.live_used || 0, limit), color: "bg-[var(--c-good)]", title: `Live ${num(plan.live_used || 0)}` },
+          { key: "other", pct: pctOf(plan.other_used || 0, limit), color: "bg-muted", title: `Other ${num(plan.other_used || 0)}` },
+        ] : [];
+        return (
+          <InfraMeter
+            key={plan.plan}
+            label={`API quota today · ${plan.plan}`}
+            // A limit of 0 means the provider has not disclosed one yet, not
+            // that we are out. Saying "0 left" would be a lie in both cases.
+            valueLabel={plan.blocked ? "Provider blocked" : limit ? `${num(Math.max(0, limit - used))} left` : `${num(used)} used`}
+            pct={pct}
+            tone={plan.blocked ? "critical" : infraMeterTone(pct, { warn: 75, critical: 92 })}
+            segments={segments}
+            // Every bucket, or the breakdown does not reconcile with the total:
+            // listing only archive and live left 53 of tsetmc's 1,588 calls
+            // apparently unaccounted for, when they were simply `other`. "of
+            // unknown" also read as a failure rather than as a provider that
+            // only discloses its ceiling on an error response.
+            sub={[
+              limit ? `${num(used)} used of ${num(limit)}` : `${num(used)} used · daily limit not disclosed yet`,
+              `archive ${num(plan.archive_used || 0)}`,
+              `live ${num(plan.live_used || 0)}`,
+              `other ${num(plan.other_used || 0)}`,
+            ].join(" · ")}
+            testId={`ops-infra-quota-${plan.plan}`}
+          />
+        );
+      })}
 
       <InfraWorkers workers={overview.workers} />
 
@@ -1486,7 +1355,7 @@ function AttentionPanel({ liveHeld, warehouse, onNavigate }) {
         const failed = e.counts?.failed || 0;
         const partial = e.counts?.partial || 0;
         if (!failed && !partial) return null;
-        const issue = failed > 0 ? "Fetch failing" : "Rows still missing";
+        const issue = failed > 0 ? "Fetch failing" : "Backfill incomplete";
         const statusKey = failed > 0 ? "failed" : "partial";
         return {
           key: e.endpoint,
@@ -1495,10 +1364,10 @@ function AttentionPanel({ liveHeld, warehouse, onNavigate }) {
           issueVariant: failed > 0 ? "critical" : "warn",
           explanation: whLabels[statusKey] || humanize(statusKey),
           jobs: failed && partial
-            ? `${num(failed)} failing · ${num(partial)} short of rows`
+            ? `${num(failed)} failed · ${num(partial)} partial`
             : failed
-              ? `${num(failed)} failing jobs`
-              : `${num(partial)} jobs short of rows`,
+              ? `${num(failed)} failed jobs`
+              : `${num(partial)} partial jobs`,
           rowFill: e.row_fill_pct != null ? `${e.row_fill_pct}%` : "—",
           sortKey: failed * 1000 + partial,
         };
@@ -1623,9 +1492,9 @@ function OverviewPanel({ overview, tickSeries, depths, onNavigate }) {
           testId="ops-overview-live-fresh"
         />
         <StatTile
-          label="Warehouse healthy"
-          value={`${warehouse?.healthy_pct ?? 0}%`}
-          sub={`${num(warehouse?.counts?.failed)} failing · ${num(warehouse?.counts?.partial)} short of rows`}
+          label="Warehouse verified"
+          value={`${warehouse?.complete_pct ?? 0}%`}
+          sub={`${num(warehouse?.counts?.failed)} failed · ${num(warehouse?.counts?.partial)} partial`}
           valueTone={(warehouse?.counts?.failed || 0) > 0 ? "critical" : (warehouse?.counts?.partial || 0) > 0 ? "warn" : "good"}
           testId="ops-overview-wh-complete"
         />
@@ -1681,14 +1550,6 @@ function OverviewPanel({ overview, tickSeries, depths, onNavigate }) {
       </div>
 
       <AttentionPanel liveHeld={liveHeld} warehouse={warehouse} onNavigate={onNavigate} />
-
-      <Card
-        title="Provider quota — two separate wallets"
-        subtitle="BrsApi meters each API key on its own. Spending one never frees the other."
-        testId="ops-overview-quota"
-      >
-        <QuotaWallets quota={overview.quota} />
-      </Card>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card title="Infrastructure" testId="ops-overview-infra">
@@ -1837,9 +1698,9 @@ export default function Ops({ user }) {
   const tickSeries = useMemo(() => {
     const history = overview?.database_history || [];
     return {
-      ticks: history.map((row) => ({ x: row.captured_at, y: nullable(row.counts?.stock_transaction_ticks) })),
-      candles: history.map((row) => ({ x: row.captured_at, y: nullable(row.counts?.candles) })),
-      bytes: history.map((row) => ({ x: row.captured_at, y: nullable(row.disk?.database_bytes) })),
+      ticks: history.map((row) => ({ x: row.captured_at, y: Number(row.counts?.stock_transaction_ticks || 0) })),
+      candles: history.map((row) => ({ x: row.captured_at, y: Number(row.counts?.candles || 0) })),
+      bytes: history.map((row) => ({ x: row.captured_at, y: Number(row.disk?.database_bytes || 0) })),
     };
   }, [overview]);
 
@@ -1909,21 +1770,9 @@ export default function Ops({ user }) {
         {tab === "warehouse" && overview?.coverage && (
           <>
             <WarehouseCoveragePanel warehouse={overview.coverage.warehouse} />
-            {/* Windows GROW: every state starts at the seed and
-                `promote_priority_tick_windows` widens it toward the clamp. This
-                card used to print the seed setting alone, so it read "90d
-                window" while symbols were already holding 12,000 days. */}
-            <Card
-              title="Tick window (intraday)"
-              subtitle="Per-symbol windows widen as each symbol completes; the seed is only where they start."
-              testId="ops-tick-coverage"
-            >
+            <Card title="Tick window (intraday)" testId="ops-tick-coverage">
               <p className="text-sm">
-                {num(overview.tick_coverage?.complete)} verified / {num(overview.tick_coverage?.total)} jobs ({overview.tick_coverage?.progress_pct || 0}%)
-              </p>
-              <p className="text-sm text-muted">
-                Window {num(overview.tick_coverage?.window_days_min)}–{num(overview.tick_coverage?.window_days_max)}d
-                (avg {num(overview.tick_coverage?.window_days_avg)}d, seed {num(overview.tick_coverage?.window_days_seed)}d)
+                {overview.tick_coverage?.window_days}d window: {num(overview.tick_coverage?.complete)} verified / {num(overview.tick_coverage?.total)} jobs ({overview.tick_coverage?.progress_pct || 0}%)
               </p>
               <p className="text-sm text-muted">{overview.tick_coverage?.oldest || "—"} → {overview.tick_coverage?.newest || "—"}</p>
             </Card>
