@@ -208,6 +208,9 @@ function extent(rows, key = "y") {
   let lo = Infinity;
   let hi = -Infinity;
   for (const row of rows || []) {
+    // `Number(null)` is 0 and 0 is finite, so a null point would drag the axis
+    // floor to zero and flatten a series that lives up at 58 million.
+    if (row[key] == null) continue;
     const v = Number(row[key]);
     if (!Number.isFinite(v)) continue;
     lo = Math.min(lo, v);
@@ -673,10 +676,17 @@ export function RiskScatter({ frontier = [], cloud = [], points = [], height = 3
   return <EChart option={option} height={height} label={label} />;
 }
 
+// `Number(null)` is 0, so mapping every point through it turned "we did not
+// measure this hour" into "the table held zero rows" -- a spike to the floor and
+// back on 4.5% of the ops growth points, on tables that only ever grow. A
+// missing measurement stays null and echarts breaks the line there instead.
 function trimLeadingZeroPoints(data) {
-  const rows = (data || []).map((p) => ({ x: p.x, y: Number(p.y) }));
+  const rows = (data || []).map((p) => ({
+    x: p.x,
+    y: p.y == null || p.y === "" ? null : Number(p.y),
+  }));
   let start = 0;
-  while (start < rows.length - 1 && rows[start].y === 0) start += 1;
+  while (start < rows.length - 1 && (rows[start].y === 0 || rows[start].y === null)) start += 1;
   return rows.slice(start);
 }
 
@@ -723,6 +733,9 @@ export function CountTrend({ data, height = 180, label = "Count over time", colo
       series: [{
         type: "line", name: label, smooth: true, showSymbol: false, symbolSize: 8,
         data: rows.map((d) => d.y),
+        // Leave the gap visible. Bridging it would draw a straight line across
+        // an interval nobody measured, which reads as data rather than absence.
+        connectNulls: false,
         lineStyle: { width: 2, color: hex },
         itemStyle: { color: hex, borderColor: t.surface, borderWidth: 2 },
         areaStyle: { color: hex, opacity: 0.15 },
@@ -735,6 +748,9 @@ export function CountTrend({ data, height = 180, label = "Count over time", colo
 }
 
 function numFmt(v) {
+  // Same `Number(null) === 0` trap as `extent`: without this the tooltip on an
+  // unmeasured hour reads "0" instead of "not measured".
+  if (v == null) return "—";
   const n = Number(v);
   if (!Number.isFinite(n)) return "—";
   if (Math.abs(n) >= 1e9) return `${(n / 1e9).toFixed(1)}B`;

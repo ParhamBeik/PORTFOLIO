@@ -138,7 +138,15 @@ def _claims(*, displayed, archive_states, integrity) -> list[dict]:
             ArchiveFetchState.Endpoint.GOLD_DAILY,
         )
     ]
-    archive_pass = bool(core) and all(s["verified_complete"] for s in core)
+    # Not `verified_complete`: that flag is deliberately re-armed to False every
+    # time a completed state falls due for another pass, so this claim went red
+    # on symbols holding every row they expect -- and its own definition below
+    # asks about stored keys, not about whether a refresh is pending. A state
+    # that has landed a payload and owes no rows satisfies the claim.
+    archive_pass = bool(core) and all(
+        s["missing_rows"] == 0 and (s["verified_complete"] or s["last_success_at"])
+        for s in core
+    )
     live = displayed or {}
     live_pass = live.get("quality_status") == "live"
     gate_pass = bool(integrity and integrity.get("passes_gate"))

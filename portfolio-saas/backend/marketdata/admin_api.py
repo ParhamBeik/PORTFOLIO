@@ -104,55 +104,6 @@ class AdminWorkflowListView(APIView):
         return paginator.get_paginated_response(results)
 
 
-class AdminLogListView(APIView):
-    permission_classes = [IsAdminUser]
-
-    ORDERING = {
-        "timestamp": "timestamp",
-        "-timestamp": "-timestamp",
-        "level": "level",
-        "-level": "-level",
-    }
-
-    def get(self, request):
-        qs = SystemLogEvent.objects.all()
-        level = request.query_params.get("level")
-        if level:
-            qs = qs.filter(level=level)
-        service = request.query_params.get("service")
-        if service:
-            qs = qs.filter(service=service)
-        category = request.query_params.get("category")
-        if category:
-            qs = qs.filter(category=category)
-        search = request.query_params.get("search")
-        if search:
-            qs = qs.filter(Q(message__icontains=search) | Q(logger_name__icontains=search))
-        start = _parse_dt(request.query_params.get("start"))
-        end = _parse_dt(request.query_params.get("end"))
-        if start:
-            qs = qs.filter(timestamp__gte=start)
-        if end:
-            qs = qs.filter(timestamp__lte=end)
-        ordering = self.ORDERING.get(request.query_params.get("ordering", "-timestamp"), "-timestamp")
-        qs = qs.order_by(ordering)
-        paginator = OpsPagination()
-        page = paginator.paginate_queryset(qs, request)
-        results = [
-            {
-                "id": r.id,
-                "timestamp": r.timestamp.isoformat(),
-                "level": r.level,
-                "category": r.category,
-                "logger_name": r.logger_name,
-                "message": r.message,
-                "service": r.service,
-            }
-            for r in page
-        ]
-        return paginator.get_paginated_response(results)
-
-
 class AdminArchiveStateListView(APIView):
     permission_classes = [IsAdminUser]
 
@@ -465,7 +416,6 @@ from django.urls import path  # noqa: E402
 urlpatterns = [
     path("overview/", AdminOverviewView.as_view(), name="admin-ops-overview"),
     path("workflows/", AdminWorkflowListView.as_view(), name="admin-ops-workflows"),
-    path("logs/", AdminLogListView.as_view(), name="admin-ops-logs"),
     path("archive-states/", AdminArchiveStateListView.as_view(), name="admin-ops-archive-states"),
     path("archive-states/retry/", AdminArchiveRetryView.as_view(), name="admin-ops-archive-retry"),
     path("assets/", AdminAssetListView.as_view(), name="admin-ops-assets"),

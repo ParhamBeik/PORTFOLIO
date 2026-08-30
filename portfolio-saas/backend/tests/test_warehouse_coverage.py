@@ -24,7 +24,11 @@ from marketdata.archive import (
     market_trading_days,
 )
 from marketdata.calendars import market_closure_days
-from marketdata.coverage_report import classify_archive_state, classify_live_asset
+from marketdata.coverage_report import (
+    classify_archive_state,
+    classify_live_asset,
+    state_stale_days,
+)
 from marketdata.management.commands.audit_warehouse import Command
 from marketdata.models import (
     ArchiveFetchState,
@@ -1202,10 +1206,52 @@ class TestIngestOutageDetection:
 
 
 def test_classify_archive_state_lifecycle():
+    now = timezone.now()
     assert classify_archive_state(ArchiveFetchState(verified_complete=True)) == "complete"
     assert classify_archive_state(ArchiveFetchState(last_attempt_at=None)) == "not_tried"
-    assert classify_archive_state(ArchiveFetchState(last_attempt_at=timezone.now(), consecutive_failures=2)) == "failed"
-    assert classify_archive_state(ArchiveFetchState(last_attempt_at=timezone.now(), stored_rows=3, missing_rows=2)) == "partial"
+    assert classify_archive_state(
+        ArchiveFetchState(last_attempt_at=now, consecutive_failures=2)
+    ) == "failed"
+    assert classify_archive_state(
+        ArchiveFetchState(last_attempt_at=now, last_success_at=now, stored_rows=3, missing_rows=2)
+    ) == "partial"
+
+    # The regression this taxonomy exists for. A completed state is deliberately
+    # re-armed (`verified_complete=False`) so it re-checks for newly printed
+    # sessions; if the daily quota runs out before its turn, the quota handler
+    # stamps last_attempt_at and leaves consecutive_failures at 0 on purpose.
+    # The old four-way ladder had no rung for that and dropped it into
+    # "partial -- gaps remain", which put 52.8% of the warehouse in the damage
+    # bucket while every one of those jobs held exactly the rows it expected.
+    quota_parked = ArchiveFetchState(
+        verified_complete=False,
+        last_attempt_at=now,
+        last_success_at=now - timedelta(days=4),
+        consecutive_failures=0,
+        stored_rows=575,
+        expected_rows=575,
+        missing_rows=0,
+        last_error="Daily quota unavailable.",
+    )
+    assert classify_archive_state(quota_parked) == "refresh_due"
+
+    # Attempted but never delivered a payload: not a gap, and not "never tried".
+    assert classify_archive_state(
+        ArchiveFetchState(last_attempt_at=now, last_success_at=None, stored_rows=0, expected_rows=0)
+    ) == "awaiting_data"
+
+
+def test_state_stale_days_orders_the_refresh_queue():
+    """Staleness is what the re-fetch queue sorts on, so it must be a real number."""
+    now = timezone.now()
+    assert state_stale_days(ArchiveFetchState(last_success_at=None), now=now) is None
+    assert state_stale_days(
+        ArchiveFetchState(last_success_at=now - timedelta(days=6, hours=3)), now=now
+    ) == 6
+    # A clock skew must not read as "fetched in the future".
+    assert state_stale_days(
+        ArchiveFetchState(last_success_at=now + timedelta(hours=2)), now=now
+    ) == 0
 
 
 def test_classify_live_asset(asset_catalog):
@@ -1901,3 +1947,26 @@ class TestLiveFetchPlan:
         )
         assert len(live_states.claim_due("crypto")) == 1
         assert live_states.claim_due("crypto") == [], "cadence not elapsed yet"
+
+
+def test_archive_claim_survives_a_pending_refresh(staff_client, asset_catalog):
+    """A re-armed state still holding every row must not fail the archive claim.
+
+    `verified_complete` is flipped back to False on purpose whenever a state
+    falls due for another pass, so keying the claim on that flag alone made the
+    evidence panel report "archive payload verified: no" for symbols with a
+    complete, gap-free payload -- the same misreading that put half the
+    warehouse in the damage bucket on the Ops donut.
+    """
+    _kama(asset_catalog)
+    state = ArchiveFetchState.objects.get(
+        symbol="کاما", endpoint=ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED
+    )
+    state.verified_complete = False
+    state.last_success_at = timezone.now() - timedelta(days=3)
+    state.last_error = "Daily quota unavailable."
+    state.save(update_fields=["verified_complete", "last_success_at", "last_error"])
+
+    body = staff_client.get("/api/admin/assets/kama_stock/evidence/").json()
+    claims = {c["id"]: c["passed"] for c in body["claims"]}
+    assert claims["archive_payload_verified"] is True
