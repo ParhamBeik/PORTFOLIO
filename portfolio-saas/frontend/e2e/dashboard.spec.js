@@ -60,7 +60,17 @@ test.describe("dashboard", () => {
     }
     await page.getByTestId("nav-portfolio").click();
     await expect(page.getByTestId("dashboard-trend-basis")).toBeVisible({ timeout: 20000 });
+
+    // Wait on the response, not on the DOM. `useApi` keeps the previous data
+    // on screen during a refetch and `Async` shows no spinner while it holds
+    // any data, so asserting straight after a tab click reads the answer to
+    // the PREVIOUS question and passes without proving anything.
+    const answered = page.waitForResponse(
+      (r) => r.url().includes("/api/snapshots/") && r.url().includes("real_toman"),
+      { timeout: 30000 }
+    );
     await clickTab(page, "dashboard-trend-basis", "real");
+    const payload = await answered.then((r) => r.json().catch(() => null));
 
     // Two diverging lines and no number is unfalsifiable: a projection running
     // at triple the published pace draws the same picture as a correct one.
@@ -69,8 +79,18 @@ test.describe("dashboard", () => {
     const failed = page.getByTestId("dashboard-trend-real-error");
     await expect(note.or(failed).first()).toBeVisible({ timeout: 20000 });
     if (await note.count()) {
-      await expect.soft(note).toContainText("%");
-      await expect.soft(page.getByTestId("dashboard-trend-cpi-source")).toBeVisible();
+      // "%" alone was satisfied by the growth figure the note always prints,
+      // so this passed identically whether or not the rate was named -- the
+      // exact blindness the test exists to close. Assert the provenance line,
+      // which is the only place the annual rate and its source appear.
+      const source = page.getByTestId("dashboard-trend-cpi-source");
+      await expect.soft(source).toBeVisible();
+      await expect.soft(source).toContainText(/%\/year/);
+      // And when the server did report the rate it divided by, the sentence
+      // must actually quote it rather than quietly dropping the clause.
+      if (payload?.cpi?.applied_annual_rate != null) {
+        await expect.soft(note).toContainText(/rose .*% a year/);
+      }
     }
   });
 
