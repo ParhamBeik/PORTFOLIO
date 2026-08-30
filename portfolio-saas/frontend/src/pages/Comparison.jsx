@@ -132,6 +132,11 @@ function Chart({ result }) {
   }, [result]);
 
   const isIndex = result.series[0].unit === "index";
+  // A week either way is rounding — weekends, a market holiday, the day the
+  // window opens on. Beyond that the range button asked for something the data
+  // could not give, and saying nothing lets the axis imply it did.
+  const { requested_days: asked, window_days: got } = result.summary;
+  const shortfall = asked && got ? asked - got : 0;
   return (
     <>
       <MultiLineTrend
@@ -151,15 +156,26 @@ function Chart({ result }) {
           not the amount of money in each.
         </p>
       )}
+      {/* The sentence, when the server sent one. A warning that reads
+          "euro cash: series ended." tells a reader something is wrong and
+          nothing about what to do; the detail says which day the data stops on
+          and what the chart did about it. */}
       {(result.warnings || []).map((w) => (
         <p
           key={`${w.key}-${w.reason}`}
           className="mt-1 text-xs text-muted"
           data-testid="comparison-warning"
         >
-          {w.key}: {humanize(w.reason)}.
+          {w.key}: {w.detail || humanize(w.reason)}.
         </p>
       ))}
+      {shortfall > 7 && (
+        <p className="mt-1 text-xs text-muted" data-testid="comparison-shortfall">
+          You asked for {result.summary.requested_days} days and this covers{" "}
+          {result.summary.window_days} — that is as much history as these two
+          have in common.
+        </p>
+      )}
       {result.summary.truncated_to_days && (
         <p className="mt-1 text-xs text-muted" data-testid="comparison-truncated">
           Showing the last {result.summary.truncated_to_days} days — your
@@ -264,6 +280,17 @@ export default function Comparison() {
                   purchase in the Ledger first.
                 </p>
               )}
+              {/* "Two of mine" needs two. With one holding the picker offered
+                  the same asset back and the page answered "cannot compare an
+                  asset with itself", which reads as a bug rather than as the
+                  shape of the portfolio. */}
+              {mode === "holdings" && holdings.length === 1 && (
+                <p className="text-sm text-muted" data-testid="comparison-one-holding">
+                  This portfolio holds only {holdings[0].label}. Compare it
+                  against something you don't own with the other modes above, or
+                  record a second position first.
+                </p>
+              )}
               {/* Named rather than simply absent: a reader who owns a house and
                   three gold bars was scanning a list that never mentioned them
                   and had no way to tell whether that was a bug. */}
@@ -298,11 +325,16 @@ export default function Comparison() {
                   </Async>
                 )
               ) : (
-                <p className="text-sm text-muted" data-testid="comparison-prompt">
-                  {needsSubject
-                    ? "Pick a holding and something to compare it against."
-                    : "Pick something to compare your portfolio against."}
-                </p>
+                // Silent when the message above already explained why there is
+                // nothing to pick -- two prompts contradicting each other is
+                // worse than one.
+                holdings.length !== 1 || mode !== "holdings" ? (
+                  <p className="text-sm text-muted" data-testid="comparison-prompt">
+                    {needsSubject
+                      ? "Pick a holding and something to compare it against."
+                      : "Pick something to compare your portfolio against."}
+                  </p>
+                ) : null
               )}
             </>
           )}

@@ -36,6 +36,16 @@ MODES = ("counterfactual", "holdings", "benchmark", "lump_sum")
 MAX_WINDOW_DAYS = 3650
 MIN_WINDOW_DAYS = 7
 
+#: How far back `_benchmark` may rebuild the portfolio's own value series.
+#:
+#: Its own bound, deliberately not `SYNTHETIC_HISTORY_MAX_DAYS`. That constant is
+#: 90 and it made the 1Y, 6M and 90D buttons on this tab return the identical
+#: ninety-day answer -- three range buttons that did nothing. The 90 stands for
+#: the other caller (a fabricated series shown when nothing was recorded); the
+#: replay itself is real arithmetic and now costs one ledger read per account
+#: rather than two per account per day, so a year of it is affordable.
+BENCHMARK_MAX_DAYS = 400
+
 #: Kinds that move a position for money. A rights issue moves the position
 #: without any, so it changes the units held but never the amount invested --
 #: counting it as a purchase would credit the counterfactual with money that was
@@ -113,11 +123,34 @@ def _window(flows, days) -> tuple[int, dt.datetime]:
     price and quietly report that as the alternative's cost.
     """
     now = timezone.now()
-    first = flows[0]["at"] if flows else now - dt.timedelta(days=365)
+    # The earliest of the flows, not the first of the list. `_holdings` hands
+    # over two assets' flow lists concatenated, so position zero is whichever
+    # asset was named first -- reading that as the pair's opening date loaded a
+    # panel that stopped short of the other one's own history.
+    first = min(
+        (flow["at"] for flow in flows), default=now - dt.timedelta(days=365)
+    )
     span = (now - first).days + 1
     shown = span if days is None else max(MIN_WINDOW_DAYS, int(days))
     load = min(max(span, shown, MIN_WINDOW_DAYS), MAX_WINDOW_DAYS)
-    return load, now - dt.timedelta(days=min(shown, load))
+    # Never opens before the money did. A 1Y button on a three-month-old position
+    # otherwise drew nine months of a flat zero line and reported a start date on
+    # which the user owned nothing -- the range was honoured literally and the
+    # answer was nonsense. The window is what the data can support, and the
+    # summary reports the span actually drawn so the page can say so.
+    return load, max(now - dt.timedelta(days=min(shown, load)), first)
+
+
+def _day(at) -> pd.Timestamp:
+    """The flow's calendar day, in UTC, at midnight.
+
+    The panel is indexed at midnight, so an afternoon purchase compared raw
+    sorts AFTER that day's row: the position appeared a day late and the
+    counterfactual spent the money at the following close. Same money, wrong
+    price, and on a fast-moving series that is the whole difference being
+    measured.
+    """
+    return pd.Timestamp(at).tz_convert("UTC").normalize()
 
 
 def _panel(keys, days, held) -> pd.DataFrame:
@@ -184,12 +217,13 @@ def _panel(keys, days, held) -> pd.DataFrame:
         for asset in Asset.objects.filter(key__in=keys, is_active=True)
     }
     today = to_jalali_str(timezone.now())
-    stale = []
+    stale, last_real = [], {}
     for key in keys:
         real = panel[key].dropna()
         if real.empty:
             stale.append(key)
             continue
+        last_real[key] = real.index[-1]
         asset = assets.get(key)
         gap = sessions_between(
             to_jalali_str(real.index[-1]), today,
@@ -197,14 +231,45 @@ def _panel(keys, days, held) -> pd.DataFrame:
         )
         if gap > MAX_FORWARD_FILL_SESSIONS or pd.isna(filled[key].iloc[-1]):
             stale.append(key)
+    _refuse(
+        [key for key in stale if key not in last_real],
+        "missing_price_history", "No usable price history",
+    )
     if stale:
-        raise ComparisonError(
-            "stale_price_history",
-            f"{', '.join(sorted(stale))} has no recent price, so there is "
-            "nothing to compare against today.",
-            keys=sorted(stale),
-        )
+        # A halted or delisted series ENDS the comparison; it no longer refuses
+        # it. The window closes on the last day every asset had a real close, so
+        # the figure the summary reports is genuinely that day's value and the
+        # end date names it. The invariant the fill bound protects is that a
+        # stale price is never presented as TODAY's outcome -- a window that
+        # stops where the data stops does not do that, while refusing outright
+        # threw away years of perfectly good overlap to avoid one dead tail.
+        cutoff = min(last_real[key] for key in stale)
+        filled = filled[filled.index <= cutoff]
+        panel.attrs["warnings"] = [
+            *panel.attrs["warnings"],
+            *[
+                {
+                    "key": key,
+                    "reason": "series_ended",
+                    "detail": (
+                        "last real price "
+                        f"{last_real[key].date().isoformat()}; the comparison "
+                        "stops there rather than carrying it forward to today"
+                    ),
+                }
+                for key in sorted(stale)
+            ],
+        ]
     result = filled.dropna()
+    # Two points is the least that can draw a line or state a change. Below that
+    # the overlap is a coincidence, not a comparison.
+    if len(result) < 2:
+        raise ComparisonError(
+            "no_overlapping_history",
+            f"{' and '.join(sorted(keys))} do not have enough price history in "
+            "common to compare -- their series barely overlap.",
+            keys=sorted(keys),
+        )
     result.attrs["warnings"] = panel.attrs["warnings"]
     return result
 
@@ -221,32 +286,61 @@ def _units_held(flows, index) -> pd.Series:
     """Running units held on each day of the index, from the flow steps."""
     units = pd.Series(0.0, index=index)
     for flow in flows:
-        at = pd.Timestamp(flow["at"]).tz_convert("UTC")
-        units[index >= at] += float(flow["units"])
+        units[index >= _day(flow["at"])] += float(flow["units"])
     return units
 
 
-def _assert_covered(flows, index) -> None:
-    """Refuse when a purchase predates the price history being replayed into.
+def _carry_in(flows, index, prices: pd.Series) -> tuple[list[dict], float]:
+    """Fold the flows older than the window into one opening stake.
 
-    `_panel` drops leading rows where either series is NaN, so the index starts
-    at the LATER of the two. A flow older than that would otherwise match the
-    first available day and buy at its price -- reporting a 2024 opening price
-    as the cost of a 2022 purchase, which is the exact thing the load-vs-show
-    split exists to prevent.
+    `_panel` starts on the first day BOTH assets are priced, which for a target
+    listed (or backfilled) after the purchase is long after the money was spent.
+    Refusing there answered nothing at all -- and "nothing" is the wrong answer
+    to a question that has a good one sitting right next to it.
+
+    So the position WALKS IN. On the first shared day it is worth what it was
+    actually worth: its own units at its own close. The alternative starts from
+    that same stake, and every later purchase is replayed on its real date as
+    before. The question becomes "from the day this comparison first became
+    possible, which of these did better with the same money" -- answerable, and
+    honest, because no price is invented for a day nobody has one for. What is
+    NOT done is pricing the old purchase at the window's opening price and
+    calling that its cost; that would be the fiction the refusal existed to
+    prevent, and the carried stake is a market value on a real day instead.
+
+    Returns the rewritten flows and the carried amount (0 when the history
+    already reached back far enough, which leaves the flows untouched).
     """
-    if not flows or index.empty:
-        return
-    first = pd.Timestamp(flows[0]["at"]).tz_convert("UTC")
-    if first < index[0].normalize():
-        raise ComparisonError(
-            "history_starts_after_purchase",
-            "The price history does not reach back to "
-            f"{first.date().isoformat()}, when the first purchase was made, so "
-            "there is no honest price to have bought at.",
-            first_purchase=first.date().isoformat(),
-            history_starts=index[0].date().isoformat(),
-        )
+    if index.empty or not flows:
+        return list(flows), 0.0
+    opens = index[0]
+    before = [flow for flow in flows if _day(flow["at"]) < opens]
+    if not before:
+        return list(flows), 0.0
+    rest = [flow for flow in flows if _day(flow["at"]) >= opens]
+    units = sum(float(flow["units"]) for flow in before)
+    if units <= 0:
+        # Bought and sold again entirely before the window opened. Nothing
+        # crossed the line, so nothing is carried; only the later flows remain.
+        return rest, 0.0
+    carried = units * float(prices.loc[opens])
+    return [{"at": opens, "units": units, "spent": carried}, *rest], carried
+
+
+def _carried_note(asset, index, carried) -> list[dict]:
+    """The one sentence a reader needs when the window opens late."""
+    if not carried:
+        return []
+    return [{
+        "key": asset.key,
+        "reason": "history_starts_late",
+        "detail": (
+            "the shared price history only reaches back to "
+            f"{index[0].date().isoformat()}, so the comparison starts there "
+            f"with the position valued at what it was worth that day "
+            f"({round(carried):,.0f} Toman) rather than at its original cost"
+        ),
+    }]
 
 
 def _counterfactual_units(flows, prices: pd.Series, index) -> pd.Series:
@@ -261,8 +355,7 @@ def _counterfactual_units(flows, prices: pd.Series, index) -> pd.Series:
     held = 0.0
     position = 0.0
     for flow in flows:
-        at = pd.Timestamp(flow["at"]).tz_convert("UTC")
-        on_or_after = index[index >= at]
+        on_or_after = index[index >= _day(flow["at"])]
         if on_or_after.empty:
             continue
         price = float(prices.loc[on_or_after[0]])
@@ -274,7 +367,7 @@ def _counterfactual_units(flows, prices: pd.Series, index) -> pd.Series:
             fraction = min(1.0, -change / held) if held > 0 else 0.0
             position -= position * fraction
         held = max(0.0, held + change)
-        units[index >= at] = position
+        units[index >= on_or_after[0]] = position
     return units
 
 
@@ -308,7 +401,10 @@ def _label(asset) -> str:
     return asset.name_fa or asset.name or asset.key
 
 
-def _summary(actual: pd.Series, alternative: pd.Series, invested=None) -> dict:
+def _summary(
+    actual: pd.Series, alternative: pd.Series, invested=None, *,
+    requested_days=None, carried=0.0,
+) -> dict:
     end_actual = float(actual.iloc[-1]) if len(actual) else 0.0
     end_alt = float(alternative.iloc[-1]) if len(alternative) else 0.0
     summary = {
@@ -317,9 +413,19 @@ def _summary(actual: pd.Series, alternative: pd.Series, invested=None) -> dict:
         "difference_tomans": round(end_actual - end_alt, 2),
         "start_date": actual.index[0].date().isoformat() if len(actual) else None,
         "end_date": actual.index[-1].date().isoformat() if len(actual) else None,
+        # What the range button asked for against what the data could give. The
+        # page prints a "1Y" label above a curve whose start date is the only
+        # thing that ever said otherwise; a reader comparing two tabs had no way
+        # to tell a short answer from a short position.
+        "requested_days": requested_days,
+        "window_days": (
+            (actual.index[-1] - actual.index[0]).days + 1 if len(actual) else 0
+        ),
     }
     if invested is not None:
         summary["invested_tomans"] = round(float(invested), 2)
+    if carried:
+        summary["carried_in_tomans"] = round(float(carried), 2)
     return summary
 
 
@@ -341,25 +447,38 @@ def _counterfactual(user, account, subject_key, target_key, days) -> dict:
             "no purchase prices are recorded, or the sales returned more than "
             "the purchases cost -- so there is no amount to invest elsewhere.",
         )
+    requested = days
     days, start = _window(flows, days)
     panel = _panel([subject.key, target.key], days, held=[subject.key])
     index = panel.index
 
-    _assert_covered(flows, index)
+    flows, carried = _carry_in(flows, index, panel[subject.key])
+    invested = sum(float(flow["spent"]) for flow in flows)
+    if invested <= 0:
+        raise ComparisonError(
+            "no_recorded_cost",
+            f"Nothing of your {_label(subject)} position carries into the "
+            f"window that {_label(target)} has prices for, so there is no "
+            "amount to invest elsewhere.",
+        )
     actual = _shown(_units_held(flows, index) * panel[subject.key], start)
     alternative = _shown(
         _counterfactual_units(flows, panel[target.key], index) * panel[target.key],
         start,
     )
-    invested = sum(float(flow["spent"]) for flow in flows)
     return {
         "mode": "counterfactual",
         "series": [
             _curve(subject.key, f"What you did: {_label(subject)}", actual),
             _curve(target.key, f"Instead: {_label(target)}", alternative),
         ],
-        "summary": _summary(actual, alternative, invested=invested),
-        "warnings": panel.attrs["warnings"],
+        "summary": _summary(
+            actual, alternative, invested=invested,
+            requested_days=requested, carried=carried,
+        ),
+        "warnings": [
+            *panel.attrs["warnings"], *_carried_note(subject, index, carried)
+        ],
     }
 
 
@@ -375,10 +494,15 @@ def _holdings(user, account, subject_key, target_key, days) -> dict:
                 "no_purchase_history",
                 f"You have no recorded {_label(asset)} position to show.",
             )
+    requested = days
     days, start = _window(subject_flows + target_flows, days)
     panel = _panel([subject.key, target.key], days, held=[subject.key, target.key])
     index = panel.index
 
+    # No carry-in here: both curves are units x price, and `_units_held` already
+    # applies a purchase older than the window from the first day onwards. The
+    # value on that day is what the position was worth, which is what this tab
+    # asks. Only the money-replay modes need a stake to start from.
     left = _shown(_units_held(subject_flows, index) * panel[subject.key], start)
     right = _shown(_units_held(target_flows, index) * panel[target.key], start)
     return {
@@ -387,7 +511,7 @@ def _holdings(user, account, subject_key, target_key, days) -> dict:
             _curve(subject.key, _label(subject), left),
             _curve(target.key, _label(target), right),
         ],
-        "summary": _summary(left, right),
+        "summary": _summary(left, right, requested_days=requested),
         "warnings": panel.attrs["warnings"],
     }
 
@@ -443,25 +567,42 @@ def _twr_index(series: list[dict]) -> pd.Series:
 
 
 def _benchmark(user, account, target_key, days) -> dict:
-    from .valuation import SYNTHETIC_HISTORY_MAX_DAYS, compute_dynamic_net_worth_series
+    from .valuation import compute_dynamic_net_worth_series
 
     target = _resolve_asset(target_key, field="target")
     # No per-asset flows to reach back for here, so unlike the other modes the
-    # requested window IS the whole request. The net-worth series is bounded on
-    # purpose -- every extra day is another full ledger replay -- so asking for
+    # requested window IS the whole request. The net-worth series is still
+    # bounded -- every extra day is another day of the replay -- so asking for
     # more than it gives returns a shorter window than the caller asked for,
     # and the answer says so rather than letting the axis imply a range the
     # data does not cover. "All" means "whatever the replay reaches", which is
     # the bound itself and therefore not a truncation.
-    capped = min(days or SYNTHETIC_HISTORY_MAX_DAYS, SYNTHETIC_HISTORY_MAX_DAYS)
+    #
+    # The bound is BENCHMARK_MAX_DAYS, not the 90-day synthetic-series cap this
+    # used to borrow. That cap made 1Y, 6M and 90D three names for the same
+    # ninety days, so two of the four range buttons on this tab were decoration.
+    capped = min(days or BENCHMARK_MAX_DAYS, BENCHMARK_MAX_DAYS)
     truncated = capped if days and days > capped else None
-    series = compute_dynamic_net_worth_series(user, account, days=capped)
+    series = compute_dynamic_net_worth_series(
+        user, account, days=capped, max_days=BENCHMARK_MAX_DAYS
+    )
     if not series:
         raise ComparisonError(
             "no_portfolio_history",
             "This portfolio has no value history to compare yet.",
         )
     portfolio = _twr_index(series)
+    # Days before the book held anything are a flat 100 that never moved. A
+    # one-year window on a two-month-old portfolio drew ten months of that line
+    # and dated the verdict to a day on which there was nothing to compare --
+    # the same rule `_window` applies to the money-replay modes.
+    funded = [
+        pd.Timestamp(point["date"], tz="UTC")
+        for point in series
+        if float(point["total"]) != 0
+    ]
+    if funded:
+        portfolio = portfolio[portfolio.index >= min(funded)]
     panel = _panel([target.key], capped, held=[])
     index = portfolio.index.intersection(panel.index)
     if index.empty:
@@ -487,6 +628,8 @@ def _benchmark(user, account, target_key, days) -> dict:
             "start_date": index[0].date().isoformat(),
             "end_date": index[-1].date().isoformat(),
             "truncated_to_days": truncated,
+            "requested_days": days,
+            "window_days": (index[-1] - index[0]).days + 1,
         },
         "warnings": panel.attrs["warnings"],
     }
@@ -505,6 +648,7 @@ def _lump_sum(user, account, subject_key, target_key, days) -> dict:
             "no_recorded_cost",
             f"There is no recorded amount invested in {_label(subject)}.",
         )
+    requested = days
     days, start = _window(flows, days)
     panel = _panel([subject.key, target.key], days, held=[subject.key])
 
@@ -514,9 +658,22 @@ def _lump_sum(user, account, subject_key, target_key, days) -> dict:
     # than the position has existed), so `iloc[0]` would deploy the money before
     # it existed -- a year of growth on ten-day-old money, and not comparable to
     # the drip mode it sits beside.
+    #
+    # When the shared history starts LATER than that purchase the stake is what
+    # the position was worth on the first shared day plus anything added after
+    # it -- the same walk-in the drip mode does, so the two tabs still describe
+    # the same money over the same window.
     index = panel.index
-    _assert_covered(flows, index)
-    opened = index[index >= pd.Timestamp(flows[0]["at"]).tz_convert("UTC")]
+    flows, carried = _carry_in(flows, index, panel[subject.key])
+    stake = sum(float(flow["spent"]) for flow in flows)
+    if not flows or stake <= 0:
+        raise ComparisonError(
+            "no_recorded_cost",
+            f"Nothing of your {_label(subject)} position carries into the "
+            f"window that {_label(target)} has prices for, so there is no "
+            "amount to put in on day one.",
+        )
+    opened = index[index >= _day(flows[0]["at"])]
     if opened.empty:
         raise ComparisonError(
             "no_price_on_purchase_date",
@@ -524,11 +681,11 @@ def _lump_sum(user, account, subject_key, target_key, days) -> dict:
         )
     day = opened[0]
     left = _shown(
-        invested / float(panel[subject.key].loc[day]) * panel[subject.key].loc[day:],
+        stake / float(panel[subject.key].loc[day]) * panel[subject.key].loc[day:],
         start,
     )
     right = _shown(
-        invested / float(panel[target.key].loc[day]) * panel[target.key].loc[day:],
+        stake / float(panel[target.key].loc[day]) * panel[target.key].loc[day:],
         start,
     )
     return {
@@ -537,8 +694,13 @@ def _lump_sum(user, account, subject_key, target_key, days) -> dict:
             _curve(subject.key, f"All at once: {_label(subject)}", left),
             _curve(target.key, f"All at once: {_label(target)}", right),
         ],
-        "summary": _summary(left, right, invested=invested),
-        "warnings": panel.attrs["warnings"],
+        "summary": _summary(
+            left, right, invested=stake,
+            requested_days=requested, carried=carried,
+        ),
+        "warnings": [
+            *panel.attrs["warnings"], *_carried_note(subject, index, carried)
+        ],
     }
 
 

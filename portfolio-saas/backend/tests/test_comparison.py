@@ -225,17 +225,17 @@ def test_a_benchmark_window_longer_than_the_replay_says_so(compared):
     """The net-worth series is capped, so "All" cannot mean all. Saying nothing
     would let the axis imply a range the data does not cover.
     """
-    from portfolio.services.valuation import SYNTHETIC_HISTORY_MAX_DAYS
+    from portfolio.services.comparison import BENCHMARK_MAX_DAYS
 
     capped = _get(
         compared, mode="benchmark", target="gold_18k_gram",
-        days=SYNTHETIC_HISTORY_MAX_DAYS + 200,
+        days=BENCHMARK_MAX_DAYS + 200,
     ).data
     within = _get(
         compared, mode="benchmark", target="gold_18k_gram", days=30
     ).data
 
-    assert capped["summary"]["truncated_to_days"] == SYNTHETIC_HISTORY_MAX_DAYS
+    assert capped["summary"]["truncated_to_days"] == BENCHMARK_MAX_DAYS
     assert within["summary"]["truncated_to_days"] is None
 
 
@@ -274,7 +274,7 @@ def test_a_dollar_quoted_target_is_not_reported_as_toman(compared, asset_catalog
         # is not, which is what the assertion below is really guarding.
         assert response.data["reason"] in {
             "missing_price_history", "stale_price_history",
-            "history_starts_after_purchase",
+            "no_overlapping_history",
         }
         return
     end = response.data["summary"]["alternative_end_tomans"]
@@ -284,10 +284,13 @@ def test_a_dollar_quoted_target_is_not_reported_as_toman(compared, asset_catalog
     assert end == pytest.approx(invested, rel=0.01)
 
 
-def test_a_target_whose_price_series_stopped_is_refused(compared, asset_catalog):
+def test_a_target_whose_price_series_stopped_ends_the_window(compared, asset_catalog):
     """A halted or delisted target used to draw a flat line from its last close
     to today, and the summary reported that stale number as what you would have
-    made. This is the forward-fill bound the whole codebase is built around.
+    made. That is what the forward-fill bound exists to prevent -- but refusing
+    the whole comparison was a heavier answer than the bound requires. The
+    window now STOPS at the last day both series really traded, which reports no
+    stale price as today's outcome while still answering the question.
     """
     from marketdata.models import GoldCurrencyHistory
 
@@ -304,13 +307,209 @@ def test_a_target_whose_price_series_stopped_is_refused(compared, asset_catalog)
             symbol="EUR", date=_jalali(day), unit="تومان",
             close_price=Decimal("50000"),
         )
+    last_real = (start + datetime.timedelta(days=30)).date()
 
     response = _get(
         compared, mode="counterfactual", subject="kama_stock", target="euro_cash"
     )
 
-    assert response.status_code == 400, response.data
-    assert response.data["reason"] == "stale_price_history"
+    assert response.status_code == 200, response.data
+    # The whole point: the window ends where the euro's data ends, not today.
+    assert response.data["summary"]["end_date"] == last_real.isoformat()
+    assert last_real < timezone.now().date()
+    ended = [
+        w for w in response.data["warnings"]
+        if w["key"] == "euro_cash" and w["reason"] == "series_ended"
+    ]
+    assert ended, response.data["warnings"]
+    assert last_real.isoformat() in ended[0]["detail"]
+    # And no curve runs past that day either -- a chart drawn to today with a
+    # flat tail is the same lie in a different place.
+    for curve in response.data["series"]:
+        assert curve["points"][-1]["date"] == last_real.isoformat()
+
+
+# ----------------------------------------------------------------------
+# Partial overlap and the range buttons.
+#
+# Integration tests again: the whole failure being pinned here is the seam
+# between what the warehouse happens to hold and what the page decides to say,
+# and neither half reproduces it alone.
+
+
+@pytest.fixture
+def late_target(compared, asset_catalog):
+    """A target the warehouse only started carrying three weeks ago.
+
+    The reported case: a position bought two months back, compared against
+    something whose price series is much younger. Every such pair used to
+    answer "no data at all".
+    """
+    from marketdata.models import GoldCurrencyHistory
+
+    coin = asset_catalog["emami_coin"]
+    coin.brs_symbol = "IR_COIN_EMAMI"
+    coin.save(update_fields=["brs_symbol"])
+    start = timezone.now() - datetime.timedelta(days=19)
+    for offset in range(20):
+        day = (start + datetime.timedelta(days=offset)).date()
+        GoldCurrencyHistory.objects.create(
+            symbol="IR_COIN_EMAMI", date=_jalali(day), unit="تومان",
+            close_price=Decimal(500000 + offset * 10000),
+        )
+    return compared, start.date()
+
+
+@pytest.fixture
+def two_holdings(late_target, asset_catalog):
+    """Both assets really held, their histories 40 days apart in length."""
+    from portfolio.services.ledger import create_ledger_entry
+
+    account, first_shared = late_target
+    create_ledger_entry(
+        account=account, kind=LedgerEntry.Kind.BUY,
+        asset=asset_catalog["emami_coin"], quantity=Decimal("1"),
+        unit_price_tomans=Decimal("480000"),
+        occurred_at=timezone.now() - datetime.timedelta(days=40),
+    )
+    return account, first_shared
+
+
+def test_a_target_with_a_shorter_history_starts_where_the_data_starts(late_target):
+    """The headline fix: compare from the first day both series exist, and say
+    so, instead of refusing because one of them does not reach back far enough.
+    """
+    account, first_shared = late_target
+
+    data = _get(
+        account, mode="counterfactual", subject="kama_stock",
+        target="emami_coin", days=0,
+    ).data
+
+    assert data["summary"]["start_date"] == first_shared.isoformat()
+    # Both sides start from the same real stake -- what the position was
+    # actually worth that day -- so the gap between them is performance and not
+    # an artefact of one curve starting at zero.
+    assert data["summary"]["carried_in_tomans"] > 0
+    assert data["summary"]["actual_end_tomans"] > 0
+    assert data["summary"]["alternative_end_tomans"] > 0
+    note = [w for w in data["warnings"] if w["reason"] == "history_starts_late"]
+    assert note, data["warnings"]
+    assert first_shared.isoformat() in note[0]["detail"]
+
+
+def test_all_at_once_answers_against_a_late_target_too(late_target):
+    account, first_shared = late_target
+
+    data = _get(
+        account, mode="lump_sum", subject="kama_stock", target="emami_coin", days=0,
+    ).data
+
+    assert data["summary"]["start_date"] == first_shared.isoformat()
+    assert data["summary"]["alternative_end_tomans"] > 0
+
+
+def test_two_of_mine_loads_back_to_the_older_position(two_holdings):
+    """The pair's window is the EARLIER of the two openings. Reading the first
+    flow of the concatenated list instead loaded a panel that stopped short of
+    whichever asset happened to be named second.
+    """
+    account, first_shared = two_holdings
+
+    data = _get(
+        account, mode="holdings", subject="emami_coin", target="kama_stock", days=0,
+    ).data
+
+    assert data["summary"]["start_date"] == first_shared.isoformat()
+    # The stock was bought 60 days ago and the coin 40; on the first shared day
+    # both are already held, so neither curve opens at zero.
+    for curve in data["series"]:
+        assert curve["points"][0]["value"] > 0
+
+
+@pytest.mark.parametrize("mode", ["counterfactual", "holdings", "benchmark", "lump_sum"])
+@pytest.mark.parametrize("days", [0, 365, 180, 90])
+def test_every_mode_and_range_answers_with_a_verdict_or_a_reason(
+    two_holdings, mode, days
+):
+    """Sixteen combinations, one rule: never a silent empty panel, and never a
+    window longer than the one asked for.
+    """
+    account, _ = two_holdings
+    params = {"mode": mode, "target": "gold_18k_gram", "days": days}
+    if mode != "benchmark":
+        params["subject"] = "kama_stock"
+
+    response = _get(account, **params)
+
+    if response.status_code != 200:
+        assert response.data.get("reason"), response.data
+        return
+    summary = response.data["summary"]
+    assert response.data["series"][0]["points"], summary
+    assert summary["start_date"] and summary["end_date"]
+    if days:
+        # A day of slack: the window is inclusive of both endpoints.
+        assert summary["window_days"] <= days + 1, summary
+
+
+@pytest.fixture
+def long_history(asset_catalog, make_user):
+    """A portfolio and a target that both go back well over a year."""
+    from marketdata.models import GoldCurrencyHistory, MarketCandle
+    from portfolio.services.ledger import create_ledger_entry
+
+    user = make_user(email="longrun@test.test")
+    account = Account.objects.create(user=user, name="Broker")
+    start = timezone.now() - datetime.timedelta(days=420)
+    for offset in range(421):
+        day = (start + datetime.timedelta(days=offset)).date()
+        jalali = _jalali(day)
+        MarketCandle.objects.create(
+            symbol="کاما", timeframe=MarketCandle.ADJUSTED, date_time=jalali,
+            close_price=Decimal(10000 + offset * 10),
+            open_price=Decimal("10000"), high_price=Decimal("20000"),
+            low_price=Decimal("10000"), volume=1,
+        )
+        GoldCurrencyHistory.objects.create(
+            symbol="IR_GOLD_18K", date=jalali, unit="تومان",
+            close_price=Decimal(1000 + offset * 5),
+        )
+    asset_catalog["gold_18k_gram"].brs_symbol = "IR_GOLD_18K"
+    asset_catalog["gold_18k_gram"].save(update_fields=["brs_symbol"])
+    create_ledger_entry(
+        account=account, kind=LedgerEntry.Kind.BUY,
+        asset=asset_catalog["kama_stock"], quantity=Decimal("1000"),
+        unit_price_tomans=Decimal("1000"),
+        occurred_at=start + datetime.timedelta(days=1),
+    )
+    return account
+
+
+def test_the_benchmark_ranges_are_three_different_windows(long_history):
+    """1Y, 6M and 90D returned the identical ninety days, because the portfolio
+    replay behind this tab borrowed a constant meant for something else. Three
+    buttons, one answer, no error -- the failure nobody reports.
+    """
+    windows = {
+        days: _get(
+            long_history, mode="benchmark", target="gold_18k_gram", days=days
+        ).data["summary"]["window_days"]
+        for days in (365, 180, 90)
+    }
+
+    assert len(set(windows.values())) == 3, windows
+    assert windows[365] > windows[180] > windows[90]
+    # And each is the window that was asked for, not merely a different one.
+    for days, window in windows.items():
+        assert abs(window - days) <= 1, windows
+
+
+def test_a_benchmark_window_does_not_open_before_the_portfolio_did(compared):
+    """A year of a flat 100 line ahead of the first purchase is not history."""
+    data = _get(compared, mode="benchmark", target="gold_18k_gram", days=365).data
+
+    assert data["summary"]["window_days"] <= 65, data["summary"]
 
 
 # ----------------------------------------------------------------------

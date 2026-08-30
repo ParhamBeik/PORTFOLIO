@@ -947,6 +947,62 @@ def _accounts_have_buy_sell(accounts, asset_ids=None) -> bool:
     return qs.exists()
 
 
+def _walked_quantities(accounts, day_ends) -> dict:
+    """Non-house quantities on each of `day_ends`, from one ledger read.
+
+    The same backwards walk `holdings_as_of` does -- qty(t) = qty_now - buys
+    after t + sells after t -- but run once across the whole window instead of
+    re-reading the ledger for every day it is asked about. That per-day re-read
+    is why the net-worth replay carried a 90-day ceiling: the cost was two
+    queries per account per day, so a year-long window meant thousands of them,
+    and the comparison page's 1Y and 6M buttons were capped down to 90 days
+    rather than pay it. Walking the days newest-first makes the whole window one
+    pass over one query.
+
+    Houses are excluded exactly as they are there: a mark REPLACES the previous
+    one, so unwinding it additively would drive the price per square metre to
+    zero. The caller resolves them from `house_state_as_of` instead.
+    """
+    from portfolio.models import Holding, LedgerEntry
+
+    quantities: dict[str, Decimal] = {}
+    for holding in Holding.objects.filter(account__in=accounts).select_related("asset"):
+        if not holding.asset.is_house:
+            key = holding.asset.key
+            quantities[key] = quantities.get(key, Decimal("0")) + _q(holding.quantity)
+
+    moves = LedgerEntry.objects.filter(
+        account__in=accounts,
+        timestamp__gt=min(day_ends),
+        kind__in=[
+            LedgerEntry.Kind.OPENING_POSITION,
+            LedgerEntry.Kind.BUY,
+            LedgerEntry.Kind.SELL,
+        ],
+        asset__isnull=False,
+        asset__is_house=False,
+    ).select_related("asset").order_by("-timestamp")
+    moves = list(moves)
+
+    walked, cursor = {}, 0
+    for day_end in sorted(day_ends, reverse=True):
+        while cursor < len(moves) and moves[cursor].timestamp > day_end:
+            entry = moves[cursor]
+            key = entry.asset.key
+            adds = entry.kind in {
+                LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.BUY,
+            }
+            # A reversal carries the kind it undoes, so its effect on the walk is
+            # the mirror image. Same rule, same place, as `holdings_as_of`.
+            step = _q(entry.quantity)
+            quantities[key] = quantities.get(key, Decimal("0")) + (
+                -step if adds != (entry.reversal_of_id is not None) else step
+            )
+            cursor += 1
+        walked[day_end] = {k: v for k, v in quantities.items() if v > Decimal("0")}
+    return walked
+
+
 def compute_dynamic_net_worth_series(
     user, account=None, days: int = 30, *, only_hidden: bool = False,
     max_days: int | None = None,
@@ -1142,6 +1198,19 @@ def compute_dynamic_net_worth_series(
         else:
             liability_by_key[key] = liability_by_key.get(key, Decimal("0")) + l.amount_tomans
 
+    # Marks are "in force that calendar day", not at today's clock on that date.
+    # A purchase at 17:40 was missing from the 16:30 reading of Aug 9.
+    day_ends = [
+        timezone.make_aware(
+            dt.combine((now - timedelta(days=i)).date(), dtime.max),
+            timezone.get_current_timezone(),
+        )
+        for i in range(days - 1, -1, -1)
+    ]
+    walked_quantities = (
+        {} if constant_holdings else _walked_quantities(accounts, day_ends)
+    )
+
     series = []
     # Yesterday's quantities, carried so each day can also be valued as if the
     # book had not changed. See `total_ex_flows` below.
@@ -1180,12 +1249,7 @@ def compute_dynamic_net_worth_series(
         # date is the mark that was in force, not a market print.
         approximated = False
 
-        # Marks are "in force that calendar day", not at today's clock on that
-        # date. A purchase at 17:40 was missing from the 16:30 reading of Aug 9.
-        day_end = timezone.make_aware(
-            dt.combine(target_date.date(), dtime.max),
-            timezone.get_current_timezone(),
-        )
+        day_end = day_ends[days - 1 - i]
         house_areas = {}
         if constant_holdings:
             # Today's house qty is the current mark, not history. Painting it
@@ -1201,13 +1265,18 @@ def compute_dynamic_net_worth_series(
                     day_holdings[k] = day_holdings.get(k, Decimal("0")) + v
                 house_areas.update(area_map)
         else:
-            day_holdings = {}
+            # Precomputed for the whole window (see `_walked_quantities`), and
+            # houses resolved from the preloaded marks rather than from a second
+            # per-day query inside `holdings_as_of` -- this branch was already
+            # calling `house_state_as_of` for the areas, so the marks were being
+            # read twice a day to produce the same answer.
+            day_holdings = dict(walked_quantities[day_end])
             for acc in accounts:
-                for k, v in holdings_as_of(user, acc, day_end).items():
-                    day_holdings[k] = day_holdings.get(k, Decimal("0")) + v
-                _qty, area_map = house_state_as_of(
+                qty_map, area_map = house_state_as_of(
                     house_histories.get(acc.pk, []), day_end
                 )
+                for k, v in qty_map.items():
+                    day_holdings[k] = day_holdings.get(k, Decimal("0")) + v
                 house_areas.update(area_map)
 
         for key, asset in assets.items():
