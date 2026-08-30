@@ -18,6 +18,13 @@ numpy==1.26.4
 pandas==2.2.2
 scipy==1.13.1
 cvxpy==1.5.2
+# cvxpy's solvers are transitive but must be pinned too, because they ship
+# their OWN bundled OpenBLAS and that is exactly what took the live worker
+# down with a SIGILL crash-loop. scs 3.3.0 (published 2026-08-30 16:06 UTC)
+# hard-crashes the optimization suite -- the process dies mid-run with no
+# traceback, pytest exits 2 -- and it reached CI the same afternoon purely
+# because nothing held the version. 3.2.11 is what production runs.
+scs==3.2.11
 scikit-learn==1.5.0
 jdatetime==5.2.0
 openpyxl==3.1.5
