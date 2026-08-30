@@ -16,7 +16,7 @@ import {
   toneClass,
   toneFor,
 } from "../components/ui.jsx";
-import { humanize, pct, perfLabel, signedPct, toman } from "../format.js";
+import { humanize, money, moneyCompact, pct, perfLabel, signedPct } from "../format.js";
 import { useApi } from "../useApi.js";
 
 const RANGES = [
@@ -54,14 +54,17 @@ function chartPortfolios(accounts) {
 
 async function fetchPortfolioHistory(accounts, days, basis) {
   const dayParam = days === "all" ? "all" : Number(days);
-  const rows = await Promise.all(
-    accounts.map(async (account) => ({
-      id: account.id,
-      name: account.name,
-      points: (await snapshots(dayParam, account.id, basis)).series || [],
-    }))
+  const replies = await Promise.all(
+    accounts.map(async (account) => {
+      const reply = await snapshots(dayParam, account.id, basis);
+      return { id: account.id, name: account.name, points: reply.series || [], basis: reply.basis };
+    })
   );
-  return mergeHistory(rows);
+  // Every reply says which basis it could actually apply; they agree, so the
+  // first one that answered speaks for the merged chart. Without it the axis
+  // draws converted dollars against a Toman scale.
+  const applied = replies.find((r) => r.basis)?.basis || basis;
+  return { ...mergeHistory(replies), basis: applied };
 }
 
 function mergeHistory(rows) {
@@ -193,6 +196,8 @@ function HistoryCharts({ accounts, basis }) {
                   data={chart.values}
                   longTicks={longTicks}
                   label="Portfolio values over time"
+                  formatValue={(v) => money(v, history.basis)}
+                  formatAxis={(v) => moneyCompact(v, history.basis)}
                 />
               </div>
             </div>
@@ -274,7 +279,7 @@ function PerformanceTable({ accounts, basis }) {
   );
 }
 
-function AssetMix({ accounts }) {
+function AssetMix({ accounts, basis }) {
   if (!accounts.length) return null;
   return (
     <Card title="Asset class mix by portfolio" testId="breakdown-asset-mix">
@@ -283,8 +288,8 @@ function AssetMix({ accounts }) {
           const groups = groupByClass(account.items);
           if (!groups.length) return null;
           return (
-            <Disclosure key={account.id} summary={`${account.name} · ${toman(account.total)}`} testId={`breakdown-mix-${account.id}`}>
-              <Donut data={groups} height={220} testId={`breakdown-donut-${account.id}`} />
+            <Disclosure key={account.id} summary={`${account.name} · ${money(account.total, basis)}`} testId={`breakdown-mix-${account.id}`}>
+              <Donut data={groups} height={220} valueFormat={(v) => money(v, basis)} testId={`breakdown-donut-${account.id}`} />
             </Disclosure>
           );
         })}
@@ -307,6 +312,10 @@ export default function Family() {
         {(data) => {
           const rows = (data.accounts || []).sort((a, b) => Number(b.total) - Number(a.total));
           const grand = Number(data.total) || 0;
+          // The server converts these figures and says which basis it managed to
+          // apply, which is not always the one asked for -- with no USD rate it
+          // answers in Toman. Trusting the request would label Toman as dollars.
+          const rowBasis = data.basis || basis;
           if (!rows.length) {
             return <Empty testId="breakdown-empty">Add at least one portfolio to see the breakdown.</Empty>;
           }
@@ -316,7 +325,7 @@ export default function Family() {
           return (
             <div className="space-y-5">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                <StatTile label="Combined total" value={toman(grand)} testId="breakdown-total" />
+                <StatTile label="Combined total" value={money(grand, rowBasis)} testId="breakdown-total" />
                 <StatTile label="Portfolios" value={String(rows.length)} testId="breakdown-count" />
                 <StatTile
                   label="Largest share"
@@ -327,7 +336,7 @@ export default function Family() {
 
               <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
                 <Card title="Current allocation" testId="breakdown-allocation">
-                  <Donut data={shareDonut} testId="breakdown-allocation-donut" />
+                  <Donut data={shareDonut} valueFormat={(v) => money(v, rowBasis)} testId="breakdown-allocation-donut" />
                 </Card>
                 <Card title="Portfolio summary" testId="breakdown-table-card">
                   <Table
@@ -336,7 +345,7 @@ export default function Family() {
                     rows={rows}
                     columns={[
                       { key: "name", header: "Portfolio", render: (r) => r.name },
-                      { key: "total", header: "Net worth", align: "right", render: (r) => toman(r.total) },
+                      { key: "total", header: "Net worth", align: "right", render: (r) => money(r.total, rowBasis) },
                       {
                         key: "share",
                         header: "Share",
@@ -361,7 +370,7 @@ export default function Family() {
 
               <HistoryCharts accounts={rows} basis={basis} />
               <PerformanceTable accounts={rows} basis={basis} />
-              <AssetMix accounts={rows} />
+              <AssetMix accounts={rows} basis={rowBasis} />
             </div>
           );
         }}

@@ -49,7 +49,22 @@ export async function login(page, { email, password } = e2eCreds() || {}) {
   return "ok";
 }
 
-/** Skip the test unless login succeeds. */
+/**
+ * Skip the test if this run was never set up to sign in; fail it if it was.
+ *
+ * Skipping a failed login was hiding the suite from itself. The API throttles
+ * anonymous requests (30/min by default) and every spec signs in from scratch,
+ * so roughly a third of the way through a full run the logins start coming back
+ * 429 and every remaining test skips with "login failed". The run then reports
+ * 9 passed, 0 failed, exit 0 — while Ops, Optimal, Risk, Universe, the routing
+ * aliases and the add-transaction dialog were never opened at all. Raising
+ * ANON_THROTTLE for the run turns those 18 skips into 20 passes, which is the
+ * measure of how much was going unwatched.
+ *
+ * So: no credentials is a legitimate skip — that run was never asked to sign in.
+ * Credentials that were supplied and did not work is a failure, because it means
+ * the specs after it are not testing anything and should say so.
+ */
 export async function requireLogin(page, test) {
   if (!(await appReachable(page.request))) {
     test.skip(true, "frontend not reachable at baseURL");
@@ -60,7 +75,11 @@ export async function requireLogin(page, test) {
   }
   const result = await login(page, creds);
   if (result !== "ok") {
-    test.skip(true, `login failed (${result}) — backend down or bad credentials`);
+    throw new Error(
+      `login failed (${result}) with E2E_EMAIL set. The backend may be down, the ` +
+      `credentials wrong, or the anonymous rate limit exhausted by earlier specs ` +
+      `— raise ANON_THROTTLE for the run (see playwright.config.js).`
+    );
   }
 }
 

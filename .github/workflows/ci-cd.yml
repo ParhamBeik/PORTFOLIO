@@ -76,6 +76,7 @@ jobs:
           cache: npm
           cache-dependency-path: portfolio-saas/frontend/package-lock.json
       - run: npm ci
+      - run: npm run test:unit
       - run: npm run build
 
   # Reports whether deployment is configured yet. Without this the deploy job

@@ -6,7 +6,7 @@ from django.core.cache import cache
 from django.db.models import Count, Max, Sum
 from django.utils import timezone
 
-from marketdata.currency import holding_value_to_toman
+from marketdata.currency import holding_value_to_toman, is_tse_priced
 
 from ..models import LedgerEntry
 from .deflator import cpi_for_date, normalize_basis
@@ -151,6 +151,14 @@ def _position_metrics(account) -> dict:
             "quantity_step": asset.quantity_step,
             "cost_basis_known": not unknown_basis,
             "average_cost_tomans": str(average_cost) if not unknown_basis else None,
+            # ...which, despite the field name, is Rial for a TSE share. The
+            # three money fields under it are products and have been divided;
+            # this one is a unit price and has not. Without the unit travelling
+            # beside it the client can only guess, and guessing "Toman" prints a
+            # 46,348-Rial average cost as "46,348 T" -- ten times what was paid,
+            # one column away from a cost basis that IS Toman and therefore does
+            # not reconcile against it. Same declaration the holdings rows carry.
+            "average_cost_currency": "rial" if is_tse_priced(asset) else "toman",
             "total_cost_basis_tomans": str(
                 holding_value_to_toman(asset, average_cost * quantity)
             ) if not unknown_basis else None,

@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { addHolding, createAccount, listAssets } from "../api.js";
 import { assetLabel } from "../format.js";
+import { QUANTITY_MIN, quantityError, validQuantity } from "../quantity.js";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { useApi } from "../useApi.js";
 import { Async, Button, Card, ErrorState, Input, Select } from "../components/ui.jsx";
@@ -23,13 +24,25 @@ export default function Onboarding() {
   // Reaching this route with an account already present means the account is
   // simply empty — reuse it rather than stacking a second one.
   const existing = accounts[0];
+  // The account survives a failed holding. Only the successful path reloads the
+  // portfolio context, so on a rejected quantity `accounts` was still empty on
+  // the retry and the form opened a SECOND portfolio; three attempts left three.
+  const created = useRef(null);
 
   const submit = async (e) => {
     e.preventDefault();
+    const quantityMessage = quantityError(quantity);
+    if (quantityMessage) {
+      setError(new Error(quantityMessage));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      const account = existing || (await createAccount(name.trim() || "My portfolio"));
+      const account =
+        existing ||
+        created.current ||
+        (created.current = await createAccount(name.trim() || "My portfolio"));
       await addHolding(account.id, assetKey, quantity);
       setActive(account.id);
       await reload();
@@ -92,11 +105,18 @@ export default function Onboarding() {
               className="w-full"
               type="number"
               step="any"
-              min="0"
+              min={QUANTITY_MIN}
               value={quantity}
               onChange={(e) => setQuantity(e.target.value)}
               required
             />
+            {/* Say why, rather than leaving a dead Submit button and no reason
+                for it — the same complaint the add-transaction wizard answered. */}
+            {quantityError(quantity) && (
+              <span className="mt-1 block text-xs text-critical" data-testid="onboarding-quantity-error">
+                {quantityError(quantity)}
+              </span>
+            )}
           </label>
 
           {error && <ErrorState error={error} testId="onboarding-error" />}
@@ -105,7 +125,7 @@ export default function Onboarding() {
             variant="primary"
             type="submit"
             data-testid="onboarding-submit"
-            disabled={busy || !assetKey || !quantity}
+            disabled={busy || !assetKey || !validQuantity(quantity)}
             className="w-full"
           >
             {busy ? "Adding…" : "Add holding"}
