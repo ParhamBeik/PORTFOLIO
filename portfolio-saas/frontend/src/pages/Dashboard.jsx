@@ -615,22 +615,39 @@ function isManualPriceEditable(row) {
   );
 }
 
+/**
+ * The stored decimal written as the shortest string meaning the same number.
+ *
+ * The API serializes Decimals verbatim, so four coins arrive as "4.000000" and
+ * seeded the editor with six meaningless decimals on a row whose spinner steps
+ * by one — the box contradicted the column beside it, which printed "4".
+ * Trimming is string-level on purpose: sending a large Toman price through
+ * Number() to tidy it is how precision gets lost.
+ */
+const trimZeros = (v) => {
+  const s = String(v);
+  return s.includes(".") ? s.replace(/\.?0+$/, "") : s;
+};
+
 // For a property `qty` is the price per square meter in millions of Toman — the
 // column the API stores it in — and `area` is its size. Those are the two numbers
 // a property is described by; the raw `quantity` is never shown on its own.
-function draftForRow(row, drafts) {
-  const key = holdingsRowKey(row);
-  return drafts[key] ?? {
-    qty: String(row.quantity ?? ""),
-    price: row.unit_price != null && row.unit_price !== "" ? String(row.unit_price) : "",
-    area: row.area_sqm != null ? String(row.area_sqm) : "",
+function originalDraft(row) {
+  return {
+    qty: row.quantity == null ? "" : trimZeros(row.quantity),
+    price: row.unit_price != null && row.unit_price !== "" ? trimZeros(row.unit_price) : "",
+    area: row.area_sqm != null ? trimZeros(row.area_sqm) : "",
   };
 }
 
+function draftForRow(row, drafts) {
+  return drafts[holdingsRowKey(row)] ?? originalDraft(row);
+}
+
 function hasDraftChanges(row, draft) {
-  const origQty = String(row.quantity ?? "");
-  const origPrice = row.unit_price != null && row.unit_price !== "" ? String(row.unit_price) : "";
-  const origArea = row.area_sqm != null ? String(row.area_sqm) : "";
+  // Compared against the same trimmed strings the editor was seeded with, or
+  // opening the editor would look like an unsaved change on every row.
+  const { qty: origQty, price: origPrice, area: origArea } = originalDraft(row);
   if (draft.qty.trim() !== origQty) return true;
   if (row.is_house) return draft.area.trim() !== origArea;
   return isManualPriceEditable(row) && draft.price.trim() !== origPrice;

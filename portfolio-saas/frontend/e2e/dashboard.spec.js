@@ -157,6 +157,9 @@ test.describe("dashboard", () => {
       const step = await qtyEdit.getAttribute("step");
       expect.soft(step, "quantity box declares a step").not.toBe("any");
       if (step === "1") {
+        // Seeded from the API's Decimal string, so a holding of four coins
+        // opened the editor reading "4.000000" beside a column printing "4".
+        expect.soft(await qtyEdit.inputValue()).not.toMatch(/\.\d*0$/);
         const before = Number(await qtyEdit.inputValue());
         await qtyEdit.press("ArrowUp");
         const after = Number(await qtyEdit.inputValue());
