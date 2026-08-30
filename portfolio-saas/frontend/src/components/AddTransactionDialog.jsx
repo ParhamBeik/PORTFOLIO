@@ -33,6 +33,7 @@ import {
 } from "./ui.jsx";
 import { area, catalogLabel, isWholeUnit, nativeName, perSqm, toman } from "../format.js";
 import { jalaliLabel, toJalali } from "../jalali.js";
+import { QUANTITY_MIN, positive, quantityError, validQuantity } from "../quantity.js";
 
 // Mirrors SEARCH_LIMIT in backend/portfolio/services/catalog.py. Only used to
 // decide whether to tell the user the list was cut short.
@@ -123,34 +124,6 @@ function Step({ n, of, title, children }) {
   );
 }
 
-const positive = (v) => v !== "" && Number(v) > 0;
-
-// What the server will actually take: `DecimalField(max_digits=20,
-// decimal_places=6, min_value=0.000001)`. The wizard only asked for "> 0", so a
-// quantity of 0.0000001 passed every step, reached the review screen and was
-// refused at Save -- the same shape as the future date that used to be caught
-// only by the server. Stated here as one rule so the two cannot drift.
-const QUANTITY_MIN = 0.000001;
-const QUANTITY_MAX = 1e14; // max_digits 20 - decimal_places 6
-
-const quantityError = (v, step) => {
-  if (v === "") return "";
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return "Enter a quantity greater than zero.";
-  // Caught here rather than rounded on save, for the same reason as the holdings
-  // editor: a share, a coin and a banknote are counted, and half of one is not a
-  // thing the market can settle. `quantity_step` is the server's declaration of
-  // which units divide (see Asset.quantity_step).
-  if (isWholeUnit(step) && !Number.isInteger(n)) {
-    return "This one is counted in whole units — enter a whole number.";
-  }
-  if (n < QUANTITY_MIN) return `The smallest quantity we record is ${QUANTITY_MIN}.`;
-  if (n >= QUANTITY_MAX) return "That quantity is larger than we can record.";
-  if ((String(v).split(".")[1] || "").length > 6) return "At most 6 decimal places.";
-  return "";
-};
-
-const validQuantity = (v, step) => positive(v) && !quantityError(v, step);
 
 export default function AddTransactionDialog({
   accountId,
@@ -309,7 +282,7 @@ export default function AddTransactionDialog({
         return !!form.name.trim() && positive(form.areaSqm) && positive(form.pricePerSqm);
       }
       if (asset?.is_house) return positive(form.pricePerSqm);
-      return validQuantity(form.quantity, asset?.quantity_step);
+      return validQuantity(form.quantity, { step: asset?.quantity_step });
     }
     return true;
   };
@@ -645,12 +618,12 @@ export default function AddTransactionDialog({
                     onChange={set("quantity")}
                     data-testid="add-transaction-quantity"
                   />
-                  {quantityError(form.quantity, asset?.quantity_step) && (
+                  {quantityError(form.quantity, { step: asset?.quantity_step }) && (
                     <p
                       className="mt-1 text-xs text-critical"
                       data-testid="add-transaction-quantity-error"
                     >
-                      {quantityError(form.quantity, asset?.quantity_step)}
+                      {quantityError(form.quantity, { step: asset?.quantity_step })}
                     </p>
                   )}
                 </Field>

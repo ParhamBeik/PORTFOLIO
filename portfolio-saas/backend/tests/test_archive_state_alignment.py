@@ -7,34 +7,43 @@ from portfolio.models import Asset
 
 @pytest.mark.django_db
 def test_tracked_brs_symbols_excludes_crypto_and_commodities(db):
-    """tracked_brs_symbols should only return gold and currency instruments, ignoring crypto/commodities."""
+    """tracked_brs_symbols should only return gold and currency instruments, ignoring crypto/commodities.
+
+    Currency is spelled the way `sync_provider_catalog` actually spells it: the
+    GOLD category with a "currency" provider_group. Asserting on a category of
+    "currency" passes while testing nothing -- no such category exists, so the
+    row it builds could never come out of the real catalog, and the filter it is
+    meant to prove could drop every USD/EUR row and still be green.
+    """
     # Create instruments in various categories
     MarketInstrument.objects.create(
         source="brs",
         symbol="IR_COIN_EMAMI",
         name="سکه امامی",
-        category="gold",
+        category=MarketInstrument.Category.GOLD,
+        provider_group="gold",
         eligible=True,
     )
     MarketInstrument.objects.create(
         source="brs",
         symbol="USD",
         name="دلار",
-        category="currency",
+        category=MarketInstrument.Category.GOLD,
+        provider_group="currency",
         eligible=True,
     )
     MarketInstrument.objects.create(
         source="brs",
         symbol="AI Analysis Token",
         name="ای‌آی آنالیز توکن",
-        category="crypto",
+        category=MarketInstrument.Category.CRYPTO,
         eligible=True,
     )
     MarketInstrument.objects.create(
         source="brs",
         symbol="GOLD_OUNCE_GLOBAL",
         name="انس جهانی",
-        category="commodity",
+        category=MarketInstrument.Category.COMMODITY,
         eligible=True,
     )
 
@@ -52,14 +61,14 @@ def test_ensure_archive_states_does_not_assign_crypto_to_gold_daily(db):
         source="brs",
         symbol="IR_COIN_HALF",
         name="نیم سکه",
-        category="gold",
+        category=MarketInstrument.Category.GOLD,
         eligible=True,
     )
     MarketInstrument.objects.create(
         source="brs",
         symbol="ARCS",
         name="ارکس",
-        category="crypto",
+        category=MarketInstrument.Category.CRYPTO,
         eligible=True,
     )
 

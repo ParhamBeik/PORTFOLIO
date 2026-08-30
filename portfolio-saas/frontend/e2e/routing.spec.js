@@ -1,23 +1,14 @@
 import { test, expect } from "@playwright/test";
-import { appReachable, e2eCreds, login } from "./helpers.js";
+import { requireLogin } from "./helpers.js";
 
 test.describe("routing aliases", () => {
-  test.beforeEach(async ({ request }) => {
-    if (!(await appReachable(request))) {
-      test.skip(true, "frontend not reachable at baseURL");
-    }
+  // Was an inline copy of `requireLogin` that skipped on a failed sign-in, so
+  // this spec reported success without ever visiting either alias.
+  test.beforeEach(async ({ page }) => {
+    await requireLogin(page, test);
   });
 
   test("route aliases redirect correctly when signed in", async ({ page }) => {
-    const creds = e2eCreds();
-    if (!creds) {
-      test.skip(true, "set E2E_EMAIL and E2E_PASSWORD for routing test");
-    }
-    const result = await login(page, creds);
-    if (result !== "ok") {
-      test.skip(true, `login failed (${result})`);
-    }
-
     // Direct navigation to /breakdown should alias to /family
     await page.goto("/breakdown");
     await page.waitForURL("**/family");

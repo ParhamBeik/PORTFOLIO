@@ -200,6 +200,12 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
     # A property's `quantity` is a price per square meter, not a count, so the
     # client has to know which convention to render before it prints the number.
     is_house = serializers.BooleanField(source="asset.is_house", read_only=True, default=False)
+    # Whether one of this asset divides, so the edit dialog asks for a whole
+    # number where a whole number is the only answer. "any" for a cash move,
+    # which has no asset to have a unit.
+    quantity_step = serializers.CharField(
+        source="asset.quantity_step", read_only=True, default="any"
+    )
     # `unit_price_tomans` is misnamed for TSE rows: the stored quote is Rial, and
     # `amount_tomans`/`pnl_tomans` are Toman because the division lands on the
     # product. Say which currency the price is in so the client stops suffixing
@@ -216,7 +222,7 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
         fields = (
             "id", "kind", "asset_key", "asset_name", "asset_name_fa", "label",
             "asset_symbol",
-            "is_house", "quantity", "unit_price_tomans", "unit_price_currency",
+            "is_house", "quantity", "quantity_step", "unit_price_tomans", "unit_price_currency",
             "amount_tomans", "value_tomans", "area_sqm", "mortgage_deduction_tomans",
             "occurred_at", "source", "note", "external_id", "reversal_of",
             "created_at", "pnl_tomans", "pnl_kind",

@@ -7,6 +7,13 @@ import { defineConfig, devices } from "@playwright/test";
  *   E2E_EMAIL=you@example.com
  *   E2E_PASSWORD=...
  *
+ * The API throttles anonymous requests (30/min) and every spec signs in from
+ * scratch, so a full run exhausts that allowance about a third of the way
+ * through and the rest fail to sign in. Give the backend a headroom the suite
+ * cannot hit, or most of it never runs:
+ *
+ *   ANON_THROTTLE=10000/min USER_THROTTLE=10000/min   (on the Django process)
+ *
  * Optional:
  *   VITE_PROXY_TARGET / VITE_API_URL — Django API (default http://localhost:8000)
  *
