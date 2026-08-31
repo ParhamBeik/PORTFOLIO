@@ -7,6 +7,55 @@ Probed from the production VPS on 2026-08-31. Companion to
 > has now been measured from the server that would actually make the calls, and **two of its
 > conclusions were wrong**. They are corrected in place and called out where they mattered.
 
+## Status: shipped
+
+Gold, FX and crypto are **off BrsApi**. `marketdata/sources/` holds TGJU, Wallex and
+Nobitex clients; `portfolio/live/fetcher.py` fetches them alongside BrsApi and
+`extractor._build_lookup` prefers the direct row. Stocks and Codal are unchanged, because
+they cannot be reached — see the egress section.
+
+| Lane | Was | Now | Metered? |
+|---|---|---|---|
+| Gold / coin / FX | `Market/Gold_Currency*.php` | **TGJU** | no |
+| Crypto | `Market/Cryptocurrency.php` | **Wallex** (+ Nobitex cross-check) | no |
+| Stocks | `Tsetmc/*.php` | unchanged — **blocked** | yes |
+| Codal | `Codal/Announcement.php` | unchanged — **blocked** | yes |
+
+Verify on any host with `python manage.py check_egress [--compare] [--verify-tsetmc]`.
+
+### The discovery that made the gold/FX swap trivial
+
+**BrsApi's gold/currency feed is TGJU, resold.** Compared against what production was
+serving at the same instant, five of eight assets matched *to the rial*:
+
+| Asset | BrsApi (Toman) | TGJU (Rial ÷ 10) | Δ |
+|---|---|---|---|
+| `emami_coin` | 223,510,000 | 223,510,000 | **exact** |
+| `half_coin` | 114,000,000 | 114,000,000 | **exact** |
+| `quarter_coin` | 61,500,000 | 61,500,000 | **exact** |
+| `one_gram_coin` | 32,000,000 | 32,000,000 | **exact** |
+| `euro_cash` | 243,980 | 243,980 | **exact** |
+| `usd_cash` | 209,300 | 209,295 | −0.002% |
+| `gold_18k_gram` | 22,220,100 | 22,183,800 | −0.16% |
+| `usdt_irt` | 209,053 | 209,643 | +0.28% |
+
+The three inexact rows differ by one refresh interval, not by content. This is not a
+substitute feed at reduced quality — it is the same feed, one hop earlier, unmetered.
+
+### Two traps in the new sources, both encoded in code rather than trusted to prose
+
+**TGJU declares no unit.** Every other provider sends a unit string, and
+`currency.to_toman` is built to trust it — the project rule is that currency is *declared*,
+never inferred from magnitude. TGJU breaks that, so `tgju.SLUG_UNITS` is a hand-verified
+map. A magnitude heuristic cannot distinguish a unit error from a price move, and Nobitex
+quotes Rial where Wallex quotes Toman, so the two differ by exactly 10× on the same coin.
+
+**TGJU serves dead slugs alongside live ones, with nothing marking which.** `usdt-irr` —
+the obvious slug to reach for — still returns **273,000, stamped 2020-11-11**. Choosing it
+would have valued every USDT holding at roughly a sixth. The live one is
+`crypto-tether-irr`. `MAX_QUOTE_AGE` is therefore load-bearing, not hygiene, and
+`tests/test_direct_sources.py` pins it against the real captured payload.
+
 ## The finding that reorders everything: the VPS is in Frankfurt
 
 ```
