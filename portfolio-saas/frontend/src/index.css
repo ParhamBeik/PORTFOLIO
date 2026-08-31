@@ -25,11 +25,35 @@
   --c-accent: #3987e5;
 
   /* Status. Reserved — never reused as a series color, always paired with a
-   * label or icon so state is not carried by hue alone. */
+   * label or icon so state is not carried by hue alone.
+   *
+   * These are FILL/BORDER values. They clear the 3:1 bar that applies to a
+   * large colored area; they do NOT all clear the 4.5:1 bar that applies to
+   * small text, and for a while they were used for both. `Delta` colors every
+   * signed number in the app through `toneClass`, so in light mode every profit
+   * figure was 3.15:1 and in dark mode every loss figure was 4.02:1.
+   *
+   * The `-text` twins below are the same hue and saturation with lightness
+   * solved so the WORST of the three surfaces (bg, panel, panel-2) clears 4.6:1
+   * with a margin. Use `--c-*-text` for glyphs, `--c-*` for fills, tints and
+   * borders. Nothing should use one where the other belongs. */
   --c-good: #0ca30c;
   --c-warn: #fab219;
   --c-serious: #ec835a;
   --c-critical: #d03b3b;
+
+  --c-good-text: #0ca30c;
+  --c-warn-text: #fab219;
+  --c-serious-text: #ec835a;
+  --c-critical-text: #d96262;
+  --c-accent-text: #3c89e5;
+
+  /* Solid fills that carry WHITE text — the primary and success buttons, and
+   * the active tab. White on the display accent was 3.64:1, which is the main
+   * call to action in the product and the first thing Lighthouse audits on the
+   * sign-in page. */
+  --c-accent-fill: #1d73dc;
+  --c-good-fill: #0a880a;
 
   --c-grid: #2c313c;
   --c-axis: #3a4150;
@@ -61,6 +85,17 @@
     --c-serious: #ec835a;
     --c-critical: #d03b3b;
 
+    /* Light mode is where the text variants matter most: amber on white is
+     * 1.72:1, which is barely a color at all. Darkened, same hue. */
+    --c-good-text: #097f09;
+    --c-warn-text: #926403;
+    --c-serious-text: #bf4516;
+    --c-critical-text: #cd3131;
+    --c-accent-text: #266dc4;
+
+    --c-accent-fill: #1d73dc;
+    --c-good-fill: #0a880a;
+
     --c-grid: #e6eaef;
     --c-axis: #c3cad3;
 
@@ -83,10 +118,16 @@
   --color-text: var(--c-text);
   --color-muted: var(--c-muted);
   --color-accent: var(--c-accent);
-  --color-good: var(--c-good);
-  --color-warn: var(--c-warn);
-  --color-serious: var(--c-serious);
-  --color-critical: var(--c-critical);
+  /* `bg-accent-fill` / `bg-good-fill` are the only two that carry white text. */
+  --color-accent-fill: var(--c-accent-fill);
+  --color-good-fill: var(--c-good-fill);
+  /* The status utilities (`text-good`, `text-critical`, …) are only ever used
+   * on glyphs, so they resolve to the text-safe twins. A fill still reaches the
+   * display value through `var(--c-good)` directly. */
+  --color-good: var(--c-good-text);
+  --color-warn: var(--c-warn-text);
+  --color-serious: var(--c-serious-text);
+  --color-critical: var(--c-critical-text);
 
   --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
 }

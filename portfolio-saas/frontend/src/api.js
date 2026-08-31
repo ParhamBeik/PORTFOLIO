@@ -6,15 +6,55 @@ export const SESSION_EXPIRED_EVENT = "lattice:session-expired";
 let accessToken = null;
 let refreshPromise = null;
 
+// Whether this browser has ever held a session, so a first-time visitor does not
+// pay for a refresh that can only fail.
+//
+// The refresh cookie is httpOnly and therefore unreadable, so asking the server
+// is the only way to KNOW -- but a signed-out visitor does not need to know. Two
+// requests fired on every anonymous page load, both answering 401, and the
+// browser logs each one as a console error: `/api/auth/csrf/` then
+// `/api/token/refresh/`. That is the same class of defect the `restoreSession`
+// comment in App.jsx already fixed once ("a second red line in the console of
+// every signed-out visitor") -- these are the remaining two, and they are what
+// held Lighthouse's Best Practices at 0.96.
+//
+// Worst case this hint is missing while the cookie is still valid (the user
+// cleared site data), and they sign in again. That is strictly better than two
+// guaranteed failures on every first visit.
+const SESSION_HINT = "lattice_session";
+
+export function hasSessionHint() {
+  try {
+    return localStorage.getItem(SESSION_HINT) === "1";
+  } catch {
+    // Private mode / storage disabled: fall back to asking the server, which is
+    // the behaviour this replaced and is still correct, just chattier.
+    return true;
+  }
+}
+
+function setSessionHint(on) {
+  try {
+    if (on) localStorage.setItem(SESSION_HINT, "1");
+    else localStorage.removeItem(SESSION_HINT);
+  } catch {
+    /* storage unavailable; hasSessionHint() already fails open */
+  }
+}
+
 export const auth = {
   get token() {
     return accessToken;
   },
   set tokens({ access }) {
     accessToken = access || null;
+    // Set on login AND on every successful refresh, which is the one place both
+    // paths already converge.
+    setSessionHint(!!access);
   },
   logout() {
     accessToken = null;
+    setSessionHint(false);
   },
 };
 
@@ -62,7 +102,10 @@ async function refreshAccessToken() {
   return refreshPromise;
 }
 
-export const restoreSession = () => refreshAccessToken();
+// Resolves null without touching the network when this browser has never held a
+// session. `App.jsx` already treats null as "anonymous", which is a normal state.
+export const restoreSession = () =>
+  (hasSessionHint() ? refreshAccessToken() : Promise.resolve(null));
 
 export async function logoutSession(allDevices = false) {
   try {

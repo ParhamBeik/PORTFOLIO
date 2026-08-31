@@ -200,7 +200,7 @@ function GapModule({ valuation: v, target, labelFor }) {
         action={
           <Link
             to="/"
-            className="inline-block rounded-md border border-transparent bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90"
+            className="inline-block rounded-md border border-transparent bg-[var(--c-accent-fill)] px-3 py-1.5 text-sm font-medium text-white hover:opacity-90"
           >
             Go to Portfolio
           </Link>

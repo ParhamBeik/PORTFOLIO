@@ -166,7 +166,7 @@ export default function Auth({ onAuthed }) {
             data-testid="auth-toggle-login"
             onClick={() => switchMode("login")}
             className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
-              mode === "login" ? "bg-accent text-white" : "text-muted hover:text-text"
+              mode === "login" ? "bg-[var(--c-accent-fill)] text-white" : "text-muted hover:text-text"
             }`}
           >
             Sign in
@@ -178,7 +178,7 @@ export default function Auth({ onAuthed }) {
             data-testid="auth-toggle-register"
             onClick={() => switchMode("signup")}
             className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
-              mode === "signup" ? "bg-accent text-white" : "text-muted hover:text-text"
+              mode === "signup" ? "bg-[var(--c-accent-fill)] text-white" : "text-muted hover:text-text"
             }`}
           >
             Create account
@@ -190,7 +190,7 @@ export default function Auth({ onAuthed }) {
             data-testid="auth-error-banner"
             role="alert"
             aria-live="polite"
-            className="mb-4 rounded-lg border border-[var(--c-critical)]/40 bg-[var(--c-critical)]/10 px-4 py-3 text-sm text-[var(--c-critical)]"
+            className="mb-4 rounded-lg border border-[var(--c-critical)]/40 bg-[var(--c-critical)]/10 px-4 py-3 text-sm text-[var(--c-critical-text)]"
           >
             {error}
           </div>
@@ -200,7 +200,7 @@ export default function Auth({ onAuthed }) {
           <div
             data-testid="auth-registration-closed"
             role="status"
-            className="mb-4 rounded-lg border border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 px-4 py-3 text-sm text-[var(--c-warn)]"
+            className="mb-4 rounded-lg border border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 px-4 py-3 text-sm text-[var(--c-warn-text)]"
           >
             New memberships are currently closed. Existing users can still sign in.
           </div>
@@ -214,7 +214,7 @@ export default function Auth({ onAuthed }) {
             {email && (
               <span
                 className={`text-xs font-medium ${
-                  emailValid ? "text-[var(--c-good)]" : "text-[var(--c-critical)]"
+                  emailValid ? "text-[var(--c-good-text)]" : "text-[var(--c-critical-text)]"
                 }`}
               >
                 {emailValid ? "✓ Valid" : "Invalid"}
@@ -234,7 +234,7 @@ export default function Auth({ onAuthed }) {
             className="w-full"
           />
           {fieldError.email && (
-            <p className="mt-1 text-xs text-[var(--c-critical)]">{fieldError.email}</p>
+            <p className="mt-1 text-xs text-[var(--c-critical-text)]">{fieldError.email}</p>
           )}
         </div>
 
@@ -273,7 +273,7 @@ export default function Auth({ onAuthed }) {
             </Button>
           </div>
           {fieldError.password && (
-            <p className="mt-1 text-xs text-[var(--c-critical)]">{fieldError.password}</p>
+            <p className="mt-1 text-xs text-[var(--c-critical-text)]">{fieldError.password}</p>
           )}
           {registering && password && (
             <div data-testid="auth-strength-meter" className="mt-2 h-1 overflow-hidden rounded-full bg-panel-2">
@@ -294,7 +294,7 @@ export default function Auth({ onAuthed }) {
               {confirmPassword && (
                 <span
                   className={`text-xs font-medium ${
-                    password === confirmPassword ? "text-[var(--c-good)]" : "text-[var(--c-critical)]"
+                    password === confirmPassword ? "text-[var(--c-good-text)]" : "text-[var(--c-critical-text)]"
                   }`}
                 >
                   {password === confirmPassword ? "✓ Match" : "Mismatch"}
@@ -332,7 +332,7 @@ export default function Auth({ onAuthed }) {
               {checks.map((c) => (
                 <li
                   key={c.id}
-                  className={`flex items-center gap-2 ${c.ok ? "text-[var(--c-good)]" : "text-muted"}`}
+                  className={`flex items-center gap-2 ${c.ok ? "text-[var(--c-good-text)]" : "text-muted"}`}
                 >
                   <span>{c.ok ? "✓" : "○"}</span>
                   <span>{c.label}</span>

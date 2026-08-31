@@ -1,0 +1,17 @@
+# Everything except the marketing/legal surface is behind a JWT, so there is
+# nothing for a crawler to index there and a fetch only ever returns the sign-in
+# shell. Saying so explicitly is more honest than letting crawlers discover it,
+# and Lighthouse's SEO audit wants a valid robots.txt either way.
+User-agent: *
+Allow: /$
+Allow: /privacy
+Allow: /terms
+Disallow: /ledger
+Disallow: /family
+Disallow: /comparison
+Disallow: /optimal
+Disallow: /universe
+Disallow: /onboarding
+Disallow: /ops
+Disallow: /api/
+Disallow: /admin/

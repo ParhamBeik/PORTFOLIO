@@ -19,13 +19,16 @@ import {
   toJalali,
 } from "../jalali.js";
 
+// Text-safe twins, not the display colors. `Delta` runs every signed number in
+// the app through this map, so a 3.15:1 token here is a contrast failure on
+// every P&L cell at once. See index.css for how the twins are derived.
 const tone = {
   neutral: "text-text",
   muted: "text-muted",
-  good: "text-[var(--c-good)]",
-  warn: "text-[var(--c-warn)]",
-  serious: "text-[var(--c-serious)]",
-  critical: "text-[var(--c-critical)]",
+  good: "text-[var(--c-good-text)]",
+  warn: "text-[var(--c-warn-text)]",
+  serious: "text-[var(--c-serious-text)]",
+  critical: "text-[var(--c-critical-text)]",
 };
 
 export const toneFor = (n) =>
@@ -79,12 +82,13 @@ export function StatTile({ label, value, sub, valueTone = "neutral", size = "md"
 
 /** Status wears an icon-free but always-labelled chip — never hue alone. */
 export function Badge({ children, variant = "neutral", title, testId }) {
+  // Border and tint keep the display color; only the label takes the text twin.
   const styles = {
     neutral: "border-border bg-panel-2 text-muted",
-    good: "border-[var(--c-good)]/40 bg-[var(--c-good)]/10 text-[var(--c-good)]",
-    warn: "border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 text-[var(--c-warn)]",
-    serious: "border-[var(--c-serious)]/40 bg-[var(--c-serious)]/10 text-[var(--c-serious)]",
-    critical: "border-[var(--c-critical)]/40 bg-[var(--c-critical)]/10 text-[var(--c-critical)]",
+    good: "border-[var(--c-good)]/40 bg-[var(--c-good)]/10 text-[var(--c-good-text)]",
+    warn: "border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 text-[var(--c-warn-text)]",
+    serious: "border-[var(--c-serious)]/40 bg-[var(--c-serious)]/10 text-[var(--c-serious-text)]",
+    critical: "border-[var(--c-critical)]/40 bg-[var(--c-critical)]/10 text-[var(--c-critical-text)]",
   };
   return (
     <span
@@ -100,12 +104,15 @@ export function Badge({ children, variant = "neutral", title, testId }) {
 /* ------------------------------------------------------------------ inputs */
 
 export function Button({ variant = "ghost", className = "", ...props }) {
+  // `-fill` on the two solid variants: white on the display accent is 3.64:1 and
+  // white on the display green is 3.35:1, and this is the primary call to action
+  // on every screen including the sign-in page.
   const styles = {
-    primary: "bg-accent text-white hover:opacity-90 border-transparent",
-    success: "bg-[var(--c-good)] text-white hover:opacity-90 border-transparent",
+    primary: "bg-[var(--c-accent-fill)] text-white hover:opacity-90 border-transparent",
+    success: "bg-[var(--c-good-fill)] text-white hover:opacity-90 border-transparent",
     ghost: "bg-panel-2 text-text hover:bg-border border-border",
-    danger: "bg-transparent text-[var(--c-critical)] hover:bg-[var(--c-critical)]/10 border-transparent",
-    link: "bg-transparent text-accent underline underline-offset-2 border-transparent px-1 py-0",
+    danger: "bg-transparent text-[var(--c-critical-text)] hover:bg-[var(--c-critical)]/10 border-transparent",
+    link: "bg-transparent text-[var(--c-accent-text)] underline underline-offset-2 border-transparent px-1 py-0",
   };
   return (
     <button
@@ -210,7 +217,7 @@ export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" 
               data-testid={testId ? `${testId}-day-${jd}` : undefined}
               className={`rounded-md border py-1.5 text-sm transition-colors disabled:cursor-not-allowed disabled:border-transparent disabled:text-muted/40 ${
                 isSelected
-                  ? "border-accent bg-accent text-white"
+                  ? "border-accent bg-[var(--c-accent-fill)] text-white"
                   : isToday
                     ? "border-accent/50 bg-panel text-text"
                     : "border-transparent text-text hover:bg-panel"
@@ -258,7 +265,7 @@ export function Tabs({ options, value, onChange, label, testId }) {
           data-testid={testId ? `${testId}-${o.value}` : undefined}
           onClick={() => onChange(o.value)}
           className={`rounded-md px-3 py-1 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
-            value === o.value ? "bg-accent text-white" : "text-muted hover:text-text"
+            value === o.value ? "bg-[var(--c-accent-fill)] text-white" : "text-muted hover:text-text"
           }`}
         >
           {o.label}
@@ -400,19 +407,53 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
   const panel = useRef(null);
 
   useEffect(() => {
+    // Where focus came from, so it can go back there. Without this, closing a
+    // dialog drops focus onto <body> and a keyboard user restarts from the top
+    // of the page every time.
+    const opener = document.activeElement;
+
+    const focusable = () =>
+      Array.from(
+        panel.current?.querySelectorAll(
+          "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])"
+        ) || []
+      ).filter((el) => el.offsetParent !== null);
+
     const onKey = (e) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      // Trap Tab inside the dialog. `aria-modal` tells a screen reader the rest
+      // of the page is inert; it does not tell the browser, so without this Tab
+      // walks straight out into the page behind the scrim and the user is
+      // editing a form they can no longer see.
+      if (e.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !panel.current?.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
+
     document.addEventListener("keydown", onKey);
     // The page behind must not scroll under the scrim.
     const previous = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    panel.current?.querySelector(
-      "input, select, button, [tabindex]:not([tabindex='-1'])"
-    )?.focus();
+    focusable()[0]?.focus();
     return () => {
       document.removeEventListener("keydown", onKey);
       document.body.style.overflow = previous;
+      // Only if the opener is still in the document — a dialog opened from a row
+      // that the save then removed has nothing to return to.
+      if (opener instanceof HTMLElement && document.contains(opener)) opener.focus();
     };
   }, [onClose]);
 
