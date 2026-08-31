@@ -136,6 +136,74 @@ def _brs_job(brs_url, brs_key):
     return result
 
 
+def _direct_job():
+    """Gold/FX from TGJU and crypto from Wallex -- the unmetered origins.
+
+    Runs ALONGSIDE the BrsApi job rather than replacing it, and the extractor
+    prefers whichever produced a row (see `extractor._build_lookup`). That
+    ordering is the whole migration strategy: the direct sources take over
+    silently when they work, BrsApi covers anything they miss, and switching
+    back is an env var rather than a rollback.
+
+    Failures are logged and swallowed. A free origin going down must not take
+    the price loop with it -- the paid one is still there, which is precisely
+    the property that makes running both worth the extra request.
+    """
+    from marketdata.sources import nobitex, tgju, wallex
+    from marketdata.sources.http import SourceError
+
+    result = {}
+    rows = []
+
+    if getattr(settings, "TGJU_ENABLED", False):
+        try:
+            rows.extend(tgju.live_rows())
+        except SourceError as exc:
+            logger.warning("TGJU live fetch failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Unexpected TGJU failure: %s", exc)
+
+    if getattr(settings, "WALLEX_ENABLED", False):
+        try:
+            wallex_rows = wallex.live_rows()
+            result["wallex_rows"] = wallex_rows
+            # Only the Toman book feeds pricing. The USDT book quotes coins in
+            # tether, and mixing the two under one symbol is a ~200,000x error.
+            rows.extend(
+                {"symbol": r["base"], "price": r["price"], "unit": r["unit"]}
+                for r in wallex_rows
+                if r.get("quote") == "TMN" and r.get("base")
+            )
+        except SourceError as exc:
+            logger.warning("Wallex live fetch failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Unexpected Wallex failure: %s", exc)
+
+    if rows:
+        # Shaped like a BrsApi envelope so `_build_lookup` consumes it unchanged.
+        result["direct"] = {"rows": rows}
+        logger.info("Direct sources supplied %s live rows.", len(rows))
+
+    # Cross-check is advisory: it never changes a price, it only reports when
+    # two exchanges disagree by more than a spread. Cheap, because both payloads
+    # are already in hand.
+    if getattr(settings, "NOBITEX_ENABLED", False) and result.get("wallex_rows"):
+        try:
+            _, disagreements = nobitex.cross_check(
+                nobitex.live_rows(), result["wallex_rows"]
+            )
+            for row in disagreements:
+                logger.warning(
+                    "crypto_source_disagreement coin=%s nobitex=%s wallex=%s spread=%.2f%%",
+                    row["coin"], row["nobitex_toman"], row["wallex_toman"],
+                    row["spread"] * 100,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Crypto cross-check unavailable: %s", exc)
+
+    return result
+
+
 def _tsetmc_job(tsetmc_url, tsetmc_key, tsetmc_symbol_url):
     from django.core.cache import cache
     result = {"tsetmc": fetch_tsetmc(tsetmc_url, tsetmc_key)}
@@ -222,6 +290,20 @@ def fetch_all_markets(api_settings):
     ))
 
     executor = ThreadPoolExecutor(max_workers=6)
+
+    # The direct origins are unmetered, so they are gated only on the market
+    # being open -- not on a key existing, and not on the BrsApi wallet having
+    # anything left in it. That independence is the point: on 2026-08-26 a full
+    # TSETMC backfill drained the shared budget before dawn and the USDT quote
+    # failed 201 times, freezing every dollar-denominated holding. A source that
+    # costs nothing cannot be starved by the archive.
+    direct_enabled = any(
+        getattr(settings, name, False)
+        for name in ("TGJU_ENABLED", "WALLEX_ENABLED", "NOBITEX_ENABLED")
+    )
+    if direct_enabled and "gold_currency" in planned:
+        jobs.append(submit_with_context(executor, _direct_job))
+
     if brs_url and brs_key:
         if "gold_currency" in planned:
             jobs.append(submit_with_context(executor, _brs_job, brs_url, brs_key))
