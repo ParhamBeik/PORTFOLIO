@@ -76,8 +76,22 @@ jobs:
           cache: npm
           cache-dependency-path: portfolio-saas/frontend/package-lock.json
       - run: npm ci
+      # Includes the colour-contrast guard (src/contrast.test.mjs), which reads
+      # the tokens straight out of index.css. Deterministic and ~60ms, so the
+      # regression that used to need a browser now fails on the commit itself.
       - run: npm run test:unit
       - run: npm run build
+
+      # Lighthouse against the REAL production image, not the dist folder.
+      #
+      # Half of what a 100 depends on is response headers -- CSP, HSTS, nosniff,
+      # COOP and gzip -- and a static file server has none of them, so auditing
+      # `dist/` would score a bundle nobody is served. `lhci.sh` builds
+      # Dockerfile.prod, runs it behind an API stub, asserts the headers, then
+      # runs Lighthouse. `deploy` already depends on this job, so a regression
+      # blocks the deploy with no extra wiring.
+      - name: Lighthouse + response-header assertions
+        run: npm run test:lighthouse
 
   # Reports whether deployment is configured yet. Without this the deploy job
   # would go red on every push until the secrets exist, training everyone to

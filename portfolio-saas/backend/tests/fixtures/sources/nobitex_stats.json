@@ -1,0 +1,50 @@
+{
+ "status": "ok",
+ "stats": {
+  "btc-rls": {
+   "isClosed": false,
+   "bestSell": "163999999990",
+   "bestBuy": "163570020040",
+   "volumeSrc": "11.6119179314",
+   "volumeDst": "1880894755675.546017757",
+   "latest": "163570020030",
+   "mark": "164624228210",
+   "dayLow": "159800000000",
+   "dayHigh": "164000000000",
+   "dayOpen": "162061000000",
+   "dayClose": "163570020030",
+   "dayChange": "0.93"
+  },
+  "usdt-rls": {
+   "isClosed": false,
+   "bestSell": "2094990",
+   "bestBuy": "2094220",
+   "volumeSrc": "6865741.1897618483",
+   "volumeDst": "14237361577152.49806708",
+   "latest": "2094230",
+   "mark": "2094600",
+   "dayLow": "2039010",
+   "dayHigh": "2096500",
+   "dayOpen": "2049990",
+   "dayClose": "2094230",
+   "dayChange": "2.16"
+  },
+  "eth-rls": {
+   "isClosed": false,
+   "bestSell": "5149059970",
+   "bestBuy": "5136903740",
+   "volumeSrc": "266.1367225562",
+   "volumeDst": "1354437388930.186992242",
+   "latest": "5149059970",
+   "mark": "5173117400",
+   "dayLow": "4950000000",
+   "dayHigh": "5173234690",
+   "dayOpen": "5140000000",
+   "dayClose": "5149059970",
+   "dayChange": "0.18"
+  }
+ },
+ "global": {
+  "binance": {}
+ }
+}

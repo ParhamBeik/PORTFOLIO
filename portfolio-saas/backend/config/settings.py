@@ -214,6 +214,69 @@ TSETMC_SYMBOL_URL = os.getenv(
     "TSETMC_SYMBOL_URL", "https://Api.BrsApi.ir/Tsetmc/Symbol.php"
 )
 
+# --------------------------------------------------------------- direct sources
+#
+# BrsApi is a paid reseller of data that the origins publish for free. Every
+# request against it is metered (~10,000/day TSETMC, ~1,500/day BRS), and that
+# ceiling -- not disk, not CPU -- is what bounds how much history this warehouse
+# can hold. The origins below are unmetered, so a source moved off BrsApi stops
+# competing for that budget entirely.
+#
+# They split into two groups by REACHABILITY, measured from the production VPS
+# (Frankfurt, AS202269) on 2026-08-31:
+#
+#   Reachable directly       tgju.org, apiv2.nobitex.ir, api.wallex.ir
+#   Blocked at L3            *.tsetmc.com, tse.ir, fipiran.ir, codal.ir
+#
+# The blocked group silently drops the SYN from any non-Iranian source address
+# (`nc -z` times out; ICMP is dropped too, and traceroute dies one hop inside
+# their network). That is a geo-block by the securities organisation's network,
+# not a route failure and not TLS filtering -- so no header, SNI or User-Agent
+# change can defeat it. The only fix is an egress hop inside Iran, which is what
+# IRAN_EGRESS_PROXY is for. Everything downstream of it is already built and
+# tested; setting this variable is the whole activation.
+IRAN_EGRESS_PROXY = os.getenv("IRAN_EGRESS_PROXY", "")
+
+# TGJU: 962 live gold/FX/commodity instruments in ONE ~180KB request, plus daily
+# history to 1390/09/05 (2011-11-26) for the dollar and 1389 for the coin. That
+# is deeper than the BRS gold history and costs nothing, which is why it leads
+# the gold/currency migration.
+TGJU_ENABLED = os.getenv("TGJU_ENABLED", "1") == "1"
+TGJU_LIVE_URL = os.getenv("TGJU_LIVE_URL", "https://call1.tgju.org/ajax.json")
+TGJU_HISTORY_URL = os.getenv(
+    "TGJU_HISTORY_URL",
+    "https://api.tgju.org/v1/market/indicator/summary-table-data",
+)
+
+# Nobitex quotes RIAL (`-rls` pairs). Its UDF history is capped near 500 candles
+# per request, so it is the live/cross-check source, not the history source.
+NOBITEX_ENABLED = os.getenv("NOBITEX_ENABLED", "1") == "1"
+NOBITEX_BASE_URL = os.getenv("NOBITEX_BASE_URL", "https://apiv2.nobitex.ir")
+
+# Wallex quotes TOMAN (`*TMN` pairs) and returned 2,755 daily candles for
+# USDTTMN in a single request -- the full series back to 2018-11-27, with no
+# 500-row cap. It is therefore the crypto HISTORY source, with Nobitex as the
+# independent second opinion on live prices.
+WALLEX_ENABLED = os.getenv("WALLEX_ENABLED", "1") == "1"
+WALLEX_BASE_URL = os.getenv("WALLEX_BASE_URL", "https://api.wallex.ir")
+
+# Direct TSETMC, used only when IRAN_EGRESS_PROXY is set (see above). Left
+# defined unconditionally so the code path is tested on every run and the switch
+# is a deploy-time env change rather than a code change.
+TSETMC_DIRECT_ENABLED = os.getenv("TSETMC_DIRECT_ENABLED", "0") == "1"
+TSETMC_DIRECT_BASE_URL = os.getenv("TSETMC_DIRECT_BASE_URL", "https://cdn.tsetmc.com")
+
+# Politeness pacing for the free origins. Wallex served 60 requests in 17.1s with
+# no rate-limit headers and no throttling, i.e. it will let us take far more than
+# we should. Self-imposed, because an unmetered origin that stops answering is
+# worse than a metered one that bills us.
+DIRECT_SOURCE_MIN_INTERVAL = float(os.getenv("DIRECT_SOURCE_MIN_INTERVAL", "0.25"))
+# After this many consecutive connect-level failures the origin is parked, with
+# one probe per cooldown to notice recovery. Same shape as the Codal breaker,
+# which is what stopped ~583 doomed connects a day against an unreachable host.
+DIRECT_SOURCE_FAILURE_THRESHOLD = int(os.getenv("DIRECT_SOURCE_FAILURE_THRESHOLD", "8"))
+DIRECT_SOURCE_COOLDOWN_SECONDS = int(os.getenv("DIRECT_SOURCE_COOLDOWN_SECONDS", "600"))
+
 # Seconds to sleep between BrsApi calls inside one sync task (paid API courtesy).
 MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "0.05"))
 # NOTE: there is deliberately no MARKETDATA_DAILY_REQUEST_LIMIT any more. The
@@ -306,7 +369,12 @@ CODAL_FETCHING_STALE_SECONDS = int(os.getenv("CODAL_FETCHING_STALE_SECONDS", "18
 # Artifact download+storage (marketdata/codal_storage.py). No proxy required by
 # default -- unset means connect to codal.ir directly, correct on any host that
 # can already reach it.
-CODAL_HTTP_PROXY = os.getenv("CODAL_HTTP_PROXY", "")
+#
+# Falls back to IRAN_EGRESS_PROXY because codal.ir and tsetmc.com are blocked by
+# the same mechanism from the same networks, so one Iranian hop fixes both. The
+# Codal-specific name stays first for deployments that already set it and for
+# the case where Codal needs a different path than the market feeds.
+CODAL_HTTP_PROXY = os.getenv("CODAL_HTTP_PROXY", "") or IRAN_EGRESS_PROXY
 # Reachability breaker (marketdata/codal_storage.py). codal.ir is unreachable from
 # some hosts -- from the production VPS, TCP 443 times out outright. Without this
 # the extractor retried a dead network path thousands of times a day. After N

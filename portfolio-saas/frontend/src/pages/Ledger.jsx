@@ -179,7 +179,7 @@ function EditEntryDialog({ row, onClose, onSaved }) {
       }
     >
       <div className="space-y-3">
-        {error && <p role="alert" className="text-sm text-[var(--c-critical)]">{error}</p>}
+        {error && <p role="alert" className="text-sm text-[var(--c-critical-text)]">{error}</p>}
         <div>
           <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">
             {row.is_house ? "Price per square meter (millions of Toman)" : "How many"}
@@ -386,7 +386,7 @@ export default function Ledger() {
       />
 
       {error && (
-        <p role="alert" className="mb-3 text-sm text-[var(--c-critical)]">{error}</p>
+        <p role="alert" className="mb-3 text-sm text-[var(--c-critical-text)]">{error}</p>
       )}
 
       {adding && (

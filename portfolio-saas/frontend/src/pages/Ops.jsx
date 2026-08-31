@@ -109,7 +109,7 @@ function AssetDetailPanel({ lookup, evidence, error, busy, onAct }) {
   if (error && !evidence) {
     return (
       <Card title="Asset detail">
-        <p role="alert" className="text-sm text-[var(--c-warn)]">{error}</p>
+        <p role="alert" className="text-sm text-[var(--c-warn-text)]">{error}</p>
       </Card>
     );
   }
@@ -378,7 +378,7 @@ function AssetInspector() {
             <StatTile label="Sort" value={ordering.replace("-", "↓ ")} sub="Click column headers" />
           </div>
 
-          {catalogError && <p role="alert" className="text-sm text-[var(--c-warn)]">{catalogError}</p>}
+          {catalogError && <p role="alert" className="text-sm text-[var(--c-warn-text)]">{catalogError}</p>}
 
           <div className="overflow-x-auto rounded-lg border border-border" data-testid="ops-asset-catalog">
             <table className="w-full text-sm">
@@ -1871,7 +1871,7 @@ export default function Ops({ user }) {
       />
 
       {overviewError && (
-        <p role="alert" className="mb-3 text-sm text-[var(--c-warn)]" data-testid="ops-stale-banner">
+        <p role="alert" className="mb-3 text-sm text-[var(--c-warn-text)]" data-testid="ops-stale-banner">
           {overviewError}. Showing last successful payload when available.
         </p>
       )}

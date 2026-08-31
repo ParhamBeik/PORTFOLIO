@@ -1,0 +1,40 @@
+{
+  "//": [
+    "Run against the REAL production image, not `staticDistDir`.",
+    "",
+    "Half of what blocks a 100 here is response headers -- CSP, HSTS, nosniff,",
+    "COOP, and gzip -- and none of those exist in a static file server. Auditing",
+    "`dist/` would score a bundle nobody is served and would have to switch off",
+    "the very audits this work was done to pass. `scripts/lhci.sh` builds",
+    "Dockerfile.prod and points this at it.",
+    "",
+    "Performance sits at 0.99, not 1.0. It is a simulated-throttling score and it",
+    "is not stable to the point: a run lands 99 for reasons unrelated to the",
+    "commit. The other three are deterministic, so a regression in them is always",
+    "real -- which is what keeps a red build worth reading.",
+    ""
+  ],
+  "ci": {
+    "collect": {
+      "url": ["http://localhost:8088/"],
+      "numberOfRuns": 3,
+      "settings": { "preset": "desktop" }
+    },
+    "assert": {
+      "assertions": {
+        "categories:accessibility": ["error", { "minScore": 1 }],
+        "categories:best-practices": ["error", { "minScore": 1 }],
+        "categories:seo": ["error", { "minScore": 1 }],
+        "categories:performance": ["error", { "minScore": 0.99 }],
+
+        "is-on-https": "off",
+        "redirects-http": "off",
+        "uses-http2": "off",
+
+        "resource-summary:script:size": ["error", { "maxNumericValue": 340000 }],
+        "resource-summary:stylesheet:size": ["error", { "maxNumericValue": 45000 }]
+      }
+    },
+    "upload": { "target": "filesystem", "outputDir": "./.lighthouseci" }
+  }
+}

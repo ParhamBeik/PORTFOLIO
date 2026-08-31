@@ -54,7 +54,7 @@ export default function App() {
     return (
       <BrowserRouter>
         {notice && (
-          <p role="alert" className="p-3 text-center text-sm text-[var(--c-warn)]">
+          <p role="alert" className="p-3 text-center text-sm text-[var(--c-warn-text)]">
             {notice}
           </p>
         )}

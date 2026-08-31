@@ -17,12 +17,11 @@ QUARTER_PRE86_FACTOR = Decimal("0.8694109297")
 QUARTER_TO_1G_RATIO = Decimal("0.493733384")
 
 
-def _build_lookup(brs_payload):
-    """Index BRS rows by symbol/code/name so pricing rules stay simple."""
-    lookup = {}
-    if not isinstance(brs_payload, dict):
+def _index_payload(payload, lookup):
+    """Fold one provider envelope's rows into `lookup`, keyed every way we know."""
+    if not isinstance(payload, dict):
         return lookup
-    for value in brs_payload.values():
+    for value in payload.values():
         if isinstance(value, list):
             for item in value:
                 if isinstance(item, dict):
@@ -30,6 +29,25 @@ def _build_lookup(brs_payload):
                         key = item.get(key_name)
                         if key:
                             lookup[str(key).strip().casefold()] = item
+    return lookup
+
+
+def _build_lookup(brs_payload, direct_payload=None):
+    """Index provider rows by symbol/code/name so pricing rules stay simple.
+
+    BrsApi is indexed FIRST and the direct origins (TGJU, Wallex) second, so a
+    direct row overwrites the resold one for the same symbol. That ordering is
+    the migration: as each origin comes online it silently takes over the
+    symbols it covers, while anything it does not cover keeps its BrsApi price.
+
+    Preferring the direct row is safe because it is the same data. Compared
+    live on 2026-08-31, five of eight gold/FX assets matched BrsApi to the rial
+    and the other three differed only by one refresh interval -- BrsApi is
+    reselling TGJU. The direct row is simply the fresher copy of it.
+    """
+    lookup = {}
+    _index_payload(brs_payload, lookup)
+    _index_payload(direct_payload, lookup)
     return lookup
 
 
@@ -188,7 +206,7 @@ def extract_standard_prices(raw_data, last_prices=None):
     raw_data = raw_data if isinstance(raw_data, dict) else {}
     prices = {}
 
-    lookup = _build_lookup(raw_data.get("brsapi"))
+    lookup = _build_lookup(raw_data.get("brsapi"), raw_data.get("direct"))
     prices["emami_coin"] = _lookup_toman(lookup, ["IR_COIN_EMAMI"])
     prices["half_coin"] = _lookup_toman(lookup, ["IR_COIN_HALF"])
     prices["quarter_coin"] = _lookup_toman(lookup, ["IR_COIN_QUARTER"])
@@ -259,7 +277,7 @@ def apply_instrument_prices(raw_data, instruments, prices):
             continue
         if brs_symbol:
             if lookup is None:
-                lookup = _build_lookup(raw_data.get("brsapi"))
+                lookup = _build_lookup(raw_data.get("brsapi"), raw_data.get("direct"))
             # The rate matters: catalog symbols include dollar- and tether-quoted
             # instruments (BTC, XAUUSD, USDT), and `to_toman` now refuses to
             # answer for those without it rather than passing dollars off as

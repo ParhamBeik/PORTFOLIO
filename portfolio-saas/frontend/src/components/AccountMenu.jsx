@@ -63,7 +63,7 @@ function MenuItem({ onClick, children, danger, testId, disabled }) {
       data-testid={testId}
       className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
         danger
-          ? "text-[var(--c-critical)] hover:bg-[var(--c-critical)]/10"
+          ? "text-[var(--c-critical-text)] hover:bg-[var(--c-critical)]/10"
           : "text-text hover:bg-panel-2 focus-visible:bg-panel-2"
       }`}
     >
@@ -146,7 +146,7 @@ function ChangePasswordModal({ onClose, onDone }) {
           data-testid="account-password-confirm"
         />
         {mismatch && (
-          <p className="text-xs text-[var(--c-critical)]" data-testid="account-password-mismatch">
+          <p className="text-xs text-[var(--c-critical-text)]" data-testid="account-password-mismatch">
             The two new passwords do not match.
           </p>
         )}
@@ -401,7 +401,7 @@ export default function AccountMenu({
           </div>
 
           {notice && (
-            <p className="mt-2 text-xs text-[var(--c-good)]" data-testid="account-notice">{notice}</p>
+            <p className="mt-2 text-xs text-[var(--c-good-text)]" data-testid="account-notice">{notice}</p>
           )}
           {error && (
             <div className="mt-2">

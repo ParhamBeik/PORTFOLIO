@@ -44,3 +44,9 @@ graphify-out/
 .idea/
 .vscode/
 .cursor/
+
+# Lighthouse CI run artefacts
+.lighthouseci/
+
+# Scratch Playwright probe, not part of the suite
+portfolio-saas/frontend/probe.mjs

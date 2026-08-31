@@ -70,7 +70,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
     <div className="flex min-h-full flex-col">
       <a
         href="#main"
-        className="sr-only focus:not-sr-only focus:absolute focus:m-2 focus:rounded focus:bg-accent focus:px-3 focus:py-2 focus:text-white"
+        className="sr-only focus:not-sr-only focus:absolute focus:m-2 focus:rounded focus:bg-[var(--c-accent-fill)] focus:px-3 focus:py-2 focus:text-white"
       >
         Skip to content
       </a>
@@ -83,7 +83,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
             aria-label={`${APP_NAME} home`}
             data-testid="app-brand"
           >
-            <span className="flex size-9 items-center justify-center rounded-lg border border-border bg-panel-2 text-accent shadow-sm transition group-hover:border-accent/40 group-hover:bg-accent/10">
+            <span className="flex size-9 items-center justify-center rounded-lg border border-border bg-panel-2 text-accent shadow-sm transition group-hover:border-accent/40 group-hover:bg-[var(--c-accent-fill)]/10">
               <Logo size={22} title={APP_NAME} />
             </span>
             <span className="flex flex-col leading-tight">
