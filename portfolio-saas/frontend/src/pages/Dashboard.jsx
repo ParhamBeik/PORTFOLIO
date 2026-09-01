@@ -291,7 +291,7 @@ function TrendCard({ activeId, basis }) {
         </div>
       )}
     >
-      <Async {...state} testId="dashboard-trend-body" empty="No history yet.">
+      <Async {...state} testId="dashboard-trend-body" empty="No history yet." minHeight={260}>
         {(data) => {
           const points = (data.series || []).map((s) => ({ x: s.date, y: Number(s.total) }));
           // Counted, not just detected. "Some points are estimated" reads like a
@@ -407,7 +407,7 @@ function TrendCard({ activeId, basis }) {
 function AllocationCard({ state }) {
   return (
     <Card title="Allocation" testId="dashboard-allocation">
-      <Async {...state} testId="dashboard-allocation-body" empty="No priced holdings yet.">
+      <Async {...state} testId="dashboard-allocation-body" empty="No priced holdings yet." minHeight={260}>
         {(data) => {
           const groups = groupByClass(data.items || []);
           if (!groups.length) return <Empty>No priced holdings yet.</Empty>;
@@ -1164,7 +1164,12 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
                 rows={items}
                 columns={columns}
                 empty="No holdings priced yet."
-                rowClass={(r) => (r.is_hidden ? "opacity-50" : "")}
+                // `text-muted` rather than `opacity-50`: opacity dims EVERY descendant,
+                // including the "Not counted" badge that explains why the row is
+                // dimmed -- which measured 3.05:1. Muting the text leaves the badge
+                // at full strength, and `--c-muted` is a token the contrast test
+                // already guards on every background.
+                rowClass={(r) => (r.is_hidden ? "text-muted" : "")}
               />
               <PricingGlossaryDisclosure />
               {actionError && (

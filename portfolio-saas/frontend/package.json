@@ -9,7 +9,8 @@
     "preview": "vite preview --host",
     "test:unit": "node --test src/*.test.mjs",
     "test:e2e": "playwright test",
-    "test:lighthouse": "bash scripts/lhci.sh"
+    "test:lighthouse": "bash scripts/lhci.sh",
+    "test:lighthouse:auth": "npm i --no-save --silent lighthouse@12 chrome-launcher && node scripts/lh-authenticated.mjs"
   },
   "dependencies": {
     "@sentry/react": "10.69.0",

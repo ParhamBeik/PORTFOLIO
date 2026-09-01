@@ -103,6 +103,22 @@ export function Badge({ children, variant = "neutral", title, testId }) {
 
 /* ------------------------------------------------------------------ inputs */
 
+/** The de-emphasis floor for a disabled control.
+ *
+ * `opacity` composites text TOWARDS the background, so any value low enough to
+ * read as "dimmed" also drags the text under AA. Measured on the live dashboard:
+ * `opacity-40` put a ghost button at 4.44:1 against a required 4.5, and
+ * `opacity-35` on the Tabs control was worse. 60% still reads as disabled and
+ * clears AA with room (~6:1 for body text on panel-2).
+ *
+ * It is a full literal rather than a number interpolated into a template,
+ * because Tailwind scans source text for class candidates and never sees a
+ * class it has to compute. It is exported so the floor has one home instead of
+ * a number chosen independently at each call site -- which is exactly how the
+ * three different values above happened.
+ */
+export const DISABLED_DIM = "disabled:cursor-not-allowed disabled:opacity-60";
+
 export function Button({ variant = "ghost", className = "", ...props }) {
   // `-fill` on the two solid variants: white on the display accent is 3.64:1 and
   // white on the display green is 3.35:1, and this is the primary call to action
@@ -117,7 +133,7 @@ export function Button({ variant = "ghost", className = "", ...props }) {
   return (
     <button
       type="button"
-      className={`rounded-md border px-3 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${styles[variant]} ${className}`}
+      className={`rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${DISABLED_DIM} ${styles[variant]} ${className}`}
       {...props}
     />
   );
@@ -215,7 +231,7 @@ export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" 
               aria-pressed={isSelected}
               onClick={() => pick(jd)}
               data-testid={testId ? `${testId}-day-${jd}` : undefined}
-              className={`rounded-md border py-1.5 text-sm transition-colors disabled:cursor-not-allowed disabled:border-transparent disabled:text-muted/40 ${
+              className={`rounded-md border py-1.5 text-sm transition-colors ${DISABLED_DIM} disabled:border-transparent ${
                 isSelected
                   ? "border-accent bg-[var(--c-accent-fill)] text-white"
                   : isToday
@@ -264,7 +280,7 @@ export function Tabs({ options, value, onChange, label, testId }) {
           aria-pressed={value === o.value}
           data-testid={testId ? `${testId}-${o.value}` : undefined}
           onClick={() => onChange(o.value)}
-          className={`rounded-md px-3 py-1 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+          className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${DISABLED_DIM} ${
             value === o.value ? "bg-[var(--c-accent-fill)] text-white" : "text-muted hover:text-text"
           }`}
         >
@@ -350,14 +366,35 @@ export function Pager({ page, count, pageSize = 25, onPage, testId }) {
 
 /* ------------------------------------------------------------------ states */
 
-export const Loading = ({ children = "Loading…", testId }) => (
-  <p role="status" data-testid={testId} className="py-8 text-center text-sm text-muted">
+/** `minHeight` reserves the loaded panel's space while it is still loading.
+ *
+ * Without it an async panel renders ~84px of "Loading…", then jumps to its full
+ * height when the payload lands and shoves everything below it down the page.
+ * On the dashboard that measured CLS 0.128 in a single shift -- the charts grid
+ * going 180px -> 464px and pushing the performance and holdings cards with it.
+ *
+ * Reserving is the fix rather than a spinner animation: layout shift is about
+ * geometry, and the only way to not move the page is to occupy the space up
+ * front. Pass the height the panel will actually render (for a chart, its
+ * `height` prop).
+ */
+export const Loading = ({ children = "Loading…", testId, minHeight }) => (
+  <p
+    role="status"
+    data-testid={testId}
+    className="flex items-center justify-center py-8 text-center text-sm text-muted"
+    style={minHeight ? { minHeight } : undefined}
+  >
     {children}
   </p>
 );
 
-export const Empty = ({ children, action, testId }) => (
-  <div data-testid={testId} className="py-8 text-center text-sm text-muted">
+export const Empty = ({ children, action, testId, minHeight }) => (
+  <div
+    data-testid={testId}
+    className="flex flex-col items-center justify-center py-8 text-center text-sm text-muted"
+    style={minHeight ? { minHeight } : undefined}
+  >
     <p>{children}</p>
     {action && <div className="mt-3">{action}</div>}
   </div>
@@ -384,10 +421,16 @@ export const ErrorState = ({ error, onRetry, testId }) => (
  *
  *   <Async {...state}>{(data) => <Table … />}</Async>
  */
-export function Async({ data, error, loading, reload, children, empty, testId }) {
+export function Async({ data, error, loading, reload, children, empty, testId, minHeight }) {
+  // `minHeight` applies only to the transient states. Putting it on the loaded
+  // branch too would mean wrapping `children` in an extra element, which changes
+  // the DOM every page and test already depends on -- and the loaded content is
+  // the thing defining the height in the first place.
   if (error) return <ErrorState error={error} onRetry={reload} testId={testId} />;
-  if (loading && data == null) return <Loading testId={testId} />;
-  if (data == null) return <Empty testId={testId}>{empty || "No data yet."}</Empty>;
+  if (loading && data == null) return <Loading testId={testId} minHeight={minHeight} />;
+  if (data == null) {
+    return <Empty testId={testId} minHeight={minHeight}>{empty || "No data yet."}</Empty>;
+  }
   return children(data);
 }
 

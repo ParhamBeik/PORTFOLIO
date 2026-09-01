@@ -10,6 +10,8 @@ Disallow: /ledger
 Disallow: /family
 Disallow: /comparison
 Disallow: /optimal
+Disallow: /best-overall
+Disallow: /breakdown
 Disallow: /universe
 Disallow: /onboarding
 Disallow: /ops
