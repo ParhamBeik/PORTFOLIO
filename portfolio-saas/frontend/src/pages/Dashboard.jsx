@@ -488,9 +488,10 @@ function PositionsTable({ rows, showAccount }) {
     // figure sitting one column away from Toman cost basis; an unlabelled
     // number there reads as ten times what was paid.
     { key: "avg", header: "Avg cost", align: "right", render: (r) => unitPrice(r.average_cost_tomans, r.average_cost_currency) },
-    { key: "basis", header: "Cost basis", align: "right", render: (r) => toman(r.total_cost_basis_tomans) },
-    { key: "realized", header: "Realized P&L", align: "right", render: (r) => <Delta value={r.realized_pnl_tomans} format={signedToman} /> },
-    { key: "unrealized", header: "Unrealized P&L", align: "right", render: (r) => <Delta value={r.unrealized_pnl_tomans} format={signedToman} /> },
+    { key: "basis", header: "Cost basis", align: "right", render: (r) => r.total_cost_basis_tomans == null ? "—" : toman(r.total_cost_basis_tomans) },
+    { key: "value", header: "Current value", align: "right", render: (r) => r.current_value_tomans == null ? "—" : toman(r.current_value_tomans) },
+    { key: "realized", header: "Realized P&L", align: "right", render: (r) => r.realized_pnl_tomans == null ? "—" : <Delta value={r.realized_pnl_tomans} format={signedToman} /> },
+    { key: "unrealized", header: "Unrealized P&L", align: "right", render: (r) => r.unrealized_pnl_tomans == null ? "—" : <Delta value={r.unrealized_pnl_tomans} format={signedToman} /> },
   ];
   if (showAccount) {
     columns.splice(1, 0, { key: "portfolio", header: "Portfolio", render: (r) => r.account_name || "—" });
@@ -546,7 +547,7 @@ function PerformanceCard({ activeId, basis, accounts }) {
               // because two accounts can hold the same asset at different costs.
               const positions = data.accounts.flatMap((row) =>
                 positionRows(row.assets, row.name)
-              ).filter((r) => r.cost_basis_known);
+              );
               if (!positions.length) {
                 return <PerformanceUnavailable detail={data.accounts[0]?.detail} />;
               }
@@ -597,12 +598,11 @@ function PerformanceCard({ activeId, basis, accounts }) {
           }
           const rows = positionRows(data.assets);
           if (!data.performance_available) {
-            const priced = rows.filter((r) => r.cost_basis_known);
-            if (!priced.length) return <PerformanceUnavailable detail={data.detail} />;
+            if (!rows.length) return <PerformanceUnavailable detail={data.detail} />;
             return (
               <>
                 <PerformanceLockedNote detail={data.detail} />
-                <PositionsTable rows={priced} />
+                <PositionsTable rows={rows} />
               </>
             );
           }
@@ -632,6 +632,25 @@ function holdingsByAccountAsset(accounts) {
 
 function holdingsRowKey(row) {
   return row.account_id != null ? `${row.account_id}:${row.key}` : row.key;
+}
+
+function sortHoldingsByPortfolioValue(items) {
+  const portfolioOrder = [];
+  const grouped = new Map();
+  for (const item of items) {
+    const portfolioKey = item.account_id == null ? "__single__" : String(item.account_id);
+    if (!grouped.has(portfolioKey)) {
+      grouped.set(portfolioKey, []);
+      portfolioOrder.push(portfolioKey);
+    }
+    grouped.get(portfolioKey).push(item);
+  }
+  return portfolioOrder.flatMap((portfolioKey) =>
+    grouped.get(portfolioKey).sort((a, b) => {
+      const valueDelta = Number(b.value || 0) - Number(a.value || 0);
+      return valueDelta || holdingLabel(a).localeCompare(holdingLabel(b));
+    })
+  );
 }
 
 function isManualPriceEditable(row) {
@@ -846,7 +865,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
           // they are leaving out and switch it back on. They are excluded from
           // the weight base for the same reason they are excluded from the
           // total: they are not part of the portfolio being measured.
-          const items = [...visible, ...hidden];
+          const items = sortHoldingsByPortfolioValue([...visible, ...hidden]);
           // `data.total` is the NET figure (liabilities and real estate netted
           // off), while these rows are gross holding values. Dividing by it gave
           // a 945M holding a 109.7% weight. Weight is a share of what is listed.
@@ -1559,8 +1578,8 @@ export default function Dashboard({ user }) {
           </div>
           <AllocationCard state={valuationState} />
         </div>
-        <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
         <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} staff={!!user?.is_staff} />
+        <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
         <ExcludedDisclosure valuationState={valuationState} />
         <RiskCard activeId={activeId} basis={basis} valuationState={valuationState} />
       </div>

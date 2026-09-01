@@ -288,7 +288,7 @@ function AssetMix({ accounts, basis }) {
           const groups = groupByClass(account.items);
           if (!groups.length) return null;
           return (
-            <Disclosure key={account.id} summary={`${account.name} · ${money(account.total, basis)}`} testId={`breakdown-mix-${account.id}`}>
+            <Disclosure key={account.id} summary={`${account.name} · ${money(account.total, basis)}`} testId={`breakdown-mix-${account.id}`} open>
               <Donut data={groups} height={220} valueFormat={(v) => money(v, basis)} testId={`breakdown-donut-${account.id}`} />
             </Disclosure>
           );

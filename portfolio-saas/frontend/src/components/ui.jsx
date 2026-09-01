@@ -536,8 +536,8 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
 }
 
 /** Collapsed assumptions / methodology block. */
-export const Disclosure = ({ summary, children, testId }) => (
-  <details data-testid={testId} className="mt-4 rounded-lg border border-border bg-panel-2 px-4 py-2">
+export const Disclosure = ({ summary, children, testId, open = false }) => (
+  <details open={open} data-testid={testId} className="mt-4 rounded-lg border border-border bg-panel-2 px-4 py-2">
     <summary className="cursor-pointer py-1 text-sm font-medium text-muted">{summary}</summary>
     <div className="pt-2 pb-1 text-sm text-muted">{children}</div>
   </details>

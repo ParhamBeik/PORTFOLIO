@@ -85,6 +85,10 @@ def _position_metrics(account) -> dict:
     if cached is not None:
         return cached
     prices = get_latest_prices()
+    valuation_items = {
+        item["key"]: item
+        for item in value_account(account).get("items", [])
+    }
     result = {}
     entries_by_asset = {}
     for entry in account.transactions.select_related("asset").order_by(
@@ -142,6 +146,7 @@ def _position_metrics(account) -> dict:
         # Everything below it is money, so each one is a quantity x price
         # product and converts exactly once -- see currency.holding_value_to_toman.
         result[asset.key] = {
+            "asset_key": asset.key,
             # Same naming rule as `Holding.label`: a TSE position is known by its
             # ticker, not by the registered company name.
             "asset_name": asset.tse_symbol or asset.name_fa or asset.name,
@@ -168,6 +173,34 @@ def _position_metrics(account) -> dict:
             "unrealized_pnl_tomans": str(
                 holding_value_to_toman(asset, (current_price - average_cost) * quantity)
             ) if not unknown_basis else None,
+            "current_value_tomans": (
+                str(valuation_items[asset.key]["value"])
+                if asset.key in valuation_items
+                and valuation_items[asset.key].get("value") is not None
+                else None
+            ),
+        }
+    for holding in account.holdings.select_related("asset").filter(is_hidden=False):
+        asset = holding.asset
+        if asset.key in result:
+            continue
+        item = valuation_items.get(asset.key)
+        result[asset.key] = {
+            "asset_key": asset.key,
+            "asset_name": asset.tse_symbol or asset.name_fa or asset.name,
+            "quantity": str(holding.quantity),
+            "quantity_step": asset.quantity_step,
+            "cost_basis_known": False,
+            "average_cost_tomans": None,
+            "average_cost_currency": "rial" if is_tse_priced(asset) else "toman",
+            "total_cost_basis_tomans": None,
+            "realized_pnl_tomans": None,
+            "unrealized_pnl_tomans": None,
+            "current_value_tomans": (
+                str(item["value"])
+                if item and item.get("value") is not None
+                else None
+            ),
         }
     cache.set(cache_key, result, timeout=3600)
     return result
