@@ -33,7 +33,7 @@ with no client answers nothing.
 | Q2 | Add/edit/delete trades; trustworthy back-dated P/L | 8 | 4 | **4** | The ledger is right. There is no CSV import, and "I already own it" silently discards the date |
 | Q3 | Historical data breadth, freshness, comparison | 8 → **9** | 4 | **4** | ~17 years of stock history is stored and there is no screen that draws one asset's price |
 | Q4 | Diversification as an allocation change | 9 | 7 | **7** | The best-conceived module in the codebase, split across two pages and never told when to act |
-| Q5 | Optimal portfolio by scenario and risk tolerance | 9 | 6 | **6** | Outstanding optimizer; no risk-tolerance control, no asset-count cap, no Pro tier |
+| Q5 | Optimal portfolio by scenario and risk tolerance | 9 | 6 → **9** | 6 → **9** | Risk tolerance, a position cap and the resampling bands all now have controls; only the Pro tier is unbuilt |
 | Q6 | Operator monitoring and diagnosis | 9 | 9 | **9** | Excellent — but it watches the warehouse, not the users |
 | Q7 | ML limit-to-limit signal *(proposed)* | 2 | 0 | **0** | Substrate is real and rare; nothing is built, and the order book it needs is unreachable |
 
@@ -95,6 +95,57 @@ substitutes for them. **Q7 (0)** remains blocked on network reachability.
 are where the product loses a customer, and both fail the same way: the backend already
 does the work and no screen exposes it. **21 of 53 endpoints have no frontend caller** —
 that single fact explains most of the gap between the backend and delivered columns.
+
+### Third pass, same day: Q5's three missing controls are built
+
+The second pass named four unmet pieces in Q5. Three are now closed, and one of
+them turned out to be a genuine backend gap rather than missing UI.
+
+**Risk tolerance is now a number the user states.** `EfficientFrontier.efficient_risk`
+was the one entry point nothing in the repo called; it is now the `efficient_risk`
+scenario — maximize expected return subject to an annualized volatility ceiling.
+The page offers Cautious/Balanced/Growth/Aggressive (10/20/35/50%), and picking
+one selects the scenario it produces rather than leaving the tab on an answer
+computed for someone else's appetite. A ceiling **below the minimum-variance
+floor** is unreachable by any weights, so it degrades to that floor, marks
+`target_volatility_below_minimum`, and prints the shortfall in warn colour —
+"the calmest book your assets can make is 18%" is the useful reply to "I want
+2%"; an error is not.
+
+**"A limited number of assets" now exists.** This was scored as missing UI and
+was not: no cardinality constraint existed anywhere in `optimize()`. It is a
+mixed-integer constraint, so the implementation is the standard greedy
+relaxation — solve, keep the N largest positions, re-solve on **just those
+columns**. The re-solve is the point: truncating and renormalizing leaves
+weights that are optimal for a universe the reader is no longer holding. The
+payload labels it a heuristic and the page repeats the label. Where the weight
+caps make N positions arithmetically unable to reach full investment (three
+assets under a 30% cap reach 0.90), it degrades and says so rather than raising
+at a user who expressed a preference, not a violation.
+
+**`/api/optimization/robustness/` has a screen.** 200 bootstrap re-solves,
+gated behind a button with its own longer timeout, because that cost is exactly
+why it was split from `my-optimal` in the first place. The table sorts by band
+**width**, not weight — the widest bands are the rows worth reading — and prints
+how many draws converged so a thin sample cannot pass for a confident band.
+
+**Found while testing the cap: `_enforce_caps` was deleting weight.** Each
+asset's share of the redistributed slack is clipped at its own headroom, so one
+pass routinely places less than the whole slack — and the tilt toward
+already-held assets makes that the normal case, since it hands the slack to
+assets near their cap while the room sits on the empty ones. The residue was
+silently dropped, because the next round recomputes slack from scratch. Four
+assets under a 32% cap can reach 1.0; with two of them zeroed by the solver it
+placed **0.64**, and the caller raised *"constraints are infeasible at full
+investment"* on a feasible problem. It now places the slack in passes until the
+headroom is gone. This affected every scenario, not just the new ones.
+
+**Q5 frontend 6 → 9, delivered 6 → 9.** Not 10: "with the Pro plans" is a
+product-model gap — tiers were removed in accounts migration `0005` and every
+endpoint is open to any authenticated user. That is a decision to make, not a
+defect to fix.
+
+Backend test count 939 → 958.
 
 ---
 
@@ -346,7 +397,7 @@ trade" crosses two pages and a vocabulary change.
 
 ## Q5 — "Show me the best portfolio for different scenarios and risk tolerances"
 
-**Backend 9 · Frontend 6 · Delivered 6**
+**Backend 9 · Frontend 9 · Delivered 9** *(was 9 · 6 · 6; see "Third pass" above)*
 
 ### What exists
 
@@ -370,22 +421,30 @@ tools:
 - An efficient frontier plus a 400-draw Dirichlet cloud over the user's **own** assets, so
   the chart describes a portfolio they can actually build (`views.py:1551`).
 
-### What is missing — the literal ask has four unmet pieces
+### What was missing, and what closed it
 
-1. **No risk-tolerance control.** `EfficientFrontier.efficient_risk` is never called;
-   `efficient_return` appears only inside `_efficient_frontier` (`optimization.py:1850`). The
-   user cannot say "I accept 25% volatility, maximise return for it". Scenario tabs are a
-   proxy for risk appetite, not an expression of it — and the question asks for the latter.
-2. **No cardinality constraint.** *"with a limited amount of portfolio assets under my name"*
-   has no expression anywhere. Nothing caps the number of names in the target, so the
-   optimizer can return a book the customer does not want to hold.
-3. **Constraints are fixed from the user's side.** `OptimizationView.post` (`views.py:1436`)
-   accepts a `constraints` body. No client sends one, and **no page calls
-   `/api/optimization/` at all** — every user sees `DEFAULT_CONSTRAINTS` and cannot change a
-   cap.
-4. **`/api/optimization/robustness/` has no client** (`RobustnessView`, `views.py:1760`) —
-   exactly the "is this fitted to noise" answer this question needs, given that the question
-   itself worries about overfitting.
+1. ~~**No risk-tolerance control.**~~ **Closed.** The `efficient_risk` scenario maximizes
+   expected return subject to an annualized volatility ceiling the user picks. It is the
+   only scenario that cannot solve unasked, so the endpoint runs it only when a ceiling
+   arrives and the nightly Best Overall precompute (its own `SCENARIOS` tuple in
+   `portfolio/tasks.py`) is untouched. An unreachable ceiling degrades to the
+   minimum-variance floor and says so, rather than erroring or quietly showing a number
+   that is not the one that was asked for.
+2. ~~**No cardinality constraint.**~~ **Closed.** `max_assets` on the constraints dict.
+   Greedy relaxation of a mixed-integer constraint — solve, keep the N largest, re-solve
+   on that subset — labelled as a heuristic in the payload and on screen. Clamped to a
+   3-asset floor, since two things are not a portfolio and `UniverseTooSmall` fires below
+   it in two other places.
+3. **Constraints are still fixed from the user's side** — *partially*. The two the
+   question names (`max_assets`, `target_volatility`) are now controls. The weight caps
+   (`max_weight_per_asset`, per-class, per-cluster, sleeves) remain policy: `OptimizationView.post`
+   accepts them in a body no client sends, and **no page calls `/api/optimization/` at
+   all**. Deliberate for now — a user who raises their own gold cap to 100% has not
+   diversified, they have turned off the thing this page exists to do — but it is a
+   product decision, not an implementation gap.
+4. ~~**`/api/optimization/robustness/` has no client.**~~ **Closed.** "How much of this is
+   signal?" on the My Optimal page: 200 bootstrap re-solves behind an explicit button,
+   sorted by band width, with the converged-draw count printed.
 5. **"With the Pro plans" does not exist.** Tiers were removed (accounts migration
    `0005_remove_user_pro_expires_at_remove_user_tier`); `views.py:5` states every endpoint is
    open to any authenticated user. This is a product-model gap, not a defect — but if Pro is
@@ -394,8 +453,10 @@ tools:
 ### Score rationale
 
 Backend 9: the mathematics, the guards and the honesty are all at a professional standard.
-Frontend 6: two of the question's three nouns — *risk tolerances*, *limited number of
-assets* — have no control, and the anti-overfitting endpoint is dark.
+Frontend 9: all three of the question's nouns — *scenarios*, *risk tolerances*, *limited
+number of assets* — now have a control, and the anti-overfitting answer is on screen.
+Neither reaches 10 while the Pro tier the question names is unbuilt and the weight caps
+remain non-negotiable from the UI.
 
 ---
 
@@ -470,7 +531,7 @@ not purchasable from the current provider.
 
 ### Produced but never surfaced
 
-**21 of 53 endpoints have no frontend caller.** Reproduce with:
+**21 of 53 endpoints had no frontend caller** when this was first measured; `/optimization/robustness/` has since been wired, so the current count is 20. Reproduce with:
 
 ```bash
 cd portfolio-saas && python3 - <<'PY'
@@ -497,7 +558,7 @@ PY
 | `/prices/history/` | **Q3** | single-asset price chart |
 | `/assets/returns/` | Q3 | returns matrix + correlation |
 | `/analytics/asset-ranking/` | Q3 | per-holding Sharpe/Sortino ranking |
-| `/optimization/robustness/` | **Q5** | the anti-overfitting answer |
+| ~~`/optimization/robustness/`~~ | ~~Q5~~ | **Wired** — "How much of this is signal?" on My Optimal |
 | `/accounts/<id>/data-quality/` · `/integrity/` | **Q2** | "can I trust my own numbers" |
 | `/insights/` | Q1/Q4 | rule-based findings |
 | `/performance/` · `/accounts/<id>/valuation/` | — | duplicated by scoped variants; likely dead |
@@ -537,10 +598,10 @@ customer hits in their first hour.
 | 3 | **Stop silently discarding the opening date** — read the returned timestamp back and say "recorded at your tracking start"; steer multi-year entry toward dated buys | Q2 | anyone entering an old book | S | `AddTransactionDialog.jsx:376`, review copy |
 | 4 | **Single-asset price history page** over `/prices/history/` + `/assets/returns/` | Q3 | everyone | M | new page, `Shell.jsx` nav, `api.js` |
 | 5 | **Dividend / fee / rights-issue in the wizard** | Q2 | every TSE holder | S | `AddTransactionDialog.jsx:54` `ACTIONS` |
-| 6 | **Risk-tolerance control** — target volatility via `efficient_risk`, plus a max-assets cap | Q5 | Pro users | M | `optimization.py`, `views.py`, `MyOptimal.jsx` |
+| ~~6~~ | ~~**Risk-tolerance control** — target volatility via `efficient_risk`, plus a max-assets cap~~ | ~~Q5~~ | — | — | **Done 2026-09-01.** Both controls ship on My Optimal |
 | 7 | **As-of stamp + freshness badge off the Dashboard** (My Optimal, Comparison, Best Overall) | Q1, Q3 | everyone | S | the three pages |
 | 8 | **One trade-advice path** — have Best Overall consume server-computed trades instead of differencing in the browser | Q1, Q4 | everyone | S | `BestOverall.jsx:194`, `views.py` |
-| 9 | **Surface `robustness` and `data-quality`** | Q2, Q5 | Pro users | S | `MyOptimal.jsx`, `Dashboard.jsx` |
+| 9 | **Surface `data-quality`** *(`robustness` done 2026-09-01)* | Q2 | everyone | S | `Dashboard.jsx` |
 | 10 | **Frame Risk Parity / HRP as "the diversified allocation"**, and add drift bands | Q4 | everyone | S | `MyOptimal.jsx`, `Dashboard.jsx` |
 | 11 | **User-domain panel in Ops** — projection drift, blocked performance, excluded reasons | Q6 | operator | M | `admin_telemetry.py`, `Ops.jsx` |
 | 12 | **Q7 v1 spike** — daily-bar + real/legal classifier (see annex) | Q7 | Pro users | L | new `marketdata/ml/` |
