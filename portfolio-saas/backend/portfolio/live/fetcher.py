@@ -136,14 +136,33 @@ def _brs_job(brs_url, brs_key):
     return result
 
 
+def _required_symbols():
+    """Every BrsApi symbol some active asset is priced by, upper-cased.
+
+    This is the bar the free sources must clear before the paid call is worth
+    skipping. Read live rather than cached: a user adding an asset from the
+    market catalog changes the answer immediately, and pricing their new
+    holding matters more than saving one request.
+    """
+    from portfolio.models import Asset
+
+    return {
+        symbol.upper()
+        for symbol in Asset.objects.filter(is_active=True)
+        .exclude(brs_symbol="")
+        .values_list("brs_symbol", flat=True)
+        if symbol
+    }
+
+
 def _direct_job():
     """Gold/FX from TGJU and crypto from Wallex -- the unmetered origins.
 
-    Runs ALONGSIDE the BrsApi job rather than replacing it, and the extractor
-    prefers whichever produced a row (see `extractor._build_lookup`). That
-    ordering is the whole migration strategy: the direct sources take over
-    silently when they work, BrsApi covers anything they miss, and switching
-    back is an env var rather than a rollback.
+    This runs before the BrsApi job. The extractor still prefers whichever
+    produced a row (see `extractor._build_lookup`), while the caller skips the
+    paid fallback when the direct board is complete. That ordering makes the
+    migration save quota rather than merely preferring one response after both
+    requests were already spent.
 
     Failures are logged and swallowed. A free origin going down must not take
     the price loop with it -- the paid one is still there, which is precisely
@@ -182,6 +201,19 @@ def _direct_job():
     if rows:
         # Shaped like a BrsApi envelope so `_build_lookup` consumes it unchanged.
         result["direct"] = {"rows": rows}
+        # Whether the paid market request would add anything. Measured against
+        # the symbols the APP needs -- every active asset's `brs_symbol` -- not
+        # against `tgju.BRS_TO_SLUG`.
+        #
+        # Those two sets happen to coincide today (all 8 priced assets are
+        # mapped), which is exactly what makes the distinction easy to miss. But
+        # the market catalog offers ~5,000 BrsApi instruments a user can add,
+        # and the moment someone adds one TGJU does not carry -- GBP, or
+        # IR_COIN_BAHAR -- keying on the mapping would declare the board
+        # complete, skip the only source that quotes their holding, and leave it
+        # frozen with no error anywhere.
+        direct_symbols = {str(row.get("symbol", "")).upper() for row in rows}
+        result["direct_complete"] = bool(direct_symbols) and _required_symbols() <= direct_symbols
         logger.info("Direct sources supplied %s live rows.", len(rows))
 
     # Cross-check is advisory: it never changes a price, it only reports when
@@ -260,17 +292,37 @@ def fetch_all_markets(api_settings):
     from zoneinfo import ZoneInfo
     from marketdata import ingest
     from marketdata.fetchers import fetch_market_index
+    from marketdata.sources import tgju
     from marketdata.market_state import (
         claim_provider_state_probe,
         live_job_keys,
         market_state,
         release_provider_state_probe,
+        remember_provider_state,
     )
 
     ignore_hours = getattr(settings, "MARKETDATA_IGNORE_MARKET_HOURS", False)
 
     tehran_now = datetime.now(ZoneInfo("Asia/Tehran"))
-    if tsetmc_url and tsetmc_key and claim_provider_state_probe(tehran_now):
+    index_probe_claimed = claim_provider_state_probe(tehran_now)
+
+    # The index probe is bought for its STATE, not for its number, so BrsApi
+    # goes first here even though TGJU is free.
+    #
+    # `market_state_at` is clock-based -- weekday plus session hours -- and the
+    # only thing that can override it is a provider saying "بسته", cached by
+    # `remember_provider_state` (which `fetch_market_index` calls and nothing
+    # else does). On a weekday public holiday the clock says OPEN, so without
+    # that override the TSE stock job runs every two minutes for a whole
+    # session against a shut market. Iran has ~20 such holidays a year.
+    #
+    # The probe is claimed at most once per half hour, so it costs ~14 requests
+    # a day out of the ~10,000 TSETMC wallet. Trading a reliable closed-signal
+    # for that is a bad deal in the one direction that matters: TSETMC is the
+    # binding wallet -- it hit 10,034/10,000 on 2026-08-26 -- and the waste this
+    # prevents is measured in thousands of stock fetches, not fourteen.
+    index_payload = None
+    if index_probe_claimed and tsetmc_url and tsetmc_key:
         try:
             index_payload = fetch_market_index(tsetmc_key)
             if index_payload:
@@ -279,6 +331,20 @@ def fetch_all_markets(api_settings):
         except Exception as exc:
             release_provider_state_probe()
             logger.warning("Index probe failed: %s", exc)
+
+    # TGJU covers the index only when the paid probe produced nothing -- either
+    # it was not claimed this cycle, or it failed. It is a free value, not a
+    # second opinion on whether the market is open: see `live_tedpix_payload`,
+    # which derives open/closed from the quote's own age rather than asserting it.
+    if index_payload is None and getattr(settings, "TGJU_ENABLED", False):
+        try:
+            direct_index = tgju.live_tedpix_payload(now=tehran_now)
+            if direct_index:
+                ingest.ingest_market_index(direct_index)
+                raw_data.setdefault("market_index", direct_index)
+                remember_provider_state(direct_index)
+        except Exception as exc:  # noqa: BLE001 - never let a free source break the loop
+            logger.warning("TGJU index probe failed: %s", exc)
 
     current_state = market_state()
     planned = set(live_job_keys(
@@ -301,11 +367,21 @@ def fetch_all_markets(api_settings):
         getattr(settings, name, False)
         for name in ("TGJU_ENABLED", "WALLEX_ENABLED", "NOBITEX_ENABLED")
     )
+    direct_result = {}
     if direct_enabled and "gold_currency" in planned:
-        jobs.append(submit_with_context(executor, _direct_job))
+        # Resolve the free origin first. This makes BrsApi a true fallback
+        # instead of a parallel request that spends quota even when direct
+        # prices are complete.
+        direct_result = _direct_job()
+        direct_complete = bool(direct_result.pop("direct_complete", False))
+        raw_data.update(direct_result)
+    else:
+        direct_complete = False
 
     if brs_url and brs_key:
-        if "gold_currency" in planned:
+        if direct_complete:
+            logger.info("Direct market sources cover the mapped board; skipping BRS fallback.")
+        elif "gold_currency" in planned:
             jobs.append(submit_with_context(executor, _brs_job, brs_url, brs_key))
         else:
             logger.info("Domestic gold & currency market closed overnight. Skipping.")

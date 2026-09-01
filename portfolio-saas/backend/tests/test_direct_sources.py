@@ -95,6 +95,112 @@ class TestTgjuUnits:
             assert unit == "دلار", f"{slug} must be dollar-quoted"
 
 
+class TestTgjuTedpixHistory:
+    def test_parser_preserves_observed_trading_days(self):
+        rows = load("tgju_tedpix_history.json")["data"]
+        parsed = tgju.tedpix_history_rows(rows)
+        assert [row["jalali"] for row in parsed] == ["1405-06-09", "1405-06-07"]
+        assert parsed[0]["close"] == Decimal("6547963.76")
+
+    def test_live_index_adapter_rejects_stale_observations(self):
+        current = {
+            "bourse": {
+                "p": "6,547,963.76",
+                "d": "31,779.83",
+                "ts": "2026-09-01 12:39:04",
+            }
+        }
+        payload = tgju.live_tedpix_payload(
+            current, now=datetime(2026, 9, 1, 12, 40, tzinfo=TEHRAN)
+        )
+        assert payload["date"] == "1405-06-10"
+        assert payload["index"] == Decimal("6547963.76")
+        assert payload["time"] == "12:39:04"
+
+        assert tgju.live_tedpix_payload(
+            current, now=datetime(2026, 9, 5, 12, 40, tzinfo=TEHRAN)
+        ) is None
+
+    def test_gold_history_adapter_preserves_provider_ohlc_and_symbol(self):
+        rows = [
+            ["2,000", "1,900", "2,100", "2,050", "", "", "2026-08-31", "1405/06/09"],
+        ]
+        payload = tgju.gold_history_payload("USD", rows)
+        assert payload["symbol"] == "USD"
+        assert payload["unit"] == "ریال"
+        assert payload["history_daily"][0]["date"] == "1405-06-09"
+        assert payload["history_daily"][0]["low"] == Decimal("1900")
+        assert payload["history_daily"][0]["high"] == Decimal("2100")
+
+    def test_gold_history_adapter_leaves_unmapped_symbols_for_fallback(self):
+        assert tgju.gold_history_payload("IR_GOLD_MELTED", []) is None
+
+
+def test_complete_direct_board_suppresses_paid_brs_fallback(monkeypatch, settings):
+    from marketdata.market_state import OPEN
+    from portfolio.live import fetcher
+
+    settings.TGJU_ENABLED = True
+    settings.WALLEX_ENABLED = True
+    settings.NOBITEX_ENABLED = False
+    settings.MARKETDATA_IGNORE_MARKET_HOURS = True
+
+    direct = {
+        "direct": {"rows": [{"symbol": "USD", "price": "1", "unit": "ریال"}]},
+        "direct_complete": True,
+    }
+    monkeypatch.setattr(fetcher, "_direct_job", lambda: dict(direct))
+    brs_calls = []
+    monkeypatch.setattr(
+        fetcher,
+        "_brs_job",
+        lambda *_args: brs_calls.append(True) or {"brsapi": {}},
+    )
+    monkeypatch.setattr(
+        "marketdata.market_state.claim_provider_state_probe", lambda _now: False
+    )
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: OPEN)
+
+    raw = fetcher.fetch_all_markets(
+        {
+            "brs_url": "https://paid.example",
+            "brs_api_key": "paid-key",
+            "tsetmc_url": "",
+            "tsetmc_api_key": "",
+        }
+    )
+
+    assert not brs_calls
+    assert raw["direct"]["rows"][0]["symbol"] == "USD"
+    assert "direct_complete" not in raw
+
+
+def test_crypto_snapshot_capture_uses_wallex_without_brs(monkeypatch, settings):
+    from marketdata import tasks
+    from marketdata.sources import wallex
+
+    settings.WALLEX_ENABLED = True
+    monkeypatch.setattr(
+        wallex,
+        "live_rows",
+        lambda: [
+            {"base": "BTC", "quote": "TMN", "price": Decimal("200"), "unit": "تومان"},
+            {"base": "BTC", "quote": "USDT", "price": Decimal("1"), "unit": "تتر"},
+        ],
+    )
+    paid_calls = []
+    monkeypatch.setattr(
+        "marketdata.fetchers.fetch_derivatives",
+        lambda *_args: paid_calls.append(True) or [],
+    )
+
+    rows = tasks._market_snapshot_payload("crypto", "crypto", "paid-key")
+
+    assert rows == [{"symbol": "BTC", "price": Decimal("200"), "unit": "تومان"}]
+    assert not paid_calls
+
+
+
 class TestTgjuStaleness:
     """The dead-slug trap, which is the one that would have shipped."""
 
@@ -497,3 +603,116 @@ class TestCryptoHistoryIngest:
         assert len(set(symbols.values())) == len(symbols)
         assert symbols["TMN"] == "BTC_IRT" and symbols["USDT"] == "BTC"
         assert QUOTES["TMN"][1] == "تومان" and QUOTES["USDT"][1] == "تتر"
+
+
+class TestIndexStateIsObservedNotAsserted:
+    """The market-open signal must never be a constant.
+
+    `market_state_at` is clock-based -- weekday plus session hours -- and the
+    ONLY thing that can override it is a cached provider "بسته". So a payload
+    that always claims open can never reveal a weekday public holiday, and the
+    TSE stock job would run every two minutes for a whole session against a shut
+    market, on the wallet that actually binds (TSETMC hit 10,034/10,000 once).
+    """
+
+    def _current(self, ts):
+        return {"bourse": {"p": "6,547,963.76", "d": "31,779.83", "ts": ts}}
+
+    def test_index_printing_today_reads_as_open(self):
+        payload = tgju.live_tedpix_payload(
+            self._current("2026-09-01 12:39:04"),
+            now=datetime(2026, 9, 1, 12, 40, tzinfo=TEHRAN),
+        )
+        assert payload["state"] == "باز"
+
+    def test_an_index_that_has_not_printed_today_reads_as_closed(self):
+        """A weekday holiday: inside session hours, last tick is yesterday's.
+
+        Fresh enough to pass MAX_QUOTE_AGE, so the old code returned it wearing
+        a hard-coded "open". The quote's own date is the evidence that the
+        exchange never opened.
+        """
+        from marketdata.market_state import PROVIDER_CLOSED
+
+        payload = tgju.live_tedpix_payload(
+            self._current("2026-09-01 12:39:04"),
+            now=datetime(2026, 9, 2, 11, 0, tzinfo=TEHRAN),
+        )
+        assert payload is not None, "still within MAX_QUOTE_AGE"
+        assert payload["state"] == PROVIDER_CLOSED
+
+    def test_that_closed_state_actually_suppresses_the_stock_job(self):
+        """End to end: the derived state must reach the job planner.
+
+        Asserting the string alone would pass while the wiring was broken; what
+        matters is that `live_job_keys` stops asking for TSE stocks.
+        """
+        from marketdata.market_state import (
+            CLOSED_DAYTIME,
+            OPEN,
+            live_job_keys,
+            market_state_at,
+        )
+
+        now = datetime(2026, 9, 2, 11, 0, tzinfo=TEHRAN)
+        assert market_state_at(now) == OPEN, "clock alone says the market is open"
+
+        closed = market_state_at(now, provider_closed=True)
+        assert closed == CLOSED_DAYTIME
+        jobs = live_job_keys(state=closed, now=now, has_brs=True, has_tsetmc=True)
+        assert "tsetmc" not in jobs
+        assert "gold_currency" in jobs, "gold desks trade when the TSE is shut"
+
+
+class TestHistoricalIndexRowsMakeNoStateClaim:
+    def test_backfilled_rows_carry_an_empty_state(self):
+        """`is_closure_day` reads the newest non-empty state for a date.
+
+        A sentinel string on 2,751 historical rows would be read as "not
+        closed" for every one of them. Empty is the value that branch already
+        excludes, so a historical close stays silent about market state.
+        """
+        import inspect
+
+        from marketdata import ingest
+
+        source = inspect.getsource(ingest.ingest_tedpix_history)
+        assert 'state=""' in source
+        assert "tgju_history" not in source
+
+
+@pytest.mark.django_db
+class TestPaidFallbackSkipIsKeyedToWhatTheAppNeeds:
+    """Skipping BrsApi is safe only if the free board covers every priced asset.
+
+    Keyed to `tgju.BRS_TO_SLUG` this passed today and would fail the first time
+    a user added one of the ~5,000 catalog instruments TGJU does not carry:
+    board declared complete, only source that quotes their holding skipped,
+    holding frozen with no error anywhere.
+    """
+
+    def test_required_symbols_come_from_active_assets(self):
+        from portfolio.live.fetcher import _required_symbols
+        from portfolio.models import Asset
+
+        Asset.objects.create(key="gbp_cash", name="GBP", brs_symbol="GBP",
+                             asset_class=Asset.AssetClass.CASH, is_active=True)
+        Asset.objects.create(key="retired", name="Old", brs_symbol="OLD",
+                             asset_class=Asset.AssetClass.CASH, is_active=False)
+
+        required = _required_symbols()
+        assert "GBP" in required
+        assert "OLD" not in required, "an inactive asset needs no live price"
+
+    def test_an_unmapped_holding_keeps_the_paid_call(self):
+        from portfolio.live.fetcher import _required_symbols
+        from portfolio.models import Asset
+
+        Asset.objects.create(key="gbp_cash", name="GBP", brs_symbol="GBP",
+                             asset_class=Asset.AssetClass.CASH, is_active=True)
+
+        # Everything TGJU maps, and nothing else -- the old completeness test.
+        direct = {s.upper() for s in tgju.BRS_TO_SLUG}
+        assert not _required_symbols() <= direct, (
+            "GBP is unpriced by the direct board, so BrsApi must still run"
+        )

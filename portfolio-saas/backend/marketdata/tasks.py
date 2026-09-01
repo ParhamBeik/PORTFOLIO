@@ -95,8 +95,6 @@ def capture_market_snapshots():
     Cadence comes from `LiveFetchState`.
     """
     from . import live_states
-    from .fetchers import fetch_derivatives
-
     live_states.ensure_live_states()  # see capture_derivative_snapshots
 
     results = {}
@@ -114,7 +112,7 @@ def capture_market_snapshots():
             destination_table="MarketSnapshot",
         )
         try:
-            payload = fetch_derivatives(api_key, endpoint_key)
+            payload = _market_snapshot_payload(asset_class, endpoint_key, api_key)
             created, skipped = ingest.ingest_market_snapshots(asset_class, payload) or (0, 0)
             results[asset_class] = (created, skipped)
             live_states.record_result(state, ok=True)
@@ -125,6 +123,34 @@ def capture_market_snapshots():
             _finish_fail(outcome, err)
 
     return results
+
+
+def _market_snapshot_payload(asset_class, endpoint_key, api_key):
+    """Use an unmetered origin first; call BrsApi only as a fallback."""
+    if asset_class == "crypto" and getattr(settings, "WALLEX_ENABLED", False):
+        from .sources import wallex
+        from .sources.http import SourceError
+
+        try:
+            rows = [
+                {
+                    "symbol": row["base"],
+                    "price": row["price"],
+                    "unit": row["unit"],
+                }
+                for row in wallex.live_rows()
+                if row.get("quote") == "TMN"
+                and row.get("base")
+                and row.get("price") is not None
+            ]
+            if rows:
+                return rows
+        except SourceError as exc:
+            logger.warning("Wallex snapshot fetch failed; using BrsApi fallback: %s", exc)
+
+    from .fetchers import fetch_derivatives
+
+    return fetch_derivatives(api_key, endpoint_key)
 
 
 @shared_task(ignore_result=True)

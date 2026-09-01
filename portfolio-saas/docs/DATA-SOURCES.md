@@ -14,12 +14,22 @@ Nobitex clients; `portfolio/live/fetcher.py` fetches them alongside BrsApi and
 `extractor._build_lookup` prefers the direct row. Stocks and Codal are unchanged, because
 they cannot be reached — see the egress section.
 
+The live loop now attempts the direct board first and calls BrsApi only when that board is
+incomplete or unavailable. This makes the migration save paid requests instead of merely
+preferring one response after spending both quotas.
+
 | Lane | Was | Now | Metered? |
 |---|---|---|---|
 | Gold / coin / FX | `Market/Gold_Currency*.php` | **TGJU** | no |
 | Crypto | `Market/Cryptocurrency.php` | **Wallex** (+ Nobitex cross-check) | no |
+| TEDPIX history | `Tsetmc/Index.php` (live only) | **TGJU `bourse` history** | no |
+| Commodity | `Market/Commodity.php` | unchanged — **BrsApi fallback** | yes |
 | Stocks | `Tsetmc/*.php` | unchanged — **blocked** | yes |
 | Codal | `Codal/Announcement.php` | unchanged — **blocked** | yes |
+
+Gold/FX historical backfills now try the mapped TGJU series first and fall back per symbol to
+BrsApi when TGJU is unavailable or has no mapped history. The fallback is retained for
+coverage rather than silently marking a state complete with an empty direct response.
 
 Verify on any host with `python manage.py check_egress [--compare] [--verify-tsetmc]`.
 
@@ -198,17 +208,11 @@ That is deeper than BrsApi's `history=2` (back to 1390 ≈ 2011) for coins, free
 
 ## Revised recommendation
 
-**Keep BrsApi for gold and currency — for now.** The BRS wallet is not the constraint: the
-live loop spends ~835/day of 1,500 (`settings.py:343`) and one call returns all 120 rows.
-There is no urgency here, and BrsApi is a paid contract with a stable shape.
-
-**But TGJU is now the better source**, and worth migrating deliberately rather than under
-pressure: 962 instruments vs 120, one request vs one, no quota at all, deeper history, and
-second-resolution timestamps. The sensible move is to run it **alongside** BrsApi as a
-cross-check first — the app already has the machinery for exactly this, since
-`_archive_replacements` (`valuation.py:375`) is built around one source vetoing another.
-A disagreement between TGJU and BrsApi on a coin price is a signal worth having regardless
-of which one you ultimately keep.
+**Use TGJU first for mapped gold/FX live and historical data, with BrsApi as a
+coverage fallback.** The live loop suppresses the paid market request when the
+direct board is complete, and the archive chooses TGJU per symbol before using
+the paid full-history endpoint. This preserves recovery coverage without paying
+for both successful responses.
 
 **Use Wallex as the primary crypto source, Nobitex (`apiv2`) as the cross-check.** This
 closes the gap named in the evaluation: crypto currently sits in
@@ -233,6 +237,30 @@ not an engineering one, and it is the same decision `CODAL_HTTP_PROXY` is alread
 Until one of those happens, the ~5M-request tick backlog stays governed by a 10,000/day
 wallet, `INTEGRITY_FAILURE_RATE_THRESHOLD = 0.85` stays a permanent condition rather than a
 transient one, and Q7 stays capped at what executed ticks can show.
+
+### Home-network egress
+
+An Iranian home computer or router can serve as the egress node. It must have an Iranian
+public source address and remain reachable from the application VPS; a home connection
+outside Iran does not change the geo-block. Run `scripts/setup_iran_egress.sh server` on an
+always-on Linux host (or a router with WireGuard/tinyproxy support), forward UDP 51820 to it
+if the ISP permits inbound traffic, and run the `client` mode on the application VPS.
+`AllowedIPs` is intentionally limited to the tunnel subnet, so only proxy traffic crosses
+the tunnel and SSH/deploy traffic keeps its normal route. If the home ISP uses CGNAT and
+cannot forward UDP, a small public relay is required; it must not be an open proxy.
+
+For a Mac behind CGNAT, the simpler option is a private Tailscale link:
+
+1. Join the Mac and application VPS to the same tailnet.
+2. Run a localhost-only HTTP proxy on the Mac, then expose that port to the tailnet with
+   `tailscale serve --tcp=8888 tcp://localhost:8888`.
+3. Set `IRAN_EGRESS_PROXY=http://<mac-tailscale-ip>:8888` on the application deployment.
+4. Run `python manage.py check_egress --verify-tsetmc` from the deployed backend before
+   enabling direct TSETMC or Codal jobs.
+
+This keeps the proxy off the public internet and does not require inbound access to the
+home router. The Mac must stay awake and connected; losing it activates the existing
+reachability breaker and paid-provider fallback rather than returning empty market data.
 
 ## Suggested sequencing
 

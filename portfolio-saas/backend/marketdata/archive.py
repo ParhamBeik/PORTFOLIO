@@ -242,9 +242,9 @@ def _fetch_and_ingest(state):
     if endpoint in _RETIRED_ARCHIVE_ENDPOINTS:
         # No request; empty expected/stored marks verified_complete and stops retries.
         return (0, 0), set(), set()
-    if endpoint in _FULL_HISTORY:
-        increment_historical_full_used()
     if endpoint == ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED:
+        if endpoint in _FULL_HISTORY:
+            increment_historical_full_used()
         payload = fetch_daily_history(settings.TSETMC_API_KEY, symbol, history_type=0)
         result = ingest.ingest_daily_history(symbol, payload)
         expected = _record_dates(payload)
@@ -252,6 +252,8 @@ def _fetch_and_ingest(state):
             symbol=symbol, date__in=expected
         ).values_list("date", flat=True))
     elif endpoint == ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED:
+        if endpoint in _FULL_HISTORY:
+            increment_historical_full_used()
         # Misnamed enum kept for DB compatibility: type=1 is the Real/Legal
         # participant breakdown, not adjusted prices (those live in MarketCandle
         # "1d_adj"). Verified on the breakdown columns, not on date presence, so
@@ -276,6 +278,8 @@ def _fetch_and_ingest(state):
                 "unadjusted history pass must land first."
             )
     elif endpoint == ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED:
+        if endpoint in _FULL_HISTORY:
+            increment_historical_full_used()
         payload = fetch_candlesticks(settings.TSETMC_API_KEY, symbol, candle_type=2)
         result = ingest.ingest_candles(symbol, 2, payload)
         expected = _candle_dates(payload)
@@ -283,6 +287,8 @@ def _fetch_and_ingest(state):
             symbol=symbol, timeframe="1d_unadj", date_time__in=expected
         ).values_list("date_time", flat=True))
     elif endpoint == ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED:
+        if endpoint in _FULL_HISTORY:
+            increment_historical_full_used()
         payload = fetch_candlesticks(settings.TSETMC_API_KEY, symbol, candle_type=3)
         result = ingest.ingest_candles(symbol, 3, payload)
         expected = _candle_dates(payload)
@@ -377,7 +383,26 @@ def _fetch_and_ingest(state):
         expected = set(pending) | _tick_dates_stored(symbol)
         stored = _tick_dates_stored(symbol)
     else:
-        payload = fetch_gold_currency_pro_history_daily(settings.BRS_API_KEY, symbol)
+        direct_payload = None
+        if getattr(settings, "TGJU_ENABLED", False):
+            from .sources import tgju
+            try:
+                direct_payload = tgju.gold_history_payload(symbol)
+                if direct_payload is not None:
+                    logger.info(
+                        "Using TGJU history for %s (%s rows); skipping BrsApi.",
+                        symbol, len(direct_payload["history_daily"]),
+                    )
+            except Exception as exc:  # noqa: BLE001 - paid fallback is intentional
+                logger.warning(
+                    "TGJU history failed for %s; using BrsApi fallback: %s",
+                    symbol, exc,
+                )
+        if direct_payload is not None:
+            payload = direct_payload
+        else:
+            increment_historical_full_used()
+            payload = fetch_gold_currency_pro_history_daily(settings.BRS_API_KEY, symbol)
         result = ingest.ingest_gold_currency_history(payload)
         expected = _gold_dates(payload)
         stored = set(GoldCurrencyHistory.objects.filter(

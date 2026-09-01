@@ -41,6 +41,8 @@ from zoneinfo import ZoneInfo
 
 from django.conf import settings
 
+from .. import jalali
+from ..market_state import PROVIDER_CLOSED
 from .http import SourceResponseError, fetch
 
 logger = logging.getLogger(__name__)
@@ -102,6 +104,9 @@ BRS_TO_SLUG = {
 #: out around 4,792 rows but costs a metered request; these cost nothing.
 HISTORY_SLUGS = ("price_dollar_rl", "price_eur", "sekee", "nim", "rob", "gerami",
                  "geram18", "ons")
+
+# TGJU's measured daily TEDPIX series (2,751 observations on 2026-09-01).
+TEDPIX_HISTORY_SLUG = "bourse"
 
 
 def _to_decimal(raw):
@@ -235,3 +240,96 @@ def parse_history_row(row):
         return None
     return {"jalali": jalali, "gregorian": gregorian,
             "open": o, "low": l, "high": h, "close": c}
+
+
+def gold_history_payload(brs_symbol, rows=None):
+    """Adapt one mapped TGJU series to the existing gold-history ingest shape.
+
+    Returns ``None`` when TGJU does not cover the symbol, leaving the caller to
+    use its paid fallback. Keeping the symbol/slug/unit decision here prevents
+    the live and archive paths from growing separate copies of the mapping.
+    """
+    slug = BRS_TO_SLUG.get(brs_symbol)
+    if slug not in HISTORY_SLUGS:
+        return None
+    raw_rows = fetch_daily_history(slug) if rows is None else rows
+    history = []
+    for raw in raw_rows:
+        parsed = parse_history_row(raw)
+        if parsed is None:
+            continue
+        history.append({
+            "date": parsed["jalali"],
+            "open": parsed["open"],
+            "low": parsed["low"],
+            "high": parsed["high"],
+            "close": parsed["close"],
+        })
+    if not history:
+        raise SourceResponseError(
+            f"TGJU history for {brs_symbol} contained no usable rows.",
+            origin=ORIGIN,
+        )
+    return {
+        "symbol": brs_symbol,
+        "name": brs_symbol,
+        "unit": SLUG_UNITS[slug],
+        "history_daily": history,
+    }
+
+
+def fetch_tedpix_history():
+    """Fetch the full daily TEDPIX history from TGJU."""
+    return fetch_daily_history(TEDPIX_HISTORY_SLUG)
+
+
+def tedpix_history_rows(rows):
+    """Parse observed TEDPIX trading days without fabricating calendar rows."""
+    parsed = []
+    for row in rows:
+        item = parse_history_row(row)
+        if item is not None and item["close"] > 0:
+            parsed.append(item)
+    return parsed
+
+
+def live_tedpix_payload(current=None, *, now=None):
+    """Adapt TGJU's live `bourse` quote to the index-ingest shape.
+
+    A stale or malformed quote returns ``None`` so the caller can retain the
+    existing TSETMC probe as a conservative fallback for market-state decisions.
+    """
+    current = fetch_live() if current is None else current
+    row = current.get(TEDPIX_HISTORY_SLUG)
+    if not isinstance(row, dict):
+        return None
+    price = _to_decimal(row.get("p"))
+    stamped = _parse_ts(row.get("ts"))
+    if price is None or price <= 0 or stamped is None:
+        return None
+    moment = now or datetime.now(TEHRAN)
+    age = moment - stamped
+    if age < -timedelta(minutes=5) or age > MAX_QUOTE_AGE:
+        return None
+    change = _to_decimal(row.get("d")) or Decimal("0")
+
+    # State is OBSERVED, never asserted. Hard-coding "باز" here was a real
+    # hazard: `market_state_at` is clock-based (weekday plus session hours) and
+    # the only thing that can override it is a cached provider "بسته". A
+    # payload that always claims open can therefore never reveal a weekday
+    # public holiday, and the TSE stock job would run all session against a shut
+    # market on the binding quota.
+    #
+    # The index printing today is the evidence. If TGJU's newest TEDPIX tick is
+    # from an earlier day while we are inside session hours, the exchange has
+    # not opened -- that is a stronger signal than a provider's string, because
+    # it is derived from whether a price actually moved.
+    same_day = stamped.date() == moment.date()
+    state = "باز" if same_day else PROVIDER_CLOSED
+    return {
+        "date": jalali.from_gregorian(stamped.date()),
+        "time": stamped.strftime("%H:%M:%S"),
+        "state": state,
+        "index": price,
+        "index_change": change,
+    }

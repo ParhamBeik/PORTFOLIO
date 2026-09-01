@@ -924,6 +924,43 @@ def test_volume_mismatch_is_recorded_so_the_day_can_be_forgiven():
     assert state.last_error == ""
 
 
+def test_gold_archive_prefers_tgju_before_paid_brs_fallback(settings):
+    """A provider-boundary test fits the integration rung: it verifies the archive
+    worker, direct adapter, and paid fallback cooperate at their component seam."""
+    from marketdata import archive
+
+    settings.TGJU_ENABLED = True
+    state = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.GOLD_DAILY,
+        symbol="USD",
+    )
+    direct = {
+        "symbol": "USD",
+        "name": "USD",
+        "unit": "ریال",
+        "history_daily": [
+            {
+                "date": "1405-06-09",
+                "open": 2_000_000,
+                "high": 2_100_000,
+                "low": 1_900_000,
+                "close": 2_050_000,
+            }
+        ],
+    }
+    with patch("marketdata.sources.tgju.gold_history_payload", return_value=direct), \
+         patch.object(
+             archive,
+             "fetch_gold_currency_pro_history_daily",
+             side_effect=AssertionError("paid BrsApi fallback was called"),
+         ):
+        result, expected, stored = archive._fetch_and_ingest(state)
+
+    assert result[0] == 1
+    assert expected == {"1405-06-09"}
+    assert stored == {"1405-06-09"}
+
+
 def test_banking_a_day_counts_as_progress_even_when_the_gap_does_not_shrink():
     """The tick window moves, so `missing` can stay flat while data lands.
 
@@ -2061,4 +2098,3 @@ def test_live_day_cost_does_not_shrink_in_the_evening(settings):
         assert live_reserve_remaining(TSETMC, row) == 198
         row.live_used = 50
         assert live_reserve_remaining(TSETMC, row) == 148
-

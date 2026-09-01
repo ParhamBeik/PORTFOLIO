@@ -357,9 +357,9 @@ The four scores are green and gated. What keeps them green:
   `ci-cd.yml`'s own header comment already makes.
 - **Bundle budgets** (`resource-summary:script:size` at 340 KB, stylesheet at 45 KB) catch
   growth before it shows up as a score drop, and specifically stop echarts creeping back.
-- **Remaining work is items 8, 9b and 10.** The authenticated Dashboard audit is the
-  important one: it is the page users actually live on, it carries the 610 KB chart chunk,
-  and until it is measured the 100 above describes the sign-in page only.
+- **The authenticated audit is measured separately below.** The CI score still describes
+  the sign-in page only; authenticated routes require a live backend and credentials, so
+  their variable runtime measurement is deliberately not a deployment gate.
 
 ## Authenticated routes (2026-09-01)
 

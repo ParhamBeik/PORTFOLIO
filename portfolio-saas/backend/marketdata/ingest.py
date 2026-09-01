@@ -841,6 +841,34 @@ def ingest_market_index(payload) -> tuple[int, int]:
     return created, conflicts + rejected
 
 
+def ingest_tedpix_history(records) -> tuple[int, int]:
+    """TGJU daily TEDPIX rows -> one close observation per trading day."""
+    rows = []
+    rejected = 0
+    for record in records or ():
+        date = normalize_jalali(record.get("jalali", ""))
+        close = record.get("close")
+        if not jalali.is_jalali(date) or close is None or close <= 0:
+            rejected += 1
+            continue
+        rows.append(
+            MarketIndexData(
+                date=date,
+                time="00:00:00",
+                # State stays EMPTY on purpose. `calendars.is_closure_day`
+                # reads the newest non-empty state for a date to decide whether
+                # the exchange was shut; a historical close carries no such
+                # claim, and any sentinel string here would be silently read as
+                # "not closed" for 2,751 days. Empty is the one value that
+                # branch already excludes.
+                state="",
+                index_overall=float(close),
+            )
+        )
+    created, conflicts = _bulk(MarketIndexData, rows)
+    return created, conflicts + rejected
+
+
 def ingest_market_snapshots(asset_class, payload) -> tuple[int, int]:
     """Persist a live poll of crypto/commodity as raw snapshots.
 

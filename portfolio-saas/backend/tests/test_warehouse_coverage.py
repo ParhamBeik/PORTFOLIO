@@ -1110,6 +1110,7 @@ def test_index_probe_closes_a_holiday_before_tse_jobs(settings):
     from portfolio.live.fetcher import fetch_all_markets
 
     settings.MARKETDATA_IGNORE_MARKET_HOURS = False
+    settings.TGJU_ENABLED = False
     settings.TSETMC_SYMBOL_URL = "https://example.test/symbol"
     index_payload = {"date": "1405-05-17", "time": "08:30", "state": "بسته"}
     with (
@@ -1128,6 +1129,23 @@ def test_index_probe_closes_a_holiday_before_tse_jobs(settings):
     index.assert_called_once_with("key")
     assert raw["market_index"] == index_payload
     stocks.assert_not_called()
+
+
+def test_ingest_tedpix_history_is_idempotent_and_keeps_live_rows():
+    MarketIndexData.objects.create(
+        date="1405-06-09",
+        time="12:30:00",
+        state="open",
+        index_overall=6_548_000,
+    )
+    records = [
+        {"jalali": "1405-06-09", "close": Decimal("6547963.76")},
+        {"jalali": "1405-06-07", "close": Decimal("6516183.93")},
+    ]
+
+    assert ingest.ingest_tedpix_history(records) == (2, 0)
+    assert ingest.ingest_tedpix_history(records) == (0, 2)
+    assert MarketIndexData.objects.filter(date="1405-06-09").count() == 2
 
 
 @pytest.mark.django_db

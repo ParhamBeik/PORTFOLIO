@@ -37,7 +37,9 @@
 #
 # WHAT THIS SCRIPT DOES
 #
-# Run it ON a small Iranian VPS you control. It installs tinyproxy bound to
+# Run it on any always-on computer whose public ISP address is Iranian. This
+# can be a small Iranian VPS OR a computer/router inside your house in Iran.
+# It installs tinyproxy bound to
 # WireGuard's interface only, so the proxy is never exposed to the public
 # internet -- an open forward proxy is found and abused within hours. The app
 # VPS then reaches it over an encrypted tunnel and sets:
@@ -48,11 +50,13 @@
 # see every request, and disappear without notice -- three properties that have
 # no place on a financial data path.
 #
-# Cost is a few dollars a month. Any Iranian provider works; the requirement is
-# only an Iranian IP and a stable route.
+# Cost is a few dollars a month for a VPS, or zero extra infrastructure when an
+# always-on home computer/router already has an Iranian IP. The requirement is
+# an Iranian source address and a stable inbound UDP path; CGNAT may require a
+# small public relay, which must still terminate the tunnel on the home network.
 #
 # USAGE
-#     # on the Iranian VPS, as root:
+#     # on the Iranian VPS OR an always-on Iranian home computer, as root:
 #     ./setup_iran_egress.sh server
 #
 #     # it prints a [Peer] block; then on the app VPS, as root:

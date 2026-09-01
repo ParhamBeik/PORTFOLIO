@@ -528,7 +528,7 @@ can run in parallel with it.
 | # | Workstream | Why it ranks here | Document |
 |---|---|---|---|
 | A | **Probe VPS egress to `cdn.tsetmc.com` / `api.nobitex.ir`** | one command; gates workstream B entirely, exactly as `codal.ir` gates Codal today | [`DATA-SOURCES.md`](DATA-SOURCES.md) |
-| B | **Move the TSETMC lane off BrsApi** | turns a ~2-year tick backfill into ~2 months, and adds the order book Q7 needs. Keep BrsApi for gold/FX — that wallet has ~44% headroom and is not the problem | [`DATA-SOURCES.md`](DATA-SOURCES.md) |
+| B | **Move the TSETMC lane off BrsApi** | turns a ~2-year tick backfill into ~2 months and adds the order book Q7 needs. Gold/FX already use TGJU first, including mapped historical backfills | [`DATA-SOURCES.md`](DATA-SOURCES.md) |
 | C | **Nobitex crypto history** | small, keyless, documented; repairs the named Q2/Q3 gap that crypto cannot be back-dated before this deployment started | [`DATA-SOURCES.md`](DATA-SOURCES.md) |
 | D | **nginx compression + `<meta description>` + CSP** | hours of work; the compression fix alone removes ~70% of transfer for every real user | [`LIGHTHOUSE.md`](LIGHTHOUSE.md) |
 | E | **Split status colour tokens into fill vs text variants** | measured WCAG failures on every P&L figure and on the primary button — 3.15:1 and 3.64:1 | [`LIGHTHOUSE.md`](LIGHTHOUSE.md) |
