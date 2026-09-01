@@ -2075,11 +2075,12 @@ class BenchmarkSeriesView(APIView):
     question is relative growth and the levels are not comparable -- a gold gram
     and a whole portfolio have no common scale.
 
-    The TSE index is deliberately absent: the provider exposes it as a LIVE
-    snapshot only (see marketdata/endpoints.py, "there is no index history
-    here"), and MarketIndexData holds ~2 weeks of rows. Plotting a benchmark
-    from that would be inventing a comparison, so it is reported as unavailable
-    with the reason instead.
+    The TSE index IS included now. It was absent for a real reason -- BrsApi
+    exposes the index as a live snapshot only (see marketdata/endpoints.py,
+    "there is no index history here") and MarketIndexData held about two weeks
+    of rows, so plotting it would have been inventing a comparison. TGJU carries
+    the full daily TEDPIX series, which BrsApi does not sell at any price, so
+    the benchmark is now drawn from observed closes.
     """
 
     permission_classes = [IsAuthenticated]
@@ -2089,7 +2090,7 @@ class BenchmarkSeriesView(APIView):
 
     def get(self, request):
         from portfolio.services.deflator import CpiUnavailable, normalize_basis
-        from portfolio.services.diagnostics import _portfolio_returns
+        from portfolio.services.diagnostics import _load_index_returns, _portfolio_returns
         from portfolio.services.returns import daily_returns_matrix
 
         account = _scope(request)
@@ -2140,10 +2141,24 @@ class BenchmarkSeriesView(APIView):
             else:
                 unavailable.append({"key": key, "label": label,
                                     "reason": "no overlapping history in this window"})
-        unavailable.append({
-            "key": "tse_index", "label": "TSE index",
-            "reason": "provider publishes the index as a live snapshot only; no history to compare against",
-        })
+        # The TSE index, now that there is one to draw.
+        #
+        # This used to be hard-coded unavailable, and correctly so: BrsApi sells
+        # the index as a live snapshot only, `MarketIndexData` held ~2 weeks of
+        # rows, and a benchmark drawn from that would have been invented. TGJU
+        # carries the full daily TEDPIX series, so the premise is gone.
+        #
+        # It is loaded through the same helper that feeds beta and alpha, so the
+        # line on this chart and the beta on the risk card can never disagree
+        # about what the benchmark was.
+        index_returns = _load_index_returns(port.index)
+        if index_returns is not None and index_returns.notna().sum() >= 2:
+            columns["tse_index"] = indexed(index_returns.reindex(port.index))
+        else:
+            unavailable.append({
+                "key": "tse_index", "label": "TSE index",
+                "reason": "no overlapping index history in this window",
+            })
 
         rows = []
         for stamp in port.index:

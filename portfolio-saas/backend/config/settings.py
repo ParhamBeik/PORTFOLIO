@@ -242,6 +242,22 @@ IRAN_EGRESS_PROXY = os.getenv("IRAN_EGRESS_PROXY", "")
 # is deeper than the BRS gold history and costs nothing, which is why it leads
 # the gold/currency migration.
 TGJU_ENABLED = os.getenv("TGJU_ENABLED", "1") == "1"
+
+# Beta, alpha and the TSE-index benchmark line (`diagnostics._load_index_returns`,
+# `ComparisonView`). This has been dead code in production since it was written:
+# the flag was never defined anywhere, so it defaulted False, and only tests ever
+# ran it under `override_settings`.
+#
+# The reason was real -- BrsApi publishes the index as a LIVE snapshot and sells
+# no history, so `MarketIndexData` held about two weeks of rows and a benchmark
+# drawn from that would have been invented. TGJU carries the full daily TEDPIX
+# series (2,751 observations back to ~1394), which is data BrsApi cannot sell at
+# any price, so the premise no longer holds.
+#
+# Enabling is safe without a data check: `_load_index_returns` already returns
+# None when fewer than two observations exist, and every caller treats None as
+# "no benchmark" rather than as zero.
+HISTORICAL_BENCHMARK_ENABLED = os.getenv("HISTORICAL_BENCHMARK_ENABLED", "1") == "1"
 TGJU_LIVE_URL = os.getenv("TGJU_LIVE_URL", "https://call1.tgju.org/ajax.json")
 TGJU_HISTORY_URL = os.getenv(
     "TGJU_HISTORY_URL",

@@ -649,3 +649,81 @@ def test_an_all_zero_base_is_an_answer_not_a_missing_field():
     index = _twr_index(series)
 
     assert list(index) == pytest.approx([100.0, 100.0])
+
+
+# ------------------------------------------------- the TSE index as a benchmark
+
+@pytest.fixture
+def benchmarked(compared, write_prices):
+    """The comparison fixture, plus the live price that makes it valuable."""
+    write_prices({"kama_stock": Decimal("2000")})
+    return compared
+
+
+def _index_history(days, start_value=1_000_000.0, step=1.0):
+    """Write one TEDPIX close per day, ending today."""
+    from marketdata.models import MarketIndexData
+
+    today = timezone.now().date()
+    for offset in range(days):
+        day = today - datetime.timedelta(days=days - 1 - offset)
+        MarketIndexData.objects.create(
+            date=_jalali(day),
+            time="00:00:00",
+            state="",
+            index_overall=start_value * (step ** offset),
+        )
+
+
+def _benchmarks(account, **params):
+    client = APIClient()
+    client.force_authenticate(user=account.user)
+    query = "&".join(f"{k}={v}" for k, v in {"account": account.id, **params}.items())
+    return client.get(f"/api/analytics/benchmarks/?{query}")
+
+
+def test_the_tse_index_is_drawn_when_there_is_history_for_it(benchmarked):
+    """The line BrsApi could not sell us at any price.
+
+    This was hard-coded unavailable for a real reason -- the paid provider
+    publishes the index as a live snapshot only, so MarketIndexData held about
+    two weeks of rows and plotting it would have been inventing a comparison.
+    TGJU carries the full daily series, so the premise is gone and the benchmark
+    has to actually appear.
+    """
+    _index_history(90, step=1.01)
+
+    response = _benchmarks(benchmarked, window=90)
+
+    assert response.status_code == 200, response.data
+    unavailable = {row["key"] for row in response.data["unavailable"]}
+    assert "tse_index" not in unavailable, response.data["unavailable"]
+    assert response.data["series"], "no rows to plot"
+    assert "tse_index" in response.data["series"][0]
+
+
+def test_a_rising_index_reads_as_growth_from_100(benchmarked):
+    """Indexed to 100, so the number is relative growth, not an index level.
+
+    A TEDPIX around 6.5 million plotted raw would flatten every other series on
+    the chart into a horizontal line at the axis floor.
+    """
+    _index_history(90, start_value=1_000_000.0, step=1.01)
+
+    rows = _benchmarks(benchmarked, window=90).data["series"]
+    values = [row["tse_index"] for row in rows if row.get("tse_index") is not None]
+
+    assert values, "index column present but entirely null"
+    assert values[0] == pytest.approx(100.0, abs=1.0), values[0]
+    assert values[-1] > values[0], "a compounding index must rise"
+
+
+def test_without_index_history_it_is_reported_unavailable_with_a_reason(benchmarked):
+    """No rows must read as "no benchmark", never as a flat zero-return line."""
+    response = _benchmarks(benchmarked, window=90)
+
+    assert response.status_code == 200, response.data
+    reasons = {row["key"]: row["reason"] for row in response.data["unavailable"]}
+    assert "tse_index" in reasons
+    assert "history" in reasons["tse_index"]
+    assert "tse_index" not in (response.data["series"][0] if response.data["series"] else {})
