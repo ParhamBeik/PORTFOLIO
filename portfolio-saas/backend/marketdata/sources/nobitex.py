@@ -110,13 +110,26 @@ def to_toman(price, unit):
     return value
 
 
-def cross_check(nobitex_rows, wallex_rows, *, tolerance=Decimal("0.02")):
+#: How far two venues may disagree before we call it a fault.
+#:
+#: Sized by measurement, not by taste. Across 12 shared coins in production the
+#: eleven liquid ones agreed to within 0.96% (BTC 0.03%, USDT 0.19%, ETH 0.16%),
+#: while PAXG -- tokenised gold, and much the thinnest book of the set -- sat at
+#: 3.74%. That is a real spread on an illiquid instrument, not a fault: spot
+#: gold times the USDT rate lands at ~927M Toman, between the two quotes.
+#:
+#: So the band has to clear the thinnest pair we quote. 5% does, and it still sits
+#: 18x below the error this check exists to catch: a Rial/Toman mixup reads as
+#: |x - 10x| / 10x = 90%, and a frozen feed drifts without bound. A 2% band flagged
+#: PAXG on every single cycle, and a check that cries wolf daily is one nobody reads.
+DEFAULT_TOLERANCE = Decimal("0.05")
+
+
+def cross_check(nobitex_rows, wallex_rows, *, tolerance=DEFAULT_TOLERANCE):
     """Compare the two exchanges coin by coin, in Toman.
 
     Returns `(agreements, disagreements)`, where a disagreement is a coin both
-    exchanges quote whose Toman prices differ by more than `tolerance`. The
-    default 2% is wide enough to absorb genuine spread between two venues and
-    narrow enough that a unit error (10x) or a frozen feed cannot hide in it.
+    exchanges quote whose Toman prices differ by more than `tolerance`.
 
     This is the check that makes a single-source migration safe: it is what
     would have caught TGJU's dead `usdt-irr` slug automatically instead of by

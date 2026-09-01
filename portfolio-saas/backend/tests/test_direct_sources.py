@@ -266,6 +266,42 @@ class TestNobitexCrossCheck:
         assert not disagreements, disagreements
         assert {r["coin"] for r in agreements} >= {"BTC", "ETH", "USDT"}
 
+    def test_a_thin_book_does_not_trip_the_check(self):
+        """A real spread on an illiquid pair is not a fault.
+
+        Measured in production: eleven liquid coins agreed within 0.96%, while
+        PAXG -- tokenised gold, much the thinnest book of the set -- sat at
+        3.74%, with spot gold times the USDT rate landing between the two
+        quotes. At the original 2% band that warned on every single cycle, and
+        a check that cries wolf daily is one nobody reads.
+        """
+        nob = [{"symbol": "PAXG", "price": "9328900000", "unit": "ریال"}]
+        wal = [{"base": "PAXG", "quote": "TMN", "price": "898000000",
+                "unit": "تومان"}]
+        agreements, disagreements = nobitex.cross_check(nob, wal)
+        assert not disagreements
+        assert agreements[0]["spread"] < Decimal("0.05")
+
+    def test_the_band_still_catches_an_order_of_magnitude(self):
+        """...while staying far below the error it exists to catch.
+
+        A Rial read as Toman reads as |x - 10x| / 10x = 90%, so the band has an
+        18x margin. Asserted rather than asserted-in-prose so that widening the
+        tolerance far enough to hide a unit error fails here.
+        """
+        unit_error_spread = Decimal("0.9")
+        assert nobitex.DEFAULT_TOLERANCE * 10 < unit_error_spread
+
+        nob = [{"symbol": "USDT", "price": "2094230", "unit": "ریال"}]
+        wal = [{"base": "USDT", "quote": "TMN", "price": "209423",
+                "unit": "تومان"}]
+        # Same price, correctly labelled: agrees.
+        assert not nobitex.cross_check(nob, wal)[1]
+        # Same payload with the Rial mislabelled as Toman: caught.
+        assert nobitex.cross_check(
+            [{**nob[0], "unit": "تومان"}], wal
+        )[1]
+
     def test_a_unit_regression_is_caught_as_a_disagreement(self, nobitex_stats,
                                                            wallex_symbols):
         """The check's reason for existing: prove it fires on a 10x error.

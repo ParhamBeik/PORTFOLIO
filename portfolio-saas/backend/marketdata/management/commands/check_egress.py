@@ -115,11 +115,22 @@ class Command(BaseCommand):
         return f"{len(rows)} live pairs"
 
     def _probe_brsapi(self):
-        """The incumbent, probed the same way so the comparison is like-for-like."""
+        """The incumbent, probed the same way so the comparison is like-for-like.
+
+        `fetchers.DEFAULT_HEADERS` is not optional decoration: BrsApi answers
+        403 to the default `requests` User-Agent, with a Persian body saying so.
+        The first version of this probe omitted them and reported the live,
+        working provider as blocked -- a false alarm on the one row an operator
+        would read as "the incumbent has failed, do not roll back".
+        """
         import requests
+
+        from marketdata.fetchers import DEFAULT_HEADERS
+
         response = requests.get(
             "https://Api.BrsApi.ir/Market/Gold_Currency.php",
             params={"key": settings.BRS_API_KEY or "probe"},
+            headers=DEFAULT_HEADERS,
             timeout=(5, 15),
         )
         return f"HTTP {response.status_code}, {len(response.content)} bytes"
