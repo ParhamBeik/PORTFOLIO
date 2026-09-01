@@ -2997,3 +2997,74 @@ def test_cardinality_reports_frozen_holdings_separately(synthetic_history, cardi
     assert "unmeasurable" in result["target_weights"], "a frozen holding must not be sold"
     assert card["chosen"] <= 3
     assert any("held at their current weight" in line for line in result["limitations"])
+
+
+def test_efficient_risk_met_is_measured_not_inferred(synthetic_history, cardinality_user):
+    """`met` reads the achieved volatility, never the fallback flag.
+
+    The scenario can land inside the ceiling by way of the minimum-variance
+    fallback. That is a portfolio inside the budget, so it is met -- inferring
+    the answer from `target_volatility_below_minimum` printed "35% is below what
+    these assets can achieve" directly above an achieved 27%.
+    """
+    universe = ["emami_coin", "bitcoin_usd", "usd_cash", "kama_stock"]
+    kwargs = dict(
+        current_weights=_weights_arg(), total_value_tomans=Decimal("1000000000"),
+        user=cardinality_user, universe=universe,
+    )
+    floor = optimize(scenario="min_volatility", constraints=_uncapped(), **kwargs)
+    floor_vol = floor["target_metrics"]["annualized_volatility"]
+
+    result = optimize(
+        scenario="efficient_risk",
+        constraints=_uncapped(target_volatility=floor_vol * 3), **kwargs
+    )
+    rt = result["risk_target"]
+    assert rt["achieved"] <= rt["requested"] + 1e-6
+    assert rt["met"] is True
+    # And the contradiction that motivated this test must be impossible.
+    assert not (rt["met"] and any("calmest portfolio" in l for l in result["limitations"]))
+
+
+def test_efficient_risk_relaxes_the_hard_asset_sleeve(asset_catalog, db):
+    """A gold+cash book breaches the sleeve on day one; the ladder must survive it.
+
+    Without the sleeve rung the scenario failed every attempt, fell through to
+    minimum variance, and then reported every ceiling as unreachable.
+    """
+    from portfolio.services.optimization import _efficient_risk
+
+    rng = np.random.default_rng(5)
+    days = 90
+    idx = pd.date_range("2025-01-01", periods=days, freq="D")
+    returns = pd.DataFrame({
+        "emami_coin": rng.normal(0.002, 0.012, days),
+        "gold_18k_gram": rng.normal(0.002, 0.011, days),
+        "usd_cash": rng.normal(0.001, 0.009, days),
+        "kama_stock": rng.normal(0.001, 0.020, days),
+    }, index=idx)
+    cov = returns.cov()
+    class_map = {
+        "emami_coin": "Gold", "gold_18k_gram": "Gold",
+        "usd_cash": "Cash", "kama_stock": "Stock",
+    }
+    degraded = []
+    weights = _efficient_risk(
+        returns, cov,
+        max_weight_per_asset=0.40,
+        max_weight_per_class={"Gold": 0.60, "Cash": 0.80, "Stock": 0.50},
+        class_map=class_map,
+        periods_per_year=365.0,
+        degraded=degraded,
+        mu_daily=returns.mean(),
+        target_volatility=0.30,
+        # A sleeve tight enough that gold + cash cannot satisfy it.
+        sleeves=[{
+            "id": "hard_assets", "assets": ["emami_coin", "gold_18k_gram", "usd_cash"],
+            "max_combined_weight": 0.05,
+        }],
+    )
+    assert sum(weights.values()) == pytest.approx(1.0, abs=1e-4)
+    assert "target_volatility_below_minimum" not in degraded, (
+        "fell through to minimum variance instead of relaxing the sleeve"
+    )

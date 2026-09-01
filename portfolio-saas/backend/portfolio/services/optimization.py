@@ -930,6 +930,16 @@ def _efficient_risk(
         raw = _attempt(use_class=False, use_corr=False, use_sleeve=use_sleeve)
         if raw is not None and degraded is not None:
             degraded.append("efficient_risk_correlation_constraints_relaxed")
+    if raw is None and use_sleeve:
+        # The last rung, and the one that matters most on a real Iranian book:
+        # gold + cash routinely breach the hard-asset sleeve on day one, so
+        # without this the scenario fell through to minimum variance for EVERY
+        # ceiling and then reported the ceiling as unreachable when it was not.
+        raw = _attempt(use_class=False, use_corr=False, use_sleeve=False)
+        if raw is not None:
+            use_sleeve = False
+            if degraded is not None:
+                degraded.append("hard_asset_sleeve_relaxed")
 
     if raw is None:
         # Every relaxation still failed, which on this solver almost always means
@@ -1675,10 +1685,16 @@ def optimize(
     # to say the number on screen is not the number that was asked for.
     risk_target = None
     if scenario == "efficient_risk":
+        requested_vol = float(resolved["target_volatility"])
+        achieved_vol = _finite(metrics["annualized_volatility"])
         risk_target = {
-            "requested": float(resolved["target_volatility"]),
-            "achieved": _finite(metrics["annualized_volatility"]),
-            "met": "target_volatility_below_minimum" not in degraded,
+            "requested": requested_vol,
+            "achieved": achieved_vol,
+            # MEASURED, never inferred from the fallback flag. The scenario can
+            # reach the ceiling via minimum variance -- that is a portfolio
+            # inside the budget, and calling it a miss printed "35% is below what
+            # these assets can achieve" next to an achieved 27%.
+            "met": achieved_vol <= requested_vol + 1e-6,
         }
 
     # The current book on the SAME mu/cov/window, so "Actual vs. optimized" is a
