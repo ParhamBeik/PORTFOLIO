@@ -119,6 +119,34 @@ def to_gregorian(value):
     return jdatetime.date(year, month, day).togregorian()
 
 
+def from_gregorian(value):
+    """datetime.date (or aware/naive datetime) -> Jalali "1405-05-24".
+
+    The inverse of `to_gregorian`, needed by any source that dates its rows in
+    Gregorian or epoch seconds while every warehouse table keys on the Jalali
+    string. Wallex's UDF candles are the first such source.
+
+    A datetime is read in TEHRAN, not UTC: a candle stamped 20:30Z belongs to
+    the NEXT Tehran day, and dating it by UTC would file every late-session bar
+    one day early -- the same off-by-one that put 3.7M duplicate candles in this
+    warehouse when `ts` was derived the other way round.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, datetime.datetime):
+        value = value.astimezone(TEHRAN).date() if value.tzinfo else value.date()
+    jalali = jdatetime.date.fromgregorian(date=value)
+    return f"{jalali.year:04d}-{jalali.month:02d}-{jalali.day:02d}"
+
+
+def from_epoch(seconds):
+    """Epoch seconds -> Jalali date string, read in Tehran."""
+    if seconds is None:
+        return ""
+    moment = datetime.datetime.fromtimestamp(int(seconds), tz=datetime.timezone.utc)
+    return from_gregorian(moment)
+
+
 def to_datetime(date_value, time_value=""):
     """Jalali date (+ optional "HH:MM:SS") -> aware UTC datetime, or None.
 

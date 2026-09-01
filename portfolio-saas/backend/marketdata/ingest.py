@@ -984,3 +984,58 @@ def aggregate_market_daily_bars(asset_class, jalali_date, *, symbols=None) -> tu
         recent_field="date",
     )
     return created, conflicts + skipped_closed
+
+
+def ingest_direct_crypto_history(symbol, unit, candles) -> tuple[int, int]:
+    """Wallex UDF candles -> GoldCurrencyHistory rows. Insert-only.
+
+    Deliberately never overwrites an existing row, and the reason is the
+    validation that justified this backfill at all. Wallex and the incumbent
+    provider quote the same coins at different venues: across the 1,037
+    overlapping BTC days they agreed to a median of 0.43% (p90 1.42%, one day
+    over 5%), and on USDT/Toman to a median of 0.26%. Close enough to trust the
+    days we are MISSING, not close enough to be worth rewriting days we already
+    have -- rewriting them would stitch two venues into one series and put a
+    small discontinuity at every join, in a table the returns matrix reads.
+
+    So this fills holes and leaves history alone. `bulk_create(ignore_conflicts)`
+    on the `(symbol, date)` unique constraint is exactly that behaviour.
+
+    Unit is passed in rather than inferred, per the rule that a quote's currency
+    is declared by whoever produced it. Wallex says `quoteAsset`, and the
+    warehouse's existing convention is followed exactly: a Toman series is
+    `{BASE}_IRT`/تومان (as `USDT_IRT` already is) and a tether series is
+    `{BASE}`/تتر (as `BTC` already is). Writing a Toman price under the bare
+    symbol would put two units in one column keyed by one symbol -- the failure
+    this warehouse has paid for more than once.
+    """
+    from django.utils import timezone
+
+    if not candles:
+        return 0, 0
+
+    rows, rejected = [], 0
+    for candle in candles:
+        date = jalali.from_epoch(candle.get("ts"))
+        close = candle.get("close")
+        if not date or close is None or close <= 0:
+            rejected += 1
+            continue
+        rows.append(
+            GoldCurrencyHistory(
+                symbol=symbol,
+                unit=unit,
+                date=date,
+                open_price=candle.get("open"),
+                high_price=candle.get("high"),
+                low_price=candle.get("low"),
+                close_price=close,
+                source=GoldCurrencyHistory.Source.PROVIDER,
+                ingested_at=timezone.now(),
+            )
+        )
+
+    created, conflicts = _bulk(
+        GoldCurrencyHistory, rows, scope={"symbol": symbol}
+    )
+    return created, conflicts + rejected

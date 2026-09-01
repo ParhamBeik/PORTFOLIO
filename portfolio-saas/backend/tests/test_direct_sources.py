@@ -377,3 +377,123 @@ class TestMigrationEquivalence:
         brs = {"gold": [{"symbol": "IR_GOLD_MELTED", "price": "5", "unit": "تومان"}]}
         lookup = _build_lookup(brs, {"rows": []})
         assert lookup["ir_gold_melted"]["price"] == "5"
+
+
+# ------------------------------------------------------- crypto history backfill
+
+@pytest.mark.django_db
+class TestCryptoHistoryIngest:
+    """The backfill that gives ten coins a history they did not have.
+
+    Before it, the whole crypto surface was BTC and USDT_IRT from 1402-08-09.
+    A symbol with no history cannot enter the returns matrix, so it cannot be
+    optimized over or risk-scored at all -- these tests guard the two ways that
+    backfill could quietly go wrong: writing the wrong unit, and rewriting
+    history it should only be extending.
+    """
+
+    def _candle(self, ts, close, **kw):
+        return {
+            "ts": ts,
+            "open": kw.get("open", close),
+            "high": kw.get("high", close),
+            "low": kw.get("low", close),
+            "close": close,
+            "volume": Decimal("1"),
+        }
+
+    def test_epoch_dates_land_on_the_right_jalali_day(self):
+        """Tehran is UTC+3:30, so the day boundary is 20:30Z.
+
+        Dating a late-session candle by UTC files it a day early. That exact
+        off-by-one, in the other direction, is what put 3.7M duplicate candles
+        in this warehouse when `ts` was derived wrongly.
+        """
+        from marketdata.ingest import ingest_direct_crypto_history
+        from marketdata.models import GoldCurrencyHistory
+
+        import datetime as dt
+        before = int(dt.datetime(2026, 8, 31, 20, 29, tzinfo=dt.timezone.utc).timestamp())
+        after = int(dt.datetime(2026, 8, 31, 20, 30, tzinfo=dt.timezone.utc).timestamp())
+
+        ingest_direct_crypto_history("TESTC", "تومان", [
+            self._candle(before, Decimal("100")),
+            self._candle(after, Decimal("200")),
+        ])
+        dates = set(
+            GoldCurrencyHistory.objects.filter(symbol="TESTC")
+            .order_by().values_list("date", flat=True)
+        )
+        assert dates == {"1405-06-09", "1405-06-10"}
+
+    def test_existing_rows_are_never_rewritten(self):
+        """Insert-only, because the two venues are close but not identical.
+
+        Across 1,037 overlapping BTC days Wallex and the incumbent agreed to a
+        median 0.43%. Good enough to trust for days we lack; not good enough to
+        restate days we have, which would stitch two venues into one series and
+        leave a discontinuity at the join in a table the returns matrix reads.
+        """
+        from marketdata.ingest import ingest_direct_crypto_history
+        from marketdata.models import GoldCurrencyHistory
+
+        import datetime as dt
+        ts = int(dt.datetime(2026, 8, 31, 10, 0, tzinfo=dt.timezone.utc).timestamp())
+        GoldCurrencyHistory.objects.create(
+            symbol="BTC", unit="تتر", date="1405-06-09",
+            close_price=Decimal("78841"),
+        )
+
+        created, known = ingest_direct_crypto_history(
+            "BTC", "تتر", [self._candle(ts, Decimal("78111"))]
+        )
+        assert created == 0 and known == 1
+        row = GoldCurrencyHistory.objects.get(symbol="BTC", date="1405-06-09")
+        assert row.close_price == Decimal("78841"), "incumbent row must survive"
+
+    def test_missing_days_are_filled(self):
+        from marketdata.ingest import ingest_direct_crypto_history
+        from marketdata.models import GoldCurrencyHistory
+
+        import datetime as dt
+        days = [
+            int(dt.datetime(2026, 8, d, 10, 0, tzinfo=dt.timezone.utc).timestamp())
+            for d in (28, 29, 30)
+        ]
+        GoldCurrencyHistory.objects.create(
+            symbol="ETH", unit="تومان", date="1405-06-08", close_price=Decimal("5")
+        )
+        created, _ = ingest_direct_crypto_history(
+            "ETH", "تومان", [self._candle(t, Decimal("7")) for t in days]
+        )
+        assert created == 2
+        assert GoldCurrencyHistory.objects.filter(symbol="ETH").count() == 3
+
+    def test_a_bad_candle_is_rejected_not_stored(self):
+        """A zero or negative close is not a price; storing it poisons returns."""
+        from marketdata.ingest import ingest_direct_crypto_history
+        from marketdata.models import GoldCurrencyHistory
+
+        import datetime as dt
+        ts = int(dt.datetime(2026, 8, 31, 10, 0, tzinfo=dt.timezone.utc).timestamp())
+        created, skipped = ingest_direct_crypto_history("BADC", "تومان", [
+            self._candle(ts, Decimal("0")),
+            {"ts": None, "close": Decimal("5")},
+        ])
+        assert created == 0 and skipped == 2
+        assert not GoldCurrencyHistory.objects.filter(symbol="BADC").exists()
+
+    def test_toman_and_tether_series_never_share_a_symbol(self):
+        """The same coin is ~200,000x apart in the two books.
+
+        The command maps a TMN book to `{BASE}_IRT` and a USDT book to `{BASE}`,
+        matching what the table already does for USDT_IRT and BTC. If those ever
+        collapse onto one symbol, one column holds two units and nothing on a
+        chart looks wrong.
+        """
+        from marketdata.management.commands.backfill_crypto_history import QUOTES
+
+        symbols = {q: f"BTC{suffix}" for q, (suffix, _) in QUOTES.items()}
+        assert len(set(symbols.values())) == len(symbols)
+        assert symbols["TMN"] == "BTC_IRT" and symbols["USDT"] == "BTC"
+        assert QUOTES["TMN"][1] == "تومان" and QUOTES["USDT"][1] == "تتر"
