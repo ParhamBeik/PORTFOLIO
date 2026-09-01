@@ -409,10 +409,12 @@ export const frontier = (account = null, { window } = {}) => {
   const qs = params.toString();
   return api(`/api/optimization/frontier/${qs ? `?${qs}` : ""}`);
 };
-// `maxAssets` is the "hold at most N positions" cap; omit it for no limit.
-export const myOptimal = (account = null, { maxAssets } = {}) => {
+// `maxAssets` caps how many positions the answer may hold; `targetVolatility`
+// is risk tolerance as an annualized number (0.25 = 25%). Omit either for none.
+export const myOptimal = (account = null, { maxAssets, targetVolatility } = {}) => {
   const params = new URLSearchParams(accountParam(account) || "");
   if (maxAssets != null) params.set("max_assets", String(maxAssets));
+  if (targetVolatility != null) params.set("target_volatility", String(targetVolatility));
   const s = params.toString();
   return api(`/api/optimization/my-optimal/${s ? `?${s}` : ""}`);
 };

@@ -1602,6 +1602,29 @@ def _lifetime_days(user, account=None) -> int:
 MAX_ASSETS_CEILING = 40
 
 
+# Risk tolerance, as annualized volatility. Below 1% no real book qualifies and
+# the scenario would always degrade to minimum variance; above 200% the ceiling
+# stops binding on anything.
+MIN_TARGET_VOLATILITY = 0.01
+MAX_TARGET_VOLATILITY = 2.0
+
+
+def _parse_target_volatility(raw):
+    """Validate the `target_volatility` query param -> (value|None, error|None)."""
+    if raw in (None, ""):
+        return None, None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None, "target_volatility must be a number (annualized, e.g. 0.25)."
+    if not MIN_TARGET_VOLATILITY <= value <= MAX_TARGET_VOLATILITY:
+        return None, (
+            f"target_volatility must be between {MIN_TARGET_VOLATILITY} and "
+            f"{MAX_TARGET_VOLATILITY}."
+        )
+    return value, None
+
+
 def _parse_max_assets(raw):
     """Validate the `max_assets` query param -> (value|None, error|None).
 
@@ -1645,7 +1668,7 @@ class MyOptimalView(APIView):
     CACHE_TTL = 300
 
     @staticmethod
-    def _cache_key(user, account, basis, max_assets=None):
+    def _cache_key(user, account, basis, max_assets=None, target_volatility=None):
         from django.core.cache import cache as _cache  # local import mirrors module style
         from .services.returns import _price_version_fingerprint
 
@@ -1668,12 +1691,13 @@ class MyOptimalView(APIView):
             f"{_price_version_fingerprint()}:{max_ledger_id}:{max_holding_id}:{hidden_fp}"
         )
         account_key = account.id if account is not None else "all"
-        # `max_assets` changes every target in the body, so it has to key the
+        # Both knobs change every target in the body, so they have to key the
         # cache too -- otherwise the first request of a TTL decides the position
-        # count for every later one.
+        # count and the risk ceiling for every later one.
         cap_key = "all" if max_assets is None else str(max_assets)
+        vol_key = "any" if target_volatility is None else f"{target_volatility:.4f}"
         return (
-            f"my_optimal:{user.id}:{account_key}:{basis}:n{cap_key}:{fingerprint}",
+            f"my_optimal:{user.id}:{account_key}:{basis}:n{cap_key}:v{vol_key}:{fingerprint}",
             _cache,
         )
 
@@ -1711,10 +1735,22 @@ class MyOptimalView(APIView):
         max_assets, error = _parse_max_assets(request.query_params.get("max_assets"))
         if error:
             return Response({"detail": error}, status=400)
-        constraints = {"max_assets": max_assets} if max_assets is not None else None
+        # "I accept X% annual volatility -- earn me the most you can inside it."
+        # Optional; it adds a scenario rather than replacing the fixed ones, so
+        # the user can still see what the forecast-free answers look like.
+        target_volatility, error = _parse_target_volatility(
+            request.query_params.get("target_volatility")
+        )
+        if error:
+            return Response({"detail": error}, status=400)
+        constraints = {
+            k: v for k, v in
+            (("max_assets", max_assets), ("target_volatility", target_volatility))
+            if v is not None
+        } or None
 
         cache_key, cache = self._cache_key(
-            request.user, account, requested_basis, max_assets
+            request.user, account, requested_basis, max_assets, target_volatility
         )
         cached = cache.get(cache_key)
         if cached is not None:
@@ -1766,7 +1802,12 @@ class MyOptimalView(APIView):
             basis_used = entry["basis"]
             # The remaining scenarios are best-effort: one failing must not blank
             # the window, since each answers a different question about risk.
-            for scenario in ("max_sharpe", "risk_parity", "hrp", "min_cvar"):
+            # `efficient_risk` only runs when the user stated a ceiling; without
+            # one the scenario has nothing to solve against and would raise.
+            optional = ("max_sharpe", "risk_parity", "hrp", "min_cvar")
+            if target_volatility is not None:
+                optional += ("efficient_risk",)
+            for scenario in optional:
                 try:
                     entry[scenario], _ = _solve(scenario, window_days, basis_used)
                 except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate,
@@ -1782,7 +1823,7 @@ class MyOptimalView(APIView):
             # Historical drawdown for the hypothetical scenarios: "if you had
             # held these target weights fixed for the whole window" -- the same
             # portfolio_diagnostics() computation, just fed the target weights.
-            for scenario_key in ("max_sharpe", "min_volatility", "risk_parity", "hrp", "min_cvar"):
+            for scenario_key in ("min_volatility", *optional):
                 scenario_payload = entry.get(scenario_key)
                 if scenario_payload:
                     scenario_diagnostics = portfolio_diagnostics(
@@ -1807,6 +1848,8 @@ class MyOptimalView(APIView):
             "basis_requested": requested_basis,
             "max_assets": max_assets,
             "max_assets_range": [MIN_CARDINALITY, MAX_ASSETS_CEILING],
+            "target_volatility": target_volatility,
+            "target_volatility_range": [MIN_TARGET_VOLATILITY, MAX_TARGET_VOLATILITY],
         }
         cache.set(cache_key, body, self.CACHE_TTL)
         return Response(body)

@@ -20,22 +20,33 @@ import {
 import { DriftBars, GroupedBar, MoneyVsRisk, RiskScatter, STATUS_COLOR } from "../components/charts.jsx";
 
 const SCENARIO_LABEL = {
+  efficient_risk: "My Risk Budget",
   min_volatility: "Min Volatility",
   min_cvar: "Min Tail Risk",
   risk_parity: "Risk Parity",
   hrp: "Hierarchical Risk Parity",
   max_sharpe: "Max Sharpe",
 };
-// Ordered so the forecast-free scenarios come first. Max Sharpe is last because
-// it is the only one whose answer depends on predicting returns, which one year
-// of data cannot support.
-const SCENARIO_ORDER = ["min_volatility", "min_cvar", "risk_parity", "hrp", "max_sharpe"];
+// `efficient_risk` leads when it exists, because the user asked for it by name.
+// The rest are ordered forecast-free first; Max Sharpe is last because it is the
+// only one whose answer depends on predicting returns, which one year of data
+// cannot support.
+const SCENARIO_ORDER = ["efficient_risk", "min_volatility", "min_cvar", "risk_parity", "hrp", "max_sharpe"];
 // Mirrors MyOptimalView.WINDOWS; "Lifetime" has no fixed length, so the frontier
 // falls back to the longest fixed window rather than guessing.
 const WINDOW_DAYS = { "1Y": 365, "3Y": 1095, "5Y": 1825, Lifetime: 1825 };
 // "" means no cap. Mirrors MIN_CARDINALITY (3) and MAX_ASSETS_CEILING (40) on
 // the server, which rejects anything outside that range with a 400.
 const MAX_ASSET_OPTIONS = ["", 3, 5, 8, 10, 15, 20];
+// Risk tolerance as annualized volatility. "" means "no ceiling -- show me the
+// standing scenarios"; the server accepts 0.01 to 2.0.
+const RISK_OPTIONS = [
+  ["", "No risk ceiling"],
+  ["0.10", "Cautious — up to 10%/yr"],
+  ["0.20", "Balanced — up to 20%/yr"],
+  ["0.35", "Growth — up to 35%/yr"],
+  ["0.50", "Aggressive — up to 50%/yr"],
+];
 
 export default function MyOptimal() {
   const navigate = useNavigate();
@@ -47,10 +58,16 @@ export default function MyOptimal() {
   // "Show me the best portfolio using at most N of my assets." Empty = no cap,
   // which is what the solvers produce on their own.
   const [maxAssets, setMaxAssets] = useState("");
+  // Risk tolerance stated as a number rather than implied by a scenario tab.
+  const [riskCeiling, setRiskCeiling] = useState("");
 
   const optimalState = useApi(
-    () => myOptimal(activeId, { maxAssets: maxAssets === "" ? null : Number(maxAssets) }),
-    [activeId, maxAssets]
+    () =>
+      myOptimal(activeId, {
+        maxAssets: maxAssets === "" ? null : Number(maxAssets),
+        targetVolatility: riskCeiling === "" ? null : Number(riskCeiling),
+      }),
+    [activeId, maxAssets, riskCeiling]
   );
   // The frontier follows the selected lookback, so the chart and the tables
   // above it describe the same window.
@@ -104,6 +121,8 @@ export default function MyOptimal() {
               setScenario={setScenario}
               maxAssets={maxAssets}
               setMaxAssets={setMaxAssets}
+              riskCeiling={riskCeiling}
+              setRiskCeiling={setRiskCeiling}
             />
           )}
         </Async>
@@ -114,7 +133,7 @@ export default function MyOptimal() {
 
 function MyOptimalBody({
   data, frontierState, label, windowLabel, setWindowLabel, scenario, setScenario,
-  maxAssets, setMaxAssets,
+  maxAssets, setMaxAssets, riskCeiling, setRiskCeiling,
 }) {
   const windows = data.windows || [];
   const win = windows.find((w) => w.label === windowLabel) || windows[0];
@@ -147,6 +166,16 @@ function MyOptimalBody({
       : cardinality.method === "not_applicable"
         ? "Equal weight spreads across everything, so a position cap has nothing to rank."
         : `Showing the best ${cardinality.applied} of your holdings: the largest positions were kept and re-optimized among themselves. A different set of that size could score slightly better.`;
+
+  // A ceiling under the minimum-variance floor is unreachable by any weights.
+  // The scenario answers with that floor rather than failing, so the screen has
+  // to say the number it is showing is not the number that was asked for.
+  const riskTarget = opt?.risk_target || null;
+  const riskNote = !riskTarget
+    ? ""
+    : riskTarget.met
+      ? `Earning the most available inside your ${pct(riskTarget.requested)} ceiling; this allocation runs at ${pct(riskTarget.achieved)}.`
+      : `No combination of your assets is as calm as ${pct(riskTarget.requested)}. This is the least volatile portfolio they can build, at ${pct(riskTarget.achieved)}.`;
 
   const actual = win.actual || {};
   const am = actual.metrics || {};
@@ -307,6 +336,21 @@ function MyOptimalBody({
         <Tabs options={windowOptions} value={win.label} onChange={setWindowLabel} label="Lookback window" testId="optimal-window-tabs" />
         <Tabs options={scenarioOptions} value={effectiveScenario} onChange={setScenario} label="Scenario" testId="optimal-scenario-tabs" />
         <Select
+          label="Risk tolerance"
+          value={riskCeiling}
+          onChange={(e) => {
+            // Picking a ceiling is asking for the scenario it produces; leaving
+            // the tab on Min Volatility would answer a question nobody asked.
+            setRiskCeiling(e.target.value);
+            setScenario(e.target.value === "" ? "min_volatility" : "efficient_risk");
+          }}
+          data-testid="optimal-risk-ceiling"
+        >
+          {RISK_OPTIONS.map(([value, text]) => (
+            <option key={value || "none"} value={value}>{text}</option>
+          ))}
+        </Select>
+        <Select
           label="Maximum number of positions"
           value={maxAssets}
           onChange={(e) => setMaxAssets(e.target.value)}
@@ -319,6 +363,15 @@ function MyOptimalBody({
           ))}
         </Select>
       </div>
+
+      {riskTarget ? (
+        <p
+          className={`text-xs ${riskTarget.met ? "text-muted" : "text-warn"}`}
+          data-testid="optimal-risk-note"
+        >
+          {riskNote}
+        </p>
+      ) : null}
 
       {cardinality ? (
         <p className="text-xs text-muted" data-testid="optimal-cardinality-note">

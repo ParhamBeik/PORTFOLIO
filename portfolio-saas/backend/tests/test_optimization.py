@@ -2765,3 +2765,134 @@ def test_my_optimal_max_assets_does_not_reuse_the_uncapped_cache(
     ).json()
     assert uncapped["max_assets"] is None
     assert capped["max_assets"] == 3
+
+
+# ---------------------------------------------------------------------------
+# risk tolerance -- "I accept X% volatility, earn me the most inside it"
+# ---------------------------------------------------------------------------
+
+
+def test_efficient_risk_respects_a_reachable_ceiling(synthetic_history, cardinality_user):
+    """A ceiling above the minimum-variance floor is honoured and reported met."""
+    universe = ["emami_coin", "bitcoin_usd", "usd_cash", "kama_stock"]
+    kwargs = dict(
+        current_weights=_weights_arg(), total_value_tomans=Decimal("1000000000"),
+        user=cardinality_user, universe=universe,
+    )
+    floor = optimize(scenario="min_volatility", constraints=_uncapped(), **kwargs)
+    floor_vol = floor["target_metrics"]["annualized_volatility"]
+
+    ceiling = floor_vol * 1.5
+    result = optimize(
+        scenario="efficient_risk",
+        constraints=_uncapped(target_volatility=ceiling), **kwargs
+    )
+    rt = result["risk_target"]
+    assert rt["met"] is True
+    assert rt["requested"] == pytest.approx(ceiling)
+    assert rt["achieved"] <= ceiling + 1e-3, "the ceiling was exceeded"
+    # Buying risk has to buy return, or the scenario is pointless.
+    assert (
+        result["target_metrics"]["expected_return_annual"]
+        >= floor["target_metrics"]["expected_return_annual"] - 1e-9
+    )
+    assert result["forecast_free"] is False
+
+
+def test_efficient_risk_below_the_floor_degrades_to_minimum_variance(
+    synthetic_history, cardinality_user
+):
+    """An unreachable ceiling answers with the calmest book, and says so.
+
+    "The least risky portfolio your assets can make is 18%" is the useful reply
+    to "I want 2%" -- an error is not.
+    """
+    universe = ["emami_coin", "bitcoin_usd", "usd_cash", "kama_stock"]
+    kwargs = dict(
+        current_weights=_weights_arg(), total_value_tomans=Decimal("1000000000"),
+        user=cardinality_user, universe=universe,
+    )
+    # Derived, not hardcoded: this fixture's usd_cash rail is nearly flat, so
+    # its minimum-variance floor is a fraction of a percent. Half of whatever
+    # the floor actually is unreachable by construction.
+    floor = optimize(scenario="min_volatility", constraints=_uncapped(), **kwargs)
+    floor_vol = floor["target_metrics"]["annualized_volatility"]
+    assert floor_vol > 0
+
+    result = optimize(
+        scenario="efficient_risk",
+        constraints=_uncapped(target_volatility=floor_vol / 2), **kwargs
+    )
+    assert result["risk_target"]["met"] is False
+    assert "target_volatility_below_minimum" in result["degraded"]
+    assert sum(result["target_weights"].values()) == pytest.approx(1.0, abs=1e-6)
+    assert any("calmest portfolio" in line for line in result["limitations"])
+    assert result["risk_target"]["achieved"] == pytest.approx(floor_vol, abs=1e-6)
+
+
+def test_efficient_risk_without_a_target_is_a_solver_error(
+    synthetic_history, cardinality_user
+):
+    """The scenario cannot run on its own; it needs the number from the user."""
+    from portfolio.services.optimization import SolverError
+
+    with pytest.raises(SolverError, match="target_volatility"):
+        optimize(
+            scenario="efficient_risk", current_weights=_weights_arg(),
+            total_value_tomans=Decimal("1000000000"), user=cardinality_user,
+            universe=["emami_coin", "bitcoin_usd", "usd_cash", "kama_stock"],
+            constraints=_uncapped(),
+        )
+
+
+def test_efficient_risk_combines_with_a_position_cap(synthetic_history, cardinality_user):
+    """The two Q5 controls are independent and must compose."""
+    result = optimize(
+        scenario="efficient_risk", current_weights=_weights_arg(),
+        total_value_tomans=Decimal("1000000000"), user=cardinality_user,
+        universe=["emami_coin", "bitcoin_usd", "usd_cash", "kama_stock"],
+        constraints=_uncapped(target_volatility=0.60, max_assets=3),
+    )
+    assert result["risk_target"] is not None
+    if "cardinality_infeasible" not in result["degraded"]:
+        assert len(result["target_weights"]) <= 3
+
+
+def test_my_optimal_risk_target_adds_a_scenario(synthetic_history, make_user):
+    """The endpoint solves efficient_risk only when a ceiling is supplied."""
+    pro = make_user(email="my_optimal_risk@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3},
+    )
+    client = _client(pro)
+
+    plain = client.get(f"/api/optimization/my-optimal/?account={acct.id}").json()
+    assert plain["target_volatility"] is None
+    assert all("efficient_risk" not in w for w in plain["windows"])
+
+    with_target = client.get(
+        f"/api/optimization/my-optimal/?account={acct.id}&target_volatility=0.35"
+    ).json()
+    assert with_target["target_volatility"] == 0.35
+    solved = [w for w in with_target["windows"] if w.get("efficient_risk")]
+    assert solved, "no window solved the risk-target scenario"
+    for window in solved:
+        assert window["efficient_risk"]["risk_target"]["requested"] == 0.35
+
+
+def test_my_optimal_rejects_an_out_of_range_target_volatility(
+    synthetic_history, make_user
+):
+    pro = make_user(email="my_optimal_risk_bad@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3},
+    )
+    client = _client(pro)
+    for bad in ("abc", "0", "9"):
+        resp = client.get(
+            f"/api/optimization/my-optimal/?account={acct.id}&target_volatility={bad}"
+        )
+        assert resp.status_code == 400, f"target_volatility={bad} should be rejected"
+        assert "target_volatility" in resp.json()["detail"]

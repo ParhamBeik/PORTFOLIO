@@ -78,6 +78,9 @@ DEFAULT_CONSTRAINTS = {
     # `optimize()` for why this is a post-solve heuristic and not a constraint
     # handed to the solver.
     "max_assets": None,
+    # Annualized volatility ceiling for the `efficient_risk` scenario, which is
+    # the only one that reads it. None = the scenario cannot run.
+    "target_volatility": None,
     "sleeves": [
         {
             "id": HARD_ASSET_SLEEVE["id"],
@@ -89,6 +92,10 @@ DEFAULT_CONSTRAINTS = {
 
 SCENARIOS = (
     "equal_weight", "min_volatility", "max_sharpe", "risk_parity", "hrp", "min_cvar",
+    # Needs a `target_volatility` constraint; every other scenario is
+    # self-contained. `portfolio/tasks.py` keeps its own SCENARIOS tuple for the
+    # nightly Best Overall precompute, so adding one here does not schedule it.
+    "efficient_risk",
 )
 
 # Scenarios that need no expected-return forecast. Everything here is a pure
@@ -848,6 +855,110 @@ def _max_sharpe(
     )
 
 
+def _efficient_risk(
+    returns: pd.DataFrame,
+    cov_daily: pd.DataFrame,
+    *,
+    max_weight_per_asset: float,
+    max_weight_per_class: dict[str, float],
+    class_map: dict[str, str],
+    risk_free_annual: float = RISK_FREE_RATE_ANNUAL,
+    periods_per_year: float = TRADING_DAYS_PER_YEAR,
+    degraded: list[str] | None = None,
+    **kwargs,
+) -> dict[str, float]:
+    """Maximize expected return subject to an annualized volatility ceiling.
+
+    This is risk tolerance stated as a number rather than implied by a scenario
+    tab: "I accept 25% annual volatility -- earn me the most you can inside it."
+
+    Two ways it can be asked for something that does not exist, and they need
+    different answers. A ceiling BELOW the minimum-variance portfolio's own
+    volatility is infeasible for any weights, so it degrades to that portfolio
+    and says so -- the useful reply to "I want 12%" is "the calmest book your
+    assets can make is 18%", not an error. A ceiling above the whole opportunity
+    set is simply not binding, and `efficient_risk` returns the max-return
+    corner on its own.
+    """
+    target = kwargs.get("target_volatility")
+    if not target or float(target) <= 0:
+        raise SolverError(
+            "The efficient_risk scenario needs a positive `target_volatility` "
+            "constraint (annualized, e.g. 0.25 for 25%)."
+        )
+    target = float(target)
+
+    mu_daily = kwargs.get("mu_daily")
+    mu = (returns.mean() if mu_daily is None else mu_daily) * periods_per_year
+    S = cov_daily * periods_per_year
+
+    columns = list(S.columns)
+    mu = mu.reindex(columns)
+    corr_clusters = kwargs.get("correlation_clusters") or []
+    max_cluster = float(kwargs.get("max_weight_per_correlation_cluster", 1.0))
+    sleeves = kwargs.get("sleeves") or []
+    use_sleeve = bool(sleeves)
+    last_exc = None
+
+    def _attempt(*, use_class: bool, use_corr: bool, use_sleeve: bool):
+        nonlocal last_exc
+        for solver in ("CLARABEL", "SCS", "OSQP"):
+            try:
+                ef = EfficientFrontier(
+                    mu, S, weight_bounds=(0.0, max_weight_per_asset), solver=solver
+                )
+                _add_ef_constraints(
+                    ef,
+                    columns,
+                    class_map=class_map if use_class else {},
+                    max_weight_per_class=max_weight_per_class if use_class else {},
+                    correlation_clusters=corr_clusters if use_corr else None,
+                    max_weight_per_correlation_cluster=max_cluster if use_corr else 1.0,
+                    sleeves=sleeves if use_sleeve else None,
+                )
+                return ef.efficient_risk(target_volatility=target)
+            except Exception as e:  # noqa: BLE001 -- pypfopt raises bare ValueError
+                last_exc = e
+        return None
+
+    raw = _attempt(use_class=True, use_corr=True, use_sleeve=use_sleeve)
+    if raw is None:
+        raw = _attempt(use_class=False, use_corr=True, use_sleeve=use_sleeve)
+        if raw is not None and degraded is not None:
+            degraded.append("efficient_risk_class_constraints_relaxed")
+    if raw is None:
+        raw = _attempt(use_class=False, use_corr=False, use_sleeve=use_sleeve)
+        if raw is not None and degraded is not None:
+            degraded.append("efficient_risk_correlation_constraints_relaxed")
+
+    if raw is None:
+        # Every relaxation still failed, which on this solver almost always means
+        # the ceiling is under the minimum-variance floor. Answer with the floor
+        # rather than an error, and record that the ask was not met.
+        if degraded is not None:
+            degraded.append("target_volatility_below_minimum")
+        return _min_volatility(
+            returns, cov_daily,
+            max_weight_per_asset=max_weight_per_asset,
+            max_weight_per_class=max_weight_per_class,
+            class_map=class_map,
+            periods_per_year=periods_per_year,
+            degraded=degraded,
+            **kwargs,
+        )
+
+    weights = {k: float(v) for k, v in raw.items() if v > 1e-6}
+    return _enforce_caps(
+        weights,
+        max_weight_per_asset=max_weight_per_asset,
+        max_weight_per_class=max_weight_per_class,
+        class_map=class_map,
+        correlation_clusters=corr_clusters,
+        max_weight_per_correlation_cluster=max_cluster,
+        sleeves=sleeves if use_sleeve else None,
+    )
+
+
 def _min_volatility(
     returns: pd.DataFrame,
     cov_daily: pd.DataFrame,
@@ -1104,6 +1215,7 @@ _SCENARIO_DISPATCH = {
     "risk_parity": _risk_parity,
     "hrp": _hrp,
     "min_cvar": _min_cvar,
+    "efficient_risk": _efficient_risk,
 }
 
 
@@ -1456,6 +1568,7 @@ def optimize(
             correlation_clusters=sub_clusters,
             max_weight_per_correlation_cluster=max_cluster,
             sleeves=sub_sleeves,
+            target_volatility=resolved.get("target_volatility"),
         )
 
     target = _solve(sleeves)
@@ -1526,6 +1639,18 @@ def optimize(
     metrics = _portfolio_metrics(
         target, mu, cov_annual, risk_free_annual=risk_free_annual
     )
+    # What the risk ceiling actually bought. `met` is the honest part: a ceiling
+    # under the minimum-variance floor is unreachable by any weights, and the
+    # scenario answers with that floor instead of failing -- so the payload has
+    # to say the number on screen is not the number that was asked for.
+    risk_target = None
+    if scenario == "efficient_risk":
+        risk_target = {
+            "requested": float(resolved["target_volatility"]),
+            "achieved": _finite(metrics["annualized_volatility"]),
+            "met": "target_volatility_below_minimum" not in degraded,
+        }
+
     # The current book on the SAME mu/cov/window, so "Actual vs. optimized" is a
     # like-for-like comparison. The page used to reconstruct this client-side
     # from the Sharpe identity against a differently-built panel.
@@ -1645,6 +1770,7 @@ def optimize(
         "constraints_floored": constraints_floored,
         "constraints_applied": constraints_applied,
         "cardinality": cardinality,
+        "risk_target": risk_target,
         "correlation_clusters": _cluster_summary(
             returns,
             correlation_clusters,
@@ -1721,6 +1847,21 @@ def optimize(
                     "problem, so a different set of that size could score better."
                 ] if cardinality and cardinality["method"] == "greedy_top_n_resolve"
                 and "cardinality_infeasible" not in degraded else []
+            ),
+            *(
+                [
+                    f"You accepted up to {risk_target['requested']:.0%} annual "
+                    f"volatility; this allocation runs at "
+                    f"{risk_target['achieved']:.0%} and earns the most expected "
+                    "return available inside that ceiling."
+                ] if risk_target and risk_target["met"] else []
+            ),
+            *(
+                [
+                    f"A {risk_target['requested']:.0%} volatility ceiling is below "
+                    "what any combination of these assets can achieve. This is the "
+                    f"calmest portfolio they can build, at {risk_target['achieved']:.0%}."
+                ] if risk_target and not risk_target["met"] else []
             ),
             *(
                 [
@@ -1806,6 +1947,7 @@ def resample_weights(
                 correlation_clusters=[],
                 max_weight_per_correlation_cluster=1.0,
                 sleeves=None,
+                target_volatility=constraints.get("target_volatility"),
             )
             weights = _enforce_caps(
                 weights,
