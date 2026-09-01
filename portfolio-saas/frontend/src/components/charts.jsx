@@ -120,14 +120,55 @@ export function useChartTokens() {
 function EChart({ option, height, label, testId, className = "w-full" }) {
   const host = useRef(null);
   const chart = useRef(null);
+  // The newest option, readable from the mount effect. A chart that mounts late
+  // has missed every `setOption` that already ran, so it has to ask for the
+  // current one rather than wait for the next change -- otherwise a deferred
+  // chart renders empty until something upstream happens to re-render.
+  const latestOption = useRef(option);
+  latestOption.current = option;
 
   useEffect(() => {
-    if (!host.current) return undefined;
-    chart.current = init(host.current);
-    const observer = new ResizeObserver(() => chart.current?.resize());
-    observer.observe(host.current);
+    const el = host.current;
+    if (!el) return undefined;
+    let resizeObserver;
+
+    // Charts below the fold used to pay their full init cost during first paint,
+    // for a canvas nobody could see: on the optimizer page that was 100ms of
+    // blocking time before anything had been scrolled to. Init when the
+    // container is about to enter the viewport instead. `rootMargin` means it is
+    // ready slightly BEFORE it becomes visible, so scrolling never reveals an
+    // empty box -- the point is to move the work off the critical path, not to
+    // trade it for a visible gap.
+    const mount = () => {
+      if (chart.current) return;
+      chart.current = init(el);
+      if (latestOption.current) chart.current.setOption(latestOption.current, true);
+      resizeObserver = new ResizeObserver(() => chart.current?.resize());
+      resizeObserver.observe(el);
+    };
+
+    let intersectionObserver;
+    if (typeof IntersectionObserver === "function") {
+      intersectionObserver = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) {
+            intersectionObserver.disconnect();
+            mount();
+          }
+        },
+        { rootMargin: "200px" },
+      );
+      intersectionObserver.observe(el);
+    } else {
+      // No IntersectionObserver (old browser, or a test DOM): mount eagerly.
+      // Deferring with no signal to un-defer on would leave the chart blank
+      // forever, which is far worse than the blocking time this saves.
+      mount();
+    }
+
     return () => {
-      observer.disconnect();
+      intersectionObserver?.disconnect();
+      resizeObserver?.disconnect();
       chart.current?.dispose();
       chart.current = null;
     };
