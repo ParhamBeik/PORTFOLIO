@@ -33,6 +33,34 @@ coverage rather than silently marking a state complete with an empty direct resp
 
 Verify on any host with `python manage.py check_egress [--compare] [--verify-tsetmc]`.
 
+### One paid call is kept on purpose: the index probe
+
+`Tsetmc/Index.php` still runs, and it should stay that way even though TGJU
+carries the index for free. The probe is not bought for its number — it is bought
+for its `state` field.
+
+`market_state_at` is **clock-based**: weekday plus session hours. The only thing
+that can override it is a cached provider `"بسته"`, written by
+`remember_provider_state`, which `fetch_market_index` calls and nothing else
+does. Take that call away and the app can no longer detect a **weekday public
+holiday** — the clock says OPEN, and the TSE stock job runs every two minutes for
+a whole session against a shut market. Iran has roughly twenty such days a year,
+and TSETMC is the wallet that actually binds (it hit 10,034/10,000 on 2026-08-26).
+
+The probe is claimed at most twice an hour: ~14 requests/day out of ~10,000, to
+prevent waste measured in thousands. TGJU covers the index when the probe was not
+claimed or failed, and `live_tedpix_payload` **derives** open/closed from whether
+the index printed today rather than asserting it.
+
+### The benchmark this unlocked
+
+BrsApi sells the index as a live snapshot and no history at any price, so
+`MarketIndexData` held ~2 weeks of rows and the TSE-index benchmark line was
+hard-coded unavailable. TGJU's daily `bourse` series removes that constraint, and
+with it `HISTORICAL_BENCHMARK_ENABLED` — a flag that had never been defined in
+settings, so **beta and alpha against the market had never once been computed in
+production**. Both now run, and the comparison chart draws the index.
+
 ### Crypto history backfilled (2026-09-01)
 
 `python manage.py backfill_crypto_history` wrote **75,257 rows across 41 pairs**
