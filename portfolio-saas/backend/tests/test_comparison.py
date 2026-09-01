@@ -727,3 +727,18 @@ def test_without_index_history_it_is_reported_unavailable_with_a_reason(benchmar
     assert "tse_index" in reasons
     assert "history" in reasons["tse_index"]
     assert "tse_index" not in (response.data["series"][0] if response.data["series"] else {})
+
+
+def test_the_index_is_named_in_labels_or_the_client_never_draws_it(benchmarked):
+    """The client renders exactly the keys `labels` names.
+
+    A column present in `series` but absent from `labels` is computed on every
+    request and silently never drawn -- the failure mode is a feature that
+    looks shipped from the backend and does not exist for the user.
+    """
+    _index_history(90, step=1.01)
+
+    labels = _benchmarks(benchmarked, window=90).data["labels"]
+
+    assert "tse_index" in labels, labels
+    assert labels["tse_index"]

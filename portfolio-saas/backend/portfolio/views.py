@@ -2088,6 +2088,13 @@ class BenchmarkSeriesView(APIView):
     # Asset keys standing in for "what else could I have held".
     BENCHMARKS = (("gold_18k_gram", "Gold (18k gram)"), ("usd_cash", "US dollar"))
 
+    # The market itself. Kept separate from BENCHMARKS because it is not an
+    # asset key -- it has no row in the returns matrix and is loaded from
+    # MarketIndexData -- but it must reach `labels` all the same: the client
+    # renders exactly the keys `labels` names, so a column missing from here is
+    # computed and then silently never drawn.
+    INDEX_BENCHMARK = ("tse_index", "TSE index (TEDPIX)")
+
     def get(self, request):
         from portfolio.services.deflator import CpiUnavailable, normalize_basis
         from portfolio.services.diagnostics import _load_index_returns, _portfolio_returns
@@ -2153,10 +2160,10 @@ class BenchmarkSeriesView(APIView):
         # about what the benchmark was.
         index_returns = _load_index_returns(port.index)
         if index_returns is not None and index_returns.notna().sum() >= 2:
-            columns["tse_index"] = indexed(index_returns.reindex(port.index))
+            columns[self.INDEX_BENCHMARK[0]] = indexed(index_returns.reindex(port.index))
         else:
             unavailable.append({
-                "key": "tse_index", "label": "TSE index",
+                "key": self.INDEX_BENCHMARK[0], "label": self.INDEX_BENCHMARK[1],
                 "reason": "no overlapping index history in this window",
             })
 
@@ -2174,7 +2181,8 @@ class BenchmarkSeriesView(APIView):
             "window": window,
             "series": rows,
             "labels": {"portfolio": "Your portfolio",
-                       **{k: v for k, v in self.BENCHMARKS if k in columns}},
+                       **{k: v for k, v in (*self.BENCHMARKS, self.INDEX_BENCHMARK)
+                          if k in columns}},
             "unavailable": unavailable,
         })
 

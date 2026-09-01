@@ -68,7 +68,7 @@ const RANGES = [
 const INFLATION_VIEWS = [
   { value: "nominal", label: "Nominal" },
   { value: "real", label: "vs inflation" },
-  { value: "benchmarks", label: "vs gold & USD" },
+  { value: "benchmarks", label: "vs gold, USD & market" },
 ];
 
 // The benchmark endpoint only accepts 90/180/365-day windows, so the comparison
@@ -317,7 +317,7 @@ function TrendCard({ activeId, basis }) {
                   longTicks={longTicks}
                   formatValue={indexPoint}
                   formatAxis={indexPoint}
-                  label="Your portfolio against gold and the dollar, indexed to 100"
+                  label="Your portfolio against gold, the dollar and the TSE index, indexed to 100"
                 />
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-bench-note">
                   Each line starts at 100, so the gap is relative growth over the
