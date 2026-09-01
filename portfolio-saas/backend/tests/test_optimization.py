@@ -2896,3 +2896,41 @@ def test_my_optimal_rejects_an_out_of_range_target_volatility(
         )
         assert resp.status_code == 400, f"target_volatility={bad} should be rejected"
         assert "target_volatility" in resp.json()["detail"]
+
+
+def test_robustness_endpoint_solves_the_risk_scenario(synthetic_history, make_user):
+    """Resampling the tab the user chose must not 503 on the one they asked for."""
+    pro = make_user(email="robustness_risk@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3},
+    )
+    client = _client(pro)
+    base = f"/api/optimization/robustness/?account={acct.id}&scenario=efficient_risk"
+
+    # Without the ceiling the scenario cannot solve -- that is the 503 branch.
+    assert client.get(base).status_code == 503
+
+    resp = client.get(f"{base}&target_volatility=0.35")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scenario"] == "efficient_risk"
+    assert body["robustness"]["converged"] > 0
+    for band in body["robustness"]["bands"].values():
+        assert band["p05"] <= band["p95"]
+        assert band["width"] == pytest.approx(band["p95"] - band["p05"], abs=1e-6)
+
+
+def test_robustness_endpoint_rejects_a_bad_target_volatility(
+    synthetic_history, make_user
+):
+    pro = make_user(email="robustness_risk_bad@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3},
+    )
+    resp = _client(pro).get(
+        f"/api/optimization/robustness/?account={acct.id}&target_volatility=nope"
+    )
+    assert resp.status_code == 400
+    assert "target_volatility" in resp.json()["detail"]

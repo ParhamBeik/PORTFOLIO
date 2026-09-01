@@ -1877,6 +1877,14 @@ class RobustnessView(APIView):
         window, error = _int_param(request, "window", 365, clamp=(30, 3650))
         if error:
             return error
+        # `efficient_risk` is the one scenario that cannot solve unasked, so the
+        # ceiling has to travel with it -- otherwise resampling the tab the user
+        # is looking at answers 503 for the one they chose deliberately.
+        target_volatility, detail = _parse_target_volatility(
+            request.query_params.get("target_volatility")
+        )
+        if detail:
+            return Response({"detail": detail}, status=400)
 
         account = _scope(request)
         weights, total, _valuation = _current_weights_and_total(request.user, account)
@@ -1893,6 +1901,10 @@ class RobustnessView(APIView):
                 universe=universe,
                 held_keys=frozenset(weights),
                 include_robustness=True,
+                constraints=(
+                    {"target_volatility": target_volatility}
+                    if target_volatility is not None else None
+                ),
             )
         except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate, MixedUnitUniverseBlocked) as exc:
             return Response({"detail": str(exc)}, status=503)

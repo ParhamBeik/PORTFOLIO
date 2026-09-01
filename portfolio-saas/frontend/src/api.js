@@ -418,6 +418,16 @@ export const myOptimal = (account = null, { maxAssets, targetVolatility } = {}) 
   const s = params.toString();
   return api(`/api/optimization/my-optimal/${s ? `?${s}` : ""}`);
 };
+// ~200 bootstrap re-solves. Never fetched with the page — the caller gates it
+// behind an explicit request and gives it a longer timeout than the default.
+export const robustness = (account = null, { scenario, window, targetVolatility } = {}) => {
+  const params = new URLSearchParams(accountParam(account) || "");
+  if (scenario) params.set("scenario", scenario);
+  if (window != null) params.set("window", String(window));
+  if (targetVolatility != null) params.set("target_volatility", String(targetVolatility));
+  const s = params.toString();
+  return api(`/api/optimization/robustness/${s ? `?${s}` : ""}`);
+};
 export const bestOverall = () => api("/api/optimization/best-overall/");
 
 function qs(params) {

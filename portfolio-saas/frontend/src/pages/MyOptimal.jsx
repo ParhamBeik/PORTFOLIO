@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { useApi } from "../useApi.js";
-import { myOptimal, frontier, listAssets } from "../api.js";
+import { myOptimal, frontier, listAssets, robustness } from "../api.js";
 import { pct, num, signedPct, signedToman, humanize, date, assetLabel } from "../format.js";
 import {
   Async,
@@ -482,6 +482,13 @@ function MyOptimalBody({
             </Card>
           )}
 
+          <RobustnessPanel
+            scenario={effectiveScenario}
+            windowDays={WINDOW_DAYS[win.label] ?? 365}
+            riskCeiling={riskCeiling}
+            label={label}
+          />
+
           {riskRows.length > 0 && (
             <Card
               title="Where your risk actually comes from"
@@ -650,5 +657,104 @@ function MyOptimalBody({
         }
       </Async>
     </div>
+  );
+}
+
+
+/**
+ * "How much of this allocation is signal?"
+ *
+ * The optimizer returns one point estimate, and a point estimate from ~250
+ * observations is mostly luck. This bootstraps the panel 200 times and reports
+ * the 5th-95th percentile each weight lands in. A position whose band spans
+ * 10%-70% was never really chosen -- it won a coin toss -- which is why the
+ * table sorts by band WIDTH rather than by weight: the least trustworthy rows
+ * are the ones worth reading.
+ *
+ * Gated behind a button and given its own timeout because 200 re-solves cannot
+ * ride along with a page load that already does eight.
+ */
+function RobustnessPanel({ scenario, windowDays, riskCeiling, label }) {
+  const { activeId } = usePortfolio();
+  const [requested, setRequested] = useState(false);
+  const state = useApi(
+    () =>
+      robustness(activeId, {
+        scenario,
+        window: windowDays,
+        // Only efficient_risk reads it, and it cannot solve without it.
+        targetVolatility: riskCeiling === "" ? null : Number(riskCeiling),
+      }),
+    [activeId, scenario, windowDays, riskCeiling],
+    { enabled: requested, timeoutMs: 90000 }
+  );
+
+  return (
+    <Card
+      title="How much of this is signal?"
+      subtitle="Re-solves the allocation on 200 bootstrap resamples of the same window. A wide band means the weight was luck, not a decision."
+      testId="optimal-robustness-card"
+      actions={
+        requested ? null : (
+          <Button variant="primary" onClick={() => setRequested(true)} data-testid="optimal-robustness-run">
+            Run 200 re-solves
+          </Button>
+        )
+      }
+    >
+      {!requested ? (
+        <p className="text-sm text-muted">
+          This takes a few seconds — it solves the portfolio 200 more times, so it is not run with the page.
+        </p>
+      ) : (
+        <Async {...state} testId="optimal-robustness" empty="No resampling result." minHeight={200}>
+          {(data) => {
+            const bands = data?.robustness?.bands || {};
+            const robust = data?.robustness?.weights || {};
+            const point = data?.target_weights || {};
+            const rows = Object.entries(bands)
+              .map(([key, b]) => ({ key, point: point[key] || 0, robust: robust[key] || 0, ...b }))
+              .filter((r) => r.p95 > 1e-6 || r.point > 1e-6)
+              .sort((a, b) => b.width - a.width);
+            const converged = data?.robustness?.converged ?? 0;
+            if (!rows.length) {
+              return <Empty testId="optimal-robustness-empty">Not enough shared history to resample this window.</Empty>;
+            }
+            return (
+              <>
+                <Table
+                  testId="optimal-robustness-table"
+                  rowKey={(r) => r.key}
+                  rows={rows}
+                  columns={[
+                    { key: "asset", header: "Asset", render: (r) => label(r.key) },
+                    { key: "point", header: "This page's weight", align: "right", render: (r) => pct(r.point) },
+                    { key: "robust", header: "Averaged over draws", align: "right", render: (r) => pct(r.robust) },
+                    { key: "band", header: "5th–95th percentile", align: "right", render: (r) => `${pct(r.p05)} – ${pct(r.p95)}` },
+                    {
+                      key: "width",
+                      header: "Band width",
+                      align: "right",
+                      // A band wider than 30 percentage points is wider than most
+                      // allocation decisions people argue about, so it is the point
+                      // at which the number stops carrying information.
+                      render: (r) => (
+                        <Badge variant={r.width > 0.3 ? "warn" : r.width > 0.15 ? "neutral" : "good"}>
+                          {pct(r.width)}
+                        </Badge>
+                      ),
+                    },
+                  ]}
+                />
+                <p className="mt-2 text-xs text-muted">
+                  {converged} of {data?.robustness?.n_draws ?? 0} resamples solved. Draws that could not solve are
+                  dropped rather than counted, so a thin sample cannot pass for a confident band.
+                </p>
+              </>
+            );
+          }}
+        </Async>
+      )}
+    </Card>
   );
 }
