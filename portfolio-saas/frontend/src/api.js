@@ -409,10 +409,13 @@ export const frontier = (account = null, { window } = {}) => {
   const qs = params.toString();
   return api(`/api/optimization/frontier/${qs ? `?${qs}` : ""}`);
 };
-export const myOptimal = (account = null) =>
-  api(
-    `/api/optimization/my-optimal/${accountParam(account) ? "?" + accountParam(account) : ""}`
-  );
+// `maxAssets` is the "hold at most N positions" cap; omit it for no limit.
+export const myOptimal = (account = null, { maxAssets } = {}) => {
+  const params = new URLSearchParams(accountParam(account) || "");
+  if (maxAssets != null) params.set("max_assets", String(maxAssets));
+  const s = params.toString();
+  return api(`/api/optimization/my-optimal/${s ? `?${s}` : ""}`);
+};
 export const bestOverall = () => api("/api/optimization/best-overall/");
 
 function qs(params) {

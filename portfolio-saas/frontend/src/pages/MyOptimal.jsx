@@ -13,6 +13,7 @@ import {
   Empty,
   PageHeader,
   Delta,
+  Select,
   Table,
   Tabs,
 } from "../components/ui.jsx";
@@ -32,6 +33,9 @@ const SCENARIO_ORDER = ["min_volatility", "min_cvar", "risk_parity", "hrp", "max
 // Mirrors MyOptimalView.WINDOWS; "Lifetime" has no fixed length, so the frontier
 // falls back to the longest fixed window rather than guessing.
 const WINDOW_DAYS = { "1Y": 365, "3Y": 1095, "5Y": 1825, Lifetime: 1825 };
+// "" means no cap. Mirrors MIN_CARDINALITY (3) and MAX_ASSETS_CEILING (40) on
+// the server, which rejects anything outside that range with a 400.
+const MAX_ASSET_OPTIONS = ["", 3, 5, 8, 10, 15, 20];
 
 export default function MyOptimal() {
   const navigate = useNavigate();
@@ -40,8 +44,14 @@ export default function MyOptimal() {
   // Defaults to the forecast-free scenario: it needs no return prediction, so
   // it is the one whose weights survive the fact that returns are unpredictable.
   const [scenario, setScenario] = useState("min_volatility");
+  // "Show me the best portfolio using at most N of my assets." Empty = no cap,
+  // which is what the solvers produce on their own.
+  const [maxAssets, setMaxAssets] = useState("");
 
-  const optimalState = useApi(() => myOptimal(activeId), [activeId]);
+  const optimalState = useApi(
+    () => myOptimal(activeId, { maxAssets: maxAssets === "" ? null : Number(maxAssets) }),
+    [activeId, maxAssets]
+  );
   // The frontier follows the selected lookback, so the chart and the tables
   // above it describe the same window.
   const windowDays = WINDOW_DAYS[windowLabel] ?? 365;
@@ -92,6 +102,8 @@ export default function MyOptimal() {
               setWindowLabel={setWindowLabel}
               scenario={scenario}
               setScenario={setScenario}
+              maxAssets={maxAssets}
+              setMaxAssets={setMaxAssets}
             />
           )}
         </Async>
@@ -100,7 +112,10 @@ export default function MyOptimal() {
   );
 }
 
-function MyOptimalBody({ data, frontierState, label, windowLabel, setWindowLabel, scenario, setScenario }) {
+function MyOptimalBody({
+  data, frontierState, label, windowLabel, setWindowLabel, scenario, setScenario,
+  maxAssets, setMaxAssets,
+}) {
   const windows = data.windows || [];
   const win = windows.find((w) => w.label === windowLabel) || windows[0];
   if (!win) return <Empty testId="optimal-empty-windows">No lookback windows available.</Empty>;
@@ -118,6 +133,20 @@ function MyOptimalBody({ data, frontierState, label, windowLabel, setWindowLabel
     ? scenario
     : SCENARIO_ORDER.find((key) => win[key]) || "min_volatility";
   const opt = win[effectiveScenario] || null;
+
+  // The position cap is a preference, not an invariant: the caps can make a
+  // small portfolio impossible to fully invest, and "hold at most N" is a
+  // greedy relaxation of a mixed-integer constraint. Both facts belong on the
+  // screen — an answer that quietly ignored the cap reads as a bug.
+  const cardinality = opt?.cardinality || null;
+  const capUnhonoured = (opt?.degraded || []).includes("cardinality_infeasible");
+  const cardinalityNote = !cardinality
+    ? ""
+    : capUnhonoured
+      ? `The per-asset and per-class limits cannot fully invest this portfolio in only ${cardinality.requested} holdings, so the cap was not applied.`
+      : cardinality.method === "not_applicable"
+        ? "Equal weight spreads across everything, so a position cap has nothing to rank."
+        : `Showing the best ${cardinality.applied} of your holdings: the largest positions were kept and re-optimized among themselves. A different set of that size could score slightly better.`;
 
   const actual = win.actual || {};
   const am = actual.metrics || {};
@@ -277,7 +306,25 @@ function MyOptimalBody({ data, frontierState, label, windowLabel, setWindowLabel
       <div className="flex flex-wrap gap-3">
         <Tabs options={windowOptions} value={win.label} onChange={setWindowLabel} label="Lookback window" testId="optimal-window-tabs" />
         <Tabs options={scenarioOptions} value={effectiveScenario} onChange={setScenario} label="Scenario" testId="optimal-scenario-tabs" />
+        <Select
+          label="Maximum number of positions"
+          value={maxAssets}
+          onChange={(e) => setMaxAssets(e.target.value)}
+          data-testid="optimal-max-assets"
+        >
+          {MAX_ASSET_OPTIONS.map((n) => (
+            <option key={n === "" ? "all" : n} value={n}>
+              {n === "" ? "Any number of holdings" : `At most ${n} holdings`}
+            </option>
+          ))}
+        </Select>
       </div>
+
+      {cardinality ? (
+        <p className="text-xs text-muted" data-testid="optimal-cardinality-note">
+          {cardinalityNote}
+        </p>
+      ) : null}
 
       {win.status === "insufficient_history" ? (
         <Empty testId="optimal-insufficient">{win.detail || "Not enough price history for this window."}</Empty>

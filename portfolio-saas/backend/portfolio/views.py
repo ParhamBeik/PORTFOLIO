@@ -66,6 +66,7 @@ from .services.performance import account_performance
 from .services.diagnostics import portfolio_diagnostics
 from .services.insights import _liquid_items, _total, build_insights
 from .services.optimization import (
+    MIN_CARDINALITY,
     SCENARIOS,
     UniverseTooSmall,
     SolverError,
@@ -1441,6 +1442,13 @@ class OptimizationView(APIView):
                 status=400,
             )
         constraints = request.data.get("constraints")
+        if isinstance(constraints, dict) and constraints.get("max_assets") is not None:
+            # `optimize()` coerces this with `int()`; an unvalidated string from
+            # the body would surface as a 500 instead of a 400.
+            value, error = _parse_max_assets(constraints["max_assets"])
+            if error:
+                return Response({"detail": error}, status=400)
+            constraints = {**constraints, "max_assets": value}
         weights, total, _valuation = _current_weights_and_total(request.user, _scope(request))
         try:
             payload = optimize(
@@ -1588,6 +1596,31 @@ def _lifetime_days(user, account=None) -> int:
     return max((timezone.now() - start).days, 30)
 
 
+# Upper bound on the "hold at most N assets" control. Above this the cap stops
+# binding on any realistic book, and it keeps a hand-crafted query string from
+# turning into a wide re-solve of every window.
+MAX_ASSETS_CEILING = 40
+
+
+def _parse_max_assets(raw):
+    """Validate the `max_assets` query param -> (value|None, error|None).
+
+    Returns a message rather than raising so the caller answers 400 instead of
+    500; `optimize()` coerces with `int()` and would blow up on a stray string.
+    """
+    if raw in (None, ""):
+        return None, None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None, "max_assets must be an integer."
+    if not MIN_CARDINALITY <= value <= MAX_ASSETS_CEILING:
+        return None, (
+            f"max_assets must be between {MIN_CARDINALITY} and {MAX_ASSETS_CEILING}."
+        )
+    return value, None
+
+
 class MyOptimalView(APIView):
     """"if a quant had optimized MY existing assets, what would it
     look like?" -- per lookback window, max-Sharpe and min-volatility weights
@@ -1612,7 +1645,7 @@ class MyOptimalView(APIView):
     CACHE_TTL = 300
 
     @staticmethod
-    def _cache_key(user, account, basis):
+    def _cache_key(user, account, basis, max_assets=None):
         from django.core.cache import cache as _cache  # local import mirrors module style
         from .services.returns import _price_version_fingerprint
 
@@ -1635,7 +1668,14 @@ class MyOptimalView(APIView):
             f"{_price_version_fingerprint()}:{max_ledger_id}:{max_holding_id}:{hidden_fp}"
         )
         account_key = account.id if account is not None else "all"
-        return f"my_optimal:{user.id}:{account_key}:{basis}:{fingerprint}", _cache
+        # `max_assets` changes every target in the body, so it has to key the
+        # cache too -- otherwise the first request of a TTL decides the position
+        # count for every later one.
+        cap_key = "all" if max_assets is None else str(max_assets)
+        return (
+            f"my_optimal:{user.id}:{account_key}:{basis}:n{cap_key}:{fingerprint}",
+            _cache,
+        )
 
     def get(self, request):
         from .services.deflator import CpiUnavailable, normalize_basis
@@ -1666,7 +1706,16 @@ class MyOptimalView(APIView):
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=400)
 
-        cache_key, cache = self._cache_key(request.user, account, requested_basis)
+        # "Show me the best portfolio I could hold using at most N of my assets."
+        # Optional; absent means the solver picks however many it likes.
+        max_assets, error = _parse_max_assets(request.query_params.get("max_assets"))
+        if error:
+            return Response({"detail": error}, status=400)
+        constraints = {"max_assets": max_assets} if max_assets is not None else None
+
+        cache_key, cache = self._cache_key(
+            request.user, account, requested_basis, max_assets
+        )
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)
@@ -1684,7 +1733,7 @@ class MyOptimalView(APIView):
                     scenario=scenario, current_weights=weights,
                     total_value_tomans=total, user=request.user,
                     history_days=window_days, universe=universe,
-                    held_keys=held_keys, basis=basis,
+                    held_keys=held_keys, basis=basis, constraints=constraints,
                 ), basis
             except CpiUnavailable:
                 if basis == "nominal_toman":
@@ -1694,6 +1743,7 @@ class MyOptimalView(APIView):
                     total_value_tomans=total, user=request.user,
                     history_days=window_days, universe=universe,
                     held_keys=held_keys, basis="nominal_toman",
+                    constraints=constraints,
                 ), "nominal_toman"
 
         windows = []
@@ -1752,7 +1802,12 @@ class MyOptimalView(APIView):
                     }
             entry["status"] = "ok"
             windows.append(entry)
-        body = {"windows": windows, "basis_requested": requested_basis}
+        body = {
+            "windows": windows,
+            "basis_requested": requested_basis,
+            "max_assets": max_assets,
+            "max_assets_range": [MIN_CARDINALITY, MAX_ASSETS_CEILING],
+        }
         cache.set(cache_key, body, self.CACHE_TTL)
         return Response(body)
 

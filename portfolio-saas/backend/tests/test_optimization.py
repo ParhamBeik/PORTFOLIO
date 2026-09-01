@@ -2522,3 +2522,246 @@ def test_shared_holdings_are_summed_not_overwritten(monkeypatch):
     # 400 + 50, not the last row's 50 alone -- the shape that hid 580,300,000 T.
     assert weights["quarter_coin"] == pytest.approx(0.45, abs=1e-9)
     assert weights["kama_stock"] == pytest.approx(0.30, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# cardinality -- "hold at most N assets"
+# ---------------------------------------------------------------------------
+#
+# The constraint is a mixed-integer one, so `optimize()` relaxes it: solve, keep
+# the N largest positions, re-solve on just those. These tests pin the two
+# things that relaxation must still get right -- the count is respected, and the
+# surviving weights come from a real second solve rather than a renormalization.
+
+
+# Caps off, so the cardinality pass is the only thing shaping the answer. With
+# the shipped policy caps in place a 3-asset gold/cash/crypto subset tops out at
+# 0.80 -- which is its own test below, not the happy path.
+UNCAPPED = {
+    "max_weight_per_asset": 1.0,
+    "max_weight_per_class": {},
+    "max_weight_per_correlation_cluster": 1.0,
+    "sleeves": [],
+}
+
+
+def _uncapped(**extra):
+    return {**UNCAPPED, **extra}
+
+
+@pytest.fixture
+def cardinality_user(db):
+    return User.objects.create_user(email="cardinality@t.t", password="Sup3rSecret!")
+
+
+def _weights_arg():
+    return {"emami_coin": 0.25, "bitcoin_usd": 0.25, "usd_cash": 0.25, "kama_stock": 0.25}
+
+
+def test_max_assets_caps_the_position_count(synthetic_history, cardinality_user):
+    """A 4-asset universe asked for 3 positions returns at most 3."""
+    universe = ["emami_coin", "bitcoin_usd", "usd_cash", "kama_stock"]
+    full = optimize(
+        scenario="risk_parity", current_weights=_weights_arg(),
+        total_value_tomans=Decimal("1000000000"), user=cardinality_user,
+        universe=universe, constraints=_uncapped(),
+    )
+    assert len(full["target_weights"]) == 4, "fixture must start above the cap"
+
+    limited = optimize(
+        scenario="risk_parity", current_weights=_weights_arg(),
+        total_value_tomans=Decimal("1000000000"), user=cardinality_user,
+        universe=universe, constraints=_uncapped(max_assets=3),
+    )
+    assert len(limited["target_weights"]) <= 3
+    assert sum(limited["target_weights"].values()) == pytest.approx(1.0, abs=1e-6)
+    assert limited["cardinality"]["method"] == "greedy_top_n_resolve"
+    assert limited["cardinality"]["requested"] == 3
+
+
+def test_max_assets_reoptimizes_instead_of_renormalizing(synthetic_history, cardinality_user):
+    """The kept weights are solved for the reduced universe, not rescaled.
+
+    Truncate-and-renormalize would leave each survivor's share of the remaining
+    weight exactly as it was in the 4-asset answer. A genuine re-solve moves it,
+    because dropping a column changes the covariance the solver is minimizing.
+    """
+    universe = ["emami_coin", "bitcoin_usd", "usd_cash", "kama_stock"]
+    kwargs = dict(
+        scenario="risk_parity", current_weights=_weights_arg(),
+        total_value_tomans=Decimal("1000000000"), user=cardinality_user,
+        universe=universe,
+    )
+    full = optimize(constraints=_uncapped(), **kwargs)["target_weights"]
+    limited = optimize(constraints=_uncapped(max_assets=3), **kwargs)["target_weights"]
+
+    kept = set(limited)
+    assert kept < set(full)
+    scale = sum(full[k] for k in kept)
+    renormalized = {k: full[k] / scale for k in kept}
+    assert any(
+        abs(limited[k] - renormalized[k]) > 1e-4 for k in kept
+    ), "weights match a pure renormalization -- the second solve did not run"
+
+
+def test_max_assets_below_the_floor_is_clamped(synthetic_history, cardinality_user):
+    """Two assets is not a portfolio; the request is raised to MIN_CARDINALITY."""
+    from portfolio.services.optimization import MIN_CARDINALITY
+
+    result = optimize(
+        scenario="min_volatility", current_weights=_weights_arg(),
+        total_value_tomans=Decimal("1000000000"), user=cardinality_user,
+        universe=["emami_coin", "bitcoin_usd", "usd_cash", "kama_stock"],
+        constraints=_uncapped(max_assets=1),
+    )
+    assert result["cardinality"]["requested"] == 1
+    assert result["cardinality"]["limit"] == MIN_CARDINALITY
+    assert len(result["target_weights"]) <= MIN_CARDINALITY
+
+
+def test_max_assets_versions_the_cache(synthetic_history, cardinality_user):
+    """Two different caps must not collide on one cache entry."""
+    universe = ["emami_coin", "bitcoin_usd", "usd_cash", "kama_stock"]
+    kwargs = dict(
+        scenario="risk_parity", current_weights=_weights_arg(),
+        total_value_tomans=Decimal("1000000000"), user=cardinality_user,
+        universe=universe,
+    )
+    three = optimize(constraints=_uncapped(max_assets=3), **kwargs)
+    unlimited = optimize(constraints=_uncapped(), **kwargs)
+
+    assert unlimited["cached"] is False, "the uncapped run served the capped payload"
+    assert unlimited["cardinality"] is None
+    assert len(unlimited["target_weights"]) > len(three["target_weights"])
+
+
+def test_max_assets_keeps_the_full_answer_when_caps_make_it_infeasible(
+    synthetic_history, cardinality_user
+):
+    """Caps that cannot fill 100% from N assets degrade, never 500.
+
+    Three assets under a 30% per-asset cap reach 0.90, so the reduced solve is
+    arithmetically infeasible at full investment. The user asked for a
+    preference, not an invariant: say it could not be honoured and hand back the
+    unrestricted portfolio rather than raising SolverError at them.
+    """
+    universe = ["emami_coin", "bitcoin_usd", "usd_cash", "kama_stock"]
+    result = optimize(
+        scenario="risk_parity", current_weights=_weights_arg(),
+        total_value_tomans=Decimal("1000000000"), user=cardinality_user,
+        universe=universe,
+        constraints=_uncapped(max_assets=3, max_weight_per_asset=0.30),
+    )
+    assert "cardinality_infeasible" in result["degraded"]
+    assert len(result["target_weights"]) == 4, "the unrestricted answer is kept"
+    assert sum(result["target_weights"].values()) == pytest.approx(1.0, abs=1e-6)
+    assert any("not applied" in line for line in result["limitations"])
+
+
+def test_max_assets_does_not_apply_to_equal_weight(synthetic_history, cardinality_user):
+    """Equal weight ranks nothing, so any "largest N" subset would be arbitrary."""
+    result = optimize(
+        scenario="equal_weight", current_weights=_weights_arg(),
+        total_value_tomans=Decimal("1000000000"), user=cardinality_user,
+        universe=["emami_coin", "bitcoin_usd", "usd_cash", "kama_stock"],
+        constraints=_uncapped(max_assets=3),
+    )
+    assert result["cardinality"]["method"] == "not_applicable"
+    assert len(result["target_weights"]) == 4
+
+
+
+def test_enforce_caps_places_slack_on_zero_weight_assets():
+    """Slack must reach assets the solver emptied, not be dropped.
+
+    Four assets under a 32% cap can be fully invested. The redistribution tilts
+    toward assets that already carry weight, so the first pass fills only the
+    non-empty ones and stops at 0.64 -- and because slack is recomputed from
+    scratch each round, the residue used to vanish and the caller raised
+    "constraints are infeasible at full investment" on a feasible problem.
+    """
+    capped = _enforce_caps(
+        {"a": 0.9, "b": 0.1, "c": 0.0, "d": 0.0},
+        max_weight_per_asset=0.32,
+        max_weight_per_class={},
+        class_map={},
+    )
+    assert sum(capped.values()) == pytest.approx(1.0, abs=1e-9)
+    assert set(capped) == {"a", "b", "c", "d"}
+    assert max(capped.values()) <= 0.32 + 1e-9
+
+
+def test_enforce_caps_still_reports_genuinely_infeasible_caps():
+    """The fix must not paper over caps that really cannot reach 1.0."""
+    capped = _enforce_caps(
+        {"a": 0.5, "b": 0.3, "c": 0.2},
+        max_weight_per_asset=0.20,
+        max_weight_per_class={},
+        class_map={},
+    )
+    # Three assets at 20% each is 0.60, full stop.
+    assert sum(capped.values()) == pytest.approx(0.60, abs=1e-9)
+
+
+def test_my_optimal_rejects_an_out_of_range_max_assets(synthetic_history, make_user):
+    """A bad cap is a 400, not a 500 -- `optimize()` coerces it with `int()`."""
+    pro = make_user(email="my_optimal_cap_bad@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3},
+    )
+    client = _client(pro)
+    for bad in ("abc", "2", "400", "-1"):
+        resp = client.get(
+            f"/api/optimization/my-optimal/?account={acct.id}&max_assets={bad}"
+        )
+        assert resp.status_code == 400, f"max_assets={bad} should be rejected"
+        assert "max_assets" in resp.json()["detail"]
+
+
+def test_my_optimal_max_assets_caps_every_window(synthetic_history, make_user):
+    """The cap reaches each window's scenarios, and echoes back in the body."""
+    pro = make_user(email="my_optimal_cap@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3},
+    )
+    acct.tracking_started_at = timezone.now() - timedelta(days=40)
+    acct.save(update_fields=["tracking_started_at"])
+
+    resp = _client(pro).get(
+        f"/api/optimization/my-optimal/?account={acct.id}&max_assets=3"
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["max_assets"] == 3
+    assert body["max_assets_range"] == [3, 40]
+    solved = 0
+    for window in body["windows"]:
+        for key in ("min_volatility", "max_sharpe", "risk_parity", "hrp", "min_cvar"):
+            payload = window.get(key)
+            if not payload:
+                continue
+            solved += 1
+            if "cardinality_infeasible" in payload["degraded"]:
+                continue
+            assert len(payload["target_weights"]) <= 3, f"{window['label']}/{key}"
+    assert solved, "fixture solved nothing, so the assertion above never ran"
+
+
+def test_my_optimal_max_assets_does_not_reuse_the_uncapped_cache(
+    synthetic_history, make_user
+):
+    """The cap keys the response cache; the second call must not serve the first."""
+    pro = make_user(email="my_optimal_cap_cache@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 0.4, "bitcoin_usd": 0.3, "usd_cash": 0.3},
+    )
+    client = _client(pro)
+    uncapped = client.get(f"/api/optimization/my-optimal/?account={acct.id}").json()
+    capped = client.get(
+        f"/api/optimization/my-optimal/?account={acct.id}&max_assets=3"
+    ).json()
+    assert uncapped["max_assets"] is None
+    assert capped["max_assets"] == 3

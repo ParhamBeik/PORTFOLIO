@@ -54,6 +54,11 @@ MIN_OBSERVATIONS_PER_ASSET = 10
 SHARPE_CREDIBILITY_CEILING = 3.0
 EXPECTED_RETURN_CREDIBILITY_CEILING = 1.0  # 100%/yr
 
+# The whole module treats three assets as the smallest thing worth calling a
+# portfolio (`UniverseTooSmall` fires below it in two places), so a cardinality
+# request is clamped here rather than handing HRP a one-column matrix.
+MIN_CARDINALITY = 3
+
 DEFAULT_CONSTRAINTS = {
     "long_only": True,
     "max_weight_per_asset": 0.40,
@@ -68,6 +73,11 @@ DEFAULT_CONSTRAINTS = {
     # (or multiple gold coins) that move together.
     "correlation_cluster_threshold": 0.65,
     "max_weight_per_correlation_cluster": 0.50,
+    # Cardinality: hold at most N positions. None = unlimited, which is what
+    # every convex solver here produces naturally. See the cardinality pass in
+    # `optimize()` for why this is a post-solve heuristic and not a constraint
+    # handed to the solver.
+    "max_assets": None,
     "sleeves": [
         {
             "id": HARD_ASSET_SLEEVE["id"],
@@ -434,23 +444,44 @@ def _enforce_caps(
         total_headroom = sum(headroom.values())
         if total_headroom <= 1e-12:
             break  # No room to redistribute — caps are infeasible at full investment.
-        # Distribute slack in proportion to headroom (weighted by current weight
-        # so empty assets don't grab everything).
-        weight_factor = {k: (headroom[k] * (w[k] + 1e-9)) for k in keys}
-        tw = sum(weight_factor.values())
-        if tw <= 0:
-            # Fall back to pure headroom proportion.
-            weight_factor = headroom
-            tw = total_headroom
-        distributed = 0.0
-        for k in keys:
-            share = weight_factor[k] / tw * slack
-            # Don't exceed headroom.
-            share = min(share, headroom[k])
-            w[k] += share
-            distributed += share
-        if distributed <= 1e-12:
-            break
+        # Distribute slack in proportion to headroom, tilted by current weight so
+        # assets the solver deliberately emptied don't outrank the ones it chose.
+        #
+        # This runs in PASSES, and that matters. Every asset's share is clipped
+        # at its own headroom, so one pass routinely places less than the whole
+        # slack -- and the tilt makes that the normal case, because it hands the
+        # slack to assets that are already near their cap while the room sits on
+        # the empty ones. `slack` is recomputed from scratch next round, so
+        # whatever a single pass failed to place was silently DELETED: four
+        # assets under a 32% cap can reach 1.0, but with two of them zeroed by
+        # the solver the old single pass placed 0.64 and the caller raised
+        # "constraints are infeasible at full investment" on a feasible problem.
+        # Bounded by len(keys) + 1 because each pass exhausts at least one
+        # asset's headroom or places everything.
+        for _ in range(len(keys) + 1):
+            if slack <= 1e-12:
+                break
+            open_keys = [k for k in keys if headroom[k] > 1e-12]
+            if not open_keys:
+                break
+            weight_factor = {k: headroom[k] * (w[k] + 1e-9) for k in open_keys}
+            tw = sum(weight_factor.values())
+            if tw <= 1e-15:
+                # Fall back to pure headroom proportion.
+                weight_factor = {k: headroom[k] for k in open_keys}
+                tw = sum(weight_factor.values())
+            distributed = 0.0
+            for k in open_keys:
+                share = min(weight_factor[k] / tw * slack, headroom[k])
+                w[k] += share
+                headroom[k] -= share
+                distributed += share
+            if distributed <= 1e-12:
+                break
+            slack -= distributed
+        # Per-asset headroom was spent without re-deriving the class, cluster and
+        # sleeve totals it was measured against, so a pass can overshoot a group
+        # cap. The outer loop re-clips and turns that back into slack.
 
     return {k: float(v) for k, v in w.items() if v > 1e-6}
 
@@ -1385,20 +1416,46 @@ def optimize(
     solver = _SCENARIO_DISPATCH[scenario]
     degraded = []
 
-    def _solve(active_sleeves):
+    def _solve(active_sleeves, cols: list[str] | None = None):
+        """Solve on the full eligible set, or on a subset of its columns.
+
+        The subset path exists for the cardinality pass below. Every input the
+        solver reads has to be narrowed together -- handing it the full
+        covariance with a narrowed returns frame is how a subset solve silently
+        prices assets that are no longer in it.
+        """
+        if cols is None:
+            sub_returns, sub_cov, sub_mu = returns, cov_daily, mu_daily
+            sub_clusters, sub_sleeves = correlation_clusters, active_sleeves
+        else:
+            keep = set(cols)
+            sub_returns = returns[cols]
+            sub_cov = cov_daily.loc[cols, cols]
+            sub_mu = mu_daily[cols]
+            # A cluster with one surviving member no longer caps anything, and a
+            # sleeve with no surviving member is not a constraint at all.
+            sub_clusters = [
+                members for cluster in correlation_clusters
+                if len(members := [k for k in cluster if k in keep]) >= 2
+            ]
+            sub_sleeves = [
+                {**sleeve, "assets": assets}
+                for sleeve in active_sleeves
+                if (assets := [k for k in sleeve["assets"] if k in keep])
+            ]
         return solver(
-            returns,
-            cov_daily,
+            sub_returns,
+            sub_cov,
             max_weight_per_asset=float(resolved["max_weight_per_asset"]),
             max_weight_per_class=resolved["max_weight_per_class"],
             class_map=class_map,
             risk_free_annual=risk_free_annual,
             periods_per_year=frequency,
-            mu_daily=mu_daily,
+            mu_daily=sub_mu,
             degraded=degraded,
-            correlation_clusters=correlation_clusters,
+            correlation_clusters=sub_clusters,
             max_weight_per_correlation_cluster=max_cluster,
-            sleeves=active_sleeves,
+            sleeves=sub_sleeves,
         )
 
     target = _solve(sleeves)
@@ -1419,6 +1476,49 @@ def optimize(
             f"of 1.0 under the active per-asset, per-class and per-cluster caps."
         )
     target = {k: float(v) for k, v in target.items() if v > 1e-6}
+
+    # ---- cardinality --------------------------------------------------------
+    # "Hold at most N assets" is a cardinality constraint: expressed exactly it
+    # needs a binary indicator per asset, which turns a convex problem into a
+    # mixed-integer one. Putting a MIP solver in the request path of a
+    # decision-support page is not worth it, so this is the standard greedy
+    # relaxation -- solve, keep the N largest positions, then RE-SOLVE on just
+    # those columns. The re-solve is the part that matters: truncating and
+    # renormalizing would leave weights that are optimal for a universe the user
+    # is no longer holding. It is a heuristic, not a global optimum, and the
+    # payload labels it as one.
+    #
+    # Skipped for `equal_weight`, which applies no ranking to its universe: any
+    # "largest N" of a flat weight vector is an arbitrary subset, and the other
+    # caps are already reported as not applying to that scenario either.
+    max_assets = resolved.get("max_assets")
+    cardinality = None
+    if max_assets is not None and scenario == "equal_weight":
+        cardinality = {
+            "requested": int(max_assets),
+            "applied": len(target),
+            "method": "not_applicable",
+            "reason": "equal_weight ranks nothing, so there is no principled top-N.",
+        }
+    elif max_assets is not None:
+        requested = int(max_assets)
+        limit = max(requested, MIN_CARDINALITY)
+        if len(target) > limit:
+            keep = sorted(target, key=lambda k: (-target[k], k))[:limit]
+            reduced = _solve(sleeves, cols=keep)
+            if abs(sum(reduced.values()) - 1.0) > 1e-6:
+                # The caps cannot fill 100% from this few assets (five assets
+                # under a 15% per-asset cap reach 0.75). Keep the unrestricted
+                # answer and say so, rather than raising on a preference.
+                degraded.append("cardinality_infeasible")
+            else:
+                target = {k: float(v) for k, v in reduced.items() if v > 1e-6}
+        cardinality = {
+            "requested": requested,
+            "limit": limit,  # `requested` raised to MIN_CARDINALITY if it was below
+            "applied": len(target),
+            "method": "greedy_top_n_resolve",
+        }
 
     # Metrics are scored on the SOLVED (collapsed, un-frozen) weights, because
     # that is the only set mu/cov can price. Scoring the expanded target instead
@@ -1544,6 +1644,7 @@ def optimize(
         "proxy_groups": proxy_groups,
         "constraints_floored": constraints_floored,
         "constraints_applied": constraints_applied,
+        "cardinality": cardinality,
         "correlation_clusters": _cluster_summary(
             returns,
             correlation_clusters,
@@ -1611,6 +1712,22 @@ def optimize(
                     "book that breaches policy still produces a target instead of an "
                     "infeasible-constraints error."
                 ] if constraints_floored else []
+            ),
+            *(
+                [
+                    f"Limited to {cardinality['limit']} position(s) by keeping the "
+                    "largest ones and re-optimizing among them. This is a greedy "
+                    "heuristic: a true cardinality constraint is a mixed-integer "
+                    "problem, so a different set of that size could score better."
+                ] if cardinality and cardinality["method"] == "greedy_top_n_resolve"
+                and "cardinality_infeasible" not in degraded else []
+            ),
+            *(
+                [
+                    f"A {cardinality['requested']}-asset limit was requested but the "
+                    "per-asset and per-class caps cannot reach full investment with "
+                    "that few positions, so it was not applied."
+                ] if "cardinality_infeasible" in degraded else []
             ),
             *_window_limitations(returns, history_days),
         ],
