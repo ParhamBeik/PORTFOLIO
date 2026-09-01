@@ -158,14 +158,26 @@ function MyOptimalBody({
   // greedy relaxation of a mixed-integer constraint. Both facts belong on the
   // screen — an answer that quietly ignored the cap reads as a bug.
   const cardinality = opt?.cardinality || null;
-  const capUnhonoured = (opt?.degraded || []).includes("cardinality_infeasible");
+  const degraded = opt?.degraded || [];
+  // `chosen` is what the cap binds. `frozen` holdings sit outside its reach on
+  // purpose: the optimizer could not measure them, and zeroing them would emit a
+  // SELL for an asset we merely failed to price. Reporting only the total would
+  // read as the cap being ignored; reporting only `chosen` would hide rows the
+  // reader can plainly see on the screen below.
   const cardinalityNote = !cardinality
     ? ""
-    : capUnhonoured
+    : degraded.includes("cardinality_infeasible")
       ? `The per-asset and per-class limits cannot fully invest this portfolio in only ${cardinality.requested} holdings, so the cap was not applied.`
       : cardinality.method === "not_applicable"
         ? "Equal weight spreads across everything, so a position cap has nothing to rank."
-        : `Showing the best ${cardinality.applied} of your holdings: the largest positions were kept and re-optimized among themselves. A different set of that size could score slightly better.`;
+        : [
+            degraded.includes("cardinality_floor_exceeds_limit")
+              ? `A ${cardinality.limit}-position limit could not be met: the smallest portfolio worth solving is 3 positions and one of them is a group of holdings sharing a price series, so this holds ${cardinality.chosen}.`
+              : `Showing the best ${cardinality.chosen} of your holdings: the largest positions were kept and re-optimized among themselves. A different set of that size could score slightly better.`,
+            cardinality.frozen
+              ? `${cardinality.frozen} further holding${cardinality.frozen === 1 ? "" : "s"} sit outside the limit — the optimizer could not measure ${cardinality.frozen === 1 ? "it" : "them"}, so ${cardinality.frozen === 1 ? "it is" : "they are"} held at current weight rather than sold.`
+              : "",
+          ].filter(Boolean).join(" ");
 
   // A ceiling under the minimum-variance floor is unreachable by any weights.
   // The scenario answers with that floor rather than failing, so the screen has

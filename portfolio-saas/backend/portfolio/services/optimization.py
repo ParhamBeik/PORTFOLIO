@@ -1616,8 +1616,37 @@ def optimize(
     elif max_assets is not None:
         requested = int(max_assets)
         limit = max(requested, MIN_CARDINALITY)
-        if len(target) > limit:
-            keep = sorted(target, key=lambda k: (-target[k], k))[:limit]
+        # The cap has to be spent in the units the reader counts in: ROWS on the
+        # screen, not solver columns. One column can be several holdings -- a
+        # collapsed proxy group is one bet split across two Swiss bars -- so
+        # keeping it costs however many real assets `_expand_from_proxies` will
+        # split it back into. Budgeting in columns let a 4-asset cap render six
+        # rows, which reads as the cap being ignored.
+        def _row_cost(column: str) -> int:
+            members = proxy_groups.get(column)
+            if not members:
+                return 1
+            return len(([column] if current_weights.get(column) else []) + members)
+
+        ordered = sorted(target, key=lambda k: (-target[k], k))
+        keep, spent = [], 0
+        for column in ordered:
+            cost = _row_cost(column)
+            # Always take the first MIN_CARDINALITY columns: a solver needs them,
+            # and a group that overshoots the budget on its own must not produce
+            # a one-column universe.
+            if len(keep) >= MIN_CARDINALITY and spent + cost > limit:
+                continue
+            keep.append(column)
+            spent += cost
+        if spent > limit:
+            # Three columns is the floor, and three columns can be more than
+            # `limit` rows if one of them is a proxy group. Nothing to trade away
+            # here -- a two-column portfolio is not an answer -- so overshoot and
+            # say by how much rather than quietly returning fewer rows than a
+            # portfolio needs.
+            degraded.append("cardinality_floor_exceeds_limit")
+        if len(keep) < len(ordered):
             reduced = _solve(sleeves, cols=keep)
             if abs(sum(reduced.values()) - 1.0) > 1e-6:
                 # The caps cannot fill 100% from this few assets (five assets
@@ -1629,8 +1658,9 @@ def optimize(
         cardinality = {
             "requested": requested,
             "limit": limit,  # `requested` raised to MIN_CARDINALITY if it was below
-            "applied": len(target),
             "method": "greedy_top_n_resolve",
+            # `positions` and `frozen` are filled in after the proxy expansion and
+            # the frozen sleeve run, because those are what decide the row count.
         }
 
     # Metrics are scored on the SOLVED (collapsed, un-frozen) weights, because
@@ -1705,6 +1735,20 @@ def optimize(
         )
         metrics["weight_covered"] = _finite(optimized_share)
     target = {k: float(v) for k, v in target.items() if v > 1e-6}
+
+    # Now that the real rows exist, say how many of them there are. `chosen` is
+    # what the cap actually bound; `frozen` is what it could not reach, because a
+    # holding the solver cannot measure is not sellable on this page by design --
+    # zeroing it would emit a SELL for an asset we simply failed to price. The
+    # two are reported separately rather than summed into one flattering number.
+    if cardinality is not None and cardinality["method"] == "greedy_top_n_resolve":
+        cardinality["frozen"] = len(frozen)
+        cardinality["chosen"] = len([k for k in target if k not in frozen])
+        cardinality["positions"] = len(target)
+        cardinality["met"] = (
+            cardinality["chosen"] <= cardinality["limit"]
+            and "cardinality_infeasible" not in degraded
+        )
 
     # Why each frozen asset could not be optimized, from the records the returns
     # pipeline already produced -- "held at current weight" with no reason is
@@ -1847,6 +1891,22 @@ def optimize(
                     "problem, so a different set of that size could score better."
                 ] if cardinality and cardinality["method"] == "greedy_top_n_resolve"
                 and "cardinality_infeasible" not in degraded else []
+            ),
+            *(
+                [
+                    f"A {cardinality['limit']}-position limit could not be met: the "
+                    f"smallest portfolio worth solving is {MIN_CARDINALITY} positions "
+                    "and one of them is a group of holdings that share a price "
+                    f"series, so the answer holds {cardinality['chosen']}."
+                ] if "cardinality_floor_exceeds_limit" in degraded and cardinality else []
+            ),
+            *(
+                [
+                    f"{cardinality['frozen']} further holding(s) sit outside that "
+                    "limit: the optimizer could not measure them, so they are held "
+                    "at their current weight rather than sold. The limit applies to "
+                    "the positions it can actually choose."
+                ] if cardinality and cardinality.get("frozen") else []
             ),
             *(
                 [

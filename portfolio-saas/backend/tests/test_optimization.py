@@ -2934,3 +2934,66 @@ def test_robustness_endpoint_rejects_a_bad_target_volatility(
     )
     assert resp.status_code == 400
     assert "target_volatility" in resp.json()["detail"]
+
+
+def test_max_assets_budgets_for_proxy_expansion(synthetic_history, cardinality_user):
+    """The cap is spent in rows the reader sees, not in solver columns.
+
+    A collapsed proxy group is one column and several holdings -- two Swiss bars
+    priced off the same gold series. Budgeting the cap in columns let a 4-asset
+    request render six rows, which reads as the cap being ignored.
+    """
+    Asset.objects.filter(
+        key__in=["swiss_gold_bar_1g", "swiss_gold_bar_2_5g"]
+    ).update(proxy_key="emami_coin")
+
+    weights = {
+        "emami_coin": 0.20, "swiss_gold_bar_1g": 0.10, "swiss_gold_bar_2_5g": 0.10,
+        "bitcoin_usd": 0.20, "usd_cash": 0.20, "kama_stock": 0.20,
+    }
+    universe = list(weights)
+    result = optimize(
+        scenario="risk_parity", current_weights=weights,
+        total_value_tomans=Decimal("1000000000"), user=cardinality_user,
+        universe=universe, held_keys=frozenset(weights),
+        constraints=_uncapped(max_assets=4),
+    )
+    assert result["proxy_groups"], "fixture did not produce a proxy group"
+    card = result["cardinality"]
+    assert card["positions"] == len(result["target_weights"])
+    assert card["positions"] == card["chosen"] + card["frozen"]
+
+    # The budget is spent in rows: a 6-holding book asked for 4 must not come
+    # back with all 6 just because two of them collapsed onto one column.
+    assert card["chosen"] < len(weights)
+    # Three columns is the floor, and three columns can cost more than the limit
+    # when one is a proxy group. Where that happens it is stated, not hidden.
+    if "cardinality_floor_exceeds_limit" in result["degraded"]:
+        assert card["met"] is False
+        assert any("could not be met" in line for line in result["limitations"])
+    else:
+        assert card["chosen"] <= card["limit"], result["target_weights"]
+        assert card["met"] is True
+
+
+def test_cardinality_reports_frozen_holdings_separately(synthetic_history, cardinality_user):
+    """A holding the solver cannot measure is counted, not hidden or sold."""
+    Asset.objects.create(
+        key="unmeasurable", name="Unmeasurable", asset_class="Gold", currency="IRT",
+    )
+    weights = {
+        "emami_coin": 0.2, "bitcoin_usd": 0.2, "usd_cash": 0.2,
+        "kama_stock": 0.2, "unmeasurable": 0.2,
+    }
+    result = optimize(
+        scenario="risk_parity", current_weights=weights,
+        total_value_tomans=Decimal("1000000000"), user=cardinality_user,
+        universe=list(weights), held_keys=frozenset(weights),
+        constraints=_uncapped(max_assets=3),
+    )
+    card = result["cardinality"]
+    assert card["frozen"] >= 1
+    assert "unmeasurable" in result["frozen_weights"]
+    assert "unmeasurable" in result["target_weights"], "a frozen holding must not be sold"
+    assert card["chosen"] <= 3
+    assert any("held at their current weight" in line for line in result["limitations"])
