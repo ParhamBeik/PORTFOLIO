@@ -65,6 +65,32 @@ product still cannot ask it.
 network reachability, not on modelling. `scripts/setup_iran_egress.sh` is the
 unblock; until it runs, nothing about Q7 can move.
 
+### Second pass, same day: the frontend column finally moves
+
+The first pass concluded that nothing reached the user. Two things now do.
+
+**Q3 delivered 4 → 6.** The comparison chart draws the TSE index. It had been
+hard-coded unavailable for a sound reason — BrsApi sells the index as a live
+snapshot and no history at any price, so there was nothing honest to plot. TGJU's
+`bourse` series supplied **2,751 daily closes back to 1393-02-08**, and the
+endpoint now returns `tse_index` in both `series` and `labels` with an empty
+`unavailable` list. Verified against production for the family account: 64
+points, indexed 101.2 → 171.8.
+
+**Q4/Q5 backend 9 → 9, but with analytics that previously did not exist.**
+`HISTORICAL_BENCHMARK_ENABLED` was never defined in settings, so it defaulted
+False and **beta, alpha and tracking error had never once been computed in
+production** — only under `override_settings` in tests. They now run: the family
+portfolio measures beta 0.243, alpha 0.963, tracking error 0.292 against TEDPIX.
+
+**Q5's investable universe also grew** from 38 analysable instruments to 53, and
+crypto from 2 series to 17.
+
+Still unmoved, and still the honest limit: **Q2 (4)** needs a CSV import and an
+opening-date fix, and **Q5 (6)** needs a risk-tolerance control and an
+asset-count cap. Those are UI that does not exist, and no amount of data work
+substitutes for them. **Q7 (0)** remains blocked on network reachability.
+
 **Weighted read.** Q1, Q4, Q5 and Q6 are at or near a shippable paid standard. Q2 and Q3
 are where the product loses a customer, and both fail the same way: the backend already
 does the work and no screen exposes it. **21 of 53 endpoints have no frontend caller** —
