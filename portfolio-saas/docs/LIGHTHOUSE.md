@@ -360,3 +360,59 @@ The four scores are green and gated. What keeps them green:
 - **Remaining work is items 8, 9b and 10.** The authenticated Dashboard audit is the
   important one: it is the page users actually live on, it carries the 610 KB chart chunk,
   and until it is measured the 100 above describes the sign-in page only.
+
+## Authenticated routes (2026-09-01)
+
+The 100/100/100/100 above is the **sign-in page** — the only route reachable
+without a backend, and therefore the only one CI can gate. It also loads almost
+nothing. `npm run test:lighthouse:auth` signs in with a real browser and audits
+what is actually behind the JWT:
+
+| Route | Performance | Accessibility | Best practices | SEO | CLS |
+|---|:---:|:---:|:---:|:---:|:---:|
+| `/` (dashboard) | 99 | **100** | **100** | **100** | 0.062 |
+| `/ledger` | **100** | **100** | **100** | 63 ✱ | 0.05 |
+| `/optimal` | 95 | **100** | **100** | 63 ✱ | 0.05 |
+
+✱ **SEO 63 is the correct result, not a defect.** Authenticated routes are
+`Disallow`ed in robots.txt and the category drops on the single audit "Page is
+blocked from indexing". A crawler gets the sign-in shell; there is nothing to
+index. Scoring 100 there would mean inviting crawlers into the app, so SEO is
+asserted on the public page only.
+
+### What the first authenticated run found
+
+**Two contrast failures, one root cause: `opacity` used for de-emphasis.**
+Opacity composites text *towards* the background, so dimming a container drags
+every label inside it down with it. The hidden-holdings row at `opacity-50` took
+its own "Not counted" badge to 3.05:1 — dimming the badge that explains why the
+row is dimmed — and disabled controls at `opacity-40`/`opacity-35` sat at 4.44:1
+against a required 4.5. The floor now lives in one exported constant instead of
+three numbers chosen independently.
+
+**CLS 0.133 in a single shift.** The charts grid rendered ~84px of "Loading…"
+then jumped to 464px when data arrived, shoving the cards below it down the
+page. Async panels now reserve the height they are about to occupy — layout
+shift is geometry, so a nicer spinner is not a fix.
+
+**Two of the routes did not exist.** There is no `/dashboard` and no
+`/my-optimal`; the `*` catch-all served the app, so the scores looked plausible
+while measuring URLs the router never defined. robots.txt had drifted the same
+way and was missing `/best-overall` and `/breakdown`.
+
+**Charts initialised on mount, including below the fold** — 100ms of blocking
+time on `/optimal` spent rendering canvases nobody could see. They now init on
+approach, which took that route 91 → 95 and TBT 100ms → 30ms.
+
+### Reading these numbers honestly
+
+Run-to-run variance on this harness is roughly **±4 points**, and it tracks load
+on the machine running Chrome, not the app: one run mid-backfill reported the
+dashboard at 72 with TBT 1,850ms, while a direct measurement of the same page
+showed **zero** long tasks and a 25KB largest payload. A clean re-run returned
+99/30ms. Treat a single sub-100 performance score as noise unless a direct
+long-task measurement agrees with it — and do not chase the last point or two,
+because on this harness that point is not real.
+
+This is not wired into CI: it needs credentials and a live backend, and a gate
+that depends on either goes red for reasons that are not the commit's fault.

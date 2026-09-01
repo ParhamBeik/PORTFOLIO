@@ -31,11 +31,39 @@ with no client answers nothing.
 |---|---|:---:|:---:|:---:|---|
 | Q1 | Live, congruent portfolio tracking | 9 | 7 | **7** | Price truth is unusually well engineered; a mortgage silently vanishes from the screen |
 | Q2 | Add/edit/delete trades; trustworthy back-dated P/L | 8 | 4 | **4** | The ledger is right. There is no CSV import, and "I already own it" silently discards the date |
-| Q3 | Historical data breadth, freshness, comparison | 8 | 4 | **4** | ~17 years of stock history is stored and there is no screen that draws one asset's price |
+| Q3 | Historical data breadth, freshness, comparison | 8 → **9** | 4 | **4** | ~17 years of stock history is stored and there is no screen that draws one asset's price |
 | Q4 | Diversification as an allocation change | 9 | 7 | **7** | The best-conceived module in the codebase, split across two pages and never told when to act |
 | Q5 | Optimal portfolio by scenario and risk tolerance | 9 | 6 | **6** | Outstanding optimizer; no risk-tolerance control, no asset-count cap, no Pro tier |
 | Q6 | Operator monitoring and diagnosis | 9 | 9 | **9** | Excellent — but it watches the warehouse, not the users |
-| Q7 | ML limit-to-limit signal *(proposed)* | 2 | 0 | **0** | Substrate is real and rare; nothing is built, and the order book it needs is not sold |
+| Q7 | ML limit-to-limit signal *(proposed)* | 2 | 0 | **0** | Substrate is real and rare; nothing is built, and the order book it needs is unreachable |
+
+### Re-scored after the direct-source migration (2026-09-01)
+
+Only one number moved, and it is worth being precise about why so little did.
+
+**Q3 backend 8 → 9.** The investable universe went from **38 analysable
+instruments to 53**, and crypto from **2 to 17**. ETH, XRP, ADA, DOGE, LTC, BNB,
+SOL, TRX, DOT, AVAX, LINK, SHIB, UNI, ATOM and FIL previously had *no history at
+all*, which meant they could not enter the returns matrix and were therefore
+invisible to the optimizer, the comparison view and every risk figure —
+regardless of whether anyone held them. BTC deepened 1,037 → 2,491 sessions and
+USDT/Toman 1,035 → 2,756, back to 2018-11-27.
+
+**Q1 backend stays 9**, but is materially more robust: the gold/FX lane no
+longer competes for the BrsApi wallet that archive could drain before dawn, and
+two independent exchanges now cross-check every crypto quote each cycle.
+
+**Nothing on the frontend column moved, and that is the honest finding.** This
+work was entirely backend and data. Q2 (4), Q3 (4) and Q5 (6) are limited by
+missing UI — a CSV import, a single-asset price screen, a risk-tolerance
+control — and none of that was touched. More history behind a screen that does
+not exist is still invisible to the user. Q3's *delivered* score is unchanged at
+4 for exactly that reason: the backend can now answer the question, and the
+product still cannot ask it.
+
+**Q7 remains 2/0.** It is blocked on the TSE order book, which is blocked on
+network reachability, not on modelling. `scripts/setup_iran_egress.sh` is the
+unblock; until it runs, nothing about Q7 can move.
 
 **Weighted read.** Q1, Q4, Q5 and Q6 are at or near a shippable paid standard. Q2 and Q3
 are where the product loses a customer, and both fail the same way: the backend already

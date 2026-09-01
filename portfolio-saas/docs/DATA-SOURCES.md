@@ -23,6 +23,32 @@ they cannot be reached — see the egress section.
 
 Verify on any host with `python manage.py check_egress [--compare] [--verify-tsetmc]`.
 
+### Crypto history backfilled (2026-09-01)
+
+`python manage.py backfill_crypto_history` wrote **75,257 rows across 41 pairs**
+in one pass, unmetered. Result:
+
+| | Before | After |
+|---|---|---|
+| Warehouse symbols | 38 | **77** |
+| Analysable catalog instruments | 38 | **53** |
+| Crypto series | 2 (BTC, USDT_IRT) | **17** |
+| BTC depth | 1,037 sessions | **2,491** (to 1398-07-23) |
+| USDT/Toman depth | 1,035 sessions | **2,756** (to 1397-09-06) |
+
+ETH, XRP, ADA, DOGE, LTC, BNB, SOL, TRX, DOT, AVAX, LINK, SHIB, UNI, ATOM and
+FIL had **no history at all** before this, so none of them could enter the
+returns matrix — invisible to the optimizer, comparison and risk regardless of
+whether anyone held them.
+
+The ingest is **insert-only**, and the reason is measured rather than cautious:
+across 1,037 overlapping BTC days Wallex and the incumbent agreed to a median
+0.43% (p90 1.42%), and on USDT/Toman to a median 0.26%. Close enough to trust
+for days we lack; not close enough to restate days we have, which would stitch
+two venues into one series and leave a discontinuity at every join in a table
+the returns matrix reads. Verified after the run: `BTC 1405-06-09` still holds
+the incumbent's 78,841.
+
 ### The discovery that made the gold/FX swap trivial
 
 **BrsApi's gold/currency feed is TGJU, resold.** Compared against what production was
