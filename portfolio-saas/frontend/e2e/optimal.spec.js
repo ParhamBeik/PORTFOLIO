@@ -108,3 +108,85 @@ test.describe("optimal", () => {
     expect.soft(sawInsufficient || n > 0).toBeTruthy();
   });
 });
+
+test.describe("optimal — risk tolerance and position cap", () => {
+  test.beforeEach(async ({ page }) => {
+    await requireLogin(page, test);
+    await page.getByTestId("nav-my-optimal").click();
+  });
+
+  // Every assertion here waits on the RESPONSE, never on the DOM alone. `useApi`
+  // keeps the previous payload visible while the next request is in flight and
+  // shows no spinner for it, so a DOM-only wait passes against the answer to the
+  // question that was asked before this one.
+  const waitForOptimal = (page, match) =>
+    page.waitForResponse(
+      (res) =>
+        res.url().includes("/api/optimization/my-optimal/") &&
+        res.url().includes(match) &&
+        res.status() === 200,
+      { timeout: 40000 }
+    );
+
+  test("a risk ceiling produces the risk-budget scenario", async ({ page }) => {
+    const control = page.getByTestId("optimal-risk-ceiling");
+    if (!(await control.isVisible().catch(() => false))) {
+      test.skip(true, "no optimal body (empty holdings / insufficient history)");
+    }
+
+    const settled = waitForOptimal(page, "target_volatility=0.35");
+    await control.selectOption("0.35");
+    await settled;
+
+    // Selecting a ceiling also selects the scenario it produces — leaving the
+    // tab on Min Volatility would answer a question nobody asked.
+    const note = page.getByTestId("optimal-risk-note");
+    const insufficient = page.getByTestId("optimal-insufficient");
+    await expect(note.or(insufficient).first()).toBeVisible({ timeout: 20000 });
+    if (await note.isVisible().catch(() => false)) {
+      await expect(note).toContainText(/%/);
+    }
+  });
+
+  test("a position cap is applied and explained", async ({ page }) => {
+    const control = page.getByTestId("optimal-max-assets");
+    if (!(await control.isVisible().catch(() => false))) {
+      test.skip(true, "no optimal body (empty holdings / insufficient history)");
+    }
+
+    const settled = waitForOptimal(page, "max_assets=3");
+    await control.selectOption("3");
+    await settled;
+
+    const note = page.getByTestId("optimal-cardinality-note");
+    const insufficient = page.getByTestId("optimal-insufficient");
+    await expect(note.or(insufficient).first()).toBeVisible({ timeout: 20000 });
+  });
+
+  test("robustness runs only when asked, and reports its bands", async ({ page }) => {
+    const card = page.getByTestId("optimal-robustness-card");
+    if (!(await card.isVisible().catch(() => false))) {
+      test.skip(true, "no optimal body to resample");
+    }
+    // The point of the gate: 200 re-solves must not ride along with the page.
+    await expect(page.getByTestId("optimal-robustness-table")).toHaveCount(0);
+
+    const settled = page.waitForResponse(
+      (res) => res.url().includes("/api/optimization/robustness/"),
+      { timeout: 120000 }
+    );
+    await page.getByTestId("optimal-robustness-run").click();
+    const response = await settled;
+
+    if (response.status() !== 200) {
+      // 503 is the documented "not enough shared history" branch, and the page
+      // has to render it as an error state rather than an endless spinner.
+      await expect(page.getByTestId("optimal-robustness")).toBeVisible();
+      return;
+    }
+    const known = page
+      .getByTestId("optimal-robustness-table")
+      .or(page.getByTestId("optimal-robustness-empty"));
+    await expect(known.first()).toBeVisible({ timeout: 20000 });
+  });
+});
