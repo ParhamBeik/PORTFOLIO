@@ -291,7 +291,11 @@ function TrendCard({ activeId, basis }) {
         </div>
       )}
     >
-      <Async {...state} testId="dashboard-trend-body" empty="No history yet." minHeight={260}>
+      {/* Measured, not guessed: the loaded body is the 260px chart PLUS the
+          estimated-points note under it, and reserving only the chart let the
+          card grow by ~170px when the data landed — which was the dashboard's
+          entire measured layout shift. Floors the transient states only. */}
+      <Async {...state} testId="dashboard-trend-body" empty="No history yet." minHeight={430}>
         {(data) => {
           const points = (data.series || []).map((s) => ({ x: s.date, y: Number(s.total) }));
           // Counted, not just detected. "Some points are estimated" reads like a
@@ -407,7 +411,8 @@ function TrendCard({ activeId, basis }) {
 function AllocationCard({ state }) {
   return (
     <Card title="Allocation" testId="dashboard-allocation">
-      <Async {...state} testId="dashboard-allocation-body" empty="No priced holdings yet." minHeight={260}>
+      {/* Loaded body measures 382px: the 260px donut plus its legend column. */}
+      <Async {...state} testId="dashboard-allocation-body" empty="No priced holdings yet." minHeight={385}>
         {(data) => {
           const groups = groupByClass(data.items || []);
           if (!groups.length) return <Empty>No priced holdings yet.</Empty>;

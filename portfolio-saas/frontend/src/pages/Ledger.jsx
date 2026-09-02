@@ -426,10 +426,14 @@ export default function Ledger() {
           </label>
         }
       >
+        {/* A page of entries is taller than a spinner, so without a reserved
+            height the footer sits under the spinner and jumps a screenful when
+            the rows arrive. */}
         <Async
           {...ledger}
           testId="ledger-history"
           empty="Nothing recorded yet. Use Add to record your first buy, sale, or holding."
+          minHeight="60vh"
         >
           {(rows) => {
             // Clamped rather than corrected in state: deleting the last row of
