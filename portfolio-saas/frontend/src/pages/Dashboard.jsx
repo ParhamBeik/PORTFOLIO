@@ -135,7 +135,14 @@ function groupByClass(items) {
 
 function HeroRow({ state, basis: selected }) {
   return (
-    <Async {...state} testId="dashboard-hero">
+    // The hero is the first thing under the page title, so anything below it
+    // moves when it grows -- the dashboard's whole measured layout shift was
+    // the chart grid being pushed down when the totals replaced the spinner.
+    // Reserved responsively rather than through `Async`'s inline `minHeight`,
+    // because the two StatTiles stack under `sm` and the reserved height has to
+    // stack with them: 184px measured at 412px wide, 94px at 1350px.
+    <div className="min-h-[184px] sm:min-h-[94px]">
+      <Async {...state} testId="dashboard-hero">
       {(data) => {
         // The basis the NUMBERS were fetched with, not the one the picker shows.
         // `useApi` keeps the previous payload on screen while the next loads, so
@@ -173,7 +180,8 @@ function HeroRow({ state, basis: selected }) {
           </div>
         );
       }}
-    </Async>
+      </Async>
+    </div>
   );
 }
 
