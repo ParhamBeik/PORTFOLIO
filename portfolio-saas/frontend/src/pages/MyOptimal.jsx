@@ -109,7 +109,16 @@ export default function MyOptimal() {
         // UniverseTooSmall is a data-coverage state, not a fault — no red ErrorState.
         <Empty testId="optimal-empty-universe">{error.message}</Empty>
       ) : (
-        <Async {...optimalState} testId="optimal-main" empty="No optimization data yet.">
+        // The loaded page is several viewports of cards. Without a reserved
+        // height the footer sits just under the spinner and then jumps down
+        // when the content arrives -- the whole of this route's measured layout
+        // shift was that one element moving.
+        <Async
+          {...optimalState}
+          testId="optimal-main"
+          empty="No optimization data yet."
+          minHeight="70vh"
+        >
           {(data) => (
             <MyOptimalBody
               data={data}
