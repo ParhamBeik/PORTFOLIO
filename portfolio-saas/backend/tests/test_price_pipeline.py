@@ -624,13 +624,23 @@ def test_fetch_persists_archive_replacement_for_missing_live_price(asset_catalog
     stock.tse_symbol = "ARCHIVE_STOCK"
     stock.save(update_fields=["tse_symbol"])
     seed = Price.objects.create(asset=stock, price=Decimal("7777"), source="SEED")
-    Price.objects.filter(pk=seed.pk).update(
-        fetched_at=timezone.now() - timedelta(days=15)
+    stored_age = timezone.now() - timedelta(days=15)
+    Price.objects.filter(pk=seed.pk).update(fetched_at=stored_age)
+    # Derived from `now`, never hardcoded. The behaviour under test is a
+    # RELATIVE one -- the archive stands in only when its close is not older
+    # than the stored price -- so a fixed Jalali date drifts across that
+    # boundary as the calendar moves. `1405-05-26` sat exactly on it on
+    # 2026-09-01 and was one day the wrong side of it on 2026-09-02, which
+    # turned CI red on a frontend-only commit.
+    import jdatetime
+
+    candle_day = jdatetime.date.fromgregorian(
+        date=(stored_age + timedelta(days=1)).date()
     )
     MarketCandle.objects.create(
         symbol="ARCHIVE_STOCK",
         timeframe=MarketCandle.ADJUSTED,
-        date_time="1405-05-26",
+        date_time=candle_day.strftime("%Y-%m-%d"),
         close_price=Decimal("8888"),
     )
 
