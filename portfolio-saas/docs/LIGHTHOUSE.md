@@ -20,11 +20,49 @@ FCP 0.3s · LCP 0.3s · TBT 0ms · CLS 0 · Speed Index 0.3s
 Stable across three runs against the **real production image**, not the `dist/` folder —
 see "How it is enforced" for why that distinction is the whole point.
 
-**One honest limit on that number.** This audits the sign-in page, which is what an
-unauthenticated Lighthouse run reaches: every other route is behind a JWT (`App.jsx:53`).
-The Dashboard — heavier by the 610 KB echarts chunk — is not yet covered, and item 8 in the
-work table below is what closes that. A 100 here is real, and it is not yet a 100 for the
-page users live on.
+**That number is the sign-in page**, which is what an unauthenticated Lighthouse run
+reaches: every other route is behind a JWT (`App.jsx:53`). The authenticated routes are
+covered separately, below.
+
+### The authenticated routes (2026-09-02)
+
+`npm run test:lighthouse:auth`, against production with a real session:
+
+| Route | Perf | A11y | Best practices | SEO | FCP | LCP | TBT | CLS |
+|---|:--:|:--:|:--:|:--:|--|--|--|--|
+| `/` (Dashboard) | **100** | **100** | **100** | **100** | 0.0 s | 1.1 s | 70 ms | **0** |
+| `/ledger` | **100** | **100** | **100** | 63 | 0.9 s | 1.0 s | 0 ms | 0.009 |
+| `/optimal` | **100** | **100** | **100** | 63 | 0.9 s | 0.9 s | 0 ms | **0** |
+
+**SEO 63 on the app routes is the correct state, not a gap.** Every authenticated route is
+`Disallow`ed in `robots.txt`, and the whole 37-point deduction is the single audit "Page is
+blocked from indexing". These pages return the sign-in shell to a crawler; there is nothing
+to index. Scoring SEO 100 on them would mean inviting crawlers into the app. The public
+sign-in page still enforces `seo: 1.0` through `lighthouserc.json`, which is where SEO
+means anything.
+
+**`/optimal` scored 92 on one run in three**, with FCP, LCP, TBT and CLS identical across
+all three. The whole difference was Speed Index, which moves with CPU contention on the
+machine running the audit. It is not a property of the page; treat a single sub-100 Speed
+Index reading as noise and re-run.
+
+### What closed the last of it: reserving height for async content
+
+All three routes carried layout shift, and all three had the same cause — a loading state
+shorter than the content that replaced it. Two lessons worth keeping:
+
+- **Lighthouse names the element that MOVED, not the one that caused it.** The Dashboard
+  reported its chart grid shifting, so the first fix reserved height on the two chart
+  cards. The score did not move: those cards were not growing, they were being *pushed*, by
+  a hero row whose `Async` reserved nothing at all.
+- **Reserve what the loaded body actually takes, not what the chart takes.** The trend and
+  allocation cards reserved their 260 px chart height while the loaded body is the chart
+  plus the note under it (382 px measured for the allocation donut). Every number in those
+  fixes was measured against production at the viewport Lighthouse audits (412 px), not
+  guessed — and the hero needed a responsive reservation rather than `Async`'s inline
+  `minHeight`, because its tiles stack under `sm` (184 px stacked, 94 px at 1350 px).
+
+Dashboard CLS 0.062 → 0, Ledger 0.05 → 0.009, My Optimal 0.05 → 0.
 
 The sections below record what was wrong, since the reasoning is what stops it regressing.
 
