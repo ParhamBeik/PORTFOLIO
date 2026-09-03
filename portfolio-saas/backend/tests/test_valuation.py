@@ -2070,7 +2070,9 @@ def test_history_older_than_the_recompute_bound_is_still_netted(
     avoid, just relocated to the bound. They are netted from the oldest computed
     day and flagged `approximated`.
     """
-    from portfolio import views as portfolio_views
+    # The bound is read by `_subtract_hidden_holdings`, which lives in the
+    # valuation view module.
+    from portfolio.views import valuation as portfolio_views
 
     # Squeeze the ceiling so the test does not need years of snapshots.
     monkeypatch.setattr(portfolio_views, "HIDDEN_ADJUSTMENT_MAX_DAYS", 2)

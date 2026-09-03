@@ -2501,7 +2501,10 @@ def _dup_valuation():
 
 
 def test_weights_sum_to_one_when_an_asset_is_held_in_two_portfolios(monkeypatch):
-    from portfolio import views as views_mod
+    # `_current_weights_and_total` and the `value_user` it calls both live in
+    # the analytics view module; patching the package aggregator would not
+    # change the name that function actually resolves.
+    from portfolio.views import analytics as views_mod
 
     monkeypatch.setattr(views_mod, "value_user", lambda user: _dup_valuation())
     weights, total, _ = views_mod._current_weights_and_total(user=object())
@@ -2512,7 +2515,10 @@ def test_weights_sum_to_one_when_an_asset_is_held_in_two_portfolios(monkeypatch)
 
 
 def test_shared_holdings_are_summed_not_overwritten(monkeypatch):
-    from portfolio import views as views_mod
+    # `_current_weights_and_total` and the `value_user` it calls both live in
+    # the analytics view module; patching the package aggregator would not
+    # change the name that function actually resolves.
+    from portfolio.views import analytics as views_mod
 
     monkeypatch.setattr(views_mod, "value_user", lambda user: _dup_valuation())
     weights, _, _ = views_mod._current_weights_and_total(user=object())
