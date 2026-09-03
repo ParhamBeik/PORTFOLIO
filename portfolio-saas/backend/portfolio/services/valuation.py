@@ -1530,8 +1530,9 @@ def resolve_asset_point_in_time_price(
             day
             for _sym, day in rejected_pairs([asset.tse_symbol], STOCK_SERIES_ENDPOINTS)
         ]
+        rejections_set = set(rejections) | {f"{d} 00:00:00" for d in rejections}
         candles = candle_close_qs(asset.tse_symbol, as_of=as_of_jalali).exclude(
-            date_time__in=rejections
+            date_time__in=rejections_set
         )
         candle = candles.order_by("-date_time").first()
         if candle:
@@ -1581,7 +1582,6 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     from portfolio.services.returns import normalize_as_of, to_jalali_str
     from portfolio.services.timeline import cash_as_of, holdings_as_of
     from portfolio.services.visibility import hidden_keys
-    from marketdata.calendars import candle_close_qs, sessions_between
     from marketdata.models import GoldCurrencyHistory
     from portfolio.models import Asset
 
@@ -1682,7 +1682,8 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                 val = holding_value_to_toman(asset, qty * price)
             if basis in ("usd_denominated", "usdt_denominated") and usd_rate > 0:
                 val = val / usd_rate
-                price = price / usd_rate
+                toman_price = price / Decimal("10") if asset.tse_symbol else price
+                price = toman_price / usd_rate
             elif basis == "real_toman":
                 val = val / cpi * Decimal("100")
                 price = price / cpi * Decimal("100")

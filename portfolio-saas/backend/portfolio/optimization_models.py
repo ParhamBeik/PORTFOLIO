@@ -37,7 +37,7 @@ class OptimizationSnapshot(models.Model):
         blank=True,
     )
     scenario = models.CharField(max_length=32, choices=SCENARIO_CHOICES, default="max_sharpe")
-    basis = models.CharField(max_length=32, default="real_toman", db_index=True)
+    basis = models.CharField(max_length=32, default="real_toman")
     # Lookback window this snapshot was optimized over (365/1095/1825/3650 for
     # the "Best Possible Portfolio Overall" page). Queryable so the view can
     # fetch "the latest snapshot per (window_days, scenario)" without parsing

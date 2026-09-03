@@ -680,12 +680,20 @@ def _lump_sum(user, account, subject_key, target_key, days) -> dict:
             "There is no price on or after the first purchase date.",
         )
     day = opened[0]
+    p_left = float(panel[subject.key].loc[day])
+    p_right = float(panel[target.key].loc[day])
+    if p_left <= 0 or p_right <= 0:
+        _refuse(
+            [k for k, p in ((subject.key, p_left), (target.key, p_right)) if p <= 0],
+            "unpriced_on_purchase_date",
+            "Price on start date must be positive.",
+        )
     left = _shown(
-        stake / float(panel[subject.key].loc[day]) * panel[subject.key].loc[day:],
+        stake / p_left * panel[subject.key].loc[day:],
         start,
     )
     right = _shown(
-        stake / float(panel[target.key].loc[day]) * panel[target.key].loc[day:],
+        stake / p_right * panel[target.key].loc[day:],
         start,
     )
     return {

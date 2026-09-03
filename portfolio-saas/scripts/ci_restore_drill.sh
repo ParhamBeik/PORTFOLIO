@@ -26,8 +26,9 @@ manage() {
 }
 
 cleanup() {
-  dropdb "${pg[@]}" --if-exists "${source_db}" >/dev/null
-  dropdb "${pg[@]}" --if-exists "${target_db}" >/dev/null
+  dropdb "${pg[@]}" --if-exists "${source_db}" >/dev/null 2>&1 || true
+  dropdb "${pg[@]}" --if-exists "${target_db}" >/dev/null 2>&1 || true
+  rm -f "${artifact}" "${source_evidence}" "${target_evidence}" "${evidence}"
 }
 trap cleanup EXIT
 cleanup

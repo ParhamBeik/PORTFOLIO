@@ -46,22 +46,30 @@ fi
 echo "Verifying archive table of contents..."
 pg_restore --list "${dump_file}" >/dev/null
 
-cleanup
+dropdb "${pg[@]}" --if-exists "${target_db}" >/dev/null 2>&1 || true
 createdb "${pg[@]}" "${target_db}"
 
 echo "Restoring backup into ${target_db}..."
 pg_restore "${pg[@]}" --no-owner --no-acl --dbname "${target_db}" "${dump_file}"
 
+python_bin="python3"
+if [[ -x "${project_dir}/.venv/bin/python3" ]]; then
+  python_bin="${project_dir}/.venv/bin/python3"
+elif [[ -x "${backend_dir}/../.venv/bin/python3" ]]; then
+  python_bin="${backend_dir}/../.venv/bin/python3"
+fi
+
 manage() {
   DJANGO_SETTINGS_MODULE=config.settings \
   DJANGO_DEBUG=0 \
+  DJANGO_SECRET_KEY="${DJANGO_SECRET_KEY:-restore-drill-production-verification-secret-key-at-least-50-characters-long}" \
   ENVIRONMENT=production \
   POSTGRES_DB="$1" \
   POSTGRES_USER="${TEST_PG_USER:-portfolio}" \
   POSTGRES_PASSWORD="${TEST_PG_PASSWORD:-}" \
   POSTGRES_HOST="${TEST_PG_HOST:-127.0.0.1}" \
   POSTGRES_PORT="${TEST_PG_PORT:-5432}" \
-    python3 "${backend_dir}/manage.py" "${@:2}"
+    "${python_bin}" "${backend_dir}/manage.py" "${@:2}"
 }
 
 echo "Asserting data integrity..."

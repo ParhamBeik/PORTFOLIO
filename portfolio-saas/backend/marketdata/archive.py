@@ -1219,9 +1219,11 @@ def grow_tick_windows(step_days=90):
             continue  # at the clamp: no wider window exists to fetch into
         listed = first_seen.get(symbol)
         if listed:
-            span_to_listing = (today - jalali.to_gregorian(listed)).days
-            if window >= span_to_listing:
-                continue  # already backfilled to this symbol's own listing date
+            greg_listed = jalali.to_gregorian(listed)
+            if greg_listed is not None:
+                span_to_listing = (today - greg_listed).days
+                if window >= span_to_listing:
+                    continue  # already backfilled to this symbol's own listing date
         to_grow.append(symbol)
     if not to_grow:
         return 0

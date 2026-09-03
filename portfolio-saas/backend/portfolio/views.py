@@ -100,7 +100,7 @@ def concurrency_cap(view_func):
         user_key = f"concurrency:analytics:user:{user_ident}"
         global_key = "concurrency:analytics:global"
 
-        if cache.add(user_key, 1, timeout=60):
+        if cache.add(user_key, 1, timeout=180):
             current_user = 1
         else:
             try:
@@ -108,7 +108,7 @@ def concurrency_cap(view_func):
             except ValueError:
                 current_user = 1
 
-        if cache.add(global_key, 1, timeout=60):
+        if cache.add(global_key, 1, timeout=180):
             current_global = 1
         else:
             try:
@@ -118,13 +118,17 @@ def concurrency_cap(view_func):
 
         if current_user > 2 or current_global > 5:
             try:
-                cache.decr(user_key)
+                u = cache.decr(user_key)
+                if u <= 0:
+                    cache.delete(user_key)
             except ValueError:
-                pass
+                cache.delete(user_key)
             try:
-                cache.decr(global_key)
+                g = cache.decr(global_key)
+                if g <= 0:
+                    cache.delete(global_key)
             except ValueError:
-                pass
+                cache.delete(global_key)
             resp = Response(
                 {"detail": "Too many concurrent optimization requests. Please try again shortly."},
                 status=429,
@@ -2771,18 +2775,22 @@ class OptimizationSnapshotListView(APIView):
         from .serializers import OptimizationSnapshotSerializer
         from django.shortcuts import get_object_or_404
 
-        account_id = request.query_params.get("account_id")
-        limit = min(int(request.query_params.get("limit", 20)), 200)
+        account_id_raw = request.query_params.get("account_id")
+        try:
+            raw_limit = int(request.query_params.get("limit", 20))
+            limit = max(1, min(raw_limit, 200))
+        except (ValueError, TypeError):
+            limit = 20
 
         qs = OptimizationSnapshot.objects.all().order_by("-created_at")
-        if account_id:
-            # Verify ownership
+        if account_id_raw is not None and account_id_raw != "":
+            try:
+                account_id = int(account_id_raw)
+            except (ValueError, TypeError):
+                return Response({"detail": "account_id must be an integer."}, status=400)
             account = get_object_or_404(Account, pk=account_id, user=request.user)
             qs = qs.filter(account=account)
         else:
-            # This is a user-facing endpoint: never infer cross-account access
-            # from staff status. Staff-only operational reads belong on an
-            # explicit admin endpoint with its own permission contract.
             qs = qs.filter(account__isnull=True)
 
         snaps = qs[:limit]
@@ -2801,8 +2809,12 @@ class OptimizationSnapshotLatestView(APIView):
         from .optimization_models import OptimizationSnapshot
         from .serializers import OptimizationSnapshotSerializer
         from django.shortcuts import get_object_or_404
-        account_id = request.query_params.get("account_id")
-        if account_id:
+        account_id_raw = request.query_params.get("account_id")
+        if account_id_raw is not None and account_id_raw != "":
+            try:
+                account_id = int(account_id_raw)
+            except (ValueError, TypeError):
+                return Response({"detail": "account_id must be an integer."}, status=400)
             account = get_object_or_404(Account, pk=account_id, user=request.user)
             snap = OptimizationSnapshot.objects.filter(account=account).order_by("-created_at").first()
         else:

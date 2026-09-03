@@ -305,7 +305,8 @@ def normalize_as_of(as_of) -> dt.datetime | None:
     if isinstance(as_of, str):
         try:
             if "T" in as_of:
-                return dt.datetime.fromisoformat(as_of)
+                parsed = dt.datetime.fromisoformat(as_of)
+                return parsed.replace(tzinfo=dt.timezone.utc) if parsed.tzinfo is None else parsed
             else:
                 y, m, d = (int(part) for part in as_of.split("-"))
                 return dt.datetime(y, m, d, 23, 59, 59, tzinfo=dt.timezone.utc)
@@ -702,6 +703,13 @@ def _load_price_panel(
     gate_excluded = []
     warnings: list[dict] = []
 
+    from portfolio.models import Asset
+    from marketdata.calendars import market_for_asset, sessions_between
+    from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS
+
+    univ_keys = [item["key"] for item in resolved_univ]
+    asset_map = {a.key: a for a in Asset.objects.filter(key__in=univ_keys)}
+
     for item in resolved_univ:
         key = item["key"]
         symbol = item["symbol"]
@@ -743,15 +751,10 @@ def _load_price_panel(
 
         # Staleness / survivorship guard: check if asset stopped trading near as_of
         if as_of_dt is not None and not series.index.empty:
-            from django.utils import timezone
-            from marketdata.calendars import market_for_asset, sessions_between
-            from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS
-            from portfolio.models import Asset
-
             max_date = series.index.max()
             last_jalali = to_jalali_str(max_date)
             as_of_jalali = to_jalali_str(as_of_dt)
-            asset_obj = Asset.objects.filter(key=key).first()
+            asset_obj = asset_map.get(key)
             market = market_for_asset(asset_obj) if asset_obj else "tse"
             stale_sessions = sessions_between(last_jalali, as_of_jalali, market=market)
             if stale_sessions > MAX_FORWARD_FILL_SESSIONS:
@@ -986,25 +989,29 @@ def _build_returns_matrix(
     excluded: list[dict] = []
     warnings: list[dict] = []
     keep: list[str] = []
+
+    from django.utils import timezone
+    from marketdata.calendars import market_for_asset, sessions_between
+    from portfolio.models import Asset
+
+    asset_map = {a.key: a for a in Asset.objects.filter(key__in=returns.columns)}
+    ref_dt = as_of if as_of is not None else timezone.now()
+    ref_jalali = to_jalali_str(ref_dt)
+
     for key in returns.columns:
         held = key in held_keys
         leading_gap, interior_gap = _gap_profile(panel[key].notna().to_numpy())
         non_nan = int(returns[key].notna().sum())
         expected = max(len(returns.index) - 1 - leading_gap, 0)
         coverage = non_nan / expected if expected else 0.0
-        # Trailing gap against market calendar relative to as_of
-        from django.utils import timezone
-        from marketdata.calendars import market_for_asset, sessions_between
-        from portfolio.models import Asset
 
-        asset_obj = Asset.objects.filter(key=key).first()
+        # Trailing gap against market calendar relative to as_of
+        asset_obj = asset_map.get(key)
         market = market_for_asset(asset_obj) if asset_obj else "tse"
         max_date = panel[key].dropna().index.max()
         trailing_sessions = 0
         if max_date is not None:
-            ref_dt = as_of if as_of is not None else timezone.now()
             last_jalali = to_jalali_str(max_date)
-            ref_jalali = to_jalali_str(ref_dt)
             trailing_sessions = sessions_between(last_jalali, ref_jalali, market=market)
 
         effective_gap = max(interior_gap, trailing_sessions)
