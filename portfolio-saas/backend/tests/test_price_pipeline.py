@@ -1031,18 +1031,26 @@ def test_stale_price_during_open_hours_is_reported_stale(asset_catalog, write_pr
     assert response.data["status"] == "stale"
 
 
-def test_stale_price_overnight_is_not_reported_stale(asset_catalog, write_prices, monkeypatch):
-    """No live job runs OVERNIGHT (marketdata.market_state.live_job_keys), so an
-    old price then is the correct current price, not a broken feed -- the
-    watchdog must not restart Celery every night for this.
+def test_stale_price_overnight_is_now_reported_stale(asset_catalog, write_prices, monkeypatch):
+    """Overnight staleness IS a fault now that the gold/currency job runs 24/7.
+
+    This test previously asserted the opposite, and was right to: `live_job_keys`
+    gated that job to OPEN/CLOSED_DAYTIME, so 23:00-07:00 fetched nothing and an
+    eight-hour-old price at 03:00 was simply the correct current price.
+
+    That gate is gone -- crypto and hard currency trade around the clock, and the
+    unmetered origins cost nothing to poll at 3am. The measured consequence of
+    the old behaviour was hours 00-06 empty in the price table every night, with
+    the dead-man's switch structurally unable to notice. Arming the watchdog for
+    those eight hours is the point of the change, not a side effect of it.
     """
     write_prices({"emami_coin": 500000000})
     Price.objects.update(fetched_at=timezone.now() - timedelta(hours=8))
     monkeypatch.setattr("marketdata.market_state.market_state", lambda: "overnight")
 
     response = _get(RequestFactory())
-    assert response.status_code == 200
-    assert response.data["status"] == "fresh"
+    assert response.status_code == 503
+    assert response.data["status"] == "stale"
 
 
 def test_fresh_price_is_reported_fresh_regardless_of_state(asset_catalog, write_prices, monkeypatch):

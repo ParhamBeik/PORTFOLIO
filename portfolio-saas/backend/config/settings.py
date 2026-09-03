@@ -334,6 +334,23 @@ MARKETDATA_PLAN_LIMIT_BRS = int(os.getenv("MARKETDATA_PLAN_LIMIT_BRS", "1500"))
 # lane down with it.
 MARKETDATA_PLAN_SAFETY_MARGIN = int(os.getenv("MARKETDATA_PLAN_SAFETY_MARGIN", "150"))
 MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "120"))
+# Hour of the Tehran quota day by which the archive's paced allowance reaches the
+# FULL day ceiling. Not 24: a ramp that only tops out at 23:59:59 leaves no time
+# to actually spend the last of it, so the day structurally ends a few percent
+# short. Closing the ramp early also leaves catch-up room after any stall, and
+# the leftover hours are exactly when the TSE close lands (14:30) and the day's
+# fresh candles become fetchable.
+MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR = int(
+    os.getenv("MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR", "21")
+)
+# How long a state waits after an `archive_paced` refusal. Minutes, because the
+# ramp advances on its own -- this is a "not yet" from our own scheduler, not a
+# refusal from the provider. It used to be deferred to the next quota day, which
+# parked ~7,000 states nightly and left ~4,000 TSETMC requests a day unspent.
+# Jittered +/-50% at the call site so a refused batch does not return as a herd.
+MARKETDATA_ARCHIVE_PACED_RETRY_SECONDS = int(
+    os.getenv("MARKETDATA_ARCHIVE_PACED_RETRY_SECONDS", "180")
+)
 # Pending work, not active workers. Sized to keep archive workers busy between
 # scheduler ticks without exceeding the archive slice of the 5-minute window
 # (~750 req / 5 min). Was 4 and starved fill rate (~4 HTTP/min vs ~100+ capacity).
@@ -346,7 +363,14 @@ MARKETDATA_ARCHIVE_QUEUE_LIMIT = int(
 # than strict priority: at ~5M requests to exhaust, strict priority would starve
 # candles, price history, gold and Codal for well over a year. The remainder goes
 # to every other endpoint, and either lane takes slots the other cannot fill.
-MARKETDATA_TICK_QUOTA_SHARE = float(os.getenv("MARKETDATA_TICK_QUOTA_SHARE", "0.70"))
+#
+# Cut 0.70 -> 0.25 on 2026-09-04. Ticks were taking the majority of a batch while
+# three of the four DAILY endpoints sat ~96% incomplete (78-93 of 1,969 symbols
+# each). Those dailies are what the returns matrix, risk and optimization pages
+# read; intraday depth is not. The lanes still lend each other unused slots, so
+# once the dailies converge the ticks reclaim the batch automatically -- this
+# changes the order things finish in, not the total spend.
+MARKETDATA_TICK_QUOTA_SHARE = float(os.getenv("MARKETDATA_TICK_QUOTA_SHARE", "0.25"))
 
 # Per-day HISTORICAL_PER_DAY endpoints (ticks) walk one calendar day per request,
 # so the trailing window is bounded to keep cost finite. Trading days only -- a
@@ -417,22 +441,56 @@ WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "30"))
 # Live poll cadence by market state (seconds). Beat still ticks every minute; the
 # task itself decides whether enough time has passed, so the cadence can change
 # without a beat restart. See marketdata/market_state.py for the arithmetic.
-# Open: 2 min; daytime/overnight: 4 min (still frees quota for archive).
 #
 # The daytime interval MUST stay below `valuation._FRESH_SECONDS` (300). At 300
 # it equalled the freshness bar, so a price aged past "fresh" at the same moment
 # its replacement became due and every held asset oscillated between Fresh and
 # Stale all day -- measured at 244s and 568s minutes apart, with the console's
-# headline freshness never settling. 240 leaves a one-minute margin, so an asset
-# on a healthy loop never reads stale.
+# headline freshness never settling.
 #
-# Cost: daytime polls rise ~200 -> ~250/day and overnight ~36 -> ~45, taking the
-# live lane from ~780 to ~835 against an ~800 expectation. That is deliberate --
-# a freshness signal nobody can trust is worth less than the calls it saves --
-# but it is env-overridable per deployment if the BRS wallet gets tight.
-MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "120"))
-MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "240"))
-MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "240"))
+# Tightened 2026-09-04 (120/240/240 -> 60/90/180) after eight days of measured
+# spend showed both meters far under-used. Cost, per trading day:
+#
+#   Market/* (1,500/day meter)  gold/FX/crypto, one request per cycle
+#     open      4.5h / 60s  = 270
+#     daytime  11.5h / 90s  = 460      (07:00-08:30 and 13:00-23:00)
+#     overnight 8.0h / 180s = 160      (newly polled at all -- see below)
+#     + commodity snapshot beat (900s)  = 96
+#     ~= 990 of a 1,350 usable budget, leaving room for the gold history lane.
+#     In practice far less is actually billed: TGJU covers the mapped board for
+#     free and `fetch_all_markets` skips the paid call when it is complete.
+#
+#   Tsetmc/* (10,000/day meter)  one AllSymbols request per cycle, session only
+#     open      4.5h / 60s  = 270  + ~9 state probes + ~54 option/IME snapshots
+#     ~= 335, against a 1,700 live budget. The archive keeps ~9,500.
+#
+# Overnight is no longer a blackout. It was 240s but `live_job_keys` gated the
+# gold/currency job to OPEN/CLOSED_DAYTIME, so 23:00-07:00 fetched nothing at
+# all: eight hours with no crypto or FX price, on markets that trade around the
+# clock. 180s there costs ~160 requests against a meter with ~500 spare.
+MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "60"))
+MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "90"))
+MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "180"))
+
+# How often the PAID gold/FX board is fetched even when the free origins already
+# cover every symbol the app prices. Normally `fetch_all_markets` skips BrsApi
+# whenever TGJU's board is complete, which is correct and is most of why the
+# Market/* meter sat at 7.6% -- but it means a TGJU slug that goes stale while
+# still answering (a known failure mode of that feed) would never be contradicted
+# by anything. This is the second opinion: one paid board every N seconds,
+# ~96/day at 900s, charged to a meter with hundreds of requests spare.
+# 0 disables it and restores the old always-skip behaviour.
+MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS = int(
+    os.getenv("MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS", "900")
+)
+# The live loop's USDT/IRT fallback quote (`Gold_Currency_Pro.php?history=1`)
+# bills the Market/* meter once per cycle. At the tightened cadence that is ~900
+# requests/day for a number the main board already carries and the warehouse
+# overlay can supply -- it exists only for when the board echoes the USD peg.
+# Cached for this long instead, so it costs ~144/day rather than ~900.
+MARKETDATA_USDT_QUOTE_TTL_SECONDS = int(
+    os.getenv("MARKETDATA_USDT_QUOTE_TTL_SECONDS", "600")
+)
 
 MARKETDATA_QUOTA_TIMEZONE = os.getenv("MARKETDATA_QUOTA_TIMEZONE", "Asia/Tehran")
 MARKETDATA_IGNORE_MARKET_HOURS = os.getenv("MARKETDATA_IGNORE_MARKET_HOURS", "False").lower() in ("true", "1")

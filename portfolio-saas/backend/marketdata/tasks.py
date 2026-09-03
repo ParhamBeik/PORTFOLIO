@@ -635,8 +635,12 @@ def run_archive_state(state_id):
     )
     outcome.finish(
         terminal,
+        # NOTE: received/accepted are the state's CUMULATIVE totals, not this
+        # run's. Only `rows_created` is a per-run delta -- use it, not a sum of
+        # the other two, when asking what a day of requests actually bought.
         rows_received=state.expected_rows,
         rows_accepted=state.stored_rows,
+        rows_created=getattr(state, "run_rows_created", 0) or 0,
         rows_rejected=state.known_gap_rows,
         error_code=_retry_code(state.last_error) if state.last_error else "",
         metadata={

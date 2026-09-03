@@ -24,9 +24,13 @@ cooldown_seconds="${WATCHDOG_COOLDOWN_SECONDS:-900}"
 
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') watchdog_prices: $*"; }
 
-# /api/health/prices/ is itself market-hours-aware (config/health.py) -- it
-# reports fresh overnight even with no new Price rows, since no live job runs
-# then by design. A 503 here means a job that SHOULD be running isn't.
+# /api/health/prices/ (config/health.py) 503s when the newest Price row is older
+# than 15 minutes. As of 2026-09-04 that applies around the clock: the
+# gold/currency job lost its 23:00-07:00 gate, so `expects_live_prices()` is
+# always true and there is no longer a designed overnight pause to excuse. The
+# overnight cadence is 180s, well inside the 15-minute bar. A 503 here means a
+# job that SHOULD be running isn't -- including at 3am, which it could not say
+# before.
 if curl -fsS --max-time 10 "https://${domain}/api/health/prices/" >/dev/null 2>&1; then
     exit 0
 fi

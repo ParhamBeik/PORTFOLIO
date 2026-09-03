@@ -3,6 +3,7 @@
 Historical/warehouse fetchers live in `marketdata.fetchers`.
 """
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from django.conf import settings
 
@@ -18,6 +19,10 @@ HEADERS = {
 }
 
 KAMA_SYMBOL = "کاما"
+
+#: Per-process fallback clock for the paid-board verification cadence, used only
+#: when the shared Redis claim is unavailable. See `_brs_verification_due`.
+_BRS_VERIFY_LOCAL = {"at": 0.0}
 
 __all__ = [
     "fetch_brsapi",
@@ -122,13 +127,46 @@ def fetch_tsetmc_symbol(tsetmc_symbol_url, tsetmc_api_key, symbol):
 FETCH_TIMEOUT = 90
 
 
+def _usdt_irt_quote(brs_key):
+    """The USDT/IRT fallback quote, cached so it is not bought every cycle.
+
+    This is a *fallback*: `extractor._lookup_usdt_toman` only reaches for it when
+    the main board echoed the USD peg instead of the tether rate, and
+    `_overlay_usdt_irt_from_warehouse` can still cover it after that. Buying it
+    on every single cycle made a rarely-read fallback the second most expensive
+    thing on the Market/* meter -- at the tightened cadence it would have been
+    ~900 requests/day, more than the live board itself.
+
+    Cached in the Django cache (Redis in every deployed environment), so the
+    saving is shared across worker processes rather than per-process. A cache
+    miss just buys it again; there is no correctness dependency on the TTL.
+    """
+    from django.core.cache import cache
+    from marketdata.fetchers import fetch_gold_currency_pro_history_24h
+
+    ttl = int(getattr(settings, "MARKETDATA_USDT_QUOTE_TTL_SECONDS", 600) or 0)
+    key = "marketdata:usdt_irt_quote"
+    if ttl > 0:
+        try:
+            cached = cache.get(key)
+            if cached is not None:
+                return cached
+        except Exception:
+            pass  # Cache down is not a reason to skip the quote.
+    quote = fetch_gold_currency_pro_history_24h(brs_key, "USDT")
+    if quote and ttl > 0:
+        try:
+            cache.set(key, quote, timeout=ttl)
+        except Exception:
+            pass
+    return quote
+
+
 def _brs_job(brs_url, brs_key):
     result = {"brsapi": fetch_brsapi(brs_url, brs_key)}
     if brs_key:
         try:
-            from marketdata.fetchers import fetch_gold_currency_pro_history_24h
-
-            usdt_quote = fetch_gold_currency_pro_history_24h(brs_key, "USDT")
+            usdt_quote = _usdt_irt_quote(brs_key)
             if usdt_quote:
                 result["usdt_irt_quote"] = usdt_quote
         except Exception as exc:
@@ -234,6 +272,46 @@ def _direct_job():
             logger.info("Crypto cross-check unavailable: %s", exc)
 
     return result
+
+
+def _brs_verification_due():
+    """Whether to buy the paid board even though the free origins look complete.
+
+    `direct_complete` skipping BrsApi entirely is the right default and is most
+    of why the Market/* meter ran at 7.6% -- but taken alone it means nothing
+    ever contradicts TGJU. That feed is known to keep answering on slugs that
+    have stopped updating, and a stale-but-answering slug satisfies
+    `direct_complete` exactly as well as a live one does. So a frozen price would
+    look healthy indefinitely, on the one board we have no second opinion for.
+
+    One paid board per interval fixes that for ~96 requests/day. Claimed with
+    Redis SET NX EX so several workers on the same cycle buy it once between
+    them, not once each; if Redis is down we fall back to buying it, because the
+    fallback that spends a little is safer than the one that goes blind.
+    """
+    interval = int(getattr(settings, "MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS", 0) or 0)
+    if interval <= 0:
+        return False
+    from portfolio.live.redis_client import get_redis
+
+    client = get_redis()
+    if client is not None:
+        try:
+            return bool(client.set("marketdata:brs_verify", "1", ex=interval, nx=True))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not claim the BRS verification slot: %s", exc)
+
+    # Degraded: throttle per process instead of not at all. Returning True here
+    # unconditionally would buy a paid board on EVERY cycle for as long as Redis
+    # was down -- ~900 extra requests/day at the current cadence, against a
+    # 1,500/day meter. A per-process clock over-spends by at most the worker
+    # count, which is bounded; "always" is not.
+    last = _BRS_VERIFY_LOCAL.get("at", 0.0)
+    now = time.monotonic()
+    if now - last < interval:
+        return False
+    _BRS_VERIFY_LOCAL["at"] = now
+    return True
 
 
 def _tsetmc_job(tsetmc_url, tsetmc_key, tsetmc_symbol_url):
@@ -379,12 +457,12 @@ def fetch_all_markets(api_settings):
         direct_complete = False
 
     if brs_url and brs_key:
-        if direct_complete:
+        if "gold_currency" not in planned:
+            logger.info("Gold & currency job not scheduled this cycle. Skipping.")
+        elif direct_complete and not _brs_verification_due():
             logger.info("Direct market sources cover the mapped board; skipping BRS fallback.")
-        elif "gold_currency" in planned:
-            jobs.append(submit_with_context(executor, _brs_job, brs_url, brs_key))
         else:
-            logger.info("Domestic gold & currency market closed overnight. Skipping.")
+            jobs.append(submit_with_context(executor, _brs_job, brs_url, brs_key))
     else:
         logger.warning("BRS API URL or Key missing in Django settings.")
 

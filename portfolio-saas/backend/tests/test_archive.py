@@ -372,19 +372,23 @@ def test_a_prereq_deferral_clears_once_the_state_stores_a_row():
     assert state.consecutive_failures == 0
 
 
-def test_quota_exhausted_defers_to_tehran_day_rollover_not_one_minute():
+def test_genuine_quota_exhaustion_defers_past_rollover_and_takes_siblings():
+    """A really-spent wallet parks the state until the next quota day.
+
+    Nothing it can do clears `plan_blocked` / `bucket_exhausted` / `live_reserved`
+    before midnight, so waiting is correct here. The wakeup is jittered across
+    the next day's ramp rather than stamped exactly on rollover: a single shared
+    timestamp is what built the midnight herd that stalled the archive.
+    """
     from marketdata.archive import next_quota_day_start
-    from marketdata.quota import QuotaExhausted
+    from marketdata.quota import REASON_BUCKET_EXHAUSTED, QuotaExhausted
 
     now = timezone.now()
     state = _state("quota-sym")
-    sibling = _state(
-        "quota-sib",
-        next_attempt_at=now + timedelta(minutes=5),
-    )
+    sibling = _state("quota-sib", next_attempt_at=now + timedelta(minutes=5))
     with patch(
         "marketdata.archive._fetch_and_ingest",
-        side_effect=QuotaExhausted("archive budget gone"),
+        side_effect=QuotaExhausted("archive budget gone", reason=REASON_BUCKET_EXHAUSTED),
     ):
         with pytest.raises(QuotaExhausted):
             run_archive_state(state.pk)
@@ -392,11 +396,50 @@ def test_quota_exhausted_defers_to_tehran_day_rollover_not_one_minute():
     state.refresh_from_db()
     sibling.refresh_from_db()
     rollover = next_quota_day_start(now)
-    assert state.last_error == "Daily quota unavailable."
-    assert state.next_attempt_at >= rollover - timedelta(seconds=2)
-    assert abs((state.next_attempt_at - rollover).total_seconds()) < 2
-    assert sibling.next_attempt_at >= rollover - timedelta(seconds=2)
-    assert sibling.last_error == "Daily quota unavailable."
+    horizon = rollover + timedelta(hours=24)
+    assert state.last_error == "Daily quota unavailable (bucket_exhausted)."
+    assert rollover - timedelta(seconds=2) <= state.next_attempt_at <= horizon
+    # The sibling leased in the same tick is pushed too, but on its own schedule.
+    assert rollover - timedelta(seconds=2) <= sibling.next_attempt_at <= horizon
+    assert sibling.last_error == "Daily quota unavailable (bucket_exhausted)."
+
+
+def test_paced_refusal_retries_in_minutes_and_spares_siblings():
+    """`archive_paced` is a wait, not a spent wallet -- the regression that cost 8 days.
+
+    The old handler deferred every `QuotaExhausted` to the next quota day. Since
+    the backlog all falls due at Tehran midnight, and midnight is exactly when
+    the paced allowance sits at its floor, ~7,000 states refused themselves and
+    re-parked nightly while ~4,000 TSETMC requests a day went unspent.
+
+    Two things must hold: the state comes back within minutes, and it does NOT
+    drag the rest of its batch to rollover with it.
+    """
+    from marketdata.quota import REASON_ARCHIVE_PACED, QuotaExhausted
+
+    now = timezone.now()
+    state = _state("paced-sym")
+    sibling_due = now + timedelta(minutes=5)
+    sibling = _state("paced-sib", next_attempt_at=sibling_due)
+    with patch(
+        "marketdata.archive._fetch_and_ingest",
+        side_effect=QuotaExhausted("ahead of pace", reason=REASON_ARCHIVE_PACED),
+    ):
+        with pytest.raises(QuotaExhausted):
+            run_archive_state(state.pk)
+
+    state.refresh_from_db()
+    sibling.refresh_from_db()
+    # Back within minutes, not tomorrow.
+    assert state.next_attempt_at <= now + timedelta(minutes=15)
+    assert state.next_attempt_at > now
+    # Pacing is not a failure: no alarming error, no failure count. Both feed the
+    # Ops "wedged" tile and the coverage classifier.
+    assert state.last_error == ""
+    assert state.consecutive_failures == 0
+    # The sibling is untouched -- one paced state must not park its whole batch.
+    assert abs((sibling.next_attempt_at - sibling_due).total_seconds()) < 2
+    assert sibling.last_error == ""
 
 
 def test_grow_tick_windows_widens_completed_states():
@@ -2035,12 +2078,19 @@ def test_archive_trip_does_not_silence_live(settings):
 
 
 def test_archive_is_paced_across_the_day(settings):
-    """Leftover is spread over 24h instead of burned before the market opens."""
+    """Leftover is spread across the day instead of burned before the market opens.
+
+    The ramp closes at `MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR`, not at midnight.
+    A curve that only reaches 100% at 23:59:59 cannot be consumed -- the archive
+    would need to spend its last thousand requests in the final second -- so the
+    day structurally ended a few percent short.
+    """
     from marketdata.quota import TSETMC, archive_allowance_now, archive_day_ceiling
 
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
     settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
     settings.MARKETDATA_ARCHIVE_BATCH_SIZE = 0
+    settings.MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR = 20
     row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
     tehran = ZoneInfo("Asia/Tehran")
     midnight = datetime.datetime(2026, 8, 26, 0, 0, tzinfo=tehran)
@@ -2048,12 +2098,43 @@ def test_archive_is_paced_across_the_day(settings):
     with patch.object(quota, "live_reserve_remaining", return_value=0):
         ceiling = archive_day_ceiling(TSETMC, row, now=midnight)
         assert ceiling == 10_000
-        # Pro rata: a quarter of the day buys a quarter of the budget.
-        assert archive_allowance_now(TSETMC, row, now=midnight) == 0
+        # Never a hard zero at the reset: the floor is one hour of the ramp, so
+        # the day starts at full speed instead of admitting a single batch and
+        # refusing the entire backlog behind it.
+        assert archive_allowance_now(TSETMC, row, now=midnight) == 500
+        # Pro rata against the 20-hour ramp: 6h buys 30%, 18h buys 90%.
         six_am = midnight + datetime.timedelta(hours=6)
-        assert archive_allowance_now(TSETMC, row, now=six_am) == 2_500
+        assert archive_allowance_now(TSETMC, row, now=six_am) == 3_000
         six_pm = midnight + datetime.timedelta(hours=18)
-        assert archive_allowance_now(TSETMC, row, now=six_pm) == 7_500
+        assert archive_allowance_now(TSETMC, row, now=six_pm) == 9_000
+        # Fully available before midnight, with hours left to actually spend it.
+        assert archive_allowance_now(
+            TSETMC, row, now=midnight + datetime.timedelta(hours=20)
+        ) == 10_000
+
+
+def test_pacing_floor_is_an_hour_of_ramp_not_one_batch(settings):
+    """The floor at 00:00 must admit real work, not a single batch.
+
+    With a 120-request floor against a ~9,500 ceiling, the first minutes of every
+    quota day admitted 120 requests and refused everything else -- and because
+    that refusal used to park each state for 24h, those refusals decided the
+    whole day.
+    """
+    from marketdata.quota import TSETMC, archive_allowance_now
+
+    settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
+    settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    settings.MARKETDATA_ARCHIVE_BATCH_SIZE = 120
+    settings.MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR = 21
+    row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
+    tehran = ZoneInfo("Asia/Tehran")
+    just_after_reset = datetime.datetime(2026, 8, 26, 0, 1, tzinfo=tehran)
+
+    with patch.object(quota, "live_reserve_remaining", return_value=0):
+        allowance = archive_allowance_now(TSETMC, row, now=just_after_reset)
+    assert allowance == 10_000 // 21 == 476
+    assert allowance > settings.MARKETDATA_ARCHIVE_BATCH_SIZE
 
 
 def test_live_slice_stays_reserved_after_the_session(settings):

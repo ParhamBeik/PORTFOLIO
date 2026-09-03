@@ -1006,15 +1006,18 @@ class TestLiveReserve:
         self._configure(settings)
         # 00:00 Tehran is 20:30 UTC the previous day: a whole quota day remains.
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=midnight_tehran) == 192
+        # 24h / 300s. Was 192 (16h) while `live_job_keys` gated gold/currency to
+        # 07:00-23:00; that blackout is gone, so the reserve now covers the
+        # overnight cycles it will actually spend.
+        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=midnight_tehran) == 288
 
     def test_the_reserve_does_not_shrink_as_the_day_closes(self, settings):
         """Static 24h slice: evening leftover is not released to archive."""
         self._configure(settings)
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
         two_hours_left = datetime(2026, 7, 27, 18, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=two_hours_left) == 192
-        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=midnight_tehran) == 192
+        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=two_hours_left) == 288
+        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=midnight_tehran) == 288
 
     def test_the_reserve_never_exceeds_what_live_could_still_spend(self, settings):
         """Live cannot borrow, so holding more than its bucket protects nothing."""
@@ -1068,9 +1071,10 @@ class TestLiveReserve:
         faster = self._both_plans(midnight_tehran)
 
         assert faster > baseline
-        # BRS gold is one job off-session; during the 135 open cycles gold plus
-        # tsetmc run, plus one provider-state probe every 30 minutes of the 4.5h session.
-        assert faster == 417
+        # BRS gold runs every cycle of the 24h day (288 at 300s, plus the faster
+        # open-session ones); during the 135 open cycles tsetmc runs too, plus one
+        # provider-state probe every 30 minutes of the 4.5h session.
+        assert faster == 513
         assert faster < 6 * 720
 
     def test_the_session_cadence_is_not_charged_on_a_closed_day(self, settings):
@@ -1081,7 +1085,8 @@ class TestLiveReserve:
         # the static 24h slice is that Friday, not whatever today is.
         friday_midnight = datetime(2026, 7, 30, 20, 30, tzinfo=dt_timezone.utc)
         with patch("django.utils.timezone.now", return_value=friday_midnight):
-            assert self._both_plans(friday_midnight) == 192
+            # Gold/FX only: 24h / 300s, with the TSE lane charging nothing.
+            assert self._both_plans(friday_midnight) == 288
 
     def test_no_credentials_means_no_phantom_reserve(self, settings):
         self._configure(settings)
@@ -1100,8 +1105,15 @@ def test_live_job_plan_changes_with_market_state():
     assert live_job_keys(
         state=CLOSED_DAYTIME, now=monday_noon, has_brs=True, has_tsetmc=True
     ) == ("gold_currency",)
+    # Overnight is no longer empty. Gold/FX/crypto trade around the clock and
+    # the origins behind that job are unmetered, so the old () left hours 00-06
+    # with no price of any kind. The TSE job stays session-gated: outside
+    # 08:30-13:00 its payload is byte-identical and bills the binding meter.
     assert live_job_keys(
         state=OVERNIGHT, now=monday_noon, has_brs=True, has_tsetmc=True
+    ) == ("gold_currency",)
+    assert live_job_keys(
+        state=OVERNIGHT, now=monday_noon, has_brs=False, has_tsetmc=True
     ) == ()
 
 

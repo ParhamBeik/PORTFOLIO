@@ -2,9 +2,18 @@
 
 Two dimensions, and they are not the same thing:
 
-* **plan** -- which provider subscription is billed. BrsApi issues one API key
-  per plan and meters each independently: `Tsetmc/*` and `Codal/*` against
-  TSETMC_API_KEY, `Market/*` against BRS_API_KEY. These are separate wallets.
+* **plan** -- which provider meter is billed. BrsApi bills **one API key against
+  two independent daily meters, chosen by the endpoint's path family**:
+  `Tsetmc/*` and `Codal/*` draw on the ~10,000/day stock meter, `Market/*` on
+  the ~1,500/day gold/FX/crypto meter. Confirmed with the account holder against
+  the vendor panel on 2026-09-04.
+
+  The key is therefore **not** the thing that selects the plan, and the two env
+  vars deliberately hold the same value in production. Earlier comments in this
+  file claimed "one API key per plan"; that was wrong and actively misleading --
+  someone reading it would conclude the deployment was misconfigured and "fix"
+  it by inventing a second key. `endpoints.Endpoint.plan` is the only correct
+  mapping, because only the path decides which meter the provider debits.
 * **bucket** -- which lane inside a plan is spending (live prices, archive
   backfill, or incidental metadata). This is our own allocation policy.
 
@@ -100,12 +109,48 @@ def increment_historical_full_used():
             pass
 
 
+# Why a claim was refused. These are not interchangeable, and treating them as
+# one thing is what stalled the archive for eight days (see PACING_REASONS).
+REASON_PLAN_BLOCKED = "plan_blocked"
+REASON_BUCKET_EXHAUSTED = "bucket_exhausted"
+REASON_LIVE_RESERVED = "live_reserved"
+REASON_ARCHIVE_PACED = "archive_paced"
+
+#: Refusals that mean "wait, and try again shortly" rather than "the wallet is
+#: spent". Only pacing qualifies, and the distinction is the whole point:
+#:
+#: `archive_paced` says the archive is ahead of its pro-rata share *at this
+#: instant*. The condition clears on its own within minutes as the day advances.
+#:
+#: `live_reserved` looks similar but is not: the gate compares
+#: `row.used + live_reserve_remaining` against the ceiling, and expanding that
+#: gives `archive_used + other_used + live_day_cost`, which does not depend on
+#: how much live has spent. It cannot clear before rollover, so retrying it in
+#: three minutes would spin for the rest of the day.
+#:
+#: `plan_blocked` and `bucket_exhausted` are likewise day-scoped.
+PACING_REASONS = frozenset({REASON_ARCHIVE_PACED})
+
+
 class QuotaExhausted(RuntimeError):
-    """Raised when a claim is refused. `reason` is the ledger grouping key."""
+    """Raised when a claim is refused. `reason` is the ledger grouping key.
+
+    Callers that reschedule work MUST branch on `reason`. `run_archive_state`
+    did not, and deferred every refusal to the next quota day -- so a pacing
+    wait measured in minutes parked the state for 24 hours. Because nearly the
+    whole backlog falls due at Tehran midnight, and midnight is exactly when the
+    paced allowance sits at its floor, this parked ~7,000 states nightly and left
+    ~4,000 TSETMC requests a day unspent from 2026-08-27 to 2026-09-04.
+    """
 
     def __init__(self, message, reason="quota_exhausted"):
         super().__init__(message)
         self.reason = reason
+
+    @property
+    def is_pacing(self):
+        """True when this refusal clears on its own within minutes."""
+        return self.reason in PACING_REASONS
 
 
 def quota_day():
@@ -453,11 +498,20 @@ def live_reserve_remaining(plan, row=None, now=None):
 
 
 def _day_elapsed_fraction(now=None):
-    """How far through the Tehran quota day we are, in [0, 1]."""
+    """How far through the archive's *spending* window we are, in [0, 1].
+
+    Not the same as how far through the day we are. The window closes at
+    `MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR` rather than at midnight, because a
+    curve that only reaches 100% at 23:59:59 can never actually be consumed --
+    the archive would have to spend its last thousand requests in the final
+    second. Ending the ramp a few hours early leaves real time to finish the day,
+    and the leftover hours act as catch-up room after any stall.
+    """
     now = now or timezone.now()
     local = now.astimezone(ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE))
     start = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    return min(1.0, max(0.0, (local - start).total_seconds() / 86400.0))
+    full_by = max(1, min(24, int(getattr(settings, "MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR", 24))))
+    return min(1.0, max(0.0, (local - start).total_seconds() / (full_by * 3600.0)))
 
 
 def archive_day_ceiling(plan, row=None, now=None):
@@ -497,11 +551,21 @@ def archive_allowance_now(plan, row=None, now=None):
     if ceiling is None:
         return None
     paced = int(ceiling * _day_elapsed_fraction(now))
-    # Never a hard zero immediately after the reset: pro rata at 00:01 is ~1/1440
-    # of the day, which would stall backfill outright for the first minutes and
-    # makes the gate depend on wall-clock time in tests. One batch is negligible
-    # against a 10k ceiling and lets the day start moving.
-    floor = int(getattr(settings, "MARKETDATA_ARCHIVE_BATCH_SIZE", 0) or 0)
+    # Never a hard zero immediately after the reset: pro rata at 00:01 is a tiny
+    # fraction of the day, which would stall backfill outright for the first
+    # minutes and makes the gate depend on wall-clock time in tests.
+    #
+    # The floor is one hour's worth of the ramp, not one batch. A single batch
+    # (120) against a ~9,500 ceiling meant the first minutes of every quota day
+    # admitted 120 requests and refused everything else -- and since the refusal
+    # used to park each state for 24h, those refusals were the whole day's
+    # outcome. An hour of headroom costs nothing (the 5-minute window limiter
+    # still caps the rate) and lets the day start at full speed.
+    full_by = max(1, min(24, int(getattr(settings, "MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR", 24))))
+    floor = max(
+        int(getattr(settings, "MARKETDATA_ARCHIVE_BATCH_SIZE", 0) or 0),
+        ceiling // full_by,
+    )
     return min(ceiling, max(paced, floor))
 
 
@@ -524,7 +588,7 @@ def reserve_request(bucket=OTHER, plan=TSETMC):
     if is_plan_blocked(plan, bucket=bucket):
         raise QuotaExhausted(
             f"Provider reported the {plan} plan exhausted; paused until reset.",
-            reason="plan_blocked",
+            reason=REASON_PLAN_BLOCKED,
         )
     # Simulate the live plan and the paced allowance *before* locking the
     # quota row. Both walk LiveFetchState / the price loop; holding
@@ -539,7 +603,7 @@ def reserve_request(bucket=OTHER, plan=TSETMC):
         if budget is not None and getattr(row, field) >= budget:
             raise QuotaExhausted(
                 f"Daily {bucket} request budget exhausted ({budget}) on {plan}.",
-                reason="bucket_exhausted",
+                reason=REASON_BUCKET_EXHAUSTED,
             )
         if bucket != LIVE:
             ceiling = effective_limit(plan, row)
@@ -547,14 +611,14 @@ def reserve_request(bucket=OTHER, plan=TSETMC):
                 raise QuotaExhausted(
                     f"Remaining {plan} quota is reserved for live prices "
                     f"({reserve} req to cover the rest of the day).",
-                    reason="live_reserved",
+                    reason=REASON_LIVE_RESERVED,
                 )
         if bucket == ARCHIVE:
             if allowance is not None and row.archive_used >= allowance:
                 raise QuotaExhausted(
                     f"Archive is ahead of its paced share of the {plan} day "
                     f"({row.archive_used}/{allowance} permitted so far); waiting.",
-                    reason="archive_paced",
+                    reason=REASON_ARCHIVE_PACED,
                 )
 
         _check_and_record_window(bucket)

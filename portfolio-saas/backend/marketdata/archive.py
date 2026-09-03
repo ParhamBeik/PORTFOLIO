@@ -799,6 +799,29 @@ def next_quota_day_start(now=None):
     return nxt.astimezone(dt_timezone.utc)
 
 
+def spread_over_next_quota_day(now=None, *, rng=None):
+    """A wakeup jittered across the next quota day's spending window.
+
+    Everything that hit a genuinely spent wallet used to be stamped with the bare
+    `next_quota_day_start`, so the entire backlog came due in the same second.
+    Tehran midnight is the worst possible moment for that: the paced allowance is
+    at its floor, so the herd immediately re-refused itself and (before the
+    reason branch below existed) parked itself for another 24 hours.
+
+    Jittering keeps the wallet fed evenly instead of in one doomed burst. The
+    spread stops at `MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR` because a state that
+    wakes after the ramp closes has no allowance left to claim that day.
+    """
+    import random
+
+    rng = rng or random
+    start = next_quota_day_start(now)
+    full_by = max(1, min(24, int(
+        getattr(settings, "MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR", 24)
+    )))
+    return start + timedelta(seconds=rng.uniform(0, full_by * 3600))
+
+
 def run_archive_state(state_id):
     state = ArchiveFetchState.objects.get(pk=state_id)
     now = timezone.now()
@@ -814,25 +837,70 @@ def run_archive_state(state_id):
         logger.info("Skipping %s (%s): endpoint disabled.", state.symbol, state.endpoint)
         return state
     logger.info("Processing archive state %s (%s).", state.symbol, state.endpoint)
+    # Per-run yield, carried on the instance for the Celery wrapper's ledger row.
+    # `rows_received`/`rows_accepted` there are the state's CUMULATIVE totals, so
+    # they cannot answer "what did this request buy?" -- summing them over a day
+    # produced "1.26M rows accepted, 0 created", which reads as a fleet of wasted
+    # requests and is really just an unset field. Transient by design: nothing
+    # persists it, and a state re-read from the DB correctly reports None.
+    state.run_rows_created = 0
     try:
         (created, _), expected, stored = _fetch_and_ingest(state)
+        state.run_rows_created = int(created or 0)
     except QuotaExhausted as exc:
-        rollover = next_quota_day_start(now)
+        # Branch on WHY the claim was refused. Treating all four reasons as "the
+        # wallet is spent" is what stalled the archive from 2026-08-27: a pacing
+        # wait of a few minutes parked the state until the next Tehran midnight,
+        # where the whole herd re-refused itself and parked again. 6,863 states
+        # sat on `last_error="Daily quota unavailable."` while ~4,000 TSETMC
+        # requests a day went unspent.
+        if exc.is_pacing:
+            # Ahead of the pro-rata share *right now*. The ramp advances on its
+            # own, so come back in minutes and leave the row otherwise untouched:
+            # no failure count (nothing failed), and no alarming `last_error`
+            # that would make a healthy queue read as a broken one.
+            import random
+
+            base = int(getattr(settings, "MARKETDATA_ARCHIVE_PACED_RETRY_SECONDS", 180))
+            state.last_attempt_at = now
+            state.next_attempt_at = now + timedelta(
+                seconds=random.uniform(base * 0.5, base * 1.5)
+            )
+            state.save(update_fields=["last_attempt_at", "next_attempt_at"])
+            logger.debug(
+                "Archive paced for %s (%s); retrying shortly.", state.symbol, state.endpoint
+            )
+            raise
+
+        # Genuinely day-scoped: plan_blocked, bucket_exhausted, live_reserved.
+        # Nothing this state can do clears it before rollover.
         state.last_attempt_at = now
-        state.next_attempt_at = rollover
-        state.last_error = "Daily quota unavailable."
+        state.next_attempt_at = spread_over_next_quota_day(now)
+        state.last_error = f"Daily quota unavailable ({exc.reason})."
         state.save(update_fields=["last_attempt_at", "next_attempt_at", "last_error"])
-        # Other states leased in this tick still wake within ~10m; push them to
-        # rollover so the queue does not spin once the day budget is gone.
-        ArchiveFetchState.objects.filter(
-            verified_complete=False,
-            next_attempt_at__gt=now,
-            next_attempt_at__lte=now + timedelta(minutes=10),
-        ).exclude(pk=state.pk).update(
-            next_attempt_at=rollover,
-            last_error="Daily quota unavailable.",
+        # Other states leased in this tick still wake within ~10m; push them past
+        # rollover so the queue does not spin once the day budget is really gone.
+        # Each gets its own jittered wakeup -- a single shared timestamp is what
+        # built the midnight herd in the first place. Deliberately NOT reached on
+        # a pacing refusal: one paced state used to drag its whole batch with it.
+        siblings = list(
+            ArchiveFetchState.objects.filter(
+                verified_complete=False,
+                next_attempt_at__gt=now,
+                next_attempt_at__lte=now + timedelta(minutes=10),
+            ).exclude(pk=state.pk)
         )
-        logger.info("Archive quota unavailable for %s (%s): %s", state.symbol, state.endpoint, exc)
+        for sibling in siblings:
+            sibling.next_attempt_at = spread_over_next_quota_day(now)
+            sibling.last_error = f"Daily quota unavailable ({exc.reason})."
+        if siblings:
+            ArchiveFetchState.objects.bulk_update(
+                siblings, ["next_attempt_at", "last_error"], batch_size=500
+            )
+        logger.info(
+            "Archive quota unavailable for %s (%s) reason=%s: %s",
+            state.symbol, state.endpoint, exc.reason, exc,
+        )
         raise
     except MarketDataFetchError as exc:
         from .fetchers import TransientMarketDataError

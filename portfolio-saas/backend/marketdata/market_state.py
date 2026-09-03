@@ -151,11 +151,25 @@ def live_job_keys(
     *, state, now, has_brs, has_tsetmc, ignore_hours=False,
     include_state_probe=False,
 ):
-    """The exact provider jobs one live cycle is allowed to execute."""
+    """The exact provider jobs one live cycle is allowed to execute.
+
+    The gold/currency job runs in EVERY state, including OVERNIGHT. It used to be
+    gated to OPEN/CLOSED_DAYTIME, which meant 23:00-07:00 Tehran fetched no price
+    of any kind: measured on 2026-08-30 through 09-03, hours 00-06 are empty in
+    the price table. That gate was written when the job meant "the domestic
+    gold/coin desks", which really are shut overnight -- but the same payload now
+    carries crypto and hard currency, which trade around the clock, and the
+    unmetered origins behind it (TGJU, Wallex, Nobitex) cost nothing to poll at
+    3am. Eight hours of frozen crypto prices is a much worse trade than the ~160
+    overnight requests this costs against a meter with room to spare.
+
+    The TSE job stays session-gated. That one is not a cadence choice: outside
+    08:30-13:00 the order book genuinely does not move, so polling it buys a
+    byte-identical payload off the binding 10,000/day meter.
+    """
     jobs = []
     if has_brs:
-        if ignore_hours or state in (OPEN, CLOSED_DAYTIME):
-            jobs.append("gold_currency")
+        jobs.append("gold_currency")
     if has_tsetmc and (ignore_hours or state == OPEN):
         if include_state_probe:
             jobs.append("market_index")
@@ -170,13 +184,16 @@ def is_market_open():
 def expects_live_prices():
     """Whether some live job should be running right now.
 
-    Every OVERNIGHT hour has zero jobs by design (see `live_job_keys`: BRS
-    needs OPEN/CLOSED_DAYTIME, TSE needs OPEN) -- a stale Price row overnight
-    is not a fault. `config.health.PriceFeedView` (the dead-man's switch the
-    on-VPS watchdog and the GitHub Actions probe both poll) uses this so it
-    doesn't page/restart on a nightly pause that isn't a problem.
+    Now true around the clock: since the gold/currency job lost its overnight
+    gate (see `live_job_keys`), there is no hour with zero scheduled jobs, so a
+    stale Price row at 03:00 IS a fault and the watchdog should say so.
+
+    This deliberately arms `config.health.PriceFeedView` -- the dead-man's switch
+    the on-VPS watchdog and the GitHub Actions probe both poll -- for eight hours
+    it previously ignored. That is the point: those were the hours in which a
+    dead price loop was indistinguishable from a working one.
     """
-    return market_state() != OVERNIGHT
+    return True
 
 
 # Daily series only gain a new row after the session closes, so a state that
@@ -206,9 +223,12 @@ def next_post_close(now=None):
 def live_interval_seconds():
     """Seconds the live loop should wait before the next fetch.
 
-    Budget: ~270 polls while the TSE is open (2 calls each), ~200 daytime and ~36
-    overnight at 1 call each -- roughly 780 requests/day against a 800-request live
-    allowance, versus 1,440 for the old flat 2-minute loop.
+    Budget at the current 60/90/180 cadences, per trading day: ~270 polls while
+    the TSE is open, ~460 daytime and ~160 overnight. The stock lane bills only
+    the open ones (~335 of a 1,700 allowance on the 10,000/day Tsetmc meter); the
+    gold/FX lane bills all three (~890 of a 1,350 allowance on the 1,500/day
+    Market meter, and much less in practice because the free origins cover the
+    board most cycles). Full arithmetic in `config.settings`.
     """
     return {
         OPEN: settings.MARKETDATA_LIVE_INTERVAL_OPEN,
