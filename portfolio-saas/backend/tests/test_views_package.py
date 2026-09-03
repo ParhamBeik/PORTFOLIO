@@ -78,6 +78,63 @@ def test_public_names_are_re_exported_from_the_package_root():
     assert not missing, f"defined but not re-exported: {sorted(missing)}"
 
 
+def test_every_name_imported_from_the_views_package_actually_resolves():
+    """Static sweep for importers the test suite never executes.
+
+    The split broke `portfolio/tasks.py`, which pulled a PRIVATE helper off the
+    package root inside a Celery task body. `__init__` re-exports the public
+    surface only, so the import raised -- and nothing caught it, because the
+    995-test suite never enters that function. It would have failed in
+    production on the first background refresh and nowhere before it.
+
+    An import buried in a function body is invisible to a test run that does
+    not call the function, so this reads the source instead of trusting
+    coverage. Anything importing from `portfolio.views` must name something the
+    package root really exports.
+    """
+    import ast
+    import pathlib
+
+    import portfolio.views as package
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    # First-party only. `accounts/urls.py` also says `from .views import ...`,
+    # and that is a different package's views entirely.
+    sources = ["accounts", "config", "marketdata", "portfolio", "tests"]
+    failures = []
+    for top in sources:
+        for path in (root / top).rglob("*.py"):
+            if "migrations" in path.parts or path.name == "test_views_package.py":
+                continue
+            try:
+                tree = ast.parse(path.read_text())
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            in_portfolio = "portfolio" in path.relative_to(root).parts
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                absolute = node.level == 0 and node.module == "portfolio.views"
+                # `from .views import x` only means THIS package when the file
+                # lives in portfolio/ -- accounts/ has its own views module.
+                relative = node.level == 1 and node.module == "views" and in_portfolio
+                # `from portfolio.views.analytics import x` targets a submodule
+                # directly and is fine; only the root is the compat layer.
+                if not (absolute or relative):
+                    continue
+                for alias in node.names:
+                    name = alias.name
+                    # `from portfolio.views import analytics` imports a submodule.
+                    if name in SUBMODULES:
+                        continue
+                    if not hasattr(package, name):
+                        rel = path.relative_to(root)
+                        failures.append(f"{rel}:{node.lineno} imports {name!r}")
+    assert not failures, (
+        "these import names the views package does not export: " + "; ".join(failures)
+    )
+
+
 @pytest.mark.parametrize("name", SUBMODULES)
 def test_each_module_imports_on_its_own(name):
     """No module may depend on a sibling having been imported first.

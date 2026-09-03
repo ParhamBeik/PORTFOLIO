@@ -796,7 +796,10 @@ def refresh_if_stale(account, basis: str = "real_toman", *, force: bool = False)
     from portfolio.models import Holding, LedgerEntry
     from portfolio.optimization_models import OptimizationSnapshot
     from portfolio.services.returns import _price_version_fingerprint
-    from portfolio.views import _compute_my_optimal_payload
+    # From the concern module, not the package root: `views/__init__` is a
+    # compatibility layer that re-exports the PUBLIC surface, and this helper is
+    # private to the analytics views.
+    from portfolio.views.analytics import _compute_my_optimal_payload
 
     holding_q = Holding.objects.filter(account=account)
     ledger_q = LedgerEntry.objects.filter(account=account)
