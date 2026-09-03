@@ -50,8 +50,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://localhost:8000/api/health/ || exit 1
 
 ENTRYPOINT ["/app/entrypoint.sh"]
-# uvicorn workers under gunicorn: streaming SSE needs async-friendly serving,
-# and a worker per process keeps one blocked stream from starving the API.
+# uvicorn workers under gunicorn: Django wraps each connection in
+# ThreadSensitiveContext, so it does not serialize requests and works correctly today.
 #
 # --max-requests recycles a worker after N requests, with jitter so the three
 # never retire together and drop the whole pool at once. UvicornWorker maps it

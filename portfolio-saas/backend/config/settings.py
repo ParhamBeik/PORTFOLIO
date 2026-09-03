@@ -169,6 +169,7 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": os.getenv("ANON_THROTTLE", "30/min"),
         "user": os.getenv("USER_THROTTLE", "120/min"),
+        "analytics": os.getenv("ANALYTICS_THROTTLE", "60/min"),
     },
     # M5: render Decimal as a string so large Toman values stay exact on the wire.
     "DEFAULT_RENDERER_CLASSES": ("config.api.DecimalStringJSONRenderer",),

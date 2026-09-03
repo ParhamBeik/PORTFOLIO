@@ -1,7 +1,7 @@
 """All /api/ routes for the portfolio app.
 
 Grouped top-down the way a request would find them: catalog & CRUD, valuation,
-prices (including the SSE stream), then the Pro analytics endpoints.
+prices, then the Pro analytics endpoints.
 """
 import importlib
 from django.urls import path
@@ -109,9 +109,6 @@ urlpatterns = [
     path("performance/", PerformanceView.as_view(), name="performance"),
     path("comparison/", ComparisonView.as_view(), name="comparison"),
     path("integrity/", IntegrityView.as_view(), name="integrity"),
-
-    # Webhook for brsapi to notify of new prices (triggers optimization run)
-    path("marketdata/webhook/brsapi/", importlib.import_module(".views", package=__package__).BrsApiWebhookView.as_view(), name="brs-webhook"),
 
     # Optimization snapshots API (MVP)
     path("optimization/snapshots/", importlib.import_module(".views", package=__package__).OptimizationSnapshotListView.as_view(), name="optimization-snapshots"),

@@ -8,6 +8,7 @@ docs used to describe was removed along with the subscription model.
 import hmac
 from datetime import datetime, timedelta
 from decimal import Decimal
+from functools import wraps
 
 import numpy as np
 import pandas as pd
@@ -21,6 +22,7 @@ from rest_framework import generics, status
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 
@@ -78,6 +80,75 @@ from .services.optimization import (
     optimize,
 )
 from .services.returns import daily_returns_matrix
+
+
+def concurrency_cap(view_func):
+    """Redis/cache-backed concurrency cap on expensive analytics views.
+
+    Rejects immediately with HTTP 429 + Retry-After if concurrent requests exceed
+    the ceiling (2 per user, 5 globally across workers). Never queues.
+    """
+    @wraps(view_func)
+    def wrapper(self, request, *args, **kwargs):
+        from django.core.cache import cache
+
+        user_ident = (
+            request.user.id
+            if getattr(request, "user", None) and request.user.is_authenticated
+            else request.META.get("REMOTE_ADDR", "anon")
+        )
+        user_key = f"concurrency:analytics:user:{user_ident}"
+        global_key = "concurrency:analytics:global"
+
+        if cache.add(user_key, 1, timeout=60):
+            current_user = 1
+        else:
+            try:
+                current_user = cache.incr(user_key)
+            except ValueError:
+                current_user = 1
+
+        if cache.add(global_key, 1, timeout=60):
+            current_global = 1
+        else:
+            try:
+                current_global = cache.incr(global_key)
+            except ValueError:
+                current_global = 1
+
+        if current_user > 2 or current_global > 5:
+            try:
+                cache.decr(user_key)
+            except ValueError:
+                pass
+            try:
+                cache.decr(global_key)
+            except ValueError:
+                pass
+            resp = Response(
+                {"detail": "Too many concurrent optimization requests. Please try again shortly."},
+                status=429,
+            )
+            resp["Retry-After"] = "5"
+            return resp
+
+        try:
+            return view_func(self, request, *args, **kwargs)
+        finally:
+            try:
+                u = cache.decr(user_key)
+                if u <= 0:
+                    cache.delete(user_key)
+            except ValueError:
+                cache.delete(user_key)
+            try:
+                g = cache.decr(global_key)
+                if g <= 0:
+                    cache.delete(global_key)
+            except ValueError:
+                cache.delete(global_key)
+
+    return wrapper
 
 
 class AssetListView(generics.ListAPIView):
@@ -1603,7 +1674,10 @@ class AnalyticsView(APIView):
     """portfolio diagnostics: vol, Sharpe, drawdown, VaR, etc."""
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "analytics"
 
+    @concurrency_cap
     def get(self, request):
         from portfolio.services.deflator import normalize_basis
         from portfolio.services import value_account, value_user
@@ -1635,7 +1709,10 @@ class OptimizationView(APIView):
     """scenario optimizer: max_sharpe / min_volatility / risk_parity / hrp."""
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "analytics"
 
+    @concurrency_cap
     def post(self, request):
         scenario = request.data.get("scenario")
         if scenario not in SCENARIOS:
@@ -1695,7 +1772,10 @@ class FrontierView(APIView):
     """efficient frontier + max_sharpe / min_volatility reference points."""
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "analytics"
 
+    @concurrency_cap
     def get(self, request):
         from .services.returns import get_universe_by_mode
 
@@ -1955,6 +2035,8 @@ class MyOptimalView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "analytics"
 
     WINDOWS = (("1Y", 365), ("3Y", 1095), ("5Y", 1825), ("Lifetime", None))
 
@@ -2008,6 +2090,7 @@ class MyOptimalView(APIView):
             _cache,
         )
 
+    @concurrency_cap
     def get(self, request):
         from .services.deflator import normalize_basis
         from .services.returns import _price_version_fingerprint
@@ -2120,7 +2203,10 @@ class RobustnessView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "analytics"
 
+    @concurrency_cap
     def get(self, request):
         from .services.returns import get_universe_by_mode
 
@@ -2653,42 +2739,6 @@ class LiabilityDetailView(generics.RetrieveUpdateDestroyAPIView):
         ).select_related("asset")
 
 
-class BrsApiWebhookView(APIView):
-    """Simple authenticated webhook endpoint for brsapi.ir to notify of new prices.
-
-    Expected usage: the brsapi system POSTs a small JSON body (e.g. {"symbols": [..]})
-    and a header `X-BRS-WEBHOOK-SECRET` containing the shared secret defined in
-    Django settings as `BRS_WEBHOOK_SECRET`. The endpoint enqueues a Celery task
-    to compute and persist optimization snapshots.
-    """
-
-    # For the MVP we keep this permissive but require the configured secret.
-    def post(self, request):
-        from django.conf import settings
-        secret = getattr(settings, "BRS_WEBHOOK_SECRET", None)
-        if not secret:
-            return Response({"detail": "Webhook secret not configured."}, status=400)
-        header = request.headers.get("X-BRS-WEBHOOK-SECRET") or request.META.get("HTTP_X_BRS_WEBHOOK_SECRET")
-        # `!=` on a secret returns as soon as two bytes differ, so response time
-        # leaks how long a guessed prefix was correct. compare_digest is the
-        # fixed-time comparison; encode first so a non-ASCII secret cannot raise.
-        if not header or not hmac.compare_digest(
-            header.encode("utf-8"), str(secret).encode("utf-8")
-        ):
-            return Response({"detail": "Unauthorized."}, status=401)
-
-        # Optionally the payload can contain symbols or metadata; keep it for the task
-        payload = request.data if request.data else {"trigger": "brs_webhook"}
-        # Enqueue the optimization snapshot task
-        try:
-            from .tasks import run_global_optimization_snapshot
-            run_global_optimization_snapshot.delay(payload)
-        except Exception as exc:
-            return Response({"detail": f"Failed to enqueue task: {exc}"}, status=500)
-
-        return Response({"ok": True}, status=202)
-
-
 class OptimizationSnapshotListView(APIView):
     """List optimization snapshots for an account or global snapshots.
 
@@ -2759,7 +2809,10 @@ class ComparisonView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "analytics"
 
+    @concurrency_cap
     def get(self, request):
         from portfolio.services.comparison import (
             MAX_WINDOW_DAYS, ComparisonError, comparable_assets, compare,

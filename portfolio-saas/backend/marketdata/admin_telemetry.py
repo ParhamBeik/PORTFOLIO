@@ -728,6 +728,42 @@ def collect_metric_payload():
     }
 
 
+def _db_connection_metrics() -> dict:
+    """Measure PostgreSQL active connections vs max_connections with threshold alerts."""
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*), (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') "
+                "FROM pg_stat_activity WHERE datname = current_database()"
+            )
+            row = cursor.fetchone()
+            if row and row[0] is not None:
+                active = int(row[0])
+                max_conn = int(row[1]) if row[1] else 100
+                utilization = round(active / max_conn * 100, 1)
+                conn_status = "healthy"
+                if active >= max_conn * 0.8:
+                    conn_status = "critical"
+                elif active >= max_conn * 0.6:
+                    conn_status = "warning"
+                return {
+                    "ok": conn_status != "critical",
+                    "status": conn_status,
+                    "active": active,
+                    "max": max_conn,
+                    "utilization_pct": utilization,
+                }
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "status": "unknown",
+        "active": None,
+        "max": None,
+        "utilization_pct": None,
+    }
+
+
 def get_admin_telemetry_context():
     """Build the staff-only operational dashboard context."""
     now = timezone.now()
@@ -744,15 +780,18 @@ def get_admin_telemetry_context():
     except Exception:
         pass
 
+    db_conn = _db_connection_metrics()
+    checks["db_connections"] = db_conn
+
     latest_price = Price.objects.aggregate(value=Max("fetched_at"))["value"]
     price_age = None if latest_price is None else now - latest_price
     price_status = "stale" if price_age is None or price_age > PRICE_STALE_AFTER else "fresh"
     workers = _workers()
     queues = _queues()
     overall = "healthy"
-    if not all(checks.values()) or workers["status"] == "critical":
+    if not all(v if isinstance(v, bool) else v.get("ok", True) for v in checks.values()) or workers["status"] == "critical":
         overall = "critical"
-    elif price_status == "stale" or queues["status"] != "healthy" or workers["status"] != "healthy":
+    elif price_status == "stale" or queues["status"] != "healthy" or workers["status"] != "healthy" or db_conn["status"] == "warning":
         overall = "degraded"
 
     counts = get_cached_db_counts()
@@ -869,12 +908,16 @@ def get_ops_overview():
         "checks": {
             "database": {"ok": ctx["checks"]["database"], "status": "healthy" if ctx["checks"]["database"] else "critical"},
             "cache": {"ok": ctx["checks"]["cache"], "status": "healthy" if ctx["checks"]["cache"] else "critical"},
+            "db_connections": ctx.get("checks", {}).get("db_connections") or {
+                "ok": True, "status": "unknown", "active": None, "max": None, "utilization_pct": None,
+            },
             "price_feed": {
                 "status": ctx["price_feed"]["status"],
                 "latest_price_age_seconds": ctx["price_feed"]["age_seconds"],
                 "threshold_seconds": ctx["price_feed"]["threshold_seconds"],
             },
         },
+        "db_connections": ctx.get("db_connections") or ctx.get("checks", {}).get("db_connections"),
         "price_feed": {**ctx["price_feed"], "latest": _iso(ctx["price_feed"]["latest"])},
         "workers": {
             "status": workers.get("status"),
@@ -934,8 +977,8 @@ def live_health_overlay():
     coverage sections stay cached, because their answers do not change minute to
     minute.
     """
-    now = timezone.now()
-    checks = {"database": True, "cache": True}
+    db_conn = _db_connection_metrics()
+    checks = {"database": True, "cache": True, "db_connections": db_conn}
     try:
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
@@ -954,9 +997,9 @@ def live_health_overlay():
     queues = _queues()
 
     overall = "healthy"
-    if not all(checks.values()) or workers["status"] == "critical":
+    if not all(v if isinstance(v, bool) else v.get("ok", True) for v in checks.values()) or workers["status"] == "critical":
         overall = "critical"
-    elif price_status == "stale" or queues["status"] != "healthy" or workers["status"] != "healthy":
+    elif price_status == "stale" or queues["status"] != "healthy" or workers["status"] != "healthy" or db_conn["status"] == "warning":
         overall = "degraded"
 
     price_feed = {
@@ -972,12 +1015,14 @@ def live_health_overlay():
         "checks": {
             "database": {"ok": checks["database"], "status": "healthy" if checks["database"] else "critical"},
             "cache": {"ok": checks["cache"], "status": "healthy" if checks["cache"] else "critical"},
+            "db_connections": db_conn,
             "price_feed": {
                 "status": price_status,
                 "latest_price_age_seconds": price_feed["age_seconds"],
                 "threshold_seconds": price_feed["threshold_seconds"],
             },
         },
+        "db_connections": db_conn,
         "price_feed": price_feed,
         "workers": {
             "status": workers.get("status"),
