@@ -16,7 +16,7 @@ mkdir -p "${work_dir}"
 manage() {
   DJANGO_SETTINGS_MODULE=config.settings \
   DJANGO_DEBUG=1 \
-  ENVIRONMENT=test \
+  ENVIRONMENT=dev \
   POSTGRES_DB="$1" \
   POSTGRES_USER="${TEST_PG_USER:-portfolio}" \
   POSTGRES_PASSWORD="${TEST_PG_PASSWORD:-}" \
