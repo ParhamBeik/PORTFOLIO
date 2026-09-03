@@ -64,6 +64,9 @@ const ACTIONS = {
   },
   deposit: { label: "Money in", hint: "Cash added to this portfolio" },
   withdrawal: { label: "Money out", hint: "Cash taken out" },
+  dividend: { label: "I received a dividend", hint: "Cash paid by this asset" },
+  fee: { label: "I paid a fee", hint: "A portfolio cost with no asset quantity" },
+  rights_issue: { label: "It gave me extra shares", hint: "A non-cash capital increase" },
 };
 
 function actionsFor(asset, isNewProperty) {
@@ -72,8 +75,8 @@ function actionsFor(asset, isNewProperty) {
   // endpoint, and selling one means removing the holding, which is a Holdings
   // action. Offering "I sold it" here would open a path that cannot complete.
   if (asset?.is_house) return ["valuation_mark"];
-  if (asset?.is_manual) return ["buy", "sell", "opening_position"];
-  return ["buy", "sell", "opening_position"];
+  if (asset?.is_manual) return ["buy", "sell", "opening_position", "dividend", "rights_issue"];
+  return ["buy", "sell", "opening_position", "dividend", "rights_issue"];
 }
 
 // Which screens this particular entry needs. A cash movement has no asset to
@@ -155,8 +158,13 @@ export default function AddTransactionDialog({
   const [formAccount, setFormAccount] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [success, setSuccess] = useState("");
+  // Set when an entry was written but the dialog stayed open to explain
+  // something about it, so the footer offers "Done" instead of a live Save.
+  const [saved, setSaved] = useState(false);
 
   const targetAccountId = accountId ?? (formAccount ? Number(formAccount) : null);
+  const targetAccount = accounts.find((a) => a.id === targetAccountId);
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
   useEffect(() => {
@@ -217,7 +225,8 @@ export default function AddTransactionDialog({
   // "I already own it" because the market answers it.
   const needsPrice =
     !isCashMove && !isProperty && !newProperty &&
-    (action !== "opening_position" || !!asset?.is_manual);
+    (action === "buy" || action === "sell" ||
+      (action === "opening_position" && !!asset?.is_manual));
 
   const steps = stepsFor(isCashMove);
   const current = steps[step];
@@ -278,6 +287,7 @@ export default function AddTransactionDialog({
     if (current === "action") return !!action;
     if (current === "amount") {
       if (isCashMove) return positive(form.amount);
+      if (action === "dividend" || action === "fee") return positive(form.amount);
       if (newProperty) {
         return !!form.name.trim() && positive(form.areaSqm) && positive(form.pricePerSqm);
       }
@@ -301,7 +311,7 @@ export default function AddTransactionDialog({
     // Named exactly as the tile the user just clicked, coin included.
     const name = newProperty ? form.name || "the property" : catalogLabel(asset || {});
     if (isCashMove) {
-      const verb = action === "deposit" ? "Add" : "Take out";
+      const verb = action === "deposit" ? "Add" : action === "fee" ? "Pay" : "Take out";
       return `${verb} ${toman(form.amount)} — ${when}.`;
     }
     if (isProperty || newProperty || asset?.is_house) {
@@ -310,6 +320,12 @@ export default function AddTransactionDialog({
       return `${name}: ${area(sqm)} at ${perSqm(
         Number(form.pricePerSqm || 0) * 1e6
       )} — ${toman(value)}, as of ${when}.`;
+    }
+    if (action === "dividend") {
+      return `Record ${toman(form.amount)} dividend from ${name} — ${when}.`;
+    }
+    if (action === "rights_issue") {
+      return `Record ${form.quantity} extra ${name} shares — ${when}.`;
     }
     const verb = { buy: "Buy", sell: "Sell", opening_position: "Record" }[action];
     // A stock's unit price is Rial, so the total is Rial/10. Printing both with
@@ -330,6 +346,7 @@ export default function AddTransactionDialog({
     if (!targetAccountId || busy) return;
     setBusy(true);
     setError(null);
+    setSuccess("");
     const occurredAt = form.when || null;
     try {
       if (isCashMove) {
@@ -354,15 +371,38 @@ export default function AddTransactionDialog({
           areaSqm: form.areaSqm || holding.area_sqm,
           ...(occurredAt ? { occurredAt } : {}),
         });
-      } else if (action === "opening_position" || action === "valuation_mark") {
-        await createLedgerEntry(targetAccountId, {
-          kind: "opening_position",
+      } else if (["opening_position", "valuation_mark", "dividend", "rights_issue"].includes(action)) {
+        const created = await createLedgerEntry(targetAccountId, {
+          kind: action === "valuation_mark" ? "opening_position" : action,
           asset_key: assetKey,
-          quantity: form.quantity,
+          // A dividend is an amount, not a quantity — its step never fills
+          // `form.quantity`. The serializer's `required=False` permits an
+          // ABSENT key, not an empty one, so sending "" 400s every dividend.
+          ...(action === "dividend"
+            ? { amount_tomans: form.amount }
+            : { quantity: form.quantity }),
           note: form.note,
           ...(priceIsMine && form.price ? { unit_price_tomans: form.price } : {}),
           ...(occurredAt ? { occurred_at: occurredAt } : {}),
         });
+        if (
+          action === "opening_position" &&
+          occurredAt &&
+          created?.occurred_at &&
+          new Date(created.occurred_at).getTime() !== new Date(occurredAt).getTime()
+        ) {
+          setSuccess(
+            `This portfolio already has a shared opening timestamp, so the position was recorded at ${jalaliLabel(
+              toJalali(new Date(created.occurred_at))
+            )}, not the date selected. Use dated purchases when you need multi-year history.`
+          );
+          // The entry IS written; the dialog stays open only to explain what
+          // happened to the date. Leaving Save armed invited a second click,
+          // and nothing constrains a duplicate opening position.
+          setSaved(true);
+          await onSaved?.();
+          return;
+        }
       } else {
         await trade(targetAccountId, {
           assetKey,
@@ -393,10 +433,14 @@ export default function AddTransactionDialog({
       size="wide"
       footer={
         <>
-          <Button onClick={back} disabled={step === 0 || busy} data-testid="add-transaction-back">
+          <Button onClick={back} disabled={step === 0 || busy || saved} data-testid="add-transaction-back">
             Back
           </Button>
-          {current !== "review" ? (
+          {saved ? (
+            <Button variant="primary" onClick={onClose} data-testid="add-transaction-done">
+              Done
+            </Button>
+          ) : current !== "review" ? (
             <Button
               variant="primary"
               disabled={!canContinue() || busy}
@@ -420,6 +464,11 @@ export default function AddTransactionDialog({
     >
       <div className="space-y-4">
         {error && <ErrorState error={error} testId="add-transaction-error" />}
+        {success && (
+          <p role="status" className="text-sm text-[var(--c-warn-text)]" data-testid="add-transaction-success">
+            {success}
+          </p>
+        )}
 
         {accountId == null && (
           <Select
@@ -526,7 +575,7 @@ export default function AddTransactionDialog({
         {current === "action" && (
           <Step n={stepNumber} of={totalSteps} title="What happened?">
             <div className="space-y-2">
-              {(isCashMove ? ["deposit", "withdrawal"] : available).map((k) => (
+              {(isCashMove ? ["deposit", "withdrawal", "fee"] : available).map((k) => (
                 <Choice
                   key={k}
                   label={ACTIONS[k].label}
@@ -606,6 +655,18 @@ export default function AddTransactionDialog({
                     </p>
                   )}
                 </>
+              ) : action === "dividend" || action === "fee" ? (
+                <Field label="Amount (Toman)">
+                  <Input
+                    label="Amount"
+                    type="number"
+                    step="any"
+                    className="w-full"
+                    value={form.amount}
+                    onChange={set("amount")}
+                    data-testid="add-transaction-amount"
+                  />
+                </Field>
               ) : (
                 <Field label="How many?">
                   <Input
@@ -628,7 +689,9 @@ export default function AddTransactionDialog({
                   )}
                 </Field>
               )}
-              <Field label="When? (leave it on today for now)">
+              <Field label={targetAccount?.tracking_started_at && action === "opening_position"
+                ? "When? (existing positions use the portfolio's tracking start)"
+                : "When?"}>
                 <JalaliDateField
                   value={form.when}
                   onChange={(iso) => setForm((f) => ({ ...f, when: iso }))}
@@ -674,6 +737,12 @@ export default function AddTransactionDialog({
                     </p>
                   )}
                 </>
+              )}
+              {action === "opening_position" && targetAccount?.tracking_started_at && form.when && (
+                <p className="text-xs text-muted" data-testid="add-transaction-opening-note">
+                  This portfolio already has a tracking start. The server will use that shared
+                  timestamp for this opening; choose “I bought it” to preserve an older purchase date.
+                </p>
               )}
               <Field label="Note (optional)">
                 <Input

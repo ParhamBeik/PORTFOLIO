@@ -1,8 +1,10 @@
 import { useState } from "react";
 import {
+  commitLedgerImport,
   deleteLedgerEntry,
   deleteLedgerHolding,
   listLedger,
+  previewLedgerImport,
   updateLedgerEntry,
   updateLedgerHolding,
 } from "../api.js";
@@ -15,6 +17,7 @@ import {
   Card,
   Delta,
   Empty,
+  ErrorState,
   Input,
   Loading,
   Modal,
@@ -36,6 +39,114 @@ import {
 } from "../format.js";
 import { useApi } from "../useApi.js";
 import { quantityError, validQuantity } from "../quantity.js";
+
+function ImportCsvDialog({ accountId, onClose, onImported }) {
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+
+  const inspect = async () => {
+    if (!file) return;
+    setBusy(true);
+    setError("");
+    try {
+      setPreview(await previewLedgerImport(accountId, file));
+    } catch (e) {
+      setError(e.message || String(e));
+      setPreview(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const commit = async () => {
+    if (!file || !preview?.valid) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await commitLedgerImport(accountId, file);
+      setDone(true);
+      await onImported?.();
+      if (!result.row_count) setError("The import completed without any rows.");
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Import transaction history"
+      subtitle="Upload the CSV exported from your broker, review it, then commit it as ledger history."
+      onClose={onClose}
+      testId="ledger-import-dialog"
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>Close</Button>
+          {!done && (
+            <Button
+              variant="primary"
+              disabled={!preview?.valid || busy}
+              onClick={commit}
+              data-testid="ledger-import-commit"
+            >
+              {busy ? "Importing…" : "Import rows"}
+            </Button>
+          )}
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {error && <ErrorState error={new Error(error)} testId="ledger-import-error" />}
+        {done ? (
+          <p className="text-sm text-[var(--c-good-text)]" data-testid="ledger-import-success">
+            Import complete. The same file can be selected again safely; duplicate files are ignored.
+          </p>
+        ) : (
+          <>
+            <label className="block text-sm">
+              <span className="mb-1 block text-xs font-medium tracking-wide text-muted uppercase">
+                CSV file
+              </span>
+              <input
+                type="file"
+                accept=".csv,text/csv"
+                onChange={(e) => {
+                  setFile(e.target.files?.[0] || null);
+                  setPreview(null);
+                  setError("");
+                }}
+                data-testid="ledger-import-file"
+                className="block w-full rounded-md border border-border bg-panel-2 px-3 py-2 text-sm"
+              />
+            </label>
+            <p className="text-xs text-muted">
+              Required columns: external_id, occurred_at, kind, asset_key, quantity,
+              unit_price_tomans, amount_tomans, note. Dates must be ISO-8601; stock prices
+              stay in Rial exactly as exported.
+            </p>
+            <Button
+              variant="secondary"
+              disabled={!file || busy}
+              onClick={inspect}
+              data-testid="ledger-import-preview"
+            >
+              {busy ? "Checking…" : "Validate file"}
+            </Button>
+            {preview?.valid && (
+              <p className="text-sm" data-testid="ledger-import-preview-result">
+                {preview.row_count} rows are valid and ready to import.
+              </p>
+            )}
+          </>
+        )}
+      </div>
+    </Modal>
+  );
+}
 
 // Plain-language names for the ledger's own vocabulary. The page never shows a
 // kind string: "opening_position" told the user nothing about what they did.
@@ -241,6 +352,7 @@ export default function Ledger() {
   });
 
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [editing, setEditing] = useState(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
@@ -371,17 +483,29 @@ export default function Ledger() {
         title="Ledger"
         subtitle="Everything you have bought, sold, or already owned. Anything you hold without a recorded purchase is listed too, so you can fill in its details."
         actions={
-          <Button
-            type="button"
-            variant="primary"
-            onClick={() => { setAdding(true); setError(""); }}
-            data-testid="ledger-add"
-            className="inline-flex items-center gap-1.5"
-            aria-label="Add transaction"
-          >
-            <PlusIcon />
-            Add
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="primary"
+              onClick={() => { setAdding(true); setError(""); }}
+              data-testid="ledger-add"
+              className="inline-flex items-center gap-1.5"
+              aria-label="Add transaction"
+            >
+              <PlusIcon />
+              Add
+            </Button>
+            {accountId != null && (
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => { setImporting(true); setError(""); }}
+                data-testid="ledger-import"
+              >
+                Import CSV
+              </Button>
+            )}
+          </div>
         }
       />
 
@@ -396,6 +520,13 @@ export default function Ledger() {
           holdings={holdings}
           onClose={() => setAdding(false)}
           onSaved={refresh}
+        />
+      )}
+      {importing && (
+        <ImportCsvDialog
+          accountId={accountId}
+          onClose={() => setImporting(false)}
+          onImported={refresh}
         />
       )}
 

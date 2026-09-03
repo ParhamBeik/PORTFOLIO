@@ -7,6 +7,10 @@ import {
   valuation,
   snapshots,
   getPerformance,
+  listLiabilities,
+  createLiability,
+  updateLiability,
+  deleteLiability,
   updateHolding,
   removeHolding,
   adminAssetEvidence,
@@ -55,6 +59,8 @@ import {
   Async,
   Disclosure,
   PageHeader,
+  Input,
+  Modal,
   toneFor,
 } from "../components/ui.jsx";
 
@@ -182,6 +188,173 @@ function HeroRow({ state, basis: selected }) {
       }}
       </Async>
     </div>
+  );
+}
+
+function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    account: String(accountId || row?.account_id || ""),
+    label: row?.label || "",
+    amount: row ? String(row.amount_tomans) : "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (key) => (e) => setForm((current) => ({ ...current, [key]: e.target.value }));
+
+  const save = async () => {
+    if (!form.account || !form.label.trim() || Number(form.amount) <= 0) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (row) {
+        await updateLiability(row.account_id, row.id, {
+          label: form.label.trim(),
+          amountTomans: form.amount,
+        });
+      } else {
+        await createLiability(Number(form.account), {
+          label: form.label.trim(),
+          amountTomans: form.amount,
+        });
+      }
+      await onSaved?.();
+      onClose();
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title={row ? "Edit liability" : "Add liability"}
+      subtitle="Liabilities are subtracted from net worth and shown here in Toman."
+      onClose={onClose}
+      testId="liability-dialog"
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button
+            variant="primary"
+            onClick={save}
+            disabled={busy || !form.account || !form.label.trim() || Number(form.amount) <= 0}
+            data-testid="liability-save"
+          >
+            {busy ? "Saving…" : "Save"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        {error && <ErrorState error={new Error(error)} testId="liability-error" />}
+        {!accountId && (
+          <Select label="Portfolio" value={form.account} onChange={set("account")} data-testid="liability-account">
+            <option value="">Choose a portfolio</option>
+            {accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+          </Select>
+        )}
+        <Input label="What is it?" value={form.label} onChange={set("label")} data-testid="liability-label" />
+        <Input
+          label="Amount (Toman)"
+          type="number"
+          min="0"
+          step="any"
+          value={form.amount}
+          onChange={set("amount")}
+          data-testid="liability-amount"
+        />
+      </div>
+    </Modal>
+  );
+}
+
+function LiabilitiesCard({ activeId, accounts }) {
+  const accountKey = accounts.map((a) => a.id).join("|");
+  // Every row carries its owning portfolio id in BOTH branches. Edit and delete
+  // address a per-account URL, and only the all-portfolios branch used to set
+  // the field -- so with a portfolio selected, saving an edit PATCHed
+  // /api/accounts/undefined/liabilities/. The serializer's own `account` is the
+  // authority; the loop index is the fallback.
+  const state = useApi(
+    () =>
+      activeId
+        ? listLiabilities(activeId).then((items) =>
+            items.map((item) => ({ ...item, account_id: item.account ?? activeId }))
+          )
+        : Promise.all(accounts.map((account) => listLiabilities(account.id))).then((rows) =>
+            rows.flatMap((items, index) =>
+              items.map((item) => ({
+                ...item,
+                account_id: item.account ?? accounts[index].id,
+                account_name: accounts[index].name,
+              }))
+            )
+          ),
+    [activeId, accountKey],
+    { enabled: accounts.length > 0 },
+  );
+  const [editing, setEditing] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [error, setError] = useState("");
+
+  const reload = () => state.reload?.();
+  const remove = async (row) => {
+    if (!window.confirm(`Delete ${row.label}?`)) return;
+    setError("");
+    try {
+      await deleteLiability(row.account_id || activeId, row.id);
+      await reload();
+    } catch (e) {
+      setError(e.message || String(e));
+    }
+  };
+
+  return (
+    <Card
+      title="Liabilities"
+      subtitle="Debts subtracted from the total above."
+      testId="dashboard-liabilities"
+      actions={
+        <Button variant="secondary" onClick={() => setAdding(true)} data-testid="liability-add">
+          Add liability
+        </Button>
+      }
+    >
+      {error && <p role="alert" className="mb-2 text-sm text-[var(--c-critical-text)]">{error}</p>}
+      <Async {...state} testId="dashboard-liabilities-body" empty="No liabilities recorded.">
+        {(rows) => !rows.length ? (
+          // `Async` renders `empty` only for a null payload, and an empty list
+          // is not null -- without this the card body is simply blank.
+          <Empty testId="dashboard-liabilities-empty">No liabilities recorded.</Empty>
+        ) : (
+          <div className="space-y-2">
+            {rows.map((row) => (
+              <div key={`${row.account_id}-${row.id}`} className="flex items-center justify-between gap-3 border-b border-border/60 pb-2 last:border-0">
+                <div>
+                  <div className="text-sm font-medium">{row.label}</div>
+                  {!activeId && <div className="text-xs text-muted">{row.account_name}</div>}
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm tabular-nums">{toman(row.amount_tomans)}</span>
+                  <Button variant="ghost" onClick={() => setEditing(row)} data-testid="liability-edit">Edit</Button>
+                  <Button variant="danger" onClick={() => remove(row)} data-testid="liability-delete">Delete</Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Async>
+      {(adding || editing) && (
+        <LiabilityDialog
+          accountId={activeId}
+          accounts={accounts}
+          row={editing}
+          onClose={() => { setAdding(false); setEditing(null); }}
+          onSaved={reload}
+        />
+      )}
+    </Card>
   );
 }
 
@@ -1585,6 +1758,7 @@ export default function Dashboard({ user }) {
       <PageHeader title="Portfolio" subtitle="Your holdings, valued live, with performance and risk alongside." />
       <div className="space-y-6">
         <HeroRow state={valuationState} basis={basis} />
+        <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} />
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
           <div className="lg:col-span-2">
             <TrendCard activeId={activeId} basis={basis} />

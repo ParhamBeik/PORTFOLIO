@@ -139,13 +139,18 @@ function apiError(message, status) {
 }
 
 export async function api(path, { method = "GET", body, _retried = false } = {}) {
-  const headers = { "Content-Type": "application/json" };
+  // A FormData body reaches fetch untouched: stringifying it would send the
+  // literal "[object FormData]", and declaring Content-Type ourselves would
+  // strip the multipart boundary only the browser can generate. Uploads go
+  // through here so they keep the 401 refresh-and-replay below.
+  const isForm = typeof FormData !== "undefined" && body instanceof FormData;
+  const headers = isForm ? {} : { "Content-Type": "application/json" };
   if (auth.token) headers.Authorization = `Bearer ${auth.token}`;
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     credentials: "include",
     headers,
-    body: body ? JSON.stringify(body) : undefined,
+    body: isForm ? body : body ? JSON.stringify(body) : undefined,
   });
 
   // On expiry, try one silent refresh then replay the original request.
@@ -333,6 +338,48 @@ export const updateLedgerHolding = (accountId, holdingId, quantity) =>
 export const deleteLedgerHolding = (accountId, holdingId) =>
   api(`/api/accounts/${accountId}/ledger/holdings/${holdingId}/`, { method: "DELETE" });
 
+async function uploadLedgerFile(accountId, file, action) {
+  if (!file) throw new Error("Choose a CSV file first.");
+  const form = new FormData();
+  form.append("file", file);
+  // Through `api()`, not a bare fetch: an access token lives 30 minutes, and a
+  // hand-rolled upload surfaced an expired one as an unexplained import error
+  // -- no silent refresh, and no session-expired banner either. `downloadExport`
+  // opts out because it reads a binary response; this endpoint answers JSON.
+  return api(`/api/accounts/${accountId}/imports/${action}/`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+export const previewLedgerImport = (accountId, file) =>
+  uploadLedgerFile(accountId, file, "preview");
+export const commitLedgerImport = (accountId, file) =>
+  uploadLedgerFile(accountId, file, "commit");
+
+export const listLiabilities = (accountId) =>
+  api(`/api/accounts/${accountId}/liabilities/`);
+export const createLiability = (accountId, { label, amountTomans, assetKey = null }) =>
+  api(`/api/accounts/${accountId}/liabilities/`, {
+    method: "POST",
+    body: {
+      label,
+      amount_tomans: Number(amountTomans),
+      ...(assetKey ? { asset_key: assetKey } : {}),
+    },
+  });
+export const updateLiability = (accountId, id, { label, amountTomans, assetKey = null }) =>
+  api(`/api/accounts/${accountId}/liabilities/${id}/`, {
+    method: "PATCH",
+    body: {
+      ...(label != null ? { label } : {}),
+      ...(amountTomans != null ? { amount_tomans: Number(amountTomans) } : {}),
+      ...(assetKey !== undefined ? { asset_key: assetKey || null } : {}),
+    },
+  });
+export const deleteLiability = (accountId, id) =>
+  api(`/api/accounts/${accountId}/liabilities/${id}/`, { method: "DELETE" });
+
 // Valuation & pricing
 //
 // `account` is the active-portfolio id (null = "All portfolios", the aggregate).
@@ -357,6 +404,12 @@ export const snapshots = (days = 30, account = null, basis = null) => {
   if (basis) url += `&basis=${basis}`;
   return api(url);
 };
+
+// `days` is a calendar window, not a row count: the warehouse prints about one
+// row a day but the live fallback ticks every two minutes, so a row cap meant
+// the same number bought a year of one asset and half a day of another.
+export const priceHistory = (assetKey, days = 365) =>
+  api(`/api/prices/history/?asset=${encodeURIComponent(assetKey)}&days=${days}`);
 
 // Portfolio against what you could have held instead, indexed to 100.
 /**
@@ -453,4 +506,3 @@ export const adminAssetRecomputeIntegrity = (key) =>
   api(`/api/admin/assets/${encodeURIComponent(key)}/recompute-integrity/`, { method: "POST", body: { confirm: true } });
 export const adminAssetRefresh = (key) =>
   api(`/api/admin/assets/${encodeURIComponent(key)}/refresh/`, { method: "POST", body: { confirm: true } });
-

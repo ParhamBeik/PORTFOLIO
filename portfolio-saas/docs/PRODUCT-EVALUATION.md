@@ -1,6 +1,6 @@
 # Product evaluation — can the app answer the customer's questions?
 
-Static audit, 2026-08-31, against `main` @ `709a317`.
+Static audit, 2026-09-02, against `main` @ `HEAD`.
 
 This scores the product the way a paying customer scores it: not "is the code good" but
 "can I get the answer I came for". Seven questions define the job to be done. Q1–Q6 are
@@ -29,9 +29,9 @@ with no client answers nothing.
 
 | # | Question | Backend | Frontend | **Delivered** | One-line verdict |
 |---|---|:---:|:---:|:---:|---|
-| Q1 | Live, congruent portfolio tracking | 9 | 7 | **7** | Price truth is unusually well engineered; a mortgage silently vanishes from the screen |
-| Q2 | Add/edit/delete trades; trustworthy back-dated P/L | 8 | 4 | **4** | The ledger is right. There is no CSV import, and "I already own it" silently discards the date |
-| Q3 | Historical data breadth, freshness, comparison | 8 → **9** | 4 | **4** | ~17 years of stock history is stored and there is no screen that draws one asset's price |
+| Q1 | Live, congruent portfolio tracking | 9 | 8 | **8** | Price truth and liabilities are visible; secondary analytics still need freshness stamps |
+| Q2 | Add/edit/delete trades; trustworthy back-dated P/L | 8 | 7 | **7** | Ledger, CSV import, dated events, and explicit opening-date behavior are reachable |
+| Q3 | Historical data breadth, freshness, comparison | 8 → **9** | 7 | **7** | Single-asset history and four comparison modes are reachable; crypto depth is stated |
 | Q4 | Diversification as an allocation change | 9 | 7 | **7** | The best-conceived module in the codebase, split across two pages and never told when to act |
 | Q5 | Optimal portfolio by scenario and risk tolerance | 9 | 6 → **9** | 6 → **9** | Risk tolerance, a position cap and the resampling bands all now have controls; only the Pro tier is unbuilt |
 | Q6 | Operator monitoring and diagnosis | 9 | 9 | **9** | Excellent — but it watches the warehouse, not the users |
@@ -86,10 +86,9 @@ portfolio measures beta 0.243, alpha 0.963, tracking error 0.292 against TEDPIX.
 **Q5's investable universe also grew** from 38 analysable instruments to 53, and
 crypto from 2 series to 17.
 
-Still unmoved, and still the honest limit: **Q2 (4)** needs a CSV import and an
-opening-date fix, and **Q5 (6)** needs a risk-tolerance control and an
-asset-count cap. Those are UI that does not exist, and no amount of data work
-substitutes for them. **Q7 (0)** remains blocked on network reachability.
+The remaining product limits are now narrower: secondary analytics still need
+freshness stamps, data-quality has no dedicated client, and the Pro tier is not
+modelled. **Q7 (0)** remains blocked on network reachability.
 
 **Weighted read.** Q1, Q4, Q5 and Q6 are at or near a shippable paid standard. Q2 and Q3
 are where the product loses a customer, and both fail the same way: the backend already
@@ -190,22 +189,13 @@ differentiator and is defended throughout this report.
 
 ### What is missing
 
-1. **Liabilities are subtracted but never shown.** `value_account` nets `total_liabilities`
-   off `total` (`valuation.py:843`) and ships a `liabilities` array with labels and amounts.
-   `grep -rn liabilit frontend/src` returns **one code comment and nothing rendered**. A
-   user with a mortgage sees a Total that does not equal the sum of their Holdings, with
-   nothing on screen accounting for the difference. There is also no UI to create, edit or
-   delete a `Liability` (`/accounts/<id>/liabilities/` has no client), and `api.js:218`
-   `addProperty` accepts a `mortgageTomans` argument that `AddTransactionDialog` never
-   sends. **This is the highest-severity congruency defect in the app**, and it is squarely
-   the failure the question asks about.
-2. **Only two surfaces poll.** `pollMs: 60000` appears on Dashboard (`:1544`) and Family
+1. **Only two surfaces poll.** `pollMs: 60000` appears on Dashboard (`:1544`) and Family
    (`:303`). My Optimal is additionally cached 300s server-side (`views.py:1613`) and Best
    Overall is a nightly snapshot, so their "Δ value" columns are priced from a different
    vintage than the Dashboard hero the user just left. Best Overall prints
    `Computed {as_of}` (`BestOverall.jsx:111`); **My Optimal prints no as-of at all**, so its
    staleness is invisible.
-3. **Two independent answers to "what should I trade".** My Optimal renders
+2. **Two independent answers to "what should I trade".** My Optimal renders
    server-computed `rebalance_trades`; Best Overall differences the weights **in the
    browser** (`BestOverall.jsx:194`). Two code paths for one question, on different price
    vintages — they can disagree, and nothing reconciles them.
@@ -254,10 +244,23 @@ Rial-vs-Toman labelling (`:212`), refusal rather than silent rounding of a fract
 
 ### What is missing
 
-1. **CSV import has no UI.** `/imports/preview/` and `/imports/commit/` exist
-   (`views.py:544`, `:567`) with full file-hash idempotency behind them. No client. For the
-   stated use case — *"the portfolio I built many years ago"* — hand-entering hundreds of
-   rows through a five-step wizard **is** the blocker. Highest-severity Q2 gap.
+1. **"I already own it" is intentionally baseline-dated.** The wizard now explains the
+   effective timestamp returned by the server and steers multi-year histories toward dated
+   purchases, which preserve the acquisition date.
+2. **No way to see how far back an asset can be dated.** `assert_not_before_history` raises
+   with the earliest available date; that reaches the user as a red error rather than as a
+   bound the date picker already knew.
+3. **`/accounts/<id>/data-quality/` and `/api/integrity/` have no client** — the two
+   endpoints built to answer "can I trust my own numbers".
+
+### Delivered in this pass
+
+CSV import now validates and commits through the existing idempotent endpoints; the wizard
+exposes dividend, fee, and rights-issue events; and replayed openings report when the shared
+tracking timestamp replaced the selected date.
+
+<!-- Historical notes retained below for auditability. -->
+<!--
 2. **"I already own it" silently discards the date you picked.** Openings must share one
    timestamp (`ledger.py:169`), so `record_existing_position` clamps `occurred_at` to
    `account.tracking_started_at` (`ledger.py:244`) and `LedgerListCreateView` routes every
@@ -277,6 +280,7 @@ Rial-vs-Toman labelling (`:212`), refusal rather than silent rounding of a fract
    bound the date picker already knew.
 5. **`/accounts/<id>/data-quality/` and `/api/integrity/` have no client** — the two
    endpoints built to answer "can I trust my own numbers".
+-->
 
 ### Score rationale
 
@@ -326,17 +330,11 @@ unit boundary is exactly where this project's bugs live". The page states its ow
 
 ### What is missing
 
-1. **There is no single-asset price chart anywhere in the product.** This is the literal
-   first half of the question. `/api/prices/history/` (`views.py:1333`),
-   `/api/assets/returns/` (`:1811`) and `/api/analytics/asset-ranking/` (`:1934`) all exist
-   and all have no client. A user who wants to see what gold did over the last year cannot.
-   The closest available things are Comparison (portfolio vs one asset, rebased to 100) and
-   the Best Overall leaders table.
-2. **Freshness is signalled on one page only.** The per-row Status column, the ≥50% stale
+1. **Freshness is signalled on one page only.** The per-row Status column, the ≥50% stale
    banner (`Dashboard.jsx:1131`) and the pricing glossary (`:689`) are Dashboard-only.
    Comparison, My Optimal and Best Overall carry no freshness indicator, so a user reading a
    comparison has no way to know whether it includes today.
-3. **Nothing surfaces the crypto asymmetry.** A user comparing a crypto holding over "1Y"
+2. **Nothing surfaces the crypto asymmetry.** A user comparing a crypto holding over "1Y"
    gets whatever exists, with no statement that the provider has no history for it.
 
 ### Score rationale
@@ -593,11 +591,11 @@ customer hits in their first hour.
 
 | # | Fix | Unblocks | Reach | Effort | Lands in |
 |---|---|---|---|---|---|
-| 1 | **CSV import UI** — preview/commit wizard over the existing endpoints | Q2 | everyone with a real history | M | `frontend/src/pages/Ledger.jsx`, new dialog, `api.js` |
-| 2 | **Show and edit liabilities** — a line under the hero, plus CRUD | Q1 | anyone with a mortgage/loan | S | `Dashboard.jsx`, `api.js`, `AddTransactionDialog.jsx` |
-| 3 | **Stop silently discarding the opening date** — read the returned timestamp back and say "recorded at your tracking start"; steer multi-year entry toward dated buys | Q2 | anyone entering an old book | S | `AddTransactionDialog.jsx:376`, review copy |
-| 4 | **Single-asset price history page** over `/prices/history/` + `/assets/returns/` | Q3 | everyone | M | new page, `Shell.jsx` nav, `api.js` |
-| 5 | **Dividend / fee / rights-issue in the wizard** | Q2 | every TSE holder | S | `AddTransactionDialog.jsx:54` `ACTIONS` |
+| ~~1~~ | ~~**CSV import UI** — preview/commit wizard over the existing endpoints~~ | ~~Q2~~ | — | — | **Done 2026-09-02** |
+| ~~2~~ | ~~**Show and edit liabilities** — a line under the hero, plus CRUD~~ | ~~Q1~~ | — | — | **Done 2026-09-02** |
+| ~~3~~ | ~~**Stop silently discarding the opening date** — read the returned timestamp back and say "recorded at your tracking start"; steer multi-year entry toward dated buys~~ | ~~Q2~~ | — | — | **Done 2026-09-02** |
+| ~~4~~ | ~~**Single-asset price history page** over `/prices/history/` + `/assets/returns/`~~ | ~~Q3~~ | — | — | **Done 2026-09-02** |
+| ~~5~~ | ~~**Dividend / fee / rights-issue in the wizard**~~ | ~~Q2~~ | — | — | **Done 2026-09-02** |
 | ~~6~~ | ~~**Risk-tolerance control** — target volatility via `efficient_risk`, plus a max-assets cap~~ | ~~Q5~~ | — | — | **Done 2026-09-01.** Both controls ship on My Optimal |
 | 7 | **As-of stamp + freshness badge off the Dashboard** (My Optimal, Comparison, Best Overall) | Q1, Q3 | everyone | S | the three pages |
 | 8 | **One trade-advice path** — have Best Overall consume server-computed trades instead of differencing in the browser | Q1, Q4 | everyone | S | `BestOverall.jsx:194`, `views.py` |

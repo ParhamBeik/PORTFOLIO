@@ -11,7 +11,7 @@ from decimal import Decimal
 import numpy as np
 import pandas as pd
 from django.conf import settings
-from django.db.models import F, Q, Window
+from django.db.models import Avg, F, Q, Window
 from django.db.models.functions import RowNumber
 from django.db.models.functions import TruncDate
 from django.utils import timezone
@@ -1331,8 +1331,165 @@ class LatestPricesView(APIView):
         return Response({k: float(v) for k, v in prices.items()})
 
 
+#: Widest window the price-history screen may ask for, in days.
+PRICE_HISTORY_MAX_DAYS = 1825
+
+#: Rejection verdicts covering the two tables this screen reads directly. A day
+#: the warehouse already judged bad must not be drawn as a fact; the daily-bar
+#: branch gets the same filter for free from `provenance.daily_bar_price`.
+_PRICE_HISTORY_REJECTIONS = (
+    "stock_candle_unadjusted",
+    "stock_candle_adjusted",
+    "stock_history_unadjusted",
+    "stock_history_adjusted",
+    "gold_daily",
+)
+
+
+def _rejected_dates(symbol, since_jalali):
+    from marketdata.models import RejectedRecord
+
+    return set(
+        RejectedRecord.objects.filter(
+            symbol=symbol,
+            date__gte=since_jalali,
+            endpoint__in=_PRICE_HISTORY_REJECTIONS,
+        ).values_list("date", flat=True)
+    )
+
+
+def _tse_price_history(asset, since_jalali):
+    """TSE daily closes, Rial and provider-verbatim like the rest of the table."""
+    from marketdata.models import MarketCandle
+
+    rejected = _rejected_dates(asset.tse_symbol, since_jalali)
+    for timeframe in (MarketCandle.UNADJUSTED, MarketCandle.ADJUSTED):
+        rows = (
+            MarketCandle.objects.filter(
+                symbol=asset.tse_symbol,
+                timeframe=timeframe,
+                close_price__gt=0,
+                date_time__gte=since_jalali,
+            )
+            .order_by("date_time")
+            .values_list("date_time", "close_price")
+        )
+        # `date_time` is stored BOTH bare ("1405-05-09") and suffixed with a
+        # time, so one session can arrive as two rows; key by day and let the
+        # later one win rather than plotting the same close twice.
+        by_day = {
+            str(stamp).split()[0]: float(close)
+            for stamp, close in rows
+            if str(stamp).split()[0] not in rejected
+        }
+        if by_day:
+            return (
+                [{"date": day, "price": by_day[day]} for day in sorted(by_day)],
+                "TSETMC daily close",
+            )
+    return [], ""
+
+
+def _brs_price_history(asset, since_jalali):
+    """Provider daily closes for a BRS-quoted asset, in Toman.
+
+    The warehouse stores this table provider-verbatim: IRR-quoted symbols were
+    converted on ingest, but XAUUSD stays in dollars and BTC in Tether, each
+    row carrying its own declared `unit`. Convert at the dollar rate of the
+    row's OWN date and refuse a row whose unit will not resolve — a foreign
+    number drawn on a Toman axis is off by five orders of magnitude, and the
+    unit is declared precisely so it never has to be guessed.
+    """
+    from marketdata.currency import to_toman
+    from marketdata.models import GoldCurrencyHistory
+    from marketdata.provenance import daily_bar_price, rate_on, toman_per_dollar
+
+    rejected = _rejected_dates(asset.brs_symbol, since_jalali)
+    rows = [
+        row
+        for row in GoldCurrencyHistory.objects.filter(
+            symbol=asset.brs_symbol, close_price__gt=0, date__gte=since_jalali
+        )
+        .order_by("date")
+        .values("date", "close_price", "unit")
+        if row["date"] not in rejected
+    ]
+    if rows:
+        rates, rate_dates = toman_per_dollar([row["date"] for row in rows])
+        points = []
+        for row in rows:
+            # An unlabelled row on a foreign-quoted asset is a refusal, not a
+            # pass-through: `to_toman` hands an unlabelled number back
+            # unchanged, which is right for a Toman quote and catastrophic here.
+            if not row["unit"] and asset.currency == Asset.Currency.USD:
+                continue
+            price = to_toman(
+                asset.brs_symbol,
+                row["close_price"],
+                row["unit"],
+                usd_rate=rate_on(rates, rate_dates, row["date"]),
+            )
+            if price > 0:
+                points.append({"date": row["date"], "price": float(price)})
+        if points:
+            return points, "provider daily close"
+    # Crypto and commodities have no provider history endpoint, so their only
+    # close series is MarketDailyBar -- where `daily_bar_price` is THE reader:
+    # it guards the asset class (a coin and a commodity can both be "BTC"),
+    # drops rejected days, and resolves the unit at each row's own rate.
+    bars = daily_bar_price([asset], since=since_jalali)
+    points = [
+        {"date": date, "price": float(close)} for _symbol, date, close in bars
+    ]
+    return points, "daily bar from live snapshots" if points else ""
+
+
+def _live_price_history(asset, since):
+    """One point per day from the recorded ticks, for an asset with no warehouse row.
+
+    `Price` is a two-minute tick table, so a 90-day window is ~65k rows that all
+    land on 90 x-values. The mean is taken in the database and one point comes
+    back per day, matching what `DailyPriceAverage` records nightly.
+
+    ARCHIVE-tagged rows are excluded for the same reason that rollup excludes
+    them: they are the warehouse read back through the live table, so they would
+    restate the branch above rather than add anything. Manual marks stay in --
+    for a manually valued asset they ARE the series, and nothing else has one.
+    """
+    rows = (
+        Price.objects.filter(asset=asset, fetched_at__gte=since)
+        .exclude(source="ARCHIVE")
+        .annotate(day=TruncDate("fetched_at"))
+        .values("day")
+        .annotate(avg_price=Avg("price"))
+        .order_by("day")
+    )
+    return [
+        {"date": row["day"].isoformat(), "price": float(row["avg_price"])}
+        for row in rows
+    ]
+
+
+def _to_gregorian_points(points):
+    """Jalali-dated warehouse points -> ISO Gregorian, the axis the charts read.
+
+    Every date formatter in the frontend is `new Date(iso)` against an en-GB
+    locale, so a Jalali string reaches it as a year-1405 CE date: the whole
+    series renders ~621 years early. An unparseable date yields no point rather
+    than a wrong one.
+    """
+    from marketdata import jalali
+
+    out = []
+    for point in points:
+        day = jalali.to_gregorian(point["date"])
+        if day is not None:
+            out.append({"date": day.isoformat(), "price": point["price"]})
+    return out
+
+
 class PriceHistoryView(APIView):
-    """Time-series for one asset, for charts. ?asset=kama_stock&limit=100."""
+    """Historical closes for one asset, for the single-asset price screen."""
 
     permission_classes = [IsAuthenticated]
 
@@ -1340,18 +1497,57 @@ class PriceHistoryView(APIView):
         asset_key = request.query_params.get("asset")
         if not asset_key:
             return Response({"detail": "asset query param required."}, status=400)
-        # Cap the window (H6): an unbounded ?limit= could pull the whole series.
-        limit, error = _int_param(request, "limit", 100, clamp=(1, 500))
+        # The window is a span of DAYS, not a row count. A shared row cap told
+        # two different stories: ~one row a day out of the warehouse, but one
+        # every two minutes out of the live table, where "1Y" was half a day.
+        days, error = _int_param(
+            request, "days", 365, clamp=(1, PRICE_HISTORY_MAX_DAYS)
+        )
         if error:
             return error
-        rows = (
-            Price.objects.filter(asset__key=asset_key)
-            .order_by("-fetched_at")[:limit]
-        )
-        return Response([
-            {"price": float(r.price), "fetched_at": r.fetched_at.isoformat()}
-            for r in rows
-        ])
+        # Deliberately no `is_active` filter: a screen may deactivate a
+        # candidate but never a holding, and a user still holding a delisted
+        # asset must keep being able to see its history.
+        asset = Asset.objects.filter(key=asset_key).first()
+        if asset is None:
+            return Response({"detail": "Unknown asset."}, status=404)
+
+        from marketdata.currency import is_tse_priced
+        from marketdata.jalali import from_gregorian
+
+        since = timezone.now() - timedelta(days=days)
+        since_jalali = from_gregorian(since)
+        points, source = [], ""
+        if asset.tse_symbol:
+            points, source = _tse_price_history(asset, since_jalali)
+        elif asset.brs_symbol:
+            points, source = _brs_price_history(asset, since_jalali)
+        points = _to_gregorian_points(points)
+        if not points:
+            # `source` is decided HERE and not before the branch: labelling
+            # live ticks "TSETMC daily close" is the exact lie this field
+            # exists to prevent.
+            points = _live_price_history(asset, since)
+            source = "recorded daily average" if points else ""
+
+        # True by construction now, not inferred: the TSE branch is the only one
+        # that returns a provider-verbatim Rial close, and every other branch
+        # converts to the Toman every non-TSE price in this codebase is quoted in.
+        unit = "Rial" if is_tse_priced(asset) else "Toman"
+        return Response({
+            "asset": {
+                "key": asset.key,
+                "name": asset.name,
+                "name_fa": asset.name_fa,
+                "symbol": asset.tse_symbol or asset.brs_symbol or asset.key,
+                "asset_class": asset.asset_class,
+                "unit": unit,
+            },
+            "source": source,
+            "points": points,
+            "earliest_date": points[0]["date"] if points else None,
+            "latest_date": points[-1]["date"] if points else None,
+        })
 
 
 class InsightsView(APIView):

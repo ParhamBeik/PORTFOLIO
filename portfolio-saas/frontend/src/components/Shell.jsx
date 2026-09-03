@@ -12,6 +12,7 @@ const PAGES = [
   { to: "/ledger", label: "Ledger" },
   { to: "/family", label: "Breakdown" },
   { to: "/comparison", label: "Comparison" },
+  { to: "/prices", label: "Prices" },
   { to: "/optimal", label: "My Optimal" },
   { to: "/universe", label: "Best Overall" },
 ];

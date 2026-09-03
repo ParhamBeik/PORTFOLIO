@@ -824,13 +824,190 @@ def test_run_price_fetch_downtime_gap_tagging(asset_catalog, raw_market_sample, 
 # test_price_history_api.py
 
 
-def test_price_history_rejects_invalid_limit(make_user):
+def _history_day(days_ago):
+    """(Jalali key, ISO string) for a day inside the endpoint's window.
+
+    Derived from `now()` on purpose: a literal Jalali date against a relative
+    window passes until the window walks past it, and then reddens CI on an
+    unrelated commit.
+    """
+    from marketdata import jalali
+
+    moment = timezone.now() - timedelta(days=days_ago)
+    jalali_date = jalali.from_gregorian(moment)
+    return jalali_date, jalali.to_gregorian(jalali_date).isoformat()
+
+
+def test_price_history_rejects_invalid_window(make_user):
     client = APIClient()
     client.force_authenticate(user=make_user())
 
-    response = client.get("/api/prices/history/?asset=emami_coin&limit=abc")
+    response = client.get("/api/prices/history/?asset=emami_coin&days=abc")
 
     assert response.status_code == 400
+
+
+def test_price_history_returns_ordered_warehouse_points_with_units(asset_catalog, make_user):
+    user = make_user()
+    stock = asset_catalog["kama_stock"]
+    older, older_iso = _history_day(20)
+    newer, newer_iso = _history_day(10)
+    MarketCandle.objects.create(
+        symbol=stock.tse_symbol,
+        timeframe=MarketCandle.UNADJUSTED,
+        date_time=newer,
+        close_price=Decimal("5200"),
+    )
+    MarketCandle.objects.create(
+        symbol=stock.tse_symbol,
+        timeframe=MarketCandle.UNADJUSTED,
+        date_time=older,
+        close_price=Decimal("5000"),
+    )
+
+    client = APIClient()
+    client.force_authenticate(user=user)
+    response = client.get(f"/api/prices/history/?asset={stock.key}&days=90")
+
+    assert response.status_code == 200, response.data
+    assert response.data["asset"]["unit"] == "Rial"
+    # Gregorian ISO, not the warehouse's Jalali string: every date formatter in
+    # the frontend is `new Date(iso)`, which reads "1405-01-01" as year 1405 CE.
+    assert [point["date"] for point in response.data["points"]] == [
+        older_iso,
+        newer_iso,
+    ]
+    assert response.data["points"][0]["price"] == 5000.0
+    assert response.data["earliest_date"] == older_iso
+
+
+def test_price_history_windows_by_days_not_rows(asset_catalog, make_user):
+    """The window is calendar days. A row cap answered "1Y" with half a day of
+    two-minute ticks, all collapsed onto one x value.
+    """
+    stock = asset_catalog["kama_stock"]
+    inside, inside_iso = _history_day(30)
+    outside, _ = _history_day(200)
+    for date, close in ((inside, "5200"), (outside, "4000")):
+        MarketCandle.objects.create(
+            symbol=stock.tse_symbol,
+            timeframe=MarketCandle.UNADJUSTED,
+            date_time=date,
+            close_price=Decimal(close),
+        )
+
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+    response = client.get(f"/api/prices/history/?asset={stock.key}&days=90")
+
+    assert [point["date"] for point in response.data["points"]] == [inside_iso]
+
+
+def test_price_history_converts_a_tether_quoted_series_to_toman(asset_catalog, make_user):
+    """The warehouse stores BTC in Tether and XAUUSD in dollars, provider-verbatim,
+    with the unit in its own column. Reading that column as Toman is a ~100,000x
+    error on the one screen whose entire job is showing a price.
+    """
+    coin = asset_catalog["bitcoin_usd"]
+    coin.brs_symbol = "BTC"
+    coin.save(update_fields=["brs_symbol"])
+    day, day_iso = _history_day(5)
+    GoldCurrencyHistory.objects.create(
+        symbol="BTC", date=day, close_price=Decimal("2"), unit="تتر",
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date=day, close_price=Decimal("90000"), unit="تومان",
+    )
+
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+    response = client.get(f"/api/prices/history/?asset={coin.key}&days=90")
+
+    assert response.data["asset"]["unit"] == "Toman"
+    assert response.data["points"] == [{"date": day_iso, "price": 180000.0}]
+
+
+def test_price_history_refuses_an_unlabelled_foreign_row(asset_catalog, make_user):
+    """No unit on a dollar-quoted asset is a refusal, not a pass-through: the
+    provider always declares one, so its absence means "unknown", never "Toman".
+    """
+    coin = asset_catalog["bitcoin_usd"]
+    coin.brs_symbol = "BTC"
+    coin.save(update_fields=["brs_symbol"])
+    day, _ = _history_day(5)
+    GoldCurrencyHistory.objects.create(
+        symbol="BTC", date=day, close_price=Decimal("95000"), unit="",
+    )
+
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+    response = client.get(f"/api/prices/history/?asset={coin.key}&days=90")
+
+    assert response.data["points"] == []
+
+
+def test_price_history_skips_a_day_the_warehouse_rejected(asset_catalog, make_user):
+    stock = asset_catalog["kama_stock"]
+    good, good_iso = _history_day(10)
+    bad, _ = _history_day(9)
+    for date, close in ((good, "5000"), (bad, "1")):
+        MarketCandle.objects.create(
+            symbol=stock.tse_symbol,
+            timeframe=MarketCandle.UNADJUSTED,
+            date_time=date,
+            close_price=Decimal(close),
+        )
+    RejectedRecord.objects.create(
+        endpoint="stock_candle_unadjusted", symbol=stock.tse_symbol, date=bad,
+        reason="bad_close", payload={},
+    )
+
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+    response = client.get(f"/api/prices/history/?asset={stock.key}&days=90")
+
+    assert [point["date"] for point in response.data["points"]] == [good_iso]
+
+
+def test_price_history_labels_the_branch_that_actually_answered(asset_catalog, make_user):
+    """`source` is provenance. Assigned before the fallback ran, it announced
+    "TSETMC daily close" over live ticks.
+    """
+    stock = asset_catalog["kama_stock"]
+    # `fetched_at` is auto_now_add, so these are three ticks on one day.
+    for price in ("5000", "5100", "5200"):
+        Price.objects.create(asset=stock, price=Decimal(price))
+
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+    response = client.get(f"/api/prices/history/?asset={stock.key}&days=90")
+
+    assert response.data["source"] == "recorded daily average"
+    # One point per day, not one per two-minute tick.
+    assert len(response.data["points"]) == 1
+
+
+def test_price_history_still_serves_a_deactivated_holding(asset_catalog, make_user):
+    """A universe screen may drop a candidate, never a holding: someone still
+    holding a delisted asset must keep being able to see its history.
+    """
+    stock = asset_catalog["kama_stock"]
+    stock.is_active = False
+    stock.save(update_fields=["is_active"])
+    day, day_iso = _history_day(10)
+    MarketCandle.objects.create(
+        symbol=stock.tse_symbol,
+        timeframe=MarketCandle.UNADJUSTED,
+        date_time=day,
+        close_price=Decimal("5000"),
+    )
+
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+    response = client.get(f"/api/prices/history/?asset={stock.key}&days=90")
+
+    assert response.status_code == 200, response.data
+    assert response.data["latest_date"] == day_iso
 
 
 # ----------------------------------------------------------------------
