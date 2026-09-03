@@ -1158,34 +1158,38 @@ def claim_archive_batch(limit=None):
     return [state.pk for state in states]
 
 
+def get_deep_tier_symbols() -> set[str]:
+    """Symbols eligible for deep tick history: held symbols + top N by liquidity.
+
+    Shallow-tier symbols stay capped at their initial 90-day seed window and never
+    widen, conserving the metered API budget for assets users actually hold or
+    that represent the market's liquid core.
+    """
+    from portfolio.models import Holding
+    from .models import StockSymbolMetadata
+
+    held = set(
+        Holding.objects.filter(quantity__gt=0)
+        .exclude(asset__tse_symbol="")
+        .values_list("asset__tse_symbol", flat=True)
+    )
+    n = getattr(settings, "MARKETDATA_DEEP_TIER_N", 100)
+    liquid = set(
+        StockSymbolMetadata.objects.filter(market_cap__gt=0)
+        .order_by("-market_cap", "-free_float")
+        .values_list("l18", flat=True)[:n]
+    )
+    return held | liquid
+
+
 def grow_tick_windows(step_days=90):
-    """Widen every fully-backfilled tick window by another `step_days` --
-    "go further back over time, without a fixed limit" for the one endpoint
-    class whose window is capped (STOCK_TRANSACTION_TICKS, one request per
-    symbol per day, so a window must stay bounded per pass).
+    """Widen fully-backfilled tick windows by another `step_days` for deep tier symbols.
 
-    Previously a one-time 90->365 jump, gated to held+liquid-100 symbols only,
-    frozen after that. Now recurring and universal: a state grows again the
-    moment it reports `verified_complete`, floored at the symbol's own listing
-    date (`InstrumentListingHistory.first_seen`) so it stops once the window
-    already reaches back to when the symbol started trading.
+    Tiered growth: only held symbols and top-N liquid stocks (deep tier) widen
+    back to their listing date. Shallow-tier symbols remain capped at their initial
+    seed window and do not grow.
 
-    "No listing record on file" used to mean "grow indefinitely", on the
-    reasoning that missing metadata is not a reason to stop backfilling. There
-    is no such thing as indefinitely: `target_window_days` is a
-    PositiveSmallIntegerField, so on 2026-08-27 thirty-one such states reached
-    32,760 and the next `+90` raised a hard database error -- inside the same
-    `try` that dispatches work, which took the whole archive down for thirteen
-    hours while the TSETMC wallet sat at 11% spent. Growth is now clamped to
-    MAX_TICK_WINDOW_DAYS, and a state already at the clamp is left alone rather
-    than being re-flagged incomplete: rewriting `verified_complete=False` on a
-    window that cannot widen is what produced 10,615 claim-fetch-nothing-
-    reclaim no-ops in a single day.
-
-    Growth strictly increases `target_window_days`, and `claim_archive_batch`'s
-    tick branch already orders by `target_window_days` ascending -- a state
-    that just widened always sorts behind any state still on a smaller
-    window, so coverage-first ordering holds with no extra priority field.
+    Clamped to MAX_TICK_WINDOW_DAYS to prevent PositiveSmallIntegerField overflow.
     """
     from .models import InstrumentListingHistory
 
@@ -1198,6 +1202,7 @@ def grow_tick_windows(step_days=90):
     if not done:
         return 0
 
+    deep_tier = get_deep_tier_symbols()
     first_seen = dict(
         InstrumentListingHistory.objects.filter(
             symbol__in=[symbol for symbol, _ in done]
@@ -1206,6 +1211,8 @@ def grow_tick_windows(step_days=90):
     today = jalali.to_gregorian(jalali.today())
     to_grow = []
     for symbol, window in done:
+        if symbol not in deep_tier:
+            continue  # shallow tier: 90-day seed, no growth
         if window >= MAX_TICK_WINDOW_DAYS:
             continue  # at the clamp: no wider window exists to fetch into
         listed = first_seen.get(symbol)

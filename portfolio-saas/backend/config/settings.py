@@ -352,6 +352,8 @@ MARKETDATA_TICK_QUOTA_SHARE = float(os.getenv("MARKETDATA_TICK_QUOTA_SHARE", "0.
 # so the trailing window is bounded to keep cost finite. Trading days only -- a
 # non-trading day simply has no daily candle, so it is never requested.
 MARKETDATA_TICK_WINDOW_DAYS = int(os.getenv("MARKETDATA_TICK_WINDOW_DAYS", "90"))
+# Deep tier cap for tick window growth: held symbols plus top N by liquidity.
+MARKETDATA_DEEP_TIER_N = int(os.getenv("MARKETDATA_DEEP_TIER_N", "100"))
 # Relative |tick_vol - candle_vol| / max(...) allowed before quarantine. Measured
 # mismatch distribution: ~75% of provider disagreements sit under 1%; the long
 # tail (near-total disagreement) still rejects. Override via env if needed.

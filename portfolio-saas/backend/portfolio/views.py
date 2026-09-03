@@ -695,6 +695,7 @@ class AccountDataQualityView(APIView):
             assets.append({"asset_key": asset.key, **result})
 
         assessed = [item for item in assets if item["passes_gate"] is not None]
+        from marketdata.coverage_report import build_warehouse_coverage
         return Response({
             "account_id": account.id,
             "assets": assets,
@@ -705,6 +706,7 @@ class AccountDataQualityView(APIView):
                 else "partial" if assessed
                 else "unavailable"
             ),
+            "warehouse_coverage": build_warehouse_coverage(),
             "known_limits": [
                 {
                     "code": "no_iranian_holiday_calendar",
@@ -1611,6 +1613,19 @@ class PriceHistoryView(APIView):
         # that returns a provider-verbatim Rial close, and every other branch
         # converts to the Toman every non-TSE price in this codebase is quoted in.
         unit = "Rial" if is_tse_priced(asset) else "Toman"
+
+        from marketdata.models import SymbolIntegrity
+        symbol_key = asset.tse_symbol or asset.brs_symbol or asset.key
+        integrity = SymbolIntegrity.objects.filter(symbol=symbol_key).first()
+        caveats = []
+        if integrity:
+            if not integrity.passes_gate and integrity.reason:
+                caveats.append(integrity.reason)
+            if integrity.coverage_ratio and integrity.coverage_ratio < 0.70:
+                caveats.append("low_coverage")
+            if integrity.max_gap_days and integrity.max_gap_days > 14:
+                caveats.append("price_gap_exceeded")
+
         return Response({
             "asset": {
                 "key": asset.key,
@@ -1621,6 +1636,8 @@ class PriceHistoryView(APIView):
                 "unit": unit,
             },
             "source": source,
+            "caveats": caveats,
+            "coverage_ratio": integrity.coverage_ratio if integrity else None,
             "points": points,
             "earliest_date": points[0]["date"] if points else None,
             "latest_date": points[-1]["date"] if points else None,
