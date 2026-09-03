@@ -741,17 +741,16 @@ def _load_price_panel(
         series = series[series > 0]
         series = series[series.index >= cutoff]
 
-        # Staleness / forward-fill bound: check if asset stopped trading on its market calendar
-        if not series.index.empty:
+        # Staleness / survivorship guard: check if asset stopped trading near as_of
+        if as_of_dt is not None and not series.index.empty:
             from django.utils import timezone
             from marketdata.calendars import market_for_asset, sessions_between
             from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS
             from portfolio.models import Asset
 
-            as_of_ref = as_of_dt if as_of_dt is not None else timezone.now()
             max_date = series.index.max()
             last_jalali = to_jalali_str(max_date)
-            as_of_jalali = to_jalali_str(as_of_ref)
+            as_of_jalali = to_jalali_str(as_of_dt)
             asset_obj = Asset.objects.filter(key=key).first()
             market = market_for_asset(asset_obj) if asset_obj else "tse"
             stale_sessions = sessions_between(last_jalali, as_of_jalali, market=market)
@@ -761,7 +760,7 @@ def _load_price_panel(
                     "reason": "survivorship_guard_failed",
                     "stale_sessions": stale_sessions,
                     "max_forward_fill_sessions": MAX_FORWARD_FILL_SESSIONS,
-                    "detail": f"Series is {stale_sessions} sessions stale at as_of (max {MAX_FORWARD_FILL_SESSIONS})",
+                    "detail": f"Series is {stale_sessions} sessions stale at as_of {as_of_dt.date()}",
                 })
                 continue
 
@@ -956,7 +955,9 @@ def _gap_profile(observed: np.ndarray) -> tuple[int, int]:
 
 
 def _build_returns_matrix(
-    panel: pd.DataFrame, held_keys: frozenset[str] = frozenset()
+    panel: pd.DataFrame,
+    held_keys: frozenset[str] = frozenset(),
+    as_of: dt.datetime | None = None,
 ) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Price panel -> (daily simple returns, excluded, warnings).
 
@@ -991,11 +992,27 @@ def _build_returns_matrix(
         non_nan = int(returns[key].notna().sum())
         expected = max(len(returns.index) - 1 - leading_gap, 0)
         coverage = non_nan / expected if expected else 0.0
-        if interior_gap > MAX_FORWARD_FILL_SESSIONS:
+        # Trailing gap against market calendar relative to as_of
+        from django.utils import timezone
+        from marketdata.calendars import market_for_asset, sessions_between
+        from portfolio.models import Asset
+
+        asset_obj = Asset.objects.filter(key=key).first()
+        market = market_for_asset(asset_obj) if asset_obj else "tse"
+        max_date = panel[key].dropna().index.max()
+        trailing_sessions = 0
+        if max_date is not None:
+            ref_dt = as_of if as_of is not None else timezone.now()
+            last_jalali = to_jalali_str(max_date)
+            ref_jalali = to_jalali_str(ref_dt)
+            trailing_sessions = sessions_between(last_jalali, ref_jalali, market=market)
+
+        effective_gap = max(interior_gap, trailing_sessions)
+        if effective_gap > MAX_FORWARD_FILL_SESSIONS:
             excluded.append({
                 "key": key,
                 "reason": "price_gap_exceeded",
-                "max_gap_sessions": interior_gap,
+                "max_gap_sessions": effective_gap,
             })
         elif non_nan < MIN_DAILY_RETURNS:
             record = {"key": key, "reason": "insufficient_history", "days": non_nan}
@@ -1084,13 +1101,11 @@ def toman_price_panel(
     )
     panel = _convert_usd_to_toman(panel)
     if gate:
-        _, gate_excluded, gate_warnings = _build_returns_matrix(panel, held_keys)
+        _, gate_excluded, gate_warnings = _build_returns_matrix(
+            panel, held_keys, as_of=as_of
+        )
         excluded = [*excluded, *gate_excluded]
         warnings = [*warnings, *gate_warnings]
-        excluded_keys = {item["key"] for item in excluded if "key" in item}
-        drop_cols = [c for c in panel.columns if c in excluded_keys]
-        if drop_cols:
-            panel = panel.drop(columns=drop_cols)
     return panel, excluded, warnings
 
 
@@ -1164,7 +1179,9 @@ def daily_returns_matrix(
     # measure it before the gates can thin the index.
     frequency = periods_per_year(panel.index)
 
-    returns, excluded, matrix_warnings = _build_returns_matrix(panel, held_keys)
+    returns, excluded, matrix_warnings = _build_returns_matrix(
+        panel, held_keys, as_of=as_of_dt
+    )
     excluded.extend(gate_excluded)
     warnings = panel_warnings + matrix_warnings
 

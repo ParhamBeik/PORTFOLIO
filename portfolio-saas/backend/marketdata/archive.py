@@ -1158,7 +1158,7 @@ def claim_archive_batch(limit=None):
     return [state.pk for state in states]
 
 
-def get_deep_tier_symbols() -> set[str]:
+def get_deep_tier_symbols(all_symbols: set[str] | None = None) -> set[str]:
     """Symbols eligible for deep tick history: held symbols + top N by liquidity.
 
     Shallow-tier symbols stay capped at their initial 90-day seed window and never
@@ -1179,6 +1179,8 @@ def get_deep_tier_symbols() -> set[str]:
         .order_by("-market_cap", "-free_float")
         .values_list("l18", flat=True)[:n]
     )
+    if not held and not liquid and all_symbols:
+        return all_symbols
     return held | liquid
 
 
@@ -1202,7 +1204,7 @@ def grow_tick_windows(step_days=90):
     if not done:
         return 0
 
-    deep_tier = get_deep_tier_symbols()
+    deep_tier = get_deep_tier_symbols(all_symbols={symbol for symbol, _ in done})
     first_seen = dict(
         InstrumentListingHistory.objects.filter(
             symbol__in=[symbol for symbol, _ in done]

@@ -977,6 +977,7 @@ def live_health_overlay():
     coverage sections stay cached, because their answers do not change minute to
     minute.
     """
+    now = timezone.now()
     db_conn = _db_connection_metrics()
     checks = {"database": True, "cache": True, "db_connections": db_conn}
     try:

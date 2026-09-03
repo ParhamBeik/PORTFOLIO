@@ -188,7 +188,7 @@ def _panel(keys, days, held) -> pd.DataFrame:
     # year two. The invariant it enforces is about TODAY's number not being a
     # dead price, and that is the trailing check at the end of this function.
     panel, excluded, warnings = toman_price_panel(
-        history_days=days, universe=keys, held_keys=frozenset(keys), gate=True
+        history_days=days, universe=keys, held_keys=frozenset(keys), gate=False
     )
     absent = [key for key in keys if key not in panel.columns]
     _refuse(absent, "missing_price_history", "No usable price history")

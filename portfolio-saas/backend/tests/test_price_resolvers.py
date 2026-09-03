@@ -98,7 +98,12 @@ def _verdicts(user, account, asset, now):
     panel, _excluded, _warnings = toman_price_panel(
         history_days=90, held_keys=frozenset({asset.key}), gate=True
     )
-    column = panel[asset.key].dropna() if asset.key in panel.columns else None
+    is_excluded = any(item.get("key") == asset.key for item in _excluded)
+    column = (
+        panel[asset.key].dropna()
+        if (asset.key in panel.columns and not is_excluded)
+        else None
+    )
     out["returns_panel"] = (
         f"price={Decimal(str(float(column.iloc[-1]))):.4f}"
         if column is not None and not column.empty
