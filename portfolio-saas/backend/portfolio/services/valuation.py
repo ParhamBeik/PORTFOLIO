@@ -1492,6 +1492,88 @@ def compute_dynamic_net_worth_series(
     return series
 
 
+def resolve_asset_point_in_time_price(
+    asset, as_of_jalali: str, *, max_sessions: int = MAX_FORWARD_FILL_SESSIONS
+) -> tuple[Decimal | None, int, str | None]:
+    """Single point-in-time price resolver for an asset.
+
+    Owns the canonical precedence:
+    1. Adjusted stock candles (TSETMC)
+    2. Gold / FX daily history (BRS)
+    3. Distilled daily bars (crypto, ETF NAV, commodities)
+
+    Enforces:
+    - Rejection filtering via RejectedRecord
+    - 5-session forward-fill bound via calendars.sessions_between()
+    - Unit safety (read-time only: Rial for TSE, Toman for BRS/bars)
+
+    Returns (price, stale_sessions, source) or (None, stale_sessions, rejection_reason).
+    """
+    from marketdata.calendars import (
+        candle_close_qs,
+        market_for_asset,
+        sessions_between,
+    )
+    from marketdata.models import GoldCurrencyHistory
+    from marketdata.provenance import (
+        BRS_SERIES_ENDPOINTS,
+        STOCK_SERIES_ENDPOINTS,
+        rejected_pairs,
+    )
+
+    price = Decimal("0")
+    stale_sessions = 0
+    source = None
+
+    if asset.tse_symbol:
+        rejections = [
+            day
+            for _sym, day in rejected_pairs([asset.tse_symbol], STOCK_SERIES_ENDPOINTS)
+        ]
+        candles = candle_close_qs(asset.tse_symbol, as_of=as_of_jalali).exclude(
+            date_time__in=rejections
+        )
+        candle = candles.order_by("-date_time").first()
+        if candle:
+            price = _q(candle.close_price)
+            source = "tse_candle_adjusted"
+            stale_sessions = sessions_between(
+                candle.date_time[:10], as_of_jalali, market="tse"
+            )
+    elif asset.brs_symbol:
+        rejections = [
+            day
+            for _sym, day in rejected_pairs([asset.brs_symbol], BRS_SERIES_ENDPOINTS)
+        ]
+        hist = (
+            GoldCurrencyHistory.objects.filter(
+                symbol=asset.brs_symbol, date__lte=as_of_jalali, close_price__gt=0
+            )
+            .exclude(date__in=rejections)
+            .order_by("-date")
+            .first()
+        )
+        if hist:
+            price = Decimal(str(hist.close_price))
+            source = "gold_currency_history"
+            stale_sessions = sessions_between(
+                hist.date, as_of_jalali, market="gold_currency"
+            )
+
+    if price <= 0:
+        price, stale_sessions = _daily_bar_as_of(asset, as_of_jalali)
+        if price > 0:
+            source = "market_daily_bar"
+
+    if price <= 0:
+        return None, 0, "missing_price"
+
+    if stale_sessions > max_sessions:
+        return None, stale_sessions, "price_gap_exceeded"
+
+    return price, stale_sessions, source
+
+
 def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     """Compute valuation of portfolio assets as of a specific date and basis."""
     from django.utils import timezone
@@ -1580,63 +1662,19 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                 val = _house_value(qty, area_sqm=area)
                 price = val / qty if qty else Decimal("0")
             else:
-                stale_sessions = 0
-                if asset.tse_symbol:
-                    from marketdata.provenance import (
-                        STOCK_SERIES_ENDPOINTS, rejected_pairs,
-                    )
-                    rejections = [
-                        day for _sym, day in
-                        rejected_pairs([asset.tse_symbol], STOCK_SERIES_ENDPOINTS)
-                    ]
-                    candles = candle_close_qs(asset.tse_symbol, as_of=jalali_str).exclude(date_time__in=rejections)
-                    candle = candles.order_by("-date_time").first()
-                    if candle:
-                        # Portfolio TSE quotes are Rial (same as warehouse).
-                        price = _q(candle.close_price)
-                        stale_sessions = sessions_between(
-                            candle.date_time[:10], jalali_str, market="tse"
-                        )
-                elif asset.brs_symbol:
-                    from marketdata.provenance import (
-                        BRS_SERIES_ENDPOINTS, rejected_pairs,
-                    )
-                    rejections = [
-                        day for _sym, day in
-                        rejected_pairs([asset.brs_symbol], BRS_SERIES_ENDPOINTS)
-                    ]
-                    history = GoldCurrencyHistory.objects.all()
-                    hist = history.filter(
-                        symbol=asset.brs_symbol, date__lte=jalali_str, close_price__gt=0
-                    ).exclude(date__in=rejections).order_by("-date").first()
-                    if hist:
-                        price = Decimal(str(hist.close_price))
-                        stale_sessions = sessions_between(
-                            hist.date, jalali_str, market="gold_currency"
-                        )
-
-                if price <= 0:
-                    # Crypto, commodities and ETF NAV have no provider history
-                    # endpoint at all, so neither branch above can ever find
-                    # them a close. Without this, a crypto holding the
-                    # dashboard prices happily is `missing_price` in every
-                    # as-of valuation -- which is also every TWR cash-flow
-                    # boundary, so one such holding made performance
-                    # permanently unavailable for the whole account.
-                    # `ledger._daily_bar_or_live_price` is the trade-price twin
-                    # of this; both read the same distilled bar.
-                    price, stale_sessions = _daily_bar_as_of(asset, jalali_str)
-
-                if price <= 0:
-                    excluded.append({"asset_key": key, "reason": "missing_price"})
-                    continue
-                if stale_sessions > MAX_FORWARD_FILL_SESSIONS:
-                    excluded.append({
-                        "asset_key": key,
-                        "reason": "price_gap_exceeded",
-                        "stale_sessions": stale_sessions,
-                        "max_forward_fill_sessions": MAX_FORWARD_FILL_SESSIONS,
-                    })
+                price, stale_sessions, reason = resolve_asset_point_in_time_price(
+                    asset, jalali_str
+                )
+                if price is None:
+                    if reason == "price_gap_exceeded":
+                        excluded.append({
+                            "asset_key": key,
+                            "reason": "price_gap_exceeded",
+                            "stale_sessions": stale_sessions,
+                            "max_forward_fill_sessions": MAX_FORWARD_FILL_SESSIONS,
+                        })
+                    else:
+                        excluded.append({"asset_key": key, "reason": reason or "missing_price"})
                     continue
 
             # Apply basis

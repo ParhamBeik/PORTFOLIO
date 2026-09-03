@@ -186,26 +186,6 @@ def test_resolvers_agree_that_a_quarantined_close_is_skipped(one_stock):
     _assert_agree(user, account, asset, now, "price=300.0000")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN DIVERGENCE, awaiting a decision -- do not delete this marker "
-        "without fixing the cause. `value_as_of` and the net-worth chart both "
-        "measure staleness with `calendars.sessions_between()` on the MARKET's "
-        "calendar. `_build_returns_matrix` instead counts consecutive NaN rows "
-        "in the panel's own index (`_gap_profile`), and that index only holds "
-        "days on which some asset ALREADY IN the panel printed. A symbol that "
-        "stops trading therefore shows a gap proportional to how live its "
-        "neighbours are, not to how many sessions the exchange actually held: "
-        "in a thin panel the gap never reaches MAX_FORWARD_FILL_SESSIONS and "
-        "the dead column survives. This is the same mistake CLAUDE.md records "
-        "for a different function -- measuring against the asset's own rows "
-        "instead of a market-wide session calendar -- relocated into the "
-        "returns matrix. Production panels are denser than this fixture, so "
-        "the divergence there is smaller than it looks here, but it is "
-        "structural rather than a matter of degree."
-    ),
-)
 @pytest.mark.django_db
 def test_resolvers_agree_to_drop_a_symbol_past_the_forward_fill_bound(one_stock):
     """The market kept trading and this symbol did not: the price is dead.

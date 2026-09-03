@@ -741,14 +741,27 @@ def _load_price_panel(
         series = series[series > 0]
         series = series[series.index >= cutoff]
 
-        # Survivorship guard: check if asset was trading at as_of
-        if as_of_dt is not None and not series.index.empty:
+        # Staleness / forward-fill bound: check if asset stopped trading on its market calendar
+        if not series.index.empty:
+            from django.utils import timezone
+            from marketdata.calendars import market_for_asset, sessions_between
+            from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS
+            from portfolio.models import Asset
+
+            as_of_ref = as_of_dt if as_of_dt is not None else timezone.now()
             max_date = series.index.max()
-            if (as_of_dt - max_date).days > 30:
+            last_jalali = to_jalali_str(max_date)
+            as_of_jalali = to_jalali_str(as_of_ref)
+            asset_obj = Asset.objects.filter(key=key).first()
+            market = market_for_asset(asset_obj) if asset_obj else "tse"
+            stale_sessions = sessions_between(last_jalali, as_of_jalali, market=market)
+            if stale_sessions > MAX_FORWARD_FILL_SESSIONS:
                 gate_excluded.append({
                     "key": key,
                     "reason": "survivorship_guard_failed",
-                    "detail": f"No price updates near as_of {as_of_dt.date()}"
+                    "stale_sessions": stale_sessions,
+                    "max_forward_fill_sessions": MAX_FORWARD_FILL_SESSIONS,
+                    "detail": f"Series is {stale_sessions} sessions stale at as_of (max {MAX_FORWARD_FILL_SESSIONS})",
                 })
                 continue
 
@@ -1074,6 +1087,10 @@ def toman_price_panel(
         _, gate_excluded, gate_warnings = _build_returns_matrix(panel, held_keys)
         excluded = [*excluded, *gate_excluded]
         warnings = [*warnings, *gate_warnings]
+        excluded_keys = {item["key"] for item in excluded if "key" in item}
+        drop_cols = [c for c in panel.columns if c in excluded_keys]
+        if drop_cols:
+            panel = panel.drop(columns=drop_cols)
     return panel, excluded, warnings
 
 
