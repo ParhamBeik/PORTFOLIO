@@ -86,6 +86,7 @@ jobs:
       # the tokens straight out of index.css. Deterministic and ~60ms, so the
       # regression that used to need a browser now fails on the commit itself.
       - run: npm run test:unit
+      - run: npm run test:vitest
       - run: npm run build
 
       # Lighthouse against the REAL production image, not the dist folder.

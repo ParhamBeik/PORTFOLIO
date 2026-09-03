@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview --host",
     "test:unit": "node --test src/*.test.mjs",
+    "test:vitest": "vitest run",
     "test:e2e": "playwright test",
     "test:lighthouse": "bash scripts/lhci.sh",
     "test:lighthouse:auth": "npm i --no-save --silent lighthouse@12 chrome-launcher && node scripts/lh-authenticated.mjs"
@@ -22,8 +23,12 @@
   "devDependencies": {
     "@playwright/test": "^1.61.1",
     "@tailwindcss/vite": "^4.3.3",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
     "@vitejs/plugin-react": "^4.7.0",
+    "jsdom": "^30.0.1",
     "tailwindcss": "^4.3.3",
-    "vite": "^6.4.3"
+    "vite": "^6.4.3",
+    "vitest": "^5.0.0"
   }
 }
