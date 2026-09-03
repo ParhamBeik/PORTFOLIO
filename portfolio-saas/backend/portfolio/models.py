@@ -637,3 +637,28 @@ class Liability(models.Model):
 
     class Meta:
         ordering = ["created_at"]
+
+
+from django.db.models.signals import post_delete, post_save
+from django.dispatch import receiver
+
+
+@receiver([post_save, post_delete], sender=LedgerEntry)
+def _on_ledger_entry_changed(sender, instance, **kwargs):
+    if getattr(instance, "account_id", None):
+        try:
+            from portfolio.tasks import debounce_my_optimal_refresh
+            debounce_my_optimal_refresh(instance.account_id)
+        except Exception:
+            pass
+
+
+@receiver([post_save, post_delete], sender=Holding)
+def _on_holding_changed(sender, instance, **kwargs):
+    if getattr(instance, "account_id", None):
+        try:
+            from portfolio.tasks import debounce_my_optimal_refresh
+            debounce_my_optimal_refresh(instance.account_id)
+        except Exception:
+            pass
+

@@ -28,11 +28,13 @@ from __future__ import annotations
 
 import bisect
 import datetime as dt
+import hashlib
 
 import jdatetime
 import numpy as np
 import pandas as pd
 from django.core.cache import cache
+from django.db.models import Max
 
 from marketdata.currency import tse_close_to_toman
 from marketdata.integrity import MAX_OUTAGE_CALENDAR_DAYS
@@ -62,15 +64,44 @@ _HISTORY_BUFFER_DAYS = 7
 # from an ingest hole; `_closure_explained()` below asks the data instead.
 
 
-def _price_version_fingerprint() -> str:
-    """Monotonic fingerprint of every table feeding the panel.
+def _returns_asset_keys(universe, held_keys=frozenset()):
+    """The assets that can affect one returns panel, or all assets for None."""
+    return set(universe) | set(held_keys) if universe is not None else None
 
-    Combines max(id) of Price with max(id) of every warehouse table that can
-    change what the returns matrix contains, so the 2-min live fetch, the
-    nightly marketdata sync, a new spike rejection, an integrity-gate flip, or
-    a listing-eligibility change all rotate the returns cache. Lazy import:
-    portfolio -> marketdata is the allowed dependency direction (marketdata
-    never imports portfolio's domain).
+
+def _price_version_fingerprint(asset_keys=None) -> str:
+    """Monotonic fingerprint of the sources feeding one returns panel.
+
+    Warehouse tables are symbol-keyed while the live fallback is asset-keyed.
+    Passing `asset_keys` therefore narrows the question
+    from "has anything anywhere been ingested" to "has anything this panel
+    actually reads been ingested". That distinction is the whole point: the
+    archive backfill writes `MarketCandle` continuously and will for another
+    year, so a global fingerprint rotated faster than a request could be
+    served. Every cache keyed on it -- the returns matrix, `optimize()`, and
+    the whole MyOptimal response body -- therefore missed essentially always,
+    and MyOptimal paid ~40 convex solves per request for a 300s cache that
+    could never hold. `_returns_cache_key` already hashes the universe and
+    `held_keys`, so the narrowing is consistent by construction.
+
+    `asset_keys=None` keeps the old global behaviour, which is correct for the
+    universe-wide callers (`invalidate_returns_cache`, warmup) where the panel
+    genuinely is everything.
+
+    Deliberately NOT cached, even though caching it would bound the cost of the
+    scoped lookups. The fingerprint's whole job is to rotate the moment the
+    data changes -- a previous fix specifically removed a 600s TTL here so a
+    new spike rejection took effect immediately instead of waiting it out, and
+    putting a TTL back would undo that under a different name. Scoping alone is
+    what makes the caches downstream viable; the remaining per-call cost is
+    eight scoped lookups.
+
+    `Price` stays in the fingerprint, scoped to the same asset keys. It is the
+    fallback source for an asset without enough warehouse history, so excluding
+    it would serve a stale returns panel for exactly the assets it supports.
+
+    Lazy import: portfolio -> marketdata is the allowed dependency direction
+    (marketdata never imports portfolio's domain).
     """
     from marketdata.models import (
         DailyStockHistory,
@@ -82,11 +113,35 @@ def _price_version_fingerprint() -> str:
         SymbolIntegrity,
     )
 
-    def _max_id(qs):
-        return qs.order_by("-id").values_list("id", flat=True).first() or 0
+    if asset_keys is None:
+        symbols = None
+    else:
+        asset_keys = sorted(set(asset_keys))
+        rows = Asset.objects.filter(key__in=asset_keys).values_list(
+            "tse_symbol", "brs_symbol"
+        )
+        symbols = sorted({symbol for row in rows for symbol in row if symbol})
+
+    def _max_id(qs, *, symbol_keyed=True):
+        if symbol_keyed and symbols is not None:
+            # Grouping disables PostgreSQL's min/max shortcut, which otherwise
+            # walks the global id index and filters unrelated archive rows.
+            # The symbol/id indexes keep each group index-served instead.
+            return (
+                qs.filter(symbol__in=symbols)
+                .values("symbol")
+                .annotate(max_id=Max("id"))
+                .aggregate(version=Max("max_id"))["version"]
+                or 0
+            )
+        return qs.aggregate(version=Max("id"))["version"] or 0
+
+    price_rows = Price.objects
+    if asset_keys is not None:
+        price_rows = price_rows.filter(asset__key__in=asset_keys)
 
     return "{}:{}:{}:{}:{}:{}:{}:{}".format(
-        hex(_max_id(Price.objects))[2:],
+        hex(_max_id(price_rows, symbol_keyed=False))[2:],
         hex(_max_id(DailyStockHistory.objects))[2:],
         hex(_max_id(GoldCurrencyHistory.objects))[2:],
         hex(_max_id(MarketCandle.objects))[2:],
@@ -1049,7 +1104,7 @@ def daily_returns_matrix(
     as_of_dt = normalize_as_of(as_of)
     basis = normalize_basis(basis)
     held_keys = frozenset(held_keys)
-    version = _price_version_fingerprint()
+    version = _price_version_fingerprint(_returns_asset_keys(universe, held_keys))
     key = _returns_cache_key(history_days, as_of_dt, universe, basis, version, held_keys)
     cached = cache.get(key)
     if cached is not None:

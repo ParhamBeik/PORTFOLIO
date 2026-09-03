@@ -25,6 +25,7 @@ class OptimizationSnapshot(models.Model):
         ("equal_weight", "Equal Weight"),
         ("risk_parity", "Risk Parity"),
         ("hrp", "HRP"),
+        ("my_optimal", "My Optimal"),
     )
 
     id = models.AutoField(primary_key=True)
@@ -36,6 +37,7 @@ class OptimizationSnapshot(models.Model):
         blank=True,
     )
     scenario = models.CharField(max_length=32, choices=SCENARIO_CHOICES, default="max_sharpe")
+    basis = models.CharField(max_length=32, default="real_toman", db_index=True)
     # Lookback window this snapshot was optimized over (365/1095/1825/3650 for
     # the "Best Possible Portfolio Overall" page). Queryable so the view can
     # fetch "the latest snapshot per (window_days, scenario)" without parsing
@@ -55,7 +57,10 @@ class OptimizationSnapshot(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["account", "scenario", "basis", "-created_at"], name="opt_snap_lookup_idx"),
+        ]
 
     def __str__(self):
         acct = f"account={self.account_id}" if self.account_id else "global"
-        return f"OptimizationSnapshot({self.scenario}) {acct} @ {self.created_at.isoformat()}"
+        return f"OptimizationSnapshot({self.scenario}/{self.basis}) {acct} @ {self.created_at.isoformat()}"

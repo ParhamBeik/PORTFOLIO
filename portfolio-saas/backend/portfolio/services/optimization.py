@@ -34,7 +34,12 @@ from sklearn.covariance import LedoitWolf
 
 from .classification import HARD_ASSET_SLEEVE, asset_class_map, class_totals
 from .deflator import normalize_basis
-from .returns import MIN_DAILY_RETURNS, _price_version_fingerprint, daily_returns_matrix
+from .returns import (
+    MIN_DAILY_RETURNS,
+    _price_version_fingerprint,
+    _returns_asset_keys,
+    daily_returns_matrix,
+)
 
 # Same risk-free proxy as diagnostics, kept here so the optimizer is standalone.
 from django.conf import settings
@@ -1371,7 +1376,9 @@ def optimize(
 
     _guard_mixed_tse_units(universe or list(current_weights))
 
-    version = _price_version_fingerprint()
+    # Match the returns panel exactly; otherwise the two cache layers could
+    # disagree about which write makes this solve stale.
+    version = _price_version_fingerprint(_returns_asset_keys(universe, held_keys))
     user_id = user.id if user is not None else 0
     portfolio_hash = _constraints_hash({
         "weights": current_weights,

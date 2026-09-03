@@ -362,6 +362,9 @@ class DailyStockHistory(models.Model):
             # it took 13.8M scans over the same period. A date-only btree is
             # the one access path the unique constraint cannot serve.
             models.Index(fields=["date"], name="stock_history_date_idx"),
+            # Supports the scoped returns-cache version lookup without walking
+            # the global primary-key index and filtering millions of rows.
+            models.Index(fields=["symbol", "-id"], name="stockhist_symbol_id_idx"),
         ]
 
 
@@ -458,6 +461,8 @@ class MarketCandle(models.Model):
         ]
         indexes = [
             models.Index(fields=["timeframe", "symbol", "date_time"]),
+            # See `portfolio.services.returns._price_version_fingerprint`.
+            models.Index(fields=["symbol", "-id"], name="candle_symbol_id_idx"),
         ]
 
 

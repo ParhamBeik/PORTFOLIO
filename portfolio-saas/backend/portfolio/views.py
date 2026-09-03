@@ -1846,6 +1846,104 @@ def _parse_max_assets(raw):
     return value, None
 
 
+def _compute_my_optimal_payload(
+    user, account, requested_basis="real_toman", max_assets=None, target_volatility=None, constraints=None
+) -> dict | None:
+    from .services.deflator import CpiUnavailable, normalize_basis
+    from .services.returns import get_universe_by_mode
+
+    weights, total, valuation = _current_weights_and_total(user, account)
+    if not weights:
+        return None
+    universe = get_universe_by_mode("held", user=user, account=account)
+    held_keys = frozenset(weights)
+    lifetime_days = _lifetime_days(user, account)
+    requested_basis = normalize_basis(requested_basis)
+
+    if constraints is None:
+        constraints = {
+            k: v for k, v in
+            (("max_assets", max_assets), ("target_volatility", target_volatility))
+            if v is not None
+        } or None
+
+    def _solve(scenario, window_days, basis):
+        """One scenario, degrading the basis rather than the answer.
+
+        A real-terms panel needs CPI for every Jalali year it spans. When
+        that is missing the request must not silently become a nominal one:
+        it falls back, but the basis actually used is reported back so the
+        client never mistakes an inflation-contaminated number for a real one.
+        """
+        try:
+            return optimize(
+                scenario=scenario, current_weights=weights,
+                total_value_tomans=total, user=user,
+                history_days=window_days, universe=universe,
+                held_keys=held_keys, basis=basis, constraints=constraints,
+            ), basis
+        except CpiUnavailable:
+            if basis == "nominal_toman":
+                raise
+            return optimize(
+                scenario=scenario, current_weights=weights,
+                total_value_tomans=total, user=user,
+                history_days=window_days, universe=universe,
+                held_keys=held_keys, basis="nominal_toman",
+                constraints=constraints,
+            ), "nominal_toman"
+
+    windows = []
+    for label, fixed_days in MyOptimalView.WINDOWS:
+        window_days = fixed_days or lifetime_days
+        entry = {"label": label, "window_days": window_days}
+        try:
+            payload, basis_used = _solve("min_volatility", window_days, requested_basis)
+            entry["min_volatility"] = payload
+            entry["basis"] = basis_used
+        except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate,
+                MixedUnitUniverseBlocked, CpiUnavailable) as exc:
+            entry["status"] = "insufficient_history"
+            entry["detail"] = str(exc)
+            windows.append(entry)
+            continue
+        basis_used = entry["basis"]
+        optional = ("max_sharpe", "risk_parity", "hrp", "min_cvar")
+        if target_volatility is not None:
+            optional += ("efficient_risk",)
+        for scenario in optional:
+            try:
+                entry[scenario], _ = _solve(scenario, window_days, basis_used)
+            except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate,
+                    MixedUnitUniverseBlocked, CpiUnavailable):
+                entry[scenario] = None
+        entry["actual"] = portfolio_diagnostics(
+            weights, total, user=user, history_days=window_days,
+            universe=universe, valuation=valuation, basis=basis_used,
+        )
+        for scenario_key in ("min_volatility", *optional):
+            scenario_payload = entry.get(scenario_key)
+            if scenario_payload:
+                scenario_diagnostics = portfolio_diagnostics(
+                    scenario_payload["target_weights"], total,
+                    user=user, history_days=window_days,
+                    universe=universe, valuation=valuation, basis=basis_used,
+                )
+                scenario_payload["diagnostics"] = {
+                    "metrics": scenario_diagnostics.get("metrics", {})
+                }
+        entry["status"] = "ok"
+        windows.append(entry)
+    return {
+        "windows": windows,
+        "basis_requested": requested_basis,
+        "max_assets": max_assets,
+        "max_assets_range": [MIN_CARDINALITY, MAX_ASSETS_CEILING],
+        "target_volatility": target_volatility,
+        "target_volatility_range": [MIN_TARGET_VOLATILITY, MAX_TARGET_VOLATILITY],
+    }
+
+
 class MyOptimalView(APIView):
     """"if a quant had optimized MY existing assets, what would it
     look like?" -- per lookback window, max-Sharpe and min-volatility weights
@@ -1889,8 +1987,15 @@ class MyOptimalView(APIView):
                 holding_q.filter(is_hidden=True).values_list("id", flat=True)
             )
         )
+        # This page optimizes the user's OWN assets, so an ingest for anything
+        # they do not hold cannot change the answer. Scoping the price half of
+        # the key to their symbols is what lets the TTL below actually hold --
+        # globally it rotated on every archive insert, which is continuous.
+        # The ledger/holding ids stay unscoped and exact: a trade must
+        # invalidate immediately, with no staleness window at all.
         fingerprint = (
-            f"{_price_version_fingerprint()}:{max_ledger_id}:{max_holding_id}:{hidden_fp}"
+            f"{_price_version_fingerprint(holding_q.values_list('asset__key', flat=True))}"
+            f":{max_ledger_id}:{max_holding_id}:{hidden_fp}"
         )
         account_key = account.id if account is not None else "all"
         # Both knobs change every target in the body, so they have to key the
@@ -1904,52 +2009,26 @@ class MyOptimalView(APIView):
         )
 
     def get(self, request):
-        from .services.deflator import CpiUnavailable, normalize_basis
-        from .services.returns import get_universe_by_mode
+        from .services.deflator import normalize_basis
+        from .services.returns import _price_version_fingerprint
+        from .optimization_models import OptimizationSnapshot
+        from django.utils import timezone
 
         account = _scope(request)
-        weights, total, valuation = _current_weights_and_total(request.user, account)
-        if not weights:
-            return Response({"detail": "No priced holdings to optimize yet."}, status=400)
-        universe = get_universe_by_mode("held", user=request.user, account=account)
-        # These are the user's OWN assets, so they must not be screened as
-        # optimizer candidates. `held_keys` relaxes the universe gates, merges
-        # proxied holdings, floors the policy caps to what this book already
-        # holds, and freezes anything unmeasurable at its current weight instead
-        # of zeroing it (which the rebalance table rendered as a SELL).
-        held_keys = frozenset(weights)
-        lifetime_days = _lifetime_days(request.user, account)
-
-        # Nominal Toman returns are dominated by rial devaluation, a factor every
-        # asset shares. That single common factor inflates every pairwise
-        # correlation and every expected return, so a nominal panel makes a
-        # portfolio look far less diversified than it is and hands the optimizer
-        # a covariance matrix that is mostly inflation. Measuring in real terms
-        # strips it and shows genuine relative diversification.
         requested_basis = request.query_params.get("basis") or "real_toman"
         try:
             requested_basis = normalize_basis(requested_basis)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=400)
 
-        # "Show me the best portfolio I could hold using at most N of my assets."
-        # Optional; absent means the solver picks however many it likes.
         max_assets, error = _parse_max_assets(request.query_params.get("max_assets"))
         if error:
             return Response({"detail": error}, status=400)
-        # "I accept X% annual volatility -- earn me the most you can inside it."
-        # Optional; it adds a scenario rather than replacing the fixed ones, so
-        # the user can still see what the forecast-free answers look like.
         target_volatility, error = _parse_target_volatility(
             request.query_params.get("target_volatility")
         )
         if error:
             return Response({"detail": error}, status=400)
-        constraints = {
-            k: v for k, v in
-            (("max_assets", max_assets), ("target_volatility", target_volatility))
-            if v is not None
-        } or None
 
         cache_key, cache = self._cache_key(
             request.user, account, requested_basis, max_assets, target_volatility
@@ -1958,102 +2037,76 @@ class MyOptimalView(APIView):
         if cached is not None:
             return Response(cached)
 
-        def _solve(scenario, window_days, basis):
-            """One scenario, degrading the basis rather than the answer.
+        is_default_knobs = (max_assets is None and target_volatility is None)
 
-            A real-terms panel needs CPI for every Jalali year it spans. When
-            that is missing the request must not silently become a nominal one:
-            it falls back, but the basis actually used is reported back so the
-            client never mistakes an inflation-contaminated number for a real one.
-            """
-            try:
-                return optimize(
-                    scenario=scenario, current_weights=weights,
-                    total_value_tomans=total, user=request.user,
-                    history_days=window_days, universe=universe,
-                    held_keys=held_keys, basis=basis, constraints=constraints,
-                ), basis
-            except CpiUnavailable:
-                if basis == "nominal_toman":
-                    raise
-                return optimize(
-                    scenario=scenario, current_weights=weights,
-                    total_value_tomans=total, user=request.user,
-                    history_days=window_days, universe=universe,
-                    held_keys=held_keys, basis="nominal_toman",
-                    constraints=constraints,
-                ), "nominal_toman"
-
-        windows = []
-        for label, fixed_days in self.WINDOWS:
-            window_days = fixed_days or lifetime_days
-            entry = {"label": label, "window_days": window_days}
-            # min_volatility leads: it needs no return forecast, so it is the
-            # scenario whose weights survive the fact that we cannot predict
-            # returns. max_sharpe is kept but is no longer the only answer.
-            try:
-                payload, basis_used = _solve("min_volatility", window_days, requested_basis)
-                entry["min_volatility"] = payload
-                entry["basis"] = basis_used
-            except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate,
-                    MixedUnitUniverseBlocked, CpiUnavailable) as exc:
-                entry["status"] = "insufficient_history"
-                entry["detail"] = str(exc)
-                windows.append(entry)
-                continue
-            basis_used = entry["basis"]
-            # The remaining scenarios are best-effort: one failing must not blank
-            # the window, since each answers a different question about risk.
-            # `efficient_risk` only runs when the user stated a ceiling; without
-            # one the scenario has nothing to solve against and would raise.
-            optional = ("max_sharpe", "risk_parity", "hrp", "min_cvar")
-            if target_volatility is not None:
-                optional += ("efficient_risk",)
-            for scenario in optional:
-                try:
-                    entry[scenario], _ = _solve(scenario, window_days, basis_used)
-                except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate,
-                        MixedUnitUniverseBlocked, CpiUnavailable):
-                    entry[scenario] = None
-            # `valuation` is what supplies diagnostics' own held_keys; without it
-            # the "Actual" column falls back to the strict screen and is measured
-            # over a different asset set than the target it sits beside.
-            entry["actual"] = portfolio_diagnostics(
-                weights, total, user=request.user, history_days=window_days,
-                universe=universe, valuation=valuation, basis=basis_used,
+        # Build current fingerprint for staleness checks
+        holding_q = Holding.objects.filter(account__user=request.user)
+        ledger_q = LedgerEntry.objects.filter(account__user=request.user)
+        if account is not None:
+            holding_q = holding_q.filter(account=account)
+            ledger_q = ledger_q.filter(account=account)
+        max_ledger_id = ledger_q.order_by("-id").values_list("id", flat=True).first() or 0
+        max_holding_id = holding_q.order_by("-id").values_list("id", flat=True).first() or 0
+        hidden_fp = "-".join(
+            str(i) for i in sorted(
+                holding_q.filter(is_hidden=True).values_list("id", flat=True)
             )
-            # Historical drawdown for the hypothetical scenarios: "if you had
-            # held these target weights fixed for the whole window" -- the same
-            # portfolio_diagnostics() computation, just fed the target weights.
-            for scenario_key in ("min_volatility", *optional):
-                scenario_payload = entry.get(scenario_key)
-                if scenario_payload:
-                    scenario_diagnostics = portfolio_diagnostics(
-                        scenario_payload["target_weights"], total,
-                        user=request.user, history_days=window_days,
-                        universe=universe, valuation=valuation, basis=basis_used,
-                    )
-                    # Only the summary metrics, which is all this block was ever
-                    # for. The full payload carries per-day rolling windows and a
-                    # per-asset breakdown of a HYPOTHETICAL book -- 41 KB against
-                    # the 625 bytes of `metrics` -- and shipping it for every
-                    # scenario in every window made this response 1.6 MB and left
-                    # the page blank for ten seconds. `actual` below stays whole:
-                    # the risk and diversification panels genuinely read it.
-                    scenario_payload["diagnostics"] = {
-                        "metrics": scenario_diagnostics.get("metrics", {})
-                    }
-            entry["status"] = "ok"
-            windows.append(entry)
-        body = {
-            "windows": windows,
-            "basis_requested": requested_basis,
-            "max_assets": max_assets,
-            "max_assets_range": [MIN_CARDINALITY, MAX_ASSETS_CEILING],
-            "target_volatility": target_volatility,
-            "target_volatility_range": [MIN_TARGET_VOLATILITY, MAX_TARGET_VOLATILITY],
-        }
+        )
+        fingerprint = (
+            f"{_price_version_fingerprint(holding_q.values_list('asset__key', flat=True))}"
+            f":{max_ledger_id}:{max_holding_id}:{hidden_fp}"
+        )
+
+        if is_default_knobs and account is not None:
+            snap = (
+                OptimizationSnapshot.objects
+                .filter(account=account, scenario="my_optimal", basis=requested_basis)
+                .order_by("-created_at")
+                .first()
+            )
+            if snap is not None and snap.price_version == fingerprint:
+                now = timezone.now()
+                is_stale = (now - snap.created_at).total_seconds() > 900
+                if is_stale:
+                    from .tasks import refresh_my_optimal_snapshot
+                    try:
+                        refresh_my_optimal_snapshot.delay(account_id=account.id, basis=requested_basis)
+                    except Exception as exc:
+                        logger.warning("Could not queue my_optimal background refresh: %s", exc)
+
+                payload = dict(snap.payload)
+                if "as_of" not in payload and snap.as_of:
+                    payload["as_of"] = snap.as_of.isoformat()
+                cache.set(cache_key, payload, self.CACHE_TTL)
+                return Response(payload)
+
+        # Cold start or non-default knobs: compute inline
+        body = _compute_my_optimal_payload(
+            request.user, account, requested_basis, max_assets, target_volatility
+        )
+        if body is None:
+            return Response({"detail": "No priced holdings to optimize yet."}, status=400)
+
+        now = timezone.now()
+        body["as_of"] = now.isoformat()
         cache.set(cache_key, body, self.CACHE_TTL)
+
+        if is_default_knobs and account is not None:
+            if any(w.get("status") == "ok" for w in body.get("windows", [])):
+                try:
+                    OptimizationSnapshot.objects.create(
+                        account=account,
+                        scenario="my_optimal",
+                        basis=requested_basis,
+                        window_days=0,
+                        payload=body,
+                        price_version=fingerprint,
+                        as_of=now,
+                        created_by=request.user,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to save default OptimizationSnapshot: %s", exc)
+
         return Response(body)
 
 

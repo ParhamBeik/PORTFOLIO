@@ -344,6 +344,25 @@ def test_fingerprint_rotates_on_warehouse_write(asset_catalog):
     assert before != after
 
 
+def test_scoped_fingerprint_tracks_only_panel_sources(asset_catalog):
+    kama = asset_catalog["kama_stock"]
+    emami = asset_catalog["emami_coin"]
+    kama.tse_symbol, emami.tse_symbol = "کاما", "امامی"
+    kama.save(update_fields=["tse_symbol"])
+    emami.save(update_fields=["tse_symbol"])
+
+    before = _price_version_fingerprint([kama.key])
+    Price.objects.create(asset=emami, price=1, source="TEST")
+    MarketCandle.objects.create(
+        symbol="امامی", timeframe=MarketCandle.ADJUSTED,
+        date_time="1403-01-01", close_price=1,
+    )
+    assert _price_version_fingerprint([kama.key]) == before
+
+    Price.objects.create(asset=kama, price=1, source="TEST")
+    assert _price_version_fingerprint([kama.key]) != before
+
+
 def test_returns_cache_isolated_by_history_window(monkeypatch):
     import pandas as pd
     from django.core.cache import cache

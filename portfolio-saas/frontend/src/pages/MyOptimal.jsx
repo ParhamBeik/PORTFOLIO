@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { useApi } from "../useApi.js";
 import { myOptimal, frontier, listAssets, robustness } from "../api.js";
-import { pct, num, signedPct, signedToman, humanize, date, assetLabel } from "../format.js";
+import { pct, num, signedPct, signedToman, humanize, date, dateTime, assetLabel } from "../format.js";
 import {
   Async,
   Badge,
@@ -353,6 +353,9 @@ function MyOptimalBody({
 
   return (
     <div className="space-y-6">
+      {data.as_of && (
+        <p className="mt-1 text-sm text-muted">Computed {dateTime(data.as_of)}</p>
+      )}
       <div className="flex flex-wrap gap-3">
         <Tabs options={windowOptions} value={win.label} onChange={setWindowLabel} label="Lookback window" testId="optimal-window-tabs" />
         <Tabs options={scenarioOptions} value={effectiveScenario} onChange={setScenario} label="Scenario" testId="optimal-scenario-tabs" />

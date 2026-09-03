@@ -498,6 +498,10 @@ def aggregate_daily_price_averages(date_str: str | None = None):
         )
         written += 1
     outcome.finish(WorkflowRun.Outcome.SUCCESS, rows_accepted=written)
+    try:
+        sweep_my_optimal_snapshots.delay()
+    except Exception as exc:
+        logger.warning("Could not enqueue sweep_my_optimal_snapshots: %s", exc)
     return written
 
 
@@ -775,3 +779,117 @@ def _ledger_prune(workflow, table, metadata):
         WorkflowRun.Outcome.SUCCESS,
         metadata=metadata,
     )
+
+
+# -----------------------------------------------------------------------------
+# Per-account MyOptimal snapshot precompute & background refresh
+# -----------------------------------------------------------------------------
+def refresh_if_stale(account, basis: str = "real_toman", *, force: bool = False):
+    """Compute and persist an OptimizationSnapshot for an account if stale.
+
+    Idempotent: uses a cache lock so concurrent triggers cannot run duplicate
+    optimizations. Skips if the latest snapshot is younger than 15 minutes
+    and the scoped price/ledger fingerprint matches.
+    """
+    from django.core.cache import cache
+    from django.utils import timezone
+    from portfolio.models import Holding, LedgerEntry
+    from portfolio.optimization_models import OptimizationSnapshot
+    from portfolio.services.returns import _price_version_fingerprint
+    from portfolio.views import _compute_my_optimal_payload
+
+    holding_q = Holding.objects.filter(account=account)
+    ledger_q = LedgerEntry.objects.filter(account=account)
+    max_ledger_id = ledger_q.order_by("-id").values_list("id", flat=True).first() or 0
+    max_holding_id = holding_q.order_by("-id").values_list("id", flat=True).first() or 0
+    hidden_fp = "-".join(
+        str(i) for i in sorted(
+            holding_q.filter(is_hidden=True).values_list("id", flat=True)
+        )
+    )
+    current_fp = (
+        f"{_price_version_fingerprint(holding_q.values_list('asset__key', flat=True))}"
+        f":{max_ledger_id}:{max_holding_id}:{hidden_fp}"
+    )
+
+    snap = (
+        OptimizationSnapshot.objects
+        .filter(account=account, scenario="my_optimal", basis=basis)
+        .order_by("-created_at")
+        .first()
+    )
+
+    now = timezone.now()
+    if not force and snap is not None:
+        if (now - snap.created_at).total_seconds() < 900 and snap.price_version == current_fp:
+            return snap
+
+    lock_key = f"lock:my_optimal_refresh:{account.id}:{basis}"
+    if not cache.add(lock_key, 1, timeout=60):
+        return snap
+
+    try:
+        payload = _compute_my_optimal_payload(account.user, account, basis)
+        if not payload or not isinstance(payload, dict) or "windows" not in payload:
+            return None
+        if not any(w.get("status") == "ok" for w in payload.get("windows", [])):
+            return None
+
+        payload["as_of"] = now.isoformat()
+        snap = OptimizationSnapshot.objects.create(
+            account=account,
+            scenario="my_optimal",
+            basis=basis,
+            window_days=0,
+            payload=payload,
+            price_version=current_fp,
+            as_of=now,
+            created_by=account.user,
+        )
+        cache_key = f"my_optimal:{account.user_id}:{account.id}:{basis}:nall:vany:{current_fp}"
+        cache.set(cache_key, payload, 300)
+        return snap
+    finally:
+        cache.delete(lock_key)
+
+
+@shared_task(ignore_result=True)
+def refresh_my_optimal_snapshot(account_id: int, basis: str = "real_toman", force: bool = False):
+    """Asynchronously refresh the default MyOptimal snapshot for one account."""
+    from portfolio.models import Account
+    account = Account.objects.select_related("user").filter(id=account_id).first()
+    if account:
+        refresh_if_stale(account, basis=basis, force=force)
+
+
+@shared_task(ignore_result=True)
+def sweep_my_optimal_snapshots():
+    """Nightly sweep refreshing stale MyOptimal snapshots for all active accounts."""
+    from portfolio.models import Account
+    accounts = (
+        Account.objects.filter(holdings__isnull=False)
+        .distinct()
+        .values_list("id", flat=True)
+    )
+    for account_id in accounts:
+        for basis in ("real_toman", "nominal_toman"):
+            refresh_my_optimal_snapshot.delay(account_id=account_id, basis=basis)
+
+
+def debounce_my_optimal_refresh(account_id: int):
+    """Debounce triggering a MyOptimal refresh for an account after ledger/holding change."""
+    from django.conf import settings
+    from django.core.cache import cache
+    if getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):
+        return
+    key = f"debounce:my_optimal:{account_id}"
+    if cache.add(key, 1, timeout=5):
+        try:
+            for basis in ("real_toman", "nominal_toman"):
+                refresh_my_optimal_snapshot.apply_async(
+                    kwargs={"account_id": account_id, "basis": basis},
+                    countdown=5,
+                )
+        except Exception as exc:
+            logger.warning("Could not enqueue debounced my_optimal refresh: %s", exc)
+

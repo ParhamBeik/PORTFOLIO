@@ -3068,3 +3068,68 @@ def test_efficient_risk_relaxes_the_hard_asset_sleeve(asset_catalog, db):
     assert "target_volatility_below_minimum" not in degraded, (
         "fell through to minimum variance instead of relaxing the sleeve"
     )
+
+
+def test_my_optimal_serves_snapshot_and_triggers_refresh_when_stale(
+    synthetic_history, make_user, monkeypatch
+):
+    """Integration: MyOptimal snapshot serving, stale refresh trigger, and as_of inclusion."""
+    from unittest.mock import MagicMock
+    from portfolio.optimization_models import OptimizationSnapshot
+
+    pro = make_user(email="snap_test@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 1, "bitcoin_usd": 1, "usd_cash": 1000},
+    )
+
+    # First request: cold start computes inline and creates OptimizationSnapshot
+    client = _client(pro)
+    resp1 = client.get(f"/api/optimization/my-optimal/?account={acct.id}")
+    assert resp1.status_code == 200
+    data1 = resp1.json()
+    assert "as_of" in data1
+
+    snap = OptimizationSnapshot.objects.filter(
+        account=acct, scenario="my_optimal", basis="real_toman"
+    ).first()
+    assert snap is not None
+    assert snap.basis == "real_toman"
+
+    # Make the snapshot appear 20 minutes old
+    snap.created_at = timezone.now() - timedelta(minutes=20)
+    snap.save(update_fields=["created_at"])
+
+    # Clear memory cache so view is forced to hit the snapshot DB layer
+    cache.clear()
+
+    # Second request: served from snapshot, triggers background refresh
+    refresh_mock = MagicMock()
+    monkeypatch.setattr("portfolio.tasks.refresh_my_optimal_snapshot.delay", refresh_mock)
+
+    resp2 = client.get(f"/api/optimization/my-optimal/?account={acct.id}")
+    assert resp2.status_code == 200
+    assert resp2.json()["windows"] == data1["windows"]
+    assert refresh_mock.called
+
+
+def test_my_optimal_knobs_bypass_snapshot(synthetic_history, make_user):
+    """Integration: custom knob values compute live instead of serving default snapshot."""
+    from portfolio.optimization_models import OptimizationSnapshot
+
+    pro = make_user(email="knobs_test@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 1, "bitcoin_usd": 1, "usd_cash": 1000},
+    )
+    client = _client(pro)
+
+    # Seed a snapshot
+    resp1 = client.get(f"/api/optimization/my-optimal/?account={acct.id}")
+    assert resp1.status_code == 200
+
+    # Request with max_assets knob: bypasses snapshot and sets max_assets
+    resp2 = client.get(f"/api/optimization/my-optimal/?account={acct.id}&max_assets=3")
+    assert resp2.status_code == 200
+    assert resp2.json()["max_assets"] == 3
+

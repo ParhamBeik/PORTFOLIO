@@ -174,6 +174,12 @@ app.conf.beat_schedule = {
         "task": "portfolio.tasks.run_best_overall_snapshots",
         "schedule": crontab(hour=2, minute=30),
     },
+    # "Optimal version of my portfolio" precompute sweep: refreshes stale
+    # snapshots for active accounts.
+    "nightly-my-optimal-sweep": {
+        "task": "portfolio.tasks.sweep_my_optimal_snapshots",
+        "schedule": crontab(hour=2, minute=45),
+    },
 }
 
 if settings.CODAL_ENABLED:
