@@ -1136,6 +1136,51 @@ def test_backfill_ledger_gap_command(account, asset_catalog, write_prices):
     assert txn2.quantity == Decimal("100")
 
 
+@pytest.mark.django_db
+def test_holdings_list_query_count_is_flat_in_holding_count(
+    asset_catalog, make_user
+):
+    """Listing holdings must not cost a query per holding.
+
+    HoldingSerializer reads five columns off `asset` plus `obj.label`, and
+    Django resolves a forward FK lazily per instance, so without the join the
+    endpoint costs one extra round trip for every row -- on the request the
+    dashboard makes first and most often. Comparing two portfolios rather than
+    asserting an absolute number keeps this pinned to the growth rate, which is
+    the actual invariant; the fixed prelude (auth, account lookup) is free to
+    change.
+    """
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    user = make_user(email="nplusone@test.test")
+    one = Account.objects.create(user=user, name="One")
+    many = Account.objects.create(user=user, name="Many")
+    keys = list(asset_catalog)[:6]
+    assert len(keys) >= 4, "fixture no longer has enough assets to see the slope"
+
+    Holding.objects.create(
+        account=one, asset=asset_catalog[keys[0]], quantity=Decimal("1")
+    )
+    for key in keys:
+        Holding.objects.create(
+            account=many, asset=asset_catalog[key], quantity=Decimal("1")
+        )
+
+    client = _client(user)
+    with CaptureQueriesContext(connection) as few:
+        assert client.get(f"/api/accounts/{one.id}/holdings/").status_code == 200
+    with CaptureQueriesContext(connection) as lots:
+        resp = client.get(f"/api/accounts/{many.id}/holdings/")
+        assert resp.status_code == 200
+    assert len(resp.data) == len(keys)
+
+    assert len(lots) == len(few), (
+        f"query count grew with the holding count ({len(few)} -> {len(lots)}) "
+        f"across {len(keys) - 1} extra rows: the asset join was dropped"
+    )
+
+
 # ----------------------------------------------------------------------
 # test_basis_integrity.py
 # Valuation-basis integrity: real_toman must actually deflate, and CPI gaps

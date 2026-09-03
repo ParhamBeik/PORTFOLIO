@@ -5,6 +5,7 @@ part (latest prices) is cached, so these endpoints stay cheap at scale.
 Every endpoint requires authentication only — the FREE/PRO tier gating these
 docs used to describe was removed along with the subscription model.
 """
+import hmac
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -174,7 +175,12 @@ class HoldingListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         account = self._account()
-        return account.holdings.all() if account else Holding.objects.none()
+        # HoldingSerializer reads five columns off `asset` plus `obj.label`, so
+        # without the join this is one extra query per row on the most-hit
+        # endpoint in the app.
+        if account is None:
+            return Holding.objects.none()
+        return account.holdings.select_related("asset").all()
 
     def _account(self):
         return (
@@ -250,7 +256,7 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
         return Holding.objects.filter(
             account__user=self.request.user,
             account_id=self.kwargs["account_id"],
-        )
+        ).select_related("asset")
 
     def perform_update(self, serializer):
         from .services.ledger import (
@@ -2569,10 +2575,12 @@ class LiabilityListCreateView(generics.ListCreateAPIView):
     serializer_class = LiabilitySerializer
 
     def get_queryset(self):
+        # LiabilitySerializer renders `asset_key`/`asset_name`, so the join has
+        # to be here or every secured debt costs its own query.
         return Liability.objects.filter(
             account__user=self.request.user,
             account_id=self.kwargs["account_id"],
-        )
+        ).select_related("asset")
 
     def perform_create(self, serializer):
         account = get_object_or_404(
@@ -2589,7 +2597,7 @@ class LiabilityDetailView(generics.RetrieveUpdateDestroyAPIView):
         return Liability.objects.filter(
             account__user=self.request.user,
             account_id=self.kwargs["account_id"],
-        )
+        ).select_related("asset")
 
 
 class BrsApiWebhookView(APIView):
@@ -2608,7 +2616,12 @@ class BrsApiWebhookView(APIView):
         if not secret:
             return Response({"detail": "Webhook secret not configured."}, status=400)
         header = request.headers.get("X-BRS-WEBHOOK-SECRET") or request.META.get("HTTP_X_BRS_WEBHOOK_SECRET")
-        if not header or header != secret:
+        # `!=` on a secret returns as soon as two bytes differ, so response time
+        # leaks how long a guessed prefix was correct. compare_digest is the
+        # fixed-time comparison; encode first so a non-ASCII secret cannot raise.
+        if not header or not hmac.compare_digest(
+            header.encode("utf-8"), str(secret).encode("utf-8")
+        ):
             return Response({"detail": "Unauthorized."}, status=401)
 
         # Optionally the payload can contain symbols or metadata; keep it for the task

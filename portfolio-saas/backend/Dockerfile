@@ -52,4 +52,27 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 ENTRYPOINT ["/app/entrypoint.sh"]
 # uvicorn workers under gunicorn: streaming SSE needs async-friendly serving,
 # and a worker per process keeps one blocked stream from starving the API.
-CMD ["gunicorn", "config.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--workers", "3"]
+#
+# --max-requests recycles a worker after N requests, with jitter so the three
+# never retire together and drop the whole pool at once. UvicornWorker maps it
+# to uvicorn's limit_max_requests, so it does take effect here. This is a
+# memory guard, not a tuning knob: pandas/numpy/cvxpy fragment the allocator
+# badly and the analytics endpoints build a fresh DataFrame per request, so RSS
+# drifts up across a long-lived process until the 1536m container limit
+# OOM-kills it. Recycling returns the arena to the OS on a schedule instead.
+#
+# --timeout is NOT a request deadline under an async worker. UvicornWorker
+# feeds it to timeout_notify, so the arbiter reaps a worker whose event loop
+# has stopped heartbeating -- but Django's sync views run in a thread and the
+# loop keeps notifying, so a slow request rides straight through it. Capping a
+# single request still needs either the edge proxy's read timeout or explicit
+# middleware; this only bounds a genuinely wedged process.
+
+CMD ["gunicorn", "config.asgi:application", \
+     "-k", "uvicorn.workers.UvicornWorker", \
+     "--bind", "0.0.0.0:8000", \
+     "--workers", "3", \
+     "--max-requests", "1000", \
+     "--max-requests-jitter", "150", \
+     "--timeout", "120", \
+     "--graceful-timeout", "30"]

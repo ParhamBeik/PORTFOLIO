@@ -288,6 +288,51 @@ def _daily_bar_as_of(asset, jalali_str) -> tuple[Decimal, int]:
     )
 
 
+def _newest_close_per_symbol(base_qs, symbols, rejections, *, date_field) -> dict:
+    """Newest NON-REJECTED close per symbol, as {symbol: (jalali_day, close)}.
+
+    Postgres `DISTINCT ON` answers "newest row per symbol" in one index-ordered
+    pass, which is the whole job in the overwhelming case. What it cannot
+    express is "newest row that is not in this rejection set", so the rare
+    symbol whose top row IS rejected falls through to a second scan scoped to
+    just those symbols -- same answer, paid for only where it is needed.
+
+    The shape this replaces streamed EVERY adjusted candle and EVERY gold row
+    that the held symbols had ever printed, then kept the first of each via
+    `setdefault`: tens of thousands of rows fetched per call to use one each,
+    on a path the live valuation hits on every cache miss.
+    """
+    if not symbols:
+        return {}
+    ordering = ("symbol", f"-{date_field}")
+    resolved: dict = {}
+    contested: list[str] = []
+    top = (
+        base_qs.order_by(*ordering)
+        .distinct("symbol")
+        .values("symbol", date_field, "close_price")
+    )
+    for row in top:
+        day = str(row[date_field]).split()[0]
+        if (row["symbol"], day) in rejections:
+            contested.append(row["symbol"])
+        else:
+            resolved[row["symbol"]] = (day, row["close_price"])
+    if contested:
+        rest = (
+            base_qs.filter(symbol__in=contested)
+            .order_by(*ordering)
+            .values("symbol", date_field, "close_price")
+        )
+        for row in rest:
+            if row["symbol"] in resolved:
+                continue
+            day = str(row[date_field]).split()[0]
+            if (row["symbol"], day) not in rejections:
+                resolved[row["symbol"]] = (day, row["close_price"])
+    return resolved
+
+
 def _latest_archive_closes(assets) -> tuple[dict, dict]:
     """Newest usable warehouse close per asset key, as (prices, jalali dates).
 
@@ -332,28 +377,23 @@ def _latest_archive_closes(assets) -> tuple[dict, dict]:
     # marketdata.ingest.ingest_real_legal) was never adjusted prices at all,
     # it is the Real/Legal breakdown, so that fallback used to silently match
     # nothing.
-    stock_rows = (
-        candle_close_qs(stock_symbols)
-        .order_by("symbol", "-date_time")
-        .values("symbol", "date_time", "close_price")
+    stock_newest = _newest_close_per_symbol(
+        candle_close_qs(stock_symbols), stock_symbols, rejections,
+        date_field="date_time",
     )
-    for row in stock_rows:
-        dt_str = row["date_time"].split()[0]
-        if (row["symbol"], dt_str) not in rejections:
-            key = stock_symbols[row["symbol"]]
-            archive_prices.setdefault(key, _q(row["close_price"]))
-            archive_dates.setdefault(key, dt_str)
+    for symbol, (day, close) in stock_newest.items():
+        key = stock_symbols[symbol]
+        archive_prices.setdefault(key, _q(close))
+        archive_dates.setdefault(key, day)
 
-    brs_rows = (
-        GoldCurrencyHistory.objects.filter(symbol__in=brs_symbols, close_price__gt=0)
-        .order_by("symbol", "-date")
-        .values("symbol", "date", "close_price")
+    brs_newest = _newest_close_per_symbol(
+        GoldCurrencyHistory.objects.filter(symbol__in=brs_symbols, close_price__gt=0),
+        brs_symbols, rejections, date_field="date",
     )
-    for row in brs_rows:
-        if (row["symbol"], row["date"]) not in rejections:
-            key = brs_symbols[row["symbol"]]
-            archive_prices.setdefault(key, _q(row["close_price"]))
-            archive_dates.setdefault(key, row["date"])
+    for symbol, (day, close) in brs_newest.items():
+        key = brs_symbols[symbol]
+        archive_prices.setdefault(key, _q(close))
+        archive_dates.setdefault(key, day)
 
     # Live-only feeds converge into MarketDailyBar, which stores the provider's
     # number in whatever currency it was quoted and carries no unit column.
@@ -1082,12 +1122,41 @@ def compute_dynamic_net_worth_series(
     stock_symbols = {a.tse_symbol: a.key for a in assets.values() if a.tse_symbol}
     brs_symbols = {a.brs_symbol: a.key for a in assets.values() if a.brs_symbol}
 
+    window_start_jalali = jdatetime.date.fromgregorian(
+        date=(now - timedelta(days=days - 1)).date()
+    ).strftime("%Y-%m-%d")
+
+    # These two maps answer two different questions, which is why each table is
+    # read twice rather than once without a bound.
+    #
+    #   1. What did this asset close at on each day INSIDE the window? Bounded
+    #      at `window_start_jalali`.
+    #   2. What was the last real close at or BEFORE the window opened? That is
+    #      the priming pass below, and it needs exactly one row per symbol --
+    #      the newest one -- however far back it sits.
+    #
+    # One unbounded query used to serve both, which meant a 30-day chart fetched
+    # every adjusted candle and every gold row the held symbols had ever printed
+    # and discarded all but the tail. Clipping that query to the window alone
+    # would NOT be equivalent: an asset last priced before the window would lose
+    # its `last_priced_date` entry, and an entry is what the staleness guard
+    # measures. Without one a delisted holding stops being dropped and starts
+    # being carried at its live price for the whole series. Hence a bounded bulk
+    # read plus a one-row-per-symbol DISTINCT ON priming read.
     stock_closes = {}
     if stock_symbols:
-        s_rows = candle_close_qs(list(stock_symbols)).values(
-            "symbol", "date_time", "close_price"
+        s_rows = candle_close_qs(
+            list(stock_symbols), since=window_start_jalali
+        ).values("symbol", "date_time", "close_price")
+        s_primer = (
+            # `as_of` is the helper's own end-of-day bound, which knows that a
+            # bare "1405-05-09" and "1405-05-09 00:00:00" are the same session.
+            candle_close_qs(list(stock_symbols), as_of=window_start_jalali)
+            .order_by("symbol", "-date_time")
+            .distinct("symbol")
+            .values("symbol", "date_time", "close_price")
         )
-        for r in s_rows:
+        for r in list(s_primer) + list(s_rows):
             key = stock_symbols[r["symbol"]]
             # Portfolio TSE quotes follow warehouse Rial under the legacy
             # one-tenth-share convention.
@@ -1095,10 +1164,19 @@ def compute_dynamic_net_worth_series(
 
     gold_closes = {}
     if brs_symbols:
-        g_rows = GoldCurrencyHistory.objects.filter(
+        brs_base = GoldCurrencyHistory.objects.filter(
             symbol__in=list(brs_symbols.keys()), close_price__gt=0
-        ).values("symbol", "date", "close_price")
-        for r in g_rows:
+        )
+        g_rows = brs_base.filter(date__gte=window_start_jalali).values(
+            "symbol", "date", "close_price"
+        )
+        g_primer = (
+            brs_base.filter(date__lte=window_start_jalali)
+            .order_by("symbol", "-date")
+            .distinct("symbol")
+            .values("symbol", "date", "close_price")
+        )
+        for r in list(g_primer) + list(g_rows):
             key = brs_symbols[r["symbol"]]
             gold_closes.setdefault(r["date"], {})[key] = Decimal(str(r["close_price"]))
 
@@ -1126,10 +1204,6 @@ def compute_dynamic_net_worth_series(
 
     latest_prices = get_latest_prices()
     usd_rate = Decimal(latest_prices.get("usd_cash", 0) or 0)
-
-    window_start_jalali = jdatetime.date.fromgregorian(
-        date=(now - timedelta(days=days - 1)).date()
-    ).strftime("%Y-%m-%d")
 
     # Track last known price for each asset to seamlessly fill non-trading days.
     #

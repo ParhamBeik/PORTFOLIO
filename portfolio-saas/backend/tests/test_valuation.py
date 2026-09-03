@@ -1180,6 +1180,85 @@ def test_stock_silent_beyond_five_sessions_is_still_dropped(
 
 
 @pytest.mark.django_db
+def test_close_from_before_the_window_still_primes_the_series(
+    asset_catalog, write_prices, make_user
+):
+    """The priming read reaches past the window; the bulk read does not have to.
+
+    `stock_closes` is filled by two queries -- one bounded to the window, one
+    DISTINCT ON row per symbol for the newest close at or before it. This pins
+    the second. The last close sits 40 days back with the market shut ever
+    since, so no session has elapsed and that close still stands. If priming
+    were dropped in favour of clipping the bulk query to the window, the asset
+    would fall back to its LIVE price instead, which is a different number --
+    that substitution is the regression this asserts against.
+    """
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+    from portfolio.services.returns import to_jalali_str
+
+    asset = asset_catalog["kama_stock"]
+    asset.tse_symbol = "کاما"
+    asset.save(update_fields=["tse_symbol"])
+    # Deliberately unequal to the candle close, so the two sources are telling
+    # the chart different things and the assertion can say which one it read --
+    # but close enough that the spike guard has no opinion, or the test would
+    # pass for the wrong reason.
+    write_prices({"kama_stock": Decimal("3500"), "usd_cash": Decimal("60000")})
+
+    now = timezone.now()
+    _write_candles("کاما", [to_jalali_str(now - timedelta(days=40))], price="3000")
+
+    user = make_user(email="primed@test.test")
+    account = Account.objects.create(user=user, name="Primed")
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("100"))
+
+    series = compute_dynamic_net_worth_series(user, account, days=10)
+    totals = {Decimal(row["total"]) for row in series}
+
+    # 100 shares x 3000 Rial, under the legacy one-tenth-share convention.
+    assert totals == {Decimal("30000")}, (
+        "the series should carry the primed warehouse close (30000), not the "
+        f"live quote (35000); got {totals}"
+    )
+
+
+@pytest.mark.django_db
+def test_close_from_before_the_window_is_still_aged_out_when_sessions_elapsed(
+    asset_catalog, write_prices, make_user
+):
+    """Priming exists to feed the staleness guard, not to defeat it.
+
+    Same shape as above, except the market kept trading throughout. The primed
+    close is then 40 days and many sessions old, so the guard must drop the
+    holding rather than carry it -- which is only possible because priming
+    recorded a `last_priced_date` for it to measure.
+    """
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+    from portfolio.services.returns import to_jalali_str
+
+    asset = asset_catalog["kama_stock"]
+    asset.tse_symbol = "کاما"
+    asset.save(update_fields=["tse_symbol"])
+    write_prices({"kama_stock": Decimal("9999"), "usd_cash": Decimal("60000")})
+
+    now = timezone.now()
+    _write_candles("کاما", [to_jalali_str(now - timedelta(days=40))], price="3000")
+    _write_candles(
+        "فولاد", [to_jalali_str(now - timedelta(days=d)) for d in range(1, 12)]
+    )
+
+    user = make_user(email="agedout@test.test")
+    account = Account.objects.create(user=user, name="AgedOut")
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("100"))
+
+    series = compute_dynamic_net_worth_series(user, account, days=10)
+
+    assert float(series[-1]["total"]) == 0.0, (
+        "a close 40 days and many sessions old must be aged out, not carried"
+    )
+
+
+@pytest.mark.django_db
 def test_dynamic_series_query_count_is_flat_in_window_length(
     asset_catalog, write_prices, make_user
 ):
@@ -1412,6 +1491,83 @@ def test_archive_close_past_the_forward_fill_bound_is_not_offered(
     replacements = _archive_replacements({"kama_stock": Decimal("0")})
 
     assert "kama_stock" not in replacements
+
+
+def test_rejected_newest_close_falls_through_to_the_session_before_it(
+    asset_catalog, write_prices, monkeypatch
+):
+    """A quarantined close is not the answer, and it is not the end of the search.
+
+    `_newest_close_per_symbol` resolves the common case with one DISTINCT ON
+    row per symbol, which by construction cannot see past a rejected top row.
+    The symbol-scoped second pass is what keeps the old streaming behaviour's
+    answer: skip the rejection, take the session before it. Without it a single
+    bad print would read as "this symbol has no warehouse close at all" and the
+    holding would silently lose its archive veto.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+    from marketdata.models import MarketCandle, RejectedRecord
+    from portfolio.services.returns import to_jalali_str
+    from portfolio.services.valuation import _latest_archive_closes
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+
+    newest_day = to_jalali_str(timezone.now() - timedelta(days=1))
+    prior_day = to_jalali_str(timezone.now() - timedelta(days=2))
+    MarketCandle.objects.create(
+        symbol="کاما", timeframe=MarketCandle.ADJUSTED,
+        date_time=newest_day, close_price=Decimal("99999"),
+    )
+    MarketCandle.objects.create(
+        symbol="کاما", timeframe=MarketCandle.ADJUSTED,
+        date_time=prior_day, close_price=Decimal("5200"),
+    )
+    RejectedRecord.objects.create(
+        endpoint="stock_candle_adjusted", symbol="کاما",
+        date=newest_day, reason="series_spike",
+    )
+
+    prices, dates = _latest_archive_closes([stock])
+
+    assert prices["kama_stock"] == Decimal("5200")
+    assert dates["kama_stock"] == prior_day
+
+
+def test_every_rejected_close_leaves_the_symbol_unresolved(
+    asset_catalog, write_prices, monkeypatch
+):
+    """The second pass must exhaust, not loop: a symbol whose every stored close
+    is quarantined has no archive answer, and saying so is what lets the caller
+    report the gap rather than reach for a number that was thrown out."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+    from marketdata.models import MarketCandle, RejectedRecord
+    from portfolio.services.returns import to_jalali_str
+    from portfolio.services.valuation import _latest_archive_closes
+
+    stock = asset_catalog["kama_stock"]
+    stock.tse_symbol = "کاما"
+    stock.save(update_fields=["tse_symbol"])
+
+    for offset in (1, 2):
+        day = to_jalali_str(timezone.now() - timedelta(days=offset))
+        MarketCandle.objects.create(
+            symbol="کاما", timeframe=MarketCandle.ADJUSTED,
+            date_time=day, close_price=Decimal("5200"),
+        )
+        RejectedRecord.objects.create(
+            endpoint="stock_candle_adjusted", symbol="کاما",
+            date=day, reason="series_spike",
+        )
+
+    prices, _dates = _latest_archive_closes([stock])
+
+    assert "kama_stock" not in prices
 
 
 def test_stale_archive_close_still_vetoes_a_corrupt_live_quote(
