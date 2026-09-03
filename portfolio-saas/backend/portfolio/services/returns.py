@@ -36,6 +36,7 @@ from django.core.cache import cache
 
 from marketdata.currency import tse_close_to_toman
 from marketdata.integrity import MAX_OUTAGE_CALENDAR_DAYS
+from marketdata.provenance import PRICE_SERIES_ENDPOINTS, rejected_pairs
 from portfolio.models import Asset, Price
 from .deflator import normalize_basis, to_basis
 
@@ -524,8 +525,6 @@ def _load_price_panel(
     if as_of_dt is not None:
         as_of_jalali = to_jalali_str(as_of_dt)
 
-    from marketdata.models import RejectedRecord
-
     # Bulk query MarketCandle (TSE)
     tse_rows = []
     if tse_symbols:
@@ -626,18 +625,8 @@ def _load_price_panel(
         )
 
     cutoff_jalali = to_jalali_str(cutoff)
-    rejections = set(
-        RejectedRecord.objects.filter(
-            symbol__in=tse_symbols + brs_symbols,
-            date__gte=cutoff_jalali,
-            endpoint__in=[
-                "stock_candle_adjusted", "stock_candle_unadjusted",
-                "stock_history_adjusted", "stock_history_unadjusted",
-                "series:1d_adj", "series:1d_unadj",
-                "gold_daily", "crypto_daily", "commodity_daily",
-                "market_index_daily", "etf_nav_daily", "option_contract_daily"
-            ]
-        ).values_list("symbol", "date")
+    rejections = rejected_pairs(
+        tse_symbols + brs_symbols, PRICE_SERIES_ENDPOINTS, since=cutoff_jalali
     )
     if rejections:
         tse_rows = [r for r in tse_rows if (r[0], r[1].split()[0]) not in rejections]
@@ -794,25 +783,14 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
     # Exclude RejectedRecord matches
     from django.utils import timezone
     from portfolio.models import Asset
-    from marketdata.models import RejectedRecord
     from django.conf import settings
     from datetime import timedelta
 
     assets = {a.key: (a.tse_symbol or a.brs_symbol or "") for a in Asset.objects.filter(key__in=keys)}
     symbols = [s for s in assets.values() if s]
 
-    rejections = set(
-        RejectedRecord.objects.filter(
-            symbol__in=symbols,
-            date__gte=to_jalali_str(cutoff),
-            endpoint__in=[
-                "stock_candle_adjusted", "stock_candle_unadjusted",
-                "stock_history_adjusted", "stock_history_unadjusted",
-                "series:1d_adj", "series:1d_unadj",
-                "gold_daily", "crypto_daily", "commodity_daily",
-                "market_index_daily", "etf_nav_daily", "option_contract_daily"
-            ]
-        ).values_list("symbol", "date")
+    rejections = rejected_pairs(
+        symbols, PRICE_SERIES_ENDPOINTS, since=to_jalali_str(cutoff)
     )
 
     now_tz = timezone.now() if timezone.is_aware(timezone.now()) else timezone.now().replace(tzinfo=dt.timezone.utc)

@@ -161,10 +161,16 @@ def _compute_candidate_universe(
 
     # Helper to convert Jalali to Gregorian date
     def to_greg(val):
+        # Narrow on purpose. A bare `except:` also swallows KeyboardInterrupt
+        # and SystemExit, so a Ctrl-C or a worker shutdown landing inside this
+        # helper was absorbed and read as "unparseable date" -- the loop below
+        # then carried on as though nothing had happened. The parse itself can
+        # only fail these three ways: a non-numeric part, the wrong number of
+        # parts, or a date Jalali has no such day for.
         try:
             y, m, d = (int(part) for part in str(val).split(" ")[0].split("-"))
             return jdatetime.date(y, m, d).togregorian()
-        except:
+        except (ValueError, TypeError):
             return None
 
     # Evaluate each instrument

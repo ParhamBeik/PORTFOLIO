@@ -193,10 +193,21 @@ def ensure_archive_states(stock_symbols=None, gold_symbols=None):
     from .catalog import sync_provider_catalog
 
     if not MarketInstrument.objects.filter(eligible=True).exists():
+        # This branch is the cold-start bootstrap: with no eligible instrument
+        # on file, nothing downstream has a universe to work from. Swallowing
+        # the failure silently meant a provider outage here looked identical to
+        # a healthy empty catalog -- the archive went on to build states from
+        # whatever `tracked_*_symbols()` could scrape instead, and the only
+        # symptom was a warehouse that never grew. Still non-fatal (the caller
+        # can proceed on tracked symbols alone), but never again invisible.
         try:
             sync_provider_catalog()
         except Exception:
-            pass
+            logger.warning(
+                "Catalog bootstrap failed and no eligible instrument exists; "
+                "archive states will be built from tracked symbols only.",
+                exc_info=True,
+            )
 
     if stock_symbols is None or not stock_symbols:
         from .tasks import tracked_tse_symbols

@@ -342,8 +342,12 @@ def _latest_archive_closes(assets) -> tuple[dict, dict]:
     Rows the warehouse recorded as rejected are excluded from all three.
     """
     from marketdata.calendars import candle_close_qs
-    from marketdata.models import GoldCurrencyHistory, RejectedRecord
-    from marketdata.provenance import daily_bar_price
+    from marketdata.models import GoldCurrencyHistory
+    from marketdata.provenance import (
+        PRICE_SERIES_ENDPOINTS,
+        daily_bar_price,
+        rejected_pairs,
+    )
 
     stock_symbols = {
         asset.tse_symbol: asset.key
@@ -357,18 +361,7 @@ def _latest_archive_closes(assets) -> tuple[dict, dict]:
     }
 
     all_symbols = list(stock_symbols.keys()) + list(brs_symbols.keys())
-    rejections = set(
-        RejectedRecord.objects.filter(
-            symbol__in=all_symbols,
-            endpoint__in=[
-                "stock_candle_adjusted", "stock_candle_unadjusted",
-                "stock_history_adjusted", "stock_history_unadjusted",
-                "series:1d_adj", "series:1d_unadj",
-                "gold_daily", "crypto_daily", "commodity_daily",
-                "market_index_daily", "etf_nav_daily", "option_contract_daily"
-            ]
-        ).values_list("symbol", "date")
-    )
+    rejections = rejected_pairs(all_symbols, PRICE_SERIES_ENDPOINTS)
 
     archive_prices = {}
     archive_dates = {}
@@ -1077,7 +1070,12 @@ def compute_dynamic_net_worth_series(
         sessions_between,
     )
     from marketdata.models import GoldCurrencyHistory
-    from marketdata.provenance import daily_bar_price
+    from marketdata.provenance import (
+        BRS_SERIES_ENDPOINTS,
+        STOCK_SERIES_ENDPOINTS,
+        daily_bar_price,
+        rejected_pairs,
+    )
     from portfolio.models import Holding, Liability
     from portfolio.services.timeline import (
         holdings_as_of,
@@ -1143,23 +1141,42 @@ def compute_dynamic_net_worth_series(
     # measures. Without one a delisted holding stops being dropped and starts
     # being carried at its live price for the whole series. Hence a bounded bulk
     # read plus a one-row-per-symbol DISTINCT ON priming read.
+    # A close the warehouse has already quarantined is not a price. `value_as_of`
+    # and `_latest_archive_closes` have always skipped these; this path did not,
+    # so a `series_spike` the validator caught still landed on the net-worth
+    # chart at full size -- the one screen where a fake 30x day is most visible.
+    # No date bound: the primer below deliberately reaches past the window, so a
+    # bounded rejection set could miss the verdict on the row it primes from.
+    stock_rejections = rejected_pairs(
+        stock_symbols, STOCK_SERIES_ENDPOINTS
+    ) if stock_symbols else set()
+    brs_rejections = rejected_pairs(
+        brs_symbols, BRS_SERIES_ENDPOINTS
+    ) if brs_symbols else set()
+
+    # The primer goes through `_newest_close_per_symbol` rather than a bare
+    # DISTINCT ON, because "newest row" and "newest USABLE row" differ exactly
+    # when the top row is quarantined -- and priming from nothing is what sends
+    # a holding to its live price for the whole series.
     stock_closes = {}
     if stock_symbols:
         s_rows = candle_close_qs(
             list(stock_symbols), since=window_start_jalali
         ).values("symbol", "date_time", "close_price")
-        s_primer = (
-            # `as_of` is the helper's own end-of-day bound, which knows that a
-            # bare "1405-05-09" and "1405-05-09 00:00:00" are the same session.
-            candle_close_qs(list(stock_symbols), as_of=window_start_jalali)
-            .order_by("symbol", "-date_time")
-            .distinct("symbol")
-            .values("symbol", "date_time", "close_price")
+        # `as_of` is the helper's own end-of-day bound, which knows that a bare
+        # "1405-05-09" and "1405-05-09 00:00:00" are the same session.
+        primed = _newest_close_per_symbol(
+            candle_close_qs(list(stock_symbols), as_of=window_start_jalali),
+            stock_symbols, stock_rejections, date_field="date_time",
         )
-        for r in list(s_primer) + list(s_rows):
-            key = stock_symbols[r["symbol"]]
+        for symbol, (day, close) in primed.items():
             # Portfolio TSE quotes follow warehouse Rial under the legacy
             # one-tenth-share convention.
+            stock_closes.setdefault(day, {})[stock_symbols[symbol]] = _q(close)
+        for r in s_rows:
+            if (r["symbol"], r["date_time"].split()[0]) in stock_rejections:
+                continue
+            key = stock_symbols[r["symbol"]]
             stock_closes.setdefault(r["date_time"], {})[key] = _q(r["close_price"])
 
     gold_closes = {}
@@ -1170,13 +1187,15 @@ def compute_dynamic_net_worth_series(
         g_rows = brs_base.filter(date__gte=window_start_jalali).values(
             "symbol", "date", "close_price"
         )
-        g_primer = (
-            brs_base.filter(date__lte=window_start_jalali)
-            .order_by("symbol", "-date")
-            .distinct("symbol")
-            .values("symbol", "date", "close_price")
+        primed = _newest_close_per_symbol(
+            brs_base.filter(date__lte=window_start_jalali),
+            brs_symbols, brs_rejections, date_field="date",
         )
-        for r in list(g_primer) + list(g_rows):
+        for symbol, (day, close) in primed.items():
+            gold_closes.setdefault(day, {})[brs_symbols[symbol]] = Decimal(str(close))
+        for r in g_rows:
+            if (r["symbol"], r["date"]) in brs_rejections:
+                continue
             key = brs_symbols[r["symbol"]]
             gold_closes.setdefault(r["date"], {})[key] = Decimal(str(r["close_price"]))
 
@@ -1563,15 +1582,13 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
             else:
                 stale_sessions = 0
                 if asset.tse_symbol:
-                    from marketdata.models import RejectedRecord
-                    rejections = RejectedRecord.objects.filter(
-                        symbol=asset.tse_symbol,
-                        endpoint__in=[
-                            "stock_candle_adjusted", "stock_candle_unadjusted",
-                            "stock_history_adjusted", "stock_history_unadjusted",
-                            "series:1d_adj", "series:1d_unadj"
-                        ]
-                    ).values_list("date", flat=True)
+                    from marketdata.provenance import (
+                        STOCK_SERIES_ENDPOINTS, rejected_pairs,
+                    )
+                    rejections = [
+                        day for _sym, day in
+                        rejected_pairs([asset.tse_symbol], STOCK_SERIES_ENDPOINTS)
+                    ]
                     candles = candle_close_qs(asset.tse_symbol, as_of=jalali_str).exclude(date_time__in=rejections)
                     candle = candles.order_by("-date_time").first()
                     if candle:
@@ -1581,14 +1598,13 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                             candle.date_time[:10], jalali_str, market="tse"
                         )
                 elif asset.brs_symbol:
-                    from marketdata.models import RejectedRecord
-                    rejections = RejectedRecord.objects.filter(
-                        symbol=asset.brs_symbol,
-                        endpoint__in=[
-                            "gold_daily", "crypto_daily", "commodity_daily",
-                            "market_index_daily", "etf_nav_daily", "option_contract_daily"
-                        ]
-                    ).values_list("date", flat=True)
+                    from marketdata.provenance import (
+                        BRS_SERIES_ENDPOINTS, rejected_pairs,
+                    )
+                    rejections = [
+                        day for _sym, day in
+                        rejected_pairs([asset.brs_symbol], BRS_SERIES_ENDPOINTS)
+                    ]
                     history = GoldCurrencyHistory.objects.all()
                     hist = history.filter(
                         symbol=asset.brs_symbol, date__lte=jalali_str, close_price__gt=0

@@ -31,6 +31,50 @@ DAILY_BAR_ENDPOINTS = (
     ArchiveFetchState.Endpoint.OPTION_CONTRACT_DAILY,
 )
 
+#: Rejection verdicts covering the TSE daily-close tables (`MarketCandle`,
+#: `DailyStockHistory`). Literals rather than `ArchiveFetchState.Endpoint`
+#: members because `series:1d_adj` / `series:1d_unadj` are written by the
+#: nightly series validator, which has no archive endpoint of its own.
+STOCK_SERIES_ENDPOINTS = (
+    "stock_candle_adjusted",
+    "stock_candle_unadjusted",
+    "stock_history_adjusted",
+    "stock_history_unadjusted",
+    "series:1d_adj",
+    "series:1d_unadj",
+)
+
+#: Rejection verdicts covering `GoldCurrencyHistory` and the live-only classes
+#: that land in `MarketDailyBar`.
+BRS_SERIES_ENDPOINTS = (
+    ArchiveFetchState.Endpoint.GOLD_DAILY,
+    *DAILY_BAR_ENDPOINTS,
+)
+
+#: Every verdict that can disqualify a daily close, whichever table it came
+#: from. Six call sites across `portfolio/` used to inline this list; they must
+#: agree, because a row one price path refuses and another accepts is how the
+#: same holding gets two different values on the same day.
+PRICE_SERIES_ENDPOINTS = (*STOCK_SERIES_ENDPOINTS, *BRS_SERIES_ENDPOINTS)
+
+
+def rejected_pairs(symbols, endpoints=PRICE_SERIES_ENDPOINTS, *, since=None):
+    """`{(symbol, jalali_day)}` the warehouse has already judged bad.
+
+    `since` is an optional Jalali lower bound: worth passing when the caller
+    only reads a bounded window, pointless when it needs the newest usable row
+    however far back that sits.
+    """
+    symbols = [s for s in symbols if s]
+    if not symbols:
+        return set()
+    queryset = RejectedRecord.objects.filter(
+        symbol__in=symbols, endpoint__in=list(endpoints)
+    )
+    if since is not None:
+        queryset = queryset.filter(date__gte=since)
+    return set(queryset.values_list("symbol", "date"))
+
 
 # A daily bar is only usable as a portfolio price if it came from the same feed
 # the asset is priced from -- `MarketDailyBar` keys on its own asset_class, and
