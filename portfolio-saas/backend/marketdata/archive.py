@@ -33,6 +33,7 @@ from .models import (
 )
 from .quota import (
     ARCHIVE,
+    BRS,
     TSETMC,
     QuotaExhausted,
     archive_capacity,
@@ -173,6 +174,37 @@ _REVERIFY_INTERVAL = {
 }
 
 # Covered by live organic ingest (portfolio.tasks); archive rows are retired.
+# Which provider wallet each archive endpoint spends.
+#
+# Declared here rather than read from `endpoints.REGISTRY` because only three of
+# these names are registry keys; the rest are archive-level jobs whose fetcher is
+# picked by a branch in `_fetch_and_ingest`, so the wallet is whichever API key
+# that branch passes. `None` means the endpoint issues no provider request at
+# all, so no wallet can exhaust it.
+#
+# `tests/test_archive.py` pins that every Endpoint choice appears here: a new
+# endpoint that silently defaulted would be claimed against a spent plan forever.
+_ENDPOINT_PLAN = {
+    ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED: TSETMC,
+    ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED: TSETMC,
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED: TSETMC,
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED: TSETMC,
+    ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS: TSETMC,
+    ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS: TSETMC,
+    # Codal/* bills the same subscription as Tsetmc/*.
+    ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS: TSETMC,
+    ArchiveFetchState.Endpoint.GOLD_DAILY: BRS,
+    # Not retired and not branched for, so it reaches the final `else` and is
+    # fetched as gold history off the BRS key. No state has ever been created for
+    # it; the mapping records where it would spend, not an endorsement.
+    ArchiveFetchState.Endpoint.ETF_NAV_DAILY: BRS,
+    ArchiveFetchState.Endpoint.COMMODITY_DAILY: None,
+    ArchiveFetchState.Endpoint.CRYPTO_DAILY: None,
+    ArchiveFetchState.Endpoint.MARKET_INDEX_DAILY: None,
+    ArchiveFetchState.Endpoint.OPTION_CONTRACT_DAILY: None,
+}
+
+
 _RETIRED_ARCHIVE_ENDPOINTS = frozenset({
     ArchiveFetchState.Endpoint.COMMODITY_DAILY,
     ArchiveFetchState.Endpoint.CRYPTO_DAILY,
@@ -1233,17 +1265,29 @@ def claim_archive_batch(limit=None):
     leaves quota unspent.
     """
     now = timezone.now()
-    # Sized against the roomiest wallet, not the sum: a batch is claimed before
-    # anyone knows which plan each state bills, and `reserve_request` refuses the
-    # individual calls anyway. Summing would over-claim; taking the minimum would
-    # let a spent TSETMC plan stop the handful of gold states, which is the whole
-    # cross-plan failure this work removed.
+    # Sized against the roomiest wallet, not the sum. Summing would over-claim;
+    # taking the minimum would let a spent TSETMC plan stop the handful of gold
+    # states, which is the whole cross-plan failure this work removed.
+    capacity = archive_capacity()
     batch_size = min(
         limit or settings.MARKETDATA_ARCHIVE_BATCH_SIZE,
-        max([*archive_capacity().values(), 0]),
+        max([*capacity.values(), 0]),
     )
     if not batch_size:
         return []
+    # ...but size is not enough on its own. 11,719 of the 11,759 states bill
+    # TSETMC and 38 bill BRS, so once TSETMC was spent for the day, BRS's idle
+    # 1,500 kept `archive_capacity()` non-zero and this went on claiming full
+    # batches out of a pool that is 99.7% TSETMC. Every one of them was refused
+    # by `reserve_request`, at 11,053 refusals an hour, each writing a ledger
+    # row -- the earlier comment here justified that as harmless because "a
+    # batch is claimed before anyone knows which plan each state bills", which
+    # is not true: the wallet is a static property of the endpoint.
+    spent = {plan for plan, room in capacity.items() if room <= 0}
+    blocked_endpoints = [
+        endpoint for endpoint, plan in _ENDPOINT_PLAN.items()
+        if plan is not None and plan in spent
+    ]
     due = Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now)
     deferred_pks = set()
     tick_endpoint = ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS
@@ -1254,7 +1298,9 @@ def claim_archive_batch(limit=None):
         # the weekly probe (claim_probe_batch) or an operator force_retry.
         base = ArchiveFetchState.objects.select_for_update(skip_locked=True).filter(
             due, suspended_at__isnull=True
-        ).exclude(endpoint__in=disabled_endpoints())
+        ).exclude(endpoint__in=disabled_endpoints()).exclude(
+            endpoint__in=blocked_endpoints
+        )
         states = []
 
         def take(candidates, n):

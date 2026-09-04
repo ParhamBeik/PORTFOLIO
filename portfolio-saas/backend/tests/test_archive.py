@@ -409,6 +409,50 @@ def test_genuine_quota_exhaustion_defers_past_rollover_and_takes_siblings():
     assert sibling.last_error == "Daily quota unavailable (bucket_exhausted)."
 
 
+def test_every_archive_endpoint_declares_which_wallet_it_spends():
+    """A new endpoint must not default into a plan by accident.
+
+    `claim_archive_batch` skips endpoints whose plan is spent, so an endpoint
+    missing from the map would keep being claimed against an empty wallet --
+    reintroducing exactly the refusal storm the map exists to stop.
+    """
+    from marketdata.archive import _ENDPOINT_PLAN
+    from marketdata.quota import PLANS
+
+    declared = set(_ENDPOINT_PLAN)
+    actual = {value for value, _ in ArchiveFetchState.Endpoint.choices}
+    assert declared == actual, f"undeclared: {actual - declared}, stale: {declared - actual}"
+    for endpoint, plan in _ENDPOINT_PLAN.items():
+        assert plan is None or plan in PLANS, f"{endpoint} claims unknown plan {plan}"
+
+
+def test_a_spent_plan_stops_claiming_its_endpoints_but_not_the_others(monkeypatch):
+    """Capacity is per wallet, so the claim filter has to be per wallet too.
+
+    11,719 of 11,759 states bill TSETMC and 38 bill BRS. Sizing the batch off
+    the roomiest wallet meant that once TSETMC was spent, BRS's idle 1,500 kept
+    capacity non-zero and full batches were still claimed from a pool that is
+    99.7% TSETMC -- 11,053 refusals an hour, each writing a ledger row. The gold
+    states must still get through, which is why this cannot just stop the tick.
+    """
+    from marketdata import archive
+    from marketdata.models import ArchiveFetchState as State
+
+    stock = _state("spent-plan-stock", Endpoint.STOCK_CANDLE_ADJUSTED)
+    tick = _state("spent-plan-tick", Endpoint.STOCK_TRANSACTION_TICKS)
+    gold = _state("spent-plan-gold", Endpoint.GOLD_DAILY)
+
+    monkeypatch.setattr(archive, "archive_capacity", lambda: {"tsetmc": 0, "brs": 500})
+    claimed = set(archive.claim_archive_batch(limit=50))
+
+    assert gold.pk in claimed, "the plan with room must still be worked"
+    assert stock.pk not in claimed
+    assert tick.pk not in claimed
+    # And the states left alone are genuinely untouched, not deferred: their
+    # wallet refills at rollover and they must be due immediately after it.
+    assert State.objects.get(pk=stock.pk).next_attempt_at == stock.next_attempt_at
+
+
 def test_tick_branch_checks_for_room_before_computing_which_days_it_needs(settings):
     """Don't work out the request, then get told there is no room for it.
 
