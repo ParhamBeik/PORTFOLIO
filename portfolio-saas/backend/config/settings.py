@@ -418,6 +418,13 @@ MARKETDATA_REVERSAL_LIQUIDITY_SINCE = os.getenv(
 MARKETDATA_REVERSAL_MIN_SESSIONS = int(
     os.getenv("MARKETDATA_REVERSAL_MIN_SESSIONS", "100")
 )
+# A symbol must actually produce the setup this many times to enter the universe.
+# Turnover alone put 118 of the top 300 in with zero positives ever: fixed-income
+# ETFs are heavily traded and by construction never move 2% in a day, so intraday
+# history for them can never yield a training example.
+MARKETDATA_REVERSAL_MIN_POSITIVES = int(
+    os.getenv("MARKETDATA_REVERSAL_MIN_POSITIVES", "5")
+)
 # Confine intraday tick spending to that universe. Outside it a symbol still gets
 # every daily endpoint; it just does not get one request per historical day for
 # intraday detail nothing will train on. 0 disables the restriction.

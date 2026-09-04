@@ -39,17 +39,23 @@ def test_grow_tick_windows_gated_to_deep_tier(settings):
         ins_code=1002, l18="SHALLOW_SYM", l30="Shallow Symbol", market_cap=50_000_000_000, free_float=Decimal("1.0")
     )
 
-    # LIQUID_SYM trades; SHALLOW_SYM barely does. Enough sessions to clear
-    # MARKETDATA_REVERSAL_MIN_SESSIONS, dated inside the liquidity window.
+    # LIQUID_SYM trades AND produces the reversal setup; SHALLOW_SYM barely
+    # trades and never moves. Both conditions matter: ranking on turnover alone
+    # admitted 118 of production's top 300 with zero positives ever -- fixed
+    # income ETFs, heavily traded and by construction incapable of a 2% day.
     settings.MARKETDATA_REVERSAL_MIN_SESSIONS = 5
+    settings.MARKETDATA_REVERSAL_MIN_POSITIVES = 3
     settings.MARKETDATA_DEEP_TIER_N = 1
     candles = []
+    close = 1000.0
     for i in range(1, 11):
         day = f"1403-01-{i:02d}"
+        previous, close = close, close * 1.03      # closes +3% on the prior close
         candles.append(MarketCandle(
             symbol="LIQUID_SYM", timeframe="1d_unadj", date_time=day,
-            open_price=1000, high_price=1000, low_price=1000,
-            close_price=1000, volume=1_000_000,
+            open_price=previous, high_price=close,
+            low_price=previous * 0.95,             # ...after dipping 5% first
+            close_price=close, volume=1_000_000,
         ))
         candles.append(MarketCandle(
             symbol="SHALLOW_SYM", timeframe="1d_unadj", date_time=day,

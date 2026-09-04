@@ -79,20 +79,50 @@ def liquid_symbols(limit=None):
     limit = limit or int(getattr(settings, "MARKETDATA_REVERSAL_UNIVERSE_N", 300))
     since = getattr(settings, "MARKETDATA_REVERSAL_LIQUIDITY_SINCE", "1403-01-01")
     min_sessions = int(getattr(settings, "MARKETDATA_REVERSAL_MIN_SESSIONS", 100))
+    min_positives = int(getattr(settings, "MARKETDATA_REVERSAL_MIN_POSITIVES", 5))
+    dip = _threshold("MARKETDATA_REVERSAL_DIP", DEFAULT_DIP)
+    recovery = _threshold("MARKETDATA_REVERSAL_RECOVERY", DEFAULT_RECOVERY)
+    # Liquid is necessary but not sufficient. Ranking on turnover alone put 118
+    # of the top 300 into the universe with ZERO positives ever -- they are
+    # fixed-income ETFs (آسان, آرامش, سپر ...), which are heavily traded and by
+    # construction never move 2% in a day. Buying intraday history for a symbol
+    # that cannot produce the setup is the same waste as the untargeted crawl,
+    # just better disguised. Require that the pattern actually occurs.
     with connection.cursor() as cur:
         cur.execute(
             """
-            SELECT symbol
-            FROM marketdata_marketcandle
-            WHERE timeframe = '1d_unadj' AND date_time >= %s AND volume > 0
-            GROUP BY symbol
-            HAVING count(*) >= %s
-            ORDER BY percentile_disc(0.5) WITHIN GROUP (
-                ORDER BY volume * close_price
-            ) DESC
+            WITH turnover AS (
+                SELECT symbol,
+                       percentile_disc(0.5) WITHIN GROUP (
+                           ORDER BY volume * close_price
+                       ) AS med
+                FROM marketdata_marketcandle
+                WHERE timeframe = '1d_unadj' AND date_time >= %s AND volume > 0
+                GROUP BY symbol
+                HAVING count(*) >= %s
+            ), moves AS (
+                SELECT symbol, low_price AS lo, close_price AS cl,
+                       lag(close_price) OVER (
+                           PARTITION BY symbol ORDER BY date_time
+                       ) AS prev
+                FROM marketdata_marketcandle
+                WHERE timeframe = '1d_unadj'
+            ), positives AS (
+                SELECT symbol, count(*) AS n
+                FROM moves
+                WHERE prev > 0
+                  AND (lo / prev - 1) <= %s
+                  AND (cl / prev - 1) >= %s
+                GROUP BY symbol
+            )
+            SELECT t.symbol
+            FROM turnover t
+            JOIN positives p ON p.symbol = t.symbol
+            WHERE p.n >= %s
+            ORDER BY t.med DESC
             LIMIT %s
             """,
-            [since, min_sessions, limit],
+            [since, min_sessions, -dip, recovery, min_positives, limit],
         )
         return [row[0] for row in cur.fetchall()]
 
