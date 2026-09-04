@@ -50,6 +50,7 @@ per-plan, and they bound our own reservation maths, never the provider's answer.
 import collections
 import logging
 import re
+import threading
 import time
 import uuid
 from datetime import timedelta
@@ -627,6 +628,83 @@ def reserve_request(bucket=OTHER, plan=TSETMC):
         setattr(row, field, getattr(row, field) + 1)
         row.save(update_fields=["used", field, "updated_at"])
         return (row.limit - row.used) if row.limit else None
+
+
+# Advisory-check cache. Process-local rather than Redis on purpose: this is a
+# hint, staleness is harmless, and a network round trip would defeat the point.
+_ROOM_TTL_SECONDS = 10.0
+_room_cache = {}
+_room_lock = threading.Lock()
+
+
+def _archive_room_refusal(plan, now=None):
+    """The reason an ARCHIVE reserve on `plan` would fail right now, or None.
+
+    Mirrors `reserve_request`'s gates minus the row lock and the rate-limit
+    window (which has a side effect and must only run for a request that is
+    really about to happen).
+    """
+    if is_plan_blocked(plan, bucket=ARCHIVE):
+        return (
+            REASON_PLAN_BLOCKED,
+            f"Provider reported the {plan} plan exhausted; paused until reset.",
+        )
+    row = ApiRequestQuota.objects.filter(day=quota_day(), plan=plan).first()
+    if row is None:
+        # No row yet means nothing has been spent today. Let the real gate create it.
+        return None
+    budget = bucket_budget(ARCHIVE, plan, row=row)
+    if budget is not None and row.archive_used >= budget:
+        return (
+            REASON_BUCKET_EXHAUSTED,
+            f"Daily {ARCHIVE} request budget exhausted ({budget}) on {plan}.",
+        )
+    reserve = live_reserve_remaining(plan, row, now=now)
+    ceiling = effective_limit(plan, row)
+    if ceiling and row.used + reserve >= ceiling - _safety_margin():
+        return (
+            REASON_LIVE_RESERVED,
+            f"Remaining {plan} quota is reserved for live prices "
+            f"({reserve} req to cover the rest of the day).",
+        )
+    allowance = archive_allowance_now(plan, row, now=now)
+    if allowance is not None and row.archive_used >= allowance:
+        return (
+            REASON_ARCHIVE_PACED,
+            f"Archive is ahead of its paced share of the {plan} day "
+            f"({row.archive_used}/{allowance} permitted so far); waiting.",
+        )
+    return None
+
+
+def require_archive_room(plan=TSETMC, *, now=None):
+    """Raise `QuotaExhausted` if an ARCHIVE reserve on `plan` would clearly fail.
+
+    Advisory, never authoritative: it takes no lock and claims nothing, so a
+    caller that passes here must still go through `reserve_request`. Its only
+    job is to let an expensive caller bail out *before* doing the work, rather
+    than preparing a request the plan has no room for and throwing it away.
+
+    On 2026-09-04 the tick branch of the archive worker spent 4,539 seconds of
+    compute per wall-clock hour on 8,461 refused attempts, against 465 fetches
+    that actually happened -- the pending-day computation runs first and the
+    refusal came after it.
+
+    The answer is cached per plan for ~10s. Both directions of staleness are
+    safe: a stale "no room" costs one skipped cycle (the archive tick is 15s),
+    and a stale "room" is corrected by the real gate a few lines later.
+    """
+    key = (plan, quota_day())
+    with _room_lock:
+        cached = _room_cache.get(key)
+        if cached and time.monotonic() < cached[0]:
+            refusal = cached[1]
+        else:
+            refusal = _archive_room_refusal(plan, now=now)
+            _room_cache.clear()  # bounded: one live key, and the day rolls over
+            _room_cache[key] = (time.monotonic() + _ROOM_TTL_SECONDS, refusal)
+    if refusal:
+        raise QuotaExhausted(refusal[1], reason=refusal[0])
 
 
 def reconcile_account(account, plan=TSETMC):

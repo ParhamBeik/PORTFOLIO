@@ -2,7 +2,8 @@
 
 Schedule (config/celery.py): `archive_tick` claims a batch and fans it out via
 `run_archive_state`.
-`weekly_metadata_sync` refreshes symbol fundamentals on Friday (market closed).
+`sync_symbol_metadata` refreshes symbol fundamentals daily, stalest first, and
+stops cleanly when its bucket is spent rather than failing.
 
 The tracked-symbol universe comes from user-land (`Asset.tse_symbol` /
 `Asset.brs_symbol`) plus `MARKETDATA_EXTRA_SYMBOLS`. Note the dependency
@@ -551,23 +552,69 @@ def _invalidate_returns():
 
 
 @shared_task(ignore_result=True)
-def weekly_metadata_sync():
-    """Refresh StockSymbolMetadata fundamentals for every tracked symbol."""
-    outcome = _ledgered("weekly_metadata_sync", destination_table="StockSymbolMetadata")
+def sync_symbol_metadata():
+    """Refresh StockSymbolMetadata fundamentals, stalest symbols first.
+
+    `Tsetmc/Symbol.php` costs one request per symbol and bills the OTHER bucket,
+    which is capped at `MARKETDATA_OTHER_REQUEST_BUDGET` (200/day). There are
+    ~1,900 tracked symbols. The previous version walked all of them in
+    `tracked_tse_symbols()` order and let `QuotaExhausted` propagate, so every
+    run refused at ~200, raised, and started from the SAME symbols next time --
+    the tail was structurally unreachable. Production evidence: 86 of 1,969
+    symbols had a non-zero `market_cap`, and the last run failed
+    `QuotaExhausted`.
+
+    Two changes make it converge. Ordering by staleness means each run resumes
+    where the last stopped rather than repeating its prefix, and running out of
+    budget is a clean stop, not a failure -- there is nothing wrong with a job
+    that has spent its daily allowance.
+
+    This matters well beyond fundamentals: `market_cap` used to pick the deep
+    tick tier, and with 96% of it missing that tier was decided by which symbols
+    this task happened to reach. Liquidity now comes from candle turnover
+    (`reversal.liquid_symbols`) precisely so it does not depend on this job, but
+    the fundamentals themselves still do.
+    """
+    from .models import StockSymbolMetadata
+    from .quota import QuotaExhausted
+
+    outcome = _ledgered("sync_symbol_metadata", destination_table="StockSymbolMetadata")
     try:
         key = settings.TSETMC_API_KEY
         if not key:
             _finish_ok(outcome, metadata={"reason": "no_api_key"})
             return
-        import re
+
+        # Symbols ending in a digit are secondary boards ("سامان2"); the provider
+        # has no fundamentals row for them.
+        candidates = [s for s in tracked_tse_symbols() if not re.search(r"\d$", s)]
+        seen = dict(
+            StockSymbolMetadata.objects.filter(l18__in=candidates).values_list(
+                "l18", "updated_at"
+            )
+        )
+        # Never-fetched first (None sorts before any timestamp), then oldest.
+        candidates.sort(key=lambda s: (seen.get(s) is not None, seen.get(s)))
+
         count = 0
-        for symbol in tracked_tse_symbols():
-            if re.search(r"\d$", symbol):
-                continue
-            ingest.ingest_symbol_metadata(fetch_symbol_data(key, symbol))
+        stopped = ""
+        for symbol in candidates:
+            try:
+                ingest.ingest_symbol_metadata(fetch_symbol_data(key, symbol))
+            except QuotaExhausted as exc:
+                stopped = exc.reason
+                break
             _pause()
             count += 1
-        _finish_ok(outcome, rows_accepted=count)
+        _finish_ok(
+            outcome,
+            rows_accepted=count,
+            metadata={
+                "stopped_on": stopped or "completed",
+                "remaining": len(candidates) - count,
+                "never_fetched": sum(1 for s in candidates if s not in seen),
+            },
+        )
     except Exception as err:
         _finish_fail(outcome, err)
         raise

@@ -22,7 +22,7 @@ KAMA_SYMBOL = "کاما"
 
 #: Per-process fallback clock for the paid-board verification cadence, used only
 #: when the shared Redis claim is unavailable. See `_brs_verification_due`.
-_BRS_VERIFY_LOCAL = {"at": 0.0}
+_BRS_VERIFY_LOCAL = {"at": None}
 
 __all__ = [
     "fetch_brsapi",
@@ -319,9 +319,15 @@ def _brs_verification_due():
     # was down -- ~900 extra requests/day at the current cadence, against a
     # 1,500/day meter. A per-process clock over-spends by at most the worker
     # count, which is bounded; "always" is not.
-    last = _BRS_VERIFY_LOCAL.get("at", 0.0)
+    # "Never claimed" has to be None, not 0.0. `time.monotonic()` counts from
+    # boot, not from the epoch, so on a machine that came up less than
+    # `interval` ago the arithmetic reads a zero sentinel as "claimed seconds
+    # ago" and suppresses the board for the first fifteen minutes of uptime --
+    # precisely the window in which a worker is most likely to be restarting
+    # because something was already wrong.
+    last = _BRS_VERIFY_LOCAL.get("at")
     now = time.monotonic()
-    if now - last < interval:
+    if last is not None and now - last < interval:
         return False
     _BRS_VERIFY_LOCAL["at"] = now
     return True

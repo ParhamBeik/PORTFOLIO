@@ -86,11 +86,16 @@ app.conf.beat_schedule = {
         "schedule": crontab(hour=4, minute=10),
     },
 
-    # Symbol fundamentals refresh weekly on Friday (TSE closed, API quiet).
-    # Celery numbers days from Sunday=0, so Friday is 5; this said 4 (Thursday).
-    "marketdata-weekly-meta": {
-        "task": "marketdata.tasks.weekly_metadata_sync",
-        "schedule": crontab(day_of_week=5, hour=9, minute=30),
+    # Symbol fundamentals, DAILY rather than weekly. One request per symbol
+    # against the 200/day OTHER bucket and ~1,900 symbols means a weekly run can
+    # cover at most 200 of them, so 90% of the universe was permanently stale --
+    # 86 of 1,969 symbols had a market cap. The task is resumable (stalest
+    # first, clean stop on quota), so a daily run walks the whole universe in
+    # ~10 days and then keeps it rolling. The OTHER bucket is otherwise idle:
+    # 51 of 200 used on the day this was measured.
+    "marketdata-daily-meta": {
+        "task": "marketdata.tasks.sync_symbol_metadata",
+        "schedule": crontab(hour=9, minute=30),
     },
     "marketdata-daily-catalog": {
         "task": "marketdata.tasks.catalog_sync",

@@ -198,7 +198,7 @@ def test_blended_mode_buys_the_paid_board_every_cycle(monkeypatch, settings):
     settings.MARKETDATA_BLEND_PAID_BOARD = True
     # Deliberately hostile to a paid fetch: board complete, throttle disabled.
     settings.MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS = 0
-    monkeypatch.setattr(fetcher, "_BRS_VERIFY_LOCAL", {"at": 0.0})
+    monkeypatch.setattr(fetcher, "_BRS_VERIFY_LOCAL", {"at": None})
     monkeypatch.setattr(
         fetcher,
         "_direct_job",
@@ -252,7 +252,7 @@ def test_paid_board_is_still_bought_periodically_to_catch_a_stale_free_feed(
     settings.MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS = 900
     settings.MARKETDATA_BLEND_PAID_BOARD = False
 
-    monkeypatch.setattr(fetcher, "_BRS_VERIFY_LOCAL", {"at": 0.0})
+    monkeypatch.setattr(fetcher, "_BRS_VERIFY_LOCAL", {"at": None})
     monkeypatch.setattr("portfolio.live.redis_client.get_redis", lambda: None)
     monkeypatch.setattr(
         fetcher,
@@ -281,6 +281,28 @@ def test_paid_board_is_still_bought_periodically_to_catch_a_stale_free_feed(
     assert len(brs_calls) == 1, "first cycle should buy the verification board"
     fetcher.fetch_all_markets(api)
     assert len(brs_calls) == 1, "second cycle inside the interval must be throttled"
+
+
+def test_verification_fallback_fires_on_a_freshly_booted_worker(monkeypatch, settings):
+    """The "never claimed" sentinel cannot be 0.0.
+
+    `time.monotonic()` counts from boot, so on a host up for less than the
+    interval, `now - 0.0 < interval` is true and the degraded path suppresses
+    the verification board for the first fifteen minutes of uptime -- exactly
+    when a worker is most likely to have just restarted because something broke.
+    Caught for real: this reddened the suite only because the Docker VM had been
+    running for under 900 seconds.
+    """
+    from portfolio.live import fetcher
+
+    settings.MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS = 900
+    monkeypatch.setattr(fetcher, "_BRS_VERIFY_LOCAL", {"at": None})
+    monkeypatch.setattr("portfolio.live.redis_client.get_redis", lambda: None)
+    # A machine that booted twelve seconds ago.
+    monkeypatch.setattr(fetcher.time, "monotonic", lambda: 12.0)
+
+    assert fetcher._brs_verification_due() is True
+    assert fetcher._brs_verification_due() is False
 
 
 def test_crypto_snapshot_capture_uses_wallex_without_brs(monkeypatch, settings):

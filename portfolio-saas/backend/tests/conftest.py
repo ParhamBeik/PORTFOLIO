@@ -117,12 +117,20 @@ def clear_caches():
     """
     from django.core.cache import cache
     cache.clear()
-    from marketdata.quota import _LOCAL_WINDOWS
+    from marketdata.quota import _LOCAL_WINDOWS, _room_cache
     _LOCAL_WINDOWS.clear()
+    # The archive-room advisory answer is memoised for ~10s in-process, so one
+    # test's refusal would otherwise be handed to the next test's fetch.
+    _room_cache.clear()
+    # The paid-board verification slot is claimed with SET NX EX at the real
+    # 900s interval, so without this the first test in the process to reach
+    # `_brs_verification_due` holds the claim for every test after it.
+    from portfolio.live.fetcher import _BRS_VERIFY_LOCAL
+    _BRS_VERIFY_LOCAL["at"] = None
     try:
         from portfolio.live.redis_client import get_redis
         r = get_redis()
-        r.delete("lock:price_fetch")
+        r.delete("lock:price_fetch", "marketdata:brs_verify")
     except Exception:
         pass
 

@@ -409,6 +409,39 @@ def test_genuine_quota_exhaustion_defers_past_rollover_and_takes_siblings():
     assert sibling.last_error == "Daily quota unavailable (bucket_exhausted)."
 
 
+def test_tick_branch_checks_for_room_before_computing_which_days_it_needs(settings):
+    """Don't work out the request, then get told there is no room for it.
+
+    Every other archive branch reserves quota on its first line, so a refusal is
+    free. The tick branch has to derive the pending day set first -- the trading
+    calendar, the stored days, the unreconciled days, the reversal labels -- and
+    that was the archive pool's dominant cost: 8,461 refused attempts in one
+    hour at 536ms each is 4,539 seconds of compute per wall-clock hour, against
+    465 fetches that actually happened.
+    """
+    from marketdata.archive import _fetch_and_ingest
+    from marketdata.models import ApiRequestQuota
+    from marketdata.quota import REASON_ARCHIVE_PACED, QuotaExhausted, TSETMC, quota_day
+
+    settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10000
+    # Far past any point on the pacing ramp, so the advisory answer is "no room"
+    # regardless of what time the suite happens to run at.
+    ApiRequestQuota.objects.create(
+        day=quota_day(), plan=TSETMC, used=9999, archive_used=9999
+    )
+    state = _state("no-room-sym", Endpoint.STOCK_TRANSACTION_TICKS)
+
+    with patch("marketdata.archive._tick_dates_needed") as pending:
+        with pytest.raises(QuotaExhausted) as exc:
+            _fetch_and_ingest(state)
+
+    assert pending.call_count == 0
+    # And it must surface as pacing, so the caller retries in minutes rather than
+    # parking the state until the next quota day.
+    assert exc.value.reason == REASON_ARCHIVE_PACED
+    assert exc.value.is_pacing
+
+
 def test_paced_refusal_retries_in_minutes_and_spares_siblings():
     """`archive_paced` is a wait, not a spent wallet -- the regression that cost 8 days.
 

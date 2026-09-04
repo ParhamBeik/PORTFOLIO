@@ -31,7 +31,14 @@ from .models import (
     ShareholderRecord,
     StockTransactionTick,
 )
-from .quota import ARCHIVE, QuotaExhausted, archive_capacity, increment_historical_full_used
+from .quota import (
+    ARCHIVE,
+    TSETMC,
+    QuotaExhausted,
+    archive_capacity,
+    increment_historical_full_used,
+    require_archive_room,
+)
 
 
 STOCK_ENDPOINTS = (
@@ -320,6 +327,22 @@ def _fetch_and_ingest(state):
             ).values_list("shareholder_id", "date")
         } & expected
     elif endpoint == ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS:
+        # Every other branch reserves quota on its first line, so a refusal costs
+        # nothing. This one has to work out WHICH day to ask for before it can
+        # ask, and that work -- the trading calendar, the stored-day set, the
+        # unreconciled set, the reversal labels -- is the most expensive in the
+        # module. Doing it and then being refused is pure waste, and it was the
+        # dominant cost on the archive pool: 8,461 paced refusals in one hour at
+        # 536ms each is 4,539 seconds of compute per wall-clock hour, against 465
+        # fetches that actually happened.
+        #
+        # Advisory only. `reserve_request` immediately below is still the real,
+        # atomic gate; this just declines to prepare a request the plan already
+        # has no room for.
+        # Ticks always bill TSETMC (`Tsetmc/Transaction.php`, and the registry
+        # entry takes the default plan), so the plan is a constant here rather
+        # than something to look up.
+        require_archive_room(TSETMC)
         pending = _tick_dates_needed(symbol, state.target_window_days)
         if not pending:
             # Nothing pending means one of two opposite things. With no daily

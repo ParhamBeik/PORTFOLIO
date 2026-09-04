@@ -212,6 +212,54 @@ def test_ingest_symbol_metadata_updates_in_place():
 
 
 @pytest.mark.django_db
+def test_metadata_sync_resumes_at_the_stalest_symbol_and_stops_on_quota():
+    """Running out of the daily bucket is a clean stop, and the next run advances.
+
+    `Tsetmc/Symbol.php` bills the OTHER bucket (200/day) and there are ~1,900
+    symbols, so no single run can cover the universe. The previous version walked
+    them in a fixed order and let `QuotaExhausted` propagate, so every run
+    refused at the same place and the tail was unreachable: production had a
+    market cap for 86 of 1,969 symbols and the last run had failed on quota.
+
+    Two properties are pinned here. Already-fetched symbols sort behind
+    never-fetched ones, so consecutive runs cover new ground; and a quota refusal
+    finishes the task successfully rather than raising.
+    """
+    from marketdata import tasks
+    from marketdata.quota import QuotaExhausted
+    from marketdata.models import WorkflowRun
+
+    universe = ["ALPHA", "BRAVO", "CHARLIE"]
+    # BRAVO already has fundamentals, so it must sort last.
+    ingest.ingest_symbol_metadata(
+        {"id": 1, "l18": "BRAVO", "l30": "B", "m": "بورس", "z": 1, "mv": 5}
+    )
+
+    fetched = []
+
+    def fake_fetch(_key, symbol):
+        if len(fetched) >= 2:
+            raise QuotaExhausted("other bucket spent", reason="bucket_exhausted")
+        fetched.append(symbol)
+        return {"id": 100 + len(fetched), "l18": symbol, "l30": symbol,
+                "m": "بورس", "z": 1, "mv": 10}
+
+    with (
+        patch.object(tasks, "tracked_tse_symbols", return_value=list(universe)),
+        patch.object(tasks, "fetch_symbol_data", side_effect=fake_fetch),
+        patch.object(tasks.settings, "TSETMC_API_KEY", "k"),
+    ):
+        tasks.sync_symbol_metadata()
+
+    # Never-fetched symbols went first; BRAVO was not re-spent on.
+    assert fetched == ["ALPHA", "CHARLIE"]
+    run = WorkflowRun.objects.filter(workflow="sync_symbol_metadata").latest("id")
+    assert run.outcome == WorkflowRun.Outcome.SUCCESS, "quota exhaustion is not a failure"
+    assert run.metadata["stopped_on"] == "bucket_exhausted"
+    assert run.metadata["remaining"] == 1
+
+
+@pytest.mark.django_db
 def test_ingest_handles_none_payload():
     assert ingest.ingest_daily_history("x", None) == (0, 0)
     assert ingest.ingest_codal(None) == (0, 0)
