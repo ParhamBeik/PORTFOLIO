@@ -21,7 +21,27 @@ mkdir -p "${backup_dir}"
 stamp="$(TZ="${BACKUP_TIMEZONE:-Asia/Tehran}" date +%F)"
 partial="${backup_dir}/daily-${stamp}.dump.enc.partial"
 destination="${partial%.partial}"
-trap 'rm -f "${partial}"' EXIT
+scratch=("${partial}")
+# `:-` because bash 3.2 treats an empty array as unbound under `set -u`, and an
+# EXIT trap that itself errors would mask the real exit status.
+trap 'rm -f "${scratch[@]:-}"' EXIT
+
+# Publish one artifact, reading its content from stdin.
+#
+# Every write here goes through a temporary file and a rename, and that is not
+# stylistic. `>` needs write permission on the *file*; rename(2) needs it only
+# on the *directory*. The nightly cron runs as root and CI deploys as `deploy`,
+# so the two leave differently-owned files in a shared directory: once root had
+# written daily-<date>.dump.enc.sha256, every CI deploy for the rest of that day
+# died truncating it -- after paying for a five-minute 1.8 GB dump. The big dump
+# itself never hit this only because it was already being renamed into place.
+publish() {
+  local target="$1" tmp="$1.tmp.$$"
+  scratch+=("${tmp}")
+  cat > "${tmp}"
+  chmod 664 "${tmp}"
+  mv -f "${tmp}" "${target}"
+}
 
 "${compose[@]}" exec -T db sh -c \
   'exec pg_dump --format=custom --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
@@ -50,7 +70,7 @@ set -o pipefail
   exit 1
 }
 checksum="$(sha256sum "${destination}" 2>/dev/null | awk '{print $1}' || shasum -a 256 "${destination}" | awk '{print $1}')"
-printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" > "${destination}.sha256"
+printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" | publish "${destination}.sha256"
 
 upload_verified=false
 if [[ -n "${RCLONE_REMOTE:-}" ]]; then
@@ -66,10 +86,13 @@ fi
 evidence="${backup_dir}/backup-evidence-${stamp}.json"
 printf '{"created_at":"%s","database_artifact":"%s","database_sha256":"%s","decrypt_verified":true,"off_host_verified":%s}\n' \
   "$(date -u +%FT%TZ)" "$(basename "${destination}")" "${checksum}" \
-  "${upload_verified}" > "${evidence}"
+  "${upload_verified}" | publish "${evidence}"
 
 if [[ "$(TZ="${BACKUP_TIMEZONE:-Asia/Tehran}" date +%u)" == "7" ]]; then
-  cp -p "${destination}" "${backup_dir}/weekly-$(TZ="${BACKUP_TIMEZONE:-Asia/Tehran}" date +%G-%V).dump.enc"
+  # `cp` truncates an existing destination in place, so it carries the same
+  # cross-owner hazard as the checksum write did.
+  publish "${backup_dir}/weekly-$(TZ="${BACKUP_TIMEZONE:-Asia/Tehran}" date +%G-%V).dump.enc" \
+    < "${destination}"
 fi
 
 prune() {
