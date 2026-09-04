@@ -1,5 +1,5 @@
-Django==5.2.16
-djangorestframework==3.15.2
+Django==5.2.17
+djangorestframework==3.17.2
 djangorestframework-simplejwt==5.5.1
 django-cors-headers==4.4.0
 psycopg[binary]==3.2.1
@@ -29,11 +29,19 @@ scikit-learn==1.5.0
 jdatetime==5.2.0
 openpyxl==3.1.5
 beautifulsoup4==4.12.3
-lxml==5.3.0
-pypdf==5.1.0
+lxml==6.1.0
+pypdf==6.16.1
 boto3==1.35.36
 # openpyxl / beautifulsoup4 / lxml / pypdf: Codal Excel/HTML/PDF text extraction
 # (marketdata/codal_extract.py, codal_parsers.py). boto3: S3/MinIO-backed
 # artifact storage (marketdata/codal_storage.py). pytesseract / Pillow (OCR for
 # scanned PDFs) are deliberately still not added — re-add with a system
 # tesseract binary when OCR support returns.
+#
+# SECURITY: lxml and pypdf are the only dependencies here fed UNTRUSTED bytes.
+# `codal_parsers.py` hands them documents filed by third parties and downloaded
+# from codal.ir — `BeautifulSoup(content, "lxml")` and
+# `PdfReader(io.BytesIO(content))`. A parser CVE in either is directly reachable
+# from the Codal worker, so they are upgraded on advisory rather than on
+# convenience. Audited clean on 2026-09-04 (`pip-audit -r requirements.txt`);
+# the versions before that bump carried 25+ known pypdf CVEs between them.
