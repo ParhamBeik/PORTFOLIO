@@ -123,6 +123,13 @@ jobs:
       - name: Audit Python dependencies
         working-directory: portfolio-saas/backend
         run: |
+          # These two pins mirror backend/Dockerfile's builder stage. Without
+          # them this audits the runner's ambient build environment rather than
+          # the image we ship, and reported setuptools 79.0.1 as vulnerable
+          # while production was already on 84.0.0. An audit that does not
+          # describe the deployed artifact is worse than none -- it spends the
+          # credibility of a red build on a machine nobody runs.
+          pip install --quiet --upgrade "pip>=26.1.2" "setuptools>=83.0.0"
           pip install --quiet pip-audit
           # Audits the resolved install, not just the pinned direct
           # dependencies -- lxml and pypdf are the two fed untrusted bytes, and
