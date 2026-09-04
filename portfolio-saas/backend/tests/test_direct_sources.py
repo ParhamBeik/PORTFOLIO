@@ -144,10 +144,11 @@ def test_complete_direct_board_suppresses_paid_brs_fallback(monkeypatch, setting
     settings.WALLEX_ENABLED = True
     settings.NOBITEX_ENABLED = False
     settings.MARKETDATA_IGNORE_MARKET_HOURS = True
-    # Verification off: this test is about the default path, where a complete
-    # free board means the paid one is not bought at all. The periodic override
-    # has its own test below.
+    # Both overrides off: this test is about the pure fallback path, where a
+    # complete free board means the paid one is not bought at all. Blending and
+    # the periodic verification each have their own test below.
     settings.MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS = 0
+    settings.MARKETDATA_BLEND_PAID_BOARD = False
 
     direct = {
         "direct": {"rows": [{"symbol": "USD", "price": "1", "unit": "ریال"}]},
@@ -179,6 +180,53 @@ def test_complete_direct_board_suppresses_paid_brs_fallback(monkeypatch, setting
     assert "direct_complete" not in raw
 
 
+def test_blended_mode_buys_the_paid_board_every_cycle(monkeypatch, settings):
+    """Blending ignores `direct_complete` and the verification throttle entirely.
+
+    The reason for suppressing the paid board was quota, and that reason is gone:
+    the Market/* meter is 1,500 per DAY and was measured running at ~42. What is
+    left points the other way -- BrsApi declares a unit string on every row, while
+    TGJU needs slug mapping and can serve a retired slug that still answers.
+    """
+    from marketdata.market_state import OPEN
+    from portfolio.live import fetcher
+
+    settings.TGJU_ENABLED = True
+    settings.WALLEX_ENABLED = True
+    settings.NOBITEX_ENABLED = False
+    settings.MARKETDATA_IGNORE_MARKET_HOURS = True
+    settings.MARKETDATA_BLEND_PAID_BOARD = True
+    # Deliberately hostile to a paid fetch: board complete, throttle disabled.
+    settings.MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS = 0
+    monkeypatch.setattr(fetcher, "_BRS_VERIFY_LOCAL", {"at": 0.0})
+    monkeypatch.setattr(
+        fetcher,
+        "_direct_job",
+        lambda: {
+            "direct": {"rows": [{"symbol": "USD", "price": "1", "unit": "ریال"}]},
+            "direct_complete": True,
+        },
+    )
+    brs_calls = []
+    monkeypatch.setattr(
+        fetcher, "_brs_job", lambda *_a: brs_calls.append(True) or {"brsapi": {}}
+    )
+    monkeypatch.setattr(
+        "marketdata.market_state.claim_provider_state_probe", lambda _now: False
+    )
+    monkeypatch.setattr("marketdata.market_state.market_state", lambda: OPEN)
+
+    api = {
+        "brs_url": "https://paid.example",
+        "brs_api_key": "paid-key",
+        "tsetmc_url": "",
+        "tsetmc_api_key": "",
+    }
+    fetcher.fetch_all_markets(api)
+    fetcher.fetch_all_markets(api)
+    assert len(brs_calls) == 2, "blended mode buys the board on every cycle"
+
+
 def test_paid_board_is_still_bought_periodically_to_catch_a_stale_free_feed(
     monkeypatch, settings
 ):
@@ -202,6 +250,7 @@ def test_paid_board_is_still_bought_periodically_to_catch_a_stale_free_feed(
     settings.NOBITEX_ENABLED = False
     settings.MARKETDATA_IGNORE_MARKET_HOURS = True
     settings.MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS = 900
+    settings.MARKETDATA_BLEND_PAID_BOARD = False
 
     monkeypatch.setattr(fetcher, "_BRS_VERIFY_LOCAL", {"at": 0.0})
     monkeypatch.setattr("portfolio.live.redis_client.get_redis", lambda: None)

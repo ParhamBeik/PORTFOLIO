@@ -274,6 +274,19 @@ def _direct_job():
     return result
 
 
+def _blend_paid_board():
+    """Whether to buy the paid gold/FX board on every cycle, not just as a fallback.
+
+    Sized against the Market/* meter, which is 1,500/day: at the 60/90/180s
+    cadences that is ~890 board requests on a trading day, plus ~96 commodity
+    snapshots and ~144 cached USDT quotes -- about 1,130 of a 1,350 usable budget.
+    `quota_plan` will refuse to let the live bucket exceed its cap, so a cadence
+    change that breaks this arithmetic surfaces there rather than as silent
+    refusals mid-session.
+    """
+    return bool(getattr(settings, "MARKETDATA_BLEND_PAID_BOARD", False))
+
+
 def _brs_verification_due():
     """Whether to buy the paid board even though the free origins look complete.
 
@@ -459,10 +472,19 @@ def fetch_all_markets(api_settings):
     if brs_url and brs_key:
         if "gold_currency" not in planned:
             logger.info("Gold & currency job not scheduled this cycle. Skipping.")
-        elif direct_complete and not _brs_verification_due():
-            logger.info("Direct market sources cover the mapped board; skipping BRS fallback.")
-        else:
+        elif _blend_paid_board() or not direct_complete or _brs_verification_due():
+            # Blended mode buys the paid board every cycle alongside the free
+            # ones and lets `extractor._build_lookup` prefer whichever answered.
+            #
+            # The quota argument for skipping it is gone: the Market/* meter is
+            # 1,500/DAY and was running at ~42. The remaining arguments are about
+            # data quality and they point the other way -- BrsApi declares a unit
+            # string on every row where TGJU needs slug mapping, and TGJU is known
+            # to keep answering on slugs that have stopped updating, which
+            # `direct_complete` cannot distinguish from a live one.
             jobs.append(submit_with_context(executor, _brs_job, brs_url, brs_key))
+        else:
+            logger.info("Direct market sources cover the mapped board; skipping BRS fallback.")
     else:
         logger.warning("BRS API URL or Key missing in Django settings.")
 

@@ -126,6 +126,11 @@ def test_ticks_take_the_majority_share_once_everything_has_succeeded(monkeypatch
     """
     monkeypatch.setattr("marketdata.archive._archive_prereqs_ready", lambda state: True)
     settings.MARKETDATA_TICK_QUOTA_SHARE = 0.70
+    # The full share only applies once the per-symbol daily endpoints have
+    # converged -- see `_tick_share_now`. This test is about the split itself, so
+    # open the gate rather than let an unrelated backlog decide the answer.
+    settings.MARKETDATA_DAILY_GATE_COMPLETENESS = 0.0
+    settings.MARKETDATA_TICK_UNIVERSE_ONLY = False
     now = timezone.now()
     for i in range(20):
         _state(f"t{i}", Endpoint.STOCK_TRANSACTION_TICKS, missing_rows=80,

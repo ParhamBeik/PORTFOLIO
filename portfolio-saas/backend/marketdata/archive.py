@@ -636,13 +636,29 @@ def _tick_dates_needed(symbol, window_days=TICK_WINDOW_DAYS):
     do not add up to the candle (broken). Missing days are prioritized first
     to establish a complete timeline before spending quota on self-repair.
     Quarantined mismatch days are never re-requested.
+
+    Within `missing`, the days the reversal model actually needs come first (see
+    `reversal.priority_tick_days`). Ordering by date alone spends one request per
+    symbol-day across a ~2.1M-day universe in whatever order the calendar hands
+    them over -- which is how 96,602 days were bought and only 3,172 of them were
+    days anything wanted to look at. Everything else still follows, newest first,
+    so a symbol with no labelled days behaves exactly as before.
     """
     trading = _tick_trading_days(symbol, window_days)
     stored = _tick_dates_stored(symbol)
     rejected = _tick_rejected_dates(symbol)
     missing = trading - stored - rejected
     broken = _tick_days_unreconciled(symbol, trading & stored)
-    return sorted(missing, reverse=True) + sorted(broken, reverse=True)
+
+    try:
+        from . import reversal
+
+        wanted = [day for day in reversal.priority_tick_days(symbol) if day in missing]
+    except Exception:  # noqa: BLE001 -- labelling must never block a fetch
+        logger.warning("reversal labelling unavailable for %s", symbol, exc_info=True)
+        wanted = []
+    rest = sorted(missing.difference(wanted), reverse=True)
+    return wanted + rest + sorted(broken, reverse=True)
 
 
 def _record_dates(payload):
@@ -1127,6 +1143,54 @@ def reopen_states_with_gaps(symbols=None):
     )
 
 
+#: Endpoints whose convergence gates the tick lane. These are the per-symbol
+#: daily series (one request buys the WHOLE history), so they finish in about one
+#: symbol-count of requests. Ticks are per symbol-day and effectively unbounded,
+#: so letting them run first means the cheap, finite work waits behind the
+#: expensive, infinite work.
+_DAILY_GATE_ENDPOINTS = (
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED,
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED,
+    ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
+)
+
+
+def _tick_share_now():
+    """The tick lane's share of a batch, held down until the dailies converge.
+
+    "Dailies first, ticks after" as an explicit gate rather than a fixed split,
+    because the two are not comparable work. A daily endpoint costs ONE request
+    per symbol for its entire history, so all three finish in ~5,900 requests --
+    well under a day of the meter. Ticks cost one request per symbol-day against
+    a ~2.1M-day universe. A static share lets the unbounded lane hold up the
+    bounded one indefinitely.
+
+    Cached briefly: this runs on every claim and the count is a full scan of the
+    state table. A stale answer only mis-sizes one batch.
+    """
+    from django.core.cache import cache
+
+    full = float(getattr(settings, "MARKETDATA_TICK_QUOTA_SHARE", 0.25))
+    gated = float(getattr(settings, "MARKETDATA_TICK_SHARE_WHILE_DAILY_GAPS", 0.05))
+    target = float(getattr(settings, "MARKETDATA_DAILY_GATE_COMPLETENESS", 0.95))
+    key = "marketdata:daily_gate_ratio"
+    try:
+        ratio = cache.get(key)
+    except Exception:
+        ratio = None
+    if ratio is None:
+        rows = ArchiveFetchState.objects.filter(endpoint__in=_DAILY_GATE_ENDPOINTS)
+        total = rows.count()
+        # No daily states at all means nothing to gate on -- do not starve ticks
+        # on the strength of an empty table.
+        ratio = (rows.filter(verified_complete=True).count() / total) if total else 1.0
+        try:
+            cache.set(key, ratio, timeout=300)
+        except Exception:
+            pass
+    return full if ratio >= target else gated
+
+
 def claim_archive_batch(limit=None):
     """Lease the next batch of states to fetch, in the operator's priority order.
 
@@ -1207,8 +1271,23 @@ def claim_archive_batch(limit=None):
         # complete states stay eligible -- that is how the daily refresh happens,
         # now at the back of the queue instead of ahead of it.
         ticks = base.filter(endpoint=tick_endpoint, verified_complete=False)
+        # Intraday detail is only ever trained on for symbols liquid enough to
+        # trade, so buying one request per historical day for the illiquid tail
+        # is pure spend. Daily endpoints are untouched by this -- every symbol
+        # still gets its candles and history; this bounds the per-day endpoint
+        # alone, which is the only one whose cost scales with calendar length.
+        if getattr(settings, "MARKETDATA_TICK_UNIVERSE_ONLY", False):
+            try:
+                from . import reversal
+
+                universe = reversal.liquid_symbol_set()
+                if universe:
+                    ticks = ticks.filter(symbol__in=universe)
+            except Exception:  # noqa: BLE001 -- never block the claim
+                logger.warning("tick universe unavailable; claiming unrestricted",
+                               exc_info=True)
         remaining = batch_size - len(states)
-        tick_slots = int(remaining * settings.MARKETDATA_TICK_QUOTA_SHARE)
+        tick_slots = int(remaining * _tick_share_now())
         take(starved(ticks, tick_slots, extra=16), tick_slots)
 
         remaining = batch_size - len(states)
@@ -1227,14 +1306,23 @@ def claim_archive_batch(limit=None):
 
 
 def get_deep_tier_symbols(all_symbols: set[str] | None = None) -> set[str]:
-    """Symbols eligible for deep tick history: held symbols + top N by liquidity.
+    """Symbols eligible for deep tick history: held symbols + the liquid core.
 
     Shallow-tier symbols stay capped at their initial 90-day seed window and never
     widen, conserving the metered API budget for assets users actually hold or
     that represent the market's liquid core.
+
+    Liquidity is measured as median daily turnover from candles we already own,
+    NOT from `StockSymbolMetadata.market_cap`. That column is filled by the weekly
+    metadata sync and on 2026-09-04 held a value for **86 of 1,969 symbols**, so
+    "top N by market cap" silently meant "the 86 we happen to know" -- a cap of
+    100 could never bind, and the tier was decided by which symbols the sync had
+    reached rather than by liquidity. Turnover covers 1,156 symbols, costs no
+    request, and is the better proxy anyway: market cap counts shares that never
+    trade, and only tradeable names are worth deep intraday history.
     """
     from portfolio.models import Holding
-    from .models import StockSymbolMetadata
+    from . import reversal
 
     held = set(
         Holding.objects.filter(quantity__gt=0)
@@ -1242,11 +1330,7 @@ def get_deep_tier_symbols(all_symbols: set[str] | None = None) -> set[str]:
         .values_list("asset__tse_symbol", flat=True)
     )
     n = getattr(settings, "MARKETDATA_DEEP_TIER_N", 100)
-    liquid = set(
-        StockSymbolMetadata.objects.filter(market_cap__gt=0)
-        .order_by("-market_cap", "-free_float")
-        .values_list("l18", flat=True)[:n]
-    )
+    liquid = set(reversal.liquid_symbols(n))
     if not held and not liquid and all_symbols:
         return all_symbols
     return held | liquid

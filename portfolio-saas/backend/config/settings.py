@@ -371,11 +371,60 @@ MARKETDATA_ARCHIVE_QUEUE_LIMIT = int(
 # once the dailies converge the ticks reclaim the batch automatically -- this
 # changes the order things finish in, not the total spend.
 MARKETDATA_TICK_QUOTA_SHARE = float(os.getenv("MARKETDATA_TICK_QUOTA_SHARE", "0.25"))
+# While the per-symbol DAILY endpoints are still short of
+# MARKETDATA_DAILY_GATE_COMPLETENESS, ticks drop to this share instead. The two
+# lanes are not comparable work: a daily endpoint buys a symbol's entire history
+# in one request (~5,900 requests finishes all three), while ticks buy one
+# symbol-day each against a ~2.1M-day universe. A fixed split lets the unbounded
+# lane hold up the bounded one forever, which is why the dailies had sat unfinished
+# for months while ticks took 67% of every day's meter.
+MARKETDATA_TICK_SHARE_WHILE_DAILY_GAPS = float(
+    os.getenv("MARKETDATA_TICK_SHARE_WHILE_DAILY_GAPS", "0.05")
+)
+MARKETDATA_DAILY_GATE_COMPLETENESS = float(
+    os.getenv("MARKETDATA_DAILY_GATE_COMPLETENESS", "0.95")
+)
 
 # Per-day HISTORICAL_PER_DAY endpoints (ticks) walk one calendar day per request,
 # so the trailing window is bounded to keep cost finite. Trading days only -- a
 # non-trading day simply has no daily candle, so it is never requested.
 MARKETDATA_TICK_WINDOW_DAYS = int(os.getenv("MARKETDATA_TICK_WINDOW_DAYS", "90"))
+# --- Reversal-model targeting -------------------------------------------------
+# Intraday ticks cost one request per symbol-day against a ~2.1M-day universe, so
+# which days get bought matters far more than how many. These parameters define
+# the only days worth buying: the ones where the strategy would have acted.
+# See marketdata/reversal.py for the full reasoning and the measured counts.
+#
+# A "trigger day" is one whose LOW fell this far below the previous close -- the
+# moment you would buy. It is a positive if the CLOSE finished this far above the
+# same previous close. Both are fractions, both measured on the UNADJUSTED series
+# because the exchange enforces its band on the traded price.
+MARKETDATA_REVERSAL_DIP = float(os.getenv("MARKETDATA_REVERSAL_DIP", "0.02"))
+MARKETDATA_REVERSAL_RECOVERY = float(os.getenv("MARKETDATA_REVERSAL_RECOVERY", "0.02"))
+# Negatives outnumber positives ~15:1 (124,705 vs 8,020 on the top 300). Taking
+# them all would spend ten days of meter to make the training set *more*
+# imbalanced. Every positive is kept; negatives are sampled to this ratio.
+MARKETDATA_REVERSAL_NEGATIVE_RATIO = int(
+    os.getenv("MARKETDATA_REVERSAL_NEGATIVE_RATIO", "2")
+)
+# Symbols in the targeted universe, ranked by median daily turnover.
+MARKETDATA_REVERSAL_UNIVERSE_N = int(os.getenv("MARKETDATA_REVERSAL_UNIVERSE_N", "300"))
+# Turnover is measured over sessions on or after this Jalali date, and a symbol
+# needs at least this many of them to be rankable at all -- otherwise a symbol
+# that traded once, hugely, outranks a genuinely liquid one.
+MARKETDATA_REVERSAL_LIQUIDITY_SINCE = os.getenv(
+    "MARKETDATA_REVERSAL_LIQUIDITY_SINCE", "1403-01-01"
+)
+MARKETDATA_REVERSAL_MIN_SESSIONS = int(
+    os.getenv("MARKETDATA_REVERSAL_MIN_SESSIONS", "100")
+)
+# Confine intraday tick spending to that universe. Outside it a symbol still gets
+# every daily endpoint; it just does not get one request per historical day for
+# intraday detail nothing will train on. 0 disables the restriction.
+MARKETDATA_TICK_UNIVERSE_ONLY = os.getenv(
+    "MARKETDATA_TICK_UNIVERSE_ONLY", "1"
+) == "1"
+
 # Deep tier cap for tick window growth: held symbols plus top N by liquidity.
 MARKETDATA_DEEP_TIER_N = int(os.getenv("MARKETDATA_DEEP_TIER_N", "100"))
 # Relative |tick_vol - candle_vol| / max(...) allowed before quarantine. Measured
@@ -483,6 +532,12 @@ MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVE
 MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS = int(
     os.getenv("MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS", "900")
 )
+# Buy the paid gold/FX board on EVERY cycle rather than only as a fallback, and
+# let the extractor blend it with the free origins. Costs ~890 requests on a
+# trading day against the 1,500/day Market/* meter, which was measured running at
+# ~42/day -- the quota reason for preferring TGJU alone no longer holds, and
+# BrsApi declares a unit string per row where TGJU needs slug mapping.
+MARKETDATA_BLEND_PAID_BOARD = os.getenv("MARKETDATA_BLEND_PAID_BOARD", "1") == "1"
 # The live loop's USDT/IRT fallback quote (`Gold_Currency_Pro.php?history=1`)
 # bills the Market/* meter once per cycle. At the tightened cadence that is ~900
 # requests/day for a number the main board already carries and the warehouse

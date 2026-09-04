@@ -7,7 +7,9 @@ import pytest
 from rest_framework.test import APIClient
 
 from marketdata.archive import grow_tick_windows, get_deep_tier_symbols
-from marketdata.models import ArchiveFetchState, StockSymbolMetadata, SymbolIntegrity
+from marketdata.models import (
+    ArchiveFetchState, MarketCandle, StockSymbolMetadata, SymbolIntegrity,
+)
 from portfolio.models import Account, Asset, Holding
 
 pytestmark = pytest.mark.django_db
@@ -15,7 +17,7 @@ pytestmark = pytest.mark.django_db
 
 # Integration test: exercises the boundary between database models (holdings, symbol metadata, archive state)
 # and the archive window progression logic to confirm tiered resource allocation without external network access.
-def test_grow_tick_windows_gated_to_deep_tier():
+def test_grow_tick_windows_gated_to_deep_tier(settings):
     User = get_user_model()
     user = User.objects.create_user(email="metering@example.com", password="password123")
     account = Account.objects.create(user=user, name="Metering Account")
@@ -25,15 +27,36 @@ def test_grow_tick_windows_gated_to_deep_tier():
     )
     Holding.objects.create(account=account, asset=held_asset, quantity=Decimal("100"))
 
-    # Top liquid symbol in StockSymbolMetadata
+    # Liquidity is measured as median daily TURNOVER from candles, not from
+    # StockSymbolMetadata.market_cap. That column is filled by the weekly
+    # metadata sync and in production held a value for only 86 of 1,969 symbols,
+    # so a "top N by market cap" tier was really "the ones the sync had reached".
+    # Metadata rows are kept here precisely to prove they no longer decide it.
     StockSymbolMetadata.objects.create(
-        ins_code=1001, l18="LIQUID_SYM", l30="Liquid Symbol", market_cap=50_000_000_000, free_float=Decimal("25.0")
+        ins_code=1001, l18="LIQUID_SYM", l30="Liquid Symbol", market_cap=0, free_float=Decimal("25.0")
+    )
+    StockSymbolMetadata.objects.create(
+        ins_code=1002, l18="SHALLOW_SYM", l30="Shallow Symbol", market_cap=50_000_000_000, free_float=Decimal("1.0")
     )
 
-    # Shallow symbol: not held, zero market cap
-    StockSymbolMetadata.objects.create(
-        ins_code=1002, l18="SHALLOW_SYM", l30="Shallow Symbol", market_cap=0, free_float=Decimal("1.0")
-    )
+    # LIQUID_SYM trades; SHALLOW_SYM barely does. Enough sessions to clear
+    # MARKETDATA_REVERSAL_MIN_SESSIONS, dated inside the liquidity window.
+    settings.MARKETDATA_REVERSAL_MIN_SESSIONS = 5
+    settings.MARKETDATA_DEEP_TIER_N = 1
+    candles = []
+    for i in range(1, 11):
+        day = f"1403-01-{i:02d}"
+        candles.append(MarketCandle(
+            symbol="LIQUID_SYM", timeframe="1d_unadj", date_time=day,
+            open_price=1000, high_price=1000, low_price=1000,
+            close_price=1000, volume=1_000_000,
+        ))
+        candles.append(MarketCandle(
+            symbol="SHALLOW_SYM", timeframe="1d_unadj", date_time=day,
+            open_price=1000, high_price=1000, low_price=1000,
+            close_price=1000, volume=1,
+        ))
+    MarketCandle.objects.bulk_create(candles)
 
     tick_ep = ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS
     state_held = ArchiveFetchState.objects.create(
