@@ -812,8 +812,16 @@ def archive_capacity():
 
     A single archive batch is a mixed bag -- `gold_daily` bills BRS while every
     stock endpoint bills TSETMC -- so the scheduler asks about all wallets at
-    once and lets the per-request reserve refuse the individual calls. Summing
-    to one number here is what would reintroduce the original bug.
+    once. Summing to one number here is what would reintroduce the original bug.
+
+    `claim_archive_batch` reads this per plan and skips the endpoints whose
+    wallet is empty (`archive._ENDPOINT_PLAN`). It used to claim blind and let
+    `reserve_request` refuse each call, which is why a spent TSETMC meter still
+    produced 11,053 refusals an hour for as long as BRS had room. The per-request
+    reserve remains the authority; it is no longer the first line of defence.
+
+    Note this is the *paced* remainder, not the raw wallet, so a plan reads 0
+    during a pacing wait and recovers on its own as the ramp opens.
     """
     return {plan: remaining_requests(ARCHIVE, plan) for plan in PLANS}
 
