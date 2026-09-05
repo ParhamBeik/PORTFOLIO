@@ -6,7 +6,8 @@ import io
 from django.db import transaction
 from django.utils.dateparse import parse_datetime
 
-from ..models import Asset, ImportBatch, LedgerEntry
+from ..models import ImportBatch, LedgerEntry
+from .catalog import resolve_asset_key
 from .ledger import LedgerError, create_ledger_entry
 
 
@@ -43,11 +44,13 @@ def read_csv_upload(upload) -> tuple[bytes, list[dict]]:
     return raw, rows
 
 
-def _asset(row: dict, row_number: int):
+def _asset(row: dict, row_number: int, user):
     key = (row.get("asset_key") or "").strip()
     if not key:
         return None
-    asset = Asset.objects.filter(key=key, is_active=True).first()
+    # Scoped to the importing user, like every other asset_key entry point --
+    # a CSV is request-supplied data exactly as a JSON body is.
+    asset = resolve_asset_key(user, key)
     if asset is None:
         raise LedgerImportError("Unknown asset_key.", row=row_number)
     return asset
@@ -81,7 +84,7 @@ def _create_rows(account, rows: list[dict], *, batch=None) -> None:
             create_ledger_entry(
                 account=account,
                 kind=(row.get("kind") or "").strip(),
-                asset=_asset(row, row_number),
+                asset=_asset(row, row_number, account.user),
                 quantity=(row.get("quantity") or "").strip() or None,
                 unit_price_tomans=(row.get("unit_price_tomans") or "").strip() or None,
                 amount_tomans=(row.get("amount_tomans") or "").strip() or None,

@@ -16,6 +16,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from ..models import Account, Asset, Holding, LedgerEntry, Price, Snapshot, Transaction, Liability
 from ..services import execute_trade, get_latest_prices, undo_trade, value_account, value_user
+from ..services.catalog import resolve_asset_key
 from ..services.valuation import (
     HIDDEN_ADJUSTMENT_MAX_DAYS,
     SYNTHETIC_HISTORY_MAX_DAYS,
@@ -668,8 +669,11 @@ class PriceHistoryView(APIView):
             return error
         # Deliberately no `is_active` filter: a screen may deactivate a
         # candidate but never a holding, and a user still holding a delisted
-        # asset must keep being able to see its history.
-        asset = Asset.objects.filter(key=asset_key).first()
+        # asset must keep being able to see its history. Owner scoping is NOT
+        # optional though -- an owner-minted row is somebody's house, and
+        # answering for one the caller does not own hands back its name and
+        # class to anyone who learns the key.
+        asset = resolve_asset_key(request.user, asset_key, active_only=False)
         if asset is None:
             return Response({"detail": "Unknown asset."}, status=404)
 

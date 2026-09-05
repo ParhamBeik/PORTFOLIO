@@ -78,7 +78,7 @@ Two things to settle before the work starts, because they change what "100" mean
    target. **Score both, gate on both**, or the number is theatre.
 2. **What serves the HTML.** Lighthouse audits the document served by
    **`frontend/nginx.conf`**, not by Django. The `SECURE_HSTS_*` / `SECURE_CONTENT_TYPE_NOSNIFF`
-   / `SECURE_REFERRER_POLICY` settings at `config/settings.py:446-454` are real and correct,
+   / `SECURE_REFERRER_POLICY` settings in `config/settings.py` are real and correct,
    but they only apply to `/api/` and `/admin/` responses. The HTML document and every JS
    asset get **no security headers and no compression** today.
 
@@ -298,7 +298,8 @@ curl -sI -H 'Accept-Encoding: gzip' "https://$HOST/assets/$(…).js" \
 ```
 
 And a genuine pytest for the half Django *does* control — that the production settings block
-at `config/settings.py:443-458` cannot be silently weakened:
+in `config/settings.py` (the `SECURE_*` / `SESSION_COOKIE_SECURE` /
+`CSRF_COOKIE_SECURE` block) cannot be silently weakened:
 
 ```python
 # backend/tests/test_security_headers.py

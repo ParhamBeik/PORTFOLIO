@@ -18,31 +18,54 @@ MIN_TRACKING_DAYS_FOR_ANNUALIZED = 90
 
 
 def _conversion_rate(basis: str, as_of) -> Decimal | None:
-    """Resolve the Toman-per-unit rate for a USD/USDT basis.
+    """Resolve the Toman-per-unit rate for a USD/USDT basis, AS OF a date.
 
-    Mirrors valuation.py's resolution order (`value_as_of` ~L572-586) so the
-    opening valuation and the current value are never priced in different units.
+    Mirrors `valuation.value_as_of`'s resolution order so the segment-boundary
+    valuation and the cash flow that crosses it are never priced at two
+    different rates.
+
+    `usd_denominated` used to ignore `as_of` entirely and return
+    `get_latest_prices()["usd_cash"]` -- today's live tick -- while
+    `usdt_denominated` beside it correctly read the warehouse at the date it was
+    handed. Both callers pass a real date: `_flow_amount` passes
+    `entry.timestamp`, which is when the deposit actually happened. So in
+    `account_performance`'s TWR loop, `before_value` came from
+    `value_as_of(as_of=entry.timestamp)` at the historical rate and `flow` came
+    back at today's, and `segment_start = before_value + signed_flow` added two
+    dollar figures measured with two different rulers. Against a currency that
+    has lost most of its value over the tracked period, a deposit made two years
+    ago was divided by a rate several times too large, so the flow was
+    understated by that factor and both TWR and XIRR came out wrong -- silently,
+    with no `quality_status` to show for it.
+
+    The live map stays as the last resort for the USD basis only, which is where
+    it was already the only source: it is what `_current_value` needs before the
+    day's gold/currency row has been ingested.
     """
-    if basis == "usd_denominated":
-        rate = Decimal(str(get_latest_prices().get("usd_cash", 0) or 0))
-        return rate if rate > 0 else None
-    if basis == "usdt_denominated":
-        from marketdata.models import GoldCurrencyHistory
-        from .returns import to_jalali_str
+    from marketdata.models import GoldCurrencyHistory
+    from .returns import to_jalali_str
 
-        jalali = to_jalali_str(as_of)
+    if basis not in ("usd_denominated", "usdt_denominated"):
+        return None
+
+    jalali = to_jalali_str(as_of)
+    row = None
+    if basis == "usdt_denominated":
         row = (
             GoldCurrencyHistory.objects.filter(symbol="USDT_IRT", date__lte=jalali)
             .order_by("-date").first()
         )
-        if not row or row.close_price <= 0:
-            row = (
-                GoldCurrencyHistory.objects.filter(symbol="USD", date__lte=jalali)
-                .order_by("-date").first()
-            )
-        if not row or row.close_price <= 0:
-            return None
+    if not row or row.close_price <= 0:
+        row = (
+            GoldCurrencyHistory.objects.filter(symbol="USD", date__lte=jalali)
+            .order_by("-date").first()
+        )
+    if row and row.close_price > 0:
         return Decimal(str(row.close_price))
+
+    if basis == "usd_denominated":
+        rate = Decimal(str(get_latest_prices().get("usd_cash", 0) or 0))
+        return rate if rate > 0 else None
     return None
 
 

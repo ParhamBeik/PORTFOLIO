@@ -56,8 +56,8 @@ jobs:
       run:
         working-directory: portfolio-saas/backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           cache: pip
@@ -76,11 +76,16 @@ jobs:
       # feature has never been switched on. Errors AND warnings both fail here;
       # the tree is clean at that level, and the two genuinely-benign findings
       # carry an inline `shellcheck disable` with the reason.
+      #
+      # frontend/scripts/*.sh is in the glob too. `lhci.sh` is bash, it is what
+      # `npm run test:lighthouse` runs, and the `frontend` job that runs it
+      # gates `deploy` -- so it sits on the deploy path exactly like the scripts
+      # beside it, and was the only shell on that path nothing linted.
       - name: Lint shell scripts
         working-directory: portfolio-saas
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck --severity=warning scripts/*.sh
+          shellcheck --severity=warning scripts/*.sh frontend/scripts/*.sh
       - name: Database restore drill
         run: ../scripts/ci_restore_drill.sh
         env:
@@ -94,8 +99,8 @@ jobs:
       run:
         working-directory: portfolio-saas/frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -128,8 +133,8 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
       - name: Audit Python dependencies
@@ -148,7 +153,7 @@ jobs:
           # both arrived as transitive concerns first.
           pip install --quiet -r requirements.txt
           pip-audit --progress-spinner off
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm

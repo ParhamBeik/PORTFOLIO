@@ -212,6 +212,90 @@ def test_usdt_denominated_current_value_matches_opening_denomination(make_user):
     assert abs(result["twr"]) < 10
 
 
+@pytest.mark.django_db
+def test_usd_conversion_rate_is_read_as_of_the_date_it_is_given():
+    """A dollar figure for a past date must use that date's rate.
+
+    `_conversion_rate` took an `as_of` and, on the usd_denominated branch only,
+    ignored it in favour of the live price map. `_flow_amount` passes
+    `entry.timestamp`, so every historical deposit in the TWR loop was divided by
+    TODAY's rate while the segment boundary it is added to came from
+    `value_as_of` at the HISTORICAL rate -- two dollar figures on two different
+    rulers, summed. Against a currency that has lost most of its value over a
+    tracked period this understates the flow by the whole devaluation.
+    """
+    from marketdata.models import GoldCurrencyHistory
+    from portfolio.services.performance import _conversion_rate
+    from portfolio.services.returns import to_jalali_str
+
+    then = timezone.now() - dt.timedelta(days=400)
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date=to_jalali_str(then), close_price=Decimal("50000")
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date=to_jalali_str(timezone.now()), close_price=Decimal("150000")
+    )
+
+    assert _conversion_rate("usd_denominated", then) == Decimal("50000")
+    # ...and the newest row still wins for a request about now, so the "current
+    # value" side of the same calculation is unchanged.
+    assert _conversion_rate("usd_denominated", timezone.now()) == Decimal("150000")
+
+
+@pytest.mark.django_db
+def test_usd_conversion_rate_falls_back_to_the_live_map_when_unwarehoused(monkeypatch):
+    """The live tick stays the last resort, which is where it was the only source.
+
+    Before the day's gold/currency row is ingested there is no row at or before
+    `as_of`, and `_current_value` still has to answer.
+    """
+    from portfolio.services import performance as perf
+
+    monkeypatch.setattr(perf, "get_latest_prices", lambda: {"usd_cash": "123456"})
+
+    assert perf._conversion_rate("usd_denominated", timezone.now()) == Decimal("123456")
+    # USDT is deliberately NOT given that fallback: it reports
+    # conversion_rate_unavailable rather than quoting a dollar rate as USDT.
+    assert perf._conversion_rate("usdt_denominated", timezone.now()) is None
+
+
+@pytest.mark.django_db
+def test_nightly_asset_metrics_annualizes_at_the_symbols_own_cadence(monkeypatch):
+    """A seven-day-a-week symbol must annualize at ~365, not the TSE's 252.
+
+    `nightly_asset_metrics` wrote the literal 252 four times over a panel that
+    mixes TSE stocks with gold, FX and crypto. `periods_per_year` exists because
+    that overstates a 7-day series' volatility by sqrt(365/252) ~= 1.20x and
+    understates its Sharpe by the same factor -- and this task persists the
+    result into AssetMetricSnapshot, which the UI reads as fact.
+    """
+    from marketdata.models import AssetMetricSnapshot, MarketInstrument
+    from marketdata.tasks import nightly_asset_metrics
+    from portfolio.services import returns as returns_mod
+
+    MarketInstrument.objects.create(symbol="BTC", eligible=True, category="crypto")
+
+    # Every calendar day for a year: mean spacing 1 day, so ~365/year.
+    index = pd.date_range("2025-01-01", periods=300, freq="D")
+    rng = np.random.default_rng(7)
+    series = pd.Series(rng.normal(0.0, 0.01, len(index)), index=index)
+    panel = pd.DataFrame({"BTC": series})
+    monkeypatch.setattr(
+        returns_mod, "daily_returns_matrix", lambda **kwargs: (panel, {})
+    )
+
+    nightly_asset_metrics(window_days=365)
+
+    row = AssetMetricSnapshot.objects.get(symbol="BTC", window_days=365)
+    daily_sigma = float(series.std(ddof=1))
+    assert row.annualized_volatility == pytest.approx(
+        daily_sigma * np.sqrt(365.25), rel=0.02
+    )
+    # And is distinguishable from what the hardcoded constant produced: the two
+    # differ by ~20%, comfortably outside the tolerance above.
+    assert row.annualized_volatility > daily_sigma * np.sqrt(252) * 1.1
+
+
 # ----------------------------------------------------------------------
 # test_returns_source_selection.py
 # Returns source selection: warehouse daily series preferred, Price fallback.

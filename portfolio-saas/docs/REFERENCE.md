@@ -41,7 +41,7 @@ standing against it.
 | Issue | Control |
 |---|---|
 | Scheduler starvation | Producers run on `live`; generated work stays on `archive`/`codal` |
-| Queue growth | Pending caps: archive 4, Codal 1; broker inspection fails closed |
+| Queue growth | Pending caps from `MARKETDATA_ARCHIVE_QUEUE_LIMIT` / `CODAL_EXTRACT_BATCH_SIZE` (`_queue_slots`); broker inspection fails closed |
 | Long-task redelivery | Broker `visibility_timeout` = 3600s (`config/celery.py`) — at the old 300s, cold-restart nightly jobs were still running when Redis redelivered them, and the duplicates starved `run_archive_state` |
 | Tick volume noise | 1% relative tolerance before quarantine |
 | Hard tick mismatch loop | Rejected dates become known gaps and are not re-requested |

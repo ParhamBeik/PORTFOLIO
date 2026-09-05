@@ -17,7 +17,25 @@ if [[ -z "${latest}" ]] || (( $(date +%s) - $(stat -f %m "${latest}" 2>/dev/null
   failures+=("backup older than ${backup_age_hours}h")
 fi
 
-"${compose[@]}" ps --status running >/dev/null || failures+=("container health check failed")
+# Every long-running service in docker-compose.prod.yml, i.e. the ones carrying
+# `restart: unless-stopped`. `migrate` is deliberately absent: it is `restart:
+# "no"` and is SUPPOSED to have exited by the time this runs.
+#
+# The line here used to be `"${compose[@]}" ps --status running >/dev/null ||
+# failures+=(...)`, which can never fail. `docker compose ps` exits 0 whether it
+# lists eight containers or none -- an empty result set is not an error to it --
+# so the `||` branch was unreachable and this hourly check reported a completely
+# dead stack as healthy. Verified against docker compose v29.7.2: a project with
+# zero running containers still exits 0.
+#
+# Asking for the names and looking for each one turns that into a real
+# assertion, and names the service that is actually down instead of saying
+# "container health check failed" about all eight.
+expected_services=(db redis minio backend celery_worker_live celery_worker_archive celery_beat frontend)
+running_services="$("${compose[@]}" ps --status running --services 2>/dev/null || true)"
+for service in "${expected_services[@]}"; do
+  grep -qx -- "${service}" <<<"${running_services}" || failures+=("service ${service} is not running")
+done
 
 if ((${#failures[@]})); then
   payload="$(printf '%s\n' "${failures[@]}" | python3 -c 'import json,sys; print(json.dumps({"event":"host-ops-check","details":{"failures":[line.strip() for line in sys.stdin if line.strip()]}}))')"

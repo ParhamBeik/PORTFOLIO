@@ -1,7 +1,38 @@
-__pycache__
-*.pyc
-.pytest_cache
+# Everything here is measured, not guessed. Before this file grew the entries
+# below, `COPY . /app/` shipped 616 MB and the `chown -R` after it wrote the
+# whole tree a second time -- 1.2 GB of a 2.76 GB image, none of it reachable.
+#
+# A leading `**/` matters: a bare pattern anchors to the build-context root, so
+# `.pytest_cache` did not match the nested `backend/.pytest_cache` that was in
+# the shipped image.
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# Local virtualenvs. The one on this machine is 581 MB of macOS/aarch64 CPython
+# ("home = /Library/Frameworks/Python.framework" in its pyvenv.cfg) and it was
+# being copied into a linux image that already has its own venv at /opt/venv.
+# It could never have run; it was pure weight on every push, pull and deploy.
+.venv
+venv
+**/.venv
+
+# Celery beat's shelve database. Beat runs with WORKDIR=/app and no --schedule
+# flag, so it opens `celerybeat-schedule` relative to the working directory --
+# meaning a copy baked in from a developer's machine is what a fresh container
+# reads its last-run times from. Runtime state, never build input.
+celerybeat-schedule*
+
+# Runtime output, not source: WAREHOUSE_AUDIT_DIR's manifests and the
+# collectstatic target (a named volume mounts over it in compose anyway).
+recovery-manifests
+staticfiles
+
 .env*
 tests
-staticfiles
 graphify-out
+.git
+.DS_Store

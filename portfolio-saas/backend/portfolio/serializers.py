@@ -11,6 +11,7 @@ from .models import (
     Transaction,
     Liability,
 )
+from .services.catalog import resolve_asset_key, visible_to
 from .services.ledger import (
     PriceResolutionError,
     assert_not_before_history,
@@ -93,14 +94,12 @@ class HoldingSerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Scoped per request so one user cannot attach another user's property to
-        # their own account by guessing its key.
+        # their own account by guessing its key. `visible_to` is that rule, held
+        # in one place now that five other call sites needed it too.
         user = getattr(self.context.get("request"), "user", None)
-        catalog = Asset.objects.filter(is_active=True)
-        self.fields["asset_key"].queryset = (
-            catalog.filter(Q(owner__isnull=True) | Q(owner=user))
-            if user is not None and user.is_authenticated
-            else catalog.filter(owner__isnull=True)
-        )
+        self.fields["asset_key"].queryset = Asset.objects.filter(
+            is_active=True
+        ).filter(visible_to(user))
 
     def get_label(self, obj) -> str:
         return obj.label
@@ -317,10 +316,13 @@ class TradeInputSerializer(serializers.Serializer):
         if timestamp > timezone.now():
             raise serializers.ValidationError({"timestamp": "Transaction timestamp cannot be in the future."})
 
-        # Get the asset
-        try:
-            asset = Asset.objects.get(key=asset_key, is_active=True)
-        except Asset.DoesNotExist:
+        # Scoped like every other asset_key entry point. This runs BEFORE the
+        # view's own lookup, so leaving it unscoped meant a key belonging to
+        # someone else got as far as price resolution and answered with its
+        # error rather than a flat "invalid asset".
+        user = getattr(self.context.get("request"), "user", None)
+        asset = resolve_asset_key(user, asset_key)
+        if asset is None:
             raise serializers.ValidationError({"asset_key": "Invalid or inactive asset."})
 
         try:
@@ -368,6 +370,16 @@ class LiabilitySerializer(serializers.ModelSerializer):
         allow_null=True,
     )
     asset_name = serializers.CharField(source="asset.name", read_only=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Same scoping as HoldingSerializer, for the same reason: a mortgage
+        # names the property it is secured against, so an unscoped queryset lets
+        # one user hang a liability off another user's house.
+        user = getattr(self.context.get("request"), "user", None)
+        self.fields["asset_key"].queryset = Asset.objects.filter(
+            is_active=True
+        ).filter(visible_to(user))
 
     class Meta:
         model = Liability

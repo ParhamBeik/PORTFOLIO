@@ -1290,7 +1290,7 @@ def nightly_asset_metrics(window_days=365):
     import numpy as np
 
     from portfolio.services.diagnostics import _load_index_returns
-    from portfolio.services.returns import daily_returns_matrix
+    from portfolio.services.returns import daily_returns_matrix, periods_per_year
     from . import jalali
     from .models import AssetMetricSnapshot, MarketInstrument
 
@@ -1310,14 +1310,29 @@ def nightly_asset_metrics(window_days=365):
         series = returns[symbol].dropna()
         if len(series) < 2:
             continue
-        annualized_return = float(series.mean() * 252)
-        volatility = float(series.std(ddof=1) * np.sqrt(252))
+        # Measured from this symbol's OWN observation dates, not the literal 252
+        # that used to be written here four times. This panel is mixed: a TSE
+        # stock prints ~252 times a year on the Sat-Wed calendar while gold, FX
+        # and crypto print ~365, and `periods_per_year` exists precisely because
+        # annualizing a 7-day series at 252 overstates volatility by
+        # sqrt(365/252) ~= 1.20x and understates Sharpe by the same factor.
+        # Every other consumer of this panel already reads the frequency
+        # (diagnostics, optimization, expected_returns, the analytics views);
+        # this task was the one place writing a constant, and it persists the
+        # result into AssetMetricSnapshot, which the UI reads as fact.
+        #
+        # Per symbol rather than per panel: `series` is already `.dropna()`, so
+        # its index is the days this instrument actually traded, whereas the
+        # panel index is the union across all of them.
+        frequency = periods_per_year(series.index)
+        annualized_return = float(series.mean() * frequency)
+        volatility = float(series.std(ddof=1) * np.sqrt(frequency))
         risk_free = settings.RATE_FOR(int(as_of[:4]))
         # Geometric daily rf (matches the compounding return side); simple
-        # rf/252 division understates the daily rate by ~13% at rf=0.30.
-        rf_daily = (1.0 + risk_free) ** (1.0 / 252) - 1.0
+        # rf/frequency division understates the daily rate by ~13% at rf=0.30.
+        rf_daily = (1.0 + risk_free) ** (1.0 / frequency) - 1.0
         downside = (series - rf_daily).clip(upper=0)
-        downside_deviation = float(np.sqrt(np.mean(downside ** 2))) * np.sqrt(252)
+        downside_deviation = float(np.sqrt(np.mean(downside ** 2))) * np.sqrt(frequency)
         wealth = (1 + series).cumprod()
         max_drawdown = float((wealth / wealth.cummax() - 1).min())
         beta = None

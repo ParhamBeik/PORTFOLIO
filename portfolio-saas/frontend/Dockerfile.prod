@@ -3,7 +3,14 @@
 # site's domain here; nginx keeps this application's SPA/API routing isolated.
 
 # --- build stage ---
-FROM node:20-alpine AS build
+#
+# Node 22, matching `node-version: '22'` in .github/workflows/ci-cd.yml. It was
+# node:20-alpine, which is two problems in one line: Node 20 left support on
+# 2026-04-30, and CI proved `npm run build` green on 22 while the image that
+# actually ships to the VPS built the bundle on 20 -- so the tested toolchain
+# and the shipping toolchain were different. Keep this pinned to whatever CI
+# installs; if one moves, move both.
+FROM node:22-alpine AS build
 WORKDIR /app
 ARG VITE_SENTRY_DSN=""
 ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN
@@ -13,7 +20,12 @@ COPY . .
 RUN npm run build
 
 # --- serve stage ---
-FROM nginx:alpine
+#
+# Pinned, not `nginx:alpine`. A floating tag means the web server in front of
+# this app can change version between two builds of the same commit, with
+# nothing in the diff to say so -- and this is the image the Lighthouse job
+# audits response headers against.
+FROM nginx:1.31.4-alpine
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 # The security headers live in a snippet because nginx's add_header does not
 # merge across blocks -- see the file's own comment. Every location that sets a

@@ -6,7 +6,6 @@ from portfolio.views import AdminCleanPricesExecuteView, AdminCleanPricesScanVie
 from .health import HealthView, PriceFeedView, ReadyView
 
 # Monkeypatch django admin index page to inject operational telemetry
-from django.contrib import admin
 from marketdata.admin_telemetry import get_admin_telemetry_context
 
 original_admin_index = admin.site.index

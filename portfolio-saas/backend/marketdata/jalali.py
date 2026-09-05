@@ -37,20 +37,18 @@ def normalize_jalali(value) -> str:
     if not value:
         return ""
     folded = fold_digits(value).replace("/", "-")
-    
+
     # Try detecting and converting standard Gregorian dates
     parts = folded.split("-")
     if len(parts) == 3:
         try:
             year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
             if 1900 <= year <= 2100:
-                import datetime
-                dt = datetime.date(year, month, day)
-                jdt = jdatetime.date.fromgregorian(date=dt)
-                return jdt.strftime("%Y-%m-%d")
+                gregorian = datetime.date(year, month, day)
+                return jdatetime.date.fromgregorian(date=gregorian).strftime("%Y-%m-%d")
         except (ValueError, TypeError):
             pass
-            
+
     return folded
 
 # The provider's data starts in 1385; anything outside a sane band is a bug
@@ -82,10 +80,36 @@ def assert_jalali(value, field="date"):
 
 
 def today():
+    """The current date on the PROCESS clock, as Jalali. Read the warning below.
+
+    Every container here runs UTC (`TIME_ZONE = "UTC"`, no TZ in the image), so
+    this is the UTC date, not the Tehran one. Tehran is UTC+3:30, which means
+    that between 20:30 and 23:59 UTC -- 00:00 to 03:29 Tehran -- this returns
+    YESTERDAY in Tehran terms. Contrast `from_gregorian`/`from_epoch`/
+    `to_datetime` below, which all deliberately read Tehran and say so.
+
+    That gap is currently LOAD-BEARING, which is why it has not simply been
+    "fixed". `config/celery.py` declares its crontabs in Tehran (CELERY_TIMEZONE
+    = Asia/Tehran), and three nightly jobs land inside exactly that window:
+    nightly_asset_metrics (01:00), nightly_asset_signals (01:20) and
+    aggregate_market_daily_bars_task (01:40). Each one wants the day that just
+    ENDED, and the UTC lag is what hands it to them. Making this Tehran-aware
+    without touching those callers would point
+    `ingest.aggregate_market_daily_bars` at a Tehran day that is 100 minutes old
+    -- it windows on `to_datetime(jalali_date)`, i.e. Tehran midnight -- so the
+    day's real bar would be built from almost no snapshots and the previous
+    complete day would never be aggregated at all.
+
+    So: if you need "the day that just ended", this is it, but say so at the
+    call site. If you need the actual Tehran date, use
+    `from_gregorian(market_state.tehran_now())`, and change the three nightly
+    callers in the same commit.
+    """
     return jdatetime.date.today().strftime("%Y-%m-%d")
 
 
 def days_ago(days):
+    """`days` before `today()`, and therefore on the same UTC clock it is."""
     return (jdatetime.date.today() - jdatetime.timedelta(days=days)).strftime("%Y-%m-%d")
 
 

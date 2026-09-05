@@ -22,6 +22,7 @@ from ..serializers import (
     LiabilitySerializer,
 )
 from ..services import execute_trade, get_latest_prices, undo_trade, value_account, value_user
+from ..services.catalog import resolve_asset_key
 from ..services.trades import TradeError
 from ..services.ledger import (
     LedgerError,
@@ -96,7 +97,7 @@ class LedgerListCreateView(APIView):
         data = form.validated_data
         asset = None
         if data.get("asset_key"):
-            asset = Asset.objects.filter(key=data["asset_key"], is_active=True).first()
+            asset = resolve_asset_key(request.user, data["asset_key"])
             if asset is None:
                 return Response({"detail": "Unknown asset_key."}, status=400)
         try:
@@ -267,10 +268,13 @@ class TradeView(APIView):
         account = request.user.accounts.filter(pk=account_id).first()
         if account is None:
             return Response({"detail": "Account not found."}, status=status.HTTP_404_NOT_FOUND)
-        form = TradeInputSerializer(data=request.data)
+        # Context, so `validate` can scope asset_key to this user. The Liability
+        # and Holding serializers get it for free from DRF's generic views; this
+        # one is constructed by hand and therefore has to be handed it.
+        form = TradeInputSerializer(data=request.data, context={"request": request})
         form.is_valid(raise_exception=True)
         data = form.validated_data
-        asset = Asset.objects.filter(key=data["asset_key"], is_active=True).first()
+        asset = resolve_asset_key(request.user, data["asset_key"])
         if asset is None:
             return Response({"detail": "Unknown asset_key."}, status=status.HTTP_400_BAD_REQUEST)
         try:

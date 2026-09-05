@@ -1011,7 +1011,15 @@ export function MoneyVsRisk({
         {
           type: "scatter", name: "Share of money", symbolSize: 11,
           data: ordered.map((r, i) => [r.weight_share, i]),
-          itemStyle: { color: money, borderColor: t.surface, borderWidth: 2 },
+          // `moneyColor`, not `money`. The comment where moneyColor is defined
+          // warns about exactly this pair, and the marker still got the
+          // currency FORMATTER imported from format.js. ECharts accepts a
+          // function here and calls it with a params object, so `money(params)`
+          // ran the formatter over a non-number and returned its "—" placeholder
+          // as the colour: the one series the panel is named after rendered
+          // unthemed, while its own tooltip dot and legend swatch (which do use
+          // moneyColor) showed the right hue.
+          itemStyle: { color: moneyColor, borderColor: t.surface, borderWidth: 2 },
           z: 5,
         },
         {

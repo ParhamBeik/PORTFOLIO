@@ -130,9 +130,47 @@ def _row_from_instrument(inst: MarketInstrument, asset: Asset | None) -> dict:
     }
 
 
+def visible_to(user):
+    """`Q` matching the Asset rows `user` is allowed to reference.
+
+    The shared catalog (`owner IS NULL`) plus whatever this user minted for
+    themselves. One place, because the expression had already been written twice
+    -- here and in `HoldingSerializer.__init__`, whose comment states the reason:
+    "so one user cannot attach another user's property to their own account by
+    guessing its key."
+
+    Everywhere it was NOT written, that protection simply did not exist. The
+    add-holding form was scoped; the four paths that take the same `asset_key`
+    from a request body and hang a row off it -- `LedgerListCreateView.post`,
+    `TradeView.post`, `LedgerEntryInputSerializer.validate` and the CSV importer
+    -- resolved it against the whole table, as did `PriceHistoryView`. Owner-
+    minted rows are only ever real estate (see `Asset.owner`), so what leaks is
+    another user's property: its name and class on a read, and on a write a
+    `Holding` in the attacker's account pointing at the victim's `Asset` -- a
+    cross-user FK that `PROTECT` then turns into a `ProtectedError` when the
+    victim tries to delete their account.
+    """
+    if user is not None and getattr(user, "is_authenticated", False):
+        return Q(owner__isnull=True) | Q(owner=user)
+    return Q(owner__isnull=True)
+
+
+def resolve_asset_key(user, key, *, active_only=True):
+    """One Asset by `key`, scoped to what `user` may see, or None.
+
+    `active_only=False` is for read paths that must keep answering for a
+    delisted holding -- a screen may deactivate a candidate but never something
+    somebody owns.
+    """
+    qs = Asset.objects.filter(key=key)
+    if active_only:
+        qs = qs.filter(is_active=True)
+    return qs.filter(visible_to(user)).first()
+
+
 def _matching_assets(asset_class: str, q: str, user):
     qs = Asset.objects.filter(is_active=True, asset_class=asset_class).filter(
-        Q(owner__isnull=True) | Q(owner=user)
+        visible_to(user)
     )
     if q:
         qs = qs.filter(

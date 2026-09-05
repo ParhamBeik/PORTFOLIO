@@ -94,33 +94,53 @@ DATABASES = {
     }
 }
 
-# A single connection string wins when present. Used by the GitHub Actions
-# fetcher, which runs `manage.py fetch_prices` against the prod DB from a
-# runner without docker-compose's service hostnames.
+# A single connection string wins when present, for any runner that has no
+# docker-compose service hostnames to resolve (a one-off `manage.py` invocation
+# against a restored database, say). Compose itself sets the POSTGRES_* vars
+# above and leaves this unset.
+#
+# Two things here are easy to get wrong and both were:
+#
+#   * `urlparse` does NOT percent-decode `username`/`password`. Every reserved
+#     character in a password -- `@ / : # ?` -- has to be percent-encoded to
+#     form a valid URL, so the raw attribute hands Postgres the literal
+#     "p%40ss" and authentication fails with a password that is in fact
+#     correct. `unquote` is the documented counterpart.
+#   * `sslmode` is a libpq connection parameter, and Django passes exactly
+#     `OPTIONS` through to the driver -- an unknown key at the top level of a
+#     DATABASES entry is silently dropped. It sat there, so `PG_SSLMODE` was a
+#     TLS switch that read as configurable and connected in the clear whatever
+#     it was set to.
 _database_url = os.getenv("DATABASE_URL")
 if _database_url:
-    from urllib.parse import urlparse
+    from urllib.parse import unquote, urlparse
 
     _u = urlparse(_database_url)
     DATABASES["default"] = {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": _u.path.lstrip("/") or "portfolio",
-        "USER": _u.username or "portfolio",
-        "PASSWORD": _u.password or "",
+        "NAME": unquote(_u.path.lstrip("/")) or "portfolio",
+        "USER": unquote(_u.username) if _u.username else "portfolio",
+        "PASSWORD": unquote(_u.password) if _u.password else "",
         "HOST": _u.hostname or "db",
         "PORT": str(_u.port or 5432),
         "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "60")),
-        "sslmode": os.getenv("PG_SSLMODE", "prefer"),
+        "OPTIONS": {"sslmode": os.getenv("PG_SSLMODE", "prefer")},
     }
 
 # Redis caches the global price map and per-user valuations so reads stay cheap
 # under load. Falls back to local-memory if REDIS_URL is unset (e.g. quick tests).
 if os.getenv("REDIS_URL"):
+    # No OPTIONS. There used to be `{"CONNECTION_CLASS_KWARGS": {"ssl_cert_reqs":
+    # None}}` here, which django-redis has never read -- its connection factory
+    # knows CONNECTION_POOL_KWARGS and REDIS_CLIENT_KWARGS, and silently ignores
+    # any other key. So it disabled nothing, and what it claimed to disable was
+    # TLS certificate verification, which is not something to switch off by
+    # default. A `rediss://` deployment that genuinely needs a relaxed check
+    # should say so explicitly under CONNECTION_POOL_KWARGS.
     CACHES = {
         "default": {
             "BACKEND": "django_redis.cache.RedisCache",
             "LOCATION": os.environ["REDIS_URL"],
-            "OPTIONS": {"CONNECTION_CLASS_KWARGS": {"ssl_cert_reqs": None}},
         }
     }
 elif not DEBUG:

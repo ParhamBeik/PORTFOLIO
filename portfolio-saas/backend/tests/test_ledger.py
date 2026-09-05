@@ -2163,3 +2163,80 @@ def test_a_backdated_trade_still_reads_the_warehouse():
     Price.objects.create(asset=asset, price=Decimal("99000000"), source="API")
 
     assert resolve_historical_price(asset, when) == Decimal("50000000")
+
+
+# --- Cross-user asset scoping ------------------------------------------------
+#
+# Owner-minted assets are only ever real estate (see `Asset.owner`), and the
+# add-holding form was the ONLY entry point that scoped `asset_key` to the
+# caller. Five others resolved it against the whole table, so a key belonging to
+# somebody else's house was accepted by the ledger, by trades, by the CSV
+# importer and by the liability form, and its name and class were readable from
+# the price-history endpoint. `catalog.visible_to` is that rule, in one place.
+
+
+def _other_users_house(make_user):
+    """Mint a property on a second user's account and return its asset key."""
+    stranger = Account.objects.create(
+        user=make_user(email="stranger@test.test"), name="Theirs"
+    )
+    response = _add_property(stranger, name="Their Villa")
+    assert response.status_code == 201, response.data
+    holding = Holding.objects.get(account=stranger, asset__is_house=True)
+    return holding.asset.key
+
+
+@pytest.mark.django_db
+def test_another_users_property_cannot_be_referenced_by_key(account, make_user):
+    victim_key = _other_users_house(make_user)
+    client = _client(account.user)
+
+    ledger = _post(client, account, {
+        "kind": LedgerEntry.Kind.BUY,
+        "asset_key": victim_key,
+        "quantity": "1",
+        "unit_price_tomans": "1000",
+        "occurred_at": timezone.now().isoformat(),
+    })
+    assert ledger.status_code == 400
+    assert "asset_key" in str(ledger.data).lower()
+
+    trade = client.post(
+        f"/api/accounts/{account.id}/trades/",
+        {"asset_key": victim_key, "side": "buy", "quantity": "1"},
+        format="json",
+    )
+    assert trade.status_code == 400
+
+    liability = client.post(
+        f"/api/accounts/{account.id}/liabilities/",
+        {"label": "Mortgage", "amount_tomans": "1000", "asset_key": victim_key},
+        format="json",
+    )
+    assert liability.status_code == 400
+
+    history = client.get(f"/api/prices/history/?asset={victim_key}")
+    assert history.status_code == 404
+
+    # Nothing was attached to the attacker's account by any of the above.
+    assert not Holding.objects.filter(account=account, asset__key=victim_key).exists()
+
+
+@pytest.mark.django_db
+def test_a_user_can_still_reference_their_own_property(account, make_user):
+    """The scoping must not break the legitimate case it sits in front of.
+
+    A mortgage names the property it is secured against, so `asset_key` on a
+    liability has to keep accepting the caller's OWN house.
+    """
+    assert _add_property(account, name="My Flat").status_code == 201
+    own_key = Holding.objects.get(account=account, asset__is_house=True).asset.key
+    client = _client(account.user)
+
+    liability = client.post(
+        f"/api/accounts/{account.id}/liabilities/",
+        {"label": "Mortgage", "amount_tomans": "1000", "asset_key": own_key},
+        format="json",
+    )
+    assert liability.status_code == 201, liability.data
+    assert client.get(f"/api/prices/history/?asset={own_key}").status_code == 200

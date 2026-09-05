@@ -15,13 +15,21 @@ All are public (permission_classes = []): healthchecks carry no auth token.
 """
 from datetime import timedelta
 
+from django.conf import settings
 from django.core.cache import cache
 from django.db import connection
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-PRICE_STALE_AFTER = timedelta(minutes=15)
+# Derived, not written again. `PRICE_STALE_THRESHOLD_SECONDS` is the one place
+# "a price this old is stale" is declared; docker-compose.prod.yml plumbs it,
+# and marketdata/tasks.py (the operator alert) and portfolio/services/returns.py
+# both read it. This module -- and marketdata/admin_telemetry.py, which imports
+# the name from here -- hardcoded 15 minutes instead, so lowering the env var
+# tightened the alert and the returns matrix while leaving the dead-man's switch
+# that the on-VPS cron and the GitHub probe actually watch on the old number.
+PRICE_STALE_AFTER = timedelta(seconds=settings.PRICE_STALE_THRESHOLD_SECONDS)
 
 
 class HealthView(APIView):
