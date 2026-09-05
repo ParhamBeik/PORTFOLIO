@@ -348,9 +348,12 @@ def _flush_user_snapshots(
                     unit_price = prices.get(holding.asset.key)
                     value = asset_value(holding, unit_price)
                     account_total += value
-                # Match value_account: net mortgage / other liabilities.
+                # Match value_account: net mortgage / other liabilities, and net
+                # what is owed TODAY. Reading `amount_tomans` here while
+                # `value_account` derives the balance would put a step into the
+                # recorded history every time someone edited the stored column.
                 for liability in account.liabilities.all():
-                    account_total -= liability.amount_tomans
+                    account_total -= liability.outstanding_tomans()
                 user_total += account_total
                 snap = Snapshot(
                     user=user,

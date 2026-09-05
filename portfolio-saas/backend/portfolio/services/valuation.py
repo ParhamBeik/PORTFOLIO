@@ -697,6 +697,51 @@ def _house_value(price_per_sqm_million: Decimal, area_sqm: Decimal = HOUSE_AREA_
     return sqm_price * area
 
 
+# Every money field a liability row carries, named once so `views._common`
+# converts all of them under a foreign basis. A row that is half Toman and half
+# dollars is worse than one that is entirely the wrong currency, because the
+# error is only visible in the arithmetic between two of its own columns.
+LIABILITY_MONEY_FIELDS = (
+    "amount_tomans",
+    "declared_amount_tomans",
+    "principal_tomans",
+    "monthly_installment_tomans",
+)
+
+
+def _liability_row(liability, as_of=None) -> dict:
+    """One debt, as the valuation payload reports it.
+
+    `amount_tomans` is what was actually NETTED off the total -- the outstanding
+    balance for `as_of`, not the column of the same name. The rows have to add
+    up to `total_liabilities` printed above them, and for a loan being repaid
+    the stored column stopped being that number the month after it was typed.
+    The stored figure is still reported, under `declared_amount_tomans`, so the
+    two can be compared where they are supposed to agree.
+    """
+    outstanding = liability.outstanding_tomans(as_of)
+    return {
+        "id": liability.id,
+        "label": liability.label,
+        "kind": liability.kind,
+        "lender": liability.lender,
+        "amount_tomans": float(outstanding),
+        "declared_amount_tomans": float(liability.amount_tomans),
+        "balance_basis": liability.balance_basis,
+        "principal_tomans": (
+            float(liability.principal_tomans)
+            if liability.principal_tomans is not None
+            else None
+        ),
+        "monthly_installment_tomans": (
+            float(liability.monthly_installment_tomans)
+            if liability.monthly_installment_tomans is not None
+            else None
+        ),
+        "asset_key": liability.asset.key if liability.asset else None,
+    }
+
+
 def asset_value(holding: Holding, price: Decimal) -> Decimal:
     """Quantity x unit price in Toman, or the house formula for real estate."""
     if holding.asset.is_house:
@@ -747,7 +792,12 @@ def value_account(
     # A hidden house takes its mortgage with it. Subtracting the debt of an asset
     # we are not counting would drop net worth by the loan alone.
     liabilities_qs = [l for l in liabilities_qs if l.asset_id not in hidden_ids]
-    total_liabilities = sum(l.amount_tomans for l in liabilities_qs)
+    # `outstanding_tomans()`, never `amount_tomans`: a loan being repaid owes
+    # less every month, and the stored column is only the figure last written
+    # down. See `Liability.outstanding_tomans` for the three rules.
+    total_liabilities = sum(
+        (l.outstanding_tomans() for l in liabilities_qs), Decimal("0")
+    )
     holdings = (
         account.holdings.select_related("asset")
         if account.pk
@@ -883,15 +933,7 @@ def value_account(
         "quality_status": quality_status,
         "tse_unit_policy": TSE_PRICE_UNIT,
         "excluded": excluded,
-        "liabilities": [
-            {
-                "id": l.id,
-                "label": l.label,
-                "amount_tomans": float(l.amount_tomans),
-                "asset_key": l.asset.key if l.asset else None,
-            }
-            for l in liabilities_qs
-        ],
+        "liabilities": [_liability_row(l) for l in liabilities_qs],
         "total_liabilities": float(total_liabilities),
     }
 
@@ -1275,21 +1317,34 @@ def compute_dynamic_net_worth_series(
         else liabilities.exclude(asset_id__in=hidden_ids)
     )
     liabilities = list(liabilities)
-    total_liabilities = sum(l.amount_tomans for l in liabilities)
     # A debt secured on an asset rides with that asset, exactly as the hidden-row
     # rule above already has it: a mortgaged property leaves value and mortgage
     # together or not at all. An unsecured loan is attached to nothing, so it is
     # simply always there. Both are needed by the matched pair below -- see
     # `paired_liabilities`.
     asset_key_by_id = {asset.id: key for key, asset in assets.items()}
-    liability_by_key: dict[str, Decimal] = {}
-    unattached_liabilities = Decimal("0")
-    for l in liabilities:
-        key = asset_key_by_id.get(l.asset_id) if l.asset_id else None
-        if key is None:
-            unattached_liabilities += l.amount_tomans
-        else:
-            liability_by_key[key] = liability_by_key.get(key, Decimal("0")) + l.amount_tomans
+
+    def liabilities_on(as_of):
+        """The day's debts: total, per secured asset, and unattached.
+
+        Recomputed per day rather than hoisted, because a loan on a repayment
+        schedule owes less every month. Held at one figure for the whole window
+        the chart drew every installment paid over the last year as portfolio
+        appreciation on the day the balance was last edited, and none of it
+        anywhere else.
+        """
+        by_key: dict[str, Decimal] = {}
+        unattached = Decimal("0")
+        total = Decimal("0")
+        for l in liabilities:
+            owed = l.outstanding_tomans(as_of)
+            total += owed
+            key = asset_key_by_id.get(l.asset_id) if l.asset_id else None
+            if key is None:
+                unattached += owed
+            else:
+                by_key[key] = by_key.get(key, Decimal("0")) + owed
+        return total, by_key, unattached
 
     # Marks are "in force that calendar day", not at today's clock on that date.
     # A purchase at 17:40 was missing from the 16:30 reading of Aug 9.
@@ -1441,13 +1496,21 @@ def compute_dynamic_net_worth_series(
                     paired_keys.add(key)
                 day_prices[key] = p
 
+        # The day's debts, not the window's: a loan on a schedule owes less each
+        # month, and that has to reach the net-worth line. It cannot reach the
+        # RATIO -- repaying a loan is a cash flow, not performance -- and it
+        # does not, because the pair below charges one and the same day's figure
+        # to both of its sides.
+        total_liabilities, liability_by_key, unattached_liabilities = liabilities_on(
+            target_date
+        )
         total -= total_liabilities
         # The pair has to net out debt for the same reason `total` does: the
         # chart is the return on what the family OWNS. Assets 100 against a
         # mortgage of 40 is 60 of net worth, and a 10% rise in the assets is a
         # 16.7% gain to them -- reporting 10% understates every leveraged day.
-        # The debt is constant across the window (one figure read once, above),
-        # so carrying it on both sides cannot invent a flow.
+        # Both sides carry the SAME day's figure, so a repayment cannot show up
+        # as a flow in the ratio however much the balance moves day to day.
         #
         # A secured debt rides with its own asset, so it is in the pair exactly
         # when that asset is. An UNSECURED loan is against the whole book, and
@@ -1722,7 +1785,12 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     liabilities = Liability.objects.filter(account__in=accounts).exclude(
         asset_id__in=hidden_asset_ids(list(accounts))
     )
-    total_liabilities = sum(l.amount_tomans for l in liabilities)
+    # As of the date being valued, not as of today: this feeds the TWR cash-flow
+    # boundaries, and charging a two-year-old boundary with today's smaller
+    # balance books the whole repayment as investment performance.
+    total_liabilities = sum(
+        (l.outstanding_tomans(as_of_dt) for l in liabilities), Decimal("0")
+    )
 
     scaled_liabilities = total_liabilities
     if basis in ("usd_denominated", "usdt_denominated") and usd_rate > 0:
@@ -1741,13 +1809,5 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
         "excluded": excluded,
         "total_liabilities": float(scaled_liabilities),
         "conversion_source": conversion_source,
-        "liabilities": [
-            {
-                "id": l.id,
-                "label": l.label,
-                "amount_tomans": float(l.amount_tomans),
-                "asset_key": l.asset.key if l.asset else None,
-            }
-            for l in liabilities
-        ],
+        "liabilities": [_liability_row(l, as_of_dt) for l in liabilities],
     }

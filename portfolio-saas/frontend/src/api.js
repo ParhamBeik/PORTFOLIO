@@ -263,13 +263,22 @@ export const addHolding = (accountId, assetKey, quantity) =>
 // A property is described by its size and what a square meter is worth, in
 // millions of Toman — never by a bare "quantity". `newPropertyName` mints a new
 // one; passing `assetKey` instead revalues a property already held.
-export const addProperty = (accountId, { name, areaSqm, pricePerSqmMillion, mortgageTomans, occurredAt }) =>
+// `pricePerSqmMillion` is what a meter is worth NOW; `purchasePricePerSqmMillion`
+// is what one COST. Two different questions about the same property, and
+// answering the second with the first restates the purchase at today's market.
+export const addProperty = (
+  accountId,
+  { name, areaSqm, pricePerSqmMillion, purchasePricePerSqmMillion, mortgageTomans, occurredAt }
+) =>
   api(`/api/accounts/${accountId}/holdings/`, {
     method: "POST",
     body: {
       new_property_name: name,
       area_sqm: Number(areaSqm),
       price_per_sqm_million: Number(pricePerSqmMillion),
+      ...(purchasePricePerSqmMillion
+        ? { purchase_price_per_sqm_million: Number(purchasePricePerSqmMillion) }
+        : {}),
       ...(mortgageTomans ? { mortgage_deduction_tomans: Number(mortgageTomans) } : {}),
       ...(occurredAt ? { occurred_at: occurredAt } : {}),
     },
@@ -281,7 +290,10 @@ const numeric = (key, value) =>
 export const updateHolding = (
   accountId,
   id,
-  { quantity, unitPriceTomans, areaSqm, pricePerSqmMillion, displayName, isHidden, occurredAt } = {}
+  {
+    quantity, unitPriceTomans, areaSqm, pricePerSqmMillion,
+    purchasePricePerSqmMillion, displayName, isHidden, occurredAt,
+  } = {}
 ) =>
   api(`/api/accounts/${accountId}/holdings/${id}/`, {
     method: "PATCH",
@@ -290,6 +302,7 @@ export const updateHolding = (
       ...numeric("unit_price_tomans", unitPriceTomans),
       ...numeric("area_sqm", areaSqm),
       ...numeric("price_per_sqm_million", pricePerSqmMillion),
+      ...numeric("purchase_price_per_sqm_million", purchasePricePerSqmMillion),
       ...(displayName != null ? { display_name: displayName } : {}),
       ...(isHidden != null ? { is_hidden: isHidden } : {}),
       ...(occurredAt ? { occurred_at: occurredAt } : {}),
@@ -359,23 +372,48 @@ export const commitLedgerImport = (accountId, file) =>
 
 export const listLiabilities = (accountId) =>
   api(`/api/accounts/${accountId}/liabilities/`);
-export const createLiability = (accountId, { label, amountTomans, assetKey = null }) =>
+// A liability is either a plain balance or a repayment schedule, and the
+// difference is which fields are null. They are sent as explicit nulls rather
+// than omitted: switching a loan back to a typed balance has to CLEAR the
+// terms, and `Liability.balance_basis` falls back a rung at a time, so a
+// leftover start date keeps it amortizing from figures the form stopped
+// showing. One body shape, so create and edit cannot drift apart.
+const liabilityBody = ({
+  label,
+  kind,
+  lender,
+  assetKey = null,
+  amountTomans = null,
+  principalTomans = null,
+  annualRatePct = null,
+  termMonths = null,
+  monthlyInstallmentTomans = null,
+  startedOn = null,
+}) => {
+  const decimal = (v) => (v === null || v === undefined || v === "" ? null : Number(v));
+  return {
+    ...(label != null ? { label } : {}),
+    ...(kind != null ? { kind } : {}),
+    ...(lender != null ? { lender } : {}),
+    asset_key: assetKey || null,
+    amount_tomans: decimal(amountTomans),
+    principal_tomans: decimal(principalTomans),
+    annual_rate_pct: decimal(annualRatePct),
+    term_months: termMonths === null || termMonths === "" ? null : Number(termMonths),
+    monthly_installment_tomans: decimal(monthlyInstallmentTomans),
+    started_on: startedOn || null,
+  };
+};
+
+export const createLiability = (accountId, fields) =>
   api(`/api/accounts/${accountId}/liabilities/`, {
     method: "POST",
-    body: {
-      label,
-      amount_tomans: Number(amountTomans),
-      ...(assetKey ? { asset_key: assetKey } : {}),
-    },
+    body: liabilityBody(fields),
   });
-export const updateLiability = (accountId, id, { label, amountTomans, assetKey = null }) =>
+export const updateLiability = (accountId, id, fields) =>
   api(`/api/accounts/${accountId}/liabilities/${id}/`, {
     method: "PATCH",
-    body: {
-      ...(label != null ? { label } : {}),
-      ...(amountTomans != null ? { amount_tomans: Number(amountTomans) } : {}),
-      ...(assetKey !== undefined ? { asset_key: assetKey || null } : {}),
-    },
+    body: liabilityBody(fields),
   });
 export const deleteLiability = (accountId, id) =>
   api(`/api/accounts/${accountId}/liabilities/${id}/`, { method: "DELETE" });

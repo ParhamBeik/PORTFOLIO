@@ -120,6 +120,7 @@ class LedgerListCreateView(APIView):
                     asset=asset,
                     quantity=data.get("quantity"),
                     unit_price_tomans=data.get("unit_price_tomans"),
+                    cost_basis_tomans=data.get("cost_basis_tomans"),
                     occurred_at=data["occurred_at"],
                     source=data["source"],
                     note=data.get("note", ""),
@@ -137,6 +138,7 @@ class LedgerListCreateView(APIView):
                 mortgage_deduction_tomans=data.get(
                     "mortgage_deduction_tomans"
                 ),
+                cost_basis_tomans=data.get("cost_basis_tomans"),
                 occurred_at=data["occurred_at"],
                 source=data["source"],
                 note=data.get("note", ""),

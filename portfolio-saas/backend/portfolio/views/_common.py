@@ -11,6 +11,7 @@ from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 from ..services.deflator import cpi_for_date, normalize_basis
+from ..services.valuation import LIABILITY_MONEY_FIELDS
 
 
 def concurrency_cap(view_func):
@@ -208,11 +209,14 @@ def _rescale(valuation, factor, *, to_foreign_currency=False):
         # `value_user` rebuilds these as fresh dicts per account, so the root
         # list and the per-account lists are separate objects and each is
         # divided exactly once.
+        # Every money column on the row, not just the netted one: a loan also
+        # reports what was borrowed and what is paid monthly, and those are
+        # money in exactly the same way. `LIABILITY_MONEY_FIELDS` is the list,
+        # kept beside the builder that produces the rows.
         for row in rows or []:
-            if row.get("amount_tomans") is not None:
-                row["amount_tomans"] = float(
-                    Decimal(str(row["amount_tomans"])) / factor
-                )
+            for field in LIABILITY_MONEY_FIELDS:
+                if row.get(field) is not None:
+                    row[field] = float(Decimal(str(row[field])) / factor)
 
     valuation["total"] = Decimal(str(valuation.get("total", 0) or 0)) / factor
     if valuation.get("total_usd") is not None:

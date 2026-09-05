@@ -89,16 +89,95 @@ def _flow_amount(entry, basis: str) -> Decimal | None:
     return amount / rate if rate else None
 
 
+def _house_position(asset, entries, valuation_items, label=None) -> dict:
+    """What a property cost and what it is worth, as one row.
+
+    Everything about a house is measured per square meter, so both prices on
+    this row are per square meter and the "quantity" is the area. Reusing the
+    unit-count shape would print a quantity of 24 for a flat bought at 24
+    million a meter, and the reader has no way to tell that from 24 coins.
+
+    Marks REPLACE (see `ledger.HOUSE_MARK_KINDS`), so the current mark is the
+    last one and the purchase price is the last one that declared it -- a later
+    correction wins, which is the only way a typo is fixable.
+    """
+    from ..models import HOUSE_AREA_SQM, HOUSE_PRICE_SCALE
+    from .ledger import HOUSE_MARK_KINDS
+
+    reversed_ids = {e.reversal_of_id for e in entries if e.reversal_of_id}
+    live = [
+        e for e in entries
+        if not e.reversal_of_id
+        and e.pk not in reversed_ids
+        and e.kind in HOUSE_MARK_KINDS
+    ]
+    area = HOUSE_AREA_SQM
+    basis_per_sqm_million = None
+    for entry in live:
+        if entry.area_sqm is not None:
+            area = Decimal(entry.area_sqm)
+        if entry.cost_basis_tomans is not None:
+            basis_per_sqm_million = Decimal(entry.cost_basis_tomans)
+
+    item = valuation_items.get(asset.key)
+    current_value = (
+        Decimal(str(item["value"]))
+        if item and item.get("value") is not None
+        else None
+    )
+    known = basis_per_sqm_million is not None and basis_per_sqm_million > 0
+    cost_per_sqm = (
+        basis_per_sqm_million * HOUSE_PRICE_SCALE if known else None
+    )
+    total_basis = cost_per_sqm * area if known else None
+    return {
+        "asset_key": asset.key,
+        # A property is minted per owner and the catalog row has nothing but
+        # the asset class to put in `name`, so without the holder's own name
+        # for it every house on this table reads "Real Estate". Same rule as
+        # `models.owner_display_names`.
+        "asset_name": label or asset.name_fa or asset.name,
+        "quantity": str(area),
+        # Square meters divide; the step is what the holdings table would use
+        # for a divisible unit, not the "1" a countable asset gets.
+        "quantity_step": "any",
+        "quantity_unit": "sqm",
+        "cost_basis_known": known,
+        "average_cost_tomans": str(cost_per_sqm) if known else None,
+        "average_cost_currency": "toman",
+        # Says the price above is per square meter, so the table can label it
+        # rather than leave a per-meter figure next to per-unit ones.
+        "average_cost_unit": "sqm",
+        "total_cost_basis_tomans": str(total_basis) if known else None,
+        # A property is not part-sold here; a sale is a delete, and the ledger
+        # reverses every mark with it.
+        "realized_pnl_tomans": "0" if known else None,
+        "unrealized_pnl_tomans": (
+            str(current_value - total_basis)
+            if known and current_value is not None
+            else None
+        ),
+        "current_value_tomans": (
+            str(current_value) if current_value is not None else None
+        ),
+    }
+
+
 def _position_metrics(account) -> dict:
     from .visibility import hidden_asset_ids
 
     hidden_ids = hidden_asset_ids([account])
     version = account.transactions.aggregate(
-        count=Count("id"), max_id=Max("id"), id_sum=Sum("id")
+        count=Count("id"), max_id=Max("id"), id_sum=Sum("id"),
+        # An EDIT moves none of the three above -- same rows, same ids -- so
+        # correcting a quantity or declaring a purchase price left this table
+        # answering from cache for the next hour.
+        touched=Max("updated_at"),
     )
     cache_key = (
         f"position-metrics:{account.id}:{version['count']}:"
         f"{version['max_id'] or 0}:{version['id_sum'] or 0}:"
+        f"{version['touched'].timestamp() if version['touched'] else 0}:"
         # Ticking an asset off changes this result without touching a single
         # ledger row, so the visibility set has to be part of the key or the
         # cached answer outlives the toggle for an hour.
@@ -113,6 +192,12 @@ def _position_metrics(account) -> dict:
         for item in value_account(account).get("items", [])
     }
     result = {}
+    # The holder's own name for each asset, so a property is "Tehran flat" and
+    # not "Real Estate". Read once rather than per row.
+    labels = {
+        holding.asset_id: holding.label
+        for holding in account.holdings.select_related("asset")
+    }
     entries_by_asset = {}
     for entry in account.transactions.select_related("asset").order_by(
         "timestamp", "pk"
@@ -121,6 +206,17 @@ def _position_metrics(account) -> dict:
             entries_by_asset.setdefault(entry.asset_id, []).append(entry)
     for entries in entries_by_asset.values():
         asset = entries[0].asset
+        if asset.is_house:
+            # A property is a series of dated marks, not a position, and the
+            # running total below would add every revaluation to the last: the
+            # "quantity" it accumulates is a price per square meter, so a house
+            # marked three times reported a quantity of 119 and a current price
+            # of zero (real estate has no feed to look one up in). It gets its
+            # own arithmetic.
+            result[asset.key] = _house_position(
+                asset, entries, valuation_items, labels.get(asset.id)
+            )
+            continue
         quantity = Decimal("0")
         average_cost = Decimal("0")
         realized = Decimal("0")
@@ -136,8 +232,24 @@ def _position_metrics(account) -> dict:
             qty = Decimal(entry.quantity or 0)
             price = Decimal(entry.price_tomans or 0)
             if entry.kind == LedgerEntry.Kind.OPENING_POSITION:
-                quantity += qty
-                unknown_basis = True
+                # An opening says "I already own this". Whether that voids the
+                # cost basis depends on one thing only: whether the owner said
+                # what they paid. `cost_basis_tomans` is that declaration, in
+                # the same unit as every other price on the row (Rial for TSE),
+                # and it absorbs exactly like a purchase at that price so a
+                # later buy averages against it. Absent it, the basis is
+                # genuinely unknown and everything downstream stays blank --
+                # which is what every opening used to mean, unconditionally.
+                declared = Decimal(entry.cost_basis_tomans or 0)
+                if declared > 0 and not unknown_basis:
+                    if quantity + qty > 0:
+                        average_cost = (
+                            average_cost * quantity + declared * qty
+                        ) / (quantity + qty)
+                    quantity += qty
+                else:
+                    quantity += qty
+                    unknown_basis = True
             elif entry.kind == LedgerEntry.Kind.RIGHTS_ISSUE:
                 # Free shares: the money already spent now buys more of them, so
                 # the average cost falls and the basis stays KNOWN. Treating this
@@ -177,6 +289,11 @@ def _position_metrics(account) -> dict:
             # Same declaration the valuation rows carry, so this table and the
             # holdings table print the same count to the same precision.
             "quantity_step": asset.quantity_step,
+            # Countable things have no unit to name. Only a property does, and
+            # `_house_position` is where that row comes from -- but the key is
+            # present on every row so the client never has to test for it.
+            "quantity_unit": None,
+            "average_cost_unit": None,
             "cost_basis_known": not unknown_basis,
             "average_cost_tomans": str(average_cost) if not unknown_basis else None,
             # ...which, despite the field name, is Rial for a TSE share. The
@@ -208,11 +325,21 @@ def _position_metrics(account) -> dict:
         if asset.key in result:
             continue
         item = valuation_items.get(asset.key)
+        if asset.is_house:
+            # A property with no ledger history at all: still measured in square
+            # meters, and `holding.quantity` is a price per meter, not a count.
+            result[asset.key] = _house_position(
+                asset, [], valuation_items, holding.label
+            )
+            result[asset.key]["quantity"] = str(holding.area_sqm)
+            continue
         result[asset.key] = {
             "asset_key": asset.key,
             "asset_name": asset.tse_symbol or asset.name_fa or asset.name,
             "quantity": str(holding.quantity),
             "quantity_step": asset.quantity_step,
+            "quantity_unit": None,
+            "average_cost_unit": None,
             "cost_basis_known": False,
             "average_cost_tomans": None,
             "average_cost_currency": "rial" if is_tse_priced(asset) else "toman",

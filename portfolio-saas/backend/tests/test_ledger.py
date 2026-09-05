@@ -2240,3 +2240,361 @@ def test_a_user_can_still_reference_their_own_property(account, make_user):
     )
     assert liability.status_code == 201, liability.data
     assert client.get(f"/api/prices/history/?asset={own_key}").status_code == 200
+
+
+# ----------------------------------------------------------------------
+# A declared purchase price: what an opening position costs, as opposed
+# to what it is worth
+# ----------------------------------------------------------------------
+
+
+def test_an_opening_with_a_declared_price_has_a_known_cost_basis(
+    asset_catalog, write_prices, make_user
+):
+    """"I already own this, and here is what I paid" is one sentence.
+
+    An opening used to void the cost basis unconditionally, so a portfolio
+    assembled by declaring what you already own could never show a gain -- only
+    a current value. `cost_basis_tomans` is the missing half of the sentence.
+    """
+    from portfolio.services.performance import _position_metrics
+    from portfolio.services.ledger import record_existing_position
+
+    write_prices({"gold_18k_gram": Decimal("14000000")})
+    user = make_user(email="declared-basis@test.test")
+    account = Account.objects.create(user=user, name="Gold")
+    record_existing_position(
+        account=account,
+        asset=asset_catalog["gold_18k_gram"],
+        quantity=Decimal("100"),
+        cost_basis_tomans=Decimal("10000000"),
+    )
+
+    row = _position_metrics(account)["gold_18k_gram"]
+
+    assert row["cost_basis_known"] is True
+    assert Decimal(row["average_cost_tomans"]) == Decimal("10000000")
+    assert Decimal(row["total_cost_basis_tomans"]) == Decimal("1000000000")
+    # 100 grams bought at 10m, now worth 14m: 400m of unrealized gain.
+    assert Decimal(row["unrealized_pnl_tomans"]) == Decimal("400000000")
+
+
+def test_an_opening_without_a_declared_price_is_still_basis_unknown(
+    asset_catalog, write_prices, make_user
+):
+    """The old meaning survives untouched when nothing was declared."""
+    from portfolio.services.performance import _position_metrics
+    from portfolio.services.ledger import record_existing_position
+
+    write_prices({"gold_18k_gram": Decimal("14000000")})
+    user = make_user(email="silent-basis@test.test")
+    account = Account.objects.create(user=user, name="Gold")
+    record_existing_position(
+        account=account, asset=asset_catalog["gold_18k_gram"], quantity=Decimal("100")
+    )
+
+    row = _position_metrics(account)["gold_18k_gram"]
+
+    assert row["cost_basis_known"] is False
+    assert row["average_cost_tomans"] is None
+    assert row["unrealized_pnl_tomans"] is None
+
+
+def test_a_later_buy_averages_against_the_declared_basis(
+    asset_catalog, write_prices, make_user
+):
+    """The declaration absorbs exactly like a purchase at that price.
+
+    Anything else leaves two costing rules in one column: the opening priced
+    one way and every trade after it priced another.
+    """
+    from portfolio.services.performance import _position_metrics
+    from portfolio.services.ledger import create_ledger_entry, record_existing_position
+
+    write_prices({"gold_18k_gram": Decimal("14000000")})
+    user = make_user(email="blended-basis@test.test")
+    account = Account.objects.create(user=user, name="Gold")
+    record_existing_position(
+        account=account,
+        asset=asset_catalog["gold_18k_gram"],
+        quantity=Decimal("100"),
+        cost_basis_tomans=Decimal("10000000"),
+    )
+    create_ledger_entry(
+        account=account,
+        kind=LedgerEntry.Kind.BUY,
+        asset=asset_catalog["gold_18k_gram"],
+        quantity=Decimal("100"),
+        unit_price_tomans=Decimal("12000000"),
+    )
+
+    row = _position_metrics(account)["gold_18k_gram"]
+
+    assert row["cost_basis_known"] is True
+    assert Decimal(row["average_cost_tomans"]) == Decimal("11000000")
+
+
+def test_a_purchase_price_cannot_be_declared_on_a_buy(asset_catalog, make_user):
+    """A buy already states its price; a second answer has no tie-break."""
+    from portfolio.services.ledger import LedgerError, create_ledger_entry
+
+    user = make_user(email="double-price@test.test")
+    account = Account.objects.create(user=user, name="Gold")
+
+    with pytest.raises(LedgerError, match="already own"):
+        create_ledger_entry(
+            account=account,
+            kind=LedgerEntry.Kind.BUY,
+            asset=asset_catalog["gold_18k_gram"],
+            quantity=Decimal("1"),
+            unit_price_tomans=Decimal("12000000"),
+            cost_basis_tomans=Decimal("10000000"),
+        )
+
+
+def test_a_property_reports_cost_and_worth_per_square_meter(
+    asset_catalog, make_user
+):
+    """A house is measured per square meter on both sides of the trade.
+
+    The generic path accumulated `quantity` across marks -- which for a house
+    is a price per meter, not a count -- so a property marked twice reported a
+    quantity of 119 against a current price of zero.
+    """
+    from portfolio.services.ledger import record_house_mark
+    from portfolio.services.performance import _position_metrics
+
+    user = make_user(email="house-basis@test.test")
+    account = Account.objects.create(user=user, name="Property")
+    house = asset_catalog["house_asset"]
+    record_house_mark(
+        user=user,
+        account_id=account.id,
+        asset=house,
+        quantity=Decimal("24"),          # worth 24m/sqm when recorded
+        area_sqm=Decimal("100"),
+        cost_basis_tomans=Decimal("24"),  # and bought at 24m/sqm
+    )
+    # A revaluation states no purchase price, and must not erase the one on
+    # record: marks REPLACE the mark, not the acquisition.
+    record_house_mark(
+        user=user,
+        account_id=account.id,
+        asset=house,
+        quantity=Decimal("60"),
+        area_sqm=Decimal("100"),
+    )
+
+    row = _position_metrics(account)[house.key]
+
+    assert row["quantity_unit"] == "sqm"
+    assert Decimal(row["quantity"]) == Decimal("100")
+    assert row["cost_basis_known"] is True
+    assert row["average_cost_unit"] == "sqm"
+    assert Decimal(row["average_cost_tomans"]) == Decimal("24000000")
+    assert Decimal(row["total_cost_basis_tomans"]) == Decimal("2400000000")
+    assert Decimal(row["current_value_tomans"]) == Decimal("6000000000")
+    assert Decimal(row["unrealized_pnl_tomans"]) == Decimal("3600000000")
+
+
+def test_correcting_a_purchase_price_is_visible_immediately(
+    asset_catalog, write_prices, make_user
+):
+    """An in-place edit has to defeat the position-metrics cache.
+
+    The key was (count, max id, id sum) -- none of which an edit moves -- so a
+    corrected figure sat behind the old answer for the full hour of the cache's
+    life. Same class of failure as an endpoint that accepts a field, drops it,
+    and answers 200.
+    """
+    from portfolio.services.ledger import record_existing_position, update_ledger_entry
+    from portfolio.services.performance import _position_metrics
+
+    write_prices({"gold_18k_gram": Decimal("14000000")})
+    user = make_user(email="basis-edit@test.test")
+    account = Account.objects.create(user=user, name="Gold")
+    entry = record_existing_position(
+        account=account,
+        asset=asset_catalog["gold_18k_gram"],
+        quantity=Decimal("100"),
+        cost_basis_tomans=Decimal("1000000"),
+    )
+    assert Decimal(
+        _position_metrics(account)["gold_18k_gram"]["average_cost_tomans"]
+    ) == Decimal("1000000")
+
+    update_ledger_entry(
+        user=user,
+        account_id=account.id,
+        entry_id=entry.pk,
+        cost_basis_tomans=Decimal("10000000"),
+    )
+
+    assert Decimal(
+        _position_metrics(account)["gold_18k_gram"]["average_cost_tomans"]
+    ) == Decimal("10000000")
+
+
+def test_a_secured_debt_must_name_what_secures_it(asset_catalog, make_user):
+    """Otherwise it is an unsecured loan wearing the wrong label.
+
+    The distinction is load-bearing further down: a secured debt rides with its
+    asset through the hidden-row rule and through the matched pair in the
+    net-worth series, and one attached to nothing rides with the whole book.
+    """
+    user = make_user(email="secured-noasset@test.test")
+    account = Account.objects.create(user=user, name="Levered")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    response = client.post(
+        f"/api/accounts/{account.id}/liabilities/",
+        {"label": "Mortgage", "kind": "secured_debt", "amount_tomans": "1000"},
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert "asset_key" in response.data
+
+
+def test_half_a_repayment_schedule_is_refused(make_user):
+    """A schedule missing its start date silently stops being a schedule.
+
+    `balance_basis` falls back a rung at a time, so the row would be accepted,
+    report the figure typed at creation, and drift from the truth every month
+    after -- correct on exactly the day it was entered.
+    """
+    user = make_user(email="halfterms@test.test")
+    account = Account.objects.create(user=user, name="Levered")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    response = client.post(
+        f"/api/accounts/{account.id}/liabilities/",
+        {
+            "label": "Car loan",
+            "kind": "bank_loan",
+            "principal_tomans": "600000000",
+            "annual_rate_pct": "20",
+            "term_months": 60,
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert "start date" in str(response.data)
+
+
+def test_a_scheduled_loan_needs_no_balance_typed_in(make_user):
+    """The server derives it. Asking the client to is asking it to be wrong."""
+    import datetime as dt
+
+    user = make_user(email="derivedbalance@test.test")
+    account = Account.objects.create(user=user, name="Levered")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    response = client.post(
+        f"/api/accounts/{account.id}/liabilities/",
+        {
+            "label": "Car loan",
+            "kind": "bank_loan",
+            "lender": "Bank Melli",
+            "principal_tomans": "600000000",
+            "annual_rate_pct": "20",
+            "term_months": 60,
+            "started_on": dt.date(2024, 1, 15).isoformat(),
+        },
+        format="json",
+    )
+
+    assert response.status_code == 201, response.data
+    assert response.data["balance_basis"] == "amortized"
+    assert Decimal(response.data["outstanding_tomans"]) < Decimal("600000000")
+    assert response.data["installments_paid"] > 0
+    # The annuity payment the terms imply, printed so a mistyped rate shows up
+    # as a payment nobody recognises.
+    assert Decimal(response.data["scheduled_installment_tomans"]) == pytest.approx(
+        Decimal("15895000"), rel=Decimal("0.001")
+    )
+    assert response.data["payoff_on"] is not None
+
+
+def test_set_cost_basis_command_declares_a_price_and_is_idempotent(
+    asset_catalog, write_prices, make_user
+):
+    """The backfill for holdings that predate the field.
+
+    `--dry-run` must save nothing, a second run must change nothing, and a
+    holding with no opening must be REPORTED rather than silently skipped --
+    the whole point of the command is to say which positions still have no
+    declared basis.
+    """
+    from io import StringIO
+
+    from portfolio.services.ledger import record_existing_position
+    from portfolio.services.performance import _position_metrics
+
+    write_prices({"gold_18k_gram": Decimal("14000000")})
+    user = make_user(email="backfill-basis@test.test")
+    account = Account.objects.create(user=user, name="Gold")
+    entry = record_existing_position(
+        account=account, asset=asset_catalog["gold_18k_gram"], quantity=Decimal("100")
+    )
+
+    out = StringIO()
+    call_command(
+        "set_cost_basis", "--email", user.email,
+        "--key", "gold_18k_gram=10000000", "--dry-run", stdout=out,
+    )
+    entry.refresh_from_db()
+    assert entry.cost_basis_tomans is None
+    assert "None -> 10000000" in out.getvalue()
+
+    call_command(
+        "set_cost_basis", "--email", user.email,
+        "--key", "gold_18k_gram=10000000", stdout=StringIO(),
+    )
+    entry.refresh_from_db()
+    assert entry.cost_basis_tomans == Decimal("10000000.0000")
+    assert _position_metrics(account)["gold_18k_gram"]["cost_basis_known"] is True
+
+    again = StringIO()
+    call_command(
+        "set_cost_basis", "--email", user.email,
+        "--key", "gold_18k_gram=10000000", stdout=again,
+    )
+    assert "already" in again.getvalue()
+
+
+def test_set_cost_basis_refuses_an_ambiguous_property_name(make_user):
+    """Two properties can share a name, and writing to the wrong one is silent.
+
+    Both rows still look plausible afterwards, so the only safe answer is to
+    refuse and say which holdings collided.
+    """
+    from io import StringIO
+
+    from portfolio.models import Asset
+    from portfolio.services.ledger import record_house_mark
+
+    user = make_user(email="two-flats@test.test")
+    account = Account.objects.create(user=user, name="Property")
+    for suffix in ("a", "b"):
+        asset = Asset.objects.create(
+            key=f"re-tehran-{suffix}", name="Tehran flat",
+            asset_class="Real Estate", currency="IRT", is_house=True, owner=user,
+        )
+        record_house_mark(
+            user=user, account_id=account.id, asset=asset,
+            quantity=Decimal("60"), area_sqm=Decimal("90"),
+        )
+
+    err = StringIO()
+    call_command(
+        "set_cost_basis", "--email", user.email, "--name", "Tehran=24",
+        stdout=StringIO(), stderr=err,
+    )
+
+    assert "matched 2 holdings" in err.getvalue()
+    assert not LedgerEntry.objects.filter(cost_basis_tomans__isnull=False).exists()

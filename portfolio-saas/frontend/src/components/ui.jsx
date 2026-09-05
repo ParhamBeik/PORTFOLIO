@@ -149,6 +149,24 @@ export function Select({ label, className = "", ...props }) {
   );
 }
 
+/**
+ * A visible caption above a control.
+ *
+ * `Input` and `Select` take `label` as an aria-label only, which is enough for
+ * a screen reader and nothing at all for someone looking at the form. Every
+ * dialog needs the visible version, so it lives here rather than being
+ * redefined privately in each one.
+ */
+export function Field({ label, hint, children }) {
+  return (
+    <div>
+      <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">{label}</div>
+      {children}
+      {hint && <p className="mt-1 text-xs text-muted">{hint}</p>}
+    </div>
+  );
+}
+
 export function Input({ label, className = "", ...props }) {
   return (
     <input

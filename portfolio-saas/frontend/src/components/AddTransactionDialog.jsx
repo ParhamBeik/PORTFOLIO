@@ -25,6 +25,7 @@ import {
   Badge,
   Button,
   ErrorState,
+  Field,
   Input,
   JalaliDateField,
   Loading,
@@ -149,6 +150,10 @@ export default function AddTransactionDialog({
     quantity: "",
     areaSqm: "",
     pricePerSqm: "",
+    // What it COST, as opposed to what it is worth. Only ever asked for a
+    // position being declared rather than bought -- a buy states its price.
+    purchasePricePerSqm: "",
+    costBasis: "",
     amount: "",
     price: "",
     when: "",
@@ -227,6 +232,13 @@ export default function AddTransactionDialog({
     !isCashMove && !isProperty && !newProperty &&
     (action === "buy" || action === "sell" ||
       (action === "opening_position" && !!asset?.is_manual));
+  // Only the kinds that record something ALREADY OWNED, which is the same set
+  // the server accepts a declared basis on (`ledger.COST_BASIS_KINDS`). A buy
+  // states what it cost in its own price field; asking twice would leave two
+  // answers and no rule for which the P&L believes.
+  const asksCostBasis =
+    !isCashMove &&
+    (action === "opening_position" || newProperty || action === "valuation_mark");
 
   const steps = stepsFor(isCashMove);
   const current = steps[step];
@@ -242,8 +254,8 @@ export default function AddTransactionDialog({
     setAction("");
     setOwnPrice(false);
     setForm({
-      name: "", quantity: "", areaSqm: "", pricePerSqm: "",
-      amount: "", price: "", when: "", note: "",
+      name: "", quantity: "", areaSqm: "", pricePerSqm: "", purchasePricePerSqm: "",
+      amount: "", price: "", costBasis: "", when: "", note: "",
     });
   };
 
@@ -361,6 +373,7 @@ export default function AddTransactionDialog({
           name: form.name,
           areaSqm: form.areaSqm,
           pricePerSqmMillion: form.pricePerSqm,
+          purchasePricePerSqmMillion: form.purchasePricePerSqm,
           ...(occurredAt ? { occurredAt } : {}),
         });
       } else if (asset?.is_house && action === "valuation_mark") {
@@ -369,6 +382,10 @@ export default function AddTransactionDialog({
         await updateHolding(targetAccountId, holding.id, {
           pricePerSqmMillion: form.pricePerSqm,
           areaSqm: form.areaSqm || holding.area_sqm,
+          // Only sent when stated. A revaluation that says nothing about the
+          // purchase price must LEAVE the one on record, not restate it as
+          // today's figure -- marks replace the mark, not the acquisition.
+          purchasePricePerSqmMillion: form.purchasePricePerSqm,
           ...(occurredAt ? { occurredAt } : {}),
         });
       } else if (["opening_position", "valuation_mark", "dividend", "rights_issue"].includes(action)) {
@@ -383,6 +400,9 @@ export default function AddTransactionDialog({
             : { quantity: form.quantity }),
           note: form.note,
           ...(priceIsMine && form.price ? { unit_price_tomans: form.price } : {}),
+          ...(asksCostBasis && form.costBasis
+            ? { cost_basis_tomans: form.costBasis }
+            : {}),
           ...(occurredAt ? { occurred_at: occurredAt } : {}),
         });
         if (
@@ -738,6 +758,33 @@ export default function AddTransactionDialog({
                   )}
                 </>
               )}
+              {/* What was PAID, for something being declared rather than
+                  bought. Without it an opening is cost-basis-unknown by
+                  construction, so a portfolio assembled from things you
+                  already own can only ever show a current value -- never a
+                  gain. Optional, because "I do not remember" is a real answer
+                  and the old behaviour is exactly what leaving it blank gives. */}
+              {asksCostBasis && (
+                <Field
+                  label={
+                    isProperty
+                      ? "What did you pay per square meter? (millions of Toman, optional)"
+                      : `What did you pay for one? (${priceUnitLabel}, optional)`
+                  }
+                  hint="Fills in your cost basis and unrealized gain. Leave it blank if you would rather not say."
+                >
+                  <Input
+                    label="Purchase price"
+                    type="number"
+                    step="any"
+                    min="0"
+                    className="w-full"
+                    value={isProperty ? form.purchasePricePerSqm : form.costBasis}
+                    onChange={set(isProperty ? "purchasePricePerSqm" : "costBasis")}
+                    data-testid="add-transaction-cost-basis"
+                  />
+                </Field>
+              )}
               {action === "opening_position" && targetAccount?.tracking_started_at && form.when && (
                 <p className="text-xs text-muted" data-testid="add-transaction-opening-note">
                   This portfolio already has a tracking start. The server will use that shared
@@ -767,11 +814,3 @@ export default function AddTransactionDialog({
   );
 }
 
-function Field({ label, children }) {
-  return (
-    <div>
-      <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">{label}</div>
-      {children}
-    </div>
-  );
-}

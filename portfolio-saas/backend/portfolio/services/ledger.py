@@ -57,6 +57,20 @@ HOUSE_MARK_KINDS = frozenset({
     LedgerEntry.Kind.VALUATION_MARK,
 })
 
+# Which rows may declare `cost_basis_tomans` -- what was PAID, as opposed to
+# what the row is worth. Only the kinds that record something already owned:
+# a buy states its price in `price_tomans` and needs no second answer.
+#
+# `VALUATION_MARK` is in the set because of the account-level rule in
+# `record_house_mark`: a property acquired after the account's baseline is a
+# mark, not an opening, and it was still bought at a price. Marks REPLACE, so
+# `performance._position_metrics` reads the LATEST declaration, which is also
+# what makes a mistyped basis correctable.
+COST_BASIS_KINDS = frozenset({
+    LedgerEntry.Kind.OPENING_POSITION,
+    LedgerEntry.Kind.VALUATION_MARK,
+})
+
 
 def _cash_delta(
     kind: str, amount: Decimal, reverse: bool, track_cash: bool = True
@@ -95,7 +109,7 @@ def _cash_delta(
 def create_ledger_entry(
     *, account: Account, kind: str, occurred_at=None, asset: Asset | None = None,
     quantity=None, unit_price_tomans=None, amount_tomans=None,
-    area_sqm=None, mortgage_deduction_tomans=None,
+    area_sqm=None, mortgage_deduction_tomans=None, cost_basis_tomans=None,
     source: str = "manual", note: str = "", external_id: str = "",
     import_batch=None,
 ) -> LedgerEntry:
@@ -127,6 +141,14 @@ def create_ledger_entry(
     mortgage = _decimal(
         mortgage_deduction_tomans, "mortgage_deduction_tomans", allow_zero=True
     )
+    cost_basis = _decimal(cost_basis_tomans, "cost_basis_tomans")
+    if cost_basis is not None and kind not in COST_BASIS_KINDS:
+        # A buy already states what was paid, in `price_tomans`. Accepting a
+        # second answer on the same row would leave two prices for one purchase
+        # and no rule for which one the P&L should believe.
+        raise LedgerError(
+            "A purchase price can only be declared on a position you already own."
+        )
     if kind in {
         LedgerEntry.Kind.OPENING_POSITION,
         LedgerEntry.Kind.BUY,
@@ -182,6 +204,7 @@ def create_ledger_entry(
         amount_tomans=amount,
         area_sqm=area,
         mortgage_deduction_tomans=mortgage,
+        cost_basis_tomans=cost_basis,
         timestamp=occurred_at,
         source=source,
         note=note[:200],
@@ -210,8 +233,8 @@ def create_ledger_entry(
 
 def record_existing_position(
     *, account: Account, asset: Asset, quantity, occurred_at=None,
-    unit_price_tomans=None, note: str = "", source: str = "manual",
-    external_id: str = "", import_batch=None,
+    unit_price_tomans=None, cost_basis_tomans=None, note: str = "",
+    source: str = "manual", external_id: str = "", import_batch=None,
 ) -> LedgerEntry:
     """Record something the user says they already own.
 
@@ -228,19 +251,25 @@ def record_existing_position(
     the record of it did.
 
     So the date is clamped rather than the kind changed. What is lost is the
-    acquisition date, which for a holding whose cost basis is unknown anyway was
-    never carrying weight: `performance._position_metrics` reads every opening
-    as unknown basis regardless. The caller is told which timestamp was used.
+    acquisition DATE. What is not lost is the acquisition PRICE:
+    `cost_basis_tomans` records what was paid per unit, and
+    `performance._position_metrics` reads it as a known basis. Without it an
+    opening is basis-unknown by construction, so a portfolio built by declaring
+    what you already own could never show a gain -- only a current value.
 
-    A price may still be supplied and is passed through, for a different job --
-    `create_ledger_entry` uses it to seed the first `Price` row of a MANUAL
-    asset, which has no feed and is otherwise worth nothing at all.
+    The two price arguments are different questions and both are passed
+    through. `unit_price_tomans` is what the thing is worth NOW, which
+    `create_ledger_entry` uses to seed the first `Price` row of a MANUAL asset
+    that has no feed. `cost_basis_tomans` is what it cost THEN. Answering the
+    second with the first would restate today's gold price as whatever was paid
+    for the gram in 1402.
     House marks do not come through here; `record_house_mark` owns that pair.
     """
     occurred_at = occurred_at or timezone.now()
     return create_ledger_entry(
         account=account, asset=asset, kind=LedgerEntry.Kind.OPENING_POSITION,
         quantity=quantity, unit_price_tomans=unit_price_tomans,
+        cost_basis_tomans=cost_basis_tomans,
         occurred_at=account.tracking_started_at or occurred_at,
         source=source, note=note, external_id=external_id,
         import_batch=import_batch,
@@ -265,6 +294,7 @@ def reverse_ledger_entry(*, user, account_id: int, entry_id: int) -> LedgerEntry
         amount_tomans=entry.amount_tomans,
         area_sqm=entry.area_sqm,
         mortgage_deduction_tomans=entry.mortgage_deduction_tomans,
+        cost_basis_tomans=entry.cost_basis_tomans,
         timestamp=timezone.now(),
         source="system",
         note=f"Reversal of ledger entry {entry.pk}",
@@ -277,7 +307,8 @@ def reverse_ledger_entry(*, user, account_id: int, entry_id: int) -> LedgerEntry
 @transaction.atomic
 def update_ledger_entry(
     *, user, account_id: int, entry_id: int, quantity=None,
-    unit_price_tomans=None, amount_tomans=None, area_sqm=None, occurred_at=None,
+    unit_price_tomans=None, amount_tomans=None, area_sqm=None,
+    cost_basis_tomans=None, occurred_at=None,
     note=None,
 ) -> LedgerEntry:
     """Mutate a ledger row in place, then rebuild holdings/cash from the timeline."""
@@ -306,6 +337,17 @@ def update_ledger_entry(
         if not (entry.asset and entry.asset.is_house) or entry.kind not in HOUSE_MARK_KINDS:
             raise LedgerError("Only a property entry has a size in square meters.")
         entry.area_sqm = _decimal(area_sqm, "area_sqm", required=True)
+    if cost_basis_tomans is not None:
+        # Correcting what you paid must be possible, or the first typo is
+        # permanent -- the same failure `area_sqm` had, where the endpoint took
+        # the field, dropped it, and answered 200.
+        if entry.kind not in COST_BASIS_KINDS:
+            raise LedgerError(
+                "A purchase price can only be declared on a position you already own."
+            )
+        entry.cost_basis_tomans = _decimal(
+            cost_basis_tomans, "cost_basis_tomans", required=True
+        )
     if entry.kind in {LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL}:
         qty = entry.quantity
         price = entry.price_tomans
@@ -784,7 +826,7 @@ def projection_drift(account: Account) -> list[dict]:
 @transaction.atomic
 def replace_ledger_entry(
     *, user, account_id: int, entry_id: int, quantity,
-    area_sqm=None, mortgage_deduction_tomans=None
+    area_sqm=None, mortgage_deduction_tomans=None, cost_basis_tomans=None
 ) -> LedgerEntry:
     original = (
         LedgerEntry.objects.select_for_update()
@@ -802,6 +844,15 @@ def replace_ledger_entry(
         quantity=quantity,
         area_sqm=area_sqm,
         mortgage_deduction_tomans=mortgage_deduction_tomans,
+        # Carried forward unless the caller states a new one. A replacement is
+        # a correction to the POSITION, and correcting how much you own is not
+        # a claim about what you paid -- dropping the basis here would make a
+        # quantity fix silently erase the purchase price.
+        cost_basis_tomans=(
+            cost_basis_tomans
+            if cost_basis_tomans is not None
+            else original.cost_basis_tomans
+        ),
         occurred_at=original.timestamp,
         source="system",
         note=f"Replacement for ledger entry {original.pk}",
@@ -834,6 +885,7 @@ def record_house_mark(
     quantity,
     area_sqm=None,
     mortgage_deduction_tomans=None,
+    cost_basis_tomans=None,
     occurred_at=None,
 ) -> LedgerEntry:
     """Append a dated valuation mark for a house.
@@ -883,6 +935,10 @@ def record_house_mark(
         quantity=quantity,
         area_sqm=area_sqm,
         mortgage_deduction_tomans=mortgage_deduction_tomans,
+        # A property bought at 24 a meter and worth 60 today needs both numbers
+        # on the row: `quantity` is the mark, this is the purchase price. Both
+        # are millions of Toman per square meter (HOUSE_PRICE_SCALE).
+        cost_basis_tomans=cost_basis_tomans,
         occurred_at=when,
         source="manual",
     )

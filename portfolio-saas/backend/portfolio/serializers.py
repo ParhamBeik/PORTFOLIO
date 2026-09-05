@@ -68,6 +68,14 @@ class HoldingSerializer(serializers.ModelSerializer):
         max_digits=20, decimal_places=6, min_value=Decimal("0.000001"),
         required=False, write_only=True,
     )
+    # What a square meter COST, as opposed to what one is worth today. Same
+    # unit as `price_per_sqm_million` and stored on the ledger mark rather than
+    # the holding, because a property is a series of dated marks and the
+    # purchase price is a fact about the acquisition, not about the latest one.
+    purchase_price_per_sqm_million = serializers.DecimalField(
+        max_digits=20, decimal_places=6, min_value=Decimal("0.000001"),
+        required=False, write_only=True,
+    )
     price_per_sqm_tomans = serializers.SerializerMethodField()
     gross_value_tomans = serializers.SerializerMethodField()
     label = serializers.SerializerMethodField()
@@ -86,7 +94,8 @@ class HoldingSerializer(serializers.ModelSerializer):
         fields = ("id", "asset_key", "asset_name", "asset_name_fa", "asset_class", "is_house", "is_manual",
                   "quantity", "unit_price_tomans", "area_sqm", "mortgage_deduction_tomans",
                   "display_name", "label", "is_hidden",
-                  "price_per_sqm_million", "price_per_sqm_tomans", "gross_value_tomans",
+                  "price_per_sqm_million", "purchase_price_per_sqm_million",
+                  "price_per_sqm_tomans", "gross_value_tomans",
                   "new_property_name", "occurred_at",
                   "created_at", "updated_at")
         read_only_fields = ("id", "created_at", "updated_at")
@@ -171,6 +180,12 @@ class LedgerEntryInputSerializer(serializers.Serializer):
     mortgage_deduction_tomans = serializers.DecimalField(
         max_digits=20, decimal_places=4, min_value=Decimal("0.0001"), required=False
     )
+    # What was PAID per unit, for a position being declared rather than bought.
+    # Distinct from `unit_price_tomans`, which is what it is worth now. Millions
+    # of Toman per square meter for a property, matching `quantity`.
+    cost_basis_tomans = serializers.DecimalField(
+        max_digits=20, decimal_places=4, min_value=Decimal("0.0001"), required=False
+    )
     occurred_at = serializers.DateTimeField(required=False, default=timezone.now)
     source = serializers.ChoiceField(choices=("manual", "csv"), default="manual")
     note = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
@@ -223,6 +238,7 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
             "asset_symbol",
             "is_house", "quantity", "quantity_step", "unit_price_tomans", "unit_price_currency",
             "amount_tomans", "value_tomans", "area_sqm", "mortgage_deduction_tomans",
+            "cost_basis_tomans",
             "occurred_at", "source", "note", "external_id", "reversal_of",
             "created_at", "pnl_tomans", "pnl_kind",
             "account_id", "account_name", "is_synthetic",
@@ -287,6 +303,11 @@ class LedgerEntryPatchSerializer(serializers.Serializer):
     # field, dropped it, and answered 200 -- a resize that looked saved and was not.
     area_sqm = serializers.DecimalField(
         max_digits=10, decimal_places=2, min_value=Decimal("0.01"), required=False
+    )
+    # Correctable for the same reason `area_sqm` is: a purchase price entered
+    # once and never fixable is a typo that outlives the portfolio.
+    cost_basis_tomans = serializers.DecimalField(
+        max_digits=20, decimal_places=4, min_value=Decimal("0.0001"), required=False
     )
     occurred_at = serializers.DateTimeField(required=False)
     note = serializers.CharField(max_length=200, required=False, allow_blank=True)
@@ -370,6 +391,28 @@ class LiabilitySerializer(serializers.ModelSerializer):
         allow_null=True,
     )
     asset_name = serializers.CharField(source="asset.name", read_only=True)
+    # The asset's own name for it, so a mortgage says "Tehran flat" and not
+    # "Real Estate" -- a property is minted per owner and the catalog row has
+    # nothing but the asset class to put in `name`. Same rule as
+    # `models.owner_display_names`, which is what the holdings screens use.
+    asset_label = serializers.SerializerMethodField()
+
+    # `amount_tomans` stops being required once a schedule can produce it, and
+    # `outstanding_tomans` is what every consumer should read: the balance for
+    # TODAY, derived where terms exist and the declared figure where they do
+    # not. `balance_basis` says which, so the UI never presents a number the
+    # user typed six months ago as though the schedule had just produced it.
+    # `allow_null` because clearing is a real edit: switching a scheduled loan
+    # back to a typed balance sends every term as an explicit null, and the
+    # client must be able to say "no value" as distinct from "unchanged".
+    amount_tomans = serializers.DecimalField(
+        max_digits=20, decimal_places=4, required=False, allow_null=True
+    )
+    outstanding_tomans = serializers.SerializerMethodField()
+    balance_basis = serializers.CharField(read_only=True)
+    installments_paid = serializers.SerializerMethodField()
+    scheduled_installment_tomans = serializers.SerializerMethodField()
+    payoff_on = serializers.SerializerMethodField()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -387,13 +430,118 @@ class LiabilitySerializer(serializers.ModelSerializer):
             "id",
             "account",
             "label",
+            "kind",
+            "lender",
             "amount_tomans",
+            "outstanding_tomans",
+            "balance_basis",
+            "principal_tomans",
+            "annual_rate_pct",
+            "term_months",
+            "monthly_installment_tomans",
+            "scheduled_installment_tomans",
+            "installments_paid",
+            "started_on",
+            "payoff_on",
             "asset_key",
             "asset_name",
+            "asset_label",
             "created_at",
             "updated_at",
         )
         read_only_fields = ("id", "account", "created_at", "updated_at")
+
+    def get_asset_label(self, obj):
+        if not obj.asset_id:
+            return None
+        asset = obj.asset
+        # An owner-minted property is named by whoever holds it; a shared
+        # catalog row keeps the name everybody knows it by.
+        if asset.owner_id:
+            holding = asset.holdings.filter(account_id=obj.account_id).first()
+            if holding and holding.display_name:
+                return holding.display_name
+        return asset.tse_symbol or asset.name_fa or asset.name
+
+    def get_outstanding_tomans(self, obj):
+        return str(obj.outstanding_tomans())
+
+    def get_installments_paid(self, obj):
+        return obj.installments_paid()
+
+    def get_scheduled_installment_tomans(self, obj):
+        value = obj.scheduled_installment_tomans()
+        return None if value is None else str(value)
+
+    def get_payoff_on(self, obj):
+        payoff = obj.payoff_on()
+        return payoff.isoformat() if payoff else None
+
+    def validate(self, attrs):
+        """Reject the combinations that would silently mean something else.
+
+        Partial terms are the trap. `Liability.balance_basis` falls back a rung
+        at a time, so a loan missing only its start date quietly stops
+        amortizing and reports the figure typed at creation forever — right on
+        the day it was entered, drifting every month after. Better to refuse
+        the row than to accept it and answer with a number that ages.
+        """
+        merged = {
+            field: attrs.get(field, getattr(self.instance, field, None))
+            for field in (
+                "kind", "asset", "amount_tomans", "principal_tomans",
+                "annual_rate_pct", "term_months", "monthly_installment_tomans",
+                "started_on",
+            )
+        }
+        kind = merged["kind"] or Liability.Kind.OTHER
+
+        if kind == Liability.Kind.SECURED_DEBT and merged["asset"] is None:
+            raise serializers.ValidationError({
+                "asset_key": "A secured debt must name the asset it is secured against."
+            })
+
+        schedule = (
+            merged["principal_tomans"], merged["annual_rate_pct"],
+            merged["term_months"], merged["monthly_installment_tomans"],
+            merged["started_on"],
+        )
+        has_any_term = any(value is not None for value in schedule)
+        if has_any_term:
+            if merged["term_months"] is None or merged["started_on"] is None:
+                raise serializers.ValidationError(
+                    "A repayment schedule needs both a term and a start date."
+                )
+            if merged["principal_tomans"] is None and merged["monthly_installment_tomans"] is None:
+                raise serializers.ValidationError(
+                    "Give either the amount borrowed or the monthly installment."
+                )
+            if (
+                merged["annual_rate_pct"] is not None
+                and merged["principal_tomans"] is None
+            ):
+                raise serializers.ValidationError({
+                    "principal_tomans": "An interest rate needs the amount borrowed to apply to."
+                })
+        elif merged["amount_tomans"] is None:
+            raise serializers.ValidationError({
+                "amount_tomans": "Enter what is owed, or the loan's repayment terms."
+            })
+
+        # A scheduled loan still stores a balance, because `amount_tomans` is
+        # the column the database constrains and the fallback if the terms are
+        # later cleared. Seed it from the schedule rather than making the
+        # client compute a number the server already knows how to derive.
+        if attrs.get("amount_tomans") is None and has_any_term:
+            attrs["amount_tomans"] = Liability(
+                amount_tomans=Decimal("0"),
+                principal_tomans=merged["principal_tomans"],
+                annual_rate_pct=merged["annual_rate_pct"],
+                term_months=merged["term_months"],
+                monthly_installment_tomans=merged["monthly_installment_tomans"],
+                started_on=merged["started_on"],
+            ).outstanding_tomans()
+        return attrs
 
 
 # Serializer for OptimizationSnapshot persisted records

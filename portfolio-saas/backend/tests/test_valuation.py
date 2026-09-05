@@ -2700,3 +2700,151 @@ def test_an_unsecured_loan_is_spread_over_the_book_not_charged_to_the_pair(
         # The loan never exceeds the book it is spread over, so neither side of
         # the pair can go negative and flip the index through zero.
         assert base >= 0 and paired >= 0
+
+
+# ----------------------------------------------------------------------
+# A loan is a schedule, not a number someone re-types every month
+# ----------------------------------------------------------------------
+
+
+def _loan(account, **terms):
+    from portfolio.models import Liability
+
+    defaults = {
+        "label": "Bank loan",
+        "kind": Liability.Kind.BANK_LOAN,
+        "lender": "Bank Melli",
+        "amount_tomans": Decimal("0"),
+    }
+    return Liability.objects.create(account=account, **{**defaults, **terms})
+
+
+def test_an_amortizing_loan_owes_less_every_month(db, make_user):
+    """The balance is derived from the terms, not read off a stale column.
+
+    Straight-line "principal minus payments made" is the tempting shortcut and
+    it is wrong for the whole life of the loan: early installments are mostly
+    interest, so at the midpoint of a 20%/5-year loan it understates the debt
+    by roughly a third of the balance.
+    """
+    import datetime as dt
+    from django.utils import timezone
+
+    user = make_user(email="amortize@test.test")
+    account = Account.objects.create(user=user, name="Levered")
+    loan = _loan(
+        account,
+        principal_tomans=Decimal("600000000"),
+        annual_rate_pct=Decimal("20"),
+        term_months=60,
+        started_on=dt.date(2024, 1, 15),
+    )
+
+    assert loan.balance_basis == "amortized"
+    # Nothing paid on day one: the full principal is owed.
+    at_start = loan.outstanding_tomans(
+        timezone.make_aware(dt.datetime(2024, 1, 15, 12, 0))
+    )
+    assert at_start == Decimal("600000000.0000")
+
+    # Halfway through the term, still owing well over half -- the point of the
+    # formula. 29 of 60 installments paid (Jalali 1402-10-25 to 1405-04-24),
+    # and the balance is 382m against a straight-line 300m.
+    halfway = loan.outstanding_tomans(
+        timezone.make_aware(dt.datetime(2026, 7, 15, 12, 0))
+    )
+    assert loan.installments_paid(
+        timezone.make_aware(dt.datetime(2026, 7, 15, 12, 0))
+    ) == 29
+    assert Decimal("380000000") < halfway < Decimal("385000000")
+    straight_line = Decimal("600000000") * Decimal(60 - 29) / 60
+    assert halfway > straight_line
+
+    # Past maturity it is settled, never negative -- a matured loan read as an
+    # asset would add its whole balance to net worth.
+    assert loan.outstanding_tomans(
+        timezone.make_aware(dt.datetime(2031, 1, 15, 12, 0))
+    ) == Decimal("0.0000")
+
+
+def test_a_loan_quoted_in_installments_owes_what_is_left_to_pay(db, make_user):
+    """Iranian banks quote a loan as "N installments of X", not as a rate.
+
+    With no rate there is no amortization to do: the interest is already inside
+    the installment, so what is owed is what is left to hand over.
+    """
+    import datetime as dt
+    from django.utils import timezone
+
+    user = make_user(email="installments@test.test")
+    account = Account.objects.create(user=user, name="Levered")
+    loan = _loan(
+        account,
+        monthly_installment_tomans=Decimal("5000000"),
+        term_months=36,
+        started_on=dt.date(2025, 1, 1),
+    )
+
+    assert loan.balance_basis == "installments"
+    # Twelve months in, 24 installments left. Counted on the JALALI calendar,
+    # which is why the anniversary is 1404-10-12 (2026-01-02) and not the
+    # Gregorian 2026-01-01 -- one day earlier is still only eleven payments in.
+    owed = loan.outstanding_tomans(
+        timezone.make_aware(dt.datetime(2026, 1, 2, 12, 0))
+    )
+    assert owed == Decimal("120000000.0000")
+    assert loan.outstanding_tomans(
+        timezone.make_aware(dt.datetime(2026, 1, 1, 12, 0))
+    ) == Decimal("125000000.0000")
+
+
+def test_a_liability_with_no_terms_keeps_the_figure_it_was_given(db, make_user):
+    user = make_user(email="declared@test.test")
+    account = Account.objects.create(user=user, name="Simple")
+    debt = account.liabilities.create(
+        label="Owed to a friend", amount_tomans=Decimal("50000000")
+    )
+
+    assert debt.balance_basis == "declared"
+    assert debt.outstanding_tomans() == Decimal("50000000")
+
+
+def test_valuation_nets_what_is_owed_today_not_what_was_borrowed(
+    db, make_user, asset_catalog, write_prices
+):
+    """`value_account` must read the schedule, not the stored column.
+
+    The stored `amount_tomans` is only the figure last written down. Netting it
+    while the loan is being repaid holds net worth flat for the life of the
+    loan and then jumps it the day someone remembers to edit the row.
+    """
+    import datetime as dt
+
+    write_prices({"emami_coin": Decimal("1000000000")})
+    user = make_user(email="netting@test.test")
+    account = Account.objects.create(user=user, name="Levered")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("1")
+    )
+    loan = _loan(
+        account,
+        # Deliberately stale: what the row says, versus what the schedule says.
+        amount_tomans=Decimal("600000000"),
+        principal_tomans=Decimal("600000000"),
+        annual_rate_pct=Decimal("20"),
+        term_months=60,
+        started_on=dt.date(2024, 1, 15),
+    )
+
+    result = value_account(account)
+
+    owed = loan.outstanding_tomans()
+    assert owed < Decimal("600000000")
+    assert result["total_liabilities"] == pytest.approx(float(owed))
+    assert result["total"] == Decimal("1000000000") - owed
+    # The itemised row reports the netted figure and the stored one separately,
+    # so the two can be compared where they are supposed to agree.
+    row = result["liabilities"][0]
+    assert row["amount_tomans"] == pytest.approx(float(owed))
+    assert row["declared_amount_tomans"] == 600000000.0
+    assert row["balance_basis"] == "amortized"

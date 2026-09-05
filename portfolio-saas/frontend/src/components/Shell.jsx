@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import AccountMenu from "./AccountMenu.jsx";
 import Logo from "./Logo.jsx";
@@ -50,22 +50,123 @@ function NavItem({ to, end, testId, children, onClick }) {
   );
 }
 
+/**
+ * The page links, rendered twice: inline above `lg`, in the drawer below it.
+ *
+ * Two copies means two sets of test ids, and only one can be the canonical
+ * `nav-ledger` — a duplicate id resolves to whichever the DOM happens to hold
+ * and a hidden one is not clickable. The inline rail keeps the plain names
+ * because that is the one on screen at the width the suites run at; the drawer
+ * suffixes `-mobile`, the same convention `AccountMenu` already uses.
+ */
+function NavLinks({ staff, suffix = "", onNavigate }) {
+  const id = (label) => `nav-${label.toLowerCase().replace(/\s+/g, "-")}${suffix}`;
+  return (
+    <>
+      {PAGES.map((p) => (
+        <NavItem key={p.to} to={p.to} end={p.end} testId={id(p.label)} onClick={onNavigate}>
+          {p.label}
+        </NavItem>
+      ))}
+      {staff && (
+        <NavItem to="/ops" testId={id("Ops")} onClick={onNavigate}>Ops</NavItem>
+      )}
+    </>
+  );
+}
+
+/**
+ * The small-screen navigation, as a panel that slides in from the right.
+ *
+ * It used to be an inline block in the header flow, so opening it PUSHED the
+ * whole page down and closing it snapped the page back up — on a phone that
+ * reads as the content jumping, not as a menu. A drawer sits over the page
+ * instead: nothing below it moves, and the thing that moves is the thing the
+ * tap was about.
+ *
+ * Overlay rules are the ones `Modal` already establishes, for the same reasons:
+ * Escape closes it, a click on the scrim closes it, the page behind must not
+ * scroll under it, and focus goes in on open and back to the opener on close.
+ * A menu that leaves focus behind on <body> restarts a keyboard user at the top
+ * of the document every time they open it.
+ */
+function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
+  const panel = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const opener = document.activeElement;
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    panel.current?.querySelector("a, button")?.focus();
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previous;
+      if (opener instanceof HTMLElement && document.contains(opener)) opener.focus();
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="app-drawer-scrim lg:hidden"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={panel}
+        id="app-nav-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Menu"
+        data-testid="nav-drawer"
+        className="app-drawer"
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+          <span className="text-sm font-semibold">Menu</span>
+          <Button
+            variant="ghost"
+            onClick={onClose}
+            aria-label="Close menu"
+            data-testid="nav-close"
+          >
+            ✕
+          </Button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-4 py-4">
+          <nav aria-label="Primary" className="app-nav-stack" data-testid="nav-mobile">
+            <NavLinks staff={user?.is_staff} suffix="-mobile" onNavigate={onClose} />
+          </nav>
+
+          {/* Account settings that only exist above the md breakpoint are
+              account settings most people never find. */}
+          <div className="mt-4 border-t border-border pt-4 md:hidden">
+            <AccountMenu
+              user={user}
+              onLogout={onLogout}
+              onUserChange={onUserChange}
+              triggerClass="flex w-full"
+              testId="user-email-mobile"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Shell({ user, onLogout, onUserChange }) {
   const { accounts, activeId, setActive, basis, setBasis, error, reload } = usePortfolio();
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const closeMobile = () => setMobileOpen(false);
-
-  // An opened menu covers the page it was opened from, so it has to be
-  // dismissable the way every other overlay is.
-  useEffect(() => {
-    if (!mobileOpen) return undefined;
-    const onKey = (e) => {
-      if (e.key === "Escape") setMobileOpen(false);
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [mobileOpen]);
 
   return (
     <div className="flex min-h-full flex-col">
@@ -77,27 +178,30 @@ export default function Shell({ user, onLogout, onUserChange }) {
       </a>
 
       <header className="app-header sticky top-0 z-20 border-b border-border bg-panel/95 backdrop-blur-md">
-        <div className="flex min-h-[4.25rem] flex-wrap items-center gap-x-5 gap-y-3 px-5 py-3 lg:px-6">
+        <div className="flex min-h-[3.5rem] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2 lg:min-h-[4.25rem] lg:gap-x-5 lg:gap-y-3 lg:px-6 lg:py-3">
           <NavLink
             to="/"
             className="app-brand group order-1 shrink-0"
             aria-label={`${APP_NAME} home`}
             data-testid="app-brand"
           >
-            <span className="flex size-9 items-center justify-center rounded-lg border border-border bg-panel-2 text-accent shadow-sm transition group-hover:border-accent/40 group-hover:bg-[var(--c-accent-fill)]/10">
-              <Logo size={22} title={APP_NAME} />
+            <span className="flex size-8 items-center justify-center rounded-lg border border-border bg-panel-2 text-accent shadow-sm transition group-hover:border-accent/40 group-hover:bg-[var(--c-accent-fill)]/10 lg:size-9">
+              <Logo size={20} title={APP_NAME} />
             </span>
             <span className="flex flex-col leading-tight">
-              <span className="text-base font-semibold tracking-tight text-text">{APP_NAME}</span>
-              <span className="hidden text-[11px] text-muted sm:block">Portfolio tracker</span>
+              <span className="text-sm font-semibold tracking-tight text-text lg:text-base">{APP_NAME}</span>
+              {/* Below lg the header is fighting for every pixel of height and
+                  the strapline is the one thing on it that says nothing. */}
+              <span className="hidden text-[11px] text-muted lg:block">Portfolio tracker</span>
             </span>
           </NavLink>
 
           {/* Which portfolio, priced in what: these two say what every number on
-              the page MEANS, so they sit outside the collapsible panel and stay
-              on screen at every width. Inside it, a phone read a whole screen of
-              figures without ever saying whose money it was. Below `lg` they
-              take a row of their own, under the brand. */}
+              the page MEANS, so they stay on screen at every width rather than
+              hiding behind the menu button. Below `lg` they are the compact
+              variant -- caption beside the control instead of above it, smaller
+              type -- because the alternative to shrinking them is a header that
+              eats 141px of a phone's viewport before any content loads. */}
           <div
             className="app-toolbar order-3 w-full lg:ml-auto lg:w-auto"
             data-testid="header-toolbar"
@@ -137,54 +241,22 @@ export default function Shell({ user, onLogout, onUserChange }) {
             </label>
           </div>
 
-          {/* Below `lg` the page links wrap to a line of their own, and only when
-              opened — six tabs inline eat most of a phone's viewport. */}
-          <div
-            id="app-nav-panel"
-            className={`${mobileOpen ? "flex" : "hidden"} order-4 w-full flex-col gap-3 lg:contents`}
+          {/* From `lg` up there is room for the links inline, and a drawer for
+              seven tabs on a desktop would be hiding navigation for no reason.
+              The breakpoint lives on `.app-nav-rail` in index.css, not in a
+              `hidden lg:flex` here: that utility and the component class are
+              both single-class selectors, so the later stylesheet wins and the
+              rail rendered stacked inside a phone's header. */}
+          <nav
+            aria-label="Primary"
+            className="app-nav-rail order-2"
+            data-testid="nav"
           >
-            <nav aria-label="Primary" className="app-nav-rail lg:order-2" data-testid="nav">
-              {PAGES.map((p) => (
-                <NavItem
-                  key={p.to}
-                  to={p.to}
-                  end={p.end}
-                  testId={`nav-${p.label.toLowerCase().replace(/\s+/g, "-")}`}
-                  onClick={closeMobile}
-                >
-                  {p.label}
-                </NavItem>
-              ))}
-              {user?.is_staff && (
-                <NavItem to="/ops" testId="nav-ops" onClick={closeMobile}>Ops</NavItem>
-              )}
-            </nav>
-
-            {/* Same menu, reachable on a phone: account settings that only
-                exist above the md breakpoint are account settings most people
-                never find. */}
-            <AccountMenu
-              user={user}
-              onLogout={onLogout}
-              onUserChange={onUserChange}
-              triggerClass="flex md:hidden"
-              testId="user-email-mobile"
-            />
-
-            {/* The icon that opened this turns into a close cross, which is easy
-                to miss once the panel has pushed the page down. Escape works too. */}
-            <Button
-              variant="ghost"
-              className="app-header-btn w-full lg:hidden"
-              onClick={closeMobile}
-              data-testid="nav-close"
-            >
-              Close menu
-            </Button>
-          </div>
+            <NavLinks staff={user?.is_staff} />
+          </nav>
 
           <div className="order-2 ml-auto flex items-center gap-2 sm:gap-3 lg:order-4 lg:ml-0">
-            {/* Log out moved INSIDE this menu, next to the rest of the account
+            {/* Log out lives INSIDE this menu, next to the rest of the account
                 actions it belongs with — it was the only one that had a home. */}
             <AccountMenu user={user} onLogout={onLogout} onUserChange={onUserChange} />
 
@@ -193,6 +265,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
               className="app-header-btn inline-flex items-center justify-center rounded-md border border-border bg-panel-2 p-2 text-text lg:hidden"
               aria-label={mobileOpen ? "Close menu" : "Open menu"}
               aria-expanded={mobileOpen}
+              aria-haspopup="dialog"
               aria-controls="app-nav-panel"
               data-testid="nav-toggle"
               onClick={() => setMobileOpen((v) => !v)}
@@ -202,6 +275,14 @@ export default function Shell({ user, onLogout, onUserChange }) {
           </div>
         </div>
       </header>
+
+      <NavDrawer
+        open={mobileOpen}
+        onClose={closeMobile}
+        user={user}
+        onLogout={onLogout}
+        onUserChange={onUserChange}
+      />
 
       <main id="main" tabIndex={-1} className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 lg:px-6">
         {error && (

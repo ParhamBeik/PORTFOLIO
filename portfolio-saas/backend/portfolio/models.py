@@ -12,6 +12,8 @@ Scale design:
   volatility. Current value is computed live from holdings x latest prices.
 """
 from decimal import Decimal
+
+import jdatetime
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -478,6 +480,13 @@ class LedgerEntry(models.Model):
     note = models.CharField(max_length=200, blank=True, default="")
     timestamp = models.DateTimeField(db_index=True, default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
+    # Rows are appended far more often than corrected, which is why the cost
+    # basis cache in `performance._position_metrics` keyed itself on
+    # (count, max id, id sum) and got away with it. An in-place edit moves none
+    # of those three, so correcting a quantity or declaring what you paid left
+    # the P&L table showing the old answer for the full hour of the cache's
+    # life. This column is what makes an edit visible to that key.
+    updated_at = models.DateTimeField(auto_now=True)
     source = models.CharField(
         max_length=16,
         choices=(
@@ -497,6 +506,24 @@ class LedgerEntry(models.Model):
         blank=True,
     )
     external_id = models.CharField(max_length=120, blank=True, default="")
+    # What was actually PAID per unit, when that differs from what the row is
+    # worth. Only an opening (and a house's valuation mark, which is how a
+    # property added after the baseline is recorded) carries it.
+    #
+    # `price_tomans` cannot do this job. On an opening it means "the price at
+    # the moment the position was declared", which is what seeds the first
+    # `Price` row of a manual asset -- today's number, not the acquisition
+    # number. Overloading it would make recording a gram of gold you bought in
+    # 1402 quietly restate today's gold price as 10 million Toman.
+    #
+    # Unit convention matches `price_tomans` exactly: the asset's own quote
+    # unit, so Rial for a TSE share and Toman for everything else. The one
+    # exception is the one `quantity` already makes -- for a house this is
+    # MILLIONS of Toman per square meter (HOUSE_PRICE_SCALE), because that is
+    # the unit a property is bought and sold in.
+    cost_basis_tomans = models.DecimalField(
+        max_digits=20, decimal_places=4, null=True, blank=True
+    )
     reversal_of = models.OneToOneField(
         "self",
         on_delete=models.CASCADE,
@@ -622,21 +649,215 @@ class Snapshot(models.Model):
 
 
 class Liability(models.Model):
-    """Subtractions from the net worth (e.g. loans, mortgages)."""
+    """A debt subtracted from net worth.
+
+    Three shapes, and the difference is not cosmetic:
+
+    * `bank_loan` — money borrowed from an institution and repaid on a
+      schedule. What is owed today is not what was borrowed, so the balance is
+      DERIVED from the terms (`outstanding_tomans`) rather than re-typed every
+      month. A loan whose balance is a hand-maintained number is a number that
+      is wrong for twenty-nine days out of thirty, and it is wrong in the
+      direction that flatters the portfolio.
+    * `secured_debt` — a debt attached to one asset: the mortgage on a house,
+      a loan taken against a position. `asset` is what makes it secured, and
+      the whole valuation stack already rides that link — a hidden or excluded
+      asset takes its debt with it, so netting the debt of an asset nobody is
+      counting cannot drop net worth by the loan alone.
+    * `other` — anything the user simply wants subtracted. `amount_tomans` is
+      the whole story.
+
+    A mortgage is BOTH a bank loan and secured, which is why the kind and the
+    asset link are separate fields rather than one enum: the kind says how the
+    balance is computed, the asset says what the balance rides with.
+    """
+
+    class Kind(models.TextChoices):
+        BANK_LOAN = "bank_loan", "Bank loan"
+        SECURED_DEBT = "secured_debt", "Debt secured on an asset"
+        OTHER = "other", "Other"
+
+    # How the outstanding balance was arrived at, reported next to it. A number
+    # the user typed and a number the schedule produced are not the same claim,
+    # and a UI that prints them identically invites the reader to trust the
+    # stale one as much as the live one.
+    class BalanceBasis(models.TextChoices):
+        AMORTIZED = "amortized", "Amortized from the loan terms"
+        INSTALLMENTS = "installments", "Remaining installments"
+        DECLARED = "declared", "As entered"
 
     account = models.ForeignKey(
         Account, on_delete=models.CASCADE, related_name="liabilities"
     )
     label = models.CharField(max_length=200)
+    kind = models.CharField(
+        max_length=16, choices=Kind.choices, default=Kind.OTHER
+    )
+    # The declared balance, and the fallback for every liability that has no
+    # schedule. Still the authority for `other`; for a loan with terms it is
+    # what was last written down, and `outstanding_tomans` supersedes it.
     amount_tomans = models.DecimalField(max_digits=20, decimal_places=4)
+    lender = models.CharField(
+        max_length=120, blank=True, default="",
+        help_text="Bank or institution the money is owed to.",
+    )
     asset = models.ForeignKey(
         Asset, on_delete=models.PROTECT, related_name="liabilities", null=True, blank=True
     )
+
+    # --- Repayment schedule. All optional; see `balance_basis`. ---
+    principal_tomans = models.DecimalField(
+        max_digits=20, decimal_places=4, null=True, blank=True,
+        help_text="Amount originally borrowed.",
+    )
+    annual_rate_pct = models.DecimalField(
+        max_digits=6, decimal_places=3, null=True, blank=True,
+        help_text="Nominal annual rate, percent (18 means 18%).",
+    )
+    term_months = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Total number of monthly installments."
+    )
+    monthly_installment_tomans = models.DecimalField(
+        max_digits=20, decimal_places=4, null=True, blank=True,
+        help_text="Installment actually paid, when it is known but the rate is not.",
+    )
+    # Stored Gregorian (DateField), but counted in Jalali months -- see
+    # `installments_paid`. An Iranian loan's installments fall on a Jalali month
+    # day, and Jalali months are 31/30/29 days long, so counting Gregorian
+    # months drifts a payment either side of every anniversary.
+    started_on = models.DateField(
+        null=True, blank=True, help_text="Date the first installment was due."
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.label} ({self.get_kind_display()})"
+
+    # ------------------------------------------------------------------
+    # Repayment maths. This is the ONE place a balance is derived; the
+    # valuation engine, the snapshot writer and the serializer all call
+    # `outstanding_tomans` rather than reading `amount_tomans` directly.
+    # ------------------------------------------------------------------
+
+    @property
+    def balance_basis(self) -> str:
+        """Which rule `outstanding_tomans` will use, in priority order."""
+        if (
+            self.principal_tomans is not None
+            and self.annual_rate_pct is not None
+            and self.term_months
+            and self.started_on is not None
+        ):
+            return self.BalanceBasis.AMORTIZED
+        if (
+            self.monthly_installment_tomans is not None
+            and self.term_months
+            and self.started_on is not None
+        ):
+            return self.BalanceBasis.INSTALLMENTS
+        return self.BalanceBasis.DECLARED
+
+    def installments_paid(self, as_of=None) -> int:
+        """Whole Jalali months elapsed since the first installment, clamped.
+
+        Clamped at both ends: a loan dated in the future has paid nothing, and
+        one past its term has paid all of it. Without the upper clamp the
+        amortization formula runs past maturity and returns a NEGATIVE balance,
+        which reads as an asset.
+        """
+        if self.started_on is None or not self.term_months:
+            return 0
+        as_of = as_of or timezone.now()
+        as_of_date = getattr(as_of, "date", lambda: as_of)()
+        start = jdatetime.date.fromgregorian(date=self.started_on)
+        now = jdatetime.date.fromgregorian(date=as_of_date)
+        months = (now.year - start.year) * 12 + (now.month - start.month)
+        if now.day < start.day:
+            months -= 1
+        return max(0, min(int(self.term_months), months))
+
+    def scheduled_installment_tomans(self) -> Decimal | None:
+        """The monthly payment the terms imply, or the one the user declared.
+
+        The standard annuity payment: P·r/(1-(1+r)^-n). Printing it beside the
+        installment the user actually pays is how a mistyped rate becomes
+        visible — the two should agree, and when they do not, one of them is
+        wrong.
+        """
+        if self.balance_basis != self.BalanceBasis.AMORTIZED:
+            return self.monthly_installment_tomans
+        principal = Decimal(self.principal_tomans)
+        n = int(self.term_months)
+        rate = self._monthly_rate()
+        if rate == 0:
+            return (principal / n).quantize(Decimal("0.0001"))
+        growth = (Decimal(1) + rate) ** n
+        return (principal * rate * growth / (growth - Decimal(1))).quantize(
+            Decimal("0.0001")
+        )
+
+    def outstanding_tomans(self, as_of=None) -> Decimal:
+        """What is still owed, as of a moment.
+
+        Three rules, tried in order (`balance_basis` names which one fired):
+
+        1. Full terms → the amortized principal balance. Early installments are
+           mostly interest, so a straight-line "principal minus payments made"
+           understates the debt for most of a loan's life — by a third of the
+           balance at the midpoint of a typical 20%/5-year loan.
+        2. Installment and term, no rate → what is left to PAY, which is the
+           honest reading of a loan quoted the way Iranian banks quote them
+           ("60 million, thirty-six installments"): the interest is already
+           inside the installment.
+        3. Neither → the declared `amount_tomans`, unchanged.
+
+        Never negative: a matured loan is settled, not an asset.
+        """
+        basis = self.balance_basis
+        if basis == self.BalanceBasis.DECLARED:
+            return Decimal(self.amount_tomans)
+
+        paid = self.installments_paid(as_of)
+        n = int(self.term_months)
+
+        if basis == self.BalanceBasis.INSTALLMENTS:
+            remaining = Decimal(self.monthly_installment_tomans) * (n - paid)
+            return max(Decimal("0"), remaining).quantize(Decimal("0.0001"))
+
+        principal = Decimal(self.principal_tomans)
+        rate = self._monthly_rate()
+        if rate == 0:
+            remaining = principal * Decimal(n - paid) / Decimal(n)
+        else:
+            growth = (Decimal(1) + rate) ** n
+            paid_growth = (Decimal(1) + rate) ** paid
+            remaining = principal * (growth - paid_growth) / (growth - Decimal(1))
+        return max(Decimal("0"), remaining).quantize(Decimal("0.0001"))
+
+    def payoff_on(self):
+        """The Jalali month the last installment falls in, as a Gregorian date."""
+        if self.started_on is None or not self.term_months:
+            return None
+        start = jdatetime.date.fromgregorian(date=self.started_on)
+        total = (start.month - 1) + int(self.term_months)
+        year = start.year + total // 12
+        month = total % 12 + 1
+        # The 31-day months stop at month 6 and Esfand is shortest, so a start
+        # day of 31 has no counterpart in most payoff months. `j_days_in_month`
+        # already gives Esfand its common-year 29, which in a leap year moves
+        # the payoff one day early rather than off the end of the calendar.
+        day = min(start.day, jdatetime.j_days_in_month[month - 1])
+        return jdatetime.date(year, month, day).togregorian()
+
+    def _monthly_rate(self) -> Decimal:
+        if self.annual_rate_pct is None:
+            return Decimal("0")
+        return Decimal(self.annual_rate_pct) / Decimal("1200")
 
 
 from django.db.models.signals import post_delete, post_save

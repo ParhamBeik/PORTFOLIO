@@ -171,6 +171,7 @@ class HoldingListCreateView(generics.ListCreateAPIView):
                     quantity=data["quantity"],
                     area_sqm=data.get("area_sqm"),
                     mortgage_deduction_tomans=data.get("mortgage_deduction_tomans"),
+                    cost_basis_tomans=data.get("purchase_price_per_sqm_million"),
                     occurred_at=data.get("occurred_at"),
                 )
                 holding = Holding.objects.get(account=account, asset=data["asset"])
@@ -228,7 +229,8 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
         # must not fall through into a ledger write, and may arrive on its own.
         _apply_presentation_fields(serializer.instance, data)
         if not any(k in data for k in ("quantity", "unit_price_tomans", "area_sqm",
-                                       "mortgage_deduction_tomans")):
+                                       "mortgage_deduction_tomans",
+                                       "purchase_price_per_sqm_million")):
             return
         if asset.is_manual and not asset.is_house and not LedgerEntry.objects.filter(
             account=serializer.instance.account, asset=asset
@@ -272,6 +274,11 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
                     "mortgage_deduction_tomans",
                     serializer.instance.mortgage_deduction_tomans,
                 ),
+                # Not carried forward, and deliberately: marks REPLACE, but
+                # `performance._house_position` reads the latest mark that
+                # DECLARED a basis, so a plain revaluation leaves the purchase
+                # price standing instead of restating it as today's figure.
+                cost_basis_tomans=data.get("purchase_price_per_sqm_million"),
                 occurred_at=data.get("occurred_at"),
             )
         except LedgerError as exc:
