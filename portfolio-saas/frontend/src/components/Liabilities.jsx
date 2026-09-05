@@ -14,7 +14,7 @@ import {
   createLiability,
   deleteLiability,
   listLiabilities,
-  updateLiability,
+  replaceLiability,
 } from "../api.js";
 import { date, holdingLabel, toman } from "../format.js";
 import { dateToIso, isoToDate } from "../jalali.js";
@@ -131,7 +131,7 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
       return Number(form.amount) > 0 ? "" : "Enter what is still owed.";
     }
     if (!(Number(form.termMonths) > 0)) return "Enter how many monthly installments there are in total.";
-    if (!form.startedOn) return "Choose the month the first installment was due.";
+    if (!form.startedOn) return "Choose the month the loan was taken out.";
     if (form.mode === "rate") {
       if (!(Number(form.principal) > 0)) return "Enter the amount borrowed.";
       // `Number("") === 0`, which passes a bare `>= 0`, so an untouched rate
@@ -169,7 +169,7 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
     setError("");
     try {
       if (row) {
-        await updateLiability(row.account_id, row.id, payload);
+        await replaceLiability(row.account_id, row.id, payload);
       } else {
         await createLiability(Number(form.account), payload);
       }
@@ -361,9 +361,13 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
                 data-testid="liability-term"
               />
             </Field>
+            {/* The day the money was taken, not the day the first installment
+                fell -- the server counts whole months elapsed since this date,
+                so naming it the first installment costs a payment for the whole
+                life of the loan. See `Liability.started_on`. */}
             <Field
-              label="First installment was due"
-              hint="Installments are counted on the Jalali calendar, which is when they actually fall."
+              label="Loan taken out"
+              hint="The day the money arrived. Installments are counted from it on the Jalali calendar, which is when they actually fall."
             >
               <JalaliDateField
                 value={form.startedOn}

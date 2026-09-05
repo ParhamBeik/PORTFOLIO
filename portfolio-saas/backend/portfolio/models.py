@@ -735,8 +735,16 @@ class Liability(models.Model):
     # `installments_paid`. An Iranian loan's installments fall on a Jalali month
     # day, and Jalali months are 31/30/29 days long, so counting Gregorian
     # months drifts a payment either side of every anniversary.
+    #
+    # This is the day the money was TAKEN, not the day the first installment
+    # fell. `installments_paid` counts whole months elapsed since it, so nothing
+    # is paid on the day itself and the n-th payment lands n months later, which
+    # is what `payoff_on` returns. Reading it as the first installment date is
+    # off by one payment for the loan's entire life, in the direction that
+    # flatters the borrower -- and the help text said exactly that until
+    # 2026-09-05, so a row entered before then may be a month early.
     started_on = models.DateField(
-        null=True, blank=True, help_text="Date the first installment was due."
+        null=True, blank=True, help_text="Date the loan was taken out.",
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -850,7 +858,13 @@ class Liability(models.Model):
         return max(Decimal("0"), remaining).quantize(Decimal("0.0001"))
 
     def payoff_on(self):
-        """The Jalali month the last installment falls in, as a Gregorian date."""
+        """The Jalali month the last installment falls in, as a Gregorian date.
+
+        `started_on` is origination, so the n-th and final payment lands n
+        months after it -- the same month `installments_paid` first returns the
+        full term in. The two must agree, or the balance hits zero in a
+        different month from the one shown as the payoff date.
+        """
         if self.started_on is None or not self.term_months:
             return None
         start = jdatetime.date.fromgregorian(date=self.started_on)

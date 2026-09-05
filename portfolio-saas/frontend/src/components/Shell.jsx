@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import AccountMenu from "./AccountMenu.jsx";
 import Logo from "./Logo.jsx";
@@ -166,7 +166,14 @@ export default function Shell({ user, onLogout, onUserChange }) {
   const { accounts, activeId, setActive, basis, setBasis, error, reload } = usePortfolio();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  const closeMobile = () => setMobileOpen(false);
+  // Stable, because the drawer's focus-and-scroll-lock effect lists it as a
+  // dependency. A fresh closure per render tore that effect down and rebuilt it
+  // on every `usePortfolio()` change -- a price poll, an account switch -- and
+  // the teardown restores focus to the opener while the re-run sends it back to
+  // the first nav link. A keyboard user tabbed three links deep was thrown to
+  // the top mid-poll. `setMobileOpen` is itself stable, so there is nothing to
+  // depend on.
+  const closeMobile = useCallback(() => setMobileOpen(false), []);
 
   return (
     <div className="flex min-h-full flex-col">

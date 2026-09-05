@@ -2767,6 +2767,55 @@ def test_an_amortizing_loan_owes_less_every_month(db, make_user):
     ) == Decimal("0.0000")
 
 
+def test_the_payoff_date_is_the_month_the_balance_reaches_zero(db, make_user):
+    """`payoff_on` and `installments_paid` must name the same month.
+
+    They read `started_on` independently -- one adds the term to it, the other
+    counts months elapsed since it -- so a disagreement about whether that date
+    is origination or the first installment shows up as a payoff date a month
+    away from the month the balance actually hits zero. The date is built on
+    the Jalali calendar, so the assertion is made there rather than against a
+    Gregorian literal that would drift.
+    """
+    import datetime as dt
+
+    import jdatetime
+    from django.utils import timezone
+
+    user = make_user(email="payoff@test.test")
+    account = Account.objects.create(user=user, name="Levered")
+    loan = _loan(
+        account,
+        principal_tomans=Decimal("600000000"),
+        annual_rate_pct=Decimal("20"),
+        term_months=60,
+        started_on=dt.date(2024, 1, 15),
+    )
+
+    start = jdatetime.date.fromgregorian(date=loan.started_on)
+    payoff = jdatetime.date.fromgregorian(date=loan.payoff_on())
+    assert (payoff.year - start.year) * 12 + (payoff.month - start.month) == 60
+
+    # The same day, from the other direction: every installment is accounted
+    # for and nothing is left owing.
+    at_payoff = timezone.make_aware(
+        dt.datetime.combine(loan.payoff_on(), dt.time(12, 0))
+    )
+    assert loan.installments_paid(at_payoff) == 60
+    assert loan.outstanding_tomans(at_payoff) == Decimal("0.0000")
+
+    # And one month earlier it is not yet settled, so the date is not merely
+    # somewhere past maturity.
+    a_month_before = timezone.make_aware(
+        dt.datetime.combine(
+            jdatetime.date(payoff.year, payoff.month - 1, payoff.day).togregorian(),
+            dt.time(12, 0),
+        )
+    )
+    assert loan.installments_paid(a_month_before) == 59
+    assert loan.outstanding_tomans(a_month_before) > Decimal("0")
+
+
 def test_a_loan_quoted_in_installments_owes_what_is_left_to_pay(db, make_user):
     """Iranian banks quote a loan as "N installments of X", not as a rate.
 

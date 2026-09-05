@@ -20,7 +20,7 @@ import { JALALI_MONTHS, dateToIso, toJalali } from "../jalali.js";
 vi.mock("../api.js", () => ({
   listLiabilities: vi.fn(async () => []),
   createLiability: vi.fn(async () => ({})),
-  updateLiability: vi.fn(async () => ({})),
+  replaceLiability: vi.fn(async () => ({})),
   deleteLiability: vi.fn(async () => ({})),
 }));
 

@@ -107,4 +107,28 @@ describe("Shell drawer", () => {
     fireEvent.click(screen.getByTestId("nav-ledger-mobile"));
     expect(screen.queryByTestId("nav-drawer")).toBeNull();
   });
+
+  it("leaves focus alone when the shell re-renders under it", () => {
+    const { rerender } = mount();
+    fireEvent.click(screen.getByTestId("nav-toggle"));
+
+    // A keyboard user, three links into the menu.
+    const target = screen.getByTestId("nav-breakdown-mobile");
+    target.focus();
+    expect(document.activeElement).toBe(target);
+
+    // Anything that re-renders `Shell` -- a price poll landing, the active
+    // portfolio changing. The close callback used to be a fresh closure each
+    // time, and it is a dependency of the drawer's focus effect, so the effect
+    // tore down (restoring focus to the opener) and re-ran (sending it to the
+    // top of the panel) for a re-render that changed nothing on screen.
+    rerender(
+      <MemoryRouter>
+        <Shell user={USER} onLogout={() => {}} onUserChange={() => {}} />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId("nav-drawer")).toBeInTheDocument();
+    expect(document.activeElement).toBe(target);
+  });
 });

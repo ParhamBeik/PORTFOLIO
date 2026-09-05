@@ -410,7 +410,13 @@ export const createLiability = (accountId, fields) =>
     method: "POST",
     body: liabilityBody(fields),
   });
-export const updateLiability = (accountId, id, fields) =>
+// Named for what it does, not for the verb it rides on. `liabilityBody` always
+// emits every schedule key, so an omitted field is sent as an explicit null and
+// is CLEARED -- which is the point when a loan reverts to a typed balance, and a
+// trap for anyone who reads "update ... PATCH" and passes only the field they
+// meant to change. `replaceLiability(a, id, { label })` would unlink the asset,
+// wipe the terms, and be rejected by the `amount_tomans` guard on the way out.
+export const replaceLiability = (accountId, id, fields) =>
   api(`/api/accounts/${accountId}/liabilities/${id}/`, {
     method: "PATCH",
     body: liabilityBody(fields),
