@@ -321,19 +321,18 @@ const HTML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'
  * reaching a tooltip goes through the two helpers below, so escaping here
  * covers all of them.
  *
- * This is also what contains GHSA-fgmj-fm8m-jvvx (ECharts XSS, all versions
- * < 6.1.0, which is what this project pins). Two properties make it
- * unreachable, and BOTH must hold — check them before relaxing either:
+ * GHSA-fgmj-fm8m-jvvx (ECharts XSS, all versions < 6.1.0) was carried here for
+ * a while on the argument that it was unreachable — CanvasRenderer is the only
+ * renderer imported, so the library's own text paths paint to a canvas rather
+ * than to DOM, leaving the tooltip as the single HTML surface. That reasoning
+ * held, but it was load-bearing and undefended: nothing in CI checked either
+ * half of it. The project is now on 6.1.0 and the advisory is simply fixed.
  *
- *   1. `CanvasRenderer` is the only renderer imported. Axis labels, legends and
- *      series names are painted to a canvas, never inserted as DOM, so the
- *      library's own text paths cannot inject markup.
- *   2. The tooltip is therefore the single HTML surface, and every tooltip that
- *      renders supplies a custom `formatter` running its labels through `esc()`.
- *      The only tooltips without one are `{ show: false }`.
- *
- * Switching to the SVG renderer, or adding a chart that leans on ECharts'
- * default tooltip formatter, re-opens it. Upgrading to 6.x is the durable fix.
+ * The escaping below is still required regardless of version, and is now pinned
+ * by `charts.spec.jsx`, which mounts a holding named `<img src=x onerror=...>`
+ * and asserts no element is created. Adding a chart that leans on ECharts'
+ * default tooltip formatter, rather than supplying one that calls `esc()`,
+ * still reintroduces the bug this guards.
  */
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);

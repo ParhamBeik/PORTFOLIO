@@ -143,12 +143,11 @@ jobs:
           cache-dependency-path: portfolio-saas/frontend/package-lock.json
       - name: Audit JS dependencies
         working-directory: portfolio-saas/frontend
-        # Production dependencies only, and `high` rather than `moderate`: the
-        # one open moderate is the echarts XSS (GHSA-fgmj-fm8m-jvvx), which is
-        # unreachable here -- see the note in src/components/charts.jsx. Lower
-        # the threshold once that upgrade lands rather than carrying an
-        # ignore-list that silently outlives its reason.
-        run: npm audit --omit=dev --audit-level=high
+        # Production dependencies, at `moderate`. This was briefly `high` to
+        # accommodate the echarts XSS advisory; that upgrade has landed and the
+        # tree reports 0 vulnerabilities, so the threshold went back down rather
+        # than staying loose after the reason for it expired.
+        run: npm audit --omit=dev --audit-level=moderate
 
   # Reports whether deployment is configured yet. Without this the deploy job
   # would go red on every push until the secrets exist, training everyone to
