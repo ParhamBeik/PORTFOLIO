@@ -226,9 +226,19 @@ def _position_metrics(account) -> dict:
         reversed_ids = {
             entry.reversal_of_id for entry in entries if entry.reversal_of_id
         }
-        for entry in entries:
-            if entry.reversal_of_id or entry.pk in reversed_ids:
-                continue
+        live = [
+            entry for entry in entries
+            if not entry.reversal_of_id and entry.pk not in reversed_ids
+        ]
+        if not live:
+            # EVERY entry was reversed, so this asset was never really held here.
+            # The loop below would fall through untouched and emit a row with
+            # `cost_basis_known` True and a basis of zero -- a position the
+            # account does not have, on the P&L table, claiming to have cost
+            # nothing. Distinct from a position bought and then sold, which has
+            # live entries and a realized P&L worth showing.
+            continue
+        for entry in live:
             qty = Decimal(entry.quantity or 0)
             price = Decimal(entry.price_tomans or 0)
             if entry.kind == LedgerEntry.Kind.OPENING_POSITION:

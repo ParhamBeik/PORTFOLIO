@@ -2598,3 +2598,36 @@ def test_set_cost_basis_refuses_an_ambiguous_property_name(make_user):
 
     assert "matched 2 holdings" in err.getvalue()
     assert not LedgerEntry.objects.filter(cost_basis_tomans__isnull=False).exists()
+
+
+def test_a_fully_reversed_position_is_not_a_row_that_cost_nothing(
+    asset_catalog, write_prices, make_user
+):
+    """Every entry reversed means the asset was never really held here.
+
+    The pair nets to nothing and both rows are skipped, so the costing loop
+    fell through untouched -- leaving `unknown_basis` False and an average cost
+    of zero. That printed a position the account does not have, on the P&L
+    table, claiming to have cost nothing. Found in production: a coin recorded
+    and immediately reversed sat there as "paid 0 T".
+
+    A position bought and then SOLD is a different thing entirely: it has live
+    entries and a realized P&L worth showing.
+    """
+    from portfolio.services.ledger import (
+        record_existing_position,
+        reverse_ledger_entry,
+    )
+    from portfolio.services.performance import _position_metrics
+
+    write_prices({"emami_coin": Decimal("100000000")})
+    user = make_user(email="all-reversed@test.test")
+    account = Account.objects.create(user=user, name="Coins")
+    entry = record_existing_position(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("1")
+    )
+    reverse_ledger_entry(user=user, account_id=account.id, entry_id=entry.pk)
+    # The replay drops the holding too, so nothing downstream re-adds the row.
+    Holding.objects.filter(account=account, asset=asset_catalog["emami_coin"]).delete()
+
+    assert "emami_coin" not in _position_metrics(account)
