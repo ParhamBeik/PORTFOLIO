@@ -49,16 +49,22 @@ RUN rm -rf /opt/venv/bin/pip* /opt/venv/lib/python*/site-packages/pip* \
 # ownership as it writes. A `chown -R /app` after the copy rewrites every inode
 # and therefore stores a second full copy of the tree in its own layer: with the
 # context at 616 MB that was 1.2 GB of a 2.76 GB image for one tree.
-RUN useradd -m -u 1000 appuser
+#
+# /app ITSELF is chowned here, and that line is load-bearing. `COPY --chown`
+# sets ownership on what it writes INTO the directory, not on the directory,
+# which `WORKDIR` created as root -- so replacing `chown -R` with `COPY --chown`
+# alone leaves appuser unable to CREATE anything at /app. Celery beat runs
+# `PersistentScheduler` with no --schedule flag, so it opens
+# `celerybeat-schedule` relative to WORKDIR: it crash-looped on startup, taking
+# the price loop, the archive and every nightly job down with it, while the
+# three services that only ever READ from /app stayed healthy and hid it.
+RUN useradd -m -u 1000 appuser \
+    && mkdir -p /app/staticfiles \
+    && chown appuser:appuser /app /app/staticfiles
 
 COPY --chown=appuser:appuser . /app/
 
-# staticfiles is in .dockerignore (collectstatic writes it at runtime, and
-# compose mounts a named volume over it), so the mount point has to exist and
-# be writable before the process drops privileges.
-RUN mkdir -p /app/staticfiles \
-    && chown appuser:appuser /app/staticfiles \
-    && chmod +x /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 USER appuser
 
