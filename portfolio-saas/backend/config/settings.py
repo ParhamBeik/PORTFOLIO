@@ -572,9 +572,12 @@ MARKETDATA_REQUIRE_SHARED_WINDOW = os.getenv(
 MARKETDATA_EXTRA_SYMBOLS = [
     s.strip() for s in os.getenv("MARKETDATA_EXTRA_SYMBOLS", "").split(",") if s.strip()
 ]
-TSETMC_HISTORY_URL = os.getenv(
-    "TSETMC_HISTORY_URL", "https://Api.BrsApi.ir/Tsetmc/History.php"
-)
+# TSETMC_HISTORY_URL was removed here: nothing read it. Every provider URL is
+# declared once in marketdata/endpoints.py, which is what fetchers.py builds
+# requests from, so this knob looked configurable and silently was not -- the
+# worst kind of dead setting, because setting it in .env.production would have
+# had no effect and given no warning. It was absent from the env example, from
+# compose and from production, so removing it changes nothing.
 
 # Manual prices for assets that have no reliable API (e.g. Swiss gold bars).
 # Coerced to Decimal once at load so the extractor never re-parses them.

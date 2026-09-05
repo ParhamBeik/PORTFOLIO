@@ -13,7 +13,7 @@ Full API surface, layout tree, and prod deploy steps: [`README.md`](README.md). 
 - `backend/portfolio/` — user-portfolio domain: models (Asset, Account, Holding, Price, Snapshot, LedgerEntry), `services/` (valuation, ledger, performance, returns, diagnostics, optimization), `live/` (price loop: fetcher, extractor, redis_client), `tasks.py` (Celery heartbeat)
 - `backend/portfolio/views/` — a package, not a module, split along the groupings `urls.py` already used: `catalog` (assets/accounts/holdings/liabilities), `ledger` (dated events, trades, imports), `valuation` (live value, net-worth series, price screen, performance), `analytics` (risk, optimization, comparison — the throttled and concurrency-capped ones), `admin_ops` (the small `IsAdminUser` surface), and `_common` (request-scope parsing, basis rescalers, the concurrency cap). `__init__.py` re-exports every public name, so `urls.py` and any older importer see the pre-split surface; `tests/test_views_package.py` pins that. A view belongs in the module its URL prefix belongs to — put a shared helper in `_common` only once a second module needs it.
 - `backend/marketdata/` — market-history warehouse, separate bounded context: symbol-keyed tables, no user FKs. `fetchers.py` (every BrsApi client, validated against the `endpoints.py` registry), `ingest.py`, `archive.py`/`quota.py` (gap-driven backfill under a request budget), `calendars.py` (which days a market was open), `admin_api.py` (staff-only Ops console plus its urlpatterns)
-- `backend/tests/` — 11 thematic suites, one per bounded concern; each merges the older single-topic files and keeps their banners
+- `backend/tests/` — 19 thematic suites, one per bounded concern; each merges the older single-topic files and keeps their banners
 - `frontend/src/` — `pages/` (Dashboard, Ops, MyOptimal, BestOverall, Family, Ledger, Onboarding), `components/ui.jsx` (shared primitives: Card, StatTile, Async, Table, Button…), `components/charts.jsx` (themed echarts wrappers), `api.js` + `useApi.js` (the one fetch pattern), `format.js` (number/date formatting)
 
 Each app has one squashed schema migration (`0001_squashed`, carrying `replaces=`);
@@ -39,7 +39,14 @@ python -m pytest -q
 # frontend
 cd frontend && npm install && npm run dev      # proxies /api to :8000
 npm run build
-npx playwright test                            # e2e, needs E2E_EMAIL/E2E_PASSWORD env
+# e2e. Needs E2E_EMAIL/E2E_PASSWORD, and needs the API's limits raised BEFORE
+# `docker compose up` — they are read by the Django process, not by Playwright.
+# Without them 16 of 35 specs fail on the anon rate limit and the analytics
+# concurrency guard, which looks like a broken app and is not.
+export ANON_THROTTLE=10000/min USER_THROTTLE=10000/min ANALYTICS_THROTTLE=10000/min
+export ANALYTICS_MAX_CONCURRENT_PER_USER=100 ANALYTICS_MAX_CONCURRENT_GLOBAL=100
+docker compose up -d && docker compose exec backend python manage.py seed_demo
+E2E_EMAIL=demopro@portfolio.local E2E_PASSWORD=demopro12345 npx playwright test
 ```
 
 Demo users (DEBUG only): `demopro@portfolio.local` / `demopro12345`.
