@@ -174,4 +174,13 @@ describe("LiabilitiesCard", () => {
     render(<LiabilitiesCard activeId={1} accounts={ACCOUNTS} />);
     expect(await screen.findByTestId("liability-add")).toBeInTheDocument();
   });
+
+  // The crash that reached production only fired when no portfolio was selected,
+  // because that is the branch that mounts the portfolio picker.
+  it("opens the add dialog on the all-portfolios branch", async () => {
+    render(<LiabilitiesCard activeId={null} accounts={ACCOUNTS} />);
+    fireEvent.click(await screen.findByTestId("liability-add"));
+    expect(screen.getByTestId("liability-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("liability-account")).toBeInTheDocument();
+  });
 });

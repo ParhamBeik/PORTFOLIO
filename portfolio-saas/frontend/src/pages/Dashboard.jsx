@@ -1609,7 +1609,6 @@ export default function Dashboard({ user }) {
       <PageHeader title="Portfolio" subtitle="Your holdings, valued live, with performance and risk alongside." />
       <div className="space-y-6">
         <HeroRow state={valuationState} basis={basis} />
-        <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} />
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
           <div className="lg:col-span-2">
             <TrendCard activeId={activeId} basis={basis} />
@@ -1617,6 +1616,7 @@ export default function Dashboard({ user }) {
           <AllocationCard state={valuationState} />
         </div>
         <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} staff={!!user?.is_staff} />
+        <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} />
         <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
         <ExcludedDisclosure valuationState={valuationState} />
         <RiskCard activeId={activeId} basis={basis} valuationState={valuationState} />

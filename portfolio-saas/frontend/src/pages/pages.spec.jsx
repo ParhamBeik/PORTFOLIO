@@ -122,6 +122,11 @@ describe("Page Rendering Tests", () => {
       expect(screen.getByText(/500,000,000 T/i)).toBeInTheDocument();
     });
     expect(screen.getByText(/Kama Stock/i)).toBeInTheDocument();
+    const holdings = await screen.findByTestId("dashboard-holdings");
+    const liabilities = await screen.findByTestId("dashboard-liabilities");
+    expect(
+      holdings.compareDocumentPosition(liabilities) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
   });
 
   it("renders MyOptimal with scenarios and recommended weights", async () => {

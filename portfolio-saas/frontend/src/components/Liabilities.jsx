@@ -499,7 +499,7 @@ export default function LiabilitiesCard({ activeId, accounts }) {
       subtitle="Debts subtracted from the total above."
       testId="dashboard-liabilities"
       actions={
-        <Button variant="secondary" onClick={() => setAdding(true)} data-testid="liability-add">
+        <Button variant="ghost" onClick={() => setAdding(true)} data-testid="liability-add">
           Add liability
         </Button>
       }
