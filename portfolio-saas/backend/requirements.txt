@@ -1,19 +1,31 @@
 Django==5.2.17
-djangorestframework==3.17.2
+djangorestframework==3.18.0
 djangorestframework-simplejwt==5.5.1
-django-cors-headers==4.4.0
-psycopg[binary]==3.2.1
-redis==5.0.8
-django-redis==5.4.0
-requests==2.33.0
-gunicorn==22.0.0
-uvicorn[standard]==0.30.6
-celery==5.4.0
-sentry-sdk==2.66.1
+django-cors-headers==4.9.0
+psycopg[binary]==3.3.5
+redis==8.1.0
+django-redis==7.0.0
+requests==2.34.2
+gunicorn==26.2.0
+uvicorn[standard]==0.52.4
+celery==5.6.3
+sentry-sdk==2.68.1
+# The scientific stack below (numpy/pandas/scipy/cvxpy/scs/scikit-learn) is
+# deliberately NOT on latest: numpy 2.x, pandas 3.x and their dependents are
+# available and were left alone. The blocker is not the Python API, it is the
+# bundled OpenBLAS -- see the scs note further down. That failure is selected by
+# CPU microarchitecture at import time, production is an x86_64 QEMU guest, and
+# this repo's development machines are aarch64, so a green suite here would not
+# be evidence either way. Upgrading that group needs a run on the target CPU.
+#
+# Everything else was moved to latest stable on 2026-09-04 and verified: full
+# suite (1,006 tests), an ASGI boot serving /api/health/ready/ 200 with database
+# and cache checks passing, and a Celery worker registering all 27 tasks.
+#
 # Pro optimization engine (pricing/optimization.py, pricing/returns.py).
 # PyPortfolioOpt is the single top-level dep; the rest are pinned for
 # reproducible Docker builds (all ship linux/amd64 py3.11 wheels, no compile).
-PyPortfolioOpt==1.5.6
+PyPortfolioOpt==1.6.0
 numpy==1.26.4
 pandas==2.2.2
 scipy==1.13.1
@@ -26,12 +38,12 @@ cvxpy==1.5.2
 # because nothing held the version. 3.2.11 is what production runs.
 scs==3.2.11
 scikit-learn==1.5.0
-jdatetime==5.2.0
+jdatetime==6.1.0
 openpyxl==3.1.5
-beautifulsoup4==4.12.3
-lxml==6.1.0
-pypdf==6.16.1
-boto3==1.35.36
+beautifulsoup4==4.15.0
+lxml==6.1.3
+pypdf==6.17.0
+boto3==1.43.88
 # openpyxl / beautifulsoup4 / lxml / pypdf: Codal Excel/HTML/PDF text extraction
 # (marketdata/codal_extract.py, codal_parsers.py). boto3: S3/MinIO-backed
 # artifact storage (marketdata/codal_storage.py). pytesseract / Pillow (OCR for
