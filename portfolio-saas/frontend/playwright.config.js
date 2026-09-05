@@ -10,9 +10,19 @@ import { defineConfig, devices } from "@playwright/test";
  * The API throttles anonymous requests (30/min) and every spec signs in from
  * scratch, so a full run exhausts that allowance about a third of the way
  * through and the rest fail to sign in. Give the backend a headroom the suite
- * cannot hit, or most of it never runs:
+ * cannot hit, or most of it never runs. The analytics endpoints additionally
+ * cap *concurrent* solves (2 per user, 5 globally), which specs running in
+ * parallel workers hit as "Too many concurrent optimization requests" -- that
+ * is a working guard, not a failure, but it has to be lifted to test past it:
  *
- *   ANON_THROTTLE=10000/min USER_THROTTLE=10000/min   (on the Django process)
+ *   ANON_THROTTLE=10000/min USER_THROTTLE=10000/min \
+ *   ANALYTICS_THROTTLE=10000/min \
+ *   ANALYTICS_MAX_CONCURRENT_PER_USER=100 ANALYTICS_MAX_CONCURRENT_GLOBAL=100
+ *
+ * All five are read by config/settings.py and are passed through by
+ * docker-compose.yml, so exporting them before `docker compose up` is enough;
+ * setting them only in the shell that runs Playwright does nothing, because
+ * they have to reach the Django process, not this one.
  *
  * Optional:
  *   VITE_PROXY_TARGET / VITE_API_URL — Django API (default http://localhost:8000)

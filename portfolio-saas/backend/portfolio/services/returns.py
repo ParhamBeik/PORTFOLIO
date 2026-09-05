@@ -1010,7 +1010,20 @@ def _build_returns_matrix(
         market = market_for_asset(asset_obj) if asset_obj else "tse"
         max_date = panel[key].dropna().index.max()
         trailing_sessions = 0
-        if max_date is not None:
+        # `pd.isna`, not `is not None`. An empty index's `.max()` is pandas.NaT,
+        # which is emphatically not None, and NaT's .year/.month/.day are all
+        # float nan -- so the old check let it through and to_jalali_str died
+        # inside jdatetime with "TypeError: 'float' object cannot be interpreted
+        # as an integer". That reached the user as a 500 on MyOptimal whenever a
+        # held asset had no observation anywhere in the window.
+        #
+        # Leaving trailing_sessions at 0 is deliberate rather than a fallback. A
+        # column with nothing in it is 100% leading gap, and `_gap_profile`
+        # defines a leading run as the absence of history rather than a hole in
+        # it, so the honest verdict is `insufficient_history` (days: 0) from the
+        # branch below -- not the `price_gap_exceeded` data-corruption verdict
+        # that inventing a large trailing gap here would produce.
+        if not pd.isna(max_date):
             last_jalali = to_jalali_str(max_date)
             trailing_sessions = sessions_between(last_jalali, ref_jalali, market=market)
 

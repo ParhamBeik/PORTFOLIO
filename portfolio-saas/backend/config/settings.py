@@ -175,6 +175,15 @@ REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ("config.api.DecimalStringJSONRenderer",),
 }
 
+# Companion to the `analytics` throttle above: that bounds requests per minute,
+# these bound how many may be *in flight* at once (portfolio/views/_common.py).
+# The optimizer holds a worker for seconds at a time, so the rate limit alone
+# does not stop a handful of concurrent solves from starving the pool. Defaults
+# are the literals this guard has always used; they are named here so a test run
+# can raise them the same way it raises the throttles.
+ANALYTICS_MAX_CONCURRENT_PER_USER = int(os.getenv("ANALYTICS_MAX_CONCURRENT_PER_USER", "2"))
+ANALYTICS_MAX_CONCURRENT_GLOBAL = int(os.getenv("ANALYTICS_MAX_CONCURRENT_GLOBAL", "5"))
+
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=int(os.getenv("REFRESH_TOKEN_LIFETIME_DAYS", "30"))),

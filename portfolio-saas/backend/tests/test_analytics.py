@@ -422,6 +422,62 @@ def test_returns_exclude_prices_with_a_gap_longer_than_five_sessions():
     assert {item["key"]: item["reason"] for item in excluded}["long_gap"] == "price_gap_exceeded"
 
 
+def test_an_asset_with_no_observations_at_all_is_excluded_not_a_500():
+    """An empty column must not reach the Jalali converter.
+
+    `panel[key].dropna().index.max()` on a column with nothing in it returns
+    `pandas.NaT`, which is not None, and whose .year/.month/.day are float nan.
+    The guard used to be `is not None`, so NaT sailed through into
+    `to_jalali_str` and jdatetime raised "TypeError: 'float' object cannot be
+    interpreted as an integer" -- surfacing as a 500 on MyOptimal, which is how
+    the e2e suite found it.
+
+    The verdict must be `insufficient_history`, not `price_gap_exceeded`: an
+    all-empty column is entirely leading gap, and `_gap_profile` defines a
+    leading run as the absence of history rather than a hole in it. Calling it
+    a gap is the data-corruption accusation that rule exists to avoid.
+    """
+    index = pd.date_range("2026-01-01", periods=45, tz="UTC")
+    panel = pd.DataFrame(
+        {
+            "complete": np.linspace(100.0, 145.0, len(index)),
+            "never_priced": np.full(len(index), np.nan),
+        },
+        index=index,
+    )
+
+    returns, excluded, _warnings = _build_returns_matrix(panel)
+
+    assert "complete" in returns.columns
+    assert "never_priced" not in returns.columns
+    reasons = {item["key"]: item["reason"] for item in excluded}
+    assert reasons["never_priced"] == "insufficient_history"
+
+
+def test_an_empty_column_is_excluded_even_when_it_is_held():
+    """The held-asset softening must not turn the crash case into a warning.
+
+    A held asset with too little history is downgraded to a `short_history`
+    warning and kept -- but only when it has at least 2 observations. With zero
+    it has no returns to contribute at all, so it must still be excluded.
+    """
+    index = pd.date_range("2026-01-01", periods=45, tz="UTC")
+    panel = pd.DataFrame(
+        {
+            "complete": np.linspace(100.0, 145.0, len(index)),
+            "never_priced": np.full(len(index), np.nan),
+        },
+        index=index,
+    )
+
+    returns, excluded, _warnings = _build_returns_matrix(
+        panel, held_keys=frozenset({"never_priced"})
+    )
+
+    assert "never_priced" not in returns.columns
+    assert {item["key"] for item in excluded} == {"never_priced"}
+
+
 @pytest.mark.django_db
 def test_integrity_uses_an_explicit_window_and_real_expected_sessions():
     MarketInstrument.objects.create(

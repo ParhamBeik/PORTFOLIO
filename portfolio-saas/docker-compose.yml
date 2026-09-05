@@ -18,6 +18,19 @@ x-backend-env: &backend-env
   REDIS_URL: redis://redis:6379/1            # cache (DB 1)
   CELERY_BROKER_URL: redis://redis:6379/2    # broker/result (DB 2, kept off the cache)
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+  # DRF throttle rates, passed through so they can be raised for a test run.
+  # playwright.config.js instructs the operator to set ANON_THROTTLE and
+  # USER_THROTTLE "on the Django process", but with no passthrough here that had
+  # no effect on the compose stack -- which is the documented way to run the
+  # suite. The result was 16 of 35 specs failing on "login failed ... the
+  # anonymous rate limit exhausted by earlier specs", which reads like a broken
+  # application rather than a throttle the harness told you to raise.
+  # Defaults match config/settings.py, so leaving them unset changes nothing.
+  ANON_THROTTLE: ${ANON_THROTTLE:-30/min}
+  USER_THROTTLE: ${USER_THROTTLE:-120/min}
+  ANALYTICS_THROTTLE: ${ANALYTICS_THROTTLE:-60/min}
+  ANALYTICS_MAX_CONCURRENT_PER_USER: ${ANALYTICS_MAX_CONCURRENT_PER_USER:-2}
+  ANALYTICS_MAX_CONCURRENT_GLOBAL: ${ANALYTICS_MAX_CONCURRENT_GLOBAL:-5}
   EMAIL_BACKEND: ${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}
   EMAIL_FILE_PATH: ${EMAIL_FILE_PATH:-/app/test-emails}
   FRONTEND_VERIFICATION_URL: ${FRONTEND_VERIFICATION_URL:-http://localhost:5173/verify-email}

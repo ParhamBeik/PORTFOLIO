@@ -47,7 +47,16 @@ def concurrency_cap(view_func):
             except ValueError:
                 current_global = 1
 
-        if current_user > 2 or current_global > 5:
+        # Sourced from settings rather than written inline. The two ceilings sit
+        # beside DRF's throttle rates, which have always been env-tunable, and
+        # the e2e suite is told by playwright.config.js to raise its limits for
+        # a run -- but these two could not be raised at all, so a parallel run
+        # of the optimizer specs failed on "Too many concurrent optimization
+        # requests" with no lever to pull. Defaults are the previous literals,
+        # so nothing changes unless someone sets them.
+        per_user = int(getattr(settings, "ANALYTICS_MAX_CONCURRENT_PER_USER", 2))
+        global_cap = int(getattr(settings, "ANALYTICS_MAX_CONCURRENT_GLOBAL", 5))
+        if current_user > per_user or current_global > global_cap:
             try:
                 u = cache.decr(user_key)
                 if u <= 0:
