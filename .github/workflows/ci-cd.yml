@@ -69,6 +69,18 @@ jobs:
         env:
           DJANGO_SETTINGS_MODULE: config.settings_test
       - run: python -m pytest -q
+      # The shell scripts are the deploy and backup path, and nothing had ever
+      # linted them. A first run found an unreachable off-host upload: the count
+      # regex used doubled backslashes, so it matched nothing and `set -e` would
+      # have killed the backup on the first upload -- latent only because the
+      # feature has never been switched on. Errors AND warnings both fail here;
+      # the tree is clean at that level, and the two genuinely-benign findings
+      # carry an inline `shellcheck disable` with the reason.
+      - name: Lint shell scripts
+        working-directory: portfolio-saas
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=warning scripts/*.sh
       - name: Database restore drill
         run: ../scripts/ci_restore_drill.sh
         env:

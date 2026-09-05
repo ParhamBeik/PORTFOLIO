@@ -81,11 +81,19 @@ python manage.py migrate --noinput 2>&1 | tee "$OUT_DIR/migrate_output.txt"
 sudo -u "$STAGING_PG_SUPERUSER" psql -d "${STAGING_DB_RESTORE_NAME}" -c "SELECT column_name FROM information_schema.columns WHERE table_name='portfolio_price' AND column_name IN ('price_unit','price_unit_verified');" | tee "$OUT_DIR/verify_columns.txt"
 
 # Aggregate by unit
+# shellcheck disable=SC2024  # The redirect is intentionally the invoking
+# shell's, not the sudo'd psql's: OUT_DIR is created by this script under
+# /tmp and is owned by whoever ran it, so writing as root would leave
+# root-owned files in a directory the operator then cannot clean up.
 sudo -u "$STAGING_PG_SUPERUSER" psql -d "${STAGING_DB_RESTORE_NAME}" -c "SELECT price_unit, price_unit_verified, COUNT(*) FROM portfolio_price GROUP BY price_unit, price_unit_verified ORDER BY COUNT(*) DESC;" > "$OUT_DIR/aggregate_by_unit.txt" 2>&1
 
 # Representative samples: operator may set ASSET_IDS env var (e.g. '1,2,3')
 ASSET_IDS="${ASSET_IDS:-NULL}"
 if [ "$ASSET_IDS" != "NULL" ]; then
+  # shellcheck disable=SC2024  # The redirect is intentionally the invoking
+  # shell's, not the sudo'd psql's: OUT_DIR is created by this script under
+  # /tmp and is owned by whoever ran it, so writing as root would leave
+  # root-owned files in a directory the operator then cannot clean up.
   sudo -u "$STAGING_PG_SUPERUSER" psql -d "${STAGING_DB_RESTORE_NAME}" -c "SELECT p.id, p.asset_id, a.tse_symbol, a.brs_symbol, p.price, p.price_unit, p.price_unit_verified, p.fetched_at FROM portfolio_price p JOIN portfolio_asset a ON a.id = p.asset_id WHERE p.asset_id IN (${ASSET_IDS}) ORDER BY p.fetched_at DESC LIMIT 50;" > "$OUT_DIR/sample_prices.txt" 2>&1 || true
 else
   echo "ASSET_IDS not provided; skipping per-asset samples. To enable, set ASSET_IDS='1,2,3' in env before running." | tee "$OUT_DIR/sample_prices_notice.txt"

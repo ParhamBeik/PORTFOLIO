@@ -72,13 +72,31 @@ set -o pipefail
 checksum="$(sha256sum "${destination}" 2>/dev/null | awk '{print $1}' || shasum -a 256 "${destination}" | awk '{print $1}')"
 printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" | publish "${destination}.sha256"
 
+# Off-host copy. Everything above this line still leaves the only copy of the
+# database on the same host as the database, so a host loss takes both.
+#
+# This block had never run -- RCLONE_REMOTE is unset in production and rclone is
+# not installed -- and it could not have: the count regex was written with
+# doubled backslashes (`\\([0-9]\\)`), which inside single quotes reaches sed as
+# a literal backslash rather than a BRE group, so it matched nothing, the
+# comparison against "1" was always false, and `set -e` would have killed the
+# backup at the first upload. Both bugs are fixed here rather than left for
+# whoever eventually turns this on.
 upload_verified=false
 if [[ -n "${RCLONE_REMOTE:-}" ]]; then
   command -v rclone >/dev/null
-  for artifact in "${destination}"; do
+  # The checksum travels with the dump. Verifying an off-host artifact means
+  # nothing if the only copy of its expected hash is on the host that died.
+  for artifact in "${destination}" "${destination}.sha256"; do
     remote_path="${RCLONE_REMOTE%/}/$(basename "${artifact}")"
     rclone copyto "${artifact}" "${remote_path}" --immutable
-    [[ "$(rclone size "${remote_path}" --json | tr -d '\n' | sed -n 's/.*"count":\\([0-9][0-9]*\\).*/\\1/p')" == "1" ]]
+    remote_count="$(rclone size "${remote_path}" --json | tr -d '\n' \
+      | sed -n 's/.*"count":\([0-9][0-9]*\).*/\1/p')"
+    [[ "${remote_count}" == "1" ]] || {
+      echo "Off-host upload of $(basename "${artifact}") did not verify:" \
+           "expected exactly 1 object at ${remote_path}, rclone reported '${remote_count}'." >&2
+      exit 1
+    }
   done
   upload_verified=true
 fi
