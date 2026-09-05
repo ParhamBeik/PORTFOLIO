@@ -80,6 +80,16 @@ def asset_class_map(universe: list[str] | None = None) -> dict[str, str]:
     from marketdata.models import MarketInstrument
 
     resolved = resolve_universe(universe)
+    # One query for the whole universe rather than one per entry. This runs on
+    # the optimizer path (`optimization._asset_class_map`) over a universe that
+    # is ~1,900 symbols market-wide, and it is the same N+1 that
+    # `resolve_universe` itself had immediately upstream.
+    symbols = {item.get("symbol") or "" for item in resolved} - {""}
+    instruments = {
+        mi.symbol: mi
+        for mi in MarketInstrument.objects.filter(symbol__in=symbols)
+    } if symbols else {}
+
     cls_map: dict[str, str] = {}
     for item in resolved:
         key = item["key"]
@@ -88,7 +98,7 @@ def asset_class_map(universe: list[str] | None = None) -> dict[str, str]:
             cls_map[key] = normalize_asset_class(asset.asset_class)
             continue
         symbol = item.get("symbol") or ""
-        mi = MarketInstrument.objects.filter(symbol=symbol).first()
+        mi = instruments.get(symbol)
         if mi is not None:
             cls_map[key] = classify_from_market_instrument(mi)
         else:

@@ -1381,3 +1381,24 @@ def test_resolve_universe_does_not_query_per_symbol(django_assert_num_queries):
     assert len(resolved) == len(symbols)
     assert {item["symbol"] for item in resolved} == set(symbols)
     assert all(item["source"] == "tse" for item in resolved)
+
+
+@pytest.mark.django_db
+def test_asset_class_map_does_not_query_per_symbol(django_assert_num_queries):
+    """`asset_class_map` batches too -- it is the twin of the resolve_universe N+1.
+
+    It runs on the optimizer path over the same market-wide universe, and had
+    the same shape: one MarketInstrument query per resolved entry.
+    """
+    from portfolio.services.classification import asset_class_map
+
+    symbols = [f"CLS{i:03d}" for i in range(40)]
+    MarketInstrument.objects.bulk_create([
+        MarketInstrument(symbol=s, source=MarketInstrument.Source.TSETMC)
+        for s in symbols
+    ])
+
+    with django_assert_num_queries(3):
+        mapping = asset_class_map(symbols)
+
+    assert set(mapping) == set(symbols)
