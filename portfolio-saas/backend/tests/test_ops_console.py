@@ -982,6 +982,52 @@ def test_house_opening_position_without_mortgage_invents_none(db, make_user):
     assert value_account(account, {"house_two": Decimal("10")})["total"] == Decimal("902000000")
 
 
+def test_a_house_mortgage_is_owned_by_the_replay_and_a_users_debt_is_not(db, make_user):
+    """`derived` must mean "the replay will put this back", nothing looser.
+
+    The reap in `rebuild_projections` deletes on that flag, so the two rows
+    below are the whole contract: a mortgage the marks imply is recreated on
+    every replay and must carry it, and a debt a person secured on the same
+    house is theirs and must not. Classifying on the label's shape instead is
+    what migration 0037 had to withdraw -- it caught four seeded rows on gold
+    coins that no mark would ever have rebuilt.
+    """
+    from django.utils import timezone
+    from portfolio.models import LedgerEntry
+    from portfolio.services.ledger import create_ledger_entry, rebuild_projections
+
+    user = make_user(email="derived-vs-typed@test.test")
+    account = Account.objects.create(name="Home", user=user)
+    house = Asset.objects.create(
+        key="house_three", name="House Three", asset_class="Real Estate",
+        currency="IRT", is_house=True,
+    )
+    create_ledger_entry(
+        account=account, asset=house, kind=LedgerEntry.Kind.OPENING_POSITION,
+        quantity=Decimal("10"), occurred_at=timezone.now(),
+        area_sqm=Decimal("90.2"), mortgage_deduction_tomans=Decimal("400000000"),
+    )
+
+    mortgage = Liability.objects.get(account=account, asset=house, derived=True)
+    assert mortgage.amount_tomans == Decimal("400000000")
+
+    typed = Liability.objects.create(
+        account=account, asset=house, label="Loan from my brother",
+        kind=Liability.Kind.SECURED_DEBT, amount_tomans=Decimal("50000000"),
+    )
+
+    rebuild_projections(account)
+
+    # The derived row is gone and remade -- a new pk, the same figure.
+    remade = Liability.objects.get(account=account, asset=house, derived=True)
+    assert remade.pk != mortgage.pk
+    assert remade.amount_tomans == Decimal("400000000")
+    # The typed one is untouched, same row.
+    typed.refresh_from_db()
+    assert typed.label == "Loan from my brother"
+    assert typed.derived is False
+
+
 def test_usdt_basis_conversion_fallback(db):
     from portfolio.services.deflator import to_basis
     
