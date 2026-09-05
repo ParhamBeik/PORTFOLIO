@@ -1628,16 +1628,28 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
 
     excluded = []
 
+    # Holdings are resolved per account before the price loop so the assets they
+    # name can be fetched in one query. The lookup used to sit inside the inner
+    # loop, costing one query per holding per account -- and `value_as_of` is
+    # called once per TWR cash-flow boundary, so a performance request paid that
+    # repeatedly.
+    per_account = [(acc, holdings_as_of(user, acc, as_of_dt)) for acc in accounts]
+    asset_by_key = {
+        a.key: a
+        for a in Asset.objects.filter(
+            key__in={key for _, holdings in per_account for key in holdings}
+        )
+    }
+
     # Resolve close price for each asset
-    for acc in accounts:
-        acc_holdings = holdings_as_of(user, acc, as_of_dt)
+    for acc, acc_holdings in per_account:
         # Per account, not per user: the same asset may be counted in one
         # portfolio and switched off in another.
         acc_hidden = hidden_keys(user, account=acc)
         for key, qty in acc_holdings.items():
             if qty <= 0 or key in acc_hidden:
                 continue
-            asset = Asset.objects.filter(key=key).first()
+            asset = asset_by_key.get(key)
             if not asset:
                 continue
 
