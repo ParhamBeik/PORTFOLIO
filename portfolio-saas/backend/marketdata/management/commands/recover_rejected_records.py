@@ -28,6 +28,24 @@ REAL_LEGAL_FIELDS = {
 }
 
 
+def _gold_unit_for(symbol):
+    """The unit this symbol's warehouse rows are already stored in, or None.
+
+    The rejection payload records `close`, `median` and the raw provider record
+    but not the declared unit, so the only trustworthy local answer to "what
+    scale is this number on" is what the symbol's own accepted rows say. None
+    means "nothing accepted for this symbol yet", and the caller must refuse
+    rather than guess -- the project rule is that the provider declares units
+    and nothing infers them from the symbol or the magnitude.
+    """
+    return (
+        GoldCurrencyHistory.objects.filter(symbol=symbol)
+        .exclude(unit="")
+        .values_list("unit", flat=True)
+        .first()
+    )
+
+
 def _real_legal_action(row, existing=None):
     payload = row.payload if isinstance(row.payload, dict) else {}
     buy = int(payload.get("Buy_I_Volume") or 0) + int(payload.get("Buy_N_Volume") or 0)
@@ -165,6 +183,7 @@ class Command(BaseCommand):
             raise CommandError("manifest checksum mismatch")
         manifest = json.loads(payload)
         recovered = 0
+        skipped_unknown_unit = 0
         with transaction.atomic():
             for action in manifest["actions"]:
                 row = RejectedRecord.objects.select_for_update().get(pk=action["rejected_record_id"])
@@ -183,10 +202,31 @@ class Command(BaseCommand):
                     recovered += 1
                 elif disposition == "recoverable" and action["destination"] == "GoldCurrencyHistory":
                     close = Decimal(str(row.payload.get("close")))
+                    unit = _gold_unit_for(row.symbol)
+                    if unit is None:
+                        # Fail closed, exactly as ingest_gold_currency_history
+                        # does for the same question. This wrote "تومان"
+                        # unconditionally, and the rejected `close` is on the
+                        # STORAGE scale -- `to_storage` only converts when the
+                        # symbol is IRR-quoted and otherwise keeps the
+                        # provider's own number. So recovering an outlier for a
+                        # foreign-quoted symbol (XAUUSD quotes دلار, BTC quotes
+                        # تتر) stored a dollar or tether magnitude labelled as
+                        # Toman, and valuation.py reads close_price straight as
+                        # Toman: the silent 10x that the ingest path refuses a
+                        # whole batch to avoid, reintroduced by the repair.
+                        skipped_unknown_unit += 1
+                        row.disposition = "quarantined"
+                        row.destination_reference = "unit_unresolved"
+                        row.recovered_at = None
+                        row.save(update_fields=[
+                            "disposition", "destination_reference", "recovered_at",
+                        ])
+                        continue
                     record, _ = GoldCurrencyHistory.objects.get_or_create(
                         symbol=row.symbol,
                         date=row.date,
-                        defaults={"close_price": close, "unit": "تومان"},
+                        defaults={"close_price": close, "unit": unit},
                     )
                     disposition = "recovered"
                     destination_reference = f"GoldCurrencyHistory:{record.pk}"
@@ -195,4 +235,8 @@ class Command(BaseCommand):
                 row.destination_reference = destination_reference or action["destination"]
                 row.recovered_at = timezone.now() if disposition == "recovered" else None
                 row.save(update_fields=["disposition", "destination_reference", "recovered_at"])
-        self.stdout.write(json.dumps({"recovered": recovered, "manifest_sha256": actual}, sort_keys=True))
+        self.stdout.write(json.dumps({
+            "recovered": recovered,
+            "skipped_unknown_unit": skipped_unknown_unit,
+            "manifest_sha256": actual,
+        }, sort_keys=True))

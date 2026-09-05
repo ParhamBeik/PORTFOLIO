@@ -43,6 +43,7 @@ from marketdata.models import ArchiveFetchState, MarketCandle
 from marketdata.models import ArchiveFetchState, RejectedRecord
 from marketdata.models import DailyStockHistory, MarketCandle
 from marketdata.models import RealLegalHistory, RejectedRecord
+from marketdata.models import GoldCurrencyHistory
 from marketdata import quota
 from marketdata.quota import (
     ARCHIVE,
@@ -1876,6 +1877,33 @@ def test_existing_real_legal_row_is_salvaged_evidence():
     row = _row(100, 99)
     RealLegalHistory.objects.create(symbol=row.symbol, date=row.date)
     assert classify(row)[0] == "salvaged_evidence"
+
+
+def test_gold_recovery_reads_the_symbols_stored_unit_and_never_assumes_toman():
+    """The repair path must not relabel a foreign quote as Toman.
+
+    `_gold_action`'s rejected `close` is on the STORAGE scale, and
+    `ingest_gold_currency_history.to_storage` only converts when the symbol is
+    IRR-quoted -- a دلار- or تتر-quoted symbol keeps the provider's own number.
+    The apply path wrote `unit="تومان"` unconditionally, so recovering an
+    outlier for one of those stored a dollar magnitude labelled as Toman, and
+    `valuation.py` reads `close_price` straight as Toman. This is the silent 10x
+    that the ingest path refuses a whole batch to avoid.
+    """
+    from marketdata.management.commands.recover_rejected_records import _gold_unit_for
+
+    GoldCurrencyHistory.objects.create(
+        symbol="XAUUSD", date="1404-01-01", close_price=Decimal("2600"), unit="دلار"
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="EMAMI", date="1404-01-01", close_price=Decimal("62000000"), unit="تومان"
+    )
+
+    assert _gold_unit_for("XAUUSD") == "دلار"
+    assert _gold_unit_for("EMAMI") == "تومان"
+    # Fail closed: nothing accepted for this symbol yet means the scale is
+    # unknown, and the caller must refuse rather than guess.
+    assert _gold_unit_for("NEVER_SEEN") is None
 
 
 # ----------------------------------------------------------------------

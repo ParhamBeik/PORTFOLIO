@@ -102,7 +102,7 @@ def today():
 
     So: if you need "the day that just ended", this is it, but say so at the
     call site. If you need the actual Tehran date, use
-    `from_gregorian(market_state.tehran_now())`, and change the three nightly
+    `from_gregorian(market_state._now_tehran())`, and change the three nightly
     callers in the same commit.
     """
     return jdatetime.date.today().strftime("%Y-%m-%d")
