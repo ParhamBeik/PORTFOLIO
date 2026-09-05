@@ -79,6 +79,27 @@ export function jalaliToIso(jy, jm, jd) {
   return t === null ? null : new Date(t - TEHRAN_OFFSET_MS).toISOString();
 }
 
+/**
+ * An ISO instant -> the Gregorian day it falls on in Tehran, as "YYYY-MM-DD".
+ *
+ * The inverse of `jalaliToIso` for anything that has to hand a plain date to
+ * the server. Slicing the instant's own string instead is wrong by a day every
+ * time: Tehran midnight is 20:30 UTC on the *previous* Gregorian day, so
+ * `jalaliToIso(1404, 7, 1).slice(0, 10)` reads 31 Shahrivar, and at a year
+ * boundary it reads the wrong year too.
+ */
+export function isoToDate(iso) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t)
+    ? null
+    : new Date(t + TEHRAN_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+/** The inverse: a plain "YYYY-MM-DD" as the instant that day begins in Tehran. */
+export const dateToIso = (date) =>
+  date ? new Date(Date.parse(`${date}T00:00:00Z`) - TEHRAN_OFFSET_MS).toISOString() : "";
+
 /** 29, 30 or 31 — Esfand is asked, not computed. */
 export const monthLength = (jy, jm) =>
   jm <= 6 ? 31 : jm <= 11 ? 30 : fromJalali(jy, 12, 30) === null ? 29 : 30;

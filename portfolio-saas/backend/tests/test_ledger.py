@@ -22,6 +22,7 @@ from marketdata.models import MarketCandle, RejectedRecord
 from portfolio.models import Account, Asset, Holding, Price, Transaction
 from portfolio.models import Account, Holding, LedgerEntry
 from portfolio.models import Account, Holding, LedgerEntry, Snapshot, Transaction
+from portfolio.models import Liability
 from portfolio.serializers import TradeInputSerializer
 from portfolio.services.deflator import CpiUnavailable, cpi_for_date, to_basis
 from portfolio.services.ledger import create_ledger_entry
@@ -2483,6 +2484,81 @@ def test_half_a_repayment_schedule_is_refused(make_user):
 
     assert response.status_code == 400
     assert "start date" in str(response.data)
+
+
+def test_a_schedule_with_no_repayment_rule_is_refused(make_user):
+    """Principal, term and start date name no rule to derive a balance from.
+
+    `balance_basis` needs a rate to amortize or an installment to count down;
+    with neither it drops to DECLARED, and on a create there is nothing
+    declared. The row used to be accepted reporting zero owed -- the whole loan
+    vanished from net worth, which is the one direction an error must never go.
+    """
+    user = make_user(email="norule@test.test")
+    account = Account.objects.create(user=user, name="Levered")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    response = client.post(
+        f"/api/accounts/{account.id}/liabilities/",
+        {
+            "label": "Car loan",
+            "kind": "bank_loan",
+            "principal_tomans": "600000000",
+            "term_months": 60,
+            "started_on": (timezone.now().date() - datetime.timedelta(days=90)).isoformat(),
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400, response.data
+    assert Liability.objects.filter(account=account).count() == 0
+
+
+def test_a_users_secured_debt_survives_the_next_trade(ledger_account, asset_catalog):
+    """The replay owns only the mortgages it derives from house marks.
+
+    `rebuild_projections` recreates those and so must delete the previous copy
+    first. Keying that reap on "has an asset" also matched every secured debt a
+    person had entered by hand -- and a secured debt is REQUIRED to name an
+    asset -- so recording a mortgage and then any trade erased it silently.
+    """
+    client = _client(ledger_account.user)
+    started_at = (timezone.now() - datetime.timedelta(days=10)).isoformat()
+    assert _post(client, ledger_account, {
+        "kind": "opening_position",
+        "asset_key": "emami_coin",
+        "quantity": "2",
+        "occurred_at": started_at,
+    }).status_code == 201
+
+    created = client.post(
+        f"/api/accounts/{ledger_account.id}/liabilities/",
+        {
+            "label": "Mortgage",
+            "kind": "secured_debt",
+            "lender": "Bank Maskan",
+            "asset_key": "emami_coin",
+            "amount_tomans": "600000000",
+        },
+        format="json",
+    )
+    assert created.status_code == 201, created.data
+    assert created.data["derived"] is False
+
+    # Any entry replays the account, which is where the row used to go.
+    assert _post(client, ledger_account, {
+        "kind": "buy",
+        "asset_key": "emami_coin",
+        "quantity": "1",
+        "unit_price_tomans": "100",
+        "occurred_at": timezone.now().isoformat(),
+    }).status_code == 201
+
+    survivor = Liability.objects.get(pk=created.data["id"])
+    assert survivor.label == "Mortgage"
+    assert survivor.lender == "Bank Maskan"
+    assert survivor.amount_tomans == Decimal("600000000")
 
 
 def test_a_scheduled_loan_needs_no_balance_typed_in(make_user):

@@ -741,7 +741,11 @@ def rebuild_projections(account: Account) -> dict:
         ]
     )
     from portfolio.models import Liability
-    Liability.objects.filter(account=account, asset__isnull=False).delete()
+    # Only the rows this function minted. Scoping the reap to `asset__isnull`
+    # instead reached every secured debt on the account, so a user's own
+    # mortgage — which names the house by definition — was erased by the next
+    # buy, sell or deposit that triggered a replay.
+    Liability.objects.filter(account=account, derived=True).delete()
     for asset_id, data in state["real_estate"].items():
         mortgage_val = data.get("mortgage_deduction_tomans", Decimal("0"))
         if mortgage_val > 0:
@@ -750,7 +754,9 @@ def rebuild_projections(account: Account) -> dict:
                 account=account,
                 asset=a_obj,
                 label=f"Mortgage ({a_obj.name})",
+                kind=Liability.Kind.SECURED_DEBT,
                 amount_tomans=mortgage_val,
+                derived=True,
             )
     return {
         "account_id": account.id,

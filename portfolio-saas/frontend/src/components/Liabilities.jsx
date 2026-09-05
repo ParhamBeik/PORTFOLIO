@@ -17,6 +17,7 @@ import {
   updateLiability,
 } from "../api.js";
 import { date, holdingLabel, toman } from "../format.js";
+import { dateToIso, isoToDate } from "../jalali.js";
 import { useApi } from "../useApi.js";
 import {
   Async,
@@ -105,7 +106,10 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
         ? String(row.monthly_installment_tomans)
         : "",
     // The server holds a plain date; `JalaliDateField` speaks ISO instants.
-    startedOn: row?.started_on ? `${row.started_on}T00:00:00` : "",
+    // Both conversions go through `jalali.js`, which anchors them to Tehran —
+    // parsing the date in the browser's own zone put a reader east of Tehran
+    // on the previous day.
+    startedOn: dateToIso(row?.started_on),
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -130,7 +134,12 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
     if (!form.startedOn) return "Choose the month the first installment was due.";
     if (form.mode === "rate") {
       if (!(Number(form.principal) > 0)) return "Enter the amount borrowed.";
-      if (!(Number(form.rate) >= 0)) return "Enter the annual interest rate.";
+      // `Number("") === 0`, which passes a bare `>= 0`, so an untouched rate
+      // field looked complete and posted a schedule the server cannot derive
+      // a balance from. Zero is a legitimate rate; blank is not.
+      if (form.rate === "" || !(Number(form.rate) >= 0)) {
+        return "Enter the annual interest rate.";
+      }
       return "";
     }
     if (!(Number(form.installment) > 0)) return "Enter the monthly installment.";
@@ -151,7 +160,7 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
     termMonths: scheduled ? form.termMonths : null,
     monthlyInstallmentTomans:
       scheduled && form.mode === "installment" ? form.installment : null,
-    startedOn: scheduled ? form.startedOn.slice(0, 10) : null,
+    startedOn: scheduled ? isoToDate(form.startedOn) : null,
   };
 
   const save = async () => {

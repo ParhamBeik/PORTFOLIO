@@ -446,10 +446,11 @@ class LiabilitySerializer(serializers.ModelSerializer):
             "asset_key",
             "asset_name",
             "asset_label",
+            "derived",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "account", "created_at", "updated_at")
+        read_only_fields = ("id", "account", "derived", "created_at", "updated_at")
 
     def get_asset_label(self, obj):
         if not obj.asset_id:
@@ -523,6 +524,21 @@ class LiabilitySerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     "principal_tomans": "An interest rate needs the amount borrowed to apply to."
                 })
+            # Principal, term and start date, with neither a rate nor an
+            # installment, names no repayment rule: `balance_basis` clears
+            # neither AMORTIZED nor INSTALLMENTS and drops to DECLARED, which
+            # reports the amount typed rather than anything the schedule
+            # implies. On a create there is nothing typed, so the row lands at
+            # zero and the debt disappears from net worth entirely.
+            if (
+                merged["principal_tomans"] is not None
+                and merged["annual_rate_pct"] is None
+                and merged["monthly_installment_tomans"] is None
+            ):
+                raise serializers.ValidationError({
+                    "annual_rate_pct": "Give the interest rate, or the monthly "
+                                       "installment, so the balance can be derived."
+                })
         elif merged["amount_tomans"] is None:
             raise serializers.ValidationError({
                 "amount_tomans": "Enter what is owed, or the loan's repayment terms."
@@ -533,14 +549,25 @@ class LiabilitySerializer(serializers.ModelSerializer):
         # later cleared. Seed it from the schedule rather than making the
         # client compute a number the server already knows how to derive.
         if attrs.get("amount_tomans") is None and has_any_term:
-            attrs["amount_tomans"] = Liability(
+            probe = Liability(
                 amount_tomans=Decimal("0"),
                 principal_tomans=merged["principal_tomans"],
                 annual_rate_pct=merged["annual_rate_pct"],
                 term_months=merged["term_months"],
                 monthly_installment_tomans=merged["monthly_installment_tomans"],
                 started_on=merged["started_on"],
-            ).outstanding_tomans()
+            )
+            # The probe is seeded at zero, so a basis of DECLARED would hand
+            # back that zero as the balance. The rules above are meant to make
+            # that unreachable; assert it rather than trust it, because the
+            # failure is silent and reads as "this loan is paid off".
+            if probe.balance_basis == Liability.BalanceBasis.DECLARED:
+                raise serializers.ValidationError(
+                    "These terms do not describe a repayment schedule. Give a "
+                    "term, a start date, and either a rate with the amount "
+                    "borrowed or the monthly installment."
+                )
+            attrs["amount_tomans"] = probe.outstanding_tomans()
         return attrs
 
 

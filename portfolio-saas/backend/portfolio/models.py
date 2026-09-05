@@ -704,6 +704,16 @@ class Liability(models.Model):
     asset = models.ForeignKey(
         Asset, on_delete=models.PROTECT, related_name="liabilities", null=True, blank=True
     )
+    # Owned by `services.ledger.rebuild_projections`, which recreates these from
+    # the house marks on every replay and therefore deletes them first. The flag
+    # is what keeps that reap off the rows a person typed: a user's mortgage also
+    # names an asset, so "has an asset" cannot be the test. Never writable over
+    # the API — a client that could set it could make its own row disappear on
+    # the next trade.
+    derived = models.BooleanField(
+        default=False,
+        help_text="Maintained by the ledger replay rather than entered by hand.",
+    )
 
     # --- Repayment schedule. All optional; see `balance_basis`. ---
     principal_tomans = models.DecimalField(

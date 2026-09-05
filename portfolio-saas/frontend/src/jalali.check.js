@@ -6,8 +6,10 @@
 // not a re-implementation of the same formula in the assertions.
 import assert from "node:assert/strict";
 import {
+  dateToIso,
   firstColumn,
   fromJalali,
+  isoToDate,
   jalaliToIso,
   monthLength,
   toJalali,
@@ -29,6 +31,21 @@ for (const [iso, jy, jm, jd] of ANCHORS) {
 // A chosen day is recorded at ITS OWN midnight in Tehran, which is 20:30 UTC the
 // day before. Getting this wrong shifts every entry onto the neighbouring day.
 assert.equal(jalaliToIso(1405, 6, 7), "2026-08-28T20:30:00.000Z");
+
+// ...which is exactly why a plain date must not be sliced off that string. Both
+// cases below cross a Jalali month on the 1st — the day a loan installment
+// normally falls — and the second crosses a year as well.
+assert.equal(isoToDate(jalaliToIso(1405, 6, 7)), "2026-08-29");
+assert.equal(isoToDate(jalaliToIso(1404, 7, 1)), "2025-09-23");  // not 09-22
+assert.equal(isoToDate(jalaliToIso(1403, 1, 1)), "2024-03-20");  // not 03-19
+assert.equal(isoToDate(""), null);
+
+// The round trip a form does: server date -> picker instant -> server date.
+for (const [jy, jm, jd] of [[1405, 6, 7], [1404, 7, 1], [1403, 1, 1], [1403, 12, 30]]) {
+  const iso = jalaliToIso(jy, jm, jd);
+  assert.deepEqual(toJalali(new Date(dateToIso(isoToDate(iso)))), { jy, jm, jd });
+  assert.equal(isoToDate(dateToIso(isoToDate(iso))), isoToDate(iso));
+}
 
 // Esfand is 30 days only in a leap year, and the non-existent day is refused
 // rather than silently rolled into Farvardin.

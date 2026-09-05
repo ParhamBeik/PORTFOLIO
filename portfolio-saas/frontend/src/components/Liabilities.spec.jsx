@@ -15,6 +15,7 @@
  */
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { JALALI_MONTHS, dateToIso, toJalali } from "../jalali.js";
 
 vi.mock("../api.js", () => ({
   listLiabilities: vi.fn(async () => []),
@@ -99,6 +100,68 @@ describe("LiabilityDialog", () => {
     expect(screen.getByTestId("liability-incomplete").textContent).toMatch(
       /installments/i
     );
+  });
+
+  it("does not accept a blank interest rate as zero", () => {
+    render(<LiabilityDialog accountId={1} accounts={ACCOUNTS} onClose={() => {}} />);
+    fireEvent.click(screen.getByTestId("liability-mode-rate"));
+    fireEvent.change(screen.getByTestId("liability-label"), {
+      target: { value: "Mortgage" },
+    });
+    fireEvent.change(screen.getByTestId("liability-principal"), {
+      target: { value: "600000000" },
+    });
+    fireEvent.change(screen.getByTestId("liability-term"), {
+      target: { value: "60" },
+    });
+    // The picker only offers days up to today, so take one that is on the grid
+    // whatever day this runs: the 1st of the month it opens on.
+    fireEvent.click(screen.getByTestId("liability-started-on-day-1"));
+
+    // Everything but the rate. `Number("")` is 0 and 0 is a legitimate rate, so
+    // a bare `>= 0` let this through and posted a schedule with no basis.
+    expect(screen.getByTestId("liability-save")).toBeDisabled();
+    expect(screen.getByTestId("liability-incomplete").textContent).toMatch(
+      /interest rate/i
+    );
+
+    // An explicit zero is a real answer -- an interest-free family loan.
+    fireEvent.change(screen.getByTestId("liability-rate"), {
+      target: { value: "0" },
+    });
+    expect(screen.getByTestId("liability-save")).toBeEnabled();
+  });
+
+  it("sends the Gregorian day the picker actually shows", async () => {
+    const { createLiability } = await import("../api.js");
+    createLiability.mockClear();
+    render(<LiabilityDialog accountId={1} accounts={ACCOUNTS} onClose={() => {}} />);
+    fireEvent.click(screen.getByTestId("liability-mode-installment"));
+    fireEvent.change(screen.getByTestId("liability-label"), {
+      target: { value: "Car loan" },
+    });
+    fireEvent.change(screen.getByTestId("liability-installment"), {
+      target: { value: "15000000" },
+    });
+    fireEvent.change(screen.getByTestId("liability-term"), {
+      target: { value: "36" },
+    });
+
+    const month = screen.getByTestId("liability-started-on-month").textContent;
+    fireEvent.click(screen.getByTestId("liability-started-on-day-1"));
+    fireEvent.click(screen.getByTestId("liability-save"));
+    await vi.waitFor(() => expect(createLiability).toHaveBeenCalled());
+
+    // Tehran midnight is 20:30 UTC the day before, so slicing the instant used
+    // to send the last day of the PREVIOUS Jalali month. Read the date back
+    // through the calendar the picker was showing.
+    const [, body] = createLiability.mock.calls[0];
+    const [jm, jy] = month.split(" ");
+    expect(toJalali(new Date(dateToIso(body.startedOn)))).toEqual({
+      jy: Number(jy),
+      jm: JALALI_MONTHS.indexOf(jm) + 1,
+      jd: 1,
+    });
   });
 
   it("names the asset a secured debt must be attached to", () => {
