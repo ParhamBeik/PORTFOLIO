@@ -1352,3 +1352,32 @@ def test_a_bar_with_no_dollar_rate_yet_yields_no_row(db):
 
     rows = daily_bar_price([coin])
     assert [date for _symbol, date, _price in rows] == ["1404-01-05"]
+
+
+@pytest.mark.django_db
+def test_resolve_universe_does_not_query_per_symbol(django_assert_num_queries):
+    """The universe branch must batch its MarketInstrument lookups.
+
+    `resolve_universe` used to issue one query per symbol that is not already a
+    catalog asset, and a second `iexact` query for each one that missed. The
+    market-wide universe is ~1,900 symbols and `daily_returns_matrix` -- which
+    every analytics surface routes through -- calls this, so a single request
+    could issue thousands of queries.
+
+    The bound below is deliberately a small constant rather than an exact
+    number: the point is that it does not scale with the size of the universe.
+    """
+    from portfolio.services.returns import resolve_universe
+
+    symbols = [f"SYM{i:03d}" for i in range(40)]
+    MarketInstrument.objects.bulk_create([
+        MarketInstrument(symbol=s, source=MarketInstrument.Source.TSETMC)
+        for s in symbols
+    ])
+
+    with django_assert_num_queries(2):
+        resolved = resolve_universe(symbols)
+
+    assert len(resolved) == len(symbols)
+    assert {item["symbol"] for item in resolved} == set(symbols)
+    assert all(item["source"] == "tse" for item in resolved)

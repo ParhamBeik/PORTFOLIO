@@ -388,6 +388,30 @@ def resolve_universe(
         for a in assets.values():
             resolved.append(_entry(a))
     else:
+        # One query for every symbol that is not already a catalog asset,
+        # instead of one (or two) per symbol inside the loop below. The
+        # market-wide universe is ~1,900 symbols, and `daily_returns_matrix` is
+        # the single function all the analytics surfaces route through, so the
+        # per-item version issued up to ~3,800 queries for one request. The
+        # InstrumentListingHistory lookup further down was already batched with
+        # `symbol__in`; this branch simply had not been.
+        unknown = [item for item in universe
+                   if item not in assets and item not in asset_by_symbol]
+        # A single case-insensitive fetch serves both lookups below. The
+        # case-insensitive result set is a superset of the exact one -- anything
+        # matching `symbol=X` also matches `LOWER(symbol)=LOWER(X)` -- so both
+        # maps are built from it, and the exact map is still consulted first so
+        # priority between the two branches is unchanged.
+        instruments, instruments_ci = {}, {}
+        if unknown:
+            from django.db.models.functions import Lower
+
+            for mi in MarketInstrument.objects.annotate(
+                _lowered=Lower("symbol")
+            ).filter(_lowered__in={item.lower() for item in unknown}):
+                instruments.setdefault(mi.symbol, mi)
+                instruments_ci.setdefault(mi._lowered, mi)
+
         for item in universe:
             if item in assets:
                 resolved.append(_entry(assets[item]))
@@ -400,7 +424,7 @@ def resolve_universe(
                     "asset": a
                 })
             else:
-                mi = MarketInstrument.objects.filter(symbol=item).first()
+                mi = instruments.get(item)
                 if mi:
                     resolved.append({
                         "key": item,
@@ -409,7 +433,7 @@ def resolve_universe(
                         "asset": None
                     })
                 else:
-                    mi = MarketInstrument.objects.filter(symbol__iexact=item).first()
+                    mi = instruments_ci.get(item.lower())
                     if mi:
                         resolved.append({
                             "key": item,
