@@ -16,6 +16,13 @@ from .models import ArchiveFetchState, SymbolIntegrity
 
 ARCHIVE_STATUSES = (
     "complete", "refresh_due", "partial", "failed", "awaiting_data", "not_tried",
+    # Added 2026-09-06. `blacklisted` and `suspended_at` have been on the model
+    # for weeks but no status named them, so a symbol the archive had given up
+    # on was counted under whatever its stale row counts happened to say --
+    # usually "failed", sometimes "complete". "How many symbols can we not
+    # fetch?" was therefore unanswerable from the console, which is the one
+    # question that decides whether a coverage number is a bug or a ceiling.
+    "unfetchable", "suspended",
 )
 LIVE_STATUSES = ("fresh", "stale", "missing", "manual", "formula", "no_source")
 
@@ -52,7 +59,16 @@ def classify_archive_state(state: ArchiveFetchState) -> str:
     (`missing_rows`), and has it ever landed a payload (`last_success_at`)?
     Failures are tested before either, because a failing state is the operator's
     problem whatever its row counts say.
+
+    Unfetchability is tested before everything, including `verified_complete`.
+    A blacklisted or suspended state is not going to be fetched no matter what
+    its row counts say, and reporting it under any other label overstates both
+    the coverage we have and the backlog we can still work through.
     """
+    if state.blacklisted:
+        return "unfetchable"
+    if state.suspended_at is not None:
+        return "suspended"
     if state.verified_complete:
         return "complete"
     if state.consecutive_failures > 0:
@@ -308,6 +324,7 @@ def build_warehouse_coverage() -> dict:
         "by_endpoint": by_endpoint,
         "live_sourced": live_sourced,
         "refresh_backlog": _refresh_backlog(states, now=now),
+        "symbol_census": build_symbol_census(states),
         "status_labels": {
             "complete": "Verified complete",
             "refresh_due": "Complete — refresh due",
@@ -315,8 +332,58 @@ def build_warehouse_coverage() -> dict:
             "failed": "Failing — needs attention",
             "awaiting_data": "Attempted — no payload yet",
             "not_tried": "Never attempted",
+            "unfetchable": "Blacklisted — will not be fetched",
+            "suspended": "Suspended — auto-probed weekly",
         },
     }
+
+
+def build_symbol_census(states=None) -> dict:
+    """How many distinct SYMBOLS the archive has, has given up on, or has never touched.
+
+    Deliberately counted per symbol, not per job. Every other number in this
+    module counts `(symbol, endpoint)` states, so a symbol with eight endpoints
+    contributes eight rows and "1,331 pending" reads as a symbol count when it
+    is not. The question this answers -- how much of the universe do we actually
+    hold, and how much can we never hold -- is a question about symbols.
+
+    A symbol counts as `fetched` if ANY of its endpoints has ever landed a
+    payload, and as `unfetchable` only if EVERY endpoint has been given up on:
+    one blacklisted endpoint out of eight is not a lost symbol.
+    """
+    if states is None:
+        states = list(ArchiveFetchState.objects.all())
+
+    by_symbol: dict[str, list] = {}
+    for state in states:
+        by_symbol.setdefault(state.symbol, []).append(state)
+
+    census = {
+        "symbols_total": len(by_symbol),
+        "fetched": 0,
+        "never_fetched": 0,
+        "unfetchable": 0,
+        "partially_unfetchable": 0,
+        "attempted_never_landed": 0,
+    }
+    for rows in by_symbol.values():
+        blocked = [r for r in rows if r.blacklisted or r.suspended_at is not None]
+        if len(blocked) == len(rows):
+            census["unfetchable"] += 1
+            continue
+        if blocked:
+            census["partially_unfetchable"] += 1
+        if any(r.last_success_at is not None for r in rows):
+            census["fetched"] += 1
+        elif any(r.last_attempt_at is not None for r in rows):
+            # Tried and came back with nothing -- a different problem from
+            # never having been reached, and the two were previously merged.
+            census["attempted_never_landed"] += 1
+        else:
+            census["never_fetched"] += 1
+
+    census["fetched_pct"] = _pct(census["fetched"], census["symbols_total"])
+    return census
 
 
 def build_table_coverage(database_rows: list[dict]) -> dict:

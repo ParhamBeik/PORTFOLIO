@@ -122,33 +122,13 @@ REGISTRY = {
             bucket=LIVE,
             rows_per_request=200,
         ),
-        Endpoint(
-            key="ime_futures",
-            # IME/* is served on the TSETMC subscription, not the Market/* one:
-            # every caller passes TSETMC_API_KEY (marketdata/tasks.py). Stated
-            # explicitly so the plan is a decision, not an inherited default.
-            plan=TSETMC,
-            # Capital IME, not Ime -- BrsApi's routing is case-sensitive and the
-            # lowercase path 404s (confirmed live 2026-08-19). Docs:
-            # https://brsapi.ir/ime-api-futures-webservice/
-            path="IME/Futures.php",
-            nature=Nature.LIVE,
-            bucket=LIVE,
-            rows_per_request=200,
-        ),
-        Endpoint(
-            key="ime_options",
-            # IME/* is served on the TSETMC subscription, not the Market/* one:
-            # every caller passes TSETMC_API_KEY (marketdata/tasks.py). Stated
-            # explicitly so the plan is a decision, not an inherited default.
-            plan=TSETMC,
-            # Capital IME, not Ime -- same case-sensitive routing 404 (confirmed
-            # live 2026-08-19). Docs: https://brsapi.ir/ime-api-option-webservice/
-            path="IME/Option.php",
-            nature=Nature.LIVE,
-            bucket=LIVE,
-            rows_per_request=200,
-        ),
+        # IME/Futures.php and IME/Option.php (Iran Mercantile Exchange) were
+        # removed on 2026-09-06. They billed the TSETMC plan on every live tick
+        # and every row they returned failed validation on arrival -- 135
+        # rejected, 0 kept, per pass, for the whole time they ran. Nothing in
+        # the product ever read an `ime_future`/`ime_option` row. Do not
+        # re-register them without a fetcher that produces rows the validator
+        # accepts; the endpoints answer, which is what made this look healthy.
         Endpoint(
             key="symbol",
             path="Tsetmc/Symbol.php",
@@ -257,6 +237,27 @@ def url_for(key):
 
 def bucket_for(key):
     return REGISTRY[key].bucket
+
+
+def source_for(key, default=""):
+    """A short "where did this row come from" label, e.g. `brsapi:Tsetmc/Symbol.php`.
+
+    Derived from the registry rather than typed at each call site: the registry
+    is already the single declaration of which provider path and which billing
+    plan an endpoint uses, so a hand-written source string can only ever drift
+    from it. Unknown keys fall back to `default` -- not every workflow is a
+    provider fetch, and a scheduler or an aggregation has no origin to name.
+    """
+    endpoint = REGISTRY.get(key)
+    if endpoint is None:
+        return default
+    return f"brsapi:{endpoint.path}"
+
+
+def plan_for(key, default=""):
+    """The billing plan an endpoint's requests are metered against."""
+    endpoint = REGISTRY.get(key)
+    return endpoint.plan if endpoint is not None else default
 
 
 def keys_by_nature(nature):

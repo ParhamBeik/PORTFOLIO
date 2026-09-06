@@ -213,6 +213,32 @@ _RETIRED_ARCHIVE_ENDPOINTS = frozenset({
 })
 
 
+#: Where each archive endpoint's rows actually land.
+#:
+#: The ledger used to record `ArchiveFetchState` as the destination for every
+#: archive workflow. That is the bookkeeping row the job updates, not the table
+#: the data is written to, so the one column that answers "where did these rows
+#: go" named the same table for all eight endpoints and told an operator
+#: nothing. Kept beside `_fetch_and_ingest`, whose branches these mirror.
+ENDPOINT_DESTINATIONS = {
+    ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED: "DailyStockHistory",
+    # Misnamed enum (see `_fetch_and_ingest`): type=1 is the real/legal
+    # participant breakdown, so it writes RealLegalHistory, not prices.
+    ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED: "RealLegalHistory",
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED: "MarketCandle",
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED: "MarketCandle",
+    ArchiveFetchState.Endpoint.GOLD_DAILY: "GoldCurrencyHistory",
+    ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS: "CodalAnnouncement",
+    ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS: "ShareholderRecord",
+    ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS: "StockTransactionTick",
+}
+
+
+def destination_for(endpoint):
+    """The table `endpoint` writes rows into, for the ledger and the log line."""
+    return ENDPOINT_DESTINATIONS.get(endpoint, "")
+
+
 def disabled_endpoints():
     """Endpoints no state may be claimed or created for right now.
 

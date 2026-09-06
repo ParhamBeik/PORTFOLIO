@@ -31,25 +31,45 @@ logger = logging.getLogger(__name__)
 # these feeds a daily OHLC bar (`aggregate_market_daily_bars`), not the held-asset
 # price loop, so a 5-minute poll bought ~1,440 requests/day of resolution that
 # nothing downstream reads. Rows are DB-editable afterwards; these are seeds only.
+#
+# `session_only` is the market-hours switch: True means "only poll while the
+# exchange is open", False means "poll around the clock". It is per endpoint
+# because the asset classes genuinely differ -- crypto prints 24/7 and a
+# session gate would blind us all night, while a TSE option board is static
+# outside the session and polling it just spends quota.
 _MARKET_WIDE_SEEDS = {
     "crypto": (900, False),
     "commodity": (900, False),
     "option_contracts": (900, True),
-    "ime_futures": (900, True),
-    "ime_options": (900, True),
 }
+
+#: Endpoints that once had a seed row and must never poll again. Disabled on
+#: every `ensure_live_states` rather than deleted, so an operator can see what
+#: was retired and why instead of finding an unexplained absence.
+_RETIRED_LIVE_ENDPOINTS = {
+    # Nav.php never produced a usable NAV series (zero snapshots in production,
+    # zero eligible funds in the catalog) and would spend ~417 TSETMC live
+    # requests a day for nothing.
+    "etf_nav": "retired: no usable series",
+    # IME/*, removed 2026-09-06: every row the two endpoints returned failed
+    # validation (135 rejected, 0 kept, per pass) and nothing read them. They
+    # billed the TSETMC plan on a 900s cadence the whole time. See endpoints.py.
+    "ime_futures": "retired: 100% rejected on ingest",
+    "ime_options": "retired: 100% rejected on ingest",
+}
+
 
 def ensure_live_states():
     """Create missing market-wide rows. Cadence is operator-tunable.
 
-    Nav.php is retired: the payload never produced a usable NAV series (zero
-    snapshots in production, zero eligible funds in the catalog), and enabling
-    it would spend ~417 TSETMC live requests a day for nothing. Leftover
-    `etf_nav` rows, if any, stay disabled.
+    Retired endpoints are force-disabled here rather than merely dropped from
+    the seeds: a seed only governs row *creation*, so a row created by an
+    earlier deploy keeps polling forever unless something switches it off.
     """
-    LiveFetchState.objects.filter(endpoint_key="etf_nav", enabled=True).update(
-        enabled=False, last_error="retired"
-    )
+    for key, reason in _RETIRED_LIVE_ENDPOINTS.items():
+        LiveFetchState.objects.filter(endpoint_key=key, enabled=True).update(
+            enabled=False, last_error=reason
+        )
     rows = [
         LiveFetchState(
             endpoint_key=key,

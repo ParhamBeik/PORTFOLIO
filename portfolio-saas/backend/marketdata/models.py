@@ -588,9 +588,11 @@ class DerivativeContract(models.Model):
     """Current metadata for a provider-listed option or futures contract."""
 
     class Kind(models.TextChoices):
+        # `ime_option`/`ime_future` were removed on 2026-09-06 with the IME
+        # endpoints that fed them. Existing rows keep their raw value -- Django
+        # does not validate choices on read -- so history stays readable while
+        # nothing new is written. See `endpoints.py`.
         TSE_OPTION = "tse_option", "TSE option"
-        IME_OPTION = "ime_option", "IME option"
-        IME_FUTURE = "ime_future", "IME future"
 
     kind = models.CharField(max_length=16, choices=Kind.choices)
     contract_code = models.CharField(max_length=96)
@@ -1123,9 +1125,9 @@ class MarketDailyBar(models.Model):
         COMMODITY = "commodity", "Commodity"
         ETF_NAV = "etf_nav", "ETF NAV"
         INDEX = "index", "Market index"
+        # See DerivativeContract.Kind: the two IME classes were retired
+        # 2026-09-06 and are no longer written. Historical rows keep theirs.
         TSE_OPTION = "tse_option", "TSE option"
-        IME_FUTURE = "ime_future", "IME future"
-        IME_OPTION = "ime_option", "IME option"
 
     asset_class = models.CharField(max_length=16, choices=AssetClass.choices, db_index=True)
     symbol = models.CharField(max_length=64, db_index=True)
@@ -1135,7 +1137,7 @@ class MarketDailyBar(models.Model):
     low_price = models.DecimalField(max_digits=24, decimal_places=4, null=True, blank=True)
     close_price = models.DecimalField(max_digits=24, decimal_places=4, null=True, blank=True)
     volume = models.BigIntegerField(null=True, blank=True)
-    # Only meaningful for tse_option/ime_future/ime_option rows; null elsewhere.
+    # Only meaningful for derivative rows (DerivativeContract.Kind); null elsewhere.
     open_interest = models.BigIntegerField(null=True, blank=True)
     sample_count = models.PositiveIntegerField(default=0)
 

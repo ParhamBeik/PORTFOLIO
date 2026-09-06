@@ -176,14 +176,22 @@ class WorkflowOutcome:
             "metadata": redact(values.pop("metadata", values)),
         }
         safe = redact(payload)
+        # `source` and `dest` answer "where did this come from, where did it go"
+        # without opening the database. Both were already recorded on the ledger
+        # row and both were omitted from the line, so the one artifact an
+        # operator actually reads -- `docker logs` -- could not answer either
+        # question. `cid` ties the line back to its WorkflowRun and to every
+        # other log line emitted under the same correlation id.
         summary = (
             f"workflow={safe['workflow']} outcome={safe['outcome']} "
             f"endpoint={safe['endpoint'] or '-'} symbol={safe['symbol'] or '-'} "
+            f"source={safe['source'] or '-'} dest={safe['destination_table'] or '-'} "
             f"rows={safe['rows_received']}/{safe['rows_accepted']} "
             f"created={safe['rows_created']} updated={safe['rows_updated']} "
             f"rejected={safe['rows_rejected']} "
             f"attempts={safe['http_attempts']}/{safe['quota_attempts']} "
-            f"duration_ms={safe['duration_ms']} error={safe['error_code'] or '-'}"
+            f"duration_ms={safe['duration_ms']} error={safe['error_code'] or '-'} "
+            f"cid={safe['correlation_id']}"
         )
         # Every metadata key is printed, not just "reason": Codal ingest failures
         # set error_code/artifacts/parse_errors and no reason at all, and used to

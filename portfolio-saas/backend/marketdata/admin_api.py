@@ -149,6 +149,13 @@ class AdminArchiveStateListView(APIView):
                 "missing_rows": r.missing_rows,
                 "consecutive_failures": r.consecutive_failures,
                 "verified_complete": r.verified_complete,
+                # The console classifies on these two before anything else
+                # (Ops.jsx:archiveJobVariant). Without them on the wire every
+                # unfetchable symbol renders as whatever its stale row counts
+                # imply, which is the reading this pair exists to correct.
+                "blacklisted": r.blacklisted,
+                "suspended_at": r.suspended_at.isoformat() if r.suspended_at else None,
+                "suspension_reason": r.suspension_reason,
                 "last_error": r.last_error,
                 "last_attempt_at": r.last_attempt_at.isoformat() if r.last_attempt_at else None,
                 "next_attempt_at": r.next_attempt_at.isoformat() if r.next_attempt_at else None,
