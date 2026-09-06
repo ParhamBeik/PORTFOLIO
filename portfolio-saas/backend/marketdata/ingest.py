@@ -43,6 +43,13 @@ logger = logging.getLogger(__name__)
 # candle_type param of fetch_candlesticks -> stored timeframe label
 CANDLE_TIMEFRAMES = {1: "intraday", 2: "1d_unadj", 3: "1d_adj"}
 
+#: Asset classes whose daily bars come from `DerivativeSnapshot` rather than
+#: `MarketSnapshot`. Derived from the model's own choices so retiring a kind
+#: (as `ime_future`/`ime_option` were on 2026-09-06) updates every branch at
+#: once -- this tuple was previously spelled out at each call site, which is
+#: how a removed kind can keep a dead branch alive.
+DERIVATIVE_ASSET_CLASSES = frozenset(DerivativeContract.Kind.values)
+
 
 # Codal is the one provider surface that answers in Persian/Arabic-Indic digits
 # ("۱۴۰۵/۰۵/۰۳"). Stored raw they are unjoinable and unsortable against every
@@ -924,9 +931,9 @@ def aggregate_market_daily_bars(asset_class, jalali_date, *, symbols=None) -> tu
     """Distill one Jalali day's `MarketSnapshot`/`DerivativeSnapshot` rows into
     `MarketDailyBar` OHLC rows, for one asset class.
 
-    Options/futures (`tse_option`/`ime_future`/`ime_option`) read from the
-    existing `DerivativeSnapshot` table (kept as-is, see MarketSnapshot's
-    docstring); the four newly-wired classes read from `MarketSnapshot`.
+    Derivative kinds (`DerivativeContract.Kind`) read from the existing
+    `DerivativeSnapshot` table (kept as-is, see MarketSnapshot's docstring);
+    the newly-wired classes read from `MarketSnapshot`.
     Skips symbols where `calendars.is_closure_day`/`is_contract_expired` says
     there was nothing to fetch, so a legitimate no-data day never shows up as
     a gap in `MarketDailyBar`'s own row-existence completeness signal.
@@ -939,7 +946,7 @@ def aggregate_market_daily_bars(asset_class, jalali_date, *, symbols=None) -> tu
     start = jalali_mod.to_datetime(jalali_date)
     end = start + timedelta(days=1)
 
-    if asset_class in ("tse_option", "ime_future", "ime_option"):
+    if asset_class in DERIVATIVE_ASSET_CLASSES:
         snapshot_qs = DerivativeSnapshot.objects.filter(
             contract__kind=asset_class, observed_at__gte=start, observed_at__lt=end
         ).select_related("contract").order_by("contract__contract_code", "observed_at")
@@ -975,7 +982,7 @@ def aggregate_market_daily_bars(asset_class, jalali_date, *, symbols=None) -> tu
     for symbol in target_symbols:
         snaps = grouped.get(symbol, [])
         if not snaps:
-            if asset_class in ("tse_option", "ime_future", "ime_option"):
+            if asset_class in DERIVATIVE_ASSET_CLASSES:
                 expired = calendars.is_contract_expired(asset_class, symbol, jalali_date)
             else:
                 expired = False

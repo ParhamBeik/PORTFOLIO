@@ -1371,7 +1371,10 @@ def test_crypto_is_never_forgiven():
     assert calendars.is_closure_day("crypto", "BTC", "1404-01-01") is False
 
 
-@pytest.mark.parametrize("asset_class", ["commodity", "ime_future", "ime_option"])
+# `ime_future`/`ime_option` were retired 2026-09-06 and no longer reach this
+# branch; `commodity` is the only class left that infers its calendar from the
+# feed's own breadth.
+@pytest.mark.parametrize("asset_class", ["commodity"])
 def test_commodity_and_derivative_classes_use_snapshot_breadth(asset_class):
     from marketdata import jalali
 
@@ -1964,9 +1967,27 @@ class TestLiveFetchPlan:
         leftover.refresh_from_db()
         already_off.refresh_from_db()
         assert leftover.enabled is False
-        assert leftover.last_error == "retired"
+        # The reason is carried in the field so an operator reading the row
+        # learns why it is off, rather than finding a bare "retired".
+        assert leftover.last_error == "retired: no usable series"
         assert already_off.enabled is False
         assert already_off.last_error == "operator"
+
+    def test_seeding_disables_leftover_ime_rows(self):
+        """A seed governs creation only; a row an earlier deploy created keeps
+        polling forever unless something switches it off."""
+        from marketdata import live_states
+        from marketdata.models import LiveFetchState
+
+        leftover = LiveFetchState.objects.create(
+            endpoint_key="ime_futures", scope="", cadence_seconds=900
+        )
+
+        live_states.ensure_live_states()
+
+        leftover.refresh_from_db()
+        assert leftover.enabled is False
+        assert leftover.last_error == "retired: 100% rejected on ingest"
 
     def test_a_claim_leases_the_row_so_a_second_worker_cannot_double_spend(self):
         from marketdata import live_states

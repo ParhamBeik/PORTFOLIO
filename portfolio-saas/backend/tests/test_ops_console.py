@@ -363,6 +363,11 @@ def test_admin_overview_includes_fill_completeness_disk(staff_user, monkeypatch)
     assert "warehouse" in body["coverage"]
     assert set(body["coverage"]["warehouse"]["counts"].keys()) == {
         "complete", "refresh_due", "partial", "failed", "awaiting_data", "not_tried",
+        # A symbol the archive has given up on is neither coverage nor backlog.
+        # Without these two the console had no way to answer "how many symbols
+        # can we not fetch?", so every unfetchable one was silently counted as
+        # something it was not.
+        "unfetchable", "suspended",
     }
     assert "refresh_backlog" in body["coverage"]["warehouse"]
 

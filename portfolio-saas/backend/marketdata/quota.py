@@ -538,19 +538,31 @@ def archive_day_ceiling(plan, row=None, now=None):
 def archive_allowance_now(plan, row=None, now=None):
     """How much of the day's archive ceiling may have been spent *by now*.
 
-    Paced pro rata across the Tehran day so backfill trickles instead of
-    draining the wallet before the market opens -- which is exactly what
-    happened on 2026-08-26: ~2,750 req/hour from 00:00 to 03:00, breaker tripped
-    at 03:43, then zero provider requests for the remaining twenty hours.
+    **Burst by default** (2026-09-06): the whole ceiling is available from
+    00:01, so backfill runs flat out in priority order until the wallet reaches
+    the live reserve line and then idles until the next quota day.
 
-    Backfill is *expected* to be slow and to lag by days; that is the design, not
-    a fault. Pacing also makes the post-reset ramp gentle for free -- at 00:01
-    this is ~1/1440th of the budget, so nothing special is needed at the
-    boundary.
+    This deliberately reverses the pro-rata curve added after 2026-08-26, when
+    archive drained the TSETMC wallet before dawn (~2,750 req/hour from 00:00,
+    breaker tripped 03:43, then twenty hours dark with `live_used=0`). The curve
+    was the wrong fix for that incident. What actually starved live was that the
+    live reserve gate in `reserve_request` was skipped whenever the provider had
+    not disclosed a limit -- which is most days. That gate is now unconditional
+    and sized per plan and per market state, so live's share is subtracted
+    inside `archive_day_ceiling` *before* archive sees a budget at all. Spending
+    it early no longer takes anything from live; it only decides whether the
+    warehouse converges in weeks or in days.
+
+    Pacing remains available for a plan whose provider punishes bursts: set
+    `MARKETDATA_ARCHIVE_PACE_ENABLED=1`. Leave it off unless a provider
+    complains -- with it on, the 5-minute window limiter is the only thing
+    shaping the rate, which is what we want.
     """
     ceiling = archive_day_ceiling(plan, row, now=now)
     if ceiling is None:
         return None
+    if not getattr(settings, "MARKETDATA_ARCHIVE_PACE_ENABLED", False):
+        return ceiling
     paced = int(ceiling * _day_elapsed_fraction(now))
     # Never a hard zero immediately after the reset: pro rata at 00:01 is a tiny
     # fraction of the day, which would stall backfill outright for the first

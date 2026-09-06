@@ -16,6 +16,13 @@ from .models import ArchiveFetchState, SymbolIntegrity
 
 ARCHIVE_STATUSES = (
     "complete", "refresh_due", "partial", "failed", "awaiting_data", "not_tried",
+    # Added 2026-09-06. `blacklisted` and `suspended_at` have been on the model
+    # for weeks but no status named them, so a symbol the archive had given up
+    # on was counted under whatever its stale row counts happened to say --
+    # usually "failed", sometimes "complete". "How many symbols can we not
+    # fetch?" was therefore unanswerable from the console, which is the one
+    # question that decides whether a coverage number is a bug or a ceiling.
+    "unfetchable", "suspended",
 )
 LIVE_STATUSES = ("fresh", "stale", "missing", "manual", "formula", "no_source")
 
@@ -52,7 +59,16 @@ def classify_archive_state(state: ArchiveFetchState) -> str:
     (`missing_rows`), and has it ever landed a payload (`last_success_at`)?
     Failures are tested before either, because a failing state is the operator's
     problem whatever its row counts say.
+
+    Unfetchability is tested before everything, including `verified_complete`.
+    A blacklisted or suspended state is not going to be fetched no matter what
+    its row counts say, and reporting it under any other label overstates both
+    the coverage we have and the backlog we can still work through.
     """
+    if state.blacklisted:
+        return "unfetchable"
+    if state.suspended_at is not None:
+        return "suspended"
     if state.verified_complete:
         return "complete"
     if state.consecutive_failures > 0:

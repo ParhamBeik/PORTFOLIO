@@ -1502,23 +1502,26 @@ def test_apply_instrument_prices_leaves_seed_quote(raw_market_sample):
 
 # ----------------------------------------------------------------------
 # test_derivative_snapshot_split.py
-# capture_derivative_snapshots: each of tse_option/ime_future/ime_option is
-# its own provider endpoint and must be its own failure domain. Before this
-# split, ime_futures/ime_options (evaluated after tse_option) repeatedly timed
-# out and re-raised, so tse_option's already-ingested rows were the only ones
-# ever reflected in the WorkflowRun ledger and the ime kinds never got an
-# independent success/failure signal (DerivativeContract held 1,111 tse_option
-# rows and zero ime_future/ime_option rows in production).
+# capture_derivative_snapshots: each kind is its own provider endpoint and must
+# be its own failure domain. Before this split, ime_futures/ime_options
+# (evaluated after tse_option) repeatedly timed out and re-raised, so
+# tse_option's already-ingested rows were the only ones ever reflected in the
+# WorkflowRun ledger.
+#
+# The two IME kinds were then retired outright on 2026-09-06: every row they
+# returned failed validation on ingest (135 rejected, 0 kept, per pass) while
+# billing the TSETMC plan on a 900s cadence, and nothing in the product read an
+# ime_future/ime_option row. `tse_option` is the only kind left. The isolation
+# property is still pinned below, because it is what makes adding a kind back
+# safe; what is pinned alongside it now is that the IME kinds stay gone.
 
 
-def test_one_kinds_failure_does_not_block_the_others(settings):
+def test_a_kinds_failure_is_recorded_and_does_not_raise(settings):
     settings.TSETMC_API_KEY = "test-key"
     settings.MARKETDATA_IGNORE_MARKET_HOURS = True  # session-gated; see below
 
     def fake_fetch(api_key, endpoint_key):
-        if endpoint_key == "ime_futures":
-            raise TimeoutError("ReadTimeout")
-        return []
+        raise TimeoutError("ReadTimeout")
 
     with (
         patch("marketdata.fetchers.fetch_derivatives", side_effect=fake_fetch),
@@ -1526,41 +1529,41 @@ def test_one_kinds_failure_does_not_block_the_others(settings):
     ):
         results = capture_derivative_snapshots()
 
-    assert results["tse_option"] == (3, 0)
-    assert results["ime_option"] == (3, 0)
-    assert isinstance(results["ime_future"], TimeoutError)
+    # Contained, not propagated: one endpoint's timeout must never abort the
+    # loop, or a later kind's rows go missing with no signal of their own.
+    assert isinstance(results["tse_option"], TimeoutError)
 
     runs = {
         run.workflow: run.outcome
         for run in WorkflowRun.objects.filter(workflow__startswith="capture_derivative_snapshots:")
     }
-    assert runs["capture_derivative_snapshots:tse_option"] == WorkflowRun.Outcome.SUCCESS
-    assert runs["capture_derivative_snapshots:ime_option"] == WorkflowRun.Outcome.SUCCESS
-    assert runs["capture_derivative_snapshots:ime_future"] == WorkflowRun.Outcome.FAILED
+    assert runs["capture_derivative_snapshots:tse_option"] == WorkflowRun.Outcome.FAILED
 
 
-def test_all_three_kinds_succeed_independently(settings):
+def test_retired_ime_kinds_are_never_polled(settings):
+    """The IME endpoints must not be fetched, ledgered, or seeded."""
     settings.TSETMC_API_KEY = "test-key"
-    # Derivative endpoints are session-gated (LiveFetchState.session_only):
-    # contracts only move while the TSE trades. This test is about failure
-    # isolation, not scheduling, so take the market as open.
     settings.MARKETDATA_IGNORE_MARKET_HOURS = True
 
+    called = []
+
+    def fake_fetch(api_key, endpoint_key):
+        called.append(endpoint_key)
+        return []
+
     with (
-        patch("marketdata.fetchers.fetch_derivatives", return_value=[]),
+        patch("marketdata.fetchers.fetch_derivatives", side_effect=fake_fetch),
         patch("marketdata.ingest.ingest_derivative_snapshots", return_value=(1, 0)),
     ):
         results = capture_derivative_snapshots()
 
-    assert results == {
-        "tse_option": (1, 0),
-        "ime_future": (1, 0),
-        "ime_option": (1, 0),
-    }
+    assert called == ["option_contracts"]
+    assert results == {"tse_option": (1, 0)}
+    assert not WorkflowRun.objects.filter(workflow__contains="ime_").exists()
     assert WorkflowRun.objects.filter(
         workflow__startswith="capture_derivative_snapshots:",
         outcome=WorkflowRun.Outcome.SUCCESS,
-    ).count() == 3
+    ).count() == 1
 
 
 @pytest.mark.django_db

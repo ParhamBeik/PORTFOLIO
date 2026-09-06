@@ -42,11 +42,11 @@ def capture_derivative_snapshots():
     """Collect live contracts now; analytics waits for real accumulated history.
 
     Each kind is its own provider endpoint and its own failure domain: one
-    endpoint timing out must not mask or abort the others' results. Before
-    this split, `ime_futures`/`ime_options` (evaluated after `tse_option`)
-    repeatedly timed out and re-raised, so `tse_option`'s already-ingested
-    rows were the only ones ever reflected in the ledger and the ime kinds
-    never got an independent success/failure signal of their own.
+    endpoint timing out must not mask or abort the others' results.
+
+    Only `tse_option` remains. The two IME (Iran Mercantile Exchange) kinds were
+    removed on 2026-09-06 -- see `endpoints.py` for why. The loop keeps its shape
+    because the per-kind failure isolation is the point, not the number of kinds.
 
     Cadence comes from `LiveFetchState`, not from the beat interval: these fetches
     bill the live bucket, and the quota reserve can only be exact if the schedule
@@ -63,8 +63,6 @@ def capture_derivative_snapshots():
     results = {}
     for kind, endpoint_key in (
         ("tse_option", "option_contracts"),
-        ("ime_future", "ime_futures"),
-        ("ime_option", "ime_options"),
     ):
         claimed = live_states.claim_due(endpoint_key, limit=1)
         if not claimed:
@@ -164,8 +162,7 @@ def aggregate_market_daily_bars_task(jalali_date=None):
     target_date = jalali_date or jalali.today()
     results = {}
     for asset_class in (
-        "crypto", "commodity", "index",
-        "tse_option", "ime_future", "ime_option",
+        "crypto", "commodity", "index", "tse_option",
     ):
         outcome = _ledgered(
             f"aggregate_market_daily_bars:{asset_class}",
@@ -761,7 +758,22 @@ def archive_tick():
                 "grow_tick_windows failed correlation_id=%s error=%s: %s",
                 outcome.correlation_id, type(err).__name__, err,
             )
-        claim_limit = min(settings.MARKETDATA_ARCHIVE_BATCH_SIZE, slots)
+        # Bound the batch by the quota actually left, not just by the batch size
+        # and the queue. Dispatching more states than there are requests to
+        # spend does not fetch more -- every surplus task wakes up, loses the
+        # race for the last request, and re-parks itself. On 2026-09-06 that was
+        # 101,098 no-op `archive_paced` runs against 4,139 real fetches in a
+        # single day: 96% of all archive executions, each one a database round
+        # trip and a log line, hiding the 4% that mattered.
+        budget = sum(value for value in capacity.values() if value > 0)
+        claim_limit = min(settings.MARKETDATA_ARCHIVE_BATCH_SIZE, slots, budget)
+        if claim_limit <= 0:
+            outcome.finish(
+                WorkflowRun.Outcome.SKIPPED,
+                error_code="archive_paced",
+                metadata={"reason": "no_quota_headroom", **capacity},
+            )
+            return
         batch = claim_archive_batch(limit=claim_limit)
         if not batch:
             outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "no_due_states"})
@@ -771,6 +783,7 @@ def archive_tick():
             WorkflowRun.Outcome.SUCCESS,
             rows_received=len(batch),
             rows_accepted=len(batch),
+            metadata={"quota_headroom": budget, "dispatched": len(batch)},
         )
     except Exception as err:
         outcome.finish(

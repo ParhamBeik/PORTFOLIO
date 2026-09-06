@@ -469,16 +469,23 @@ def test_tick_branch_checks_for_room_before_computing_which_days_it_needs(settin
     from marketdata.quota import REASON_ARCHIVE_PACED, QuotaExhausted, TSETMC, quota_day
 
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10000
-    # Far past any point on the pacing ramp, so the advisory answer is "no room"
-    # regardless of what time the suite happens to run at.
-    ApiRequestQuota.objects.create(
-        day=quota_day(), plan=TSETMC, used=9999, archive_used=9999
-    )
+    # Pacing on, so the refusal is specifically `archive_paced` -- the retryable
+    # kind this test is about. Under the default (burst) an equivalently empty
+    # wallet is honestly `live_reserved`, which is day-scoped and parks the state
+    # until rollover; correct there, but not the branch under test.
+    settings.MARKETDATA_ARCHIVE_PACE_ENABLED = True
+    ApiRequestQuota.objects.create(day=quota_day(), plan=TSETMC)
     state = _state("no-room-sym", Endpoint.STOCK_TRANSACTION_TICKS)
 
-    with patch("marketdata.archive._tick_dates_needed") as pending:
-        with pytest.raises(QuotaExhausted) as exc:
-            _fetch_and_ingest(state)
+    # Pin the allowance instead of spending the meter up to it. The arithmetic
+    # has its own tests; what matters here is only that the refusal happens
+    # before the day set is derived, and a fixture that spends the wallet to the
+    # brim trips the live-reserve gate first and reads as a different refusal
+    # depending on what time of day the suite runs.
+    with patch.object(quota, "archive_allowance_now", return_value=0):
+        with patch("marketdata.archive._tick_dates_needed") as pending:
+            with pytest.raises(QuotaExhausted) as exc:
+                _fetch_and_ingest(state)
 
     assert pending.call_count == 0
     # And it must surface as pacing, so the caller retries in minutes rather than
@@ -2187,8 +2194,30 @@ def test_archive_trip_does_not_silence_live(settings):
     assert is_plan_blocked(TSETMC, bucket=_L), "a live 429 must still stop live"
 
 
+def test_archive_burst_spends_the_whole_ceiling_from_the_reset(settings):
+    """Default since 2026-09-06: no ramp, the full day ceiling from 00:01.
+
+    The live reserve is subtracted inside `archive_day_ceiling`, so bursting
+    cannot take a request live still needs. That gate -- not the pro-rata curve
+    this replaced -- is what prevents a repeat of 2026-08-26.
+    """
+    from marketdata.quota import TSETMC, archive_allowance_now, archive_day_ceiling
+
+    settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
+    settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
+    tehran = ZoneInfo("Asia/Tehran")
+    just_after_reset = datetime.datetime(2026, 8, 26, 0, 1, tzinfo=tehran)
+
+    with patch.object(quota, "live_reserve_remaining", return_value=1_500):
+        ceiling = archive_day_ceiling(TSETMC, row, now=just_after_reset)
+        assert ceiling == 8_500  # 10,000 less the live reserve
+        # The whole of it, immediately -- and never more than it.
+        assert archive_allowance_now(TSETMC, row, now=just_after_reset) == 8_500
+
+
 def test_archive_is_paced_across_the_day(settings):
-    """Leftover is spread across the day instead of burned before the market opens.
+    """Opt-in pacing (`MARKETDATA_ARCHIVE_PACE_ENABLED`) still spreads the day.
 
     The ramp closes at `MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR`, not at midnight.
     A curve that only reaches 100% at 23:59:59 cannot be consumed -- the archive
@@ -2200,6 +2229,7 @@ def test_archive_is_paced_across_the_day(settings):
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
     settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
     settings.MARKETDATA_ARCHIVE_BATCH_SIZE = 0
+    settings.MARKETDATA_ARCHIVE_PACE_ENABLED = True
     settings.MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR = 20
     row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
     tehran = ZoneInfo("Asia/Tehran")
@@ -2236,6 +2266,7 @@ def test_pacing_floor_is_an_hour_of_ramp_not_one_batch(settings):
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
     settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
     settings.MARKETDATA_ARCHIVE_BATCH_SIZE = 120
+    settings.MARKETDATA_ARCHIVE_PACE_ENABLED = True
     settings.MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR = 21
     row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
     tehran = ZoneInfo("Asia/Tehran")

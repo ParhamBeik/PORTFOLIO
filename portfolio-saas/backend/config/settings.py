@@ -363,12 +363,16 @@ MARKETDATA_PLAN_LIMIT_BRS = int(os.getenv("MARKETDATA_PLAN_LIMIT_BRS", "1500"))
 # lane down with it.
 MARKETDATA_PLAN_SAFETY_MARGIN = int(os.getenv("MARKETDATA_PLAN_SAFETY_MARGIN", "150"))
 MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "120"))
-# Hour of the Tehran quota day by which the archive's paced allowance reaches the
-# FULL day ceiling. Not 24: a ramp that only tops out at 23:59:59 leaves no time
-# to actually spend the last of it, so the day structurally ends a few percent
-# short. Closing the ramp early also leaves catch-up room after any stall, and
-# the leftover hours are exactly when the TSE close lands (14:30) and the day's
-# fresh candles become fetchable.
+# OFF by default since 2026-09-06: archive spends its whole day ceiling as fast
+# as the window limiter allows, starting at 00:01, and idles once the wallet
+# reaches the live reserve. See `quota.archive_allowance_now` for why the
+# pro-rata curve this replaces was the wrong fix for the 2026-08-26 incident.
+# Turn on only if a provider starts punishing bursts.
+MARKETDATA_ARCHIVE_PACE_ENABLED = os.getenv("MARKETDATA_ARCHIVE_PACE_ENABLED", "0") == "1"
+# Only consulted when pacing is ON. Hour of the Tehran quota day by which the
+# archive's paced allowance reaches the FULL day ceiling. Not 24: a ramp that
+# only tops out at 23:59:59 leaves no time to actually spend the last of it, so
+# the day structurally ends a few percent short.
 MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR = int(
     os.getenv("MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR", "21")
 )

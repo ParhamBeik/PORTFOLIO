@@ -122,33 +122,13 @@ REGISTRY = {
             bucket=LIVE,
             rows_per_request=200,
         ),
-        Endpoint(
-            key="ime_futures",
-            # IME/* is served on the TSETMC subscription, not the Market/* one:
-            # every caller passes TSETMC_API_KEY (marketdata/tasks.py). Stated
-            # explicitly so the plan is a decision, not an inherited default.
-            plan=TSETMC,
-            # Capital IME, not Ime -- BrsApi's routing is case-sensitive and the
-            # lowercase path 404s (confirmed live 2026-08-19). Docs:
-            # https://brsapi.ir/ime-api-futures-webservice/
-            path="IME/Futures.php",
-            nature=Nature.LIVE,
-            bucket=LIVE,
-            rows_per_request=200,
-        ),
-        Endpoint(
-            key="ime_options",
-            # IME/* is served on the TSETMC subscription, not the Market/* one:
-            # every caller passes TSETMC_API_KEY (marketdata/tasks.py). Stated
-            # explicitly so the plan is a decision, not an inherited default.
-            plan=TSETMC,
-            # Capital IME, not Ime -- same case-sensitive routing 404 (confirmed
-            # live 2026-08-19). Docs: https://brsapi.ir/ime-api-option-webservice/
-            path="IME/Option.php",
-            nature=Nature.LIVE,
-            bucket=LIVE,
-            rows_per_request=200,
-        ),
+        # IME/Futures.php and IME/Option.php (Iran Mercantile Exchange) were
+        # removed on 2026-09-06. They billed the TSETMC plan on every live tick
+        # and every row they returned failed validation on arrival -- 135
+        # rejected, 0 kept, per pass, for the whole time they ran. Nothing in
+        # the product ever read an `ime_future`/`ime_option` row. Do not
+        # re-register them without a fetcher that produces rows the validator
+        # accepts; the endpoints answer, which is what made this look healthy.
         Endpoint(
             key="symbol",
             path="Tsetmc/Symbol.php",

@@ -359,9 +359,9 @@ def is_closure_day(asset_class: str, symbol: str, date: str) -> bool:
         # TSE, where over-forgiving would hide a real ingest hole.
         return False
 
-    if asset_class in ("commodity", "ime_future", "ime_option"):
-        # No published calendar to hardcode against (IME/global commodity
-        # hours don't align with TSE's Thu/Fri weekend) -- infer it the same
+    if asset_class == "commodity":
+        # No published calendar to hardcode against (global commodity hours
+        # don't align with TSE's Thu/Fri weekend) -- infer it the same
         # way gold/FX does, from the feed's own breadth. Same `end`-only
         # reasoning as the gold/currency branch above -- a single-day window
         # cannot produce a "thin relative to what" signal.

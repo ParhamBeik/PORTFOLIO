@@ -42,6 +42,10 @@ const TONE = {
   skipped: "warn", not_assessed: "warn", awaiting_data: "warn",
   critical: "critical", failed: "critical", fail: "critical",
   missing: "critical", blocked_network: "critical", blocked_storage: "critical",
+  // Not "critical": a blacklisted or peer-suspended symbol is a settled
+  // decision, not an incident to page on. It is still not coverage, so it must
+  // not read as good either.
+  unfetchable: "warn", suspended: "warn",
 };
 
 const tone = (value) => TONE[value] || "neutral";
@@ -56,8 +60,11 @@ function gb(bytes) {
 }
 
 // Mirrors `coverage_report.classify_archive_state`. Kept in step with it: a
-// re-armed job that owes no rows is healthy, not partial.
+// re-armed job that owes no rows is healthy, not partial, and a symbol the
+// archive has given up on is neither complete nor merely failing.
 function archiveJobVariant(row) {
+  if (row.blacklisted) return "unfetchable";
+  if (row.suspended_at) return "suspended";
   if (row.verified_complete) return "complete";
   if ((row.consecutive_failures || 0) > 0) return "failed";
   if ((row.missing_rows || 0) > 0) return "partial";
