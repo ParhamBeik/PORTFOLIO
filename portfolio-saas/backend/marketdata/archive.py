@@ -239,6 +239,28 @@ def destination_for(endpoint):
     return ENDPOINT_DESTINATIONS.get(endpoint, "")
 
 
+# Archive job names are not registry keys (`stock_candle_adjusted` vs
+# `stock_candles`). Map to the registry key so `endpoints.source_for` can name
+# the provider path instead of echoing the enum.
+_ENDPOINT_REGISTRY_KEY = {
+    ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED: "stock_history",
+    ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED: "stock_history",
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED: "stock_candles",
+    ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED: "stock_candles",
+    ArchiveFetchState.Endpoint.GOLD_DAILY: "gold_currency_history",
+    ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS: "codal_announcements",
+    ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS: "shareholder_records",
+    ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS: "stock_transaction_ticks",
+}
+
+
+def source_for(endpoint):
+    """Provider path the archive job actually calls, or empty if it calls none."""
+    from . import endpoints as endpoint_registry
+
+    return endpoint_registry.source_for(_ENDPOINT_REGISTRY_KEY.get(endpoint, ""))
+
+
 def disabled_endpoints():
     """Endpoints no state may be claimed or created for right now.
 

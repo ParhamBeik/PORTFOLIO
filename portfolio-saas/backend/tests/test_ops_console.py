@@ -370,6 +370,11 @@ def test_admin_overview_includes_fill_completeness_disk(staff_user, monkeypatch)
         "unfetchable", "suspended",
     }
     assert "refresh_backlog" in body["coverage"]["warehouse"]
+    census = body["coverage"]["warehouse"]["symbol_census"]
+    assert set(census) >= {
+        "symbols_total", "fetched", "never_fetched", "unfetchable",
+        "partially_unfetchable", "attempted_never_landed", "fetched_pct",
+    }
 
 
 def test_pipelines_write_workflow_runs(settings, monkeypatch):
@@ -890,6 +895,19 @@ def test_archive_workflow_names_the_table_it_actually_writes():
     assert destination_for(E.STOCK_HISTORY_UNADJUSTED) == "DailyStockHistory"
     # No destination invented for an endpoint that writes nothing.
     assert destination_for(E.CRYPTO_DAILY) == ""
+
+
+def test_archive_source_names_the_provider_path():
+    """Enum keys are not registry keys; the path must still be recoverable."""
+    from marketdata.archive import source_for
+    from marketdata.models import ArchiveFetchState
+
+    E = ArchiveFetchState.Endpoint
+    assert source_for(E.STOCK_CANDLE_ADJUSTED) == "brsapi:Tsetmc/Candlestick.php"
+    assert source_for(E.STOCK_HISTORY_UNADJUSTED) == "brsapi:Tsetmc/History.php"
+    assert source_for(E.GOLD_DAILY) == "brsapi:Market/Gold_Currency_Pro.php"
+    assert source_for(E.STOCK_TRANSACTION_TICKS) == "brsapi:Tsetmc/Transaction.php"
+    assert source_for(E.CRYPTO_DAILY) == ""
 
 
 def test_ledgered_names_the_provider_path_from_the_registry():

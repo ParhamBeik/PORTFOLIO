@@ -657,19 +657,14 @@ def _retry_code(last_error):
 def run_archive_state(state_id):
     """Process one claimed ArchiveFetchState (HTTP + ingest)."""
     from .models import ArchiveFetchState, WorkflowRun
-    from .workflows import WorkflowOutcome
-
-    from .archive import destination_for
+    from .archive import destination_for, source_for
 
     initial = ArchiveFetchState.objects.get(pk=state_id)
-    outcome = WorkflowOutcome(
+    outcome = _ledgered(
         "archive_state",
         endpoint=initial.endpoint,
         symbol=initial.symbol,
-        # Not the bare host: eight endpoints answered "brsapi.ir" and the
-        # destination said "ArchiveFetchState" for all of them, so neither end
-        # of the pipe was identifiable from the ledger or the log.
-        source=f"brsapi:{initial.endpoint}",
+        source=source_for(initial.endpoint),
         destination_table=destination_for(initial.endpoint),
     )
     try:

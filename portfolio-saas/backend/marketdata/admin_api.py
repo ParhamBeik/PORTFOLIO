@@ -158,6 +158,7 @@ class AdminArchiveStateListView(APIView):
                 "suspension_reason": r.suspension_reason,
                 "last_error": r.last_error,
                 "last_attempt_at": r.last_attempt_at.isoformat() if r.last_attempt_at else None,
+                "last_success_at": r.last_success_at.isoformat() if r.last_success_at else None,
                 "next_attempt_at": r.next_attempt_at.isoformat() if r.next_attempt_at else None,
             }
             for r in page

@@ -1282,6 +1282,15 @@ def test_classify_archive_state_lifecycle():
     ) == "suspended"
 
 
+def test_worst_archive_status_does_not_hide_unfetchable():
+    """A blocked job must outrank a complete sibling on the same symbol."""
+    from marketdata.coverage_report import _worst_archive_status
+
+    complete = ArchiveFetchState(verified_complete=True, stored_rows=10, expected_rows=10)
+    blocked = ArchiveFetchState(blacklisted=True, verified_complete=True, stored_rows=10)
+    assert _worst_archive_status([complete, blocked]) == "unfetchable"
+
+
 @pytest.mark.django_db
 def test_symbol_census_counts_symbols_not_jobs():
     """The census answers a question about symbols, so it must not count states.
@@ -1322,14 +1331,20 @@ def test_symbol_census_counts_symbols_not_jobs():
         symbol="PARTIAL", endpoint=E.STOCK_HISTORY_UNADJUSTED,
         last_attempt_at=now, last_success_at=now,
     )
+    # Once fetched, then every endpoint given up: exclusive unfetchable, not
+    # also counted as fetched. The tiles are a partition.
+    ArchiveFetchState.objects.create(
+        symbol="LOST", endpoint=E.STOCK_CANDLE_ADJUSTED,
+        last_attempt_at=now, last_success_at=now, blacklisted=True,
+    )
 
     census = build_symbol_census()
 
-    assert census["symbols_total"] == 5  # not the 7 states
+    assert census["symbols_total"] == 6  # not the 8 states
     assert census["fetched"] == 2  # FETCHED, PARTIAL
     assert census["never_fetched"] == 1  # UNTOUCHED
     assert census["attempted_never_landed"] == 1  # EMPTY
-    assert census["unfetchable"] == 1  # GONE
+    assert census["unfetchable"] == 2  # GONE, LOST
     assert census["partially_unfetchable"] == 1  # PARTIAL
 
 

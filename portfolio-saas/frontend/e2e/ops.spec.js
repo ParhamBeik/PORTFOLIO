@@ -22,6 +22,8 @@ test.describe("ops center", () => {
     await expect(page.getByTestId("ops-live-held")).toBeVisible();
     await page.getByTestId("ops-tabs-warehouse").click();
     await expect(page.getByTestId("ops-warehouse")).toBeVisible();
+    await expect(page.getByTestId("ops-warehouse-census")).toBeVisible();
+    await expect(page.getByTestId("ops-warehouse-census-fetched")).toBeVisible();
     await page.getByTestId("ops-tabs-tables").click();
     await expect(page.getByTestId("ops-tables")).toBeVisible();
     await page.getByTestId("ops-tabs-jobs").click();

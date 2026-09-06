@@ -347,9 +347,12 @@ def build_symbol_census(states=None) -> dict:
     is not. The question this answers -- how much of the universe do we actually
     hold, and how much can we never hold -- is a question about symbols.
 
-    A symbol counts as `fetched` if ANY of its endpoints has ever landed a
-    payload, and as `unfetchable` only if EVERY endpoint has been given up on:
-    one blacklisted endpoint out of eight is not a lost symbol.
+    These buckets are exclusive. A symbol whose every endpoint is blacklisted
+    or suspended is `unfetchable`, even if an earlier pass once landed rows --
+    the question is what we can still work, not what we once held. A symbol
+    counts as `fetched` only when at least one endpoint is still live and has
+    landed a payload. One blocked endpoint out of eight is
+    `partially_unfetchable`, not a lost symbol.
     """
     if states is None:
         states = list(ArchiveFetchState.objects.all())
@@ -410,8 +413,13 @@ def build_coverage_report(*, database_rows: list[dict]) -> dict:
     }
 
 ARCHIVE_STATUS_PRIORITY = {
-    "failed": 0, "partial": 1, "awaiting_data": 2, "not_tried": 3,
-    "refresh_due": 4, "complete": 5,
+    "failed": 0, "partial": 1,
+    # Unknown statuses used to default to 99, which is *better* than complete.
+    # A symbol with one blacklisted job and one verified job then rolled up as
+    # complete in the asset catalog.
+    "unfetchable": 2, "suspended": 3,
+    "awaiting_data": 4, "not_tried": 5,
+    "refresh_due": 6, "complete": 7,
 }
 LIVE_STATUS_SORT = {"fresh": 0, "stale": 1, "missing": 2, "manual": 3, "formula": 4, "no_source": 5}
 # Spelled out rather than abbreviated: the console renders reason codes straight

@@ -67,9 +67,10 @@ function archiveJobVariant(row) {
   if (row.suspended_at) return "suspended";
   if (row.verified_complete) return "complete";
   if ((row.consecutive_failures || 0) > 0) return "failed";
-  if ((row.missing_rows || 0) > 0) return "partial";
-  if ((row.stored_rows || 0) > 0) return "refresh_due";
-  return "awaiting_data";
+  if (!row.last_attempt_at) return "not_tried";
+  if (!row.last_success_at) return "awaiting_data";
+  if ((row.missing_rows || 0) === 0) return "refresh_due";
+  return "partial";
 }
 
 function historySeries(history, key) {
@@ -487,6 +488,8 @@ const WAREHOUSE_SERIES = [
   { key: "failed", name: "Failing" },
   { key: "awaiting_data", name: "No payload yet" },
   { key: "not_tried", name: "Not tried" },
+  { key: "unfetchable", name: "Unfetchable" },
+  { key: "suspended", name: "Suspended" },
 ];
 
 function totalsToDonut(totals, labels) {
@@ -576,8 +579,11 @@ function WarehouseCoveragePanel({ warehouse }) {
       failed: row.counts?.failed || 0,
       awaiting_data: row.counts?.awaiting_data || 0,
       not_tried: row.counts?.not_tried || 0,
+      unfetchable: row.counts?.unfetchable || 0,
+      suspended: row.counts?.suspended || 0,
     }));
   const backlog = warehouse.refresh_backlog || {};
+  const census = warehouse.symbol_census || {};
 
   return (
     <div className="space-y-4" data-testid="ops-warehouse">
@@ -604,6 +610,42 @@ function WarehouseCoveragePanel({ warehouse }) {
           label="No payload yet"
           value={num((warehouse.counts?.awaiting_data || 0) + (warehouse.counts?.not_tried || 0))}
           sub={`${num(warehouse.counts?.awaiting_data)} attempted · ${num(warehouse.counts?.not_tried)} never tried`}
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5" data-testid="ops-warehouse-census">
+        <StatTile
+          label="Symbols fetched"
+          value={num(census.fetched)}
+          sub={`${census.fetched_pct ?? 0}% of ${num(census.symbols_total)} symbols`}
+          valueTone={(census.fetched_pct ?? 0) >= 90 ? "good" : "warn"}
+          testId="ops-warehouse-census-fetched"
+        />
+        <StatTile
+          label="Never fetched"
+          value={num(census.never_fetched)}
+          sub="No archive job has ever been attempted"
+          valueTone={(census.never_fetched || 0) > 0 ? "warn" : "good"}
+          testId="ops-warehouse-census-never"
+        />
+        <StatTile
+          label="Attempted, nothing landed"
+          value={num(census.attempted_never_landed)}
+          sub="Tried at least once, still empty"
+          valueTone={(census.attempted_never_landed || 0) > 0 ? "warn" : "good"}
+          testId="ops-warehouse-census-empty"
+        />
+        <StatTile
+          label="Unfetchable"
+          value={num(census.unfetchable)}
+          sub="Every endpoint given up on"
+          valueTone={(census.unfetchable || 0) > 0 ? "warn" : "good"}
+          testId="ops-warehouse-census-unfetchable"
+        />
+        <StatTile
+          label="Partly unfetchable"
+          value={num(census.partially_unfetchable)}
+          sub="Some endpoints given up, others still live"
+          testId="ops-warehouse-census-partial"
         />
       </div>
       {/* The refresh queue's own health. A completed job is deliberately
@@ -657,6 +699,8 @@ function WarehouseCoveragePanel({ warehouse }) {
           { key: "partial", header: "Rows missing", align: "right", render: (r) => num(r.counts?.partial) },
           { key: "failed", header: "Failing", align: "right", render: (r) => num(r.counts?.failed) },
           { key: "awaiting_data", header: "No payload", align: "right", render: (r) => num((r.counts?.awaiting_data || 0) + (r.counts?.not_tried || 0)) },
+          { key: "unfetchable", header: "Unfetchable", align: "right", render: (r) => num(r.counts?.unfetchable) },
+          { key: "suspended", header: "Suspended", align: "right", render: (r) => num(r.counts?.suspended) },
           { key: "row_fill", header: "Row fill", align: "right", render: (r) => (r.row_fill_pct != null ? `${r.row_fill_pct}%` : "—") },
         ]}
       />
@@ -1621,7 +1665,7 @@ function OverviewPanel({ overview, tickSeries, depths, onNavigate }) {
 
   return (
     <div className="space-y-4" data-testid="ops-overview">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
         <StatTile
           label="Live prices (held)"
           value={`${liveHeld?.fresh_pct ?? 0}%`}
@@ -1635,6 +1679,13 @@ function OverviewPanel({ overview, tickSeries, depths, onNavigate }) {
           sub={`${num(warehouse?.counts?.failed)} failing · ${num(warehouse?.counts?.partial)} short of rows`}
           valueTone={(warehouse?.counts?.failed || 0) > 0 ? "critical" : (warehouse?.counts?.partial || 0) > 0 ? "warn" : "good"}
           testId="ops-overview-wh-complete"
+        />
+        <StatTile
+          label="Symbols fetched"
+          value={`${warehouse?.symbol_census?.fetched_pct ?? 0}%`}
+          sub={`${num(warehouse?.symbol_census?.fetched)}/${num(warehouse?.symbol_census?.symbols_total)} · ${num(warehouse?.symbol_census?.never_fetched)} never · ${num(warehouse?.symbol_census?.unfetchable)} unfetchable`}
+          valueTone={(warehouse?.symbol_census?.fetched_pct ?? 0) >= 90 ? "good" : "warn"}
+          testId="ops-overview-symbol-census"
         />
         <StatTile
           label="Row fill"
