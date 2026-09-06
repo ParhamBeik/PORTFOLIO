@@ -324,6 +324,7 @@ def build_warehouse_coverage() -> dict:
         "by_endpoint": by_endpoint,
         "live_sourced": live_sourced,
         "refresh_backlog": _refresh_backlog(states, now=now),
+        "symbol_census": build_symbol_census(states),
         "status_labels": {
             "complete": "Verified complete",
             "refresh_due": "Complete — refresh due",
@@ -331,8 +332,58 @@ def build_warehouse_coverage() -> dict:
             "failed": "Failing — needs attention",
             "awaiting_data": "Attempted — no payload yet",
             "not_tried": "Never attempted",
+            "unfetchable": "Blacklisted — will not be fetched",
+            "suspended": "Suspended — auto-probed weekly",
         },
     }
+
+
+def build_symbol_census(states=None) -> dict:
+    """How many distinct SYMBOLS the archive has, has given up on, or has never touched.
+
+    Deliberately counted per symbol, not per job. Every other number in this
+    module counts `(symbol, endpoint)` states, so a symbol with eight endpoints
+    contributes eight rows and "1,331 pending" reads as a symbol count when it
+    is not. The question this answers -- how much of the universe do we actually
+    hold, and how much can we never hold -- is a question about symbols.
+
+    A symbol counts as `fetched` if ANY of its endpoints has ever landed a
+    payload, and as `unfetchable` only if EVERY endpoint has been given up on:
+    one blacklisted endpoint out of eight is not a lost symbol.
+    """
+    if states is None:
+        states = list(ArchiveFetchState.objects.all())
+
+    by_symbol: dict[str, list] = {}
+    for state in states:
+        by_symbol.setdefault(state.symbol, []).append(state)
+
+    census = {
+        "symbols_total": len(by_symbol),
+        "fetched": 0,
+        "never_fetched": 0,
+        "unfetchable": 0,
+        "partially_unfetchable": 0,
+        "attempted_never_landed": 0,
+    }
+    for rows in by_symbol.values():
+        blocked = [r for r in rows if r.blacklisted or r.suspended_at is not None]
+        if len(blocked) == len(rows):
+            census["unfetchable"] += 1
+            continue
+        if blocked:
+            census["partially_unfetchable"] += 1
+        if any(r.last_success_at is not None for r in rows):
+            census["fetched"] += 1
+        elif any(r.last_attempt_at is not None for r in rows):
+            # Tried and came back with nothing -- a different problem from
+            # never having been reached, and the two were previously merged.
+            census["attempted_never_landed"] += 1
+        else:
+            census["never_fetched"] += 1
+
+    census["fetched_pct"] = _pct(census["fetched"], census["symbols_total"])
+    return census
 
 
 def build_table_coverage(database_rows: list[dict]) -> dict:

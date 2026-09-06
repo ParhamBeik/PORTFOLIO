@@ -239,6 +239,27 @@ def bucket_for(key):
     return REGISTRY[key].bucket
 
 
+def source_for(key, default=""):
+    """A short "where did this row come from" label, e.g. `brsapi:Tsetmc/Symbol.php`.
+
+    Derived from the registry rather than typed at each call site: the registry
+    is already the single declaration of which provider path and which billing
+    plan an endpoint uses, so a hand-written source string can only ever drift
+    from it. Unknown keys fall back to `default` -- not every workflow is a
+    provider fetch, and a scheduler or an aggregation has no origin to name.
+    """
+    endpoint = REGISTRY.get(key)
+    if endpoint is None:
+        return default
+    return f"brsapi:{endpoint.path}"
+
+
+def plan_for(key, default=""):
+    """The billing plan an endpoint's requests are metered against."""
+    endpoint = REGISTRY.get(key)
+    return endpoint.plan if endpoint is not None else default
+
+
 def keys_by_nature(nature):
     return tuple(k for k, e in REGISTRY.items() if e.nature == nature)
 

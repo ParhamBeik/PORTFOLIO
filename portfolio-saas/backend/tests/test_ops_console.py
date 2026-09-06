@@ -834,9 +834,12 @@ def test_workflow_stdout_is_a_compact_human_summary():
         patch("marketdata.workflows.logger.info") as info,
         patch("marketdata.models.WorkflowRun.objects.create"),
     ):
-        WorkflowOutcome(
-            "archive_state", endpoint="stock_candle_adjusted", symbol="TEST"
-        ).finish(
+        outcome = WorkflowOutcome(
+            "archive_state", endpoint="stock_candle_adjusted", symbol="TEST",
+            source="brsapi:stock_candle_adjusted",
+            destination_table="MarketCandle",
+        )
+        outcome.finish(
             "retry",
             rows_received=42,
             rows_accepted=19,
@@ -855,6 +858,46 @@ def test_workflow_stdout_is_a_compact_human_summary():
     assert "error=ReadTimeout" in message
     assert "reason=Provider request failed (ReadTimeout)" in message
     assert not message.startswith("{")
+    # Where it came from and where it went. Both were recorded on the ledger row
+    # and omitted from the line, so `docker logs` -- the artifact anyone
+    # actually reads -- could answer neither question.
+    assert "source=brsapi:stock_candle_adjusted" in message
+    assert "dest=MarketCandle" in message
+    # And the thread back to the ledger row and to sibling lines.
+    assert f"cid={outcome.correlation_id}" in message
+
+
+def test_archive_workflow_names_the_table_it_actually_writes():
+    """Not the bookkeeping row it updates.
+
+    Every archive endpoint reported `ArchiveFetchState` as its destination --
+    the state row the job maintains, never the table the data lands in -- so the
+    one column that answers "where did these rows go" said the same thing for
+    all eight endpoints.
+    """
+    from marketdata.archive import destination_for
+    from marketdata.models import ArchiveFetchState
+
+    E = ArchiveFetchState.Endpoint
+    assert destination_for(E.STOCK_CANDLE_ADJUSTED) == "MarketCandle"
+    assert destination_for(E.STOCK_TRANSACTION_TICKS) == "StockTransactionTick"
+    assert destination_for(E.GOLD_DAILY) == "GoldCurrencyHistory"
+    # The misnamed enum: type=1 is the real/legal breakdown, not adjusted prices.
+    assert destination_for(E.STOCK_HISTORY_ADJUSTED) == "RealLegalHistory"
+    assert destination_for(E.STOCK_HISTORY_UNADJUSTED) == "DailyStockHistory"
+    # No destination invented for an endpoint that writes nothing.
+    assert destination_for(E.CRYPTO_DAILY) == ""
+
+
+def test_ledgered_names_the_provider_path_from_the_registry():
+    """A hand-typed source can only drift from the registry that declares it."""
+    from marketdata.tasks import _ledgered
+
+    assert _ledgered("x", endpoint="all_symbols").source == "brsapi:Tsetmc/AllSymbols.php"
+    # A scheduler or an aggregation has no provider origin to name.
+    assert _ledgered("x", endpoint="archive_scheduler").source == ""
+    # An explicit empty source is honoured, not overwritten by the lookup.
+    assert _ledgered("x", endpoint="all_symbols", source="").source == ""
 
 
 # ----------------------------------------------------------------------

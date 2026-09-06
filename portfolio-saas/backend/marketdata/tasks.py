@@ -427,11 +427,28 @@ from portfolio.live.redis_client import get_redis
 logger = logging.getLogger(__name__)
 
 
-def _ledgered(workflow, *, endpoint="", destination_table=""):
-    from .models import WorkflowRun
-    from .workflows import WorkflowOutcome
+def _ledgered(workflow, *, endpoint="", destination_table="", source=None, symbol=""):
+    """Open a ledgered workflow, naming its origin automatically where one exists.
 
-    return WorkflowOutcome(workflow, endpoint=endpoint, destination_table=destination_table)
+    `source` defaults to the endpoint registry's provider path rather than to
+    the empty string. Every marketdata workflow used to record an empty source
+    because `_ledgered` had no way to accept one, so the column existed, the log
+    line omitted it, and "where did this row come from" was unanswerable from
+    either. Pass `source=""` explicitly for a workflow that genuinely has no
+    origin -- a scheduler, a prune, an aggregation over rows already stored.
+    """
+    from .workflows import WorkflowOutcome
+    from . import endpoints as endpoint_registry
+
+    if source is None:
+        source = endpoint_registry.source_for(endpoint)
+    return WorkflowOutcome(
+        workflow,
+        endpoint=endpoint,
+        symbol=symbol,
+        source=source,
+        destination_table=destination_table,
+    )
 
 
 def _finish_ok(outcome, **values):
@@ -642,13 +659,18 @@ def run_archive_state(state_id):
     from .models import ArchiveFetchState, WorkflowRun
     from .workflows import WorkflowOutcome
 
+    from .archive import destination_for
+
     initial = ArchiveFetchState.objects.get(pk=state_id)
     outcome = WorkflowOutcome(
         "archive_state",
         endpoint=initial.endpoint,
         symbol=initial.symbol,
-        source="brsapi.ir",
-        destination_table="ArchiveFetchState",
+        # Not the bare host: eight endpoints answered "brsapi.ir" and the
+        # destination said "ArchiveFetchState" for all of them, so neither end
+        # of the pipe was identifiable from the ledger or the log.
+        source=f"brsapi:{initial.endpoint}",
+        destination_table=destination_for(initial.endpoint),
     )
     try:
         state = process_archive_state(state_id)
