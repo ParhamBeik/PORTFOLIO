@@ -675,10 +675,21 @@ def run_archive_state(state_id):
     try:
         state = process_archive_state(state_id)
     except QuotaExhausted as err:
+        # When it comes back, and whether the wait is minutes or until the next
+        # quota day. A refusal that does not say what happens next reads as a
+        # failure, and `archive_paced` vs `live_reserved` is exactly the
+        # difference between "again in three minutes" and "idle until 00:01".
+        deferred = ArchiveFetchState.objects.filter(pk=state_id).values_list(
+            "next_attempt_at", flat=True
+        ).first()
         outcome.finish(
             WorkflowRun.Outcome.RETRY,
             error_code=getattr(err, "reason", None) or "quota_exhausted",
-            metadata={"reason": str(err)},
+            metadata={
+                "reason": str(err),
+                "next_attempt_at": deferred.isoformat() if deferred else "-",
+                "wait": "minutes" if getattr(err, "is_pacing", False) else "next_quota_day",
+            },
         )
         return
     except Exception as err:

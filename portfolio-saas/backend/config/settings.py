@@ -525,7 +525,12 @@ CODAL_S3_REGION = os.getenv("CODAL_S3_REGION", "us-east-1")
 # version stamp CodalReport/CodalParsedTable/CodalFact rows carry.
 CODAL_PARSER_VERSION = os.getenv("CODAL_PARSER_VERSION", "2")
 
-WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "30"))
+# 14, not 30. At 30 the nightly prune had never deleted a row -- the ledger was
+# only 20 days old -- while the table grew to 877 MB on 845k rows, because
+# volume per day rose roughly tenfold once bulk backfill started. Two weeks is
+# still far more than any operator question needs, and it is the one signal that
+# has no other copy, so it is trimmed by retention rather than by hand.
+WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "14"))
 
 # Live poll cadence by market state (seconds). Beat still ticks every minute; the
 # task itself decides whether enough time has passed, so the cadence can change

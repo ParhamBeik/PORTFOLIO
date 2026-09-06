@@ -812,9 +812,12 @@ def test_healthy_archive_raises_no_wedged_alert(settings):
     assert "wedged-archive-states" not in {c.args[0] for c in notify.call_args_list}
 
 
-def test_prune_keeps_inside_window_and_drops_outside():
+def test_prune_keeps_inside_window_and_drops_outside(settings):
+    # Straddle the configured window rather than a literal, so changing the
+    # retention (30 -> 14 on 2026-09-06) does not silently invert this test.
+    window = settings.WORKFLOW_RETENTION_DAYS
     now = timezone.now()
-    for age_days, workflow in ((31, "old"), (29, "recent")):
+    for age_days, workflow in ((window + 1, "old"), (window - 1, "recent")):
         run = WorkflowRun.objects.create(workflow=workflow, outcome="success")
         # created_at is auto_now_add, so age it after the fact.
         WorkflowRun.objects.filter(pk=run.pk).update(
