@@ -184,7 +184,66 @@ def _breaker_key(plan):
     return f"quota:blocked:{plan}:{quota_day()}"
 
 
-def is_plan_blocked(plan, bucket=None):
+def _probe_key(plan):
+    return f"{_breaker_key(plan)}:probe"
+
+
+def _probe_claimed(plan):
+    from django.core.cache import cache
+
+    try:
+        return bool(cache.get(_probe_key(plan)))
+    except Exception:
+        return False
+
+
+def _claim_breaker_probe(plan):
+    """Atomically admit the one half-open request. False if someone else holds it."""
+    interval = int(getattr(settings, "MARKETDATA_BREAKER_RETRY_SECONDS", 900) or 0)
+    if interval <= 0:
+        return False
+    from django.core.cache import cache
+
+    try:
+        return cache.add(_probe_key(plan), 1, timeout=interval)
+    except Exception:
+        return False
+
+
+def clear_plan_breaker(plan, *, bucket=None):
+    """Drop the trip only if this request was allowed to ask the provider.
+
+    A live 200 during an archive-triggered trip means the reserved live slice
+    still works, not that archive should resume hammering a wallet the provider
+    just refused. Clearing on every parseable JSON was the opposite of
+    bucket-aware: live would wipe an archive trip on the next 60s poll.
+    """
+    from django.core.cache import cache
+
+    try:
+        tripped = cache.get(_breaker_key(plan))
+        if not tripped:
+            return
+        tripped_by = tripped.get("bucket") if isinstance(tripped, dict) else None
+        if not _bucket_may_clear(tripped_by, bucket):
+            return
+        cache.delete(_breaker_key(plan))
+        cache.delete(_probe_key(plan))
+    except Exception:
+        logger.warning("could not clear quota breaker for plan %s", plan)
+
+
+def _bucket_may_clear(tripped_by, bucket):
+    if bucket is None:
+        return True
+    if tripped_by is None:
+        return True
+    if tripped_by == LIVE:
+        return bucket == LIVE
+    return bucket != LIVE
+
+
+def is_plan_blocked(plan, bucket=None, *, admit=False, holding_probe=False):
     """Whether `bucket` is currently barred from spending `plan`.
 
     `bucket=None` asks the plan-wide question, which is what the Ops console and
@@ -199,6 +258,18 @@ def is_plan_blocked(plan, bucket=None):
 
     A LIVE-triggered trip still stops live: that is the provider refusing live
     itself, and hammering it further only deepens the hole.
+
+    The trip is HALF-OPEN, not latched to rollover. After
+    `MARKETDATA_BREAKER_RETRY_SECONDS` one request is allowed through to ask the
+    provider again; if it is still refusing, `trip_plan_breaker` re-arms for
+    another interval, and if it is not, the plan is back. A latched breaker
+    assumes the only reason to see a quota-shaped body is a spent wallet, and
+    `looks_like_quota_error` matches any 5xx whose body merely contains "limit"
+    -- so one bad minute at the origin cost a whole plan for up to 24 hours. It
+    did: BRS was blocked from 09:30 to 20:30 UTC on 2026-09-06 having spent 799
+    of 1,500 requests, failing the USDT/IRT quote 316 times with 47% of the
+    wallet unused. Re-probing costs at most one request per interval; getting
+    this wrong costs a day of a subscription we paid for.
     """
     from django.core.cache import cache
 
@@ -216,16 +287,71 @@ def is_plan_blocked(plan, bucket=None):
     tripped_by = tripped.get("bucket") if isinstance(tripped, dict) else None
     if bucket == LIVE and tripped_by is not None and tripped_by != LIVE:
         return False
+    if _breaker_retry_due(tripped):
+        # A LIVE-ranked trip is probed only by live. Archive stealing the one
+        # slot would spend it, re-trip, and freeze quotes for another interval.
+        if tripped_by == LIVE and bucket != LIVE:
+            return True
+        if holding_probe:
+            return False
+        if admit:
+            return not _claim_breaker_probe(plan)
+        return _probe_claimed(plan)
     return True
 
 
-def trip_plan_breaker(plan, *, reason="", bucket=None):
-    """Stop spending this plan until the Tehran-midnight reset.
+def _breaker_retry_due(tripped, now=None):
+    """Whether a tripped breaker is due to let one request through.
 
-    Called when the provider itself reports exhaustion. Idempotent, and scoped
-    to one plan so a spent TSETMC subscription never silences gold/currency.
-    `bucket` records who caused it, which is what lets `is_plan_blocked` keep
-    the live lane alive through an archive-triggered trip.
+    A payload with no `tripped_at` predates half-open (or is a legacy bare
+    string). Those stay closed until rollover rather than reopening en masse the
+    moment this deploys.
+    """
+    if not isinstance(tripped, dict):
+        return False
+    tripped_at = tripped.get("tripped_at")
+    if not tripped_at:
+        return False
+    interval = int(getattr(settings, "MARKETDATA_BREAKER_RETRY_SECONDS", 900) or 0)
+    if interval <= 0:
+        return False
+    clock = time.time() if now is None else now
+    return clock - tripped_at >= interval
+
+
+def _breaker_is_half_open(plan, bucket=None):
+    """Peek: tripped, due to probe, and this bucket is the one allowed to probe."""
+    from django.core.cache import cache
+
+    try:
+        tripped = cache.get(_breaker_key(plan))
+    except Exception:
+        return False
+    if not tripped:
+        return False
+    tripped_by = tripped.get("bucket") if isinstance(tripped, dict) else None
+    if bucket == LIVE and tripped_by is not None and tripped_by != LIVE:
+        return False
+    if tripped_by == LIVE and bucket != LIVE:
+        return False
+    return _breaker_retry_due(tripped) and not _probe_claimed(plan)
+
+
+def trip_plan_breaker(plan, *, reason="", bucket=None):
+    """Stop spending this plan until the next half-open probe, or rollover.
+
+    Called when the provider itself reports exhaustion. Scoped to one plan so a
+    spent TSETMC subscription never silences gold/currency. `bucket` records who
+    caused it, which is what lets `is_plan_blocked` keep the live lane alive
+    through an archive-triggered trip.
+
+    Re-tripping always refreshes `tripped_at` while KEEPING the broadest bucket
+    seen. Those two rules pull in opposite directions and both are load-bearing:
+    the old early `return` on an equal-or-broader existing trip meant a re-trip
+    could not re-arm the half-open timer, so a genuinely spent plan would be
+    re-probed every interval forever; dropping the rank check instead would let
+    an archive trip arriving after a live trip reopen live on a wallet the
+    provider had already refused.
 
     Uses the Django cache rather than a raw Redis handle: it is Redis-backed in
     every deployed environment, shared across workers exactly the same way, and
@@ -234,19 +360,17 @@ def trip_plan_breaker(plan, *, reason="", bucket=None):
     """
     from django.core.cache import cache
 
-    # None = plan-wide (blocks every bucket, including live). Do not default
-    # to OTHER: that would fail-open the live lane for any caller that omits
-    # bucket, and an archive 429 arriving after a live 429 would reopen live
-    # on a wallet the provider already refused.
-    payload = {"bucket": bucket, "reason": reason or "1"}
-
     def _rank(tripped_by):
+        # None = plan-wide (blocks every bucket, including live). Do not default
+        # to OTHER: that would fail-open the live lane for any caller that omits
+        # bucket.
         if tripped_by is None:
             return 3
         if tripped_by == LIVE:
             return 2
         return 1
 
+    effective = bucket
     try:
         existing = cache.get(_breaker_key(plan))
         if existing:
@@ -254,13 +378,19 @@ def trip_plan_breaker(plan, *, reason="", bucket=None):
                 existing.get("bucket") if isinstance(existing, dict) else None
             )
             if _rank(existing_bucket) >= _rank(bucket):
-                return
-        cache.set(_breaker_key(plan), payload, timeout=_seconds_to_rollover())
+                effective = existing_bucket
+        cache.set(
+            _breaker_key(plan),
+            {"bucket": effective, "reason": reason or "1", "tripped_at": time.time()},
+            timeout=_seconds_to_rollover(),
+        )
+        cache.delete(_probe_key(plan))
     except Exception:
         logger.warning("could not persist quota breaker for plan %s", plan)
     logger.warning(
-        "quota_breaker_tripped plan=%s bucket=%s reason=%s until=rollover",
-        plan, bucket or "plan", reason or "-",
+        "quota_breaker_tripped plan=%s bucket=%s reason=%s retry_in=%ss",
+        plan, effective or "plan", reason or "-",
+        getattr(settings, "MARKETDATA_BREAKER_RETRY_SECONDS", 900),
     )
 
 
@@ -498,6 +628,31 @@ def live_reserve_remaining(plan, row=None, now=None):
     return max(0, live_day_cost(plan, row, now=now) - spent)
 
 
+def other_reserve_remaining(plan, row=None):
+    """Unused portion of the OTHER bucket's daily budget on `plan`.
+
+    The exact counterpart of `live_reserve_remaining`, and it exists for the
+    same reason. OTHER already has a ceiling (`MARKETDATA_OTHER_REQUEST_BUDGET`,
+    200/day) but nothing ever held that budget FOR it: `archive_day_ceiling`
+    subtracted only what OTHER had already spent, so under burst allocation
+    archive reached the live-reserve line hours before the day's maintenance
+    jobs woke up, and every one of them was refused `live_reserved` on its first
+    request.
+
+    Those jobs are small, fixed-cost and are the ones that keep the universe
+    honest -- `catalog_sync` (03:40 Tehran) failed outright on 2026-09-07, and
+    `sync_symbol_metadata` (09:30 Tehran) stopped with 923 symbols never
+    fetched. Both are written to resume where they stopped, so a guaranteed
+    200/day converges; zero per day never does. The cost to backfill is 2% of
+    the TSETMC wallet. BRS has no OTHER endpoints -- catalog and metadata are
+    Tsetmc/* -- so holding 200 on that plan would just shrink gold/FX backfill.
+    """
+    if plan != TSETMC:
+        return 0
+    spent = getattr(row, "other_used", 0) or 0
+    return max(0, (bucket_budget(OTHER, plan, row) or 0) - spent)
+
+
 def _day_elapsed_fraction(now=None):
     """How far through the archive's *spending* window we are, in [0, 1].
 
@@ -520,8 +675,14 @@ def archive_day_ceiling(plan, row=None, now=None):
 
     Live is subtracted first and is never negotiable: the static 24h live
     slice (`live_day_cost`), of which `live_reserve_remaining` is the unused
-    part. Whatever remains, minus a safety margin so the wallet is never
-    actually emptied, belongs to backfill and is paced across the Tehran day.
+    part. The OTHER bucket's small fixed budget is held back the same way --
+    see `other_reserve_remaining`. Whatever remains, minus a safety margin so
+    the wallet is never actually emptied, belongs to backfill and is paced
+    across the Tehran day.
+
+    Both reserves subtract the bucket's *spend so far* and its *unspent
+    remainder* separately, so a bucket that overruns its budget cannot have the
+    overrun reserved a second time.
 
     None means "no ceiling known for this plan" -- only possible if the plan has
     neither a disclosed limit nor a configured expectation.
@@ -532,7 +693,11 @@ def archive_day_ceiling(plan, row=None, now=None):
     live_spent = getattr(row, "live_used", 0) or 0
     other_spent = getattr(row, "other_used", 0) or 0
     reserve = live_reserve_remaining(plan, row, now=now)
-    return max(0, ceiling - _safety_margin() - live_spent - reserve - other_spent)
+    other_reserve = other_reserve_remaining(plan, row)
+    return max(
+        0,
+        ceiling - _safety_margin() - live_spent - reserve - other_spent - other_reserve,
+    )
 
 
 def archive_allowance_now(plan, row=None, now=None):
@@ -582,7 +747,7 @@ def archive_allowance_now(plan, row=None, now=None):
     return min(ceiling, max(paced, floor))
 
 
-def reserve_request(bucket=OTHER, plan=TSETMC):
+def reserve_request(bucket=OTHER, plan=TSETMC, *, holding_probe=False):
     """Claim one request on `plan` for `bucket`, or raise `QuotaExhausted`.
 
     Gates, in order:
@@ -598,7 +763,9 @@ def reserve_request(bucket=OTHER, plan=TSETMC):
     4. Archive's paced share of the day, so the leftover is spread across 24h
        instead of burned at midnight.
     """
-    if is_plan_blocked(plan, bucket=bucket):
+    if is_plan_blocked(
+        plan, bucket=bucket, admit=not holding_probe, holding_probe=holding_probe
+    ):
         raise QuotaExhausted(
             f"Provider reported the {plan} plan exhausted; paused until reset.",
             reason=REASON_PLAN_BLOCKED,
@@ -803,20 +970,30 @@ def remaining_requests(bucket=None, plan=TSETMC):
         return 0
     day_left = max(0, limit - _safety_margin() - used)
     if bucket is None:
-        return day_left
-    budget = bucket_budget(bucket, plan, row=row)
-    if budget is not None:
-        day_left = min(
-            day_left, max(0, budget - (getattr(row, f"{bucket}_used") if row else 0))
-        )
-    if bucket != LIVE:
-        day_left -= live_reserve_remaining(plan, row)
-    if bucket == ARCHIVE:
-        allowance = archive_allowance_now(plan, row)
-        if allowance is not None:
-            spent = getattr(row, "archive_used", 0) or 0
-            day_left = min(day_left, max(0, allowance - spent))
-    return max(0, day_left)
+        leftover = day_left
+    else:
+        leftover = day_left
+        budget = bucket_budget(bucket, plan, row=row)
+        if budget is not None:
+            leftover = min(
+                leftover, max(0, budget - (getattr(row, f"{bucket}_used") if row else 0))
+            )
+        if bucket != LIVE:
+            leftover -= live_reserve_remaining(plan, row)
+        if bucket == ARCHIVE:
+            allowance = archive_allowance_now(plan, row)
+            if allowance is not None:
+                spent = getattr(row, "archive_used", 0) or 0
+                leftover = min(leftover, max(0, allowance - spent))
+        leftover = max(0, leftover)
+    if _breaker_is_half_open(plan, bucket):
+        # Live may advertise the one probe. Archive must not: the batcher
+        # sizes off this number, and a leftover of 1 would look like room
+        # and claim a full mixed batch that then parks until rollover.
+        if bucket == ARCHIVE:
+            return 0
+        return min(1, leftover if bucket is not None else day_left)
+    return leftover if bucket is not None else day_left
 
 
 def archive_capacity():

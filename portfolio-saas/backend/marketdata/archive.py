@@ -877,6 +877,14 @@ _PREREQ_ERROR_MARKERS = (
 # not converge, and that has to be counted.
 PREREQ_DEFER_INTERVAL = timedelta(hours=3)
 
+# The one declaration of "this state is waiting on a SIBLING endpoint, not on the
+# provider". `suspension` reads it to keep those states out of its peer sample:
+# the wait says the scheduler has not reached the prerequisite yet, which is a
+# statement about our own fetch order, never about whether this symbol is
+# servable. Distinct from the `_PREREQ_ERROR_MARKERS` defers above, which carry
+# an exception message and ARE the symbol's own problem.
+PREREQ_WAIT_ERROR = "Waiting on prerequisite endpoint."
+
 
 def _defer_for_prereq(state, *, now, error=""):
     """Hold a state whose dependency endpoint has not landed, and count the pass.
@@ -1206,9 +1214,7 @@ def _pick_ready_states(candidates, limit, now, deferred_pks):
             # call rather than after it. It costs no quota, but a state parked
             # here is just as stuck and was just as invisible, so it is counted
             # the same way -- one rule, not two that drift.
-            _defer_for_prereq(
-                state, now=now, error="Waiting on prerequisite endpoint.",
-            )
+            _defer_for_prereq(state, now=now, error=PREREQ_WAIT_ERROR)
     return ready
 
 

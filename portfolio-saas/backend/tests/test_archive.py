@@ -5,6 +5,7 @@ Merged from 8 files; each section keeps its original banner.
 
 from datetime import timedelta
 import datetime
+import time
 from decimal import Decimal
 from unittest import mock
 from unittest.mock import patch
@@ -56,6 +57,7 @@ from marketdata.quota import (
 )
 from marketdata.quota import ARCHIVE
 from marketdata.suspension import (
+    DEGENERATE_FENCE_MIN_FAILURES,
     MIN_ABSOLUTE_FAILURES,
     MIN_PEER_SAMPLE,
     PROBE_INTERVAL,
@@ -621,13 +623,37 @@ def _peers(n, value, prefix="p"):
 
 # --- unit: pure detection function --------------------------------------
 
-def test_outlier_against_healthy_peers_is_flagged():
-    # unit test: pure function, no DB
-    peers = _peers(9, 0) + [(99, "sick", MIN_ABSOLUTE_FAILURES)]
+def test_outlier_against_spread_peers_is_flagged():
+    # unit test: pure function, no DB. The peers carry real dispersion, so the
+    # Tukey fence is a fence and the sick state clears it on the maths alone.
+    peers = [(i, f"p{i}", v) for i, v in enumerate([0, 0, 1, 1, 2, 2, 3, 3, 4])]
+    peers += [(99, "sick", MIN_ABSOLUTE_FAILURES + 5)]
     candidates = _outlier_candidates(peers)
     assert {c.state_id for c in candidates} == {99}
     assert candidates[0].sample_size == 10
-    assert candidates[0].peer_median == 0
+    assert candidates[0].floor == MIN_ABSOLUTE_FAILURES
+
+
+def test_degenerate_peer_spread_demands_the_absolute_floor():
+    """The 337-state regression: Q1 == Q3 == 0 makes the Tukey fence 0.
+
+    A healthy endpoint is overwhelmingly zeros, so the IQR is zero and
+    `Q3 + 1.5*IQR` collapses to 0 -- every failing state is then "above the
+    fence" and the peer-relative test silently becomes the absolute one it
+    promises never to use. That is how 337 states were suspended, 300 in a
+    single sweep on 2026-08-31, every one with evidence `peer_q1 = peer_q3 = 0`.
+    With no dispersion the fence is undefined, not zero, so a much higher
+    absolute bar has to carry the decision on its own.
+    """
+    healthy = _peers(9, 0)
+    assert _outlier_candidates(healthy + [(99, "sick", MIN_ABSOLUTE_FAILURES)]) == []
+
+    candidates = _outlier_candidates(
+        healthy + [(99, "hopeless", DEGENERATE_FENCE_MIN_FAILURES)]
+    )
+    assert {c.state_id for c in candidates} == {99}
+    assert candidates[0].floor == DEGENERATE_FENCE_MIN_FAILURES
+    assert candidates[0].evidence["peer_q1"] == candidates[0].evidence["peer_q3"] == 0
 
 
 def test_same_rate_as_peers_is_not_flagged():
@@ -663,7 +689,7 @@ def test_below_absolute_floor_never_flagged_even_if_relatively_high():
 def test_suspend_outliers_flags_only_the_outlier_and_keeps_the_row():
     for i in range(9):
         _state(f"healthy{i}", consecutive_failures=0)
-    sick = _state("sick", consecutive_failures=MIN_ABSOLUTE_FAILURES)
+    sick = _state("sick", consecutive_failures=DEGENERATE_FENCE_MIN_FAILURES)
 
     suspended_ids = suspend_outliers(Endpoint.STOCK_HISTORY_ADJUSTED)
 
@@ -671,9 +697,35 @@ def test_suspend_outliers_flags_only_the_outlier_and_keeps_the_row():
     sick.refresh_from_db()
     assert sick.suspended_at is not None
     assert sick.suspension_reason == "peer_outlier"
-    assert sick.suspension_evidence["value"] == MIN_ABSOLUTE_FAILURES
+    assert sick.suspension_evidence["value"] == DEGENERATE_FENCE_MIN_FAILURES
     # never deleted
     assert ArchiveFetchState.objects.filter(pk=sick.pk).exists()
+
+
+@pytest.mark.django_db
+def test_a_state_waiting_on_a_prerequisite_is_never_suspended():
+    """`_defer_for_prereq` counts the pass; suspension must not read that count.
+
+    The counter is deliberately incremented so a state stuck behind a sibling
+    endpoint is visible to the Ops tile and the wedged alert. For those readers
+    it means "nothing is happening here". For this one it would mean "the
+    provider cannot serve this symbol", which is a different claim and a false
+    one -- and acting on it stops the very fetch that would clear the wait.
+    295 of the 337 states suspended before 2026-09-07 were exactly this.
+    """
+    from marketdata.archive import PREREQ_WAIT_ERROR
+
+    for i in range(9):
+        _state(f"healthy{i}", consecutive_failures=0)
+    waiting = _state(
+        "waiting",
+        consecutive_failures=DEGENERATE_FENCE_MIN_FAILURES * 2,
+        last_error=PREREQ_WAIT_ERROR,
+    )
+
+    assert suspend_outliers(Endpoint.STOCK_HISTORY_ADJUSTED) == []
+    waiting.refresh_from_db()
+    assert waiting.suspended_at is None
 
 
 @pytest.mark.django_db
@@ -694,8 +746,11 @@ def test_suspended_state_becomes_probe_due_after_a_week_and_unsuspends_on_clean_
     state.refresh_from_db()
     assert state.last_probe_at == now  # claimed
 
-    # simulate a clean fetch result landing on the probed state
-    state.verified_complete = True
+    # simulate a clean fetch result landing on the probed state: it landed a
+    # payload and owes no rows. Deliberately still `verified_complete=False` --
+    # see the next test.
+    state.last_success_at = now
+    state.missing_rows = 0
     state.consecutive_failures = 0
     recovered = try_recover(state, now=now)
 
@@ -713,6 +768,51 @@ def test_dirty_probe_result_stays_suspended():
     state.verified_complete = False
     assert try_recover(state, now=now) is False
     assert state.suspended_at is not None
+
+
+@pytest.mark.django_db
+def test_recovery_never_keys_on_verified_complete():
+    """`verified_complete` is a re-arm switch, not a health flag.
+
+    `reopen_states_with_gaps` and `promote_priority_tick_windows` clear it on
+    purpose so a finished state picks up sessions printed since its last pass,
+    and a tick state whose window is still growing is essentially never
+    `verified_complete` at the instant a probe finishes. Keying recovery on it
+    made suspension a one-way door: all 337 states suspended before 2026-09-07
+    carried `verified_complete=False`, so not one of the 21 that were probed and
+    came back clean was ever released.
+    """
+    now = timezone.now()
+    rearmed = _state(
+        "rearmed",
+        suspended_at=now,
+        consecutive_failures=0,
+        verified_complete=False,
+        missing_rows=0,
+        last_success_at=now,
+    )
+    assert try_recover(rearmed, now=now) is True
+    assert rearmed.suspended_at is None
+
+    # The two questions are asked separately: a state that has never landed a
+    # payload has `missing_rows=0` only because that is the field's default.
+    never_fetched = _state(
+        "never_fetched",
+        suspended_at=now,
+        consecutive_failures=0,
+        missing_rows=0,
+        last_success_at=None,
+    )
+    assert try_recover(never_fetched, now=now) is False
+
+    owes_rows = _state(
+        "owes_rows",
+        suspended_at=now,
+        consecutive_failures=0,
+        missing_rows=12,
+        last_success_at=now,
+    )
+    assert try_recover(owes_rows, now=now) is False
 
 
 @pytest.mark.django_db
@@ -1168,7 +1268,11 @@ def test_live_floor_survives_an_archive_burst(settings):
     settings.TSETMC_API_KEY = "test-key"
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 4
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
-    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 10
+    # OTHER is held back from the archive ceiling exactly as LIVE is (see
+    # `other_reserve_remaining`). Zero it here for the same reason these tests
+    # zero the safety margin: this one is about the LIVE reserve, and a second
+    # subtraction in the same arithmetic only obscures which gate fired.
+    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 0
     # The reserve only binds once the provider has told us this plan's ceiling;
     # there is no hardcoded daily limit any more.
     ApiRequestQuota.objects.create(day=quota_day(), plan=TSETMC, limit=10)
@@ -1243,6 +1347,7 @@ def test_each_provider_plan_keeps_its_own_wallet(settings):
 
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 0
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 0
+    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 0
     ApiRequestQuota.objects.create(day=quota_day(), plan=TSETMC, limit=5)
 
     for _ in range(5):
@@ -1778,7 +1883,7 @@ def test_archive_stops_only_where_the_live_reserve_begins(settings):
     settings.TSETMC_API_KEY = "test-key"
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 4
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 2
-    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 2
+    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 0
     ApiRequestQuota.objects.create(day=quota_day(), plan=TSETMC, limit=20)
 
     # 20 reported - 6 live still spendable = 14 for everything else. The live
@@ -2155,6 +2260,7 @@ def test_live_reserve_holds_when_provider_has_not_disclosed_a_limit(settings):
 
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 300
     settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 0
 
     row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
     assert row.limit == 0, "precondition: the provider has told us nothing"
@@ -2169,6 +2275,99 @@ def test_live_reserve_holds_when_provider_has_not_disclosed_a_limit(settings):
             reserve_request(ARCHIVE, TSETMC)
         with pytest.raises(QuotaExhausted, match="reserved for live"):
             reserve_request(ARCHIVE, TSETMC)
+
+
+def test_other_bucket_keeps_a_reserve_the_archive_burst_cannot_reach(settings):
+    """Maintenance jobs must not be starved by a backfill that spends first.
+
+    OTHER already had a ceiling; nothing held that budget FOR it, so under burst
+    allocation archive reached the live-reserve line hours before the day's
+    maintenance woke up. On 2026-09-07 `catalog_sync` (03:40 Tehran) failed
+    outright and `sync_symbol_metadata` (09:30 Tehran) stopped with 923 symbols
+    never fetched -- both refused `live_reserved` on their first request, on a
+    wallet whose OTHER bucket had spent nothing at all.
+    """
+    from marketdata.quota import OTHER, TSETMC, archive_day_ceiling
+
+    # Small numbers on purpose: the rolling 5-minute window limiter binds long
+    # before a realistic day ceiling does, and this test is about the day
+    # ceiling.
+    settings.MARKETDATA_PLAN_LIMIT_TSETMC = 90
+    settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 5
+    row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
+
+    with patch.object(quota, "live_reserve_remaining", return_value=20):
+        # 90 - 20 live - 5 other = 65 for backfill.
+        assert archive_day_ceiling(TSETMC, row) == 65
+        for _ in range(65):
+            reserve_request(ARCHIVE, TSETMC)
+        with pytest.raises(QuotaExhausted):
+            reserve_request(ARCHIVE, TSETMC)
+
+        # The maintenance lane still has its whole budget, which is the point.
+        for _ in range(5):
+            reserve_request(OTHER, TSETMC)
+        assert ApiRequestQuota.objects.get(plan=TSETMC).other_used == 5
+
+        # Spending the reserve does not release more to archive: the ceiling
+        # subtracts OTHER's spend and its unspent remainder separately, so the
+        # pair is constant and archive's budget never moves under it.
+        row.refresh_from_db()
+        assert archive_day_ceiling(TSETMC, row) == 65
+
+
+def test_tripped_breaker_reprobes_instead_of_latching_until_midnight(settings):
+    """A quota-shaped 5xx must not cost a whole day of a plan we paid for.
+
+    `looks_like_quota_error` fires on any 5xx whose body merely contains
+    "limit", so one bad minute at the origin latched the breaker to rollover.
+    BRS was blocked 09:30-20:30 UTC on 2026-09-06 having spent 799 of 1,500
+    requests -- the USDT/IRT quote failed 316 times with 47% of the wallet
+    unused.
+    """
+    from marketdata.quota import BRS, LIVE as _L, is_plan_blocked, trip_plan_breaker
+
+    settings.MARKETDATA_BREAKER_RETRY_SECONDS = 900
+    t0 = time.time()
+
+    def at(offset):
+        return patch("marketdata.quota.time.time", return_value=t0 + offset)
+
+    with at(0):
+        trip_plan_breaker(BRS, reason="http_500", bucket=_L)
+        assert is_plan_blocked(BRS, bucket=_L)
+    # Still closed a moment before the interval, open one request after it.
+    with at(899):
+        assert is_plan_blocked(BRS, bucket=_L)
+    with at(901):
+        assert not is_plan_blocked(BRS, bucket=_L)
+        # That probe reached a provider still refusing, so it re-trips -- and the
+        # interval restarts from HERE. The old early-return on an equal-or-broader
+        # existing trip left `tripped_at` at t0, which would have re-probed a
+        # genuinely spent plan on every single call from 901 onwards.
+        trip_plan_breaker(BRS, reason="http_500", bucket=_L)
+        assert is_plan_blocked(BRS, bucket=_L)
+    with at(1_799):
+        assert is_plan_blocked(BRS, bucket=_L)
+    with at(1_802):
+        assert not is_plan_blocked(BRS, bucket=_L)
+
+
+def test_reprobe_never_widens_an_archive_trip_into_a_live_one(settings):
+    """Re-tripping refreshes the timer but keeps the BROADEST bucket seen.
+
+    Dropping the rank check to make the timer refreshable would let an archive
+    429 arriving after a live 429 reopen live on a wallet the provider had
+    already refused.
+    """
+    from marketdata.quota import (
+        ARCHIVE as _A, LIVE as _L, TSETMC, is_plan_blocked, trip_plan_breaker,
+    )
+
+    trip_plan_breaker(TSETMC, reason="http_429", bucket=_L)
+    trip_plan_breaker(TSETMC, reason="http_429", bucket=_A)
+    assert is_plan_blocked(TSETMC, bucket=_L), "an archive trip must not reopen live"
 
 
 def test_archive_trip_does_not_silence_live(settings):
@@ -2205,6 +2404,7 @@ def test_archive_burst_spends_the_whole_ceiling_from_the_reset(settings):
 
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
     settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 0
     row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
     tehran = ZoneInfo("Asia/Tehran")
     just_after_reset = datetime.datetime(2026, 8, 26, 0, 1, tzinfo=tehran)
@@ -2228,6 +2428,7 @@ def test_archive_is_paced_across_the_day(settings):
 
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
     settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 0
     settings.MARKETDATA_ARCHIVE_BATCH_SIZE = 0
     settings.MARKETDATA_ARCHIVE_PACE_ENABLED = True
     settings.MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR = 20
@@ -2265,6 +2466,7 @@ def test_pacing_floor_is_an_hour_of_ramp_not_one_batch(settings):
 
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
     settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 0
     settings.MARKETDATA_ARCHIVE_BATCH_SIZE = 120
     settings.MARKETDATA_ARCHIVE_PACE_ENABLED = True
     settings.MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR = 21
@@ -2284,6 +2486,7 @@ def test_live_slice_stays_reserved_after_the_session(settings):
 
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 5_000
     settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 0
     row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
 
     with patch.object(quota, "live_reserve_remaining", return_value=1_200):
@@ -2311,6 +2514,7 @@ def test_live_day_cost_does_not_shrink_in_the_evening(settings):
 
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
     settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 0
     row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
     with (
         patch.object(quota, "_simulate_price_loop", return_value=144),

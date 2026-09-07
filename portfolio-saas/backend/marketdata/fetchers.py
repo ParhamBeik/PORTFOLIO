@@ -19,6 +19,7 @@ from .quota import (
     OTHER,
     TSETMC,
     QuotaExhausted,
+    clear_plan_breaker,
     looks_like_quota_error,
     reconcile_account,
     reserve_request,
@@ -97,6 +98,10 @@ def fetch_json(
     # only holds a worker and can spend the provider quota several times for
     # one logical job. Live/other calls retain one short retry.
     retries = (0 if quota_bucket == "archive" else 1) if retries is None else retries
+    from .quota import _breaker_is_half_open
+
+    if _breaker_is_half_open(quota_plan, quota_bucket):
+        retries = 0
     if timeout is None or timeout == 20:
         from django.conf import settings
 
@@ -106,8 +111,10 @@ def fetch_json(
         )
     req_headers = {**DEFAULT_HEADERS, **(headers or {})}
     attempt = 0
+    holding_probe = False
     while attempt <= retries:
-        reserve_request(quota_bucket, quota_plan)
+        reserve_request(quota_bucket, quota_plan, holding_probe=holding_probe)
+        holding_probe = True
         from .workflows import record_http_attempt
 
         record_http_attempt(quota=True)
@@ -183,7 +190,7 @@ def fetch_json(
             continue
 
         try:
-            return response.json()
+            payload = response.json()
         except ValueError as exc:
             attempt += 1
             if attempt > retries:
@@ -192,6 +199,9 @@ def fetch_json(
                     status_code=response.status_code,
                 ) from exc
             time.sleep(backoff_factor * (2 ** (attempt - 1)))
+            continue
+        clear_plan_breaker(quota_plan, bucket=quota_bucket)
+        return payload
     raise TransientMarketDataError("Provider request failed.")
 
 

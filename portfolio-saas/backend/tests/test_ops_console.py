@@ -732,6 +732,47 @@ def test_alert_notifier_redacts_and_deduplicates():
     assert post.call_args.kwargs["timeout"] == 5
 
 
+@override_settings(
+    ALERT_WEBHOOK_URL="",
+    ALERT_TELEGRAM_BOT_TOKEN="bot-token",
+    ALERT_TELEGRAM_CHAT_ID="12345",
+)
+def test_alert_telegram_sends_plain_text_and_does_not_parse_markup():
+    from config.observability import notify
+
+    with mock.patch("config.observability.requests.post") as post:
+        ok = notify("telegram-alert", {"symbol": "FOOLAD_x"}, dedupe_seconds=60)
+
+    assert ok is True
+    assert post.call_args.args[0] == "https://api.telegram.org/botbot-token/sendMessage"
+    payload = post.call_args.kwargs["json"]
+    assert payload["chat_id"] == "12345"
+    assert "parse_mode" not in payload
+    assert payload["disable_web_page_preview"] is True
+    assert payload["text"].startswith("[telegram-alert]")
+    assert "FOOLAD_x" in payload["text"]
+
+
+@override_settings(
+    ALERT_WEBHOOK_URL="https://alerts.test/hook",
+    ALERT_TELEGRAM_BOT_TOKEN="bot-token",
+    ALERT_TELEGRAM_CHAT_ID="12345",
+)
+def test_alert_channels_are_independent():
+    from config.observability import notify
+
+    def _post(url, **kwargs):
+        if "alerts.test" in url:
+            raise ConnectionError("webhook down")
+        resp = mock.Mock()
+        resp.raise_for_status = mock.Mock()
+        return resp
+
+    with mock.patch("config.observability.requests.post", side_effect=_post) as post:
+        assert notify("split-alert", {"n": 1}, dedupe_seconds=60) is True
+    assert post.call_count == 2
+
+
 def test_sentry_disabled_does_not_import_or_send():
     from config.observability import init_sentry
 
@@ -815,6 +856,73 @@ def test_healthy_archive_raises_no_wedged_alert(settings):
         operational_health_check()
 
     assert "wedged-archive-states" not in {c.args[0] for c in notify.call_args_list}
+
+
+def test_wedged_alert_ignores_states_the_archive_has_already_parked(settings):
+    """A state nobody is claiming is neither coverage nor backlog.
+
+    `classify_archive_state` tests `blacklisted`/`suspended_at` before anything
+    else for exactly this reason, and the alert has to mirror it. Without that
+    the alert was 100% noise: all 322 states it named on 2026-09-07 were
+    suspended, so it fired every 15 minutes with an unchanging payload and
+    buried the detections above it that do mean something.
+    """
+    from marketdata.models import ArchiveFetchState
+    from marketdata.tasks import operational_health_check
+
+    settings.ARCHIVE_WEDGED_FAILURE_THRESHOLD = 6
+    common = dict(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+        consecutive_failures=9,
+        last_error="MarketDataFetchError: 1405-05-11: tick_volume_mismatch:5!=9",
+    )
+    ArchiveFetchState.objects.create(symbol="parked", suspended_at=timezone.now(), **common)
+    ArchiveFetchState.objects.create(symbol="gone", blacklisted=True,
+                                     suspended_at=timezone.now(), **common)
+
+    with patch("config.observability.notify") as notify:
+        operational_health_check()
+    assert "wedged-archive-states" not in {c.args[0] for c in notify.call_args_list}
+
+    # An un-parked state at the same failure count still alerts.
+    ArchiveFetchState.objects.create(symbol="really-wedged", **common)
+    with patch("config.observability.notify") as notify:
+        operational_health_check()
+    fired = {call.args[0]: call.args[1] for call in notify.call_args_list}
+    assert fired["wedged-archive-states"]["count"] == 1
+
+
+def test_stale_archive_alert_is_silent_when_there_is_no_quota_to_spend(settings):
+    """"Quiet" only means something when the archive COULD be spending.
+
+    Under burst allocation the wallet is empty for most of the day by design --
+    backfill runs flat out from Tehran midnight and then idles until the reset.
+    This alert fired 86 times in the 25h to 2026-09-07, every quarter hour
+    outside the 2h38m burst, which is not a stall.
+    """
+    from marketdata.models import ArchiveFetchState
+    from marketdata.tasks import operational_health_check
+
+    ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+        symbol="pending", verified_complete=False,
+    )
+
+    with (
+        patch("marketdata.quota.archive_capacity", return_value={"tsetmc": 0, "brs": 0}),
+        patch("config.observability.notify") as notify,
+    ):
+        operational_health_check()
+    assert "stale-archive-progress" not in {c.args[0] for c in notify.call_args_list}
+
+    # Same silence, but with quota available, is a real stall.
+    with (
+        patch("marketdata.quota.archive_capacity", return_value={"tsetmc": 4_000, "brs": 0}),
+        patch("config.observability.notify") as notify,
+    ):
+        operational_health_check()
+    fired = {call.args[0]: call.args[1] for call in notify.call_args_list}
+    assert fired["stale-archive-progress"]["archive_capacity"] == 4_000
 
 
 def test_prune_keeps_inside_window_and_drops_outside(settings):

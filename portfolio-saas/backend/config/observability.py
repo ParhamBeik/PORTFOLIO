@@ -80,42 +80,94 @@ def _redact(value):
     return value
 
 
+def _telegram_target():
+    """(token, chat_id) when both are configured, else None."""
+    token = getattr(settings, "ALERT_TELEGRAM_BOT_TOKEN", "")
+    chat_id = getattr(settings, "ALERT_TELEGRAM_CHAT_ID", "")
+    return (token, chat_id) if token and chat_id else None
+
+
+def _send_telegram(token, chat_id, event, safe_details):
+    # `text` rather than a parse_mode: alert payloads carry Persian symbol names
+    # and JSON punctuation, and Markdown/HTML parsing would make Telegram reject
+    # the message for an unbalanced `_` in a symbol -- an alert that fails to
+    # send because of the shape of its own contents is the worst failure mode
+    # available here.
+    body = json.dumps(safe_details, sort_keys=True, default=str, ensure_ascii=False)
+    requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": f"[{event}] {get_request_id()}\n{body}"[:4096],
+            "disable_web_page_preview": True,
+        },
+        timeout=5,
+    ).raise_for_status()
+
+
 def notify(event, details, *, dedupe_seconds=900):
-    """Raise one operator alert: always to stdout, to the webhook when configured.
+    """Raise one operator alert: always to stdout, plus every configured channel.
 
     The stdout line is unconditional because operational_health_check's
     detections (wedged archive states, stale prices, backlog) route only through
-    here -- without it an unconfigured ALERT_WEBHOOK_URL made the whole
-    mechanism produce zero observable output.
+    here -- without it an unconfigured channel made the whole mechanism produce
+    zero observable output.
+
+    Channels are independent and best-effort: one failing must not suppress the
+    other, and neither may raise into the health check that called it.
     """
     from django.core.cache import cache
 
     safe_details = _redact(details)
     url = getattr(settings, "ALERT_WEBHOOK_URL", "")
-    # Say whether this reached a human. On 2026-08-27 the archive was dead for
-    # 13h having raised stale-archive-progress 49 times, and every one of those
-    # lines looked exactly like a delivered alert -- ALERT_WEBHOOK_URL is set to
-    # the empty string on the VPS. `undelivered=1` is the greppable difference.
-    logger.warning(
-        "alert:%s undelivered=%d %s",
-        event,
-        0 if url else 1,
-        json.dumps(safe_details, sort_keys=True, default=str)[:500],
-    )
-    if not url:
+    telegram = _telegram_target()
+    payload = json.dumps(safe_details, sort_keys=True, default=str)[:500]
+    if not (url or telegram):
+        # On 2026-08-27 the archive was dead for 13h having raised
+        # stale-archive-progress 49 times, and every line looked delivered --
+        # no channel was configured. `undelivered=1` is the greppable difference.
+        logger.warning("alert:%s undelivered=1 %s", event, payload)
         return False
     digest = hashlib.sha256(
         json.dumps([event, safe_details], sort_keys=True, default=str).encode()
     ).hexdigest()
-    if not cache.add(f"alert:{digest}", True, timeout=dedupe_seconds):
-        return False
+    cache_key = f"alert:{digest}"
     try:
-        requests.post(
-            url,
-            json={"event": event, "request_id": get_request_id(), "details": safe_details},
-            timeout=5,
-        ).raise_for_status()
-        return True
+        reserved = cache.add(cache_key, True, timeout=dedupe_seconds)
     except Exception:
-        logger.exception("Alert webhook failed for %s", event)
+        reserved = True
+    if not reserved:
         return False
+
+    delivered = False
+    if url:
+        try:
+            requests.post(
+                url,
+                json={
+                    "event": event,
+                    "request_id": get_request_id(),
+                    "details": safe_details,
+                },
+                timeout=5,
+            ).raise_for_status()
+            delivered = True
+        except Exception:
+            logger.exception("Alert webhook failed for %s", event)
+    if telegram:
+        try:
+            _send_telegram(*telegram, event, safe_details)
+            delivered = True
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            logger.error(
+                "Alert telegram failed for %s status=%s err=%s",
+                event, status, type(exc).__name__,
+            )
+    if not delivered:
+        try:
+            cache.delete(cache_key)
+        except Exception:
+            logger.warning("could not release alert dedupe for %s", event)
+    logger.warning("alert:%s undelivered=%d %s", event, 0 if delivered else 1, payload)
+    return delivered

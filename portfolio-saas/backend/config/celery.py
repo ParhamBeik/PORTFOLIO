@@ -23,6 +23,7 @@ app.config_from_object("django.conf:settings", namespace="CELERY")
 # Discover tasks.py in each installed app (portfolio.tasks, marketdata.tasks).
 # Every task lives in one of those two modules; there is no second discovery pass.
 app.autodiscover_tasks()
+import marketdata.burst_probes  # noqa: F401 -- not in tasks.py; beat must register it
 
 # Global reliability defaults. Per-task retry policy (autoretry_for) belongs in
 # the individual tasks (e.g. portfolio/tasks.py), not here.
@@ -84,6 +85,12 @@ app.conf.beat_schedule = {
     "marketdata-low-rate-maintenance": {
         "task": "marketdata.tasks.archive_maintenance",
         "schedule": crontab(hour=4, minute=10),
+    },
+    # Two weekly probes take TSETMC slots at 00:05, while the midnight burst
+    # still has remaining requests. 04:10 is leftover-only and usually empty.
+    "marketdata-burst-probes": {
+        "task": "marketdata.burst_probes.claim_burst_probes",
+        "schedule": crontab(hour=0, minute=5),
     },
 
     # Symbol fundamentals, DAILY rather than weekly. One request per symbol

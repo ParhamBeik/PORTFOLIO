@@ -362,6 +362,15 @@ MARKETDATA_PLAN_LIMIT_BRS = int(os.getenv("MARKETDATA_PLAN_LIMIT_BRS", "1500"))
 # exhausted. Exhaustion trips the breaker, and the breaker is what took the live
 # lane down with it.
 MARKETDATA_PLAN_SAFETY_MARGIN = int(os.getenv("MARKETDATA_PLAN_SAFETY_MARGIN", "150"))
+# How long a tripped plan breaker stays closed before it lets ONE request
+# through to ask the provider again. The breaker used to latch until Tehran
+# midnight, which assumes a quota-shaped response can only mean a spent wallet
+# -- but `looks_like_quota_error` fires on any 5xx whose body contains "limit",
+# so an origin blip cost a whole plan for the rest of the day. 0 disables the
+# probe and restores the latched behaviour.
+MARKETDATA_BREAKER_RETRY_SECONDS = int(
+    os.getenv("MARKETDATA_BREAKER_RETRY_SECONDS", "900")
+)
 MARKETDATA_ARCHIVE_BATCH_SIZE = int(os.getenv("MARKETDATA_ARCHIVE_BATCH_SIZE", "120"))
 # OFF by default since 2026-09-06: archive spends its whole day ceiling as fast
 # as the window limiter allows, starting at 00:01, and idles once the wallet
@@ -641,6 +650,10 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True  # survive a broker restart
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
+# Second, independent alert channel. Both must be set for it to be used; either
+# channel alone is enough to stop `notify` logging `undelivered=1`.
+ALERT_TELEGRAM_BOT_TOKEN = os.getenv("ALERT_TELEGRAM_BOT_TOKEN", "")
+ALERT_TELEGRAM_CHAT_ID = os.getenv("ALERT_TELEGRAM_CHAT_ID", "")
 QUEUE_BACKLOG_THRESHOLD = int(os.getenv("QUEUE_BACKLOG_THRESHOLD", "100"))
 APPLICATION_ERROR_THRESHOLD = int(os.getenv("APPLICATION_ERROR_THRESHOLD", "20"))
 WORKFLOW_FAILURE_RATE_THRESHOLD = float(os.getenv("WORKFLOW_FAILURE_RATE_THRESHOLD", "0.10"))

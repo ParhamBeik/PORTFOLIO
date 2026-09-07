@@ -49,6 +49,23 @@ MIN_PEER_SAMPLE = 5
 # to be a genuine outlier, not just worse luck". Standard default, not hand-fit.
 OUTLIER_IQR_MULTIPLIER = 1.5
 
+# What to demand when the peer distribution has NO spread at all (Q1 == Q3).
+#
+# This is the case that broke: a healthy endpoint is overwhelmingly zeros, so
+# Q1 = Q3 = 0, the IQR is 0, and the Tukey fence collapses to `Q3 + 1.5*0 == 0`.
+# Every failing state is then "infinitely many IQRs above the pack" and the
+# peer-relative test degenerates into exactly the absolute threshold this module
+# opens by promising never to use -- `value >= MIN_ABSOLUTE_FAILURES`. On
+# 2026-08-15/31 that suspended 337 states, 300 of them in a single sweep, every
+# one carrying evidence `peer_q1 = peer_q3 = 0.0`.
+#
+# With zero dispersion the fence is undefined, not zero, so fall back to an
+# absolute bar that means something on its own terms. Past ~5 failures the retry
+# backoff has already capped at 24h, so a state here has been retrying once a day
+# for three weeks and getting nowhere -- that is a judgement we can defend
+# without a distribution behind it.
+DEGENERATE_FENCE_MIN_FAILURES = 20
+
 # If this share (or more) of an endpoint's states are already at/above the
 # failure floor, treat it as a provider-wide outage and suspend nobody on
 # that endpoint this pass. Configurable because different endpoints may want
@@ -79,6 +96,7 @@ class SuspensionCandidate:
     peer_q1: float
     peer_q3: float
     sample_size: int
+    floor: int = MIN_ABSOLUTE_FAILURES
     evidence: dict = field(init=False)
 
     def __post_init__(self):
@@ -89,6 +107,11 @@ class SuspensionCandidate:
             "peer_q1": self.peer_q1,
             "peer_q3": self.peer_q3,
             "sample_size": self.sample_size,
+            # Which bar this state actually cleared. Without it the stored
+            # evidence for a degenerate-fence suspension is indistinguishable
+            # from a real peer-relative one -- both read `q1=0, q3=0` -- and
+            # that is what made 337 bad suspensions look deliberate.
+            "floor": self.floor,
         }
 
 
@@ -109,24 +132,45 @@ def _outlier_candidates(peers):
         return []  # provider-wide outage guard: most peers are broken too
 
     q1, median, q3 = statistics.quantiles(failures, n=4, method="inclusive")
-    fence = q3 + OUTLIER_IQR_MULTIPLIER * (q3 - q1)
+    iqr = q3 - q1
+    fence = q3 + OUTLIER_IQR_MULTIPLIER * iqr
+    # No dispersion means no fence. See DEGENERATE_FENCE_MIN_FAILURES: on a
+    # healthy endpoint the quartiles are both 0, and `value > 0` is not an
+    # outlier test.
+    floor = MIN_ABSOLUTE_FAILURES if iqr else DEGENERATE_FENCE_MIN_FAILURES
 
     candidates = []
     for state_id, symbol, value in peers:
-        if value < MIN_ABSOLUTE_FAILURES or value <= fence:
+        if value < floor or value <= fence:
             continue
         candidates.append(SuspensionCandidate(
             state_id=state_id, symbol=symbol, value=value,
             peer_median=median, peer_q1=q1, peer_q3=q3, sample_size=n,
+            floor=floor,
         ))
     return candidates
 
 
 def scan_endpoint_for_outliers(endpoint):
     """DB-backed wrapper: peer set is every non-suspended, non-blacklisted state
-    on `endpoint`. Read-only -- does not mutate anything."""
+    on `endpoint` that is not merely queued behind a sibling endpoint.
+    Read-only -- does not mutate anything.
+
+    `_defer_for_prereq` deliberately increments `consecutive_failures` so a state
+    waiting forever on a prerequisite is visible to the Ops tile and the wedged
+    alert. That is right for those readers and wrong for this one: the counter
+    then measures how long OUR scheduler has taken to reach the prerequisite,
+    not whether the provider can serve the symbol -- and suspending on it stops
+    the very fetch that would clear the wait. 295 of the 337 states suspended
+    before 2026-09-07 sat at exactly `consecutive_failures == 6` with this
+    message, prerequisites that are satisfied today, and zero rows owed.
+    """
+    from .archive import PREREQ_WAIT_ERROR
+
     peers = ArchiveFetchState.objects.filter(
         endpoint=endpoint, blacklisted=False, suspended_at__isnull=True,
+    ).exclude(
+        last_error=PREREQ_WAIT_ERROR
     ).values_list("id", "symbol", "consecutive_failures")
     return _outlier_candidates(peers)
 
@@ -170,20 +214,40 @@ def claim_probe_batch(limit=5, *, now=None):
     lowest-priority one) and then call `try_recover()` on the result.
     """
     now = now or timezone.now()
+    from .archive import _ENDPOINT_PLAN
+    from .quota import archive_capacity
+
+    capacity = archive_capacity()
+    allowed = [
+        endpoint for endpoint, plan in _ENDPOINT_PLAN.items()
+        if plan is not None and (capacity.get(plan, 0) or 0) > 0
+    ]
+    if not allowed:
+        return []
     cutoff = now - PROBE_INTERVAL
     due = Q(last_probe_at__isnull=True) | Q(last_probe_at__lte=cutoff)
     with transaction.atomic():
-        states = list(
+        candidates = list(
             ArchiveFetchState.objects.select_for_update(skip_locked=True)
-            .filter(due, suspended_at__isnull=False, blacklisted=False)
-            # The third lease path, and the one most likely to hold a disabled
-            # endpoint's rows: a subsystem is usually switched off *because* it
-            # kept failing, and repeated failure is what suspends a state in the
-            # first place. Production carries 10 suspended Codal states, which
-            # this would otherwise re-probe every week.
+            .filter(
+                due,
+                suspended_at__isnull=False,
+                blacklisted=False,
+                endpoint__in=allowed,
+            )
             .exclude(endpoint__in=_disabled_endpoints())
-            .order_by("last_probe_at")[:limit]
+            .order_by("last_probe_at")[: max(limit * 4, limit)]
         )
+        used = {}
+        states = []
+        for state in candidates:
+            plan = _ENDPOINT_PLAN.get(state.endpoint)
+            if used.get(plan, 0) >= (capacity.get(plan, 0) or 0):
+                continue
+            states.append(state)
+            used[plan] = used.get(plan, 0) + 1
+            if len(states) >= limit:
+                break
         ArchiveFetchState.objects.filter(pk__in=[s.pk for s in states]).update(
             last_probe_at=now,
         )
@@ -195,10 +259,23 @@ def try_recover(state, *, now=None):
 
     Call after `run_archive_state()` has updated `state` for a pk that came
     from `claim_probe_batch`. Returns True if the state was recovered.
+
+    "Clean" is two questions asked separately -- did the probe land a payload
+    (`last_success_at`), and does the state owe rows (`missing_rows`) -- never
+    `verified_complete`. That flag is a re-arm switch, not a health flag:
+    `reopen_states_with_gaps` and `promote_priority_tick_windows` clear it on
+    purpose so a finished state picks up sessions printed since its last pass,
+    and a tick state whose window is still growing is essentially never
+    `verified_complete` at the instant a probe finishes. Keying recovery on it
+    made suspension a one-way door -- all 337 states suspended before
+    2026-09-07 carried `verified_complete=False`, so not one of the 21 that were
+    probed and came back clean was ever released.
     """
     if not state.suspended_at or state.blacklisted:
         return False
-    if state.verified_complete and state.consecutive_failures == 0:
+    if state.consecutive_failures:
+        return False
+    if state.last_success_at is not None and state.missing_rows == 0:
         unsuspend(state, now=now)
         return True
     return False

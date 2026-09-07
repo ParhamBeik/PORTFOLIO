@@ -314,6 +314,7 @@ def operational_health_check():
 
     from config.observability import notify
     from portfolio.models import Price
+    from . import archive
     from .models import ApiRequestQuota, ArchiveFetchState, SymbolIntegrity, WorkflowRun
 
     alerts = []
@@ -365,9 +366,19 @@ def operational_health_check():
     # genuine progress (len(missing) shrinking), never on a mere successful call.
     # Past ~5 the backoff has capped at 24h, so a state here retries once a day
     # and gets nowhere. Report the causes, not just the count.
+    #
+    # Suspended and blacklisted states are excluded for the same reason
+    # `classify_archive_state` tests those flags first: a state the archive has
+    # already stopped claiming is neither coverage nor backlog, and re-reporting
+    # it is asking an operator to act on a decision the system has made. Without
+    # this the alert was 100% noise -- all 322 states it named on 2026-09-07
+    # were suspended, so it fired every 15 minutes for weeks with an unchanging
+    # payload and buried the four detections above it that do mean something.
     wedged = ArchiveFetchState.objects.filter(
-        consecutive_failures__gte=settings.ARCHIVE_WEDGED_FAILURE_THRESHOLD
-    )
+        consecutive_failures__gte=settings.ARCHIVE_WEDGED_FAILURE_THRESHOLD,
+        blacklisted=False,
+        suspended_at__isnull=True,
+    ).exclude(endpoint__in=archive.disabled_endpoints())
     wedged_count = wedged.count()
     if wedged_count:
         causes = Counter(
@@ -383,16 +394,32 @@ def operational_health_check():
             ),
         }))
 
+    # "Quiet" only means something when the archive COULD be spending. Under
+    # burst allocation the wallet is empty for most of the day by design -- the
+    # backlog is larger than the subscription, so backfill runs flat out from
+    # Tehran midnight and then idles until the next reset. That silence is the
+    # intended shape, not a stall: this fired 86 times in the 25h to 2026-09-07,
+    # every quarter hour outside the 2h38m burst, which is the same "cries wolf
+    # daily" failure the integrity-rate alert above was already rewritten to
+    # avoid. Ask whether there is quota to make progress with first; if there is
+    # and nothing has moved in 30 minutes, that is a real stall.
+    from .quota import archive_capacity
+
     stale_before = timezone.now() - timedelta(seconds=settings.ARCHIVE_PROGRESS_STALE_SECONDS)
+    capacity = sum(archive_capacity().values())
     if (
-        ArchiveFetchState.objects.filter(verified_complete=False).exists()
+        capacity
+        and ArchiveFetchState.objects.filter(verified_complete=False).exists()
         and not WorkflowRun.objects.filter(
             workflow="archive_state",
             outcome__in=(WorkflowRun.Outcome.SUCCESS, WorkflowRun.Outcome.PARTIAL),
             created_at__gte=stale_before,
         ).exists()
     ):
-        alerts.append(("stale-archive-progress", {"stale_seconds": settings.ARCHIVE_PROGRESS_STALE_SECONDS}))
+        alerts.append(("stale-archive-progress", {
+            "stale_seconds": settings.ARCHIVE_PROGRESS_STALE_SECONDS,
+            "archive_capacity": capacity,
+        }))
 
     # Per plan: each subscription is its own ledger, and summing them would let
     # an overcount on one wallet cancel an undercount on the other.
@@ -981,16 +1008,34 @@ def archive_maintenance():
         # it can never crowd out real archive work. A probe is an ordinary fetch
         # through run_archive_state; try_recover clears the flag if it comes
         # back clean.
-        probe_ids = suspension.claim_probe_batch(
-            limit=max(0, min(2, slots - len(state_ids)))
-        )
+        #
+        # Only claim when a wallet actually has room. `claim_probe_batch` stamps
+        # `last_probe_at` at lease time, so a probe that reaches the provider
+        # gate and is refused on quota still consumes the state's slot for the
+        # next PROBE_INTERVAL. This task runs at 04:10 Tehran, which on any day
+        # the archive burst empties the wallet is 90 minutes after the last
+        # request -- both probes on 2026-09-07 came back `live_reserved` having
+        # made no call at all, and their two states are now parked until
+        # 2026-09-14. Skipping is free; the states stay due.
+        from .quota import archive_capacity
+
+        capacity = sum(archive_capacity().values())
+        probe_ids = []
+        if capacity:
+            probe_ids = suspension.claim_probe_batch(
+                limit=max(0, min(2, slots - len(state_ids)))
+            )
 
         for state_id in list(state_ids) + list(probe_ids):
             run_archive_state.si(state_id).apply_async()
         _finish_ok(
             outcome,
             rows_accepted=len(state_ids) + len(probe_ids),
-            metadata={"suspended": len(suspended), "probes": len(probe_ids)},
+            metadata={
+                "suspended": len(suspended),
+                "probes": len(probe_ids),
+                "probe_capacity": capacity,
+            },
         )
     except Exception as err:
         _finish_fail(outcome, err)
