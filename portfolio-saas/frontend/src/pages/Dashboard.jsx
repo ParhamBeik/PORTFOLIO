@@ -74,14 +74,6 @@ const INFLATION_VIEWS = [
   { value: "benchmarks", label: "vs gold, USD & market" },
 ];
 
-// The benchmark endpoint only accepts 90/180/365-day windows, so the comparison
-// offers exactly those. Mapping "30d" onto a 90-day request made the selected
-// button say 30d while the axis showed three months.
-const BENCH_RANGES = [
-  { value: "90", label: "90d" },
-  { value: "365", label: "1y" },
-];
-
 // ponytail: the CPI table is `base 1398=100` (config/settings.py), and a rebase
 // is a once-a-decade SCI event, so the base year is a literal here rather than a
 // new field on every valuation payload. If it ever moves, serve it from the API.
@@ -244,17 +236,7 @@ function InflationNote({ realGrowth, nominalGrowth, cpi, basis }) {
 function TrendCard({ activeId, basis }) {
   const [range, setRange] = useState("30");
   const [mode, setMode] = useState("nominal");
-  // Ranges differ per mode, so a range the current mode cannot honour falls back
-  // rather than silently showing a different window than the one selected.
-  // EVERY series on this chart has to follow that fallback, not just the tab
-  // highlight and the benchmark fetch: deriving `days` from the raw `range` left
-  // the net-worth line on 30 days while the gold/USD lines covered 90, and both
-  // were rebased to 100 on the same axis, so the "relative growth" gap compared
-  // three months of benchmark against one month of portfolio.
-  const rangeOptions = mode === "benchmarks" ? BENCH_RANGES : RANGES;
-  const effectiveRange = rangeOptions.some((r) => r.value === range)
-    ? range
-    : rangeOptions[0].value;
+  const effectiveRange = RANGES.some((r) => r.value === range) ? range : RANGES[0].value;
   const days = effectiveRange === "all" ? "all" : Number(effectiveRange);
   // "After inflation" is a Toman question -- the other line is fetched as
   // `real_toman` and cannot be anything else. Leaving the nominal line on the
@@ -275,10 +257,11 @@ function TrendCard({ activeId, basis }) {
     { enabled: mode === "real" }
   );
   const benchState = useApi(
-    () => benchmarks(activeId, { window: Number(effectiveRange) }),
+    () => benchmarks(activeId, { window: effectiveRange === "all" ? "all" : Number(effectiveRange) }),
     [activeId, effectiveRange],
     { enabled: mode === "benchmarks" }
   );
+  const trendState = mode === "benchmarks" ? benchState : state;
 
   return (
     <Card
@@ -294,7 +277,7 @@ function TrendCard({ activeId, basis }) {
             testId="dashboard-trend-basis"
           />
           <Tabs
-            options={rangeOptions}
+            options={RANGES}
             value={effectiveRange}
             onChange={setRange}
             label="Range"
@@ -307,24 +290,21 @@ function TrendCard({ activeId, basis }) {
           estimated-points note under it, and reserving only the chart let the
           card grow by ~170px when the data landed — which was the dashboard's
           entire measured layout shift. Floors the transient states only. */}
-      <Async {...state} testId="dashboard-trend-body" empty="No history yet." minHeight={430}>
+      <Async {...trendState} testId="dashboard-trend-body" empty="No history yet." minHeight={430}>
         {(data) => {
-          const points = (data.series || []).map((s) => ({ x: s.date, y: Number(s.total) }));
-          // Counted, not just detected. "Some points are estimated" reads like a
-          // footnote when 47 of 66 points are reconstructed rather than recorded,
-          // which is a different chart from the one that phrasing implies.
-          const estimatedCount = (data.series || []).filter((s) => s.is_estimated).length;
-          const pointCount = (data.series || []).length;
-          const hasEstimated = estimatedCount > 0;
-          // Set when a switched-off holding had no recorded close for that day and
-          // its current price stood in while netting it out of the history.
-          const hasApproximated = (data.series || []).some((s) => s.approximated);
-          const longTicks = effectiveRange === "365" || effectiveRange === "all";
-
-          if (mode === "benchmarks" && benchState.data?.series?.length) {
-            const bench = benchState.data;
-            const keys = Object.keys(bench.labels);
-            const last = bench.series[bench.series.length - 1];
+          if (mode === "benchmarks") {
+            const bench = data;
+            if (!bench.series?.length) return <Empty>No history yet.</Empty>;
+            const keys = Object.keys(bench.labels || {});
+            const longTicks = effectiveRange === "365" || effectiveRange === "all";
+            const requestedDays =
+              effectiveRange === "all" ? bench.requested_window_days : Number(effectiveRange);
+            const actualDays = bench.data_window?.observations;
+            const shortfall =
+              requestedDays &&
+              actualDays &&
+              requestedDays > actualDays &&
+              requestedDays - actualDays > 7;
             return (
               <>
                 <MultiLineTrend
@@ -339,6 +319,12 @@ function TrendCard({ activeId, basis }) {
                   Each line starts at 100, so the gap is relative growth over the
                   window — not the amount of money in each.
                 </p>
+                {shortfall && (
+                  <p className="mt-1 text-xs text-muted" data-testid="dashboard-trend-bench-shortfall">
+                    You asked for {requestedDays} days and this covers {actualDays} — that is as
+                    much shared history as these series have in common.
+                  </p>
+                )}
                 {(bench.unavailable || []).map((u) => (
                   <p key={u.key} className="mt-1 text-xs text-muted">
                     {u.label} not shown: {u.reason}.
@@ -347,6 +333,18 @@ function TrendCard({ activeId, basis }) {
               </>
             );
           }
+
+          const points = (data.series || []).map((s) => ({ x: s.date, y: Number(s.total) }));
+          // Counted, not just detected. "Some points are estimated" reads like a
+          // footnote when 47 of 66 points are reconstructed rather than recorded,
+          // which is a different chart from the one that phrasing implies.
+          const estimatedCount = (data.series || []).filter((s) => s.is_estimated).length;
+          const pointCount = (data.series || []).length;
+          const hasEstimated = estimatedCount > 0;
+          // Set when a switched-off holding had no recorded close for that day and
+          // its current price stood in while netting it out of the history.
+          const hasApproximated = (data.series || []).some((s) => s.approximated);
+          const longTicks = effectiveRange === "365" || effectiveRange === "all";
 
           if (mode === "real" && realState.data?.series?.length) {
             const real = new Map(

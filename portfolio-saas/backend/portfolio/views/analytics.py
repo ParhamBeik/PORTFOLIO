@@ -948,9 +948,16 @@ class BenchmarkSeriesView(APIView):
         if not weights:
             return Response({"detail": "No priced holdings to compare yet."}, status=400)
 
-        window, error = _int_param(request, "window", 365, allowed=(90, 180, 365))
-        if error:
-            return error
+        raw_window = request.query_params.get("window", "365")
+        if raw_window == "all":
+            window = _lifetime_days(request.user, account)
+            requested_window = "all"
+        else:
+            window, error = _int_param(request, "window", 365, allowed=(30, 90, 180, 365))
+            if error:
+                return error
+            requested_window = window
+        requested_window_days = window if requested_window != "all" else window
         try:
             basis = normalize_basis(request.query_params.get("basis") or "nominal_toman")
         except ValueError as exc:
@@ -975,7 +982,14 @@ class BenchmarkSeriesView(APIView):
 
         port = _portfolio_returns(returns, weights)
         if port.empty:
-            return Response({"basis": basis, "window": window, "series": [], "unavailable": []})
+            return Response({
+                "basis": basis,
+                "window": window,
+                "requested_window": requested_window,
+                "requested_window_days": requested_window_days,
+                "series": [],
+                "unavailable": [],
+            })
 
         def indexed(series):
             """Cumulative growth from 100. NaN-safe: a benchmark that starts
@@ -1022,6 +1036,13 @@ class BenchmarkSeriesView(APIView):
             "basis": basis,
             "basis_requested": basis_requested,
             "window": window,
+            "requested_window": requested_window,
+            "requested_window_days": requested_window_days,
+            "data_window": {
+                "start": port.index[0].date().isoformat(),
+                "end": port.index[-1].date().isoformat(),
+                "observations": int(len(port.index)),
+            },
             "series": rows,
             "labels": {"portfolio": "Your portfolio",
                        **{k: v for k, v in (*self.BENCHMARKS, self.INDEX_BENCHMARK)

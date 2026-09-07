@@ -1,9 +1,10 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { me, restoreSession, SESSION_EXPIRED_EVENT } from "./api.js";
 import Auth from "./components/Auth.jsx";
 import Legal from "./components/Legal.jsx";
 import { PortfolioProvider, usePortfolio } from "./components/PortfolioContext.jsx";
+import { hasAnyHoldings } from "./holdingsGate.js";
 import Shell from "./components/Shell.jsx";
 import { Loading } from "./components/ui.jsx";
 
@@ -102,18 +103,20 @@ export default function App() {
                   onto a bare page whose only way out said "Back to sign in". */}
               <Route path="/privacy" element={<Legal kind="privacy" authed />} />
               <Route path="/terms" element={<Legal kind="terms" authed />} />
-              <Route index element={<RequireHoldings><Dashboard user={user} /></RequireHoldings>} />
-              <Route path="/optimal" element={<MyOptimal />} />
-              <Route path="/universe" element={<BestOverall />} />
-              <Route path="/best-overall" element={<Navigate to="/universe" replace />} />
-              <Route path="/onboarding" element={<Onboarding />} />
-              <Route path="/ledger" element={<Ledger />} />
-              <Route path="/family" element={<Family />} />
-              <Route path="/breakdown" element={<Navigate to="/family" replace />} />
-              <Route path="/comparison" element={<Comparison />} />
-              <Route path="/prices" element={<AssetHistory />} />
-              <Route path="/ops" element={<Ops user={user} />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
+              <Route element={<HoldingsGate user={user} />}>
+                <Route index element={<Dashboard user={user} />} />
+                <Route path="/optimal" element={<MyOptimal />} />
+                <Route path="/universe" element={<BestOverall />} />
+                <Route path="/best-overall" element={<Navigate to="/universe" replace />} />
+                <Route path="/onboarding" element={<Onboarding />} />
+                <Route path="/ledger" element={<Ledger />} />
+                <Route path="/family" element={<Family />} />
+                <Route path="/breakdown" element={<Navigate to="/family" replace />} />
+                <Route path="/comparison" element={<Comparison />} />
+                <Route path="/prices" element={<AssetHistory />} />
+                <Route path="/ops" element={<Ops user={user} />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Route>
             </Route>
           </Routes>
         </Suspense>
@@ -122,11 +125,33 @@ export default function App() {
   );
 }
 
-// A brand-new user has nothing to render a dashboard from. Only redirect once
-// the account list has actually loaded — otherwise a slow request looks like
-// "no holdings" and bounces an existing user off their own dashboard.
-function RequireHoldings({ children }) {
+export { hasAnyHoldings } from "./holdingsGate.js";
+
+// One gate for both directions: empty accounts belong on onboarding, and an
+// account that already has holdings should not sit on "Add your first holding"
+// because they bookmarked the URL or signed in from a deep link. The old guard
+// lived only on `/`, so signing in at `/ledger` skipped onboarding entirely.
+function HoldingsGate({ user }) {
+  const { pathname } = useLocation();
   const { accounts, loading, error } = usePortfolio();
-  if (loading || error) return children;
-  return accounts.some((a) => a.holdings?.length) ? children : <Navigate to="/onboarding" replace />;
+  const onOnboarding = pathname === "/onboarding";
+  const exempt =
+    pathname === "/privacy" ||
+    pathname === "/terms" ||
+    (pathname === "/ops" && user?.is_staff);
+
+  if (loading || exempt) return <Outlet />;
+
+  const hasHoldings = hasAnyHoldings(accounts);
+
+  if (!error) {
+    if (!hasHoldings && !onOnboarding) {
+      return <Navigate to="/onboarding" replace />;
+    }
+    if (hasHoldings && onOnboarding) {
+      return <Navigate to="/" replace />;
+    }
+  }
+
+  return <Outlet />;
 }

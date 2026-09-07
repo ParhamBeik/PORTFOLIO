@@ -54,7 +54,27 @@ test.describe("dashboard", () => {
     }
   });
 
-  test("the vs-inflation view names the rate it divided by", async ({ page }) => {
+  test("benchmark range tabs match nominal windows", async ({ page }) => {
+    if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
+      test.skip(true, "account has no holdings (onboarding)");
+    }
+    await page.getByTestId("nav-portfolio").click();
+    await expect(page.getByTestId("dashboard-trend-basis")).toBeVisible({ timeout: 20000 });
+    await clickTab(page, "dashboard-trend-basis", "benchmarks");
+    await expect(page.getByTestId("dashboard-trend-tabs")).toBeVisible();
+
+    for (const value of ["30", "90", "365", "all"]) {
+      const answered = page.waitForResponse(
+        (r) => r.url().includes("/api/analytics/benchmarks/") && r.url().includes(`window=${value}`),
+        { timeout: 30000 },
+      );
+      const ok = await clickTab(page, "dashboard-trend-tabs", value);
+      expect.soft(ok, `benchmark tab ${value}`).toBeTruthy();
+      const response = await answered;
+      expect.soft(response.ok(), `benchmark ${value} response`).toBeTruthy();
+    }
+  });
+
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }
