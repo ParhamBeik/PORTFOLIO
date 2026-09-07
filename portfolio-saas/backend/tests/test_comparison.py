@@ -742,3 +742,24 @@ def test_the_index_is_named_in_labels_or_the_client_never_draws_it(benchmarked):
 
     assert "tse_index" in labels, labels
     assert labels["tse_index"]
+
+
+def test_benchmarks_accepts_thirty_day_window(benchmarked):
+    _index_history(30, step=1.01)
+
+    response = _benchmarks(benchmarked, window=30)
+
+    assert response.status_code == 200, response.data
+    assert response.data["window"] == 30
+    assert response.data["series"]
+
+
+def test_benchmarks_all_maps_to_lifetime_days(benchmarked):
+    _index_history(90, step=1.01)
+
+    response = _benchmarks(benchmarked, window="all")
+
+    assert response.status_code == 200, response.data
+    assert response.data["requested_window"] == "all"
+    assert response.data["requested_window_days"] >= 30
+    assert response.data["data_window"]["observations"] >= 2
