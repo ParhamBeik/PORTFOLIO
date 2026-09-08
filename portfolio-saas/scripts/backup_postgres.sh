@@ -19,8 +19,10 @@ passphrase_mode="$(stat -c '%a' "${passphrase_file}" 2>/dev/null || stat -f '%Lp
 mkdir -p "${backup_dir}"
 
 stamp="$(TZ="${BACKUP_TIMEZONE:-Asia/Tehran}" date +%F)"
-partial="${backup_dir}/daily-${stamp}.dump.enc.partial"
-destination="${partial%.partial}"
+destination="${backup_dir}/daily-${stamp}.dump.enc"
+# PID suffix: root cron and CI deploy used the same .partial name, so a
+# simultaneous run could not open the other's file (2026-09-08 CI deploy).
+partial="${destination}.partial.$$"
 scratch=("${partial}")
 # `:-` because bash 3.2 treats an empty array as unbound under `set -u`, and an
 # EXIT trap that itself errors would mask the real exit status.
@@ -42,6 +44,24 @@ publish() {
   chmod 664 "${tmp}"
   mv -f "${tmp}" "${target}"
 }
+
+# Nightly cron already wrote today's dump. Rewriting it as `deploy` fails when
+# the file is root-owned, and a second 1.6 GB dump delays every CI ship.
+if [[ -f "${destination}" ]]; then
+  echo "Reusing existing ${destination}"
+  set +o pipefail
+  openssl enc -d -aes-256-cbc -pbkdf2 -iter 310000 \
+    -pass "file:${passphrase_file}" -in "${destination}" 2>/dev/null \
+    | "${compose[@]}" exec -T db pg_restore --list >/dev/null
+  verify_status="${PIPESTATUS[1]}"
+  set -o pipefail
+  [[ "${verify_status}" -eq 0 ]] || {
+    echo "Existing backup is unreadable: ${destination}" >&2
+    exit 1
+  }
+  echo "Created ${destination}"
+  exit 0
+fi
 
 "${compose[@]}" exec -T db sh -c \
   'exec pg_dump --format=custom --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
