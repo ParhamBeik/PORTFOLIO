@@ -338,9 +338,10 @@ MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
 # bounded, knowable daily cost so they keep a cap; ARCHIVE has an effectively
 # infinite backlog and deliberately has none (see marketdata/quota.bucket_budget).
 #
-# The floor is the live reserve's lower bound, used when the plan cannot be read
-# (cold DB, mid-migration): over-reserving only slows the backfill, while
-# under-reserving gets customer-facing price fetches refused.
+# The floor is a hard lower bound on the live reserve on any day that will
+# actually spend (not a TSE weekend). Simulation alone under-counted TSETMC
+# (297 vs this 1200 on 2026-09-08) and archive spent the rest. Over-reserving
+# only slows the backfill; under-reserving gets live prices refused.
 MARKETDATA_LIVE_REQUEST_FLOOR = int(os.getenv("MARKETDATA_LIVE_REQUEST_FLOOR", "1200"))
 MARKETDATA_LIVE_REQUEST_HEADROOM = int(os.getenv("MARKETDATA_LIVE_REQUEST_HEADROOM", "500"))
 MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET", "200"))
@@ -362,6 +363,11 @@ MARKETDATA_PLAN_LIMIT_BRS = int(os.getenv("MARKETDATA_PLAN_LIMIT_BRS", "1500"))
 # exhausted. Exhaustion trips the breaker, and the breaker is what took the live
 # lane down with it.
 MARKETDATA_PLAN_SAFETY_MARGIN = int(os.getenv("MARKETDATA_PLAN_SAFETY_MARGIN", "150"))
+# Provider TSETMC bills ~30% more than we reserve (2026-09-05/06/08). Archive
+# leftover is charged at this ratio so live still has room on the provider meter.
+MARKETDATA_TSETMC_ARCHIVE_BILL_RATIO = float(
+    os.getenv("MARKETDATA_TSETMC_ARCHIVE_BILL_RATIO", "1.30")
+)
 # How long a tripped plan breaker stays closed before it lets ONE request
 # through to ask the provider again. The breaker used to latch until Tehran
 # midnight, which assumes a quota-shaped response can only mean a spent wallet

@@ -56,6 +56,12 @@ MARKETDATA_REQUIRE_SHARED_WINDOW = False
 # suite uses 5–20 request ceilings to pin the reserve arithmetic; that gap
 # would zero those wallets and hide the behaviour under test.
 MARKETDATA_PLAN_SAFETY_MARGIN = 0
+# Existing tests pin leftover arithmetic against an unscaled ceiling. Production
+# still charges TSETMC archive at 1.30; tests that cover that ratio set it.
+MARKETDATA_TSETMC_ARCHIVE_BILL_RATIO = 1.0
+# Production floor (1200) would replace simulated live cost in leftover tests.
+# Cases that need the floor set it explicitly.
+MARKETDATA_LIVE_REQUEST_FLOOR = 0
 
 # Run Celery tasks synchronously in-process. This removes the hard dependency on
 # a running Redis broker during tests — views that call `.delay()` (e.g.

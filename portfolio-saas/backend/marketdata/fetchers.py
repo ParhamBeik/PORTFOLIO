@@ -20,6 +20,7 @@ from .quota import (
     TSETMC,
     QuotaExhausted,
     clear_plan_breaker,
+    is_daily_quota_exhaustion,
     looks_like_quota_error,
     reconcile_account,
     reserve_request,
@@ -137,23 +138,65 @@ def fetch_json(
 
         # The provider is the source of truth for quota: reconcile our counter to
         # its `usage_today` whenever it exposes one, before deciding to retry.
-        block = reconcile_account(_extract_account(response), quota_plan)
+        account = _extract_account(response)
+        block = reconcile_account(account, quota_plan)
+
+        # #region agent log
+        if response.status_code >= 400 or response.history or account:
+            try:
+                import json as _json
+                from urllib.parse import urlsplit
+                _acct = account or {}
+                _payload = {
+                    "sessionId": "e89767",
+                    "runId": "post-fix",
+                    "hypothesisId": "H5" if (response.history or response.status_code >= 400) else "H1",
+                    "location": "fetchers.py:fetch_json",
+                    "message": "provider_http_result",
+                    "data": {
+                        "status": response.status_code,
+                        "plan": quota_plan,
+                        "bucket": quota_bucket,
+                        "path": urlsplit(url).path,
+                        "redirects": [r.status_code for r in response.history],
+                        "attempt": attempt,
+                        "has_account": bool(_acct),
+                        "usage_today": _acct.get("usage_today"),
+                        "limit_today": _acct.get("limit_today") or _acct.get("limit"),
+                        "daily_exhaustion": is_daily_quota_exhaustion(_acct, quota_plan),
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }
+                logger.info("agent_dbg %s", _json.dumps(_payload, default=str))
+                with open(
+                    "/Users/parham/Downloads/GITHUB_PROJECTS/API/PORTFOLIO/.cursor/debug-e89767.log",
+                    "a",
+                    encoding="utf-8",
+                ) as _fh:
+                    _fh.write(_json.dumps(_payload, default=str) + "\n")
+            except Exception:
+                pass
+        # #endregion
 
         # The provider signals an exhausted subscription with a 5xx carrying a
         # quota message. Checked before the status-class branches below, because
         # that response used to fall straight through to `response.json()` and be
         # returned as if it were data -- a 500 was never handled at all.
         if looks_like_quota_error(response.status_code, response.text):
-            trip_plan_breaker(
-                quota_plan,
-                reason=f"http_{response.status_code}",
-                bucket=quota_bucket,
-            )
-            raise QuotaExhausted(
-                f"Provider reports the {quota_plan} plan exhausted "
-                f"(HTTP {response.status_code}); paused until reset.",
-                reason="plan_blocked",
-            )
+            if is_daily_quota_exhaustion(account, quota_plan):
+                trip_plan_breaker(
+                    quota_plan,
+                    reason=f"http_{response.status_code}",
+                    bucket=quota_bucket,
+                )
+                raise QuotaExhausted(
+                    f"Provider reports the {quota_plan} plan exhausted "
+                    f"(HTTP {response.status_code}); paused until reset.",
+                    reason="plan_blocked",
+                )
+            # Burst/window 429 or a quota-shaped 5xx while usage is still
+            # under the daily ceiling: do not trip the day. Fall through to
+            # the retry/backoff branches below.
 
         if 400 <= response.status_code < 500 and response.status_code != 429:
             raise PermanentMarketDataError(

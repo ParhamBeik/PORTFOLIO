@@ -65,9 +65,36 @@ from .models import ApiRequestQuota
 
 logger = logging.getLogger(__name__)
 
+
+# #region agent log
+def _agent_dbg(hypothesis_id, location, message, data):
+    """Session e89767: dual-write so VPS docker logs and local debug file both see it."""
+    try:
+        import json as _json
+        payload = {
+            "sessionId": "e89767",
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        logger.info("agent_dbg %s", _json.dumps(payload, default=str))
+        with open(
+            "/Users/parham/Downloads/GITHUB_PROJECTS/API/PORTFOLIO/.cursor/debug-e89767.log",
+            "a",
+            encoding="utf-8",
+        ) as _fh:
+            _fh.write(_json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
+# #endregion
+
 ARCHIVE = "archive"
 LIVE = "live"
 OTHER = "other"
+_H2_LOGGED = set()
 
 # Provider subscriptions. One counter row and one circuit breaker per plan.
 TSETMC = "tsetmc"
@@ -85,6 +112,13 @@ _LOCAL_WINDOWS = collections.defaultdict(collections.deque)
 # gets 1/Nth of the window so N of them together stay under the provider's real
 # limit. Over-estimating only throttles us; under-estimating gets us blocked.
 _DEGRADED_PROCESS_DIVISOR = 10
+
+# 2026-09-08: AIO panel billed 10058 against 7833 reserved TSETMC calls. The
+# 2225-request gap landed in other_used on the 429, after archive had already
+# spent past what the provider still needed for live. Until those extra bills
+# have a call site, TSETMC archive leftover is charged at this ratio.
+# ponytail: measured ratio, not a product knob; set 1.0 in tests that pin leftovers.
+_TSETMC_ARCHIVE_BILL_RATIO = 1.30
 
 
 def get_historical_full_used_today():
@@ -392,6 +426,19 @@ def trip_plan_breaker(plan, *, reason="", bucket=None):
         plan, effective or "plan", reason or "-",
         getattr(settings, "MARKETDATA_BREAKER_RETRY_SECONDS", 900),
     )
+    # #region agent log
+    _agent_dbg(
+        "H4",
+        "quota.py:trip_plan_breaker",
+        "breaker_tripped",
+        {
+            "plan": plan,
+            "bucket": effective,
+            "reason": reason or "-",
+            "quota_day": str(quota_day()),
+        },
+    )
+    # #endregion
 
 
 def looks_like_quota_error(status_code, body_text):
@@ -399,6 +446,33 @@ def looks_like_quota_error(status_code, body_text):
     if status_code not in (429, 500, 502, 503):
         return False
     return bool(_QUOTA_MESSAGE_RE.search(body_text or ""))
+
+
+def is_daily_quota_exhaustion(account, plan, row=None):
+    """True when the error means the daily wallet is spent, not a burst 429.
+
+    On 2026-09-08 BRS tripped on HTTP 429 with 77 archive calls logged while the
+    vendor panel still showed 349/1500. TSETMC the same morning was a real
+    empty wallet (10058/10000). `looks_like_quota_error` cannot tell those
+    apart; `usage_today` vs the plan ceiling can.
+    """
+    if not isinstance(account, dict):
+        return True
+    try:
+        usage = int(account.get("usage_today"))
+    except (TypeError, ValueError):
+        return True
+    reported_limit = None
+    for name in ("limit_today", "daily_limit", "request_limit", "limit"):
+        try:
+            reported_limit = int(account[name])
+            break
+        except (KeyError, TypeError, ValueError):
+            continue
+    limit = reported_limit or effective_limit(plan, row)
+    if not limit:
+        return True
+    return usage >= limit - _safety_margin()
 
 
 def _quota_row(plan, *, locked=False):
@@ -610,6 +684,16 @@ def live_day_cost(plan, row=None, now=None):
     except Exception:
         logger.warning("live plan unavailable; reserving the price loop only")
     cap = bucket_budget(LIVE, plan, row)
+    # The floor is a lower bound, not just the first term of the live cap.
+    # On 2026-09-08 TSETMC simulated to 297 against FLOOR=1200, archive was
+    # handed ~9,300, and live used 16 before the provider 429'd at 10,058.
+    # Apply only when the floor sits strictly below the live cap (production:
+    # 1200 < 1700). When HEADROOM is 0, FLOOR *is* the cap and the simulation
+    # is used as-is, clamped — the warehouse tests' old pattern.
+    # Skip entirely when the lane will spend nothing (TSE weekend).
+    floor = int(getattr(settings, "MARKETDATA_LIVE_REQUEST_FLOOR", 0) or 0)
+    if needed > 0 and floor and (cap is None or floor < cap):
+        needed = max(needed, floor)
     if cap is not None:
         needed = min(needed, cap)
     return max(0, needed)
@@ -694,10 +778,59 @@ def archive_day_ceiling(plan, row=None, now=None):
     other_spent = getattr(row, "other_used", 0) or 0
     reserve = live_reserve_remaining(plan, row, now=now)
     other_reserve = other_reserve_remaining(plan, row)
-    return max(
+    result = max(
         0,
         ceiling - _safety_margin() - live_spent - reserve - other_spent - other_reserve,
     )
+    if plan == TSETMC:
+        ratio = float(
+            getattr(
+                settings,
+                "MARKETDATA_TSETMC_ARCHIVE_BILL_RATIO",
+                _TSETMC_ARCHIVE_BILL_RATIO,
+            )
+            or _TSETMC_ARCHIVE_BILL_RATIO
+        )
+        if ratio > 1:
+            result = int(result / ratio)
+    # #region agent log
+    day = quota_day()
+    if (plan, day) not in _H2_LOGGED:
+        _H2_LOGGED.add((plan, day))
+        floor = int(getattr(settings, "MARKETDATA_LIVE_REQUEST_FLOOR", 0) or 0)
+        _agent_dbg(
+            "H2",
+            "quota.py:archive_day_ceiling",
+            "archive_ceiling_vs_live_floor",
+            {
+                "plan": plan,
+                "quota_day": str(day),
+                "ceiling_assumed": ceiling,
+                "safety": _safety_margin(),
+                "live_spent": live_spent,
+                "live_reserve": reserve,
+                "live_floor_setting": floor,
+                "other_spent": other_spent,
+                "other_reserve": other_reserve,
+                "archive_day_ceiling": result,
+                "used": getattr(row, "used", 0) if row else 0,
+            },
+        )
+        local = timezone.now().astimezone(ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE))
+        _agent_dbg(
+            "H3",
+            "quota.py:archive_day_ceiling",
+            "quota_clock",
+            {
+                "quota_day": str(day),
+                "tehran_now": local.isoformat(),
+                "utc_now": timezone.now().isoformat(),
+                "django_tz": getattr(settings, "TIME_ZONE", ""),
+                "quota_tz": settings.MARKETDATA_QUOTA_TIMEZONE,
+            },
+        )
+    # #endregion
+    return result
 
 
 def archive_allowance_now(plan, row=None, now=None):
@@ -938,6 +1071,23 @@ def reconcile_account(account, plan=TSETMC):
                 "quota reconciled plan=%s day_usage %d->%d unattributed=%d",
                 plan, row.used, usage, drift,
             )
+            # #region agent log
+            _agent_dbg(
+                "H1",
+                "quota.py:reconcile_account",
+                "provider_usage_ahead_of_local",
+                {
+                    "plan": plan,
+                    "local_used": row.used,
+                    "provider_usage": usage,
+                    "drift": drift,
+                    "archive_used": row.archive_used,
+                    "live_used": row.live_used,
+                    "other_used": row.other_used,
+                    "quota_day": str(quota_day()),
+                },
+            )
+            # #endregion
             row.used = usage
             row.other_used += drift
             updates += ["used", "other_used"]
