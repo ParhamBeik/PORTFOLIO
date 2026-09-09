@@ -25,6 +25,7 @@ from django.utils import timezone
 
 from . import ingest, jalali
 from .archive import (
+    _ENDPOINT_PLAN,
     claim_archive_batch,
     claim_archive_maintenance,
     ensure_archive_states,
@@ -404,12 +405,22 @@ def operational_health_check():
     # avoid. Ask whether there is quota to make progress with first; if there is
     # and nothing has moved in 30 minutes, that is a real stall.
     from .quota import archive_capacity
+    from django.db.models import Q
 
     stale_before = timezone.now() - timedelta(seconds=settings.ARCHIVE_PROGRESS_STALE_SECONDS)
-    capacity = sum(archive_capacity().values())
+    capacity_by_plan = archive_capacity()
+    available_endpoints = [
+        endpoint for endpoint, plan in _ENDPOINT_PLAN.items()
+        if plan is None or capacity_by_plan.get(plan, 0) > 0
+    ]
     if (
-        capacity
-        and ArchiveFetchState.objects.filter(verified_complete=False).exists()
+        available_endpoints
+        and ArchiveFetchState.objects.filter(
+            verified_complete=False,
+            endpoint__in=available_endpoints,
+            suspended_at__isnull=True,
+            blacklisted=False,
+        ).filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=timezone.now())).exists()
         and not WorkflowRun.objects.filter(
             workflow="archive_state",
             outcome__in=(WorkflowRun.Outcome.SUCCESS, WorkflowRun.Outcome.PARTIAL),
@@ -418,7 +429,7 @@ def operational_health_check():
     ):
         alerts.append(("stale-archive-progress", {
             "stale_seconds": settings.ARCHIVE_PROGRESS_STALE_SECONDS,
-            "archive_capacity": capacity,
+            "archive_capacity": sum(capacity_by_plan.values()),
         }))
 
     # Per plan: each subscription is its own ledger, and summing them would let
