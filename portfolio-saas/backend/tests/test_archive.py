@@ -35,6 +35,7 @@ from marketdata.models import (
     ArchiveFetchState,
     DailyStockHistory,
     MarketInstrument,
+    WorkflowRun,
 )
 from marketdata.models import MarketCandle
 from marketdata.models import RejectedRecord
@@ -876,6 +877,33 @@ def test_archive_tick_skips_when_lock_is_held(monkeypatch):
     archive_tick()
 
     ensure.assert_not_called()
+
+
+def test_archive_tick_records_spent_budget_once_per_quota_day(monkeypatch):
+    import marketdata.tasks as tasks
+
+    client = mock.Mock()
+    idle_marks = 0
+
+    def claim_once(key, *_args, **_kwargs):
+        nonlocal idle_marks
+        if key.startswith("lock:"):
+            return True
+        idle_marks += 1
+        return idle_marks == 1
+
+    client.set.side_effect = claim_once
+    monkeypatch.setattr(tasks, "get_redis", lambda: client)
+    monkeypatch.setattr("marketdata.quota.archive_capacity", lambda: {"tsetmc": 0})
+    monkeypatch.setattr("marketdata.quota.archive_idle_reason", lambda _plan: "live_reserved")
+    monkeypatch.setattr("marketdata.quota.PLANS", ("tsetmc",))
+
+    archive_tick()
+    archive_tick()
+
+    assert WorkflowRun.objects.filter(
+        workflow="archive_tick", metadata__reason="archive_budget_empty"
+    ).count() == 1
 
 
 def test_archive_tick_claims_only_free_queue_slots(monkeypatch):

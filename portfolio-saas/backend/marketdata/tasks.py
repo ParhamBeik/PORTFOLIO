@@ -781,24 +781,29 @@ def archive_tick():
     from .models import WorkflowRun
     from .workflows import WorkflowOutcome
 
-    outcome = WorkflowOutcome("archive_tick", endpoint="archive_scheduler")
+    outcome = None
     redis_client = get_redis()
     lock_key = "lock:archive_tick"
     lock_token = uuid.uuid4().hex
     # Short lock around claim+dispatch only. Per-state leases use
     # select_for_update(skip_locked=True); quota serializes with its own lock.
     if redis_client and not redis_client.set(lock_key, lock_token, ex=30, nx=True):
-        outcome.finish(WorkflowRun.Outcome.SKIPPED, metadata={"reason": "lock_held"})
         return
     try:
         from .models import ArchiveFetchState
-        from .quota import PLANS, archive_capacity, archive_idle_reason
+        from .quota import PLANS, archive_capacity, archive_idle_reason, quota_day
         capacity = archive_capacity()
         if not any(value > 0 for value in capacity.values()):
             reasons = {plan: archive_idle_reason(plan) for plan in PLANS}
             paced = bool(reasons) and all(
                 reason == "archive_paced" for reason in reasons.values()
             )
+            marker = f"archive:idle:{quota_day()}:{'paced' if paced else 'spent'}"
+            if redis_client and not redis_client.set(
+                marker, "1", ex=300 if paced else 90_000, nx=True
+            ):
+                return
+            outcome = WorkflowOutcome("archive_tick", endpoint="archive_scheduler")
             outcome.finish(
                 WorkflowRun.Outcome.SKIPPED,
                 error_code="archive_paced" if paced else "quota_exhausted",
@@ -809,6 +814,7 @@ def archive_tick():
                 },
             )
             return
+        outcome = WorkflowOutcome("archive_tick", endpoint="archive_scheduler")
         slots, depth = _queue_slots(
             "archive", settings.MARKETDATA_ARCHIVE_QUEUE_LIMIT
         )
@@ -864,6 +870,7 @@ def archive_tick():
             metadata={"quota_headroom": budget, "dispatched": len(batch)},
         )
     except Exception as err:
+        outcome = outcome or WorkflowOutcome("archive_tick", endpoint="archive_scheduler")
         outcome.finish(
             WorkflowRun.Outcome.FAILED,
             error_code=type(err).__name__,
