@@ -1011,12 +1011,12 @@ class TestLiveReserve:
         # overnight cycles it will actually spend.
         assert quota.live_reserve_remaining(quota.BRS, self._row(), now=midnight_tehran) == 288
 
-    def test_the_reserve_does_not_shrink_as_the_day_closes(self, settings):
-        """Static 24h slice: evening leftover is not released to archive."""
+    def test_the_reserve_shrinks_with_the_remaining_schedule(self, settings):
+        """Only requests still scheduled before rollover stay reserved."""
         self._configure(settings)
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
         two_hours_left = datetime(2026, 7, 27, 18, 30, tzinfo=dt_timezone.utc)
-        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=two_hours_left) == 288
+        assert quota.live_reserve_remaining(quota.BRS, self._row(), now=two_hours_left) == 24
         assert quota.live_reserve_remaining(quota.BRS, self._row(), now=midnight_tehran) == 288
 
     def test_the_reserve_never_exceeds_what_live_could_still_spend(self, settings):
@@ -1025,7 +1025,7 @@ class TestLiveReserve:
         settings.MARKETDATA_LIVE_REQUEST_FLOOR = 100
         midnight_tehran = datetime(2026, 7, 26, 20, 30, tzinfo=dt_timezone.utc)
         row = self._row(live_used=70)
-        assert quota.live_reserve_remaining(quota.BRS, row, now=midnight_tehran) == 30
+        assert quota.live_reserve_remaining(quota.BRS, row, now=midnight_tehran) == 100
 
     def test_the_reserve_prices_the_day_it_is_asked_about(self, settings):
         """The TSE lane costs nothing on a weekend -- and that must be decided

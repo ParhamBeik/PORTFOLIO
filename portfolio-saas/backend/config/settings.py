@@ -338,10 +338,10 @@ MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
 # bounded, knowable daily cost so they keep a cap; ARCHIVE has an effectively
 # infinite backlog and deliberately has none (see marketdata/quota.bucket_budget).
 #
-# The floor is a hard lower bound on the live reserve on any day that will
-# actually spend (not a TSE weekend). Simulation alone under-counted TSETMC
-# (297 vs this 1200 on 2026-09-08) and archive spent the rest. Over-reserving
-# only slows the backfill; under-reserving gets live prices refused.
+# FLOOR + HEADROOM is the live bucket's own daily ceiling -- the safety valve
+# that stops a mis-set cadence spending a wallet, deliberately a constant rather
+# than something derived from the plan (a cap that grows with what it caps can
+# never bind). The live reserve is a forward simulation of the real planner.
 MARKETDATA_LIVE_REQUEST_FLOOR = int(os.getenv("MARKETDATA_LIVE_REQUEST_FLOOR", "1200"))
 MARKETDATA_LIVE_REQUEST_HEADROOM = int(os.getenv("MARKETDATA_LIVE_REQUEST_HEADROOM", "500"))
 MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET", "200"))
@@ -358,16 +358,23 @@ MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET
 # any 10 days: that gap is what let archive spend 10,034 of 10,000 requests
 # before dawn on 2026-08-26 while live_used sat at 0.
 MARKETDATA_PLAN_LIMIT_TSETMC = int(os.getenv("MARKETDATA_PLAN_LIMIT_TSETMC", "10000"))
-MARKETDATA_PLAN_LIMIT_BRS = int(os.getenv("MARKETDATA_PLAN_LIMIT_BRS", "1500"))
+# 0 means UNMETERED, not empty. Measured against the live API on 2026-09-09:
+# `Market/*` reports `type: "خرید نشده"` (not purchased) with
+# `usage_today_limit: 0`, and calls to Gold_Currency, Cryptocurrency and
+# Commodity move no counter at all. The 1,500 here until then was a lapsed
+# subscription, and defending it cost the gold/currency backfill all but 150
+# requests a day. Set this to the real number if the plan is bought again --
+# though the provider will disclose it on its own once it does.
+MARKETDATA_PLAN_LIMIT_BRS = int(os.getenv("MARKETDATA_PLAN_LIMIT_BRS", "0"))
 # Archive stops this far short of the ceiling so the wallet is never actually
 # exhausted. Exhaustion trips the breaker, and the breaker is what took the live
 # lane down with it.
-MARKETDATA_PLAN_SAFETY_MARGIN = int(os.getenv("MARKETDATA_PLAN_SAFETY_MARGIN", "150"))
-# Provider TSETMC bills ~30% more than we reserve (2026-09-05/06/08). Archive
-# leftover is charged at this ratio so live still has room on the provider meter.
-MARKETDATA_TSETMC_ARCHIVE_BILL_RATIO = float(
-    os.getenv("MARKETDATA_TSETMC_ARCHIVE_BILL_RATIO", "1.30")
-)
+#
+# 150 -> 50 on 2026-09-09. A margin is insurance against not knowing what the
+# provider has really billed, and `reconcile_quota_meters` now asks it every
+# five minutes while spending. Buying certainty is cheaper than reserving
+# against its absence.
+MARKETDATA_PLAN_SAFETY_MARGIN = int(os.getenv("MARKETDATA_PLAN_SAFETY_MARGIN", "50"))
 # How long a tripped plan breaker stays closed before it lets ONE request
 # through to ask the provider again. The breaker used to latch until Tehran
 # midnight, which assumes a quota-shaped response can only mean a spent wallet
@@ -396,6 +403,13 @@ MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR = int(
 # refusal from the provider. It used to be deferred to the next quota day, which
 # parked ~7,000 states nightly and left ~4,000 TSETMC requests a day unspent.
 # Jittered +/-50% at the call site so a refused batch does not return as a herd.
+# How long an archive state waits after being refused because the live lane
+# still needs the remaining quota. Much longer than a pacing wait: the reserve
+# releases in steps as the live cadence winds down (the big one is the 13:00
+# Tehran session close), not continuously.
+MARKETDATA_LIVE_RESERVED_RETRY_SECONDS = int(
+    os.getenv("MARKETDATA_LIVE_RESERVED_RETRY_SECONDS", "1800")
+)
 MARKETDATA_ARCHIVE_PACED_RETRY_SECONDS = int(
     os.getenv("MARKETDATA_ARCHIVE_PACED_RETRY_SECONDS", "180")
 )

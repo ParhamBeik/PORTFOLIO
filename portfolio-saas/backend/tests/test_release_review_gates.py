@@ -124,6 +124,9 @@ def test_probe_holder_can_retry_without_a_second_admit(settings):
 
 
 def test_other_reserve_is_tsetmc_only(settings):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
     from marketdata.models import ApiRequestQuota
     from marketdata import quota
     from marketdata.quota import BRS, TSETMC, archive_day_ceiling, other_reserve_remaining
@@ -135,7 +138,8 @@ def test_other_reserve_is_tsetmc_only(settings):
     assert other_reserve_remaining(BRS, row) == 0
     with mock.patch.object(quota, "live_reserve_remaining", return_value=0):
         assert archive_day_ceiling(BRS, row) == 1500
-    assert other_reserve_remaining(TSETMC, None) == 200
+    morning = datetime(2026, 9, 10, 9, 0, tzinfo=ZoneInfo("Asia/Tehran"))
+    assert other_reserve_remaining(TSETMC, None, now=morning) == 200
 
 
 def test_archive_half_open_does_not_advertise_room_to_the_batcher(settings):

@@ -59,9 +59,18 @@ def _safe_params(params):
 def _extract_account(response):
     """Pull the provider's `account` block out of any response, success or error.
 
-    The block rides on every envelope (and on rate-limit error bodies), reporting
-    `usage_today` and `request_block`. Swallowing parse failures here keeps a
-    malformed body from masking the real HTTP error that the caller will raise.
+    **It rides on error envelopes only.** Verified against the live API on
+    2026-09-09: three consecutive HTTP 200s from `Tsetmc/Index.php` carried
+    `date`, `time`, `state`, `index`... and no `account` key at all, while a
+    malformed request returned HTTP 400 with the full block. The docstring here
+    used to claim it rode on every envelope, which is why nothing ever noticed
+    that the local counter could only self-heal when something broke -- and it
+    drifted silently in between (2,226 requests on 2026-09-08).
+
+    `probe_meter` exists to buy that block deliberately.
+
+    Swallowing parse failures here keeps a malformed body from masking the real
+    HTTP error that the caller will raise.
     """
     try:
         body = response.json()
@@ -141,42 +150,6 @@ def fetch_json(
         account = _extract_account(response)
         block = reconcile_account(account, quota_plan)
 
-        # #region agent log
-        if response.status_code >= 400 or response.history or account:
-            try:
-                import json as _json
-                from urllib.parse import urlsplit
-                _acct = account or {}
-                _payload = {
-                    "sessionId": "e89767",
-                    "runId": "post-fix",
-                    "hypothesisId": "H5" if (response.history or response.status_code >= 400) else "H1",
-                    "location": "fetchers.py:fetch_json",
-                    "message": "provider_http_result",
-                    "data": {
-                        "status": response.status_code,
-                        "plan": quota_plan,
-                        "bucket": quota_bucket,
-                        "path": urlsplit(url).path,
-                        "redirects": [r.status_code for r in response.history],
-                        "attempt": attempt,
-                        "has_account": bool(_acct),
-                        "usage_today": _acct.get("usage_today"),
-                        "limit_today": _acct.get("limit_today") or _acct.get("limit"),
-                        "daily_exhaustion": is_daily_quota_exhaustion(_acct, quota_plan),
-                    },
-                    "timestamp": int(time.time() * 1000),
-                }
-                logger.info("agent_dbg %s", _json.dumps(_payload, default=str))
-                with open(
-                    "/Users/parham/Downloads/GITHUB_PROJECTS/API/PORTFOLIO/.cursor/debug-e89767.log",
-                    "a",
-                    encoding="utf-8",
-                ) as _fh:
-                    _fh.write(_json.dumps(_payload, default=str) + "\n")
-            except Exception:
-                pass
-        # #endregion
 
         # The provider signals an exhausted subscription with a 5xx carrying a
         # quota message. Checked before the status-class branches below, because
@@ -246,6 +219,85 @@ def fetch_json(
         clear_plan_breaker(quota_plan, bucket=quota_bucket)
         return payload
     raise TransientMarketDataError("Provider request failed.")
+
+
+# One deliberately-invalid request per plan, chosen for the smallest response
+# the provider will produce. The provider validates the parameter before it
+# does any work, so the answer is a ~460-byte HTTP 400 carrying the account
+# block -- and it is billed exactly like any other request, which is why the
+# probe reserves quota for itself.
+_METER_PROBES = {
+    "tsetmc": ("Tsetmc/Index.php", {"type": 99}),
+    "brs": ("Market/Gold_Currency_Pro.php", {"history": "bogus"}),
+}
+
+
+def probe_meter(plan):
+    """Spend one request to read `plan`'s true meter, and reconcile to it.
+
+    Returns the provider's `account` block, or None if the plan could not be
+    probed. The block is the only way to see what the vendor panel sees: the
+    provider does not report usage on a successful response (see
+    `_extract_account`), so without this the local counter drifts unobserved
+    until an error happens to disclose the truth.
+
+    Deliberately triggering a 400 is not a trick -- it is the cheapest legal way
+    to ask "what is my usage", and the provider charges for it either way. The
+    alternative was a 1.30 multiplier applied to the archive's ceiling to
+    *guess* at the drift, which silently discarded 1,950 TSETMC requests a day.
+
+    Skipped while the plan's breaker is tripped: the breaker's own half-open
+    request is the one probe that should reach a plan the provider is refusing,
+    and a second one would spend it.
+    """
+    from django.conf import settings
+
+    from .quota import OTHER, QuotaExhausted, is_plan_blocked, reconcile_account
+
+    if plan not in _METER_PROBES:
+        return None
+    if is_plan_blocked(plan):
+        return None
+    api_key = settings.TSETMC_API_KEY if plan == "tsetmc" else settings.BRS_API_KEY
+    if not api_key:
+        return None
+
+    path, params = _METER_PROBES[plan]
+    try:
+        reserve_request(OTHER, plan)
+    except QuotaExhausted:
+        return None
+    from .workflows import record_http_attempt
+
+    record_http_attempt(quota=True)
+    try:
+        response = requests.get(
+            f"{endpoints.BASE_URL}/{path}",
+            params={"key": api_key, **params},
+            headers=DEFAULT_HEADERS,
+            timeout=(
+                settings.MARKETDATA_HTTP_CONNECT_TIMEOUT,
+                settings.MARKETDATA_HTTP_READ_TIMEOUT,
+            ),
+        )
+    except requests.exceptions.RequestException as exc:
+        logger.warning("quota meter probe failed for plan %s: %s", plan, type(exc).__name__)
+        return None
+
+    account = _extract_account(response)
+    if not account:
+        # The provider answered something we did not expect -- most likely the
+        # parameter we rely on being rejected has become valid. Say so loudly:
+        # a probe that silently stops disclosing usage puts the counter back to
+        # drifting blind, which is the whole bug this was written to end.
+        logger.warning(
+            "quota meter probe for plan %s returned HTTP %s with no account block; "
+            "the probe parameter may no longer be rejected",
+            plan, response.status_code,
+        )
+        return None
+    reconcile_account(account, plan)
+    return account
 
 
 def _call(endpoint_key, api_key, **params):

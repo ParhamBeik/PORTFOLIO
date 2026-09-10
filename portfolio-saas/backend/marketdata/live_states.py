@@ -135,25 +135,6 @@ def _session_bounds(day):
     return open_at, close_at
 
 
-def planned_requests(start, end, plan=None):
-    """Live-bucket requests these states will spend across [start, end).
-
-    `plan` narrows the answer to one provider subscription, because the reserve
-    it feeds is now per-plan: gold/currency requests must not be held back on
-    behalf of TSETMC states that bill a different wallet entirely.
-    """
-    states = LiveFetchState.objects.filter(enabled=True)
-    if plan is not None:
-        from . import endpoints
-
-        keys = [
-            key for key, endpoint in endpoints.REGISTRY.items()
-            if endpoint.plan == plan
-        ]
-        states = states.filter(endpoint_key__in=keys)
-    return sum(_firings_until(state, start, end) for state in states)
-
-
 def day_start(now=None):
     """Midnight Tehran for `now`'s quota day (default: the current one).
 
@@ -175,9 +156,10 @@ def day_start(now=None):
 def full_day_cost(states=None):
     """What these states cost over one complete 24h window.
 
-    Independent of the time of day on purpose: a mid-afternoon reading of the
-    remaining plan would size a budget at half the real need. `states=None` costs
-    the whole enabled table.
+    Independent of the time of day on purpose: this is the *day's* plan, used to
+    size a budget and to report the lane's shape in the console. What still has
+    to be paid for between now and rollover is `remaining_day_cost`.
+    `states=None` costs the whole enabled table.
     """
     if states is None:
         states = LiveFetchState.objects.filter(enabled=True)
@@ -189,6 +171,23 @@ def full_day_cost(states=None):
         state.next_attempt_at = None
         total += _firings_until(state, start, start + timedelta(days=1))
     return total
+
+
+def remaining_day_cost(states=None, now=None):
+    """What these states will still cost between `now` and Tehran midnight.
+
+    The forward half of `full_day_cost`, and the reason the live reserve can
+    shrink as a day is used up. `next_attempt_at` is honoured here rather than
+    cleared: a state that is not due for another ten minutes genuinely will not
+    fire before then, and the whole question is what remains to be paid.
+    """
+    if states is None:
+        states = LiveFetchState.objects.filter(enabled=True)
+    now = now or timezone.now()
+    end = day_start(now) + timedelta(days=1)
+    if now >= end:
+        return 0
+    return sum(_firings_until(state, now, end) for state in states)
 
 
 def claim_due(endpoint_key, limit=None):

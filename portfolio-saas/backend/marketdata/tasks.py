@@ -996,6 +996,77 @@ def prune_workflow_runs():
 
 
 @shared_task(ignore_result=True)
+def reconcile_quota_meters():
+    """Ask the provider what it has actually billed today, one request per plan.
+
+    This is the only way to know. BrsApi does not report usage on a successful
+    response, so between error responses the local counter is an estimate that
+    can only drift downward -- it was 2,226 requests light on 2026-09-08, and
+    the response to that was a 1.30 correction factor on the archive's ceiling
+    that threw away 1,950 requests a day. A probe costs one request and replaces
+    the guess with the number the vendor panel shows.
+
+    **Probes only while a plan is spending.** The counter cannot drift when
+    nothing is being fetched, so an idle plan is skipped and a quiet night costs
+    nothing. In practice this is ~1-3% of the wallet on an active day, which is
+    what the accuracy is worth: without it the safety margin has to absorb the
+    unknown, and a margin sized for an unknown is indistinguishable from waste.
+    """
+    from .fetchers import probe_meter
+    from .quota import PLANS, quota_day, unattributed_used
+    from .models import ApiRequestQuota, WorkflowRun
+
+    outcome = _ledgered("reconcile_quota_meters", destination_table="ApiRequestQuota")
+    try:
+        from django.core.cache import cache
+
+        day = quota_day()
+        probed, skipped = {}, []
+        for plan in PLANS:
+            row = ApiRequestQuota.objects.filter(day=day, plan=plan).first()
+            used = row.used if row else 0
+            mark_key = f"quota:meter:last_used:{plan}:{day}"
+            if used and cache.get(mark_key) == used:
+                skipped.append(plan)
+                continue
+            account = probe_meter(plan)
+            if account is None:
+                skipped.append(plan)
+                continue
+            row = ApiRequestQuota.objects.filter(day=day, plan=plan).first()
+            cache.set(mark_key, row.used if row else used, timeout=_SECONDS_PER_DAY)
+            probed[plan] = {
+                "provider_usage": account.get("usage_today"),
+                "provider_limit": account.get("usage_today_limit"),
+                "local_used": row.used if row else used,
+                "unattributed": unattributed_used(row),
+            }
+            drift = probed[plan]["unattributed"]
+            if drift > _QUOTA_DRIFT_ALERT:
+                logger.warning(
+                    "quota_drift plan=%s unattributed=%d of %d billed; something is "
+                    "spending this key outside reserve_request",
+                    plan, drift, probed[plan]["local_used"],
+                )
+        outcome.finish(
+            WorkflowRun.Outcome.SUCCESS,
+            rows_accepted=len(probed),
+            metadata={"probed": probed, "skipped": skipped},
+        )
+        return probed
+    except Exception as err:
+        _finish_fail(outcome, err)
+        raise
+
+
+#: Unattributed requests on one plan that mean the ledger has stopped describing
+#: reality. Sized above the handful a deploy or a manual probe leaves behind and
+#: well under the 2,226 seen on 2026-09-08.
+_QUOTA_DRIFT_ALERT = 200
+_SECONDS_PER_DAY = 86400
+
+
+@shared_task(ignore_result=True)
 def archive_maintenance():
     """Reverify completed low-volatility endpoints outside normal batches."""
     outcome = _ledgered("archive_maintenance", destination_table="ArchiveFetchState")
