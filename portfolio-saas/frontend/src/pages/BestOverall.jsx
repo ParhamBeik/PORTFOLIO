@@ -31,16 +31,10 @@ const SCENARIOS = [
   { value: "max_sharpe", label: "Max Sharpe" },
   { value: "min_volatility", label: "Min volatility" },
 ];
-const HOLD_BAND = 0.005; // |delta weight| under 0.5pp reads as HOLD, not a trade signal.
-
-function actionBadge(deltaWeight) {
-  if (Math.abs(deltaWeight) < HOLD_BAND) return <Badge variant="neutral">HOLD</Badge>;
-  return deltaWeight > 0 ? <Badge variant="good">BUY</Badge> : <Badge variant="critical">SELL</Badge>;
-}
 
 export default function BestOverall() {
   const { activeId, basis } = usePortfolio();
-  const best = useApi(bestOverall, []);
+  const best = useApi(() => bestOverall(activeId), [activeId]);
   const val = useApi(() => valuation(activeId, basis), [activeId, basis]);
   const assets = useApi(listAssets, []);
   const labelFor = useMemo(() => {
@@ -108,7 +102,21 @@ function BestOverallReady({ data, windows, valState, labelFor }) {
 
   return (
     <>
-      <p className="mt-1 text-sm text-muted">Computed {dateTime(data.as_of)}</p>
+      <p className="mt-1 text-sm text-muted" data-testid="universe-as-of">
+        Snapshot {dateTime(data.as_of)}
+        {valState.data ? (
+          <>
+            {" "}
+            · live valuation used for the gap below
+            {valState.data.items?.some((i) => i.priced_at)
+              ? ` (freshest quote ${dateTime(
+                  [...valState.data.items.map((i) => i.priced_at).filter(Boolean)].sort().at(-1)
+                )})`
+              : ""}
+            . Those two clocks can disagree.
+          </>
+        ) : null}
+      </p>
 
       <div className="mt-6 flex flex-wrap gap-4">
         <Tabs
@@ -175,10 +183,10 @@ function BestOverallReady({ data, windows, valState, labelFor }) {
             testId="universe-gap-card"
             className="mt-6"
             title="Gap vs my portfolio"
-            subtitle="Computed in the browser by differencing your latest valuation against the ideal weights above. Indicative only — places no orders, and ignores transaction costs, liquidity, and tax."
+            subtitle="Trades are computed on the server from your live valuation against the nightly target. Indicative only — places no orders, and ignores transaction costs, liquidity, and tax."
           >
             <Async {...valState} testId="universe-gap" empty="No valuation yet.">
-              {(v) => <GapModule valuation={v} target={opt.target_weights} labelFor={labelFor} />}
+              {(v) => <GapModule valuation={v} opt={opt} labelFor={labelFor} />}
             </Async>
           </Card>
         </>
@@ -191,9 +199,13 @@ function BestOverallReady({ data, windows, valState, labelFor }) {
   );
 }
 
-function GapModule({ valuation: v, target, labelFor }) {
-  const total = Number(v.total) || 0;
-  if (!v.items?.length || total <= 0) {
+function GapModule({ valuation: v, opt, labelFor }) {
+  const target = opt.target_weights || {};
+  const trades = opt.rebalance_trades || [];
+  // Match the server's liquid portfolio used for rebalance trades.
+  const items = (v.items || []).filter((i) => i.class !== "Real Estate" && i.value != null);
+  const total = items.reduce((sum, i) => sum + Number(i.value), 0);
+  if (!items.length || total <= 0) {
     return (
       <Empty
         testId="universe-gap-empty"
@@ -206,7 +218,7 @@ function GapModule({ valuation: v, target, labelFor }) {
           </Link>
         }
       >
-        Add holdings to see your gap to the ideal allocation.
+        Add priced liquid holdings to see your gap to the ideal allocation.
       </Empty>
     );
   }
@@ -217,7 +229,8 @@ function GapModule({ valuation: v, target, labelFor }) {
   // column summed to less than 100% and the trade sizes were overstated by the
   // difference (703m T of quarter_coin against a true gap of ~215m).
   const currentByKey = new Map();
-  for (const i of v.items) {
+  for (const i of items) {
+    if (Number(i.value) <= 0) continue;
     currentByKey.set(i.key, (currentByKey.get(i.key) ?? 0) + Number(i.value) / total);
   }
   // What the owner calls their own copy, when they hold one. The shared catalog
@@ -229,21 +242,17 @@ function GapModule({ valuation: v, target, labelFor }) {
     .map((key) => {
       const current = currentByKey.get(key) ?? 0;
       const targetWeight = target[key] ?? 0;
-      const deltaWeight = targetWeight - current;
       return {
         key,
         label: ownLabel.get(key) || labelFor(key),
         current,
         target: targetWeight,
-        deltaWeight,
-        deltaValue: deltaWeight * total,
       };
     })
-    .sort((a, b) => Math.abs(b.deltaValue) - Math.abs(a.deltaValue));
+    .sort((a, b) => b.target - a.target);
 
-  const byTarget = [...rows].sort((a, b) => b.target - a.target);
-  const top12 = byTarget.slice(0, 12);
-  const rest = byTarget.slice(12);
+  const top12 = rows.slice(0, 12);
+  const rest = rows.slice(12);
   const chartData = top12.map((r) => ({ name: r.label, a: r.current, b: r.target }));
   if (rest.length) {
     chartData.push({
@@ -253,6 +262,11 @@ function GapModule({ valuation: v, target, labelFor }) {
     });
   }
 
+  const tradeRows = trades.map((t) => ({
+    ...t,
+    label: ownLabel.get(t.key) || labelFor(t.key),
+  }));
+
   return (
     <>
       <div className="mt-2" data-testid="universe-gap-chart">
@@ -261,25 +275,40 @@ function GapModule({ valuation: v, target, labelFor }) {
       <div className="mt-4">
         <Table
           testId="universe-gap-table"
+          empty="The current allocation already matches this scenario."
           columns={[
             { key: "asset", header: "Asset", render: (r) => r.label },
-            { key: "action", header: "Action", render: (r) => actionBadge(r.deltaWeight) },
-            { key: "yours", header: "Yours", align: "right", render: (r) => pct(r.current) },
-            { key: "ideal", header: "Ideal", align: "right", render: (r) => pct(r.target) },
+            {
+              key: "action",
+              header: "Action",
+              render: (r) => (
+                <Badge variant={r.action === "buy" ? "good" : "critical"}>{r.action.toUpperCase()}</Badge>
+              ),
+            },
+            { key: "yours", header: "Yours", align: "right", render: (r) => pct(currentByKey.get(r.key) ?? 0) },
+            { key: "ideal", header: "Ideal", align: "right", render: (r) => pct(target[r.key] ?? 0) },
             {
               key: "dw",
               header: "Δ weight",
               align: "right",
-              render: (r) => <Delta value={r.deltaWeight} format={signedPct} />,
+              render: (r) => {
+                const frac = (Math.abs(Number(r.delta_weight_pct)) / 100) * (r.action === "sell" ? -1 : 1);
+                return <Delta value={frac} format={signedPct} />;
+              },
             },
             {
               key: "dv",
               header: "Δ value",
               align: "right",
-              render: (r) => <Delta value={r.deltaValue} format={signedToman} />,
+              render: (r) => (
+                <Delta
+                  value={Number(r.delta_value_tomans) * (r.action === "buy" ? 1 : -1)}
+                  format={signedToman}
+                />
+              ),
             },
           ]}
-          rows={rows}
+          rows={tradeRows}
           rowKey={(r) => r.key}
         />
       </div>

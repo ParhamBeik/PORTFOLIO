@@ -22,29 +22,23 @@ from rest_framework.test import APITestCase
 
 from marketdata import ingest
 from marketdata.integrity import compute_symbol_integrity
-from marketdata.integrity import compute_symbol_integrity, update_all_symbols_integrity
 from marketdata.models import (
     MarketCandle,
     MarketIndexData,
     MarketInstrument,
     RejectedRecord,
 )
-from marketdata.models import DailyStockHistory, MarketCandle, MarketDailyBar, MarketInstrument
-from marketdata.models import MarketCandle, SymbolIntegrity, MarketIndexData, GoldCurrencyHistory, MarketInstrument
-from marketdata.models import MarketInstrument, SymbolIntegrity, MarketIndexData, MarketCandle
-from marketdata.models import SymbolIntegrity
+from marketdata.models import DailyStockHistory, MarketDailyBar
+from marketdata.models import SymbolIntegrity, GoldCurrencyHistory
 from marketdata.tasks import nightly_data_integrity
 from portfolio.models import Account, Asset
-from portfolio.models import Account, LedgerEntry
-from portfolio.models import Asset
-from portfolio.models import Asset, Price
+from portfolio.models import LedgerEntry
+from portfolio.models import Price
 from portfolio.services import signals as sig
 from portfolio.services.deflator import normalize_basis, to_basis
-from portfolio.services.deflator import to_basis
 from portfolio.services.diagnostics import _load_index_returns
 from portfolio.services.diagnostics import portfolio_diagnostics
 from portfolio.services.ledger import create_ledger_entry, reverse_ledger_entry
-from portfolio.services.optimization import optimize
 from portfolio.services.performance import _position_metrics, account_performance
 from portfolio.services.returns import (
     MIN_DAILY_RETURNS,
@@ -53,8 +47,7 @@ from portfolio.services.returns import (
     daily_returns_matrix,
 )
 from portfolio.services.returns import _build_returns_matrix, _returns_cache_key
-from portfolio.services.returns import daily_returns_matrix
-from portfolio.services.returns import daily_returns_matrix, _returns_cache_key, _load_price_panel, normalize_as_of
+from portfolio.services.returns import normalize_as_of
 from portfolio.services.timeline import xirr
 
 pytestmark = pytest.mark.django_db
@@ -193,7 +186,6 @@ def test_xirr_non_convergence_returns_none_not_zero():
 
 
 def test_usdt_denominated_current_value_matches_opening_denomination(make_user):
-    from marketdata.models import GoldCurrencyHistory
     from portfolio.services.returns import to_jalali_str
 
     account = _cash_account(make_user, "usdt@test.test", opened_days_ago=100)
@@ -224,7 +216,6 @@ def test_usd_conversion_rate_is_read_as_of_the_date_it_is_given():
     rulers, summed. Against a currency that has lost most of its value over a
     tracked period this understates the flow by the whole devaluation.
     """
-    from marketdata.models import GoldCurrencyHistory
     from portfolio.services.performance import _conversion_rate
     from portfolio.services.returns import to_jalali_str
 
@@ -1283,7 +1274,7 @@ class TestTrackC:
 
     def test_auto_provision_asset(self):
         # Testing Protocol: We choose an integration test for asset auto-provisioning because it validates that our on-demand Asset creation pipeline cleanly runs Asset.full_clean() and maps properties from the verified MarketInstrument model.
-        from portfolio.services.trades import execute_trade, provision_asset
+        from portfolio.services.trades import provision_asset
         from portfolio.models import Account
         from django.contrib.auth import get_user_model
 
@@ -1360,7 +1351,7 @@ def test_a_tether_quoted_bar_converts_at_the_rate_of_its_own_day(db):
     """
     from decimal import Decimal
 
-    from marketdata.models import GoldCurrencyHistory, MarketDailyBar, MarketSnapshot
+    from marketdata.models import MarketDailyBar, MarketSnapshot
     from marketdata.provenance import daily_bar_price
 
     from marketdata.models import MarketInstrument
@@ -1405,7 +1396,7 @@ def test_a_bar_with_no_dollar_rate_yet_yields_no_row(db):
     """A gap the coverage gate can see beats a day priced in the wrong currency."""
     from decimal import Decimal
 
-    from marketdata.models import GoldCurrencyHistory, MarketDailyBar, MarketSnapshot
+    from marketdata.models import MarketDailyBar, MarketSnapshot
     from marketdata.provenance import daily_bar_price
 
     from marketdata.models import MarketInstrument

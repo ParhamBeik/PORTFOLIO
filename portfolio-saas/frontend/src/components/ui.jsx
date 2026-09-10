@@ -82,13 +82,30 @@ export function StatTile({ label, value, sub, valueTone = "neutral", size = "md"
 
 /** Status wears an icon-free but always-labelled chip — never hue alone. */
 export function Badge({ children, variant = "neutral", title, testId }) {
-  // Border and tint keep the display color; only the label takes the text twin.
+  // Outline and label are the SAME token, at full opacity, over a plain surface.
+  // Two measurements forced that, and each broke the obvious alternative:
+  //
+  //   * Each variant used to add a 10% background tint, which composites the
+  //     display colour into the background the label is measured against. The
+  //     text twins clear AA on a plain surface by 4.61:1 at the tightest, so
+  //     there is no margin to spend: at 10% nine of the twenty-four
+  //     variant/surface pairs fell under 4.5:1, worst light-mode critical at
+  //     4.04:1 — and "Fetch failing" is exactly the label that must stay
+  //     readable. No opacity rescues it; 3% still only reaches 4.42:1.
+  //   * Dropping the tint alone left the chip with no visible edge: the border
+  //     was the display colour at 40%, which is 1.56:1 against the panel for
+  //     `good` in light mode. WCAG 1.4.11 wants 3:1 for a boundary that is the
+  //     only thing defining a control.
+  //
+  // The twin at 100% is the one value that satisfies both — it is AA against
+  // every surface by construction, so it is comfortably past the 3:1 the border
+  // needs (4.61:1 at the tightest). `src/contrast.test.mjs` pins both halves.
   const styles = {
     neutral: "border-border bg-panel-2 text-muted",
-    good: "border-[var(--c-good)]/40 bg-[var(--c-good)]/10 text-[var(--c-good-text)]",
-    warn: "border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 text-[var(--c-warn-text)]",
-    serious: "border-[var(--c-serious)]/40 bg-[var(--c-serious)]/10 text-[var(--c-serious-text)]",
-    critical: "border-[var(--c-critical)]/40 bg-[var(--c-critical)]/10 text-[var(--c-critical-text)]",
+    good: "border-[var(--c-good-text)] bg-panel-2 text-[var(--c-good-text)]",
+    warn: "border-[var(--c-warn-text)] bg-panel-2 text-[var(--c-warn-text)]",
+    serious: "border-[var(--c-serious-text)] bg-panel-2 text-[var(--c-serious-text)]",
+    critical: "border-[var(--c-critical-text)] bg-panel-2 text-[var(--c-critical-text)]",
   };
   return (
     <span
@@ -127,7 +144,7 @@ export function Button({ variant = "ghost", className = "", ...props }) {
     primary: "bg-[var(--c-accent-fill)] text-white hover:opacity-90 border-transparent",
     success: "bg-[var(--c-good-fill)] text-white hover:opacity-90 border-transparent",
     ghost: "bg-panel-2 text-text hover:bg-border border-border",
-    danger: "bg-transparent text-[var(--c-critical-text)] hover:bg-[var(--c-critical)]/10 border-transparent",
+    danger: "bg-transparent text-[var(--c-critical-text)] hover:bg-panel-2 border-transparent",
     link: "bg-transparent text-[var(--c-accent-text)] underline underline-offset-2 border-transparent px-1 py-0",
   };
   return (
@@ -561,11 +578,12 @@ export const Disclosure = ({ summary, children, testId, open = false }) => (
   </details>
 );
 
-export const PageHeader = ({ title, subtitle, actions }) => (
+export const PageHeader = ({ title, subtitle, actions, meta }) => (
   <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
     <div>
       <h1 className="text-xl font-semibold">{title}</h1>
       {subtitle && <p className="mt-1 max-w-prose text-sm text-muted">{subtitle}</p>}
+      {meta}
     </div>
     {actions}
   </div>

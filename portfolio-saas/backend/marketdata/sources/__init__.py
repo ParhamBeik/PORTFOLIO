@@ -1,9 +1,8 @@
 """Direct, unmetered market-data origins -- the migration off BrsApi.
 
-BrsApi resells data the origins publish for free, and meters it: ~10,000/day on
-the TSETMC key, ~1,500/day on the market key. That ceiling, not disk or CPU, is
-what bounds how much history this warehouse can hold, and it is what makes the
-archive queue and its priority arithmetic necessary in the first place.
+BrsApi resells data the origins publish for free. Its paid TSETMC product is
+metered at ~10,000/day; the current Market product is unmetered. The paid ceiling
+is what makes the archive queue and its priority arithmetic necessary.
 
 Every origin here was probed from the production VPS on 2026-08-31, and the
 results split cleanly along one line -- who is allowed to connect:

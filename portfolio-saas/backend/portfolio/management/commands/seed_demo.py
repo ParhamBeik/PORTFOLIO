@@ -4,7 +4,6 @@ Lets the app show real data immediately on first boot, before the price cron
 has run. Idempotent: only creates the demo and E2E users if they don't exist.
 DEBUG-only.
 """
-from decimal import Decimal
 
 from django.conf import settings
 from django.core.management.base import BaseCommand

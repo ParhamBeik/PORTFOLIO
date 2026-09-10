@@ -13,7 +13,6 @@ import {
   signedPct,
   signedToman,
   indexPoint,
-  perfLabel,
 } from "./format.js";
 
 test("num formatters handle valid and invalid numbers gracefully", () => {

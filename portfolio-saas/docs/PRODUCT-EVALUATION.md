@@ -470,8 +470,8 @@ ledger:
 
 - Live-price coverage split held-vs-catalog; warehouse refresh backlog ordered by
   **days since last success** rather than a boolean; archive job lifecycle; per-endpoint
-  stacked counts; per-plan quota wallets with "two separate wallets — spending one never
-  frees the other" written into the panel copy; worker ping; queue depth; disk projection;
+  stacked counts; per-product quota status distinguishing the paid stock meter from the
+  unmetered Market product; worker ping; queue depth; disk projection;
   error-code ranking; a 15-minute ingest view; a Codal panel that goes quiet when the
   subsystem is off rather than reporting a frozen backlog.
 - **Statistical honesty in the telemetry itself**, which is rare: row counts come from

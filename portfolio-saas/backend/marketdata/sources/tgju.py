@@ -14,8 +14,8 @@ This is not a substitute feed, it is the SAME feed. Compared live on
     usdt_irt          209,053  vs  crypto-tether-irr/10 +0.28%
 
 The three inexact rows differ by one refresh interval, not by content. So
-moving here costs no accuracy and removes the entire ~1,500/day BRS wallet from
-the critical path.
+moving here costs no accuracy and removes BrsApi Market calls from the critical
+path.
 
 Two things about this payload are dangerous enough to encode rather than
 document:
@@ -134,8 +134,8 @@ def fetch_live():
     """The whole board: 962 instruments in one ~180KB request.
 
     One request for every gold, coin, FX and commodity price the app needs. The
-    BrsApi equivalent was two metered calls (`Gold_Currency.php` plus a separate
-    USDT history call) against a 1,500/day wallet.
+    BrsApi equivalent was two provider calls (`Gold_Currency.php` plus a separate
+    USDT history call).
     """
     payload = fetch(settings.TGJU_LIVE_URL, origin=ORIGIN)
     if not isinstance(payload, dict):

@@ -13,7 +13,6 @@ from marketdata.admin_telemetry import get_ops_overview, invalidate_ops_cache
 from marketdata.coverage_report import list_ops_assets
 from marketdata.evidence import assemble_asset_evidence
 from marketdata.models import ArchiveFetchState, SystemLogEvent, WorkflowRun
-from marketdata.quota import get_quota_status
 
 
 class OpsPagination(PageNumberPagination):

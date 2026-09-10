@@ -21,8 +21,6 @@ import pytest
 import requests
 
 from marketdata.archive import _tick_trading_days, claim_archive_batch
-from marketdata.archive import claim_archive_batch
-from marketdata.archive import claim_archive_batch, run_archive_state
 from marketdata.archive import run_archive_state
 from marketdata.catalog import is_ordinary_stock, sync_provider_catalog
 from marketdata.fetchers import (
@@ -30,7 +28,6 @@ from marketdata.fetchers import (
     TransientMarketDataError,
     fetch_json,
 )
-from marketdata.fetchers import TransientMarketDataError, fetch_json
 from marketdata.management.commands.recheck_provider_days import Command
 from marketdata.management.commands.recover_rejected_records import classify
 from marketdata.models import (
@@ -39,11 +36,9 @@ from marketdata.models import (
     DailyStockHistory,
     MarketInstrument,
 )
-from marketdata.models import ArchiveFetchState
-from marketdata.models import ArchiveFetchState, MarketCandle
-from marketdata.models import ArchiveFetchState, RejectedRecord
-from marketdata.models import DailyStockHistory, MarketCandle
-from marketdata.models import RealLegalHistory, RejectedRecord
+from marketdata.models import MarketCandle
+from marketdata.models import RejectedRecord
+from marketdata.models import RealLegalHistory
 from marketdata.models import GoldCurrencyHistory
 from marketdata import quota
 from marketdata.quota import (
@@ -55,7 +50,6 @@ from marketdata.quota import (
     remaining_requests,
     reserve_request,
 )
-from marketdata.quota import ARCHIVE
 from marketdata.suspension import (
     DEGENERATE_FENCE_MIN_FAILURES,
     MIN_ABSOLUTE_FAILURES,
@@ -1930,7 +1924,6 @@ def test_quota_error_response_trips_the_breaker_for_that_plan_only(settings):
     A 500 used to fall straight through to `response.json()` and be returned as
     if it were data, so an exhausted subscription looked like an empty payload.
     """
-    from marketdata import quota
     from marketdata.quota import BRS, TSETMC, is_plan_blocked
 
     with patch("marketdata.fetchers.requests.get") as get:

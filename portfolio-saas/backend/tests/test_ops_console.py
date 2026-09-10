@@ -28,15 +28,12 @@ from marketdata.models import (
     SystemLogEvent,
     WorkflowRun,
 )
-from marketdata.models import ArchiveFetchState, SystemLogEvent, WorkflowRun
-from marketdata.models import GoldCurrencyHistory, ArchiveFetchState
-from marketdata.models import GoldCurrencyHistory, MarketInstrument
-from marketdata.models import WorkflowRun
+from marketdata.models import GoldCurrencyHistory
+from marketdata.models import MarketInstrument
 from marketdata.tasks import _retry_code, prune_workflow_runs
 from marketdata.tasks import capture_operational_metrics
 from marketdata.workflows import WorkflowOutcome
 from portfolio.models import Account, Asset, Holding, Liability
-from portfolio.models import Account, Holding
 from portfolio.views import AdminCleanPricesExecuteView
 
 pytestmark = pytest.mark.django_db
@@ -79,6 +76,123 @@ def test_admin_overview_requires_staff(free_user, staff_user):
     assert "generated_at" in body
     assert body["database_counts"]["approximate"] is True
     assert "checks" in body
+    users = body["users"]
+    assert users["total"] >= 1
+    assert "with_accounts" in users
+    assert "snapshots_24h" in users
+    assert "last_snapshot_at" in users
+
+
+def test_ops_overview_says_when_password_reset_mail_cannot_be_sent(staff_user):
+    """The one broken journey that is invisible from the outside.
+
+    `PasswordResetRequestView` answers the same 200 whether or not the send
+    worked -- on purpose, so the endpoint cannot enumerate accounts -- and logs
+    the failure. With no `EMAIL_HOST` the user is told to check an inbox that
+    will never receive anything, and only a log line says otherwise. The Ops
+    console is where that has to show up.
+
+    Degraded, not critical: every other request is served fine without mail.
+    """
+    cache.clear()
+    client = _auth(APIClient(), staff_user)
+
+    with override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend", EMAIL_HOST=""
+    ):
+        body = client.get("/api/admin/overview/?refresh=1").json()
+    mail = body["outbound_mail"]
+    assert mail["ok"] is False
+    assert mail["status"] == "unconfigured"
+    assert "password-reset" in mail["message"]
+    assert body["checks"]["outbound_mail"]["status"] == "unconfigured"
+    assert body["overall_status"] == "degraded", (
+        "a mail outage must not read as critical -- the API serves everything "
+        "else -- but it must not read as healthy either"
+    )
+
+    # Django's own default host is "localhost", so an environment that never set
+    # the variable is indistinguishable from one pointing a relay at loopback.
+    # Production on 2026-09-09 was exactly this, and nothing listened.
+    cache.clear()
+    with override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+        EMAIL_HOST="localhost",
+        EMAIL_PORT=25,
+    ):
+        loopback = client.get("/api/admin/overview/?refresh=1").json()
+    assert loopback["outbound_mail"]["status"] == "unconfigured"
+
+
+def test_a_configured_but_unreachable_relay_is_not_reported_as_healthy(monkeypatch):
+    """Settings alone cannot answer whether mail leaves the process.
+
+    This is the case that made a socket necessary: production had EMAIL_HOST set
+    and every send still failed with ConnectionRefusedError. A settings-only
+    check calls that configured, and the console reports healthy while account
+    recovery is dead.
+    """
+    import socket as socket_module
+
+    from marketdata.admin_telemetry import outbound_mail
+
+    cache.clear()
+    settings_kwargs = dict(
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+        EMAIL_HOST="smtp.example.com",
+        EMAIL_PORT=587,
+    )
+
+    def refuse(*args, **kwargs):
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    monkeypatch.setattr(socket_module, "create_connection", refuse)
+    with override_settings(**settings_kwargs):
+        down = outbound_mail()
+    assert down["ok"] is False
+    assert down["status"] == "unreachable"
+    assert "smtp.example.com:587" in down["message"]
+
+    class Reachable:
+        def close(self):
+            pass
+
+    cache.clear()
+    monkeypatch.setattr(socket_module, "create_connection", lambda *a, **k: Reachable())
+    with override_settings(**settings_kwargs):
+        up = outbound_mail()
+    assert up["status"] == "healthy"
+    assert up["host"] == "smtp.example.com"
+
+    # Probing on every dashboard render would dial a relay far too often; the
+    # result is cached, so a second call must not open a second socket.
+    calls = {"n": 0}
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return Reachable()
+
+    monkeypatch.setattr(socket_module, "create_connection", counting)
+    with override_settings(**settings_kwargs):
+        outbound_mail()
+        outbound_mail()
+    assert calls["n"] == 0, "a cached probe result was ignored"
+
+
+def test_a_local_capture_backend_is_not_reported_as_broken(staff_user):
+    """Console and locmem backends are correct in dev and under test."""
+    from marketdata.admin_telemetry import outbound_mail
+
+    with override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend", EMAIL_HOST=""
+    ):
+        assert outbound_mail() == {
+            "ok": True,
+            "status": "not_delivering",
+            "backend": "django.core.mail.backends.locmem.EmailBackend",
+            "host": "",
+            "message": "Mail is captured locally by this backend, not delivered.",
+        }
 
 
 def test_integrity_endpoint_requires_staff(free_user, staff_user):
@@ -265,10 +379,6 @@ def test_admin_archive_retry_requires_confirm_and_audits(staff_user, monkeypatch
             calls.append(state_id)
 
     monkeypatch.setattr("marketdata.tasks.retry_archive_job_task", DummyTask())
-    monkeypatch.setattr(
-        "marketdata.admin_api.get_quota_status",
-        lambda: {"limit": 100, "used": 1, "remaining": 99},
-    )
 
     class FakeRedis:
         def ping(self):
@@ -351,7 +461,8 @@ def test_admin_overview_includes_fill_completeness_disk(staff_user, monkeypatch)
     hist = next(c for c in body["archive"]["categories"] if c["endpoint"] == "stock_history_unadjusted")
     assert hist["complete"] == 1 and hist["total"] == 2
     assert body["fill_rates"]["prices"]["delta_24h"] == 30
-    assert body["disk"]["budget_gb"] == 250
+    assert body["disk"]["filesystem_total_bytes"] > 0
+    assert body["disk"]["filesystem_used_bytes"] <= body["disk"]["filesystem_total_bytes"]
     assert body["queues"]["depths"]["archive"] == 2
     assert body["codal"]["enabled"] in (True, False)
     assert body["workflow_15m"]["rows_accepted"] >= 12
@@ -923,6 +1034,23 @@ def test_stale_archive_alert_is_silent_when_there_is_no_quota_to_spend(settings)
         operational_health_check()
     fired = {call.args[0]: call.args[1] for call in notify.call_args_list}
     assert fired["stale-archive-progress"]["archive_capacity"] == 4_000
+
+
+def test_stale_archive_alert_ignores_capacity_for_other_provider(settings):
+    """BRS room cannot make a TSETMC-only backlog runnable."""
+    from marketdata.models import ArchiveFetchState
+    from marketdata.tasks import operational_health_check
+
+    ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS,
+        symbol="tsetmc-only", verified_complete=False,
+    )
+    with (
+        patch("marketdata.quota.archive_capacity", return_value={"tsetmc": 0, "brs": 1_500}),
+        patch("config.observability.notify") as notify,
+    ):
+        operational_health_check()
+    assert "stale-archive-progress" not in {c.args[0] for c in notify.call_args_list}
 
 
 def test_prune_keeps_inside_window_and_drops_outside(settings):
@@ -1551,3 +1679,118 @@ def test_growth_history_keeps_gaps_as_gaps_and_never_shrinks_an_append_only_tabl
     # A user really can delete a portfolio, so user-owned tables are passed
     # through untouched -- flattening a real deletion would hide it.
     assert [r["counts"]["accounts"] for r in cleaned] == [5, 5, 4, 4]
+
+
+# ---------------------------------------------------------------------------
+# DISK PROJECTION. Both halves of this used to be wrong in the reassuring
+# direction. Measured in production on 2026-09-09: the console said "257 days
+# until 80% of 250 GB, no alert" while the device was 147.4 GB with 31.6 GB
+# free -- 11.6 days from the 80% line. The budget was a hand-typed constant and
+# the usage was one database's logical size, on a box that also carries three
+# other stacks, the Docker images and this app's own 16 GB of backups.
+GB = 1024 ** 3
+
+
+def _disk_history(now, *, start_gb, end_gb, days, filesystem_gb=None):
+    def row(offset_days, own_gb, fs_gb):
+        disk = {"database_bytes": int(own_gb * GB), "codal_bytes": 0}
+        if fs_gb is not None:
+            disk["filesystem_used_bytes"] = int(fs_gb * GB)
+        return {"captured_at": now - timedelta(days=offset_days), "disk": disk}
+
+    first_fs, last_fs = filesystem_gb or (None, None)
+    return [row(days, start_gb, first_fs), row(0, end_gb, last_fs)]
+
+
+def test_disk_projection_measures_the_device_not_a_configured_budget(monkeypatch):
+    from marketdata import admin_telemetry
+
+    now = timezone.now()
+    monkeypatch.setattr(
+        admin_telemetry,
+        "filesystem_usage",
+        lambda path="/": {"total": 147 * GB, "used": 110 * GB, "free": 37 * GB},
+    )
+    disk = admin_telemetry.project_disk(
+        {"database_bytes": 17 * GB, "codal_bytes": 0},
+        _disk_history(now, start_gb=10, end_gb=17, days=10),
+    )
+
+    # Headroom is 147*0.8 - 110 = 7.6 GB against 0.7 GB/day, so ~11 days.
+    # Against the old 250 GB budget and a 17 GB numerator it read ~261 days.
+    assert disk["growth_bytes_per_day"] == pytest.approx(0.7 * GB, rel=0.01)
+    assert 10 < disk["days_to_80pct"] < 12
+    assert disk["alert"] is True
+    assert disk["filesystem_total_bytes"] == 147 * GB
+    # Our share stays available, but as a breakdown rather than as the headline.
+    assert disk["used_bytes"] == 17 * GB
+
+
+def test_disk_projection_takes_the_faster_of_the_two_growth_series(monkeypatch):
+    """The device fills from backups and neighbouring stacks too, not just us."""
+    from marketdata import admin_telemetry
+
+    now = timezone.now()
+    monkeypatch.setattr(
+        admin_telemetry,
+        "filesystem_usage",
+        lambda path="/": {"total": 100 * GB, "used": 50 * GB, "free": 50 * GB},
+    )
+    # Our tables grew 1 GB/day; the device grew 4 GB/day. Believing our own
+    # series would promise 30 days of headroom where there are 7.5.
+    disk = admin_telemetry.project_disk(
+        {"database_bytes": 20 * GB, "codal_bytes": 0},
+        _disk_history(now, start_gb=10, end_gb=20, days=10, filesystem_gb=(10, 50)),
+    )
+
+    assert disk["growth_bytes_per_day"] == pytest.approx(4 * GB, rel=0.01)
+    assert disk["days_to_80pct"] == pytest.approx(7.5, rel=0.05)
+
+
+def test_disk_projection_reports_zero_days_once_past_the_line(monkeypatch):
+    from marketdata import admin_telemetry
+
+    monkeypatch.setattr(
+        admin_telemetry,
+        "filesystem_usage",
+        lambda path="/": {"total": 100 * GB, "used": 90 * GB, "free": 10 * GB},
+    )
+    disk = admin_telemetry.project_disk({"database_bytes": 1 * GB, "codal_bytes": 0}, [])
+
+    assert disk["days_to_80pct"] == 0
+    assert disk["alert"] is True
+
+
+def test_disk_projection_says_unknown_rather_than_healthy_when_unmeasurable(monkeypatch):
+    from marketdata import admin_telemetry
+
+    monkeypatch.setattr(admin_telemetry, "filesystem_usage", lambda path="/": None)
+    disk = admin_telemetry.project_disk({"database_bytes": 1 * GB, "codal_bytes": 0}, [])
+
+    assert disk["filesystem_total_bytes"] is None
+    assert disk["days_to_80pct"] is None
+    assert disk["alert"] is False
+
+
+def test_operational_health_check_alerts_on_a_nearly_full_device(monkeypatch):
+    """The alert used to call project_disk() bare, so its numerator was always 0.
+
+    With no argument `database_bytes` defaults to 0, which against the old
+    200 GB target meant the alert could only fire if the box grew 6.7 GB/day
+    while reporting no usage at all. It had never fired and could not.
+    """
+    from marketdata import admin_telemetry, tasks
+
+    # Past the 80% line, so this asserts only that the alert is reachable at
+    # all -- not how the growth rate is derived, which the projection tests
+    # above cover directly.
+    monkeypatch.setattr(
+        admin_telemetry,
+        "filesystem_usage",
+        lambda path="/": {"total": 147 * GB, "used": 130 * GB, "free": 17 * GB},
+    )
+    cache.clear()
+
+    result = tasks.operational_health_check()
+
+    assert "disk-projection" in result["alerts"]

@@ -10,6 +10,7 @@ from ._common import (  # noqa: F401
 from .admin_ops import (  # noqa: F401
     AdminCleanPricesExecuteView,
     AdminCleanPricesScanView,
+    admin_logger,
 )
 from .analytics import (  # noqa: F401
     AnalyticsView,
@@ -54,7 +55,6 @@ from .ledger import (  # noqa: F401
     TransactionDestroyView,
     TransactionListView,
     TransactionUndoView,
-    admin_logger,
 )
 from .valuation import (  # noqa: F401
     AccountDataQualityView,

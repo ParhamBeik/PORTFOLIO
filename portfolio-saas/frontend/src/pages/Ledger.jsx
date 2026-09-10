@@ -4,6 +4,7 @@ import {
   deleteLedgerEntry,
   deleteLedgerHolding,
   listLedger,
+  reverseLedgerEntry,
   previewLedgerImport,
   updateLedgerEntry,
   updateLedgerHolding,
@@ -368,6 +369,25 @@ export default function Ledger() {
     (a.holdings || []).map((h) => ({ ...h, account_id: a.id }))
   );
 
+  const reverseRow = async (row) => {
+    if (busy || row.is_synthetic) return;
+    if (!window.confirm(
+      `Reverse this ${(KIND_LABEL[row.kind] || row.kind).toLowerCase()} entry? Holdings update, and this row leaves the History list. The correction stays on the books.`
+    )) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await reverseLedgerEntry(row.account_id, row.id);
+      await refresh();
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const removeRow = async (row) => {
     if (busy) return;
     if (!window.confirm(`Delete this ${(KIND_LABEL[row.kind] || row.kind).toLowerCase()} entry?`)) {
@@ -454,6 +474,16 @@ export default function Ledger() {
               data-testid="ledger-edit"
             >
               Edit
+            </Button>
+          )}
+          {!r.is_synthetic && (
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() => reverseRow(r)}
+              data-testid="ledger-reverse"
+            >
+              Reverse
             </Button>
           )}
           <Button

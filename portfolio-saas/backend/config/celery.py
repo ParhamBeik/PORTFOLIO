@@ -190,6 +190,15 @@ app.conf.beat_schedule = {
         "task": "portfolio.tasks.prune_prices",
         "schedule": crontab(hour=2, minute=20),
     },
+    # Refresh tokens that have already expired. Unlike the two above this needs
+    # no enable flag: the rows it deletes are credentials the auth layer already
+    # refuses, so there is nothing to sign off on. Without it both
+    # token_blacklist tables grow for the life of the deployment, because
+    # rotation writes a row on every single refresh.
+    "prune-expired-refresh-tokens-nightly": {
+        "task": "portfolio.tasks.prune_expired_refresh_tokens",
+        "schedule": crontab(hour=2, minute=10),
+    },
     # "Best Possible Portfolio Overall" precompute: 4 windows x 2 scenarios,
     # market-wide. Runs after nightly-asset-metrics (01:00) so AssetMetricSnapshot
     # (top performers by class) is fresh when this reads the same warehouse data.

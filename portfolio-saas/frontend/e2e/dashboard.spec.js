@@ -75,6 +75,7 @@ test.describe("dashboard", () => {
     }
   });
 
+  test("real basis shows the CPI rate the chart used", async ({ page }) => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }

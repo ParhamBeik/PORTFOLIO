@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import F, IntegerField, Max, Q, Sum, Value
+from django.db.models import F, IntegerField, Q, Sum, Value
 from django.db.models.functions import Least
 from django.utils import timezone
 
@@ -702,13 +702,16 @@ def _tick_days_unreconciled(symbol, days):
     if not days:
         return set()
     rejected = _tick_rejected_dates(symbol)
-    tick_totals = dict(
-        StockTransactionTick.objects.filter(
-            symbol=symbol, date__in=days, canceled=False
-        )
-        .values_list("date")
-        .annotate(total=Sum("volume"))
+    # Same partition-pruning bound as the ingest delete: `date__in` says nothing
+    # about `ts`, so without this the verifier scans every chunk to total a
+    # handful of days. See `jalali.ts_window`.
+    stored = StockTransactionTick.objects.filter(
+        symbol=symbol, date__in=days, canceled=False
     )
+    window = jalali.ts_window(days)
+    if window:
+        stored = stored.filter(ts__gte=window[0], ts__lt=window[1])
+    tick_totals = dict(stored.values_list("date").annotate(total=Sum("volume")))
     candle_totals = _symbol_candle_volumes(symbol, days)
     broken = set()
     for day, candle_volume in candle_totals.items():
@@ -799,37 +802,6 @@ def _gold_dates(payload):
     }
 
 
-def _generic_dates(payload):
-    return {
-        ingest.normalize_jalali(rec.get("date") or rec.get("d"))
-        for rec in ingest.flatten_records(payload)
-        if rec.get("date") or rec.get("d")
-    }
-
-
-def _snapshot_keys(payload, name_keys=("symbol",)):
-    """symbol|date keys for the multi-symbol snapshot endpoints."""
-    keys = set()
-    for rec in ingest.flatten_records(payload):
-        day = ingest.normalize_jalali(rec.get("date") or rec.get("d"))
-        name = next((rec[k] for k in name_keys if rec.get(k)), None)
-        if name is None and rec.get("id") is not None:
-            name = f"ID_{rec['id']}"
-        if day and name:
-            keys.add(f"{str(name)[:64]}|{day}")
-    return keys
-
-
-def _stored_snapshot_keys(model, expected):
-    if not expected:
-        return set()
-    days = {key.split("|", 1)[1] for key in expected}
-    return {
-        f"{sym}|{day}"
-        for sym, day in model.objects.filter(date__in=days).values_list("symbol", "date")
-    } & expected
-
-
 def _codal_keys(payload):
     records = payload.get("announcement") if isinstance(payload, dict) else None
     if not isinstance(records, list):
@@ -853,17 +825,6 @@ def _shareholder_keys(payload, day):
         f"{rec['id']}_{day}"
         for rec in payload
         if isinstance(rec, dict) and rec.get("id") is not None
-    }
-
-
-def _transaction_keys(payload):
-    """Kept for the management command; the archive path keys ticks by date now."""
-    if not isinstance(payload, list):
-        return set()
-    return {
-        f"{rec.get('row')}_{ingest.normalize_jalali(rec.get('date', ''))}"
-        for rec in payload
-        if isinstance(rec, dict) and rec.get("row") is not None
     }
 
 
@@ -916,7 +877,7 @@ def _defer_for_prereq(state, *, now, error=""):
 
 def next_quota_day_start(now=None):
     """UTC datetime of the next Tehran midnight (provider quota day boundary)."""
-    from datetime import datetime, timezone as dt_timezone
+    from datetime import timezone as dt_timezone
 
     now = now or timezone.now()
     local = now.astimezone(market_state.TEHRAN)
@@ -1192,12 +1153,6 @@ _ENDPOINT_PRIORITY = (
 # IS NULL) sorted *behind* every state that had ever run -- the never-fetched
 # work was permanently last in line. Oldest-first must mean never-run-first.
 _LAST_ATTEMPT_FIRST = F("last_attempt_at").asc(nulls_first=True)
-
-
-def release_archive_claims(state_ids):
-    """Immediately make states claimed but not started by a bounded tick due again."""
-    if state_ids:
-        ArchiveFetchState.objects.filter(pk__in=state_ids).update(next_attempt_at=timezone.now())
 
 
 def _archive_prereqs_ready(state):

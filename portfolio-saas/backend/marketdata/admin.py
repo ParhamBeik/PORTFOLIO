@@ -4,8 +4,6 @@ Dates here are source-native Jalali strings (CharFields), so no date_hierarchy;
 plain ordering + search covers the browse cases.
 """
 from django.contrib import admin
-from django.db.models import F, Sum
-from django.utils import timezone
 
 from .models import (
     ApiRequestQuota,
@@ -105,9 +103,10 @@ class ApiRequestQuotaAdmin(admin.ModelAdmin):
 
     @admin.display(description="Remaining")
     def remaining_display(self, obj):
-        # limit=0 means the provider has not disclosed this plan's ceiling yet.
-        # Rendering that as "0 remaining" would read as exhausted.
-        return max(0, obj.limit - obj.used) if obj.limit else "—"
+        from .quota import effective_limit
+
+        limit = effective_limit(obj.plan, obj)
+        return max(0, limit - obj.used) if limit else "unmetered"
 
 
 # ---------------------------------------------------------------------------

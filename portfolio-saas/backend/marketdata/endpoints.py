@@ -45,10 +45,9 @@ class Endpoint:
     nature: str
     bucket: str
     # Which provider subscription bills this call. BrsApi issues one key per
-    # plan and meters each one separately -- `Tsetmc/*` and `Codal/*` against
-    # TSETMC_API_KEY (~10,000/day), `Market/*` against BRS_API_KEY (~1,500/day).
-    # Counting both against one pool is what let a full TSETMC backfill refuse
-    # gold/currency calls that still had 79% of their own allowance free.
+    # product -- `Tsetmc/*` and `Codal/*` use the paid daily meter, while the
+    # current `Market/*` product is unmetered. The path, not the API-key string,
+    # selects the provider product.
     plan: str = TSETMC
     # Params the provider rejects the request without (beyond `key`).
     required_params: tuple = ()
@@ -231,10 +230,6 @@ def get(key):
     return REGISTRY[key]
 
 
-def url_for(key):
-    return REGISTRY[key].url
-
-
 def bucket_for(key):
     return REGISTRY[key].bucket
 
@@ -252,12 +247,6 @@ def source_for(key, default=""):
     if endpoint is None:
         return default
     return f"brsapi:{endpoint.path}"
-
-
-def plan_for(key, default=""):
-    """The billing plan an endpoint's requests are metered against."""
-    endpoint = REGISTRY.get(key)
-    return endpoint.plan if endpoint is not None else default
 
 
 def keys_by_nature(nature):

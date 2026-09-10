@@ -81,6 +81,10 @@ assert_header "$DOC" "strict-transport-security" "max-age=31536000"
 assert_header "$DOC" "x-content-type-options" "nosniff"
 assert_header "$DOC" "referrer-policy"
 assert_header "$DOC" "cross-origin-opener-policy" "same-origin"
+# The shell is the only file whose name survives a deploy, so it must be
+# revalidated. Without this a browser's heuristic freshness can keep serving the
+# previous index.html, which names asset hashes the new deploy no longer has.
+assert_header "$DOC" "cache-control" "no-cache"
 
 echo "==> response headers and compression on a hashed asset"
 # The nginx `add_header` inheritance trap: `location /assets/` sets its own

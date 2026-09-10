@@ -444,9 +444,21 @@ def operational_health_check():
                 {"plan": quota.plan, "used": quota.used, "bucket_total": bucket_total},
             ))
 
-    from marketdata.admin_telemetry import project_disk
+    # Pass the usage breakdown rather than calling this bare. With no argument
+    # `database_bytes`/`codal_bytes` default to 0, so before the filesystem
+    # measurement landed this alert compared a zero numerator against a 200 GB
+    # budget: it could not fire unless the box grew 6.7 GB/day while reporting
+    # no usage at all. The projection is measured now, but the alert payload
+    # still needs the breakdown to be worth reading.
+    from marketdata.admin_telemetry import (
+        _codal_volume_bytes,
+        get_database_bytes,
+        project_disk,
+    )
 
-    disk = project_disk()
+    disk = project_disk(
+        {"database_bytes": get_database_bytes(), "codal_bytes": _codal_volume_bytes()}
+    )
     if disk.get("alert"):
         alerts.append(("disk-projection", disk))
 

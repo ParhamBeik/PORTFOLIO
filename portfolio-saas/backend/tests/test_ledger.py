@@ -13,18 +13,17 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 import jdatetime
 import pytest
-from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient
 
 import config.settings as settings_module
 from marketdata.models import MarketCandle, GoldCurrencyHistory
-from marketdata.models import MarketCandle, RejectedRecord
+from marketdata.models import RejectedRecord
 from portfolio.models import Account, Asset, Holding, Price, Transaction
-from portfolio.models import Account, Holding, LedgerEntry
-from portfolio.models import Account, Holding, LedgerEntry, Snapshot, Transaction
+from portfolio.models import LedgerEntry
+from portfolio.models import Snapshot
 from portfolio.models import Liability
 from portfolio.serializers import TradeInputSerializer
-from portfolio.services.deflator import CpiUnavailable, cpi_for_date, to_basis
+from portfolio.services.deflator import CpiUnavailable, cpi_for_date
 from portfolio.services.ledger import create_ledger_entry
 from portfolio.services.returns import _price_version_fingerprint, daily_returns_matrix
 from portfolio.services.timeline import holdings_as_of
@@ -35,7 +34,6 @@ from portfolio.services.trades import (
     execute_trade,
     undo_trade,
 )
-from portfolio.services.trades import execute_trade, undo_trade
 
 pytestmark = pytest.mark.django_db
 
@@ -794,6 +792,26 @@ def test_undo_latest_trade_reverses_holding_and_stamps_snapshots(
     assert Snapshot.objects.filter(user=account.user, account=account).count() == 2
 
 
+def test_legacy_transaction_delete_preserves_ownership_boundary(
+    account, asset_catalog, write_prices, make_user
+):
+    write_prices({"emami_coin": Decimal("176000000")})
+    execute_trade(
+        account=account,
+        asset=asset_catalog["emami_coin"],
+        side="buy",
+        quantity=Decimal("3"),
+    )
+    trade = Transaction.objects.get(account=account, kind="buy")
+
+    response = _client(make_user(email="other@test.test")).delete(
+        f"/api/transactions/{trade.id}/"
+    )
+
+    assert response.status_code == 404
+    assert not Transaction.objects.filter(reversal_of=trade).exists()
+
+
 def test_undo_rejects_when_reversal_would_go_negative(
     account, asset_catalog, write_prices
 ):
@@ -1040,7 +1058,7 @@ class TestTradeEndpoint:
         assert response.status_code == 400
         assert account.holdings.filter(asset=asset_catalog["house_asset"]).count() == 1
 
-    def test_cannot_undo_another_users_trade(
+    def test_cannot_reverse_another_users_ledger_entry(
         self, account, asset_catalog, write_prices, make_user
     ):
         write_prices({"emami_coin": Decimal("176000000")})
@@ -1050,14 +1068,19 @@ class TestTradeEndpoint:
             side="buy",
             quantity=Decimal("2"),
         )
-        trade = Transaction.objects.filter(account=account, kind="buy").get()
+        entry = LedgerEntry.objects.filter(
+            account=account, asset=asset_catalog["emami_coin"], kind=LedgerEntry.Kind.BUY
+        ).get()
 
-        response = self._client(make_user(email="other-trader@test.test")).delete(
-            f"/api/transactions/{trade.id}/"
+        response = self._client(make_user(email="other-trader@test.test")).post(
+            f"/api/accounts/{account.id}/ledger/{entry.id}/reverse/",
+            {},
+            format="json",
         )
 
         assert response.status_code == 404
-        assert Transaction.objects.filter(pk=trade.id).exists()
+        assert LedgerEntry.objects.filter(pk=entry.id).exists()
+        assert not LedgerEntry.objects.filter(reversal_of=entry).exists()
 
 
 def test_execute_trade_with_custom_price(account, asset_catalog):
@@ -2164,6 +2187,26 @@ def test_a_backdated_trade_still_reads_the_warehouse():
     Price.objects.create(asset=asset, price=Decimal("99000000"), source="API")
 
     assert resolve_historical_price(asset, when) == Decimal("50000000")
+
+
+def test_a_backdated_trade_never_uses_a_future_live_price(monkeypatch):
+    from portfolio.services.ledger import PriceResolutionError, resolve_historical_price
+
+    asset = Asset.objects.create(
+        key="stale_coin", name="Stale coin", is_active=True,
+        asset_class=Asset.AssetClass.GOLD, brs_symbol="STALE",
+    )
+    when = timezone.now() - dt.timedelta(days=30)
+    old_day = jdatetime.date.fromgregorian(date=when.date()).strftime("%Y-%m-%d")
+    GoldCurrencyHistory.objects.create(
+        symbol="STALE", date=old_day,
+        close_price=Decimal("50000000"), unit="تومان",
+    )
+    Price.objects.create(asset=asset, price=Decimal("99000000"), source="API")
+    monkeypatch.setattr("marketdata.calendars.sessions_between", lambda *args, **kwargs: 6)
+
+    with pytest.raises(PriceResolutionError):
+        resolve_historical_price(asset, when)
 
 
 # --- Cross-user asset scoping ------------------------------------------------

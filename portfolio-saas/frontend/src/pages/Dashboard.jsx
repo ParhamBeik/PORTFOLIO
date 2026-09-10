@@ -8,12 +8,14 @@ import {
   valuation,
   snapshots,
   getPerformance,
+  accountDataQuality,
   updateHolding,
   removeHolding,
   adminAssetEvidence,
   analytics,
   diversifiers,
   benchmarks,
+  insights,
 } from "../api.js";
 import {
   ago,
@@ -56,8 +58,6 @@ import {
   Async,
   Disclosure,
   PageHeader,
-  Input,
-  Modal,
   toneFor,
 } from "../components/ui.jsx";
 
@@ -1597,6 +1597,87 @@ function WhyDrawer({ assetKey, onClose }) {
   );
 }
 
+
+function HistoryQualityCard({ activeId }) {
+  const state = useApi(
+    () => accountDataQuality(activeId),
+    [activeId],
+    { enabled: Boolean(activeId) }
+  );
+  if (!activeId) {
+    return (
+      <p className="text-sm text-muted" data-testid="dashboard-quality-all">
+        Select one portfolio to see whether its price history is complete enough to trust.
+      </p>
+    );
+  }
+  return (
+    <Card title="History quality" testId="dashboard-quality">
+      <Async {...state} testId="dashboard-quality-body" empty="No history-quality data yet.">
+        {(data) => {
+          const failing = (data.assets || []).filter((a) => a.passes_gate === false);
+          const tone =
+            data.quality_status === "complete" ? "good"
+            : data.quality_status === "partial" ? "warn"
+            : "neutral";
+          return (
+            <div className="space-y-2 text-sm">
+              <p>
+                <Badge variant={tone}>{humanize(data.quality_status)}</Badge>
+                {" "}
+                {data.passing_assets} of {data.assessed_assets} priced holdings pass the integrity gate.
+              </p>
+              {failing.length > 0 && (
+                <ul className="list-disc pl-5 text-muted">
+                  {failing.map((a) => (
+                    <li key={a.asset_key}>
+                      {a.symbol || a.asset_key}
+                      {a.reason_codes?.length ? ` — ${a.reason_codes.map(humanize).join(", ")}` : ""}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="text-xs text-muted">
+                Live quotes on the holdings table are a different question. This card is about the warehouse history behind returns and P/L.
+              </p>
+            </div>
+          );
+        }}
+      </Async>
+    </Card>
+  );
+}
+
+
+
+function InsightsCard({ activeId }) {
+  const state = useApi(() => insights(activeId), [activeId]);
+  const tone = (severity) =>
+    severity === "ok" ? "good"
+    : severity === "warning" || severity === "high" ? "warn"
+    : "neutral";
+  return (
+    <Card title="Portfolio notes" testId="dashboard-insights">
+      <Async {...state} testId="dashboard-insights-body" empty="No notes yet.">
+        {(data) => {
+          const rows = [data.concentration, data.gold_band, data.net_worth_trend].filter(Boolean);
+          return (
+            <ul className="space-y-2 text-sm">
+              {rows.map((row, i) => (
+                <li key={i} data-testid={`dashboard-insights-${i}`}>
+                  <Badge variant={tone(row.severity)}>{humanize(row.severity || "info")}</Badge>
+                  {" "}
+                  {row.message}
+                </li>
+              ))}
+            </ul>
+          );
+        }}
+      </Async>
+    </Card>
+  );
+}
+
 export default function Dashboard({ user }) {
   const portfolio = usePortfolio();
   const { activeId, basis } = portfolio;
@@ -1614,6 +1695,8 @@ export default function Dashboard({ user }) {
           <AllocationCard state={valuationState} />
         </div>
         <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} staff={!!user?.is_staff} />
+        <HistoryQualityCard activeId={activeId} />
+        <InsightsCard activeId={activeId} />
         <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} />
         <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
         <ExcludedDisclosure valuationState={valuationState} />

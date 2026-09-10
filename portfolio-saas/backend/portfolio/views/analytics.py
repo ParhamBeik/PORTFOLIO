@@ -3,19 +3,20 @@
 These are the expensive endpoints: they carry the analytics throttle
 scope and the concurrency cap, and several read a precomputed snapshot
 rather than solving in the request path."""
+import logging
 from decimal import Decimal
 import numpy as np
 import pandas as pd
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
-from rest_framework import generics, status
+from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
-from ..models import Account, Asset, Holding, LedgerEntry, Price, Snapshot, Transaction, Liability
-from ..services import execute_trade, get_latest_prices, undo_trade, value_account, value_user
-from ..services.deflator import cpi_for_date, normalize_basis
+from ..models import Account, Holding, LedgerEntry
+from ..services import value_account, value_user
+from ..services.deflator import normalize_basis
 from ..services.diagnostics import portfolio_diagnostics
 from ..services.insights import _liquid_items, _total, build_insights
 from ..services.optimization import (
@@ -27,11 +28,19 @@ from ..services.optimization import (
     MixedUnitUniverseBlocked,
     _efficient_frontier,
     _finite,
+    _rebalance_trades,
     optimize,
 )
 from ..services.returns import daily_returns_matrix
 from rest_framework.permissions import IsAdminUser
 from ._common import _int_param, _scope, concurrency_cap
+
+# Both uses sit inside `except` handlers whose whole point is to degrade
+# gracefully -- one when the broker will not take a background refresh, one when
+# the snapshot write fails. Without this name those handlers raised NameError
+# and turned a servable cached page into a 500, which is the opposite of what
+# they were written to do.
+logger = logging.getLogger(__name__)
 
 
 class InsightsView(APIView):
@@ -87,7 +96,6 @@ class AnalyticsView(APIView):
     @concurrency_cap
     def get(self, request):
         from portfolio.services.deflator import normalize_basis
-        from portfolio.services import value_account, value_user
 
         account = _scope(request)
         basis = request.query_params.get("basis") or "nominal_toman"
@@ -336,7 +344,7 @@ def _parse_max_assets(raw):
 def _compute_my_optimal_payload(
     user, account, requested_basis="real_toman", max_assets=None, target_volatility=None, constraints=None
 ) -> dict | None:
-    from ..services.deflator import CpiUnavailable, normalize_basis
+    from ..services.deflator import CpiUnavailable
     from ..services.returns import get_universe_by_mode
 
     weights, total, valuation = _current_weights_and_total(user, account)
@@ -499,7 +507,6 @@ class MyOptimalView(APIView):
 
     @concurrency_cap
     def get(self, request):
-        from ..services.deflator import normalize_basis
         from ..services.returns import _price_version_fingerprint
         from ..optimization_models import OptimizationSnapshot
         from django.utils import timezone
@@ -741,9 +748,15 @@ class BestOverallView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        import copy
         from ..optimization_models import OptimizationSnapshot
         from ..tasks import SCENARIOS, WINDOWS_DAYS
 
+        # Trades are per caller: the nightly snapshot is market-wide and must
+        # not be mutated, and its stored trades (if any) are not this user's.
+        weights, total, _valuation = _current_weights_and_total(
+            request.user, _scope(request)
+        )
         window_labels = {365: "1Y", 1095: "3Y", 1825: "5Y", 3650: "10Y"}
         windows = []
         latest_created = None
@@ -759,7 +772,11 @@ class BestOverallView(APIView):
                 if snap is None:
                     entry[scenario] = None
                 else:
-                    entry[scenario] = snap.payload
+                    payload = copy.deepcopy(snap.payload) if isinstance(snap.payload, dict) else {}
+                    payload["rebalance_trades"] = _rebalance_trades(
+                        weights, payload.get("target_weights") or {}, total
+                    )
+                    entry[scenario] = payload
                     if latest_created is None or snap.created_at > latest_created:
                         latest_created = snap.created_at
             entry["status"] = "ok" if (entry["max_sharpe"] or entry["min_volatility"]) else "insufficient_history"
@@ -1114,7 +1131,6 @@ class OptimizationSnapshotListView(APIView):
     def get(self, request):
         from ..optimization_models import OptimizationSnapshot
         from ..serializers import OptimizationSnapshotSerializer
-        from django.shortcuts import get_object_or_404
 
         account_id_raw = request.query_params.get("account_id")
         try:
@@ -1149,7 +1165,6 @@ class OptimizationSnapshotLatestView(APIView):
     def get(self, request):
         from ..optimization_models import OptimizationSnapshot
         from ..serializers import OptimizationSnapshotSerializer
-        from django.shortcuts import get_object_or_404
         account_id_raw = request.query_params.get("account_id")
         if account_id_raw is not None and account_id_raw != "":
             try:
@@ -1196,7 +1211,7 @@ class ComparisonView(APIView):
         if error:
             return error
         try:
-            return Response(compare(
+            payload = compare(
                 request.user,
                 account=account,
                 mode=mode,
@@ -1205,8 +1220,10 @@ class ComparisonView(APIView):
                 # 0 is "as far back as my own history goes", which is the
                 # answer this page is usually asked for.
                 days=days or None,
-            ))
+            )
         except ComparisonError as exc:
             return Response(
                 {"detail": exc.detail, "reason": exc.reason, **exc.extra}, status=400
             )
+        payload["as_of"] = timezone.now().isoformat()
+        return Response(payload)

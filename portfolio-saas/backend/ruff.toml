@@ -1,0 +1,33 @@
+# Correctness only. Ruff is here because nothing checked Python for undefined
+# names, and two of them were live in the request path: `logger` inside the
+# `except` blocks of MyOptimal, whose whole job was to degrade gracefully and
+# which instead raised NameError and 500'd. Static analysis is the only thing
+# that finds a name that is only wrong on the unhappy path.
+#
+# Deliberately NOT a style tool. No line length, no import sorting, no naming
+# conventions -- this codebase has a consistent voice already and a lint run
+# that mostly prints opinions gets ignored, which costs us the rules that
+# matter. Add a rule here when it would have caught a real bug.
+line-length = 120
+target-version = "py311"
+extend-exclude = ["graphify-out", ".venv", "*/migrations/*"]
+
+[lint]
+select = [
+    "F401",  # unused import
+    "F402",  # import shadowed by loop variable
+    "F811",  # redefinition of an unused name -- a second import or def wins silently
+    "F821",  # undefined name
+    "F822",  # undefined name in __all__
+    "F823",  # local used before assignment
+    "F701", "F702", "F706", "F707",  # misplaced break/continue/return/except
+    "E9",    # syntax and IO errors
+]
+# F841 (assigned but never used) is deliberately absent. Tests create database
+# rows for their side effect -- `asset = Asset.objects.create(...)` with no
+# further reference is the fixture, not a mistake -- and there are 22 of them.
+
+[lint.per-file-ignores]
+# `from .settings import *` is the point of this module; ruff cannot see
+# through a star import to know REST_FRAMEWORK is defined.
+"config/settings_test.py" = ["F403", "F405"]

@@ -75,11 +75,9 @@ class JalaliDerivedDateTime(models.DateTimeField):
 class ApiRequestQuota(models.Model):
     """Per-day, per-plan provider-call counter shared by every worker.
 
-    One row per (day, provider subscription). BrsApi meters each API key
-    separately -- `Tsetmc/*` and `Market/*` are different wallets with different
-    ceilings -- so a single row per day could not represent the account, and in
-    production it hid the fact that one plan sat 79% unused while the other was
-    refusing requests. See `marketdata.quota`.
+    One row per (day, provider product). The path family selects the product;
+    API-key equality does not merge their provider-reported usage semantics.
+    See `marketdata.quota`.
     """
 
     day = models.DateField()
@@ -87,9 +85,8 @@ class ApiRequestQuota(models.Model):
     # owned by the quota module, and importing it here would invert the
     # models -> quota dependency that every other module relies on.
     plan = models.CharField(max_length=16, default="tsetmc")
-    # 0 means "not yet disclosed by the provider". There is no hardcoded ceiling
-    # any more; this is filled in from the `account` block when one arrives, and
-    # the circuit breaker is what actually stops spending.
+    # 0 means undisclosed or unmetered; `quota.effective_limit` combines this
+    # report with the configured per-product expectation.
     limit = models.PositiveIntegerField(default=0)
     used = models.PositiveIntegerField(default=0)
     archive_used = models.PositiveIntegerField(default=0)

@@ -1,6 +1,5 @@
 """Rebuild or verify Holding and cash projections from the immutable ledger."""
 import sys
-from decimal import Decimal
 
 from django.core.management.base import BaseCommand
 

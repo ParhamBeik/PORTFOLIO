@@ -7,7 +7,6 @@ it so the frontend can render it consistently.
 """
 from decimal import Decimal
 
-from portfolio.models import Snapshot
 from portfolio.services import value_account, value_user
 
 # A healthy portfolio keeps any single liquid asset below this share.

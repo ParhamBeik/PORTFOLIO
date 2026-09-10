@@ -69,7 +69,7 @@
   <section class="ops-card">
     <h3>Disk</h3>
     <div class="ops-stat">{% if disk.days_to_80pct != None %}{{ disk.days_to_80pct }}d{% else %}—{% endif %}</div>
-    <div class="ops-muted">to 80% of {{ disk.budget_gb }} GB{% if disk.alert %} · alert{% endif %}</div>
+    <div class="ops-muted">to 80% of the device{% if disk.alert %} · alert{% endif %}</div>
   </section>
 </div>
 

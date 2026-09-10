@@ -2,7 +2,6 @@ import pytest
 from marketdata.archive import ensure_archive_states
 from marketdata.models import ArchiveFetchState, MarketInstrument
 from marketdata.tasks import tracked_brs_symbols
-from portfolio.models import Asset
 
 
 @pytest.mark.django_db

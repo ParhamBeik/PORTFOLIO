@@ -2,8 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 // Modular build, NOT `import * as echarts from "echarts"` -- the barrel import
 // pulls every chart type and ships a 1,049 kB chunk (347 kB gzip). Registering
 // only what this file draws cuts that by roughly 4x. A new chart type needs its
-// module added to the `use()` call below or it silently renders blank.
-import { graphic, init, use } from "echarts/core";
+// module added to the `registerEcharts()` call below or it silently renders
+// blank. Aliased on import because echarts names it `use`, which every React
+// linter reads as a hook called at module scope.
+import { graphic, init, use as registerEcharts } from "echarts/core";
 import { BarChart, HeatmapChart, LineChart, PieChart, ScatterChart } from "echarts/charts";
 import {
   GridComponent,
@@ -15,7 +17,7 @@ import {
 import { CanvasRenderer } from "echarts/renderers";
 import { date, dateTime, dateTick, money, moneyCompact, pct, toman, tomanCompact, trendAxisTick } from "../format.js";
 
-use([
+registerEcharts([
   BarChart, HeatmapChart, LineChart, PieChart, ScatterChart,
   GridComponent, LegendComponent, MarkLineComponent, TooltipComponent, VisualMapComponent,
   CanvasRenderer,
@@ -825,7 +827,7 @@ export function StackedStatusBar({
   const option = useMemo(() => {
     if (!t) return null;
     const c = chrome(t);
-    // Bars are normalized to 100% (recharts called this stackOffset="expand"),
+    // Bars are normalized to 100% (the "expand" stack offset),
     // but the tooltip must still report the RAW count -- a share alone cannot
     // tell "3 of 4 failed" from "300 of 400".
     const totals = (data || []).map((row) =>

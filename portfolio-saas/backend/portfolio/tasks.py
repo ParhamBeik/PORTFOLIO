@@ -250,7 +250,6 @@ def _write_prices(priced: dict, *, sources: dict | None = None) -> None:
 
 
 from datetime import timedelta
-from django.utils import timezone
 
 
 def _write_snapshots(
@@ -771,6 +770,38 @@ def prune_prices():
     logger.info("Deleted %d stale price rows (kept latest per asset).", deleted)
     result = {"enabled": True, "deleted": deleted, "kept_latest": len(latest_ids)}
     _ledger_prune("prune_prices", "Price", result)
+    return result
+
+
+@shared_task(ignore_result=True)
+def prune_expired_refresh_tokens():
+    """Delete refresh tokens whose own expiry has already passed.
+
+    `ROTATE_REFRESH_TOKENS` + `BLACKLIST_AFTER_ROTATION` mean every refresh
+    writes an `OutstandingToken` row and blacklists the one it replaced. An
+    access token lives 30 minutes, so an active user mints dozens of rows a day
+    and nothing ever removed them: two append-only tables on a box with a disk
+    budget, and `accounts.views._revoke_all` walking every row a user has ever
+    held to blacklist tokens that expired months ago.
+
+    Deleting a token past `expires_at` is not a retention policy decision --
+    the token is already refused by `RefreshToken()` on the way in, so the row
+    can only cost storage and work. That is why this one has no
+    `*_PRUNE_ENABLED` gate: `prune_snapshots` and `prune_prices` destroy the
+    only copy of real user history and must be signed off; this destroys
+    credentials that stopped working before the sweep ran.
+
+    The delete cascades to `BlacklistedToken` (its FK to `OutstandingToken` is
+    the primary key), so both tables are bounded by one statement.
+    """
+    from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
+
+    deleted, _ = OutstandingToken.objects.filter(
+        expires_at__lt=timezone.now()
+    ).delete()
+    logger.info("Deleted %d expired refresh tokens.", deleted)
+    result = {"deleted": deleted}
+    _ledger_prune("prune_expired_refresh_tokens", "OutstandingToken", result)
     return result
 
 

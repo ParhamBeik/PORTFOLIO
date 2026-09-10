@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { auth, login, me, register, sessionExpiry } from "../api.js";
+import { auth, login, me, register, requestPasswordReset, sessionExpiry } from "../api.js";
 import Logo from "./Logo.jsx";
 import { Button, Input } from "./ui.jsx";
 
@@ -59,8 +59,10 @@ export default function Auth({ onAuthed }) {
   const [error, setError] = useState("");
   const [fieldError, setFieldError] = useState({});
   const [busy, setBusy] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
 
   const registering = mode === "signup";
+  const forgetting = mode === "forgot";
   const emailValid = EMAIL_RE.test(email.trim());
   const checks = getPasswordChecks(password, confirmPassword, registering);
   const strength = calculateStrength(password, checks);
@@ -73,12 +75,13 @@ export default function Auth({ onAuthed }) {
   // Signing up would also need every requirement in the checklist to pass,
   // including the confirmation match, which is what `checks` is already for.
   const registrationClosed = registering;
-  const canSubmit = emailValid && Boolean(password) && !registrationClosed;
+  const canSubmit = emailValid && (forgetting || Boolean(password)) && !registrationClosed;
 
   const switchMode = (next) => {
     setMode(next);
     setError("");
     setFieldError({});
+    setResetSent(false);
   };
 
   const handleEmailChange = (value) => {
@@ -114,6 +117,11 @@ export default function Auth({ onAuthed }) {
     setError("");
     setFieldError({});
     try {
+      if (forgetting) {
+        await requestPasswordReset(email.trim());
+        setResetSent(true);
+        return;
+      }
       const data = registering
         ? await register(email.trim(), password)
         : await login(email.trim(), password);
@@ -136,6 +144,7 @@ export default function Auth({ onAuthed }) {
 
   return (
     <div className="flex min-h-screen items-center justify-center px-4">
+      <main>
       <form
         data-testid="auth-card"
         className="w-full max-w-md rounded-xl border border-border bg-panel p-5"
@@ -148,9 +157,11 @@ export default function Auth({ onAuthed }) {
             <span>Holdings</span>
           </h1>
           <p className="mt-1 text-sm text-muted">
-            {registering
-              ? "Create your account to start tracking multi-asset portfolios live."
-              : "Welcome back! Sign in to access your portfolios and analytics."}
+            {forgetting
+              ? "Enter the email on the account. If it exists, we send a reset link."
+              : registering
+                ? "Create your account to start tracking multi-asset portfolios live."
+                : "Welcome back! Sign in to access your portfolios and analytics."}
           </p>
         </div>
 
@@ -190,7 +201,7 @@ export default function Auth({ onAuthed }) {
             data-testid="auth-error-banner"
             role="alert"
             aria-live="polite"
-            className="mb-4 rounded-lg border border-[var(--c-critical)]/40 bg-[var(--c-critical)]/10 px-4 py-3 text-sm text-[var(--c-critical-text)]"
+            className="mb-4 rounded-lg border border-[var(--c-critical-text)] bg-panel-2 px-4 py-3 text-sm text-[var(--c-critical-text)]"
           >
             {error}
           </div>
@@ -200,9 +211,19 @@ export default function Auth({ onAuthed }) {
           <div
             data-testid="auth-registration-closed"
             role="status"
-            className="mb-4 rounded-lg border border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 px-4 py-3 text-sm text-[var(--c-warn-text)]"
+            className="mb-4 rounded-lg border border-[var(--c-warn-text)] bg-panel-2 px-4 py-3 text-sm text-[var(--c-warn-text)]"
           >
             New memberships are currently closed. Existing users can still sign in.
+          </div>
+        )}
+
+        {resetSent && (
+          <div
+            data-testid="auth-reset-sent"
+            role="status"
+            className="mb-4 rounded-lg border border-[var(--c-good-text)] bg-panel-2 px-4 py-3 text-sm text-[var(--c-good-text)]"
+          >
+            If an account exists for that email, a reset link has been sent.
           </div>
         )}
 
@@ -238,6 +259,7 @@ export default function Auth({ onAuthed }) {
           )}
         </div>
 
+        {!forgetting && (
         <div className="mb-4">
           <div className="mb-1 flex items-center justify-between">
             <label htmlFor="auth-password" className="text-sm font-medium text-text">
@@ -284,6 +306,20 @@ export default function Auth({ onAuthed }) {
             </div>
           )}
         </div>
+        )}
+
+        {mode === "login" && (
+          <div className="mb-4 text-right">
+            <Button
+              type="button"
+              variant="link"
+              data-testid="auth-forgot"
+              onClick={() => switchMode("forgot")}
+            >
+              Forgot password?
+            </Button>
+          </div>
+        )}
 
         {registering && (
           <div className="mb-4">
@@ -346,12 +382,13 @@ export default function Auth({ onAuthed }) {
           type="submit"
           variant="primary"
           data-testid="auth-submit"
-          disabled={busy || !canSubmit}
+          disabled={busy || !canSubmit || resetSent}
           className="w-full py-1.5"
         >
-          {busy ? "Working…" : registering ? "Create account" : "Sign in"}
+          {busy ? "Working…" : forgetting ? "Send reset link" : registering ? "Create account" : "Sign in"}
         </Button>
       </form>
+      </main>
     </div>
   );
 }

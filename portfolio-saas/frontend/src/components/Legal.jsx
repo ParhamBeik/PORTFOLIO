@@ -10,7 +10,7 @@ export default function Legal({ kind, authed = false }) {
       </h1>
       <p
         data-testid="legal-warning"
-        className="mt-4 rounded-lg border border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 px-4 py-3 text-sm text-[var(--c-warn-text)]"
+        className="mt-4 rounded-lg border border-[var(--c-warn-text)] bg-panel-2 px-4 py-3 text-sm text-[var(--c-warn-text)]"
       >
         Draft for closed beta. Iranian counsel approval is pending; paid public
         launch remains blocked until that review is recorded.

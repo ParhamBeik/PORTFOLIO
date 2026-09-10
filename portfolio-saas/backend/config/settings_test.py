@@ -58,7 +58,6 @@ MARKETDATA_REQUIRE_SHARED_WINDOW = False
 MARKETDATA_PLAN_SAFETY_MARGIN = 0
 # Existing tests pin leftover arithmetic against an unscaled ceiling. Production
 # still charges TSETMC archive at 1.30; tests that cover that ratio set it.
-MARKETDATA_TSETMC_ARCHIVE_BILL_RATIO = 1.0
 # Production floor (1200) would replace simulated live cost in leftover tests.
 # Cases that need the floor set it explicitly.
 MARKETDATA_LIVE_REQUEST_FLOOR = 0
@@ -78,4 +77,3 @@ REST_FRAMEWORK = {
         "analytics": "1000/min",
     },
 }
-

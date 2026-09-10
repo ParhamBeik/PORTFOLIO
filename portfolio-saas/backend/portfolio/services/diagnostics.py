@@ -10,6 +10,7 @@ subset (assets whose columns actually exist in the returns df).
 """
 from __future__ import annotations
 
+import datetime as dt
 from decimal import Decimal
 
 import numpy as np
@@ -359,7 +360,6 @@ def _load_index_returns(target_index: pd.Index, as_of: dt.datetime | None = None
         return None
     from marketdata.models import MarketIndexData
     import jdatetime
-    import datetime as dt
     from portfolio.services.returns import to_jalali_str
 
     qs = MarketIndexData.objects.order_by("date", "time")

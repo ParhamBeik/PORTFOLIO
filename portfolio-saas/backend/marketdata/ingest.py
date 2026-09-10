@@ -463,7 +463,15 @@ def ingest_transactions(
 
     with transaction.atomic():
         if replace:
-            StockTransactionTick.objects.filter(symbol=symbol, date=day).delete()
+            # Bound the partition column too, or this deletes by scanning all
+            # 1,240 chunks of the hypertable -- see `jalali.ts_window`. Falls
+            # back to the unpruned delete when the day will not parse, because
+            # deleting nothing here would leave the old rows in place.
+            stale = StockTransactionTick.objects.filter(symbol=symbol, date=day)
+            window = jalali.ts_window(day)
+            if window:
+                stale = stale.filter(ts__gte=window[0], ts__lt=window[1])
+            stale.delete()
         created, conflicts = _bulk(
             StockTransactionTick, rows, scope={"symbol": symbol, "date": day}
         )

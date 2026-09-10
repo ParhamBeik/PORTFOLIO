@@ -5,7 +5,6 @@ Merged from 7 files; each section keeps its original banner.
 
 import csv
 from decimal import Decimal
-import math
 from unittest.mock import patch
 
 from django.core.management import call_command
@@ -15,7 +14,7 @@ import pytest
 
 from marketdata import endpoints
 from marketdata import ingest
-from marketdata import ingest, jalali
+from marketdata import jalali
 from marketdata import validation
 from marketdata.currency import to_toman
 from marketdata.fetchers import (
@@ -23,7 +22,6 @@ from marketdata.fetchers import (
     fetch_codal_announcements,
     fetch_daily_history,
     fetch_gold_currency_free,
-    fetch_gold_currency_pro,
     fetch_gold_currency_pro_history_daily,
     fetch_market_index,
     fetch_shareholders,
@@ -42,28 +40,11 @@ from marketdata.models import (
     StockTransactionTick,
 )
 from marketdata.models import (
-    CodalAnnouncement,
-    DailyStockHistory,
-    GoldCurrencyHistory,
-    MarketCandle,
-    StockSymbolMetadata,
-)
-from marketdata.models import (
-    CodalAnnouncement,
-    DailyStockHistory,
-    GoldCurrencyHistory,
-    ShareholderRecord,
-)
-from marketdata.models import (
-    MarketCandle,
     CorporateAction,
-    CodalAnnouncement,
-    GoldCurrencyHistory,
     RejectedRecord,
 )
 from marketdata.quota import ARCHIVE
 from marketdata.tasks import nightly_series_validation
-from portfolio.services.returns import daily_returns_matrix
 from portfolio.services.valuation import _archive_replacements
 
 pytestmark = pytest.mark.django_db
@@ -1323,7 +1304,6 @@ def test_empty_payload_is_a_failure_not_a_completion(settings, db):
 
 def test_never_attempted_states_get_a_reserved_slice(settings, db):
     """All 39 gold states had never run once: -missing_rows sorted them last."""
-    from django.utils import timezone
     from marketdata.archive import claim_archive_batch
     from marketdata.models import ArchiveFetchState
 
@@ -1734,11 +1714,8 @@ def test_invalid_observations_excluded_from_returns_valuation(asset_catalog):
     )
 
     # 1. Verify returns panel excludes the spike date
-    from portfolio.services.returns import _load_live_price_panel
     # Force loading prices including the dates
     # Since returns uses cutoff, let's call daily_returns_matrix or examine returns panel filter directly
-    from django.utils import timezone
-    import pandas as pd
     
     # 2. Verify archive replacements excludes it
     # _archive_replacements should filter out RejectedRecord dates
@@ -1926,3 +1903,81 @@ def test_a_provider_duplicate_does_not_take_down_the_whole_catalog_sync(db):
         ).values_list("symbol", flat=True)
     )
     assert coins == {"Ellipsis", "Bitcoin"}
+
+
+# ---------------------------------------------------------------------------
+# PARTITION PRUNING. `ts` is the hypertable's range key and `date` is the domain
+# key, and a predicate on `date` alone tells the planner nothing about which
+# chunks to look in. Measured on production 2026-09-09 against 58M ticks in
+# 1,240 chunks: one symbol-day cost 2,133 ms cold / 318 ms warm by date alone
+# and 37 ms / 2.2 ms with the window, for the same 111 rows. These tests pin the
+# only property that can go wrong -- the window has to be a SUPERSET, because a
+# delete that misses rows is how duplicates get made.
+class TestTsWindow:
+    def test_window_contains_every_moment_of_its_own_day(self):
+        from marketdata import jalali
+
+        start, end = jalali.ts_window("1405-05-24")
+        for time_value in ("00:00:00", "09:00:00", "12:29:59", "23:59:59"):
+            moment = jalali.to_datetime("1405-05-24", time_value)
+            assert start <= moment < end, time_value
+
+    def test_window_absorbs_the_pre_correction_formula_skew(self):
+        """Rows written when Tehran midnight was read as 03:30 UTC the same day.
+
+        That is a ~7-hour forward shift against today's derivation. The padding
+        exists so such a row is still inside the window and still gets deleted.
+        """
+        import datetime
+
+        from marketdata import jalali
+
+        start, end = jalali.ts_window("1405-05-24")
+        correct = jalali.to_datetime("1405-05-24", "23:59:59")
+        assert start <= correct + datetime.timedelta(hours=7) < end
+
+    def test_window_spans_a_range_of_days(self):
+        from marketdata import jalali
+
+        start, end = jalali.ts_window(["1405-05-24", "1405-05-20", "1405-05-22"])
+        assert start <= jalali.to_datetime("1405-05-20", "00:00:00")
+        assert jalali.to_datetime("1405-05-24", "23:59:59") < end
+
+    def test_unparseable_input_returns_none_rather_than_an_empty_window(self):
+        """Callers fall back to the unpruned query on None.
+
+        An empty window would be worse than no window: the delete would match
+        nothing and leave the rows it was meant to replace.
+        """
+        from marketdata import jalali
+
+        assert jalali.ts_window("") is None
+        assert jalali.ts_window("2026-08-15") is None
+        assert jalali.ts_window([]) is None
+
+
+@pytest.mark.django_db
+def test_tick_replace_still_removes_the_previous_day_under_the_window():
+    """The pruned delete must behave exactly like the unpruned one."""
+    from marketdata import ingest
+    from marketdata.models import StockTransactionTick
+
+    payload = [
+        {"row": 1, "time": "09:15:22", "price": 4200, "volume": 5},
+        {"row": 2, "time": "09:15:23", "price": 4300, "volume": 6},
+    ]
+    ingest.ingest_transactions("SYM", "1405-05-24", payload, replace=True)
+    # A neighbouring day must survive: the window is padded by a day on each
+    # side, and pruning must never widen into data nobody asked to replace.
+    ingest.ingest_transactions("SYM", "1405-05-25", payload, replace=True)
+
+    ingest.ingest_transactions(
+        "SYM", "1405-05-24",
+        [{"row": 1, "time": "10:00:00", "price": 9900, "volume": 7}],
+        replace=True,
+    )
+
+    day = StockTransactionTick.objects.filter(symbol="SYM", date="1405-05-24")
+    assert day.count() == 1, "the previous rows for this day must be gone"
+    assert int(day.first().price) == 9900
+    assert StockTransactionTick.objects.filter(symbol="SYM", date="1405-05-25").count() == 2

@@ -99,6 +99,7 @@ def test_the_same_money_in_gold_is_worth_what_gold_did_with_it(compared):
     assert summary["alternative_end_tomans"] > summary["actual_end_tomans"]
     assert summary["difference_tomans"] < 0
     assert len(actual["points"]) == len(alternative["points"]) > 1
+    assert response.data["as_of"]
 
 
 def test_a_lump_sum_beats_the_drip_when_the_price_only_rises(compared):
@@ -245,7 +246,6 @@ def test_a_dollar_quoted_target_is_not_reported_as_toman(compared, asset_catalog
     pct_change() next, where a constant factor cancels, so nothing noticed. This
     page prints the number, so it must read the converted panel.
     """
-    import jdatetime
     from marketdata.models import GoldCurrencyHistory
     from portfolio.models import Price
 

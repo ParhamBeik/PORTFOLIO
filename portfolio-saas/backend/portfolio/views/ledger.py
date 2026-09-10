@@ -2,26 +2,23 @@
 
 Every write here goes through `services.ledger`, which owns the replay
 and the invariants; these views are the HTTP surface over it."""
-from datetime import datetime, timedelta
+from datetime import timedelta
+
 from django.utils import timezone
-from rest_framework import generics, status
-from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework import status
+from rest_framework.exceptions import NotFound
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from ..models import Account, Asset, Holding, LedgerEntry, Price, Snapshot, Transaction, Liability
+from ..models import Holding, LedgerEntry, Transaction
 from ..serializers import (
-    AccountSerializer,
-    AssetSerializer,
-    HoldingSerializer,
     LedgerEntryInputSerializer,
     LedgerEntryPatchSerializer,
     LedgerEntrySerializer,
     TradeInputSerializer,
     TransactionSerializer,
-    LiabilitySerializer,
 )
-from ..services import execute_trade, get_latest_prices, undo_trade, value_account, value_user
+from ..services import execute_trade, get_latest_prices, undo_trade
 from ..services.catalog import resolve_asset_key
 from ..services.trades import TradeError
 from ..services.ledger import (
@@ -41,7 +38,6 @@ from ..services.imports import (
     commit_ledger_import,
     preview_ledger_import,
 )
-import logging
 from ._common import _int_param
 
 
@@ -296,44 +292,31 @@ class TradeView(APIView):
 
 
 class TransactionUndoView(APIView):
-    """Roll back a specific transaction by ID."""
-
     permission_classes = [IsAuthenticated]
 
     def post(self, request, tx_id):
         try:
             undo_trade(user=request.user, transaction_id=tx_id)
         except Transaction.DoesNotExist:
-            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"detail": "Not found."}, status=404)
         except TradeError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response({"detail": "Transaction undone successfully."}, status=status.HTTP_200_OK)
-
-
-
-import logging
-
-from rest_framework.permissions import IsAdminUser
-from portfolio.management.commands.clean_mispriced_data import audit_and_repair_prices
-
-admin_logger = logging.getLogger("portfolio.admin")
+            return Response({"detail": str(exc)}, status=400)
+        return Response({"detail": "Transaction undone successfully."})
 
 
 class TransactionListView(APIView):
-    """Trade history for the user (all accounts), newest first, capped by ?days=."""
-
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         days, _ = _int_param(request, "days", 90, clamp=(1, 3650), strict=False)
-        since = timezone.now() - timedelta(days=days)
         rows = Transaction.objects.filter(
-            account__user=request.user, timestamp__gte=since,
-            reversal_of__isnull=True, reversed_by__isnull=True
+            account__user=request.user,
+            timestamp__gte=timezone.now() - timedelta(days=days),
+            reversal_of__isnull=True,
+            reversed_by__isnull=True,
         ).select_related("asset")
         account_id = request.query_params.get("account")
         if account_id:
-            # Non-numeric ?account= would raise ValueError -> 500; ignore it.
             try:
                 rows = rows.filter(account_id=int(account_id))
             except (TypeError, ValueError):
@@ -342,15 +325,13 @@ class TransactionListView(APIView):
 
 
 class TransactionDestroyView(APIView):
-    """Undo the latest trade for an asset and reverse its holding effect."""
-
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, pk):
         try:
             undo_trade(user=request.user, transaction_id=pk)
         except Transaction.DoesNotExist:
-            return Response({"detail": "Transaction not found."}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"detail": "Transaction not found."}, status=404)
         except TradeError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": str(exc)}, status=400)
         return Response({"detail": "Transaction undone successfully."})

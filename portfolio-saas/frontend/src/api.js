@@ -194,6 +194,18 @@ export const register = (email, password) =>
   api("/api/auth/register/", { method: "POST", body: { email, password } });
 export const login = (email, password) =>
   api("/api/auth/login/", { method: "POST", body: { email, password } });
+export const requestPasswordReset = (email) =>
+  api("/api/auth/password-reset/", { method: "POST", body: { email } });
+export const confirmPasswordReset = ({ uid, token, newPassword, confirmPassword }) =>
+  api("/api/auth/password-reset/confirm/", {
+    method: "POST",
+    body: {
+      uid,
+      token,
+      new_password: newPassword,
+      confirm_password: confirmPassword,
+    },
+  });
 export const me = () => api("/api/auth/me/");
 export const updateProfile = ({ firstName, lastName }) =>
   api("/api/auth/me/", {
@@ -332,6 +344,8 @@ export const trade = (
   });
 export const getPerformance = (accountId, basis = "nominal_toman") =>
   api(`/api/accounts/${accountId}/performance/?basis=${basis}`);
+export const accountDataQuality = (accountId) =>
+  api(`/api/accounts/${accountId}/data-quality/`);
 
 // The account ledger: add, edit, and delete trades. Holdings without history
 // appear as position rows. accountId null = every portfolio.
@@ -343,6 +357,8 @@ export const updateLedgerEntry = (accountId, entryId, body) =>
   api(`/api/accounts/${accountId}/ledger/${entryId}/`, { method: "PATCH", body });
 export const deleteLedgerEntry = (accountId, entryId) =>
   api(`/api/accounts/${accountId}/ledger/${entryId}/`, { method: "DELETE" });
+export const reverseLedgerEntry = (accountId, entryId) =>
+  api(`/api/accounts/${accountId}/ledger/${entryId}/reverse/`, { method: "POST", body: {} });
 export const updateLedgerHolding = (accountId, holdingId, quantity) =>
   api(`/api/accounts/${accountId}/ledger/holdings/${holdingId}/`, {
     method: "PATCH",
@@ -499,6 +515,12 @@ export const analytics = (account = null, { basis, window } = {}) => {
   const qs = params.toString();
   return api(`/api/analytics/${qs ? `?${qs}` : ""}`);
 };
+export const insights = (account = null) => {
+  const params = new URLSearchParams();
+  if (account) params.set("account", account);
+  const qs = params.toString();
+  return api(`/api/insights/${qs ? `?${qs}` : ""}`);
+};
 export const frontier = (account = null, { window } = {}) => {
   const params = new URLSearchParams();
   if (account) params.set("account", account);
@@ -525,7 +547,8 @@ export const robustness = (account = null, { scenario, window, targetVolatility 
   const s = params.toString();
   return api(`/api/optimization/robustness/${s ? `?${s}` : ""}`);
 };
-export const bestOverall = () => api("/api/optimization/best-overall/");
+export const bestOverall = (account = null) =>
+  api(`/api/optimization/best-overall/${qs({ account })}`);
 
 function qs(params) {
   const u = new URLSearchParams();
@@ -542,6 +565,10 @@ export const adminArchiveStates = (params) => api(`/api/admin/archive-states/${q
 export const adminArchiveRetry = (ids) =>
   api("/api/admin/archive-states/retry/", { method: "POST", body: { ids, confirm: true } });
 export const adminAssets = (params) => api(`/api/admin/assets/${qs(params)}`);
+// Under /api/auth/, not /api/admin/: this is an accounts-app endpoint that
+// happens to be staff-only, and the two admin surfaces are mounted separately.
+export const adminPasswordResetLink = (email) =>
+  api("/api/auth/admin/password-reset-link/", { method: "POST", body: { email } });
 export const adminAssetEvidence = (key) =>
   api(`/api/admin/assets/${encodeURIComponent(key)}/evidence/`);
 export const adminAssetRetry = (key) =>

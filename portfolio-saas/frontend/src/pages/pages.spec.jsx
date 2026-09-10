@@ -13,6 +13,7 @@ vi.mock("../api.js", () => ({
   valuation: vi.fn(),
   snapshots: vi.fn(),
   getPerformance: vi.fn(),
+  accountDataQuality: vi.fn(),
   listLiabilities: vi.fn(),
   listAccounts: vi.fn(),
   myOptimal: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock("../api.js", () => ({
   analytics: vi.fn(),
   diversifiers: vi.fn(),
   benchmarks: vi.fn(),
+  insights: vi.fn(),
   adminAssetEvidence: vi.fn(),
 }));
 
@@ -100,6 +102,12 @@ describe("Page Rendering Tests", () => {
       is_estimated: false,
     });
     api.listLiabilities.mockResolvedValue([]);
+    api.accountDataQuality.mockResolvedValue({
+      quality_status: "complete",
+      passing_assets: 1,
+      assessed_assets: 1,
+      assets: [],
+    });
     api.analytics.mockResolvedValue({
       sharpe: 1.45,
       volatility: 0.12,
@@ -110,6 +118,11 @@ describe("Page Rendering Tests", () => {
     });
     api.diversifiers.mockResolvedValue([]);
     api.benchmarks.mockResolvedValue({ benchmarks: [] });
+    api.insights.mockResolvedValue({
+      concentration: { severity: "ok", message: "No single holding dominates." },
+      gold_band: { severity: "ok", message: "Gold allocation is within target band." },
+      net_worth_trend: { severity: "info", message: "Not enough history yet." },
+    });
 
     render(
       <MemoryRouter>
@@ -123,14 +136,23 @@ describe("Page Rendering Tests", () => {
     });
     expect(screen.getByText(/Kama Stock/i)).toBeInTheDocument();
     const holdings = await screen.findByTestId("dashboard-holdings");
+    const quality = await screen.findByTestId("dashboard-quality");
+    const notes = await screen.findByTestId("dashboard-insights");
     const liabilities = await screen.findByTestId("dashboard-liabilities");
     expect(
-      holdings.compareDocumentPosition(liabilities) & Node.DOCUMENT_POSITION_FOLLOWING
+      holdings.compareDocumentPosition(quality) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      quality.compareDocumentPosition(notes) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      notes.compareDocumentPosition(liabilities) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
   });
 
   it("renders MyOptimal with scenarios and recommended weights", async () => {
     api.myOptimal.mockResolvedValue({
+      as_of: "2026-09-08T12:00:00Z",
       windows: [
         {
           label: "1Y",
@@ -193,5 +215,6 @@ describe("Page Rendering Tests", () => {
     expect(
       screen.getByTestId("optimal-scenario-tabs-max_sharpe")
     ).toBeInTheDocument();
+    expect(screen.getByTestId("optimal-as-of")).toBeInTheDocument();
   });
 });

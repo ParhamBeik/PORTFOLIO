@@ -4,3 +4,7 @@ pytest>=8.0,<9
 pytest-django>=4.8,<4.13
 responses>=0.25
 rich>=13.7
+# Correctness lint (config in backend/ruff.toml). Pinned like every other
+# dependency here so a new ruff release cannot turn a green CI red on a rule
+# that did not exist when the commit was written.
+ruff==0.16.6

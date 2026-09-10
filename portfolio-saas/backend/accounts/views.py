@@ -2,18 +2,24 @@
 import csv
 import io
 import json
+import logging
 import zipfile
 
 from django.conf import settings
+from django.contrib.auth.tokens import PasswordResetTokenGenerator
+from django.core.mail import send_mail
 from django.db import transaction
 from django.http import HttpResponse
 from django.middleware.csrf import get_token
 from django.utils import timezone
 from django.utils.decorators import method_decorator
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.views.decorators.csrf import csrf_protect
-from rest_framework import generics, serializers, status
+from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
@@ -26,9 +32,16 @@ from .models import User
 from .serializers import (
     ChangePasswordSerializer,
     PasswordAwareTokenRefreshSerializer,
+    PasswordResetConfirmSerializer,
+    PasswordResetRequestSerializer,
     RegisterSerializer,
     UserSerializer,
 )
+
+logger = logging.getLogger(__name__)
+RESET_TOKEN = PasswordResetTokenGenerator()
+RESET_ACCEPTED = "If an account exists for that email, a reset link has been sent."
+RESET_INVALID = "This reset link is invalid or has expired."
 
 
 REFRESH_COOKIE = "ps_refresh"
@@ -44,8 +57,22 @@ def _session_expires_at() -> str:
 
 
 def _revoke_all(user: User) -> None:
-    for token in OutstandingToken.objects.filter(user=user):
-        BlacklistedToken.objects.get_or_create(token=token)
+    """Blacklist every refresh token this user still holds, in one round trip.
+
+    Two bounds, both of which the previous per-token `get_or_create` loop
+    lacked. Refresh rotation writes an `OutstandingToken` row on every refresh,
+    so a year-old account has thousands: the loop issued a SELECT and an INSERT
+    for each, inside the request that changes a password or deletes an account.
+
+    Already-expired tokens are skipped because blacklisting them buys nothing --
+    `RefreshToken()` rejects them on expiry before the blacklist is consulted --
+    and `prune_expired_refresh_tokens` deletes them nightly anyway.
+    """
+    live = OutstandingToken.objects.filter(user=user, expires_at__gte=timezone.now())
+    BlacklistedToken.objects.bulk_create(
+        [BlacklistedToken(token=token) for token in live],
+        ignore_conflicts=True,
+    )
 
 
 def _set_refresh_cookie(response, request, refresh: str):
@@ -65,6 +92,14 @@ def _set_refresh_cookie(response, request, refresh: str):
 class CookieTokenObtainPairView(TokenObtainPairView):
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
+        # JWT login never fires Django's user_logged_in, so last_login stays
+        # null and Ops "People and books" prints an em dash. Stamp only here;
+        # cookie refresh is not a new sign-in.
+        ident = request.data.get(User.USERNAME_FIELD)
+        if ident:
+            User.objects.filter(
+                **{User.USERNAME_FIELD: User.objects.normalize_email(ident)}
+            ).update(last_login=timezone.now())
         refresh = response.data.pop("refresh")
         response.data["session_expires_at"] = _session_expires_at()
         return _set_refresh_cookie(response, request, refresh)
@@ -188,6 +223,143 @@ class ChangePasswordView(APIView):
         return _set_refresh_cookie(Response({
             "detail": "Password updated successfully.", "access": access,
         }), request, refresh)
+
+
+def _user_from_uid(uid: str) -> User | None:
+    try:
+        pk = force_str(urlsafe_base64_decode(uid))
+        return User.objects.select_for_update().get(pk=pk, is_active=True)
+    except (ValueError, TypeError, OverflowError, UnicodeDecodeError, User.DoesNotExist):
+        return None
+
+
+def _reset_link(user: User) -> str:
+    uid = urlsafe_base64_encode(force_bytes(user.pk))
+    token = RESET_TOKEN.make_token(user)
+    return f"{settings.FRONTEND_PASSWORD_RESET_URL}?uid={uid}&token={token}"
+
+
+def _send_reset_mail(user: User) -> None:
+    link = _reset_link(user)
+    send_mail(
+        subject="Reset your Holdings password",
+        message=(
+            "Reset your Holdings password by opening this link. "
+            "It expires in three days.\n\n"
+            f"{link}\n\n"
+            "If you did not ask for this, you can ignore the email."
+        ),
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[user.email],
+        fail_silently=False,
+    )
+
+
+class PasswordResetRequestView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_reset"
+
+    def post(self, request):
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = User.objects.normalize_email(serializer.validated_data["email"])
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        if user is not None:
+            try:
+                _send_reset_mail(user)
+            except Exception:
+                logger.exception("password-reset: failed to send mail to uid=%s", user.pk)
+        return Response({"detail": RESET_ACCEPTED})
+
+
+class AdminPasswordResetLinkView(APIView):
+    """Mint a reset link a superuser can hand over out of band.
+
+    Password reset is a two-part system -- mint a token, deliver it -- and only
+    delivery is broken here: there is no mail relay, so `PasswordResetRequestView`
+    answers 200 and sends nothing, and a user who forgets their password has no
+    route back into their own account. The token half works and is exercised by
+    the existing confirm flow.
+
+    So this exposes the working half. An operator reads the link and delivers it
+    however they already reach that person; the user redeems it through the
+    ordinary `password-reset/confirm/` endpoint. That turns "unrecoverable" into
+    "recoverable with an operator in the loop", which is a support process rather
+    than a dead end, and it needs no third-party account.
+
+    **It grants no new power.** A Django superuser can already set another
+    user's password outright. This is strictly weaker: the link is single-use,
+    expires on the same schedule as an emailed one, and the operator never
+    chooses or learns the password -- the user sets it themselves.
+
+    Deliberately not a replacement for a mail relay: it does not scale past a
+    handful of users and it puts an operator in every recovery. Configure a
+    transactional-mail provider and self-service reset starts working with no
+    change here.
+    """
+
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        if not request.user.is_superuser:
+            return Response({"detail": "Superuser access required."}, status=403)
+        email = request.data.get("email") if isinstance(request.data, dict) else None
+        if not isinstance(email, str) or not email.strip():
+            return Response({"detail": "email is required."}, status=400)
+        normalized = User.objects.normalize_email(email.strip())
+        user = User.objects.filter(email__iexact=normalized, is_active=True).first()
+        if user is None:
+            # No enumeration concern here -- the caller is already staff and can
+            # list every user -- so this says plainly what happened rather than
+            # handing back a link-shaped answer for an address that has none.
+            return Response({"detail": "No active user with that email."}, status=404)
+        # Audited through the log rather than a model: `accounts` does not import
+        # `marketdata`, and inverting that dependency to reach SystemLogEvent
+        # would cost more than this line is worth. WARNING level so it stands out
+        # in a stream that is otherwise INFO.
+        logger.warning(
+            "admin-password-reset-link issued by uid=%s for uid=%s",
+            request.user.pk, user.pk,
+        )
+        return Response({
+            "link": _reset_link(user),
+            "expires_in_seconds": settings.PASSWORD_RESET_TIMEOUT,
+            "detail": (
+                "Single-use link. Deliver it to the account holder yourself; "
+                "they set the password, you never see it."
+            ),
+        })
+
+
+class PasswordResetConfirmView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_reset"
+
+    @transaction.atomic
+    def post(self, request):
+        if not isinstance(request.data, dict):
+            return Response({"detail": RESET_INVALID}, status=400)
+        uid = request.data.get("uid") or ""
+        token = request.data.get("token") or ""
+        if not isinstance(uid, str) or not isinstance(token, str):
+            return Response({"detail": RESET_INVALID}, status=400)
+        # Lock before checking the token: a concurrent reset must see the new
+        # password hash, which makes this single-use token invalid.
+        user = _user_from_uid(uid)
+        if user is None or not RESET_TOKEN.check_token(user, token):
+            return Response({"detail": RESET_INVALID}, status=400)
+        serializer = PasswordResetConfirmSerializer(
+            data=request.data, context={"user": user}
+        )
+        serializer.is_valid(raise_exception=True)
+        user.set_password(serializer.validated_data["new_password"])
+        user.save(update_fields=["password"])
+        _revoke_all(user)
+        return Response({"detail": "Password updated. Sign in with the new password."})
 
 
 def _csv_bytes(headers, rows) -> bytes:

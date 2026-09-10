@@ -5,17 +5,17 @@ All of it reads; none of it writes."""
 from datetime import datetime, timedelta
 from decimal import Decimal
 from django.conf import settings
-from django.db.models import Avg, F, Q, Window
+from django.db.models import Avg, F, Window
 from django.db.models.functions import RowNumber
 from django.db.models.functions import TruncDate
 from django.utils import timezone
-from rest_framework import generics, status
-from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework import status
+from rest_framework.exceptions import NotFound
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from ..models import Account, Asset, Holding, LedgerEntry, Price, Snapshot, Transaction, Liability
-from ..services import execute_trade, get_latest_prices, undo_trade, value_account, value_user
+from ..models import Asset, Holding, LedgerEntry, Price, Snapshot, Transaction
+from ..services import get_latest_prices, value_account, value_user
 from ..services.catalog import resolve_asset_key
 from ..services.valuation import (
     HIDDEN_ADJUSTMENT_MAX_DAYS,
@@ -77,8 +77,7 @@ class AccountDataQualityView(APIView):
             assets.append({"asset_key": asset.key, **result})
 
         assessed = [item for item in assets if item["passes_gate"] is not None]
-        from marketdata.coverage_report import build_warehouse_coverage
-        return Response({
+        payload = {
             "account_id": account.id,
             "assets": assets,
             "passing_assets": sum(bool(item["passes_gate"]) for item in assessed),
@@ -88,7 +87,6 @@ class AccountDataQualityView(APIView):
                 else "partial" if assessed
                 else "unavailable"
             ),
-            "warehouse_coverage": build_warehouse_coverage(),
             "known_limits": [
                 {
                     "code": "no_iranian_holiday_calendar",
@@ -103,7 +101,14 @@ class AccountDataQualityView(APIView):
                     "detail": "Provider market state is cached for 3600 seconds and has no external fallback.",
                 },
             ],
-        })
+        }
+        # Warehouse coverage is operator telemetry (row counts across the
+        # whole store). A member asking "can I trust MY symbols" does not
+        # need it, and computing it is the expensive half of this view.
+        if request.user.is_staff:
+            from marketdata.coverage_report import build_warehouse_coverage
+            payload["warehouse_coverage"] = build_warehouse_coverage()
+        return Response(payload)
 
 
 class ValuationView(APIView):

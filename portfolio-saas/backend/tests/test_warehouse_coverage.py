@@ -17,7 +17,7 @@ from rest_framework.test import APIClient
 
 from marketdata import calendars
 from marketdata import ingest, jalali
-from marketdata import jalali, quota
+from marketdata import quota
 from marketdata.archive import (
     _tick_dates_needed,
     _tick_days_unreconciled,
@@ -45,14 +45,10 @@ from marketdata.models import (
     MarketIndexData,
     MarketSnapshot,
 )
-from marketdata.models import ApiRequestQuota, MarketCandle, StockTransactionTick
-from marketdata.models import ArchiveFetchState
-from marketdata.models import DailyStockHistory
-from marketdata.models import GoldCurrencyHistory
-from marketdata.models import MarketDailyBar, MarketIndexData, MarketSnapshot
+from marketdata.models import ApiRequestQuota, StockTransactionTick
+from marketdata.models import MarketDailyBar
 from marketdata.workflows import WorkflowOutcome, current_correlation_id
 from portfolio.models import Account, Asset, Holding, LedgerEntry
-from portfolio.models import Asset, Price
 from portfolio.models import Price
 from portfolio.services.returns import _closure_explained, _mask_closure_returns
 
@@ -1888,10 +1884,6 @@ def test_symbol_retry_enqueues(staff_client, asset_catalog, monkeypatch):
             calls.append(state_id)
 
     monkeypatch.setattr("marketdata.tasks.retry_archive_job_task", DummyTask())
-    monkeypatch.setattr(
-        "marketdata.admin_api.get_quota_status",
-        lambda: {"limit": 100, "used": 1, "remaining_daily": 99},
-    )
 
     class FakeRedis:
         def ping(self):

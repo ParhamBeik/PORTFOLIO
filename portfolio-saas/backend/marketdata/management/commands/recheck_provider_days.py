@@ -25,7 +25,7 @@ from django.core.management.base import BaseCommand, CommandError
 
 from marketdata import ingest
 from marketdata.fetchers import fetch_candlesticks, fetch_daily_history
-from marketdata.models import DailyStockHistory, MarketCandle, RejectedRecord
+from marketdata.models import DailyStockHistory, MarketCandle
 
 # Two prices agree when they are within this fraction of each other. The
 # disagreements under investigation are 10x, 6.7x and 5x, so the bar only has to

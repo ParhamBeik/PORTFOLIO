@@ -1,9 +1,7 @@
-from decimal import Decimal
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from portfolio.models import Holding, Transaction
-from portfolio.services.trades import execute_trade
 from portfolio.services.valuation import get_latest_prices
 
 

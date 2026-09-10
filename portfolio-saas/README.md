@@ -38,11 +38,17 @@ celery -A config worker -l info &  celery -A config beat -l info &
 
 # tests — local Postgres required (DISTINCT ON; sqlite cannot run them)
 python -m pytest -q
+ruff check .                 # correctness lint (undefined names, dead imports)
 
 # frontend (proxies /api to :8000)
 cd frontend && npm install && npm run dev
+npm run lint                 # eslint; catches the missing import Vite will not
 npx playwright test          # e2e, needs E2E_EMAIL / E2E_PASSWORD
 ```
+
+Both linters run in CI and are correctness-only — no style rules. Their configs
+(`backend/ruff.toml`, `frontend/eslint.config.js`) explain which rules are on
+and, more usefully, which are deliberately off.
 
 ## Layout
 
@@ -71,7 +77,7 @@ portfolio-saas/
 │   │   ├── archive.py + quota.py #   gap-driven backfill under a request budget
 │   │   ├── calendars.py          #   which days a market was actually open
 │   │   └── admin_api.py          #   staff-only /api/admin/* Ops console backend
-│   └── tests/                    # 19 thematic suites, one per bounded concern
+│   └── tests/                    # 21 thematic suites, one per bounded concern
 └── frontend/src/                 # pages/ · components/ui.jsx + charts.jsx
                                   # api.js + useApi.js (the one fetch pattern)
 ```
@@ -115,6 +121,8 @@ Every API request needs a JWT; tokenless requests get 401. There are no
 subscription tiers — every endpoint is available to any authenticated user. An
 "account" is a named portfolio group ("Main", "Brokerage", "Cash"); the Iranian
 market has no Plaid equivalent, so v1 uses manual or imported holdings.
+Password reset emails need SMTP (`EMAIL_HOST` and friends); without it the
+request still returns 200 and the send is logged as failed.
 
 ## API summary
 
@@ -125,6 +133,7 @@ services.
 | Method | Path | Auth | Notes |
 |---|---|---|---|
 | POST | `/api/auth/register/` · `/api/auth/login/` | – | create account / JWT pair |
+| POST | `/api/auth/password-reset/` · `/confirm/` | – | email a reset link / set the new password |
 | POST | `/api/token/refresh/` | refresh | new access token |
 | GET | `/api/auth/me/` | JWT | current user |
 | GET | `/api/assets/` | JWT | asset catalog |
@@ -133,10 +142,12 @@ services.
 | GET/POST | `/api/accounts/<id>/holdings/` | JWT | list / add holding |
 | GET/PATCH/DELETE | `/api/accounts/<id>/holdings/<id>/` | JWT | edit / remove holding |
 | GET/POST | `/api/accounts/<id>/ledger/` | JWT | ledger entries |
+| POST | `/api/accounts/<id>/ledger/<id>/reverse/` | JWT | append-only reversal |
 | POST | `/api/accounts/<id>/trades/` | JWT | buy / sell |
 | GET | `/api/accounts/<id>/performance/?basis=` | JWT | TWR / XIRR / cost basis |
 | GET | `/api/valuation/` | JWT | live net worth across accounts |
 | GET | `/api/snapshots/?days=` | JWT | net-worth history (for charts) |
+| GET | `/api/insights/` | JWT | concentration / gold band / net-worth trend |
 | GET | `/api/analytics/` | JWT | risk diagnostics + correlation |
 | GET | `/api/optimization/my-optimal/` · `/frontier/` · `/best-overall/` | JWT | optimizer surfaces |
 | GET/POST | `/api/admin/*` | staff | Ops console (overview, workflows, archive states, asset evidence) |

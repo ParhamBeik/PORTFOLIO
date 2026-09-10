@@ -19,7 +19,7 @@ from .ledger import (
     resolve_historical_price,
     reverse_ledger_entry,
 )
-from .valuation import get_latest_prices, value_account, value_user
+from .valuation import value_account, value_user
 
 
 class TradeError(Exception):

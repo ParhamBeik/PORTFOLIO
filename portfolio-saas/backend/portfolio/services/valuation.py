@@ -1120,7 +1120,6 @@ def compute_dynamic_net_worth_series(
     )
     from portfolio.models import Holding, Liability
     from portfolio.services.timeline import (
-        holdings_as_of,
         house_state_as_of,
         load_house_marks,
     )
@@ -1574,7 +1573,6 @@ def resolve_asset_point_in_time_price(
     """
     from marketdata.calendars import (
         candle_close_qs,
-        market_for_asset,
         sessions_between,
     )
     from marketdata.models import GoldCurrencyHistory
@@ -1582,7 +1580,11 @@ def resolve_asset_point_in_time_price(
         BRS_SERIES_ENDPOINTS,
         STOCK_SERIES_ENDPOINTS,
         rejected_pairs,
+        rate_on,
+        toman_per_dollar,
     )
+    from marketdata.currency import FOREIGN_QUOTE_UNITS, to_toman
+    from portfolio.services.returns import USD_QUOTED_KEYS
 
     price = Decimal("0")
     stale_sessions = 0
@@ -1618,7 +1620,22 @@ def resolve_asset_point_in_time_price(
             .first()
         )
         if hist:
-            price = Decimal(str(hist.close_price))
+            raw_price = Decimal(str(hist.close_price))
+            foreign_quote = (
+                asset.key in USD_QUOTED_KEYS
+                or str(hist.unit or "").strip().casefold() in FOREIGN_QUOTE_UNITS
+            )
+            usd_rate = None
+            if foreign_quote:
+                rates, dates = toman_per_dollar([hist.date])
+                usd_rate = rate_on(rates, dates, hist.date)
+            price = (
+                raw_price * Decimal(str(usd_rate))
+                if asset.key in USD_QUOTED_KEYS and usd_rate
+                else to_toman(
+                    hist.symbol, raw_price, hist.unit, usd_rate=usd_rate
+                )
+            )
             source = "gold_currency_history"
             stale_sessions = sessions_between(
                 hist.date, as_of_jalali, market="gold_currency"
@@ -1663,21 +1680,40 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     usd_rate = Decimal("1")
     conversion_source = None
     if basis in ("usd_denominated", "usdt_denominated"):
+        from marketdata.calendars import sessions_between
+        from marketdata.provenance import BRS_SERIES_ENDPOINTS, rejected_pairs
+
+        rejected = rejected_pairs(["USDT_IRT", "USD"], BRS_SERIES_ENDPOINTS)
+
+        def usable_rate(symbol):
+            row = (
+                GoldCurrencyHistory.objects.filter(
+                    symbol=symbol, date__lte=jalali_str, close_price__gt=0
+                )
+                .exclude(date__in=[day for sym, day in rejected if sym == symbol])
+                .order_by("-date")
+                .first()
+            )
+            if row is None:
+                return None
+            stale = sessions_between(row.date, jalali_str, market="gold_currency")
+            return Decimal(str(row.close_price)) if stale <= MAX_FORWARD_FILL_SESSIONS else None
+
         rate_found = False
         if basis == "usdt_denominated":
-            usdt_hist = GoldCurrencyHistory.objects.filter(symbol="USDT_IRT", date__lte=jalali_str).order_by("-date").first()
-            if usdt_hist and usdt_hist.close_price > 0:
-                usd_rate = Decimal(str(usdt_hist.close_price))
+            usdt_rate = usable_rate("USDT_IRT")
+            if usdt_rate is not None:
+                usd_rate = usdt_rate
                 conversion_source = "USDT"
                 rate_found = True
-        
+
         if not rate_found:
-            usd_hist = GoldCurrencyHistory.objects.filter(symbol="USD", date__lte=jalali_str).order_by("-date").first()
-            if usd_hist and usd_hist.close_price > 0:
-                usd_rate = Decimal(str(usd_hist.close_price))
+            historical_usd_rate = usable_rate("USD")
+            if historical_usd_rate is not None:
+                usd_rate = historical_usd_rate
                 conversion_source = "USD"
                 rate_found = True
-                
+
         if not rate_found:
             return {
                 "total": 0.0,

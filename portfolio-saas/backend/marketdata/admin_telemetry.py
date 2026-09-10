@@ -12,6 +12,7 @@ and `hypertable_size` instead, which are still estimates rather than COUNT(*).
 from __future__ import annotations
 
 import math
+import shutil
 from datetime import timedelta
 
 from django.conf import settings
@@ -451,6 +452,97 @@ def _workers():
         return result
 
 
+def outbound_mail():
+    """Whether a password-reset email can actually leave this process.
+
+    The one user journey with no in-app fallback. `PasswordResetRequestView`
+    answers the same 200 whether or not the send worked -- deliberately, so the
+    endpoint cannot be used to enumerate accounts -- and logs the failure. That
+    means an unconfigured `EMAIL_HOST` is invisible from the outside: the user
+    is told to check their inbox for mail that was never sent, and nothing
+    surfaces it but a log line nobody greps. This is what surfaces it.
+
+    Configuration alone is not enough to answer it, which is the lesson this
+    function was rewritten for. Checked against production on 2026-09-09:
+    `EMAIL_HOST` was `localhost` and `EMAIL_PORT` 25 -- Django's own defaults,
+    reached because the deployed revision has no `EMAIL_*` block at all -- and
+    nothing listens there. A settings-only check calls that "configured" and
+    reports healthy while every reset email fails with ConnectionRefusedError.
+    So this also opens a socket.
+
+    The probe is one TCP connect with a short timeout, **cached**, so the Ops
+    page does not dial a relay on every render. It is a connect, never a
+    handshake or a test message: reachability is the question, and sending mail
+    to prove you can send mail is not something a dashboard should do.
+
+    Reported as **degraded**, never critical, and deliberately kept out of the
+    `checks` dict that decides `critical` -- the API serves every other request
+    perfectly well without mail. Losing account recovery is serious and is not
+    an outage.
+    """
+    backend = str(getattr(settings, "EMAIL_BACKEND", ""))
+    host = str(getattr(settings, "EMAIL_HOST", ""))
+    port = int(getattr(settings, "EMAIL_PORT", 25) or 25)
+    if "smtp" not in backend:
+        # console / locmem / filebased: mail is captured somewhere local. That
+        # is correct in dev and in the test suite, and is not a fault.
+        return {
+            "ok": True,
+            "status": "not_delivering",
+            "backend": backend,
+            "host": "",
+            "message": "Mail is captured locally by this backend, not delivered.",
+        }
+    # A loopback host counts as unset, not as configured. Django's global
+    # default for EMAIL_HOST is "localhost", so this is what an environment that
+    # never set the variable looks like -- and a mail relay inside the
+    # application container is not a deployment anyone here intends.
+    if not host or host in ("localhost", "127.0.0.1", "::1"):
+        return {
+            "ok": False,
+            "status": "unconfigured",
+            "backend": backend,
+            "host": host,
+            "message": (
+                "EMAIL_HOST is unset (or still Django's localhost default) with "
+                "an SMTP backend, so password-reset mail cannot be sent. Users "
+                "asking to reset a password are told to check their inbox and "
+                "nothing arrives."
+            ),
+        }
+
+    cache_key = f"admin_outbound_mail:{host}:{port}"
+    probe = cache.get(cache_key)
+    if probe is None:
+        import socket
+
+        try:
+            socket.create_connection((host, port), timeout=3).close()
+            probe = {"reachable": True, "error": ""}
+        except Exception as exc:
+            probe = {"reachable": False, "error": f"{type(exc).__name__}: {exc}"}
+        cache.set(cache_key, probe, 300)
+
+    if not probe["reachable"]:
+        return {
+            "ok": False,
+            "status": "unreachable",
+            "backend": backend,
+            "host": host,
+            "message": (
+                f"Cannot reach the mail relay at {host}:{port} "
+                f"({probe['error']}), so password-reset mail cannot be sent."
+            ),
+        }
+    return {
+        "ok": True,
+        "status": "healthy",
+        "backend": backend,
+        "host": host,
+        "message": "",
+    }
+
+
 def _queues():
     try:
         from redis import Redis
@@ -657,42 +749,103 @@ def _fill_rates(counts, table_bytes):
     return rates
 
 
+def filesystem_usage(path="/"):
+    """Measured size of the device the data sits on, or None if it cannot be read.
+
+    The backend container's `/` is the host's data device through overlay2, so
+    statvfs here reports the real filesystem rather than a container-local view.
+    """
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError:
+        return None
+    return {"total": usage.total, "used": usage.used, "free": usage.free}
+
+
+def _growth_per_day(history, measure):
+    """Bytes/day between the ends of the snapshot series, or None if unmeasurable."""
+    if len(history) < 2:
+        return None
+    first, last = history[0], history[-1]
+    first_used = measure(first.get("disk") or {})
+    last_used = measure(last.get("disk") or {})
+    if first_used is None or last_used is None:
+        return None
+    t0 = parse_datetime(first["captured_at"]) if isinstance(first["captured_at"], str) else first["captured_at"]
+    t1 = parse_datetime(last["captured_at"]) if isinstance(last["captured_at"], str) else last["captured_at"]
+    if not t0 or not t1:
+        return None
+    days = max((t1 - t0).total_seconds() / 86400, 1 / 24)
+    return (last_used - first_used) / days
+
+
+def _own_bytes(disk):
+    return int(disk.get("database_bytes") or 0) + int(disk.get("codal_bytes") or 0)
+
+
 def project_disk(disk=None, history=None):
-    """Days until 80% of the VPS disk budget, from snapshot history — never COUNT(*)."""
-    budget_gb = int(getattr(settings, "VPS_DISK_BUDGET_GB", 250))
-    budget_bytes = budget_gb * 1024 ** 3
-    target = int(budget_bytes * 0.80)
+    """Days until the device holding the database is 80% full.
+
+    This used to project against `VPS_DISK_BUDGET_GB`, a hand-typed 250 copied
+    from an aspirational comment in `docker-compose.prod.yml`, and to compare
+    that budget against `pg_database_size` -- one database's *logical* size.
+    Both halves were wrong, and both in the reassuring direction. Measured in
+    production on 2026-09-09: the console reported "257 days until 80% of
+    250 GB, no alert" while the device was 147.4 GB with 31.6 GB free -- 11.6
+    days from the 80% line and ~45 days from full. A 22x overstatement, on the
+    one signal that says the box is about to stop accepting writes.
+
+    The numerator was the deeper error. A filesystem fills from everything on
+    it, not from us: three other application stacks share this box, 9 GB is
+    Docker images and build cache, and 16 GB is this app's own encrypted
+    backups -- which grow in lockstep with the database they back up, so the
+    thing being measured was funding its own blind spot. `pg_database_size` saw
+    19 GB of the 110 GB in use.
+
+    Growth is taken from whichever series is available and *faster*: the device
+    itself once `filesystem_used_bytes` has accumulated in snapshot history, or
+    our own database+Codal bytes, which is a lower bound because backups, images
+    and the neighbouring stacks are not in that series. For a "when do I run
+    out" alarm the conservative estimate is the larger one; underestimating
+    growth is precisely the failure this function already had.
+    """
     disk = disk or {}
     db_bytes = int(disk.get("database_bytes") or 0)
     codal_bytes = int(disk.get("codal_bytes") or 0)
-    used = db_bytes + codal_bytes
     history = history if history is not None else _database_history()
-    growth_per_day = None
-    if len(history) >= 2:
-        first = history[0]
-        last = history[-1]
-        first_used = int((first.get("disk") or {}).get("database_bytes") or 0) + int(
-            (first.get("disk") or {}).get("codal_bytes") or 0
+
+    rates = [
+        rate
+        for rate in (
+            _growth_per_day(history, lambda d: d.get("filesystem_used_bytes")),
+            _growth_per_day(history, _own_bytes),
         )
-        last_used = int((last.get("disk") or {}).get("database_bytes") or 0) + int(
-            (last.get("disk") or {}).get("codal_bytes") or 0
-        )
-        t0 = parse_datetime(first["captured_at"]) if isinstance(first["captured_at"], str) else first["captured_at"]
-        t1 = parse_datetime(last["captured_at"]) if isinstance(last["captured_at"], str) else last["captured_at"]
-        if t0 and t1:
-            days = max((t1 - t0).total_seconds() / 86400, 1 / 24)
-            growth_per_day = (last_used - first_used) / days
+        if rate is not None and rate > 0
+    ]
+    growth_per_day = max(rates) if rates else None
+
+    filesystem = filesystem_usage(getattr(settings, "DISK_USAGE_PATH", "/"))
+    total = filesystem["total"] if filesystem else None
+    used = filesystem["used"] if filesystem else None
+    target = int(total * 0.80) if total else None
+
     days_to_80pct = None
-    if growth_per_day and growth_per_day > 0 and used < target:
-        days_to_80pct = round((target - used) / growth_per_day, 1)
-    elif used >= target:
-        days_to_80pct = 0
+    if target is not None:
+        if used >= target:
+            days_to_80pct = 0
+        elif growth_per_day:
+            days_to_80pct = round((target - used) / growth_per_day, 1)
     return {
-        "budget_gb": budget_gb,
+        "filesystem_total_bytes": total,
+        "filesystem_used_bytes": used,
+        "filesystem_free_bytes": filesystem["free"] if filesystem else None,
+        "target_80_bytes": target,
+        # Our share of the device, kept separate: "how full is the disk" and
+        # "how much of it is ours" are different questions and the old code
+        # answered the second while labelling it the first.
         "database_bytes": db_bytes,
         "codal_bytes": codal_bytes,
-        "used_bytes": used,
-        "target_80_bytes": target,
+        "used_bytes": db_bytes + codal_bytes,
         "growth_bytes_per_day": None if growth_per_day is None else round(growth_per_day),
         "days_to_80pct": days_to_80pct,
         "alert": days_to_80pct is not None and days_to_80pct < 30,
@@ -703,9 +856,16 @@ def collect_metric_payload():
     """Point-in-time payload stored on OperationalMetricSnapshot (worker path)."""
     counts = get_cached_db_counts()
     table_bytes = get_cached_table_bytes()
+    # `filesystem_used_bytes` is recorded so the growth rate can eventually come
+    # from the device rather than from our own tables, which miss everything
+    # else that fills the same disk. Until a few days of it exist,
+    # `project_disk` falls back to the database+Codal series.
+    filesystem = filesystem_usage(getattr(settings, "DISK_USAGE_PATH", "/"))
     disk = {
         "database_bytes": get_database_bytes(),
         "codal_bytes": _codal_volume_bytes(),
+        "filesystem_used_bytes": filesystem["used"] if filesystem else None,
+        "filesystem_total_bytes": filesystem["total"] if filesystem else None,
     }
     quota = get_quota_status()
     quota_slim = {
@@ -788,10 +948,17 @@ def get_admin_telemetry_context():
     price_status = "stale" if price_age is None or price_age > PRICE_STALE_AFTER else "fresh"
     workers = _workers()
     queues = _queues()
+    mail = outbound_mail()
     overall = "healthy"
     if not all(v if isinstance(v, bool) else v.get("ok", True) for v in checks.values()) or workers["status"] == "critical":
         overall = "critical"
-    elif price_status == "stale" or queues["status"] != "healthy" or workers["status"] != "healthy" or db_conn["status"] == "warning":
+    elif (
+        price_status == "stale"
+        or queues["status"] != "healthy"
+        or workers["status"] != "healthy"
+        or db_conn["status"] == "warning"
+        or not mail["ok"]
+    ):
         overall = "degraded"
 
     counts = get_cached_db_counts()
@@ -850,6 +1017,7 @@ def get_admin_telemetry_context():
         "generated_at": now,
         "overall_status": overall,
         "checks": checks,
+        "outbound_mail": mail,
         "price_feed": {
             "status": price_status,
             "latest": latest_price,
@@ -868,10 +1036,7 @@ def get_admin_telemetry_context():
         "workflow_15m": _workflow_15m(),
         "error_codes_24h": _error_code_breakdown(),
         "last_success": _last_success_by_workflow(),
-        "users": {
-            "total": User.objects.count(),
-            "staff": User.objects.filter(is_staff=True).count(),
-        },
+        "users": _user_domain_health(),
         "database_rows": database_rows,
         "database_history": history,
         "workflow_history": _workflow_history(),
@@ -916,7 +1081,9 @@ def get_ops_overview():
                 "latest_price_age_seconds": ctx["price_feed"]["age_seconds"],
                 "threshold_seconds": ctx["price_feed"]["threshold_seconds"],
             },
+            "outbound_mail": ctx["outbound_mail"],
         },
+        "outbound_mail": ctx["outbound_mail"],
         "db_connections": ctx.get("db_connections") or ctx.get("checks", {}).get("db_connections"),
         "price_feed": {**ctx["price_feed"], "latest": _iso(ctx["price_feed"]["latest"])},
         "workers": {
@@ -965,6 +1132,29 @@ def get_ops_overview():
     return body
 
 
+def _user_domain_health():
+    """Cheap counts an operator needs about people and books, not the warehouse.
+
+    Cached overview is warehouse/disk. These are small indexed aggregations and
+    belong on every request so a silent snapshot writer is visible immediately.
+    """
+    now = timezone.now()
+    since = now - timedelta(hours=24)
+    last_login = User.objects.aggregate(value=Max("last_login"))["value"]
+    last_snapshot = Snapshot.objects.aggregate(value=Max("timestamp"))["value"]
+    return {
+        "total": User.objects.count(),
+        "staff": User.objects.filter(is_staff=True).count(),
+        "active": User.objects.filter(is_active=True).count(),
+        "with_accounts": User.objects.filter(accounts__isnull=False).distinct().count(),
+        "accounts": Account.objects.count(),
+        "holdings": Holding.objects.count(),
+        "last_login": _iso(last_login),
+        "last_snapshot_at": _iso(last_snapshot),
+        "snapshots_24h": Snapshot.objects.filter(timestamp__gte=since).count(),
+    }
+
+
 def live_health_overlay():
     """The signals an operator needs to be true *now*, recomputed per request.
 
@@ -996,11 +1186,18 @@ def live_health_overlay():
     price_status = "stale" if price_age is None or price_age > PRICE_STALE_AFTER else "fresh"
     workers = _workers()
     queues = _queues()
+    mail = outbound_mail()
 
     overall = "healthy"
     if not all(v if isinstance(v, bool) else v.get("ok", True) for v in checks.values()) or workers["status"] == "critical":
         overall = "critical"
-    elif price_status == "stale" or queues["status"] != "healthy" or workers["status"] != "healthy" or db_conn["status"] == "warning":
+    elif (
+        price_status == "stale"
+        or queues["status"] != "healthy"
+        or workers["status"] != "healthy"
+        or db_conn["status"] == "warning"
+        or not mail["ok"]
+    ):
         overall = "degraded"
 
     price_feed = {
@@ -1022,7 +1219,9 @@ def live_health_overlay():
                 "latest_price_age_seconds": price_feed["age_seconds"],
                 "threshold_seconds": price_feed["threshold_seconds"],
             },
+            "outbound_mail": mail,
         },
+        "outbound_mail": mail,
         "db_connections": db_conn,
         "price_feed": price_feed,
         "workers": {
@@ -1036,6 +1235,7 @@ def live_health_overlay():
             "depths": queues.get("depths") or {},
             "depth": sum((queues.get("depths") or {}).values()),
         },
+        "users": _user_domain_health(),
     }
 
 

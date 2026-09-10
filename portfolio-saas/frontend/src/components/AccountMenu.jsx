@@ -63,7 +63,7 @@ function MenuItem({ onClick, children, danger, testId, disabled }) {
       data-testid={testId}
       className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
         danger
-          ? "text-[var(--c-critical-text)] hover:bg-[var(--c-critical)]/10"
+          ? "text-[var(--c-critical-text)] hover:bg-panel-2 focus-visible:bg-panel-2"
           : "text-text hover:bg-panel-2 focus-visible:bg-panel-2"
       }`}
     >

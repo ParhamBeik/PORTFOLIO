@@ -120,9 +120,28 @@ def test_price_history_view_returns_caveats():
     assert "low_coverage" in response.data["caveats"]
 
 
-def test_account_data_quality_view_includes_warehouse_coverage():
+def test_account_data_quality_hides_warehouse_coverage_from_members():
     User = get_user_model()
     user = User.objects.create_user(email="quality_user@example.com", password="password123")
+    account = Account.objects.create(user=user, name="Quality Account")
+
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    url = reverse("account-data-quality", kwargs={"account_id": account.id})
+    response = client.get(url)
+    assert response.status_code == 200
+    assert "warehouse_coverage" not in response.data
+    assert "quality_status" in response.data
+
+
+def test_account_data_quality_shows_warehouse_coverage_to_staff():
+    User = get_user_model()
+    user = User.objects.create_user(
+        email="quality_staff@example.com",
+        password="password123",
+        is_staff=True,
+    )
     account = Account.objects.create(user=user, name="Quality Account")
 
     client = APIClient()

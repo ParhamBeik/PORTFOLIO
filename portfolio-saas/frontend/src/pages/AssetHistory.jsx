@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { listAssets, priceHistory } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
-import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { Async, Card, Empty, PageHeader, Select, Tabs } from "../components/ui.jsx";
 import { catalogLabel, date, num, toman } from "../format.js";
 import { useApi } from "../useApi.js";
@@ -18,8 +17,9 @@ function nativePrice(value, unit) {
   return toman(value);
 }
 
+// Prices are global, not per-account, so this page deliberately does not read
+// the active portfolio: the same series answers for every user.
 export default function AssetHistory() {
-  const { activeId } = usePortfolio();
   const assets = useApi(listAssets, []);
   const [assetKey, setAssetKey] = useState("");
   const [window, setWindow] = useState("365");

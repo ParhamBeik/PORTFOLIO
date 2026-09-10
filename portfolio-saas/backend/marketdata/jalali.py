@@ -190,3 +190,44 @@ def to_datetime(date_value, time_value=""):
         gregorian.year, gregorian.month, gregorian.day, hour, minute, second,
         tzinfo=TEHRAN,
     ).astimezone(datetime.timezone.utc)
+
+
+def ts_window(dates, pad_days=1):
+    """UTC bounds containing every `ts` derivable from these Jalali dates.
+
+    Hypertables here are range-partitioned on `ts` because TimescaleDB cannot
+    partition a varchar, while every domain query filters the Jalali `date`
+    column beside it. A predicate on `date` alone carries no partition
+    information, so the planner cannot exclude a single chunk and has to touch
+    all of them. Measured on production, 2026-09-09 -- one symbol-day of ticks
+    out of 58M rows in 1,240 chunks:
+
+        symbol + date                 2,133 ms cold / 318 ms warm
+        symbol + date + this window      37 ms cold / 2.2 ms warm
+
+    Identical 111 rows either way. The tick re-ingest path deletes a symbol-day
+    before rewriting it, so that scan was being paid on every replace.
+
+    The window is padded because it only has to be a superset. `ts` for a row is
+    Tehran(date, time), so one Jalali day spans one Tehran calendar day; a day
+    of padding on each side absorbs the ~7-hour skew left on any row written
+    under the pre-correction formula (Tehran midnight read as 03:30 UTC the same
+    day rather than 20:30 UTC the previous one) without weakening exclusion
+    meaningfully -- 3 chunks instead of 1,240. Narrowing it to the exact day
+    would risk the one failure that matters: a delete that misses rows.
+
+    Returns None when nothing parses, and callers must then fall back to the
+    unpruned query rather than to an empty window.
+
+    Caveat worth knowing: chunk exclusion happens at plan time, so a *generic*
+    plan loses it. The same parameterized query measured 2 ms on its custom
+    plans and 3,365 ms on the sixth execution, where PostgreSQL switched to a
+    generic one and then reverted. That is a worse best case than the literal
+    form, and still two orders of magnitude better than no window at all.
+    """
+    values = [dates] if isinstance(dates, str) else list(dates or ())
+    moments = [moment for moment in (to_datetime(value) for value in values) if moment]
+    if not moments:
+        return None
+    pad = datetime.timedelta(days=pad_days)
+    return min(moments) - pad, max(moments) + datetime.timedelta(days=1) + pad

@@ -9,6 +9,7 @@ import {
   adminAssetRefresh,
   adminAssetRetry,
   adminOverview,
+  adminPasswordResetLink,
   adminWorkflows,
 } from "../api.js";
 import { CountTrend, Donut, StackedStatusBar } from "../components/charts.jsx";
@@ -17,6 +18,7 @@ import {
   Button,
   Card,
   Delta,
+  Input,
   PageHeader,
   Pager,
   StatTile,
@@ -1246,10 +1248,16 @@ function InfraMeter({ label, valueLabel, pct, tone, sub, testId, segments, badge
           <span className="font-medium tabular">{valueLabel}</span>
         </div>
       </div>
+      {/* Named and value-texted. Without `aria-label` a screen reader announces
+          "progressbar, 62" with nothing saying what is 62% full, and
+          `aria-valuenow` alone reads the percentage rather than the figure
+          sighted users see beside it ("18.4 GB of 250 GB"). */}
       <div
         className="h-2.5 overflow-hidden rounded-full bg-panel-2"
         role="progressbar"
+        aria-label={label}
         aria-valuenow={pct}
+        aria-valuetext={valueLabel ? `${valueLabel} (${pct}%)` : undefined}
         aria-valuemin={0}
         aria-valuemax={100}
       >
@@ -1373,6 +1381,7 @@ function QuotaWallets({ quota }) {
               role="progressbar"
               aria-label={`${meta.title} quota used`}
               aria-valuenow={Math.round(pct)}
+              aria-valuetext={`${num(used)} of ${num(ceiling)} requests today`}
               aria-valuemin={0}
               aria-valuemax={100}
             >
@@ -1431,6 +1440,7 @@ function InfraPanel({ overview, depths, queueTotal, gb }) {
   const priceThreshold = priceFeed.threshold_seconds || 900;
   const pricePct = priceAge != null ? pctOf(priceAge, priceThreshold) : 0;
   const priceTone = priceFeed.status === "fresh" ? "good" : priceFeed.status === "stale" ? "warn" : "critical";
+  const mail = overview.outbound_mail || overview.checks?.outbound_mail || {};
 
   const liveQ = Number(depths?.live || 0);
   const archiveQ = Number(depths?.archive || 0);
@@ -1441,9 +1451,13 @@ function InfraPanel({ overview, depths, queueTotal, gb }) {
     { key: "codal", pct: pctOf(codalQ, queueTotal), color: "bg-[var(--c-warn)]", title: `Codal queue ${num(codalQ)}` },
   ] : [];
 
-  const diskUsed = disk.used_bytes || disk.database_bytes || 0;
-  const diskTarget = disk.target_80_bytes || 0;
-  const diskPct = pctOf(diskUsed, diskTarget);
+  // The device, not our share of it. This meter used to draw the database's
+  // logical size against 80% of a budget nobody had measured, so it read 10%
+  // full on a disk that was 75% full.
+  const diskTotal = Number(disk.filesystem_total_bytes) || 0;
+  const diskUsed = Number(disk.filesystem_used_bytes) || 0;
+  const diskPct = pctOf(diskUsed, diskTotal);
+  const diskOurs = Number(disk.used_bytes) || 0;
 
   return (
     <div className="space-y-5" data-testid="ops-infra-panel">
@@ -1468,6 +1482,27 @@ function InfraPanel({ overview, depths, queueTotal, gb }) {
         testId="ops-infra-price-feed"
       />
 
+      {/* Outbound mail. A row rather than a meter: there is no percentage to
+          draw, and the reason it is here at all is that this failure is
+          invisible everywhere else. Password reset answers the same 200 whether
+          or not the send worked -- deliberately, so it cannot enumerate
+          accounts -- so an unreachable relay looks exactly like a working one
+          from outside, and only a log line says otherwise. */}
+      {mail.status && mail.status !== "healthy" && (
+        <div
+          className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-border bg-panel-2 px-3 py-2.5"
+          data-testid="ops-infra-outbound-mail"
+        >
+          <div className="min-w-0">
+            <div className="text-sm text-muted">Outbound mail</div>
+            {mail.message && (
+              <p className="mt-0.5 max-w-prose text-xs text-muted">{mail.message}</p>
+            )}
+          </div>
+          <Badge variant={mail.ok ? "neutral" : "warn"}>{humanize(mail.status)}</Badge>
+        </div>
+      )}
+
       <InfraMeter
         label="Task queues"
         valueLabel={queueTotal ? `${num(queueTotal)} pending` : "All clear"}
@@ -1479,13 +1514,14 @@ function InfraPanel({ overview, depths, queueTotal, gb }) {
       />
 
       <InfraMeter
-        label="Disk to 80% budget"
-        valueLabel={gb(diskUsed)}
+        label="Disk used"
+        valueLabel={diskTotal ? `${gb(diskUsed)} of ${gb(diskTotal)}` : "Unmeasured"}
         pct={diskPct}
         tone={disk.alert ? "warn" : infraMeterTone(diskPct, { warn: 60, critical: 80 })}
         badge={disk.alert ? <Badge variant="warn">alert</Badge> : null}
         sub={[
-          disk.days_to_80pct != null ? `${disk.days_to_80pct}d until 80% of ${disk.budget_gb ?? 250} GB` : null,
+          disk.days_to_80pct != null ? `${disk.days_to_80pct}d until 80% full` : null,
+          diskOurs ? `This app ${gb(diskOurs)}` : null,
           disk.codal_bytes ? `Codal files ${gb(disk.codal_bytes)}` : null,
         ].filter(Boolean).join(" · ") || undefined}
         testId="ops-infra-disk"
@@ -1504,13 +1540,110 @@ function formatAge(seconds) {
   return `${Math.round(s / 86400)} days ago`;
 }
 
+/**
+ * Hand a locked-out user a way back in, without a mail relay.
+ *
+ * Password reset is mint-a-token plus deliver-it, and only delivery is broken in
+ * production -- there is no SMTP relay, so the self-service flow answers "check
+ * your email" and sends nothing. This exposes the half that works: an operator
+ * mints the link and delivers it however they already reach that person, and the
+ * user redeems it through the ordinary reset page and chooses their own
+ * password. The operator never sees it.
+ *
+ * It confers nothing a superuser lacks -- Django admin can already set any
+ * password outright -- and it stops being needed the day a relay is configured.
+ */
+function OperatorResetLink() {
+  const [email, setEmail] = useState("");
+  const [state, setState] = useState({ status: "idle" });
+
+  const issue = async (event) => {
+    event.preventDefault();
+    if (!email.trim()) return;
+    setState({ status: "working" });
+    try {
+      const data = await adminPasswordResetLink(email.trim());
+      setState({ status: "done", link: data.link });
+    } catch (error) {
+      setState({ status: "error", message: error.message });
+    }
+  };
+
+  return (
+    <form
+      className="mt-4 rounded-lg border border-border bg-panel-2 p-3"
+      onSubmit={issue}
+      data-testid="ops-reset-link"
+    >
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="min-w-0 grow">
+          <label
+            className="block text-xs font-medium tracking-wide text-muted uppercase"
+            htmlFor="ops-reset-email"
+          >
+            Issue a password reset link
+          </label>
+          <Input
+            id="ops-reset-email"
+            type="email"
+            autoComplete="off"
+            className="mt-1 w-full"
+            placeholder="person@example.com"
+            label="Email address of the account to recover"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+          />
+        </div>
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={state.status === "working" || !email.trim()}
+        >
+          {state.status === "working" ? "Issuing…" : "Issue link"}
+        </Button>
+      </div>
+      <p className="mt-2 max-w-prose text-xs text-muted">
+        Outbound mail is not configured, so self-service reset sends nothing. Mint
+        a link here and deliver it yourself; it is single-use and the account
+        holder chooses the password.
+      </p>
+      {/* Polite, not assertive: the operator submitted this deliberately and is
+          already looking at it, so it should not interrupt a screen reader. */}
+      <div aria-live="polite" className="mt-2">
+        {state.status === "done" && (
+          <div className="flex flex-wrap items-center gap-2">
+            <code
+              className="min-w-0 grow overflow-x-auto rounded border border-border bg-panel px-2 py-1 text-xs text-text"
+              data-testid="ops-reset-link-value"
+            >
+              {state.link}
+            </code>
+            <Button onClick={() => navigator.clipboard?.writeText(state.link)}>
+              Copy
+            </Button>
+          </div>
+        )}
+        {state.status === "error" && (
+          <p className="text-xs text-[var(--c-critical-text)]" data-testid="ops-reset-link-error">
+            {state.message}
+          </p>
+        )}
+      </div>
+    </form>
+  );
+}
+
+
 function AttentionPanel({ liveHeld, warehouse, onNavigate }) {
   const [view, setView] = useState("live");
-  const liveLabels = liveHeld?.status_labels || {};
-  const whLabels = warehouse?.status_labels || {};
 
-  const liveRows = useMemo(() => (
-    (liveHeld?.assets || [])
+  // The label maps are read INSIDE each memo rather than hoisted above them.
+  // `x?.status_labels || {}` mints a fresh object on every render whenever the
+  // payload omits the field, so as a dependency it defeated the memo entirely
+  // and both tables were rebuilt on every parent render.
+  const liveRows = useMemo(() => {
+    const liveLabels = liveHeld?.status_labels || {};
+    return (liveHeld?.assets || [])
       .filter((a) => a.status === "stale" || a.status === "missing")
       .sort((a, b) => {
         if (a.status !== b.status) return a.status === "missing" ? -1 : 1;
@@ -1528,11 +1661,12 @@ function AttentionPanel({ liveHeld, warehouse, onNavigate }) {
             ? `${formatAge(a.age_seconds)} · ${dateTime(a.fetched_at)}`
             : formatAge(a.age_seconds),
         symbol: [a.tse_symbol, a.brs_symbol].filter(Boolean).join(" · ") || "—",
-      }))
-  ), [liveHeld, liveLabels]);
+      }));
+  }, [liveHeld]);
 
-  const warehouseRows = useMemo(() => (
-    (warehouse?.by_endpoint || [])
+  const warehouseRows = useMemo(() => {
+    const whLabels = warehouse?.status_labels || {};
+    return (warehouse?.by_endpoint || [])
       .map((e) => {
         const failed = e.counts?.failed || 0;
         const partial = e.counts?.partial || 0;
@@ -1555,8 +1689,8 @@ function AttentionPanel({ liveHeld, warehouse, onNavigate }) {
         };
       })
       .filter(Boolean)
-      .sort((a, b) => b.sortKey - a.sortKey)
-  ), [warehouse, whLabels]);
+      .sort((a, b) => b.sortKey - a.sortKey);
+  }, [warehouse]);
 
   const liveCount = liveRows.length;
   const whCount = warehouseRows.length;
@@ -1645,7 +1779,7 @@ function AttentionPanel({ liveHeld, warehouse, onNavigate }) {
 }
 
 
-function OverviewPanel({ overview, tickSeries, depths, onNavigate }) {
+function OverviewPanel({ overview, tickSeries, depths, onNavigate, user }) {
   const cov = overview.coverage;
   const liveHeld = cov?.live?.held;
   const warehouse = cov?.warehouse;
@@ -1738,11 +1872,41 @@ function OverviewPanel({ overview, tickSeries, depths, onNavigate }) {
         </Card>
       </div>
 
+      <Card
+        title="People and books"
+        subtitle="User-domain health — not warehouse ingest. Snapshot age is how recently valuation history was written."
+        testId="ops-overview-users"
+      >
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <StatTile
+            label="Users"
+            value={num(overview.users?.total)}
+            sub={`${num(overview.users?.active)} active · ${num(overview.users?.staff)} staff`}
+            testId="ops-overview-users-total"
+          />
+          <StatTile
+            label="With a portfolio"
+            value={num(overview.users?.with_accounts)}
+            sub={`${num(overview.users?.accounts)} portfolios · ${num(overview.users?.holdings)} holdings`}
+          />
+          <StatTile
+            label="Last sign-in"
+            value={overview.users?.last_login ? dateTime(overview.users.last_login) : "—"}
+          />
+          <StatTile
+            label="Last valuation snapshot"
+            value={overview.users?.last_snapshot_at ? dateTime(overview.users.last_snapshot_at) : "—"}
+            sub={`${num(overview.users?.snapshots_24h)} in 24h`}
+          />
+        </div>
+        {user?.is_superuser && <OperatorResetLink />}
+      </Card>
+
       <AttentionPanel liveHeld={liveHeld} warehouse={warehouse} onNavigate={onNavigate} />
 
       <Card
-        title="Provider quota — two separate wallets"
-        subtitle="BrsApi meters each API key on its own. Spending one never frees the other."
+        title="Provider quota by product"
+        subtitle="The paid stock product is daily-metered; the Market product is currently unmetered."
         testId="ops-overview-quota"
       >
         <QuotaWallets quota={overview.quota} />
@@ -1957,6 +2121,7 @@ export default function Ops({ user }) {
             tickSeries={tickSeries}
             depths={depths}
             onNavigate={setTab}
+            user={user}
           />
         )}
 

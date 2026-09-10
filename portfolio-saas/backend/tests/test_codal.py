@@ -21,7 +21,7 @@ from marketdata.codal_classification import (
 from marketdata.codal_parsers import ParsedDocument
 from marketdata.codal_storage import CodalArtifactRejected, CodalBlockedNetwork
 from marketdata.models import CodalAnnouncement
-from marketdata.models import CodalAnnouncement, CodalArtifact, CodalReport
+from marketdata.models import CodalArtifact, CodalReport
 
 pytestmark = pytest.mark.django_db
 

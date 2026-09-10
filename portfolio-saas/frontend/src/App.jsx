@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { me, restoreSession, SESSION_EXPIRED_EVENT } from "./api.js";
 import Auth from "./components/Auth.jsx";
+import ResetPassword from "./components/ResetPassword.jsx";
 import Legal from "./components/Legal.jsx";
 import { PortfolioProvider, usePortfolio } from "./components/PortfolioContext.jsx";
 import { hasAnyHoldings } from "./holdingsGate.js";
@@ -68,6 +69,7 @@ export default function App() {
               link, had never once rendered. */}
           <Route path="/privacy" element={<Legal kind="privacy" />} />
           <Route path="/terms" element={<Legal kind="terms" />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route
             path="*"
             element={
@@ -89,7 +91,8 @@ export default function App() {
       <PortfolioProvider key={user.id} enabled>
         <Suspense fallback={<Loading testId="route-loading" />}>
           <Routes>
-              <Route
+            <Route path="/reset-password" element={<ResetPassword />} />
+            <Route
               element={
                 <Shell
                   user={user}

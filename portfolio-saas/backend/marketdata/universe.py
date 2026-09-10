@@ -1,7 +1,5 @@
 import datetime as dt
-from decimal import Decimal
 import numpy as np
-import pandas as pd
 from django.conf import settings
 from django.db.models import Count
 from django.utils import timezone

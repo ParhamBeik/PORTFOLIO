@@ -2,7 +2,6 @@
 import logging
 from django.conf import settings
 from django.db.models import Max, Min
-from django.utils import timezone
 
 from .currency import canonical_symbol
 from .fetchers import fetch_all_symbols, fetch_derivatives, fetch_gold_currency_free

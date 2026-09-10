@@ -45,20 +45,37 @@ publish() {
   mv -f "${tmp}" "${target}"
 }
 
+checksum_file() {
+  sha256sum "$1" 2>/dev/null | awk '{print $1}' \
+    || shasum -a 256 "$1" | awk '{print $1}'
+}
+
+verify_backup() {
+  local artifact="$1"
+  openssl enc -d -aes-256-cbc -pbkdf2 -iter 310000 \
+    -pass "file:${passphrase_file}" -in "${artifact}" 2>/dev/null \
+    | "${compose[@]}" exec -T db pg_restore --file=/dev/null
+}
+
 # Nightly cron already wrote today's dump. Rewriting it as `deploy` fails when
 # the file is root-owned, and a second 1.6 GB dump delays every CI ship.
 if [[ -f "${destination}" ]]; then
   echo "Reusing existing ${destination}"
-  set +o pipefail
-  openssl enc -d -aes-256-cbc -pbkdf2 -iter 310000 \
-    -pass "file:${passphrase_file}" -in "${destination}" 2>/dev/null \
-    | "${compose[@]}" exec -T db pg_restore --list >/dev/null
-  verify_status="${PIPESTATUS[1]}"
-  set -o pipefail
-  [[ "${verify_status}" -eq 0 ]] || {
+  verify_backup "${destination}" || {
     echo "Existing backup is unreadable: ${destination}" >&2
     exit 1
   }
+  checksum="$(checksum_file "${destination}")"
+  if [[ -f "${destination}.sha256" ]]; then
+    expected_checksum="$(awk 'NR==1 {print $1}' "${destination}.sha256")"
+    [[ "${checksum}" == "${expected_checksum}" ]] || {
+      echo "Existing backup checksum does not match: ${destination}" >&2
+      exit 1
+    }
+  else
+    printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" \
+      | publish "${destination}.sha256"
+  fi
   echo "Created ${destination}"
   exit 0
 fi
@@ -69,27 +86,14 @@ fi
       -pass "file:${passphrase_file}" -out "${partial}"
 mv "${partial}" "${destination}"
 
-# Verify the artifact decrypts into a readable archive. `pg_restore --list`
-# only reads the table of contents at the head of a custom-format dump and then
-# exits 0 -- it never drains the rest of the stream. openssl is consequently
-# still writing into a closed pipe, takes EPIPE ("error writing output file")
-# and exits 1, which under `pipefail` failed this script every single time,
-# right before the checksum below. That is why no daily-*.sha256 or
-# backup-evidence-*.json has ever existed on the server, and why deploy.sh --
-# which runs this first under `set -e` -- could never get past its backup step.
-# Judge the verification on pg_restore's status alone; openssl's EPIPE is the
-# expected consequence of a successful early exit, not a failure.
-set +o pipefail
-openssl enc -d -aes-256-cbc -pbkdf2 -iter 310000 \
-  -pass "file:${passphrase_file}" -in "${destination}" 2>/dev/null \
-  | "${compose[@]}" exec -T db pg_restore --list >/dev/null
-verify_status="${PIPESTATUS[1]}"
-set -o pipefail
-[[ "${verify_status}" -eq 0 ]] || {
+# Generate SQL to /dev/null so pg_restore drains and validates the whole archive.
+# Listing the table of contents only validates the header and can accept a dump
+# truncated after the TOC; pipefail also makes a decrypt failure fatal.
+verify_backup "${destination}" || {
   echo "Backup verification failed: ${destination} did not decrypt into a readable archive." >&2
   exit 1
 }
-checksum="$(sha256sum "${destination}" 2>/dev/null | awk '{print $1}' || shasum -a 256 "${destination}" | awk '{print $1}')"
+checksum="$(checksum_file "${destination}")"
 printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" | publish "${destination}.sha256"
 
 # Off-host copy. Everything above this line still leaves the only copy of the

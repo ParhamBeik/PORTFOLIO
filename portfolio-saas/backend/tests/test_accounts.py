@@ -3,11 +3,9 @@
 Merged from 3 files; each section keeps its original banner.
 """
 
-import csv
 from datetime import timedelta
 from decimal import Decimal
 import io
-import json
 
 from django.core.cache import cache
 from django.test import override_settings
@@ -61,6 +59,37 @@ def test_login_returns_access_and_sets_refresh_cookie():
     assert "refresh" not in data
     assert "session_expires_at" in data
     assert resp.cookies["ps_refresh"]["httponly"] is True
+
+
+def test_login_stamps_last_login_and_refresh_does_not():
+    """A successful JWT obtain is a sign-in; cookie refresh is not."""
+    user = User.objects.create_user(email="stamp@test.test", password="Sup3rSecret!")
+    assert user.last_login is None
+    client = APIClient(enforce_csrf_checks=True)
+    login_resp = client.post(
+        "/api/auth/login/",
+        {"email": "stamp@test.test", "password": "Sup3rSecret!"},
+        format="json",
+    )
+    user.refresh_from_db()
+    stamped = user.last_login
+    assert login_resp.status_code == 200
+    assert stamped is not None
+
+    csrf = client.cookies["csrftoken"].value
+    client.post(
+        "/api/token/refresh/", {}, format="json", HTTP_X_CSRFTOKEN=csrf
+    )
+    user.refresh_from_db()
+    assert user.last_login == stamped
+
+    APIClient().post(
+        "/api/auth/login/",
+        {"email": "stamp@test.test", "password": "wrong"},
+        format="json",
+    )
+    user.refresh_from_db()
+    assert user.last_login == stamped
 
 
 def test_access_token_lifetime_is_thirty_minutes():
@@ -235,6 +264,92 @@ def test_change_password_revokes_existing_tokens(make_user):
 
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {new_tokens['access']}")
     assert client.get("/api/auth/me/").status_code == 200
+
+
+def test_revoking_sessions_is_one_round_trip_and_skips_expired_tokens(
+    make_user, django_assert_num_queries
+):
+    """Refresh rotation makes this table grow forever; revocation must not walk it.
+
+    Every refresh mints an `OutstandingToken`, so an old account holds
+    thousands. The previous per-token `get_or_create` loop issued two queries
+    each, inside the request that changes a password or deletes an account.
+    Expired rows are skipped because the auth layer already refuses them.
+    """
+    from rest_framework_simplejwt.token_blacklist.models import (
+        BlacklistedToken,
+        OutstandingToken,
+    )
+
+    from accounts.views import _revoke_all
+
+    user = make_user(email="bulk-revoke@test.test")
+    now = timezone.now()
+    OutstandingToken.objects.bulk_create(
+        [
+            OutstandingToken(
+                user=user, jti=f"live-{i}", token=f"t-live-{i}",
+                created_at=now, expires_at=now + timedelta(days=1),
+            )
+            for i in range(20)
+        ]
+        + [
+            OutstandingToken(
+                user=user, jti=f"dead-{i}", token=f"t-dead-{i}",
+                created_at=now - timedelta(days=40), expires_at=now - timedelta(days=10),
+            )
+            for i in range(20)
+        ]
+    )
+
+    # One SELECT for the live tokens, one bulk INSERT. Constant in the number of
+    # tokens; the loop this replaced would have been 40 queries and rising.
+    with django_assert_num_queries(2):
+        _revoke_all(user)
+
+    blacklisted = set(
+        BlacklistedToken.objects.filter(token__user=user).values_list(
+            "token__jti", flat=True
+        )
+    )
+    assert len(blacklisted) == 20
+    assert all(jti.startswith("live-") for jti in blacklisted), (
+        "expired tokens were blacklisted; they are already refused on expiry"
+    )
+
+    # Idempotent: a second revoke must not raise on the rows already there.
+    _revoke_all(user)
+    assert BlacklistedToken.objects.filter(token__user=user).count() == 20
+
+
+def test_expired_refresh_tokens_are_pruned_and_live_ones_survive(make_user):
+    """Nothing else bounds these two tables; rotation writes a row per refresh."""
+    from rest_framework_simplejwt.token_blacklist.models import (
+        BlacklistedToken,
+        OutstandingToken,
+    )
+
+    from portfolio.tasks import prune_expired_refresh_tokens
+
+    user = make_user(email="token-prune@test.test")
+    now = timezone.now()
+    dead = OutstandingToken.objects.create(
+        user=user, jti="dead", token="t-dead",
+        created_at=now - timedelta(days=40), expires_at=now - timedelta(days=10),
+    )
+    OutstandingToken.objects.create(
+        user=user, jti="live", token="t-live",
+        created_at=now, expires_at=now + timedelta(days=1),
+    )
+    # A blacklist row on the expired token must go with it, or the delete fails
+    # on the FK and the table stays unbounded anyway.
+    BlacklistedToken.objects.create(token=dead)
+
+    result = prune_expired_refresh_tokens()
+
+    assert result["deleted"] >= 1
+    assert list(OutstandingToken.objects.values_list("jti", flat=True)) == ["live"]
+    assert BlacklistedToken.objects.count() == 0
 
 
 def test_logout_requires_csrf_and_blacklists_refresh(make_user):
@@ -499,3 +614,514 @@ def test_asset_ranking_is_scoped_to_owned_account(asset_catalog, make_user):
 
     assert response.status_code == 200
     assert [row["symbol"] for row in response.json()] == ["IR_COIN_EMAMI"]
+
+
+def test_insights_returns_explainable_payload(make_user):
+    user = make_user(email="insights@t.t")
+    response = _client(user).get("/api/insights/")
+    assert response.status_code == 200
+    body = response.json()
+    for key in ("valuation", "allocation", "concentration", "gold_band", "net_worth_trend"):
+        assert key in body
+    assert "message" in body["concentration"]
+
+
+def test_insights_is_account_scoped(make_user):
+    owner = make_user(email="ins-owner@t.t")
+    other = make_user(email="ins-other@t.t")
+    account = Account.objects.create(user=other, name="Other")
+    assert _client(owner).get(f"/api/insights/?account={account.id}").status_code == 404
+
+
+# ----------------------------------------------------------------------
+# Password recovery. Unit tests at the auth boundary: HTTP in, mail/token
+# out. Pyramid: many of these, fast, no browser.
+
+
+def test_password_reset_is_silent_for_unknown_and_known_emails(make_user):
+    from django.core import mail
+
+    make_user(email="reset@test.test")
+    client = APIClient()
+    unknown = client.post(
+        "/api/auth/password-reset/",
+        {"email": "nobody@test.test"},
+        format="json",
+    )
+    known = client.post(
+        "/api/auth/password-reset/",
+        {"email": "reset@test.test"},
+        format="json",
+    )
+    assert unknown.status_code == 200
+    assert known.status_code == 200
+    assert unknown.json()["detail"] == known.json()["detail"]
+    assert len(mail.outbox) == 1
+    assert "reset@test.test" in mail.outbox[0].to
+    assert "uid=" in mail.outbox[0].body
+    assert "token=" in mail.outbox[0].body
+
+
+def test_password_reset_confirm_rotates_password_and_revokes_sessions(make_user):
+    import re
+    from django.core import mail
+
+    user = make_user(email="reset-confirm@test.test")
+    from rest_framework_simplejwt.tokens import RefreshToken
+    from rest_framework_simplejwt.exceptions import TokenError
+
+    old_refresh = str(RefreshToken.for_user(user))
+    client = APIClient()
+    client.post(
+        "/api/auth/password-reset/",
+        {"email": "reset-confirm@test.test"},
+        format="json",
+    )
+    uid, token = re.search(r"uid=([^&\s]+).*token=([^\s]+)", mail.outbox[0].body).groups()
+
+    refused = client.post(
+        "/api/auth/password-reset/confirm/",
+        {
+            "uid": uid,
+            "token": "not-a-token",
+            "new_password": "N3wSecret!!",
+            "confirm_password": "N3wSecret!!",
+        },
+        format="json",
+    )
+    assert refused.status_code == 400
+
+    ok = client.post(
+        "/api/auth/password-reset/confirm/",
+        {
+            "uid": uid,
+            "token": token,
+            "new_password": "N3wSecret!!",
+            "confirm_password": "N3wSecret!!",
+        },
+        format="json",
+    )
+    assert ok.status_code == 200
+    user.refresh_from_db()
+    assert user.check_password("N3wSecret!!")
+    with pytest.raises(TokenError):
+        RefreshToken(old_refresh)
+    replay = client.post(
+        "/api/auth/password-reset/confirm/",
+        {"uid": uid, "token": token, "new_password": "AnotherSecret!42",
+         "confirm_password": "AnotherSecret!42"},
+        format="json",
+    )
+    assert replay.status_code == 400
+    old = APIClient().post(
+        "/api/auth/login/",
+        {"email": "reset-confirm@test.test", "password": "Sup3rSecret!"},
+        format="json",
+    )
+    fresh = APIClient().post(
+        "/api/auth/login/",
+        {"email": "reset-confirm@test.test", "password": "N3wSecret!!"},
+        format="json",
+    )
+    assert old.status_code == 401
+    assert fresh.status_code == 200
+
+
+@pytest.mark.parametrize("bad_value", [True, 42, ["token"], {"token": "value"}])
+def test_password_reset_rejects_non_string_credentials(make_user, bad_value):
+    from accounts.views import RESET_TOKEN
+    from django.utils.http import urlsafe_base64_encode
+    from django.utils.encoding import force_bytes
+
+    user = make_user(email="malformed-reset@test.test")
+    payload = {
+        "uid": urlsafe_base64_encode(force_bytes(user.pk)),
+        "token": RESET_TOKEN.make_token(user),
+        "new_password": "AnotherSecret!42",
+        "confirm_password": "AnotherSecret!42",
+    }
+    for field in ("uid", "token"):
+        response = APIClient().post(
+            "/api/auth/password-reset/confirm/",
+            {**payload, field: bad_value}, format="json",
+        )
+        assert response.status_code == 400
+    user.refresh_from_db()
+    assert user.check_password("Sup3rSecret!")
+
+
+def test_password_reset_rolls_back_if_session_revocation_fails(make_user, monkeypatch):
+    from accounts.views import RESET_TOKEN
+    from django.utils.http import urlsafe_base64_encode
+    from django.utils.encoding import force_bytes
+
+    user = make_user(email="atomic-reset@test.test")
+    token = RESET_TOKEN.make_token(user)
+
+    def fail_revocation(user):
+        raise RuntimeError("revocation unavailable")
+
+    monkeypatch.setattr("accounts.views._revoke_all", fail_revocation)
+    with pytest.raises(RuntimeError, match="revocation unavailable"):
+        APIClient().post(
+            "/api/auth/password-reset/confirm/",
+            {"uid": urlsafe_base64_encode(force_bytes(user.pk)), "token": token,
+             "new_password": "AnotherSecret!42", "confirm_password": "AnotherSecret!42"},
+            format="json",
+        )
+    user.refresh_from_db()
+    assert user.check_password("Sup3rSecret!")
+    assert RESET_TOKEN.check_token(user, token)
+
+
+# ----------------------------------------------------------------------
+# The public surface, pinned.
+
+
+# Every route reachable without a JWT, and why it has to be. Anything not on
+# this list must authenticate: DRF's project-wide default is `IsAuthenticated`,
+# so an endpoint becomes public only by explicitly saying `AllowAny` or
+# `permission_classes = []` -- one line, easy to copy from the view above it,
+# and invisible in review because it looks exactly like the intentional ones.
+PUBLIC_ROUTES = {
+    # Issues the CSRF cookie the cookie-refresh and logout endpoints require.
+    "api/auth/csrf/",
+    # Credentials in, tokens out -- the caller has no token yet by definition.
+    "api/auth/login/",
+    # Authenticates on the httpOnly refresh cookie plus CSRF, not on a bearer.
+    "api/auth/logout/",
+    "api/token/refresh/",
+    # Reached by someone who cannot sign in. Answers the same 200 either way and
+    # carries its own tight `password_reset` throttle scope.
+    "api/auth/password-reset/",
+    "api/auth/password-reset/confirm/",
+    # Gated separately by settings.REGISTRATION_OPEN, which is False.
+    "api/auth/register/",
+    # Probes. The compose healthcheck, the on-VPS watchdog and the GitHub
+    # Actions probe all poll these, and none of them carries a token.
+    "api/health/",
+    "api/health/prices/",
+    "api/health/ready/",
+}
+
+
+def test_only_the_named_routes_are_reachable_without_a_token():
+    """A new endpoint must not become public by inheriting a copied line.
+
+    Reads the resolver rather than a hand-kept list of views, so a route added
+    under any app is covered the moment it resolves.
+    """
+    from django.urls import get_resolver
+    from rest_framework.permissions import AllowAny
+
+    public = set()
+    total = 0
+
+    def walk(patterns, prefix=""):
+        nonlocal total
+        for pattern in patterns:
+            if hasattr(pattern, "url_patterns"):
+                walk(pattern.url_patterns, prefix + str(pattern.pattern))
+                continue
+            view = getattr(pattern.callback, "view_class", None) or getattr(
+                pattern.callback, "cls", None
+            )
+            if view is None:
+                continue
+            total += 1
+            permissions = getattr(view, "permission_classes", None)
+            if permissions is None:
+                continue
+            if not permissions or all(p is AllowAny for p in permissions):
+                public.add(prefix + str(pattern.pattern))
+
+    walk(get_resolver().url_patterns)
+
+    assert total > 80, f"only {total} routes resolved; the walk is not seeing the API"
+    assert public == PUBLIC_ROUTES, (
+        "the set of routes reachable without a JWT changed. Newly public: "
+        f"{sorted(public - PUBLIC_ROUTES)}. No longer public: "
+        f"{sorted(PUBLIC_ROUTES - public)}. If a new one is deliberate, add it "
+        "to PUBLIC_ROUTES with the reason it cannot require a token."
+    )
+
+
+# ---------------------------------------------------------------------------
+# CROSS-USER ISOLATION. The highest-severity bug class in a multi-user financial
+# app is an IDOR: an authenticated user reading or writing someone else's book
+# by guessing an integer. Targeted tests already existed for trades, ledger
+# reversal, snapshots and analytics -- for the paths somebody thought about. This
+# sweeps *every* account-scoped route instead, and the guard below makes a new
+# route join the sweep rather than quietly skip it.
+#
+# Every one of these paths carries `account_id` (or is the account itself), so
+# ownership is decidable from the URL alone. 404 rather than 403 is the correct
+# answer: telling an intruder that an account exists but is not theirs is itself
+# a disclosure.
+# Routes that address a specific object or perform an action: the only correct
+# answer is 404. `ledger/<id>/` and `ledger/holdings/<id>/` take PATCH, not GET --
+# a 405 would be returned before ownership is ever consulted and would prove
+# nothing, so they are swept with the method they actually implement.
+ACCOUNT_SCOPED_ROUTES = [
+    ("get", "/api/accounts/{account}/"),
+    ("patch", "/api/accounts/{account}/"),
+    ("delete", "/api/accounts/{account}/"),
+    ("get", "/api/accounts/{account}/holdings/{holding}/"),
+    ("patch", "/api/accounts/{account}/holdings/{holding}/"),
+    ("delete", "/api/accounts/{account}/holdings/{holding}/"),
+    ("get", "/api/accounts/{account}/liabilities/{liability}/"),
+    ("patch", "/api/accounts/{account}/liabilities/{liability}/"),
+    ("delete", "/api/accounts/{account}/liabilities/{liability}/"),
+    ("get", "/api/accounts/{account}/ledger/"),
+    ("patch", "/api/accounts/{account}/ledger/holdings/{holding}/"),
+    ("patch", "/api/accounts/{account}/ledger/{entry}/"),
+    ("delete", "/api/accounts/{account}/ledger/{entry}/"),
+    ("post", "/api/accounts/{account}/ledger/{entry}/reverse/"),
+    ("post", "/api/accounts/{account}/imports/preview/"),
+    ("post", "/api/accounts/{account}/imports/commit/"),
+    ("get", "/api/accounts/{account}/performance/"),
+    ("get", "/api/accounts/{account}/data-quality/"),
+    ("get", "/api/accounts/{account}/valuation/"),
+]
+
+# List endpoints answer 200 with an empty page instead, because they filter on
+# `account__user` rather than resolving the account first. That leaks nothing
+# and is not an existence oracle -- the answer is the same empty page whether or
+# not the id exists -- so it is asserted on content, not on status.
+ACCOUNT_SCOPED_LISTS = [
+    "/api/accounts/{account}/holdings/",
+    "/api/accounts/{account}/liabilities/",
+]
+
+# Creation is the one that would actually move somebody else's money, and a
+# rejected-for-validation 400 proves nothing about ownership: the serializer runs
+# first. Each of these carries a payload valid enough to reach the view body.
+ACCOUNT_SCOPED_CREATES = [
+    ("/api/accounts/{account}/holdings/", {"asset_key": "emami_coin", "quantity": "1"}),
+    ("/api/accounts/{account}/liabilities/", {"label": "L", "amount_tomans": "1"}),
+    ("/api/accounts/{account}/trades/",
+     {"asset_key": "emami_coin", "side": "buy", "quantity": "1"}),
+]
+
+
+@pytest.fixture
+def victims_book(asset_catalog, make_user):
+    """A fully populated account belonging to somebody else."""
+    from portfolio.models import Account, Holding, LedgerEntry, Liability
+
+    owner = make_user(email="owner@test.test")
+    account = Account.objects.create(user=owner, name="Private")
+    asset = asset_catalog["emami_coin"]
+    holding = Holding.objects.create(
+        account=account, asset=asset, quantity=Decimal("3")
+    )
+    liability = Liability.objects.create(
+        account=account, label="Loan", amount_tomans=Decimal("1000")
+    )
+    entry = LedgerEntry.objects.create(
+        account=account, asset=asset, kind=LedgerEntry.Kind.BUY,
+        quantity=Decimal("1"), price_tomans=Decimal("100"),
+    )
+    return {
+        "account": account.id, "holding": holding.id,
+        "liability": liability.id, "entry": entry.id,
+    }
+
+
+@pytest.mark.parametrize("method,template", ACCOUNT_SCOPED_ROUTES)
+def test_a_stranger_cannot_touch_another_users_account(
+    method, template, victims_book, make_user
+):
+    from rest_framework.test import APIClient
+
+    intruder = make_user(email="intruder@test.test")
+    client = APIClient()
+    client.force_authenticate(user=intruder)
+
+    url = template.format(**victims_book)
+    response = getattr(client, method)(url, {}, format="json")
+
+    assert response.status_code == 404, (
+        f"{method.upper()} {url} answered {response.status_code}; an account-scoped "
+        f"route must not acknowledge another user's object"
+    )
+
+
+@pytest.mark.parametrize("template", ACCOUNT_SCOPED_LISTS)
+def test_a_stranger_sees_an_empty_page_not_another_users_rows(
+    template, victims_book, make_user
+):
+    from rest_framework.test import APIClient
+
+    intruder = make_user(email="intruder@test.test")
+    client = APIClient()
+    client.force_authenticate(user=intruder)
+
+    response = client.get(template.format(**victims_book))
+
+    assert response.status_code == 200
+    rows = response.data["results"] if isinstance(response.data, dict) else response.data
+    assert rows == [], f"{template} returned another user's rows: {rows}"
+
+
+@pytest.mark.parametrize("template,payload", ACCOUNT_SCOPED_CREATES)
+def test_a_stranger_cannot_create_inside_another_users_account(
+    template, payload, victims_book, asset_catalog, make_user
+):
+    from portfolio.models import Holding, LedgerEntry, Liability
+    from rest_framework.test import APIClient
+
+    intruder = make_user(email="intruder@test.test")
+    client = APIClient()
+    client.force_authenticate(user=intruder)
+    before = (
+        Holding.objects.count(),
+        Liability.objects.count(),
+        LedgerEntry.objects.count(),
+    )
+
+    response = client.post(template.format(**victims_book), payload, format="json")
+
+    assert response.status_code == 404, (
+        f"POST {template} answered {response.status_code} for a foreign account"
+    )
+    assert (
+        Holding.objects.count(),
+        Liability.objects.count(),
+        LedgerEntry.objects.count(),
+    ) == before, "a write reached another user's account"
+
+
+def test_every_account_scoped_route_is_in_the_isolation_sweep():
+    """A new route under /accounts/<id>/ must join the sweep above.
+
+    Without this, adding an endpoint that forgets to scope its queryset ships
+    green: the sweep only proves things about the routes it happens to list.
+    """
+    import re
+
+    from portfolio import urls as portfolio_urls
+
+    declared = {
+        str(pattern.pattern)
+        for pattern in portfolio_urls.urlpatterns
+        if re.match(r"^accounts/<int:(pk|account_id)>/", str(pattern.pattern))
+    }
+    swept = (
+        [template for _method, template in ACCOUNT_SCOPED_ROUTES]
+        + list(ACCOUNT_SCOPED_LISTS)
+        + [template for template, _payload in ACCOUNT_SCOPED_CREATES]
+    )
+    covered = {
+        re.sub(r"\{[a-z_]+\}", "PARAM", template.removeprefix("/api/"))
+        for template in swept
+    }
+    missing = {
+        route for route in declared
+        if re.sub(r"<int:[a-z_]+>", "PARAM", route) not in covered
+    }
+    assert not missing, f"account-scoped routes not covered by the sweep: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# OPERATOR-ISSUED RESET LINK. Password reset is mint-a-token plus deliver-it, and
+# only delivery is broken in production: there is no mail relay, so the request
+# endpoint answers 200 and sends nothing. These pin the working half being
+# exposed to superusers, and -- more importantly -- nobody else.
+class TestAdminPasswordResetLink:
+    URL = "/api/auth/admin/password-reset-link/"
+
+    def _client(self, user=None):
+        from rest_framework.test import APIClient
+
+        client = APIClient()
+        if user is not None:
+            client.force_authenticate(user=user)
+        return client
+
+    def test_anonymous_ordinary_and_staff_users_are_refused(self, make_user):
+        from accounts.models import User
+
+        ordinary = make_user(email="ordinary@test.test")
+        staff = make_user(email="staff@test.test")
+        User.objects.filter(pk=staff.pk).update(is_staff=True)
+        staff.refresh_from_db()
+        target = make_user(email="owner@test.test")
+        User.objects.filter(pk=target.pk).update(is_staff=True, is_superuser=True)
+        target.refresh_from_db()
+
+        anon = self._client().post(self.URL, {"email": ordinary.email}, format="json")
+        theirs = self._client(ordinary).post(
+            self.URL, {"email": ordinary.email}, format="json"
+        )
+        staff_response = self._client(staff).post(
+            self.URL, {"email": target.email}, format="json"
+        )
+
+        assert anon.status_code in (401, 403)
+        # Not even for their own address: this is an operator tool, and a
+        # self-service route that bypasses delivery would be a way to mint a
+        # reset link for any address the throttle would otherwise slow down.
+        assert theirs.status_code == 403
+        assert staff_response.status_code == 403
+
+    def test_a_superuser_link_actually_resets_the_password(self, make_user):
+        from accounts.models import User
+
+        staff = make_user(email="staff@test.test")
+        User.objects.filter(pk=staff.pk).update(is_staff=True, is_superuser=True)
+        staff.refresh_from_db()
+        forgetful = make_user(email="forgetful@test.test")
+
+        issued = self._client(staff).post(
+            self.URL, {"email": "Forgetful@Test.Test"}, format="json"
+        )
+        assert issued.status_code == 200
+
+        query = issued.data["link"].split("?", 1)[1]
+        params = dict(pair.split("=", 1) for pair in query.split("&"))
+        confirmed = self._client().post(
+            "/api/auth/password-reset/confirm/",
+            {**params, "new_password": "An0therSecret!", "confirm_password": "An0therSecret!"},
+            format="json",
+        )
+
+        assert confirmed.status_code == 200, confirmed.data
+        forgetful.refresh_from_db()
+        assert forgetful.check_password("An0therSecret!")
+
+    def test_the_link_is_single_use(self, make_user):
+        """Redeeming it invalidates it: the token hashes the password it replaced."""
+        from accounts.models import User
+
+        staff = make_user(email="staff@test.test")
+        User.objects.filter(pk=staff.pk).update(is_staff=True, is_superuser=True)
+        staff.refresh_from_db()
+        make_user(email="forgetful@test.test")
+
+        issued = self._client(staff).post(
+            self.URL, {"email": "forgetful@test.test"}, format="json"
+        )
+        query = issued.data["link"].split("?", 1)[1]
+        params = dict(pair.split("=", 1) for pair in query.split("&"))
+        payload = {**params, "new_password": "An0therSecret!", "confirm_password": "An0therSecret!"}
+
+        first = self._client().post("/api/auth/password-reset/confirm/", payload, format="json")
+        second = self._client().post("/api/auth/password-reset/confirm/", payload, format="json")
+
+        assert first.status_code == 200
+        assert second.status_code == 400
+
+    def test_an_unknown_address_gets_no_link(self, make_user):
+        from accounts.models import User
+
+        staff = make_user(email="staff@test.test")
+        User.objects.filter(pk=staff.pk).update(is_staff=True, is_superuser=True)
+        staff.refresh_from_db()
+
+        response = self._client(staff).post(
+            self.URL, {"email": "nobody@test.test"}, format="json"
+        )
+
+        assert response.status_code == 404
+        assert "link" not in response.data

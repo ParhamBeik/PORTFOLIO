@@ -109,6 +109,29 @@ class ChangePasswordSerializer(serializers.Serializer):
         return user
 
 
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    uid = serializers.CharField()
+    token = serializers.CharField()
+    new_password = serializers.CharField(write_only=True)
+    confirm_password = serializers.CharField(write_only=True)
+
+    def validate(self, data):
+        if data["new_password"] != data["confirm_password"]:
+            raise serializers.ValidationError(
+                {"confirm_password": ["New passwords do not match."]}
+            )
+        user = self.context.get("user")
+        try:
+            validate_password(data["new_password"], user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"new_password": list(exc.messages)})
+        return data
+
+
 class PasswordAwareTokenRefreshSerializer(TokenRefreshSerializer):
     def validate(self, attrs):
         try:

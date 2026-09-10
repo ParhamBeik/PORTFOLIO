@@ -26,7 +26,6 @@ Two conventions matter here:
 """
 from __future__ import annotations
 
-import bisect
 import datetime as dt
 import hashlib
 
@@ -520,7 +519,6 @@ def _returns_cache_key(
     version: str,
     held_keys: frozenset[str] = frozenset(),
 ) -> str:
-    import hashlib
     basis = normalize_basis(basis)
     if universe is None:
         univ_str = "default"
@@ -1316,37 +1314,3 @@ def invalidate_returns_cache() -> None:
                 cache.delete(key)
     except Exception:  # cache is best-effort; never crash a fetch on it
         pass
-
-
-def risk_free_rate_info(as_of=None) -> dict:
-    """The annual risk-free rate actually used for `as_of`, plus its provenance.
-
-    `RISK_FREE_RATE_BY_JALALI_YEAR` (config/settings.py) is a hand-maintained
-    ASSUMPTION, not a measured yield — every consumer of a Sharpe ratio or
-    other risk-adjusted metric built on it should surface this alongside the
-    number so nobody mistakes it for observed data.
-    """
-    from django.conf import settings
-
-    as_of_dt = normalize_as_of(as_of) or dt.datetime.now(tz=dt.timezone.utc)
-    jalali_year = jdatetime.date.fromgregorian(date=as_of_dt.date()).year
-    return {
-        "annual_rate": settings.RATE_FOR(jalali_year),
-        "jalali_year": jalali_year,
-        "is_assumption": True,
-        "source": settings.RISK_FREE_RATE_SOURCE,
-    }
-
-
-def eligible_universe_keys() -> list[str]:
-    """Convenience: active, non-house, non-manual-pending asset keys.
-
-    Mirrors the filter used by the price panel so optimization diagnostics line
-    up with what the returns matrix actually contains.
-    """
-    return list(
-        Asset.objects.filter(is_active=True)
-        .exclude(is_house=True)
-        .order_by("key")
-        .values_list("key", flat=True)
-    )

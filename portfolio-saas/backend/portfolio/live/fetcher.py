@@ -277,12 +277,9 @@ def _direct_job():
 def _blend_paid_board():
     """Whether to buy the paid gold/FX board on every cycle, not just as a fallback.
 
-    Sized against the Market/* meter, which is 1,500/day: at the 60/90/180s
-    cadences that is ~890 board requests on a trading day, plus ~96 commodity
-    snapshots and ~144 cached USDT quotes -- about 1,130 of a 1,350 usable budget.
-    `quota_plan` will refuse to let the live bucket exceed its cap, so a cadence
-    change that breaks this arithmetic surfaces there rather than as silent
-    refusals mid-session.
+    At the 60/90/180s cadences this is ~890 board requests on a trading day.
+    The current Market product is unmetered, but the rolling request window still
+    shapes bursts.
     """
     return bool(getattr(settings, "MARKETDATA_BLEND_PAID_BOARD", False))
 
@@ -291,13 +288,13 @@ def _brs_verification_due():
     """Whether to buy the paid board even though the free origins look complete.
 
     `direct_complete` skipping BrsApi entirely is the right default and is most
-    of why the Market/* meter ran at 7.6% -- but taken alone it means nothing
+    of why Market/* call volume stayed low -- but taken alone it means nothing
     ever contradicts TGJU. That feed is known to keep answering on slugs that
     have stopped updating, and a stale-but-answering slug satisfies
     `direct_complete` exactly as well as a live one does. So a frozen price would
     look healthy indefinitely, on the one board we have no second opinion for.
 
-    One paid board per interval fixes that for ~96 requests/day. Claimed with
+    One provider board per interval fixes that for ~96 requests/day. Claimed with
     Redis SET NX EX so several workers on the same cycle buy it once between
     them, not once each; if Redis is down we fall back to buying it, because the
     fallback that spends a little is safer than the one that goes blind.
@@ -315,9 +312,9 @@ def _brs_verification_due():
             logger.warning("Could not claim the BRS verification slot: %s", exc)
 
     # Degraded: throttle per process instead of not at all. Returning True here
-    # unconditionally would buy a paid board on EVERY cycle for as long as Redis
-    # was down -- ~900 extra requests/day at the current cadence, against a
-    # 1,500/day meter. A per-process clock over-spends by at most the worker
+    # unconditionally would buy a provider board on EVERY cycle for as long as
+    # Redis was down -- ~900 extra requests/day at the current cadence. A
+    # per-process clock over-spends by at most the worker
     # count, which is bounded; "always" is not.
     # "Never claimed" has to be None, not 0.0. `time.monotonic()` counts from
     # boot, not from the epoch, so on a machine that came up less than

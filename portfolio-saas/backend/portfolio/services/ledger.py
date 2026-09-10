@@ -1152,6 +1152,8 @@ def _daily_bar_or_live_price(asset: Asset, j_date: str) -> Decimal:
     live price is read from, so both sides of this fallback share a unit.
     """
     from marketdata.provenance import daily_bar_price
+    from marketdata.calendars import market_for_asset, sessions_between
+    from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS
 
     # Converted, not raw. This is the only branch that turns a bar into DURABLE
     # user data -- `LedgerEntry.price_tomans` -- and it used to return the
@@ -1159,8 +1161,16 @@ def _daily_bar_or_live_price(asset: Asset, j_date: str) -> Decimal:
     # blank persisted dollars as Toman. Same reader the valuations use.
     bars = daily_bar_price([asset], as_of=j_date, latest_only=True)
     if bars:
-        return max(bars, key=lambda row: row[1])[2]
-    price = _latest_live_price(asset)
+        _symbol, bar_date, price = max(bars, key=lambda row: row[1])
+        if sessions_between(
+            bar_date, j_date, market=market_for_asset(asset)
+        ) <= MAX_FORWARD_FILL_SESSIONS:
+            return price
+    price = (
+        _live_price_fetched_today(asset)
+        if j_date == _jalali_date(timezone.now())
+        else None
+    )
     if price is None:
         raise PriceResolutionError(
             "Price omitted and no historical price found for this date."
@@ -1205,8 +1215,16 @@ def assert_not_before_history(asset: Asset, when) -> None:
 def resolve_historical_price(asset: Asset, when) -> Decimal:
     """Warehouse close on `when`, else latest live Price. Raises if none."""
     from marketdata.currency import to_toman
+    from marketdata.calendars import market_for_asset, sessions_between
+    from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS
     from marketdata.models import GoldCurrencyHistory, MarketCandle
-    from marketdata.provenance import rate_on, toman_per_dollar
+    from marketdata.provenance import (
+        BRS_SERIES_ENDPOINTS,
+        STOCK_SERIES_ENDPOINTS,
+        rate_on,
+        rejected_pairs,
+        toman_per_dollar,
+    )
 
     assert_not_before_history(asset, when)
     if asset.is_manual or asset.is_house:
@@ -1233,11 +1251,16 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
             return live
 
     if asset.asset_class == Asset.AssetClass.STOCK and asset.tse_symbol:
+        rejections = {
+            day for _symbol, day in rejected_pairs(
+                [asset.tse_symbol], STOCK_SERIES_ENDPOINTS
+            )
+        }
         candle = MarketCandle.objects.filter(
             symbol=asset.tse_symbol,
             timeframe="1d_unadj",
             date_time__startswith=j_date,
-        ).first()
+        ).exclude(date_time__in=rejections | {f"{day} 00:00:00" for day in rejections}).first()
         if not candle:
             candle = (
                 MarketCandle.objects.filter(
@@ -1245,10 +1268,17 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
                     timeframe="1d_unadj",
                     date_time__lte=j_date + " 23:59:59",
                 )
+                .exclude(date_time__in=rejections | {f"{day} 00:00:00" for day in rejections})
                 .order_by("-date_time")
                 .first()
             )
-        if candle and candle.close_price > 0:
+        if (
+            candle
+            and candle.close_price > 0
+            and sessions_between(
+                candle.date_time[:10], j_date, market=market_for_asset(asset)
+            ) <= MAX_FORWARD_FILL_SESSIONS
+        ):
             return Decimal(str(candle.close_price))
         return _daily_bar_or_live_price(asset, j_date)
 
@@ -1257,18 +1287,30 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
         in (Asset.AssetClass.GOLD, Asset.AssetClass.CASH, Asset.AssetClass.CRYPTO)
         and asset.brs_symbol
     ):
+        rejections = {
+            day for _symbol, day in rejected_pairs(
+                [asset.brs_symbol], BRS_SERIES_ENDPOINTS
+            )
+        }
         history = GoldCurrencyHistory.objects.filter(
             symbol=asset.brs_symbol, date=j_date
-        ).first()
+        ).exclude(date__in=rejections).first()
         if not history:
             history = (
                 GoldCurrencyHistory.objects.filter(
                     symbol=asset.brs_symbol, date__lte=j_date
                 )
+                .exclude(date__in=rejections)
                 .order_by("-date")
                 .first()
             )
-        if history and history.close_price > 0:
+        if (
+            history
+            and history.close_price > 0
+            and sessions_between(
+                history.date, j_date, market=market_for_asset(asset)
+            ) <= MAX_FORWARD_FILL_SESSIONS
+        ):
             # Shared helper, not a fourth copy: this branch writes a durable
             # `LedgerEntry.price_tomans`, so a divergent answer here becomes
             # permanent rather than merely displayed.

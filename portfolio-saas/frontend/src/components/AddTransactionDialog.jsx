@@ -184,7 +184,10 @@ export default function AddTransactionDialog({
     { enabled: searchingCatalog },
   );
 
-  const catalog = assets.data || [];
+  // Memoized because `options` below depends on it: `assets.data || []` is a
+  // fresh array on every render while the fetch is in flight, which made that
+  // memo recompute the whole option list on each keystroke.
+  const catalog = useMemo(() => assets.data || [], [assets.data]);
   const asset = picked || catalog.find((a) => a.key === assetKey) || null;
   const isCashMove = category === "__cash_move";
   const isProperty = category === "Real Estate";

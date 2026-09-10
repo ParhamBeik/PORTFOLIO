@@ -190,6 +190,9 @@ REST_FRAMEWORK = {
         "anon": os.getenv("ANON_THROTTLE", "30/min"),
         "user": os.getenv("USER_THROTTLE", "120/min"),
         "analytics": os.getenv("ANALYTICS_THROTTLE", "60/min"),
+        # Tight on purpose: this endpoint sends mail. The anon bucket is 30/min
+        # and would let a bot empty an SMTP quota. Tests clear the cache.
+        "password_reset": os.getenv("PASSWORD_RESET_THROTTLE", "5/hour"),
     },
     # M5: render Decimal as a string so large Toman values stay exact on the wire.
     "DEFAULT_RENDERER_CLASSES": ("config.api.DecimalStringJSONRenderer",),
@@ -217,6 +220,38 @@ SIMPLE_JWT = {
 }
 JWT_COOKIE_SECURE = not DEBUG
 REGISTRATION_OPEN = False
+
+# Mail. `.env.production.example` has named these for some time; Django does
+# not read EMAIL_* from the environment on its own, so a filled-in env file
+# previously configured nothing. Console in DEBUG when no host is set, so a
+# local reset still prints a link. Production without EMAIL_HOST still boots
+# -- password reset then logs the send failure rather than taking the API down.
+EMAIL_HOST = os.getenv("EMAIL_HOST", "")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_TIMEOUT = 10
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "1") == "1"
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "0") == "1"
+if EMAIL_USE_SSL:
+    EMAIL_USE_TLS = False
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "noreply@localhost")
+if EMAIL_HOST:
+    EMAIL_BACKEND = os.getenv(
+        "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"
+    )
+elif DEBUG:
+    EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+else:
+    EMAIL_BACKEND = os.getenv(
+        "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"
+    )
+FRONTEND_PASSWORD_RESET_URL = os.getenv(
+    "FRONTEND_PASSWORD_RESET_URL", "http://localhost:5173/reset-password"
+)
+FRONTEND_VERIFICATION_URL = os.getenv(
+    "FRONTEND_VERIFICATION_URL", "http://localhost:5173/verify-email"
+)
 SNAPSHOT_RETENTION_DAYS = int(os.getenv("SNAPSHOT_RETENTION_DAYS", "30"))
 SNAPSHOT_PRUNE_ENABLED = os.getenv(
     "SNAPSHOT_PRUNE_ENABLED", "1" if ENVIRONMENT == "production" else "0"
@@ -225,7 +260,10 @@ PRICE_RETENTION_DAYS = int(os.getenv("PRICE_RETENTION_DAYS", "14"))
 PRICE_PRUNE_ENABLED = os.getenv(
     "PRICE_PRUNE_ENABLED", "1" if ENVIRONMENT == "production" else "0"
 ) == "1"
-VPS_DISK_BUDGET_GB = int(os.getenv("VPS_DISK_BUDGET_GB", "250"))
+# Where to statvfs for the disk projection. Not a size: the size is measured.
+# `VPS_DISK_BUDGET_GB` used to live here at 250 while the device was 147 GB,
+# which is why `admin_telemetry.project_disk` no longer takes a budget on faith.
+DISK_USAGE_PATH = os.getenv("DISK_USAGE_PATH", "/")
 MARKETDATA_HTTP_CONNECT_TIMEOUT = float(os.getenv("MARKETDATA_HTTP_CONNECT_TIMEOUT", "5"))
 MARKETDATA_HTTP_READ_TIMEOUT = float(os.getenv("MARKETDATA_HTTP_READ_TIMEOUT", "12"))
 # token_blacklist (INSTALLED_APPS above) is now available for a "log out all
@@ -246,11 +284,10 @@ TSETMC_SYMBOL_URL = os.getenv(
 
 # --------------------------------------------------------------- direct sources
 #
-# BrsApi is a paid reseller of data that the origins publish for free. Every
-# request against it is metered (~10,000/day TSETMC, ~1,500/day BRS), and that
-# ceiling -- not disk, not CPU -- is what bounds how much history this warehouse
-# can hold. The origins below are unmetered, so a source moved off BrsApi stops
-# competing for that budget entirely.
+# BrsApi resells data that the origins publish for free. Its TSETMC product is
+# metered at ~10,000/day; the current Market product is unmetered. The paid
+# ceiling -- not disk or CPU -- bounds stock-history backfill. Direct origins
+# also remove a provider dependency from the live path.
 #
 # They split into two groups by REACHABILITY, measured from the production VPS
 # (Frankfurt, AS202269) on 2026-08-31:
@@ -326,11 +363,9 @@ DIRECT_SOURCE_COOLDOWN_SECONDS = int(os.getenv("DIRECT_SOURCE_COOLDOWN_SECONDS",
 # Seconds to sleep between BrsApi calls inside one sync task (paid API courtesy).
 MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "0.05"))
 # NOTE: there is deliberately no MARKETDATA_DAILY_REQUEST_LIMIT any more. The
-# provider meters each API key separately (~10,000/day TSETMC, ~1,500/day BRS),
-# so one number could never describe the account -- and the one that was here
-# capped the pair at 9,800, which let a full TSETMC backfill refuse gold/currency
-# calls with 79% of that plan unspent. The limit is now learned from the
-# provider's own `account` block and enforced by its refusal; see marketdata/quota.py.
+# provider products have different semantics: TSETMC is metered and Market is
+# currently unmetered. The limit is learned from the provider's `account` block,
+# with a per-product fallback; see marketdata/quota.py.
 MARKETDATA_WINDOW_LIMIT = int(os.getenv("MARKETDATA_WINDOW_LIMIT", "1000"))
 MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
 
@@ -574,14 +609,13 @@ WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "14"))
 # Tightened 2026-09-04 (120/240/240 -> 60/90/180) after eight days of measured
 # spend showed both meters far under-used. Cost, per trading day:
 #
-#   Market/* (1,500/day meter)  gold/FX/crypto, one request per cycle
+#   Market/* (currently unmetered)  gold/FX/crypto, one request per cycle
 #     open      4.5h / 60s  = 270
 #     daytime  11.5h / 90s  = 460      (07:00-08:30 and 13:00-23:00)
 #     overnight 8.0h / 180s = 160      (newly polled at all -- see below)
 #     + commodity snapshot beat (900s)  = 96
-#     ~= 990 of a 1,350 usable budget, leaving room for the gold history lane.
-#     In practice far less is actually billed: TGJU covers the mapped board for
-#     free and `fetch_all_markets` skips the paid call when it is complete.
+#     ~= 990 provider calls. TGJU covers the mapped board directly and
+#     `fetch_all_markets` can skip the reseller call when it is complete.
 #
 #   Tsetmc/* (10,000/day meter)  one AllSymbols request per cycle, session only
 #     open      4.5h / 60s  = 270  + ~9 state probes + ~54 option/IME snapshots
@@ -590,33 +624,32 @@ WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "14"))
 # Overnight is no longer a blackout. It was 240s but `live_job_keys` gated the
 # gold/currency job to OPEN/CLOSED_DAYTIME, so 23:00-07:00 fetched nothing at
 # all: eight hours with no crypto or FX price, on markets that trade around the
-# clock. 180s there costs ~160 requests against a meter with ~500 spare.
+# clock. The unmetered product makes the overnight cadence safe.
 MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "60"))
 MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "90"))
 MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "180"))
 
-# How often the PAID gold/FX board is fetched even when the free origins already
+# How often the provider gold/FX board is fetched even when direct origins already
 # cover every symbol the app prices. Normally `fetch_all_markets` skips BrsApi
 # whenever TGJU's board is complete, which is correct and is most of why the
-# Market/* meter sat at 7.6% -- but it means a TGJU slug that goes stale while
+# Market/* call volume stayed low -- but it means a TGJU slug that goes stale while
 # still answering (a known failure mode of that feed) would never be contradicted
-# by anything. This is the second opinion: one paid board every N seconds,
-# ~96/day at 900s, charged to a meter with hundreds of requests spare.
+# by anything. This is the second opinion: one provider board every N seconds,
+# ~96/day at 900s.
 # 0 disables it and restores the old always-skip behaviour.
 MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS = int(
     os.getenv("MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS", "900")
 )
-# Buy the paid gold/FX board on EVERY cycle rather than only as a fallback, and
-# let the extractor blend it with the free origins. Costs ~890 requests on a
-# trading day against the 1,500/day Market/* meter, which was measured running at
-# ~42/day -- the quota reason for preferring TGJU alone no longer holds, and
+# Buy the provider gold/FX board on EVERY cycle rather than only as a fallback,
+# and let the extractor blend it with the direct origins. Costs ~890 unmetered
+# provider requests on a trading day, and
 # BrsApi declares a unit string per row where TGJU needs slug mapping.
 MARKETDATA_BLEND_PAID_BOARD = os.getenv("MARKETDATA_BLEND_PAID_BOARD", "1") == "1"
 # The live loop's USDT/IRT fallback quote (`Gold_Currency_Pro.php?history=1`)
-# bills the Market/* meter once per cycle. At the tightened cadence that is ~900
+# calls the Market/* product once per cycle. At the tightened cadence that is ~900
 # requests/day for a number the main board already carries and the warehouse
 # overlay can supply -- it exists only for when the board echoes the USD peg.
-# Cached for this long instead, so it costs ~144/day rather than ~900.
+# Cached for this long, so it costs ~144 calls/day rather than ~900.
 MARKETDATA_USDT_QUOTE_TTL_SECONDS = int(
     os.getenv("MARKETDATA_USDT_QUOTE_TTL_SECONDS", "600")
 )

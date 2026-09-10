@@ -2,9 +2,8 @@ import csv
 import hashlib
 import os
 import tempfile
-import time
 from django.core.management.base import BaseCommand, CommandError
-from django.db import connection, transaction
+from django.db import transaction
 from marketdata.tasks import nightly_series_validation
 from marketdata.models import CorporateAction, RejectedRecord, MarketCandle, GoldCurrencyHistory
 from decimal import Decimal

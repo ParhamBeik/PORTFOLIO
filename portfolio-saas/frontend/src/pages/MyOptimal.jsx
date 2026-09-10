@@ -92,6 +92,13 @@ export default function MyOptimal() {
       <PageHeader
         title="Optimal version of my portfolio"
         subtitle="Max-Sharpe and minimum-volatility allocations of the assets you already hold, over several historical lookback windows, next to how you actually performed."
+        meta={
+          optimalState.data?.as_of ? (
+            <p className="mt-1 text-sm text-muted" data-testid="optimal-as-of">
+              Computed {dateTime(optimalState.data.as_of)}. This page is cached, not polled live.
+            </p>
+          ) : null
+        }
       />
 
       {noHoldings ? (

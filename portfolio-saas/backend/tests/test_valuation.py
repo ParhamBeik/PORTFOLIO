@@ -16,11 +16,9 @@ from rest_framework.test import APIClient
 from config.settings import CpiUnavailable, cpi_for
 from marketdata.models import GoldCurrencyHistory, MarketDailyBar
 from portfolio.models import Account
-from portfolio.models import Account, Asset, Holding, LedgerEntry
-from portfolio.models import Account, Asset, Holding, LedgerEntry, Snapshot
-from portfolio.models import Account, Holding
+from portfolio.models import Asset, Holding, LedgerEntry
+from portfolio.models import Snapshot
 from portfolio.models import DailyPriceAverage, Price
-from portfolio.models import Price
 from portfolio.services import asset_value, value_account, value_user
 from portfolio.services.insights import (
     _liquid_items,
@@ -442,7 +440,6 @@ def test_quality_status_not_stale_when_tse_closed(asset_catalog, write_prices, m
     """
     from datetime import timedelta
 
-    from django.utils import timezone
 
     from portfolio.models import Price
 
@@ -477,7 +474,6 @@ def test_quality_status_follows_each_market_not_one_symbol(
     """
     from datetime import timedelta
 
-    from django.utils import timezone
 
     from portfolio.models import Asset, Price
 
@@ -2501,6 +2497,30 @@ def test_a_dollar_quoted_bar_is_never_read_as_toman(asset_catalog, make_user):
     result = value_as_of(user, account, as_of=timezone.now())
     assert Decimal(result["total"]) == Decimal("0")
     assert [e["reason"] for e in result["excluded"]] == ["missing_price"]
+
+
+def test_point_in_time_brs_history_converts_foreign_quotes_to_toman(make_user):
+    import jdatetime
+    from portfolio.services.valuation import value_as_of
+
+    today = jdatetime.date.fromgregorian(date=timezone.now().date()).strftime("%Y-%m-%d")
+    coin = Asset.objects.create(
+        key="bitcoin_usd", name="Bitcoin", is_active=True,
+        asset_class=Asset.AssetClass.CRYPTO, brs_symbol="BTC",
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date=today, close_price=Decimal("100000"), unit="تومان",
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="BTC", date=today, close_price=Decimal("2"), unit="تتر",
+    )
+    user = make_user(email="historical-units@test.test")
+    account = Account.objects.create(user=user, name="Wallet")
+    Holding.objects.create(account=account, asset=coin, quantity=Decimal("3"))
+
+    result = value_as_of(user, account, as_of=timezone.now())
+
+    assert Decimal(result["total"]) == Decimal("600000")
 
 
 def test_a_pre_open_quote_does_not_stay_live_through_its_own_session(

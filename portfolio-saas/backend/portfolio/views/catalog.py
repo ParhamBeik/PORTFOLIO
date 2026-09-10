@@ -2,36 +2,25 @@
 
 Assets, accounts, holdings and liabilities: the endpoints that change
 the shape of a portfolio rather than reporting on it."""
-from django.db.models import Avg, F, Q, Window
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
-from rest_framework import generics, status
+from rest_framework import generics
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from ..models import Account, Asset, Holding, LedgerEntry, Price, Snapshot, Transaction, Liability
+from ..models import Asset, Holding, LedgerEntry, Liability
 from ..serializers import (
     AccountSerializer,
     AssetSerializer,
     HoldingSerializer,
-    LedgerEntryInputSerializer,
-    LedgerEntryPatchSerializer,
-    LedgerEntrySerializer,
-    TradeInputSerializer,
-    TransactionSerializer,
     LiabilitySerializer,
 )
 from ..services.ledger import (
     LedgerError,
     create_ledger_entry,
-    delete_ledger_entry,
     delete_orphan_holding,
-    entry_pnl_map,
-    record_existing_position,
-    reverse_ledger_entry,
     set_orphan_holding,
-    synthetic_position_rows,
-    update_ledger_entry,
 )
 from ..services.catalog import ensure_asset, search_catalog
 
@@ -145,12 +134,9 @@ class HoldingListCreateView(generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         from ..services.ledger import (
-            LedgerError,
             backfill_house_into_snapshots,
-            create_ledger_entry,
             record_house_mark,
             record_manual_price,
-            set_orphan_holding,
         )
 
         account = self._account()
@@ -217,7 +203,6 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_update(self, serializer):
         from ..services.ledger import (
-            LedgerError,
             adjust_holding_quantity,
             record_house_mark,
             update_manual_holding,
@@ -290,9 +275,7 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_destroy(self, instance):
         from ..services.ledger import (
-            LedgerError,
             adjust_holding_quantity,
-            delete_orphan_holding,
             retire_house,
         )
 

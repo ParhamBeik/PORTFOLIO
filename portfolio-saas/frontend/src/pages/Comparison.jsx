@@ -11,7 +11,7 @@ import {
   StatTile,
   Tabs,
 } from "../components/ui.jsx";
-import { humanize, indexPoint, num, signedToman, toman } from "../format.js";
+import { dateTime, humanize, indexPoint, num, signedToman, toman } from "../format.js";
 import { useApi } from "../useApi.js";
 
 const MODES = [
@@ -195,9 +195,15 @@ export default function Comparison() {
   const [target, setTarget] = useState("");
 
   const choices = useApi(() => comparison(activeId), [activeId]);
-  const holdings = choices.data?.holdings || [];
-  const targets = choices.data?.targets || [];
+  // Memoized: both effects below depend on these, and `?.x || []` is a new
+  // array every render, so each effect re-ran on every render instead of when
+  // the portfolio actually changed.
+  const holdings = useMemo(() => choices.data?.holdings || [], [choices.data]);
+  const targets = useMemo(() => choices.data?.targets || [], [choices.data]);
   const omitted = choices.data?.omitted_holdings || [];
+  const cryptoInvolved = [...holdings, ...targets].some(
+    (row) => (row.key === subject || row.key === target) && row.asset_class === "Crypto"
+  );
 
   // Switching portfolio can strip the holding that was selected; leaving a stale
   // key in place would ask the server about something this portfolio never held.
@@ -316,6 +322,13 @@ export default function Comparison() {
                   <Async {...result} testId="comparison-result">
                     {(data) => (
                       <>
+                        <p className="mb-3 text-xs text-muted" data-testid="comparison-as-of">
+                          Prices through {data.summary?.end_date || "—"}.
+                          {data.as_of ? ` Computed ${dateTime(data.as_of)}.` : ""}
+                          {cryptoInvolved
+                            ? " Crypto series start when this system began watching; there is no provider archive."
+                            : ""}
+                        </p>
                         <Verdict result={data} />
                         <div className="mt-5">
                           <Chart result={data} />

@@ -16,6 +16,7 @@ test.describe("auth", () => {
     await expect(page.getByTestId("auth-submit")).toBeVisible();
     await expect(page.getByTestId("auth-toggle-login")).toBeVisible();
     await expect(page.getByTestId("auth-toggle-register")).toBeVisible();
+    await expect(page.getByTestId("auth-forgot")).toBeVisible();
   });
 
   // A privacy policy nobody can read without an account is not a privacy

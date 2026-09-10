@@ -157,13 +157,6 @@ table,
   outline-offset: 2px;
 }
 
-/* Recharts injects its own focus ring on every surface; ours is enough. */
-.recharts-wrapper:focus,
-.recharts-surface:focus {
-  outline: none;
-}
-
-
 /* App header — taller toolbar with button-like nav and controls. */
 .app-header {
   box-shadow: 0 1px 0 color-mix(in srgb, var(--c-border) 60%, transparent);

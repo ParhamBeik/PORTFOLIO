@@ -20,9 +20,8 @@ import pytest
 from rest_framework.test import APIClient
 
 from accounts.models import User
-from marketdata.models import GoldCurrencyHistory, MarketCandle, MarketInstrument, SymbolIntegrity
+from marketdata.models import GoldCurrencyHistory, MarketInstrument, SymbolIntegrity
 from portfolio.models import Account, Asset, Holding, Price
-from portfolio.models import Asset
 from portfolio.optimization_models import OptimizationSnapshot
 from portfolio.services import diagnostics as diag_mod
 from portfolio.tasks import SCENARIOS, WINDOWS_DAYS, run_best_overall_snapshots
@@ -41,7 +40,6 @@ from portfolio.services.diagnostics import (
     _sortino,
 )
 from portfolio.services.diagnostics import _portfolio_returns, portfolio_diagnostics
-from portfolio.services.diagnostics import portfolio_diagnostics
 from portfolio.services.optimization import (
     EXPECTED_RETURN_CREDIBILITY_CEILING,
     MIN_OBSERVATIONS_PER_ASSET,
@@ -50,21 +48,16 @@ from portfolio.services.optimization import (
     optimize,
 )
 from portfolio.services.optimization import (
-    UniverseTooSmall,
     _correlation_clusters,
     _efficient_frontier,
     _enforce_caps,
     _rebalance_trades,
-    optimize,
 )
 from portfolio.services.optimization import (
-    _correlation_clusters,
-    _enforce_caps,
     summarize_optimizer_inputs,
 )
 from portfolio.services.returns import (
     DEFAULT_HISTORY_DAYS,
-    RETURNS_CACHE_KEY,
     _price_version_fingerprint,
     daily_returns_matrix,
     invalidate_returns_cache,
@@ -72,7 +65,6 @@ from portfolio.services.returns import (
 from portfolio.services.returns import (
     _build_returns_matrix,
     _gap_profile,
-    daily_returns_matrix,
     periods_per_year,
 )
 
@@ -1531,6 +1523,9 @@ def test_best_overall_view_reads_precomputed_snapshots(held_universe, make_user)
     labels = [w["label"] for w in body["windows"]]
     assert labels == ["1Y", "3Y", "5Y", "10Y"]
     assert any(w["status"] == "ok" for w in body["windows"])
+    ok = next(w for w in body["windows"] if w["status"] == "ok")
+    opt = ok["max_sharpe"] or ok["min_volatility"]
+    assert isinstance(opt["rebalance_trades"], list)
 
 
 def test_optimization_snapshot_views_keep_account_data_isolated(make_user):
@@ -3119,9 +3114,45 @@ def test_my_optimal_serves_snapshot_and_triggers_refresh_when_stale(
     assert refresh_mock.called
 
 
+def test_my_optimal_still_serves_the_snapshot_when_the_broker_refuses(
+    synthetic_history, make_user, monkeypatch
+):
+    """A broker outage must not turn a servable cached page into a 500.
+
+    The `except` around the background refresh exists precisely so an
+    unreachable broker degrades to "serve what we have". It logged through a
+    `logger` name the module never defined, so the handler raised NameError and
+    the request 500'd -- the failure mode it was written to prevent.
+    """
+    from portfolio.optimization_models import OptimizationSnapshot
+
+    pro = make_user(email="broker_down@t.t")
+    acct = _make_portfolio(
+        pro, synthetic_history,
+        {"emami_coin": 1, "bitcoin_usd": 1, "usd_cash": 1000},
+    )
+    client = _client(pro)
+    assert client.get(f"/api/optimization/my-optimal/?account={acct.id}").status_code == 200
+
+    snap = OptimizationSnapshot.objects.filter(
+        account=acct, scenario="my_optimal", basis="real_toman"
+    ).first()
+    snap.created_at = timezone.now() - timedelta(minutes=20)
+    snap.save(update_fields=["created_at"])
+    cache.clear()
+
+    def refuse(*args, **kwargs):
+        raise ConnectionError("broker unreachable")
+
+    monkeypatch.setattr("portfolio.tasks.refresh_my_optimal_snapshot.delay", refuse)
+
+    resp = client.get(f"/api/optimization/my-optimal/?account={acct.id}")
+    assert resp.status_code == 200
+    assert resp.json()["windows"]
+
+
 def test_my_optimal_knobs_bypass_snapshot(synthetic_history, make_user):
     """Integration: custom knob values compute live instead of serving default snapshot."""
-    from portfolio.optimization_models import OptimizationSnapshot
 
     pro = make_user(email="knobs_test@t.t")
     acct = _make_portfolio(

@@ -177,10 +177,6 @@ def live_job_keys(
     return tuple(jobs)
 
 
-def is_market_open():
-    return market_state() == OPEN
-
-
 def expects_live_prices():
     """Whether some live job should be running right now.
 
@@ -225,10 +221,9 @@ def live_interval_seconds():
 
     Budget at the current 60/90/180 cadences, per trading day: ~270 polls while
     the TSE is open, ~460 daytime and ~160 overnight. The stock lane bills only
-    the open ones (~335 of a 1,700 allowance on the 10,000/day Tsetmc meter); the
-    gold/FX lane bills all three (~890 of a 1,350 allowance on the 1,500/day
-    Market meter, and much less in practice because the free origins cover the
-    board most cycles). Full arithmetic in `config.settings`.
+    the open ones against the 10,000/day TSETMC meter. The Market product is
+    currently unmetered, and free origins cover most gold/FX cycles. Full
+    arithmetic lives in `config.settings`.
     """
     return {
         OPEN: settings.MARKETDATA_LIVE_INTERVAL_OPEN,

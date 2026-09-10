@@ -62,6 +62,14 @@ jobs:
           python-version: '3.11'
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
+      # Correctness only -- undefined names, unused/shadowed imports, misplaced
+      # control flow. Added because two `logger` references in MyOptimal's
+      # `except` handlers pointed at a name the module never defined: the
+      # handlers existed to degrade gracefully and instead raised NameError and
+      # 500'd. A test only finds that if it exercises the unhappy path; this
+      # finds it on every commit. Rules and their reasoning: backend/ruff.toml.
+      - name: Lint Python
+        run: ruff check .
       # A model edited without its migration deploys cleanly and then fails at
       # runtime on the first query. Catch the drift here instead.
       - name: Check for missing migrations
@@ -106,6 +114,13 @@ jobs:
           cache: npm
           cache-dependency-path: portfolio-saas/frontend/package-lock.json
       - run: npm ci
+      # The check Vite does not do. Rollup resolves module specifiers, not
+      # identifiers, so a component referencing a name nothing imported builds
+      # clean and throws ReferenceError in the browser when that branch renders
+      # -- a blank page from a green build. `no-undef` is why this step exists;
+      # `rules-of-hooks` and unused-variable detection come along for free.
+      # Rules and their reasoning: frontend/eslint.config.js.
+      - run: npm run lint
       # Includes the colour-contrast guard (src/contrast.test.mjs), which reads
       # the tokens straight out of index.css. Deterministic and ~60ms, so the
       # regression that used to need a browser now fails on the commit itself.
@@ -225,6 +240,9 @@ jobs:
           # deploy.sh takes it from here: backup, build, migrate, restart, then
           # verify both Celery workers and three health endpoints. It exits
           # non-zero on any failed check, which fails this job.
+          #
+          # Missing or unreachable mail is reported as degraded. The superuser
+          # recovery link keeps accounts recoverable until a relay is configured.
           ./scripts/deploy.sh
           REMOTE
 

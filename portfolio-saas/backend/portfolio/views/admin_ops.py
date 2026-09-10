@@ -3,12 +3,15 @@
 Separated so the `IsAdminUser` surface is small enough to audit at a
 glance, and so a destructive operation can never be one import away
 from an ordinary user-facing view."""
-from rest_framework import generics, status
+import logging
+
+from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAdminUser
 from portfolio.management.commands.clean_mispriced_data import audit_and_repair_prices
-from .ledger import admin_logger
+
+admin_logger = logging.getLogger("portfolio.admin")
 
 
 class AdminCleanPricesScanView(APIView):

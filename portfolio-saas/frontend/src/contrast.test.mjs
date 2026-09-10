@@ -14,7 +14,7 @@
 // rather than on the deploy after it.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const css = readFileSync(fileURLToPath(new URL("./index.css", import.meta.url)), "utf8");
@@ -79,8 +79,81 @@ const TEXT_TOKENS = [
 // the active tab.
 const WHITE_ON_FILL = ["--c-accent-fill", "--c-good-fill"];
 
+// The surface tokens above are what a label is measured against only while
+// nothing is composited underneath it. A `bg-[var(--c-critical)]/10` behind
+// `text-[var(--c-critical-text)]` changes that background, and the twins clear
+// AA on a plain surface by just 4.61:1 at the tightest — so there is no margin
+// to spend. Measured across the whole tree on 2026-09-09, six sites failed:
+// the sign-in error banner (4.04:1 light), the registration-closed and
+// reset-sent banners, the legal draft notice, the danger Button's hover and the
+// account menu's danger row. No opacity rescues it; even 3% only reaches 4.42:1.
+//
+// The rule is narrow on purpose: a tint is only a problem under a `-text` TWIN.
+// `ErrorState`, the warehouse warning on Dashboard and the logo hover all tint
+// too, and all pass comfortably (11–13:1) because their text is plain
+// `--c-text`. Flagging those would force a change that buys nothing.
+//
+// Scanning source beats auditing rendered pages: this is deterministic, covers
+// components no Lighthouse run happens to load, and names the file and line.
+function tintedTwinUsages() {
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) walk(full);
+      else if (full.endsWith(".jsx")) files.push(full);
+    }
+  };
+  walk(fileURLToPath(new URL(".", import.meta.url)).replace(/\/$/, ""));
+
+  const found = [];
+  for (const file of files) {
+    readFileSync(file, "utf8").split("\n").forEach((line, i) => {
+      // Same line, because that is how Tailwind classes are written here: one
+      // className string per element.
+      const tint = line.match(/bg-\[var\((--c-[a-z0-9-]+)\)\]\/(\d+)/);
+      const text = line.match(/text-\[var\((--c-[a-z0-9-]+-text)\)\]/);
+      if (!tint || !text) return;
+      // Only the twin OF the tint. A green tint under red text is a different
+      // (and so far hypothetical) question.
+      if (text[1] !== `${tint[1]}-text`) return;
+      found.push(`${file.split("/src/")[1]}:${i + 1}`);
+    });
+  }
+  return found;
+}
+
+test("no text twin is drawn over a tint of its own colour", () => {
+  const offenders = tintedTwinUsages();
+  assert.deepEqual(
+    offenders,
+    [],
+    `these composite a colour behind text of that same colour, which spends the ` +
+      `4.61:1 the twins have on a plain surface and drops them under AA:\n  ` +
+      offenders.join("\n  ") +
+      "\nKeep the hue in the border and pin the background to a surface token."
+  );
+});
+
 for (const mode of ["dark", "light"]) {
   const t = tokens(mode);
+
+  test(`${mode}: badge borders separate the chip from what it sits on`, () => {
+    // A badge whose background matches its surface is defined by its border
+    // alone, so that border has to hold the 3:1 non-text bar of WCAG 1.4.11.
+    // `Badge` draws it in the text twin at full opacity for exactly that
+    // reason: the display colour at 40% measured 1.56:1 for `good` in light
+    // mode, which is no edge at all.
+    for (const variant of ["good", "warn", "serious", "critical"]) {
+      const border = t[`--c-${variant}-text`];
+      const ratio = contrast(border, t["--c-panel-2"]);
+      assert.ok(
+        ratio >= 3,
+        `${variant} badge border (${border}) is ${ratio.toFixed(2)}:1 against ` +
+          `panel-2 in ${mode} mode, needs 3:1 — the chip has no other outline`
+      );
+    }
+  });
 
   test(`${mode}: text tokens clear AA on every surface`, () => {
     for (const fg of TEXT_TOKENS) {
