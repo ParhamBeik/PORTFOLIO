@@ -3,10 +3,24 @@
 Two dimensions, and they are not the same thing:
 
 * **plan** -- which provider meter is billed. BrsApi bills **one API key against
-  two independent daily meters, chosen by the endpoint's path family**:
-  `Tsetmc/*` and `Codal/*` draw on the ~10,000/day stock meter, `Market/*` on
-  the ~1,500/day gold/FX/crypto meter. Confirmed with the account holder against
-  the vendor panel on 2026-09-04.
+  independent per-product meters, chosen by the endpoint's path family**.
+  Measured directly against the live API on 2026-09-09 by probing each path and
+  watching which counter moved:
+
+  ===========================  =========================  ==================
+  Path family                  Product                    Daily ceiling
+  ===========================  =========================  ==================
+  ``Tsetmc/*``, ``Codal/*``    purchased (خرید شده)       **10,000**
+  ``Market/Gold_Currency_Pro`` NOT purchased (خرید نشده)  0 -- free tier
+  other ``Market/*``           free                       not metered at all
+  ===========================  =========================  ==================
+
+  So there is exactly **one paid wallet**. The 1,500/day gold/FX/crypto plan
+  this file assumed until 2026-09-09 had lapsed: the provider reports that
+  product as `خرید نشده` with `exp: null`, and a hit on `Gold_Currency.php`,
+  `Cryptocurrency.php` or `Commodity.php` moves no counter at all. We were
+  reserving 1,200 of a phantom 1,500 for live and leaving gold backfill 150
+  requests a day, to protect a meter that does not exist.
 
   The key is therefore **not** the thing that selects the plan, and the two env
   vars deliberately hold the same value in production. Earlier comments in this
@@ -14,6 +28,11 @@ Two dimensions, and they are not the same thing:
   someone reading it would conclude the deployment was misconfigured and "fix"
   it by inventing a second key. `endpoints.Endpoint.plan` is the only correct
   mapping, because only the path decides which meter the provider debits.
+
+  A plan with an effective limit of 0 is **unmetered**, not empty. That is the
+  provider's own semantics (`usage_today_limit: 0` on a free product), so an
+  unmetered plan gets no daily ceiling and no live reserve -- only the rolling
+  5-minute window shapes it.
 * **bucket** -- which lane inside a plan is spending (live prices, archive
   backfill, or incidental metadata). This is our own allocation policy.
 
@@ -22,26 +41,39 @@ capped at 9,800 meant a full TSETMC backfill refused gold/currency requests that
 still had 79% of the BRS plan free, so the USDT quote failed 201 times in a day
 and dollar-denominated holdings went stale.
 
-The allocation policy, in one line: **live is static, leftover is dynamic.**
+The allocation policy, in one line: **live keeps what it still needs, archive
+gets the rest.**
 
-* **Live** gets a fixed, guaranteed share of every plan, deducted before anything
-  else and never lent out. It has a definite, simulable task -- a known cadence
-  over a known day -- so its need is computed, not guessed, by
-  `live_reserve_remaining`.
-* **Archive** gets whatever is left, minus a safety margin, *paced pro rata
-  across the Tehran day* (`archive_allowance_now`). Backfill is expected to be
-  slow and to lag by days or weeks; that is the design. What it must never do is
-  spend the wallet before the market opens.
+* **Live** reserves the requests its cadence will actually make *between now and
+  Tehran midnight*, not over a whole day. The reserve was static until
+  2026-09-09, which meant that at 13:00 -- when the TSE session ends and the
+  live lane's remaining need really is near zero -- 1,074 TSETMC requests stayed
+  fenced off for eleven more hours and expired unspent every single evening.
+  Forward-looking is not the 2026-08-26 bug returning: what starved live then
+  was gate 3 of `reserve_request` being skipped entirely whenever the provider
+  had not disclosed a limit, and that gate is unconditional now.
+* **Archive** gets whatever is left, minus a safety margin. Backfill is expected
+  to be slow and to lag by days or weeks; that is the design.
 
 The provider remains the only authority on how much is really left, and its
 refusal still breaks the circuit for that plan until the Tehran-midnight reset.
-But we no longer wait to be told: `effective_limit` falls back to a configured
-per-plan expectation, because the provider only discloses its ceiling on *error*
-responses and the reserve used to be skipped entirely while that ceiling was
-unknown. On 2026-08-26 that gap let archive spend 10,034 of 10,000 TSETMC
-requests between midnight and 03:43 Tehran with `live_used` at exactly 0, trip
-the breaker, and -- because the breaker was not bucket-aware -- take the live
-lane down with it for the remaining twenty hours.
+`effective_limit` falls back to a configured per-plan expectation only until a
+real answer arrives.
+
+**Getting that real answer is deliberate, not incidental.** The `account` block
+does not ride on a successful response -- verified 2026-09-09 -- so the counter
+used to drift unobserved between error responses, by 2,226 requests on
+2026-09-08. `fetchers.probe_meter` buys the block for one request, and
+`tasks.reconcile_quota_meters` does that every five minutes while a plan is
+spending. Roughly 1-3% of the wallet buys a counter that matches the vendor
+panel, which is what makes the rest of this file's arithmetic trustworthy
+instead of merely plausible.
+
+Do not replace that with a correction factor. One existed here between
+2026-09-08 and 2026-09-09 -- archive's leftover divided by 1.30, to "account
+for" the 2,225-request gap -- and it silently discarded 1,950 TSETMC requests a
+day. The gap it was calibrated against was mostly an operator hand-probing the
+API from the VPS while debugging that very incident.
 
 Note the per-plan expectation is *not* the 2026-08-24 bug returning. That was one
 **shared** counter across two wallets, so spending either drained both. These are
@@ -66,35 +98,10 @@ from .models import ApiRequestQuota
 logger = logging.getLogger(__name__)
 
 
-# #region agent log
-def _agent_dbg(hypothesis_id, location, message, data):
-    """Session e89767: dual-write so VPS docker logs and local debug file both see it."""
-    try:
-        import json as _json
-        payload = {
-            "sessionId": "e89767",
-            "runId": "pre-fix",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        logger.info("agent_dbg %s", _json.dumps(payload, default=str))
-        with open(
-            "/Users/parham/Downloads/GITHUB_PROJECTS/API/PORTFOLIO/.cursor/debug-e89767.log",
-            "a",
-            encoding="utf-8",
-        ) as _fh:
-            _fh.write(_json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
-# #endregion
 
 ARCHIVE = "archive"
 LIVE = "live"
 OTHER = "other"
-_H2_LOGGED = set()
 
 # Provider subscriptions. One counter row and one circuit breaker per plan.
 TSETMC = "tsetmc"
@@ -112,14 +119,6 @@ _LOCAL_WINDOWS = collections.defaultdict(collections.deque)
 # gets 1/Nth of the window so N of them together stay under the provider's real
 # limit. Over-estimating only throttles us; under-estimating gets us blocked.
 _DEGRADED_PROCESS_DIVISOR = 10
-
-# 2026-09-08: AIO panel billed 10058 against 7833 reserved TSETMC calls. The
-# 2225-request gap landed in other_used on the 429, after archive had already
-# spent past what the provider still needed for live. Until those extra bills
-# have a call site, TSETMC archive leftover is charged at this ratio.
-# ponytail: measured ratio, not a product knob; set 1.0 in tests that pin leftovers.
-_TSETMC_ARCHIVE_BILL_RATIO = 1.30
-
 
 def get_historical_full_used_today():
     client = get_redis()
@@ -152,19 +151,24 @@ REASON_LIVE_RESERVED = "live_reserved"
 REASON_ARCHIVE_PACED = "archive_paced"
 
 #: Refusals that mean "wait, and try again shortly" rather than "the wallet is
-#: spent". Only pacing qualifies, and the distinction is the whole point:
+#: spent". The distinction is the whole point:
 #:
 #: `archive_paced` says the archive is ahead of its pro-rata share *at this
 #: instant*. The condition clears on its own within minutes as the day advances.
 #:
-#: `live_reserved` looks similar but is not: the gate compares
-#: `row.used + live_reserve_remaining` against the ceiling, and expanding that
-#: gives `archive_used + other_used + live_day_cost`, which does not depend on
-#: how much live has spent. It cannot clear before rollover, so retrying it in
-#: three minutes would spin for the rest of the day.
+#: `live_reserved` **joined this set on 2026-09-09**, and only because
+#: `live_reserve_remaining` became forward-looking on the same day. While the
+#: reserve was a static 24h figure the gate expanded to
+#: `archive_used + other_used + live_day_cost` -- the `live_used` terms cancel,
+#: so it could not move before rollover and retrying it would have spun for the
+#: rest of the day. Now the reserve shrinks as the remaining cadence shrinks,
+#: and the single largest release happens at 13:00 Tehran when the TSE session
+#: ends. A state parked until tomorrow at 10:00 would sit out an afternoon that
+#: has room for it. If the reserve is ever made static again, take
+#: `live_reserved` back out of this set in the same commit.
 #:
-#: `plan_blocked` and `bucket_exhausted` are likewise day-scoped.
-PACING_REASONS = frozenset({REASON_ARCHIVE_PACED})
+#: `plan_blocked` and `bucket_exhausted` remain day-scoped.
+PACING_REASONS = frozenset({REASON_ARCHIVE_PACED, REASON_LIVE_RESERVED})
 
 
 class QuotaExhausted(RuntimeError):
@@ -426,19 +430,6 @@ def trip_plan_breaker(plan, *, reason="", bucket=None):
         plan, effective or "plan", reason or "-",
         getattr(settings, "MARKETDATA_BREAKER_RETRY_SECONDS", 900),
     )
-    # #region agent log
-    _agent_dbg(
-        "H4",
-        "quota.py:trip_plan_breaker",
-        "breaker_tripped",
-        {
-            "plan": plan,
-            "bucket": effective,
-            "reason": reason or "-",
-            "quota_day": str(quota_day()),
-        },
-    )
-    # #endregion
 
 
 def looks_like_quota_error(status_code, body_text):
@@ -446,6 +437,47 @@ def looks_like_quota_error(status_code, body_text):
     if status_code not in (429, 500, 502, 503):
         return False
     return bool(_QUOTA_MESSAGE_RE.search(body_text or ""))
+
+
+#: The provider's own name for this plan's daily ceiling, in the order we trust
+#: them. `usage_today_limit` is the one BrsApi actually sends -- verified against
+#: the live API on 2026-09-09, where a deliberately malformed request returned
+#: `{"usage_today": 6929, "usage_today_limit": 10000, ...}`.
+#:
+#: It was missing from this list for the whole life of the file, so no response
+#: ever disclosed a ceiling, `ApiRequestQuota.limit` was 0 on every row ever
+#: written, and `effective_limit` always fell back to the configured guess. Every
+#: downstream "the provider has not told us yet" comment described a field-name
+#: typo, not the provider.
+_LIMIT_FIELDS = ("usage_today_limit", "limit_today", "daily_limit", "request_limit", "limit")
+
+
+def reported_limit(account):
+    """This plan's ceiling as the provider states it, or None if it did not.
+
+    Zero is a real answer and is NOT None: BrsApi reports `usage_today_limit: 0`
+    together with `type: "خرید نشده"` (not purchased) for a product on the free
+    tier, which is exactly the Market/* family here. Collapsing that into "no
+    news" is what would put a phantom ceiling back on an unmetered plan.
+    """
+    if not isinstance(account, dict):
+        return None
+    for name in _LIMIT_FIELDS:
+        try:
+            return int(account[name])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+def reported_usage(account):
+    """This plan's spend so far as the provider states it, or None."""
+    if not isinstance(account, dict):
+        return None
+    try:
+        return int(account["usage_today"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def is_daily_quota_exhaustion(account, plan, row=None):
@@ -458,18 +490,10 @@ def is_daily_quota_exhaustion(account, plan, row=None):
     """
     if not isinstance(account, dict):
         return True
-    try:
-        usage = int(account.get("usage_today"))
-    except (TypeError, ValueError):
+    usage = reported_usage(account)
+    if usage is None:
         return True
-    reported_limit = None
-    for name in ("limit_today", "daily_limit", "request_limit", "limit"):
-        try:
-            reported_limit = int(account[name])
-            break
-        except (KeyError, TypeError, ValueError):
-            continue
-    limit = reported_limit or effective_limit(plan, row)
+    limit = reported_limit(account) or effective_limit(plan, row)
     if not limit:
         return True
     return usage >= limit - _safety_margin()
@@ -683,36 +707,60 @@ def live_day_cost(plan, row=None, now=None):
         needed += live_states.full_day_cost(states)
     except Exception:
         logger.warning("live plan unavailable; reserving the price loop only")
+    # No floor here. `MARKETDATA_LIVE_REQUEST_FLOOR` used to be applied as a
+    # lower bound on this number, which made the day cost read 1,200 for a lane
+    # whose planner simulates to ~300 and whose measured spend is 114-191. That
+    # was a response to the 2026-09-08 429 at 10,058/10,000, but the cause there
+    # was the 2,226 requests the counter could not see, not an under-sized
+    # reserve -- and `reconcile_quota_meters` addresses that directly now. The
+    # floor that remains lives on the *reserve*
+    # (`MARKETDATA_LIVE_RESERVE_MIN`), which is the quantity a floor makes sense
+    # on, and FLOOR keeps its other job as the basis of `bucket_budget(LIVE)`.
     cap = bucket_budget(LIVE, plan, row)
-    # The floor is a lower bound, not just the first term of the live cap.
-    # On 2026-09-08 TSETMC simulated to 297 against FLOOR=1200, archive was
-    # handed ~9,300, and live used 16 before the provider 429'd at 10,058.
-    # Apply only when the floor sits strictly below the live cap (production:
-    # 1200 < 1700). When HEADROOM is 0, FLOOR *is* the cap and the simulation
-    # is used as-is, clamped — the warehouse tests' old pattern.
-    # Skip entirely when the lane will spend nothing (TSE weekend).
-    floor = int(getattr(settings, "MARKETDATA_LIVE_REQUEST_FLOOR", 0) or 0)
-    if needed > 0 and floor and (cap is None or floor < cap):
-        needed = max(needed, floor)
     if cap is not None:
         needed = min(needed, cap)
     return max(0, needed)
 
 
 def live_reserve_remaining(plan, row=None, now=None):
-    """Unused portion of the static 24h live slice on `plan`.
+    """What the live lane still has to spend on `plan` before Tehran midnight.
 
-    The slice does not depend on the TIME of day -- evening leftover is not
-    released to archive -- but it does depend on WHICH day, since a weekend has
-    no TSE session to poll. `now` therefore selects the day, never the fraction
-    of it. Live already spent today is subtracted so a live overrun cannot be
-    reserved twice.
+    **Forward-looking since 2026-09-09.** It used to be the unused portion of a
+    static 24h slice, which does not describe the thing being reserved: the
+    price loop cannot retroactively spend the morning's requests, so at 17:00 on
+    a closed market the honest answer is "almost nothing" and the static answer
+    was 1,074. Those requests were fenced off from backfill and then expired at
+    midnight, every day.
+
+    Sized by simulating the same planner the live loop runs (`_simulate_price_loop`)
+    plus the cadence-driven `LiveFetchState` rows, over `[now, rollover)`, capped
+    by the full day's cost.
+
+    Unmetered plans reserve nothing: there is no wallet to protect live's share
+    of, and holding one back only throttles a lane the provider is not counting.
     """
-    spent = getattr(row, "live_used", 0) or 0
-    return max(0, live_day_cost(plan, row, now=now) - spent)
+    if not effective_limit(plan, row):
+        return 0
+
+    from . import endpoints, live_states
+    from .models import LiveFetchState
+
+    now = now or timezone.now()
+    end = live_states.day_start(now) + timedelta(days=1)
+    needed = _simulate_price_loop(now, end, plan=plan)
+    try:
+        keys = [key for key, ep in endpoints.REGISTRY.items() if ep.plan == plan]
+        states = list(
+            LiveFetchState.objects.filter(enabled=True, endpoint_key__in=keys)
+        )
+        needed += live_states.remaining_day_cost(states, now=now)
+    except Exception:
+        logger.warning("live plan unavailable; reserving the price loop only")
+
+    return max(0, min(needed, live_day_cost(plan, row, now=now)))
 
 
-def other_reserve_remaining(plan, row=None):
+def other_reserve_remaining(plan, row=None, now=None):
     """Unused portion of the OTHER bucket's daily budget on `plan`.
 
     The exact counterpart of `live_reserve_remaining`, and it exists for the
@@ -732,6 +780,11 @@ def other_reserve_remaining(plan, row=None):
     Tsetmc/* -- so holding 200 on that plan would just shrink gold/FX backfill.
     """
     if plan != TSETMC:
+        return 0
+    local = (now or timezone.now()).astimezone(
+        ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE)
+    )
+    if local.hour >= 10:
         return 0
     spent = getattr(row, "other_used", 0) or 0
     return max(0, (bucket_budget(OTHER, plan, row) or 0) - spent)
@@ -757,80 +810,33 @@ def _day_elapsed_fraction(now=None):
 def archive_day_ceiling(plan, row=None, now=None):
     """Total requests ARCHIVE may spend on `plan` across the whole quota day.
 
-    Live is subtracted first and is never negotiable: the static 24h live
-    slice (`live_day_cost`), of which `live_reserve_remaining` is the unused
-    part. The OTHER bucket's small fixed budget is held back the same way --
-    see `other_reserve_remaining`. Whatever remains, minus a safety margin so
-    the wallet is never actually emptied, belongs to backfill and is paced
-    across the Tehran day.
+    Live is subtracted first and is never negotiable: what its cadence will
+    still cost between now and rollover (`live_reserve_remaining`). The OTHER
+    bucket's small fixed budget is held back the same way -- see
+    `other_reserve_remaining`. Whatever remains, minus a safety margin so the
+    wallet is never actually emptied, belongs to backfill.
 
-    Both reserves subtract the bucket's *spend so far* and its *unspent
-    remainder* separately, so a bucket that overruns its budget cannot have the
-    overrun reserved a second time.
+    Because the live reserve now shrinks through the day, this ceiling *grows*
+    through the day. That is the intended shape: an evening with no session left
+    to poll should hand the backfill everything the price loop no longer needs,
+    instead of letting it expire at midnight.
 
-    None means "no ceiling known for this plan" -- only possible if the plan has
-    neither a disclosed limit nor a configured expectation.
+    None means **unmetered**: the provider is not counting this plan, so there is
+    no ceiling to divide up and only the rolling window shapes the rate.
+
+    The subtrahend is `row.used`, not `archive_used`. Everything the provider has
+    billed today counts against the same wallet, including the drift that no
+    bucket of ours claims (`unattributed_used`) -- charging archive only for its
+    own lane is how a plan reaches its real ceiling while our arithmetic still
+    reports room.
     """
     ceiling = effective_limit(plan, row)
     if not ceiling:
         return None
-    live_spent = getattr(row, "live_used", 0) or 0
-    other_spent = getattr(row, "other_used", 0) or 0
+    spent_elsewhere = max(0, (getattr(row, "used", 0) or 0) - (getattr(row, "archive_used", 0) or 0))
     reserve = live_reserve_remaining(plan, row, now=now)
-    other_reserve = other_reserve_remaining(plan, row)
-    result = max(
-        0,
-        ceiling - _safety_margin() - live_spent - reserve - other_spent - other_reserve,
-    )
-    if plan == TSETMC:
-        ratio = float(
-            getattr(
-                settings,
-                "MARKETDATA_TSETMC_ARCHIVE_BILL_RATIO",
-                _TSETMC_ARCHIVE_BILL_RATIO,
-            )
-            or _TSETMC_ARCHIVE_BILL_RATIO
-        )
-        if ratio > 1:
-            result = int(result / ratio)
-    # #region agent log
-    day = quota_day()
-    if (plan, day) not in _H2_LOGGED:
-        _H2_LOGGED.add((plan, day))
-        floor = int(getattr(settings, "MARKETDATA_LIVE_REQUEST_FLOOR", 0) or 0)
-        _agent_dbg(
-            "H2",
-            "quota.py:archive_day_ceiling",
-            "archive_ceiling_vs_live_floor",
-            {
-                "plan": plan,
-                "quota_day": str(day),
-                "ceiling_assumed": ceiling,
-                "safety": _safety_margin(),
-                "live_spent": live_spent,
-                "live_reserve": reserve,
-                "live_floor_setting": floor,
-                "other_spent": other_spent,
-                "other_reserve": other_reserve,
-                "archive_day_ceiling": result,
-                "used": getattr(row, "used", 0) if row else 0,
-            },
-        )
-        local = timezone.now().astimezone(ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE))
-        _agent_dbg(
-            "H3",
-            "quota.py:archive_day_ceiling",
-            "quota_clock",
-            {
-                "quota_day": str(day),
-                "tehran_now": local.isoformat(),
-                "utc_now": timezone.now().isoformat(),
-                "django_tz": getattr(settings, "TIME_ZONE", ""),
-                "quota_tz": settings.MARKETDATA_QUOTA_TIMEZONE,
-            },
-        )
-    # #endregion
-    return result
+    other_reserve = other_reserve_remaining(plan, row, now=now)
+    return max(0, ceiling - _safety_margin() - spent_elsewhere - reserve - other_reserve)
 
 
 def archive_allowance_now(plan, row=None, now=None):
@@ -1041,20 +1047,10 @@ def reconcile_account(account, plan=TSETMC):
     # The provider is also the only authority on this plan's ceiling. Recording
     # what it reports is what makes the limit observed data instead of a guess
     # in a settings file.
-    reported_limit = None
-    for name in ("limit_today", "daily_limit", "request_limit", "limit"):
-        try:
-            reported_limit = int(account[name])
-            break
-        except (KeyError, TypeError, ValueError):
-            continue
+    disclosed = reported_limit(account)
+    usage = reported_usage(account)
 
-    try:
-        usage = int(account["usage_today"])
-    except (KeyError, TypeError, ValueError):
-        usage = None
-
-    if usage is None and reported_limit is None:
+    if usage is None and disclosed is None:
         return block
 
     with transaction.atomic():
@@ -1062,44 +1058,48 @@ def reconcile_account(account, plan=TSETMC):
         updates = []
         # Responses from concurrent requests can arrive out of order. Lowering
         # the local counter to an older response re-opens quota that was already
-        # spent, while a larger counter is useful evidence of calls made outside
-        # this process. Keep usage monotonic and account unexplained positive
-        # drift in `other_used` so the bucket sum remains an exact ledger.
+        # spent, while a larger counter is evidence of calls made outside this
+        # process. Keep usage monotonic.
+        #
+        # The drift is deliberately NOT added to `other_used`. It did that until
+        # 2026-09-09 to keep the three buckets summing to `used`, which is a tidy
+        # invariant and a false one: the whole point of the drift is that we do
+        # not know which lane spent it. Charging it to OTHER made a bucket with a
+        # 200/day budget report 2,226 spent (2026-09-08), which zeroed the
+        # reserve that keeps `catalog_sync` and `sync_symbol_metadata` alive and
+        # made the console attribute the app's own blind spot to a named lane.
+        # `unattributed_used` derives it instead, and nothing budgets against it.
         if usage is not None and usage > row.used:
-            drift = usage - row.used
             logger.info(
                 "quota reconciled plan=%s day_usage %d->%d unattributed=%d",
-                plan, row.used, usage, drift,
+                plan, row.used, usage, usage - row.used,
             )
-            # #region agent log
-            _agent_dbg(
-                "H1",
-                "quota.py:reconcile_account",
-                "provider_usage_ahead_of_local",
-                {
-                    "plan": plan,
-                    "local_used": row.used,
-                    "provider_usage": usage,
-                    "drift": drift,
-                    "archive_used": row.archive_used,
-                    "live_used": row.live_used,
-                    "other_used": row.other_used,
-                    "quota_day": str(quota_day()),
-                },
-            )
-            # #endregion
             row.used = usage
-            row.other_used += drift
-            updates += ["used", "other_used"]
-        if reported_limit and reported_limit != row.limit:
+            updates.append("used")
+        if disclosed is not None and disclosed != row.limit:
             logger.info(
-                "quota limit observed plan=%s %d->%d", plan, row.limit, reported_limit
+                "quota limit observed plan=%s %d->%d", plan, row.limit, disclosed
             )
-            row.limit = reported_limit
+            row.limit = disclosed
             updates.append("limit")
         if updates:
             row.save(update_fields=[*updates, "updated_at"])
     return block
+
+
+def unattributed_used(row):
+    """Requests the provider billed that no bucket of ours claims.
+
+    Positive drift means something spent this plan without passing
+    `reserve_request` -- a manual probe from a shell, another deployment holding
+    the same key, or a code path that bypasses `fetchers.fetch_json`. It is the
+    single number that says whether our accounting can be trusted, so it is
+    derived and surfaced rather than hidden inside a bucket.
+    """
+    if row is None:
+        return 0
+    attributed = (row.archive_used or 0) + (row.live_used or 0) + (row.other_used or 0)
+    return max(0, (row.used or 0) - attributed)
 
 
 def remaining_requests(bucket=None, plan=TSETMC):
@@ -1117,7 +1117,14 @@ def remaining_requests(bucket=None, plan=TSETMC):
     used = row.used if row else 0
     limit = effective_limit(plan, row)
     if not limit:
-        return 0
+        # Unmetered plan: the provider is not counting, so there is no daily
+        # remainder to report. Answer with one rolling window's worth -- the
+        # only thing that actually shapes the rate -- because this number sizes
+        # batches, and returning 0 froze the lane completely. That is what the
+        # lapsed Market plan looked like from here: `archive_capacity()[brs]`
+        # was 0, so `claim_archive_batch` skipped every gold and currency
+        # endpoint outright while the provider was refusing nothing.
+        return _window_limit(bucket or ARCHIVE)
     day_left = max(0, limit - _safety_margin() - used)
     if bucket is None:
         leftover = day_left
@@ -1197,9 +1204,16 @@ def get_quota_status():
         row = rows.get(plan)
         plans[plan] = {
             "plan": plan,
-            # 0 means "the provider has not told us yet"; the UI shows it as
-            # unknown rather than inventing a number.
+            # What the provider itself last reported. 0 means **unmetered** --
+            # a free product it does not count (`usage_today_limit: 0`) -- which
+            # is a real answer, not a missing one. `metered` says which.
             "limit": row.limit if row else 0,
+            "metered": bool(effective_limit(plan, row)),
+            # Requests the provider billed that no lane of ours claims. This is
+            # the number that says whether the rest of this block can be
+            # trusted; a persistently rising value means something is spending
+            # the key outside `reserve_request`.
+            "unattributed": unattributed_used(row),
             # What the reserve maths actually used: disclosed if we have it,
             # otherwise the configured expectation. Shown so an operator can see
             # the difference between "provider said 10,000" and "we assumed it".

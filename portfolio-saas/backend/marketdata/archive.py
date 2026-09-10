@@ -32,8 +32,8 @@ from .models import (
     StockTransactionTick,
 )
 from .quota import (
-    ARCHIVE,
     BRS,
+    REASON_LIVE_RESERVED,
     TSETMC,
     QuotaExhausted,
     archive_capacity,
@@ -982,25 +982,36 @@ def run_archive_state(state_id):
         # sat on `last_error="Daily quota unavailable."` while ~4,000 TSETMC
         # requests a day went unspent.
         if exc.is_pacing:
-            # Ahead of the pro-rata share *right now*. The ramp advances on its
-            # own, so come back in minutes and leave the row otherwise untouched:
-            # no failure count (nothing failed), and no alarming `last_error`
-            # that would make a healthy queue read as a broken one.
+            # Refused by something that clears on its own before rollover. Come
+            # back later and leave the row otherwise untouched: no failure count
+            # (nothing failed), and no alarming `last_error` that would make a
+            # healthy queue read as a broken one.
+            #
+            # The two reasons clear on different timescales, so they get
+            # different waits. Pacing moves with the ramp, in minutes. A live
+            # reservation only releases as the live lane's *remaining* cadence
+            # shrinks, and the step that matters is the 13:00 Tehran session
+            # close -- retrying that every three minutes would spin all morning
+            # for a condition that changes a few times a day.
             import random
 
-            base = int(getattr(settings, "MARKETDATA_ARCHIVE_PACED_RETRY_SECONDS", 180))
+            if exc.reason == REASON_LIVE_RESERVED:
+                base = int(getattr(settings, "MARKETDATA_LIVE_RESERVED_RETRY_SECONDS", 1800))
+            else:
+                base = int(getattr(settings, "MARKETDATA_ARCHIVE_PACED_RETRY_SECONDS", 180))
             state.last_attempt_at = now
             state.next_attempt_at = now + timedelta(
                 seconds=random.uniform(base * 0.5, base * 1.5)
             )
             state.save(update_fields=["last_attempt_at", "next_attempt_at"])
             logger.debug(
-                "Archive paced for %s (%s); retrying shortly.", state.symbol, state.endpoint
+                "Archive deferred for %s (%s): %s; retrying in ~%ds.",
+                state.symbol, state.endpoint, exc.reason, base,
             )
             raise
 
-        # Genuinely day-scoped: plan_blocked, bucket_exhausted, live_reserved.
-        # Nothing this state can do clears it before rollover.
+        # Genuinely day-scoped: plan_blocked and bucket_exhausted. Nothing this
+        # state can do clears either before rollover.
         state.last_attempt_at = now
         state.next_attempt_at = spread_over_next_quota_day(now)
         state.last_error = f"Daily quota unavailable ({exc.reason})."

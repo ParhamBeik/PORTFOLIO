@@ -1340,13 +1340,16 @@ def test_archive_bucket_has_no_hardcoded_ceiling(settings):
 
 
 def test_provider_account_reconciles_local_counter(settings):
-    """Provider drift is monotonic and remains represented in bucket totals."""
+    """Provider drift is monotonic and remains explicitly unattributed."""
+    from marketdata.quota import unattributed_used
+
     reserve_request(ARCHIVE)
     assert reconcile_account({"usage_today": 4021, "request_block": 120}) == 120
     row = ApiRequestQuota.objects.get()
     assert row.used == 4021
-    assert row.archive_used + row.live_used + row.other_used == row.used
-    assert row.other_used == 4020
+    assert row.archive_used == 1
+    assert row.other_used == 0
+    assert unattributed_used(row) == 4020
     # An out-of-order provider response must not re-open already spent quota.
     reconcile_account({"usage_today": 4000})
     assert ApiRequestQuota.objects.get().used == 4021
@@ -1358,19 +1361,39 @@ def test_reconcile_records_the_limit_the_provider_reports(settings):
     """The daily ceiling is observed data now, not a constant in settings."""
     from marketdata.quota import TSETMC
 
-    reconcile_account({"usage_today": 12, "limit_today": 10000}, TSETMC)
+    reconcile_account({"usage_today": 12, "usage_today_limit": 10000}, TSETMC)
     row = ApiRequestQuota.objects.get(plan=TSETMC)
     assert (row.limit, row.used) == (10000, 12)
 
 
-def test_each_provider_plan_keeps_its_own_wallet(settings):
-    """The production failure: a spent TSETMC plan refused BRS calls.
+def test_meter_probe_reserves_then_reconciles_provider_truth(settings):
+    """Integration: one probe joins HTTP billing to the shared quota ledger."""
+    from marketdata.fetchers import probe_meter
+    from marketdata.quota import TSETMC, unattributed_used
 
-    BrsApi meters the two API keys separately (~10,000/day vs ~1,500/day), so
-    exhausting one must leave the other completely untouched. This is the single
-    most important behaviour in this module -- when it regressed, the USDT quote
-    failed 201 times in one day and dollar holdings went stale.
-    """
+    settings.TSETMC_API_KEY = "test-key"
+    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 200
+    response = mock.Mock(status_code=400)
+    response.json.return_value = {
+        "account": {
+            "usage_today": 321,
+            "usage_today_limit": 10_000,
+            "request_block": 137,
+        }
+    }
+    with patch("marketdata.fetchers.requests.get", return_value=response) as get:
+        account = probe_meter(TSETMC)
+
+    row = ApiRequestQuota.objects.get(plan=TSETMC)
+    assert account["usage_today"] == row.used == 321
+    assert row.limit == 10_000
+    assert row.other_used == 1
+    assert unattributed_used(row) == 320
+    assert get.call_args.kwargs["params"] == {"key": "test-key", "type": 99}
+
+
+def test_each_provider_plan_keeps_its_own_wallet(settings):
+    """A spent paid product must not block the unmetered Market product."""
     from marketdata.quota import BRS, TSETMC
 
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 0
@@ -2323,11 +2346,16 @@ def test_other_bucket_keeps_a_reserve_the_archive_burst_cannot_reach(settings):
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 90
     settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
     settings.MARKETDATA_OTHER_REQUEST_BUDGET = 5
-    row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
-
-    with patch.object(quota, "live_reserve_remaining", return_value=20):
+    morning = datetime.datetime(
+        2026, 9, 10, 9, 0, tzinfo=ZoneInfo("Asia/Tehran")
+    )
+    with (
+        patch.object(quota, "live_reserve_remaining", return_value=20),
+        patch.object(quota.timezone, "now", return_value=morning),
+    ):
+        row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
         # 90 - 20 live - 5 other = 65 for backfill.
-        assert archive_day_ceiling(TSETMC, row) == 65
+        assert archive_day_ceiling(TSETMC, row, now=morning) == 65
         for _ in range(65):
             reserve_request(ARCHIVE, TSETMC)
         with pytest.raises(QuotaExhausted):
@@ -2536,8 +2564,8 @@ def test_live_budget_never_exceeds_the_wallet_it_spends(settings):
     assert bucket_budget(LIVE, TSETMC) == 1_700      # fits, unchanged
     assert bucket_budget(LIVE, BRS) == 1_350         # clamped to 1500 - 150
 
-def test_live_day_cost_does_not_shrink_in_the_evening(settings):
-    """Unit: the 24h live slice is counted from midnight, not from now."""
+def test_live_reserve_uses_remaining_schedule_not_spend_so_far(settings):
+    """Unit: observed spend cannot reduce requests still due before rollover."""
     from marketdata.quota import TSETMC, live_day_cost, live_reserve_remaining
 
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
@@ -2547,8 +2575,25 @@ def test_live_day_cost_does_not_shrink_in_the_evening(settings):
     with (
         patch.object(quota, "_simulate_price_loop", return_value=144),
         patch("marketdata.live_states.full_day_cost", return_value=54),
+        patch("marketdata.live_states.remaining_day_cost", return_value=54),
     ):
         assert live_day_cost(TSETMC, row) == 198
         assert live_reserve_remaining(TSETMC, row) == 198
         row.live_used = 50
-        assert live_reserve_remaining(TSETMC, row) == 148
+        assert live_reserve_remaining(TSETMC, row) == 198
+
+
+def test_other_reserve_is_released_after_morning_maintenance(settings):
+    """Unit: unused maintenance allowance becomes archive capacity after 10:00."""
+    from marketdata.quota import TSETMC, other_reserve_remaining
+
+    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 200
+    row = ApiRequestQuota(other_used=51)
+    tehran = ZoneInfo("Asia/Tehran")
+
+    assert other_reserve_remaining(
+        TSETMC, row, now=datetime.datetime(2026, 9, 10, 9, 59, tzinfo=tehran)
+    ) == 149
+    assert other_reserve_remaining(
+        TSETMC, row, now=datetime.datetime(2026, 9, 10, 10, 0, tzinfo=tehran)
+    ) == 0

@@ -1,8 +1,10 @@
-"""Unit: live floor, TSETMC archive bill ratio, daily-vs-burst 429.
+"""Unit: live reserve, archive ceiling, and daily-vs-burst 429.
 
 Pyramid: unit — pure quota arithmetic and one HTTP classification branch.
 """
+from datetime import datetime
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pytest
 import requests
@@ -24,7 +26,7 @@ from marketdata.quota import (
 pytestmark = pytest.mark.django_db
 
 
-def test_live_day_cost_uses_floor_on_a_spending_day(settings):
+def test_live_day_cost_uses_simulated_spend_on_a_spending_day(settings):
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 1_200
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 500
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
@@ -34,27 +36,26 @@ def test_live_day_cost_uses_floor_on_a_spending_day(settings):
         patch("marketdata.quota._simulate_price_loop", return_value=297),
         patch("marketdata.live_states.full_day_cost", return_value=0),
     ):
-        assert live_day_cost(TSETMC, row) == 1_200
-        assert live_reserve_remaining(TSETMC, row) == 1_200
+        assert live_day_cost(TSETMC, row) == 297
+        assert live_reserve_remaining(TSETMC, row) == 297
 
 
-def test_tsetmc_archive_ceiling_shrinks_by_bill_ratio(settings):
+def test_tsetmc_archive_ceiling_uses_provider_request_units(settings):
     from marketdata import quota
 
-    settings.MARKETDATA_TSETMC_ARCHIVE_BILL_RATIO = 1.30
     settings.MARKETDATA_PLAN_LIMIT_TSETMC = 10_000
     settings.MARKETDATA_PLAN_SAFETY_MARGIN = 150
     settings.MARKETDATA_OTHER_REQUEST_BUDGET = 200
     row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=TSETMC)
+    morning = datetime(2026, 9, 10, 9, 0, tzinfo=ZoneInfo("Asia/Tehran"))
     with patch.object(quota, "live_reserve_remaining", return_value=1_200):
         leftover = 10_000 - 150 - 1_200 - 200
-        assert archive_day_ceiling(TSETMC, row) == int(leftover / 1.30)
+        assert archive_day_ceiling(TSETMC, row, now=morning) == leftover
 
 
-def test_brs_archive_ceiling_is_not_scaled(settings):
+def test_brs_archive_ceiling_uses_provider_request_units(settings):
     from marketdata import quota
 
-    settings.MARKETDATA_TSETMC_ARCHIVE_BILL_RATIO = 1.30
     settings.MARKETDATA_PLAN_LIMIT_BRS = 1_500
     settings.MARKETDATA_PLAN_SAFETY_MARGIN = 150
     row = ApiRequestQuota.objects.create(day=quota.quota_day(), plan=BRS)

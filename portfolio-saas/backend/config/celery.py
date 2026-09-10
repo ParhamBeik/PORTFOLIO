@@ -47,6 +47,9 @@ app.conf.update(
     task_routes={
         "marketdata.tasks.archive_tick": {"queue": "live"},
         "marketdata.tasks.archive_maintenance": {"queue": "live"},
+        # Not the archive queue: this is what tells the archive how much it may
+        # spend, and it is useless if it queues behind the backlog it governs.
+        "marketdata.tasks.reconcile_quota_meters": {"queue": "live"},
         "marketdata.tasks.capture_operational_metrics": {"queue": "live"},
         "marketdata.tasks.capture_derivative_snapshots": {"queue": "live"},
         "marketdata.tasks.capture_market_snapshots": {"queue": "live"},
@@ -82,6 +85,14 @@ app.conf.beat_schedule = {
     # once the backlog has taken its share, and `next_post_close` scheduling
     # already makes them due at the right moment. Held symbols' same-day close
     # comes from the live lane, which is reserved first.
+    # One request per spending plan, every five minutes, to read the provider's
+    # own meter. Everything else in this file divides up a number; this is the
+    # only entry that checks the number is real. It self-skips while a plan is
+    # idle, so the cost tracks activity rather than the clock.
+    "marketdata-reconcile-quota-meters": {
+        "task": "marketdata.tasks.reconcile_quota_meters",
+        "schedule": 300.0,
+    },
     "marketdata-low-rate-maintenance": {
         "task": "marketdata.tasks.archive_maintenance",
         "schedule": crontab(hour=4, minute=10),
