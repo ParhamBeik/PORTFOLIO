@@ -634,6 +634,7 @@ def _parsed_any(payload):
 def _tick_dates_stored(symbol):
     return set(
         StockTransactionTick.objects.filter(symbol=symbol)
+        .order_by()
         .values_list("date", flat=True)
         .distinct()
     )

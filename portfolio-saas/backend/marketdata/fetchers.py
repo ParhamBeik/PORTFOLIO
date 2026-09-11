@@ -20,6 +20,7 @@ from .quota import (
     TSETMC,
     QuotaExhausted,
     clear_plan_breaker,
+    is_confirmed_daily_quota_exhaustion,
     is_daily_quota_exhaustion,
     looks_like_quota_error,
     reconcile_account,
@@ -157,10 +158,12 @@ def fetch_json(
         # returned as if it were data -- a 500 was never handled at all.
         if looks_like_quota_error(response.status_code, response.text):
             if is_daily_quota_exhaustion(account, quota_plan):
+                confirmed = is_confirmed_daily_quota_exhaustion(account, quota_plan)
                 trip_plan_breaker(
                     quota_plan,
                     reason=f"http_{response.status_code}",
-                    bucket=quota_bucket,
+                    bucket=None if confirmed else quota_bucket,
+                    until_reset=confirmed,
                 )
                 raise QuotaExhausted(
                     f"Provider reports the {quota_plan} plan exhausted "

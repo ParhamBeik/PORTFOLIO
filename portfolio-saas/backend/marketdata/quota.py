@@ -262,6 +262,11 @@ def clear_plan_breaker(plan, *, bucket=None):
         tripped = cache.get(_breaker_key(plan))
         if not tripped:
             return
+        # A success already in flight can finish after another request proves
+        # the daily wallet is empty. It must not reopen a meter that only the
+        # provider's day rollover can refill.
+        if isinstance(tripped, dict) and tripped.get("until_reset"):
+            return
         tripped_by = tripped.get("bucket") if isinstance(tripped, dict) else None
         if not _bucket_may_clear(tripped_by, bucket):
             return
@@ -297,17 +302,11 @@ def is_plan_blocked(plan, bucket=None, *, admit=False, holding_probe=False):
     A LIVE-triggered trip still stops live: that is the provider refusing live
     itself, and hammering it further only deepens the hole.
 
-    The trip is HALF-OPEN, not latched to rollover. After
-    `MARKETDATA_BREAKER_RETRY_SECONDS` one request is allowed through to ask the
-    provider again; if it is still refusing, `trip_plan_breaker` re-arms for
-    another interval, and if it is not, the plan is back. A latched breaker
-    assumes the only reason to see a quota-shaped body is a spent wallet, and
-    `looks_like_quota_error` matches any 5xx whose body merely contains "limit"
-    -- so one bad minute at the origin cost a whole plan for up to 24 hours. It
-    did: BRS was blocked from 09:30 to 20:30 UTC on 2026-09-06 having spent 799
-    of 1,500 requests, failing the USDT/IRT quote 316 times with 47% of the
-    wallet unused. Re-probing costs at most one request per interval; getting
-    this wrong costs a day of a subscription we paid for.
+    Ambiguous quota-shaped errors are HALF-OPEN after
+    `MARKETDATA_BREAKER_RETRY_SECONDS`; a response whose account meter proves
+    the daily wallet empty is latched until rollover. This keeps an ordinary
+    origin limit error from costing a whole day while preventing pointless
+    probes against a known-empty wallet.
     """
     from django.core.cache import cache
 
@@ -347,6 +346,8 @@ def _breaker_retry_due(tripped, now=None):
     """
     if not isinstance(tripped, dict):
         return False
+    if tripped.get("until_reset"):
+        return False
     tripped_at = tripped.get("tripped_at")
     if not tripped_at:
         return False
@@ -375,13 +376,12 @@ def _breaker_is_half_open(plan, bucket=None):
     return _breaker_retry_due(tripped) and not _probe_claimed(plan)
 
 
-def trip_plan_breaker(plan, *, reason="", bucket=None):
+def trip_plan_breaker(plan, *, reason="", bucket=None, until_reset=False):
     """Stop spending this plan until the next half-open probe, or rollover.
 
-    Called when the provider itself reports exhaustion. Scoped to one plan so a
-    spent TSETMC subscription never silences gold/currency. `bucket` records who
-    caused it, which is what lets `is_plan_blocked` keep the live lane alive
-    through an archive-triggered trip.
+    `until_reset` is reserved for provider meter evidence that the daily wallet
+    is empty. The caller broadens that trip to every bucket, and this flag
+    disables half-open probes until the Tehran-day cache key expires.
 
     Re-tripping always refreshes `tripped_at` while KEEPING the broadest bucket
     seen. Those two rules pull in opposite directions and both are load-bearing:
@@ -409,6 +409,7 @@ def trip_plan_breaker(plan, *, reason="", bucket=None):
         return 1
 
     effective = bucket
+    latched = until_reset
     try:
         existing = cache.get(_breaker_key(plan))
         if existing:
@@ -417,18 +418,30 @@ def trip_plan_breaker(plan, *, reason="", bucket=None):
             )
             if _rank(existing_bucket) >= _rank(bucket):
                 effective = existing_bucket
+            latched = latched or (
+                isinstance(existing, dict) and existing.get("until_reset", False)
+            )
         cache.set(
             _breaker_key(plan),
-            {"bucket": effective, "reason": reason or "1", "tripped_at": time.time()},
+            {
+                "bucket": effective,
+                "reason": reason or "1",
+                "tripped_at": time.time(),
+                "until_reset": latched,
+            },
             timeout=_seconds_to_rollover(),
         )
         cache.delete(_probe_key(plan))
     except Exception:
         logger.warning("could not persist quota breaker for plan %s", plan)
     logger.warning(
-        "quota_breaker_tripped plan=%s bucket=%s reason=%s retry_in=%ss",
+        "quota_breaker_tripped plan=%s bucket=%s reason=%s retry=%s",
         plan, effective or "plan", reason or "-",
-        getattr(settings, "MARKETDATA_BREAKER_RETRY_SECONDS", 900),
+        (
+            "rollover"
+            if latched
+            else f"{getattr(settings, 'MARKETDATA_BREAKER_RETRY_SECONDS', 900)}s"
+        ),
     )
 
 
@@ -497,6 +510,17 @@ def is_daily_quota_exhaustion(account, plan, row=None):
     if not limit:
         return True
     return usage >= limit - _safety_margin()
+
+
+def is_confirmed_daily_quota_exhaustion(account, plan, row=None):
+    """Whether provider meter data proves that today's wallet is spent."""
+    if not isinstance(account, dict):
+        return False
+    usage = reported_usage(account)
+    if usage is None:
+        return False
+    limit = reported_limit(account) or effective_limit(plan, row)
+    return bool(limit) and usage >= limit - _safety_margin()
 
 
 def _quota_row(plan, *, locked=False):
