@@ -1266,6 +1266,28 @@ def test_archive_fetch_has_one_physical_attempt_by_default():
     assert reserve.call_count == 1
 
 
+def test_tick_date_lookup_clears_default_row_ordering():
+    """Distinct dates must not silently become distinct date/row pairs."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from marketdata.archive import _tick_dates_stored
+    from marketdata.models import StockTransactionTick
+
+    StockTransactionTick.objects.create(
+        symbol="TEST", date="1405-06-20", time="09:00:00", row=1,
+    )
+    StockTransactionTick.objects.create(
+        symbol="TEST", date="1405-06-20", time="09:01:00", row=2,
+    )
+    with CaptureQueriesContext(connection) as queries:
+        assert _tick_dates_stored("TEST") == {"1405-06-20"}
+
+    sql = queries.captured_queries[-1]["sql"]
+    assert "ORDER BY" not in sql
+    assert '"marketdata_stocktransactiontick"."row"' not in sql
+
+
 # ----------------------------------------------------------------------
 # test_marketdata_tracking.py
 # Quota, provider classification, and DB-verified archive progress.
@@ -1966,6 +1988,26 @@ def test_quota_error_response_trips_the_breaker_for_that_plan_only(settings):
     with pytest.raises(QuotaExhausted):
         reserve_request(ARCHIVE, TSETMC)
     reserve_request(ARCHIVE, BRS)  # the other wallet is unaffected
+
+
+def test_confirmed_daily_exhaustion_stays_latched_until_rollover(settings):
+    """A known-empty daily wallet must not send a half-open probe every 15 minutes."""
+    from marketdata.quota import TSETMC, clear_plan_breaker, is_plan_blocked
+
+    settings.MARKETDATA_PLAN_SAFETY_MARGIN = 0
+    settings.MARKETDATA_BREAKER_RETRY_SECONDS = 900
+    response = mock.Mock(status_code=500, text='{"error":"daily quota limit"}')
+    response.json.return_value = {
+        "account": {"usage_today": 10_000, "usage_today_limit": 10_000}
+    }
+    with patch("marketdata.fetchers.requests.get", return_value=response):
+        with pytest.raises(QuotaExhausted):
+            fetch_json("https://example.test", retries=0, quota_plan=TSETMC)
+
+    with patch("marketdata.quota.time.time", return_value=time.time() + 901):
+        clear_plan_breaker(TSETMC, bucket=LIVE)
+        assert is_plan_blocked(TSETMC, bucket=ARCHIVE, admit=True)
+        assert is_plan_blocked(TSETMC, bucket=LIVE, admit=True)
 
 
 def test_ordinary_server_error_does_not_pause_the_day(settings):
