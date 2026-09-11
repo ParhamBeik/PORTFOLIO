@@ -53,3 +53,6 @@ graphify-out/
 
 # Scratch Playwright probe, not part of the suite
 portfolio-saas/frontend/probe.mjs
+portfolio-saas/frontend/scripts/_probe.mjs
+portfolio-saas/frontend/scripts/explore.mjs
+portfolio-saas/frontend/artifacts/

@@ -1,11 +1,14 @@
 """Authentication and account endpoints."""
 import csv
+import hashlib
 import io
 import json
 import logging
+import time
 import zipfile
 
 from django.conf import settings
+from django.core.cache import cache
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.core.mail import send_mail
 from django.db import transaction
@@ -45,6 +48,16 @@ RESET_INVALID = "This reset link is invalid or has expired."
 
 
 REFRESH_COOKIE = "ps_refresh"
+
+# How long a just-rotated refresh token keeps replaying its own response. Long
+# enough to cover a lost round trip, short enough that a stolen token is still
+# effectively single-use. See CookieTokenRefreshView.post.
+ROTATION_GRACE_SECONDS = 30
+# How long one request may hold the rotation for a token, and how long another
+# will wait for its answer. Both are bounded so a dead request cannot wedge a
+# session and a waiting one cannot occupy a worker.
+ROTATION_LOCK_SECONDS = 5
+ROTATION_WAIT_SECONDS = 3.0
 
 
 def _tokens(user: User) -> tuple[str, str]:
@@ -105,20 +118,93 @@ class CookieTokenObtainPairView(TokenObtainPairView):
         return _set_refresh_cookie(response, request, refresh)
 
 
+def _rotation_replay_key(refresh: str) -> str:
+    """Cache key for the response a given refresh token already produced.
+
+    Keyed on a hash of the token string rather than its `jti` so a token that is
+    already blacklisted -- the whole case this exists for -- needs no decoding.
+    """
+    return f"jwt-rotation-replay:{hashlib.sha256(refresh.encode()).hexdigest()}"
+
+
+def _await_replay(key: str, wait: float = ROTATION_WAIT_SECONDS):
+    """Poll for the rotation another request is currently performing.
+
+    The replay cache alone only covers a response that was *lost* -- it is
+    written after the rotation completes, so two genuinely simultaneous
+    refreshes (two tabs restoring at once) both miss it and one still loses.
+    The loser waits here for the winner's answer instead of failing.
+    """
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        cached = cache.get(key)
+        if cached:
+            return cached
+        time.sleep(0.05)
+    return None
+
+
+def _replayable(payload: dict) -> bool:
+    """True if the cached rotation is still safe to hand out again.
+
+    A grace entry outlives a `logout-all` / password change by up to
+    ROTATION_GRACE_SECONDS, and replaying it then would mint a fresh 30-minute
+    access token for a session the user just revoked. The successor refresh is
+    blacklisted by that revocation, so checking it closes the window.
+    """
+    successor = payload.get("refresh")
+    if not successor:
+        return False
+    try:
+        jti = RefreshToken(successor, verify=False).payload.get("jti")
+    except TokenError:
+        return False
+    return not BlacklistedToken.objects.filter(token__jti=jti).exists()
+
+
 @method_decorator(csrf_protect, name="dispatch")
 class CookieTokenRefreshView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
     def post(self, request):
+        """Exchange the refresh cookie for an access token, rotating the cookie.
+
+        Rotation is single-use (`BLACKLIST_AFTER_ROTATION`), which makes the
+        exchange fatal if the *response* is lost: the server has already burned
+        the old token, so a browser that never committed the `Set-Cookie` is
+        signed out on its next request. That is not a theoretical race -- the
+        session restore fires on every page load, and clicking a nav link inside
+        its round trip cancels it. Reproduced in four navigations.
+
+        So the exchange is made idempotent for a short window: the response a
+        token produced is cached under that token, and presenting it again
+        inside ROTATION_GRACE_SECONDS replays the same answer instead of
+        failing. Beyond the window the token is single-use again, which is the
+        property rotation is for.
+        """
         refresh = request.COOKIES.get(REFRESH_COOKIE)
         if not refresh:
             return Response({"detail": "Refresh session is missing."}, status=401)
+
+        key = _rotation_replay_key(refresh)
+        cached = cache.get(key)
+        # Only one request may rotate a given token; the rest replay its answer.
+        # `add` is the atomic claim (SETNX on Redis), and its short TTL means a
+        # request that dies mid-rotation costs the next one a wait, not a wedge.
+        if cached is None and not cache.add(f"{key}:lock", 1, ROTATION_LOCK_SECONDS):
+            cached = _await_replay(key)
+        if cached and _replayable(cached):
+            replay = dict(cached)
+            return _set_refresh_cookie(Response(replay), request, replay.pop("refresh"))
+
         serializer = PasswordAwareTokenRefreshSerializer(data={"refresh": refresh})
         serializer.is_valid(raise_exception=True)
         payload = dict(serializer.validated_data)
         rotated = payload.pop("refresh", refresh)
         payload["session_expires_at"] = _session_expires_at()
+        if rotated != refresh:
+            cache.set(key, {**payload, "refresh": rotated}, ROTATION_GRACE_SECONDS)
         return _set_refresh_cookie(Response(payload), request, rotated)
 
 

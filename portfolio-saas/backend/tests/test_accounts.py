@@ -119,6 +119,71 @@ def test_cookie_refresh_requires_csrf_and_rotates_cookie(make_user):
     assert refreshed.cookies["ps_refresh"]["httponly"] is True
 
 
+def test_refresh_replays_its_answer_when_the_response_was_lost(make_user):
+    """A rotated token presented again inside the grace window must not sign the user out.
+
+    Rotation blacklists on use, so a refresh whose response never reached the
+    browser -- a nav click cancelling the session restore, which happens on
+    every page load -- left the cookie holding a token the server had already
+    burned. The next request 403'd and the user landed back on the sign-in form.
+    Reproduced in four navigations before the grace window existed.
+    """
+    make_user(email="refresh-replay@test.test")
+    client = APIClient(enforce_csrf_checks=True)
+    client.post(
+        "/api/auth/login/",
+        {"email": "refresh-replay@test.test", "password": "Sup3rSecret!"},
+        format="json",
+    )
+    csrf = client.cookies["csrftoken"].value
+    presented = client.cookies["ps_refresh"].value
+
+    first = client.post("/api/token/refresh/", {}, format="json", HTTP_X_CSRFTOKEN=csrf)
+
+    # The browser never committed the new cookie. A second client carrying the
+    # old one models that faithfully; re-assigning it on `client` does not,
+    # because the test client's jar re-applies the response cookie underneath.
+    stale = APIClient(enforce_csrf_checks=True)
+    stale.cookies["csrftoken"] = csrf
+    stale.cookies["ps_refresh"] = presented
+    replay = stale.post("/api/token/refresh/", {}, format="json", HTTP_X_CSRFTOKEN=csrf)
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json()["access"] == first.json()["access"]
+    assert replay.cookies["ps_refresh"].value == first.cookies["ps_refresh"].value
+
+
+def test_refresh_token_error_during_rotation_is_auth_failure(make_user, monkeypatch):
+    """A token revoked between the serializer's two reads is not a server error.
+
+    `super().validate()` re-reads the token and raises a bare `TokenError` that
+    DRF does not translate, so it escaped as a 500 whenever the token was
+    blacklisted between the serializer's two reads -- exactly what a concurrent
+    refresh of the same cookie does.
+    """
+    make_user(email="refresh-revoked@test.test")
+    client = APIClient(enforce_csrf_checks=True)
+    client.post(
+        "/api/auth/login/",
+        {"email": "refresh-revoked@test.test", "password": "Sup3rSecret!"},
+        format="json",
+    )
+    csrf = client.cookies["csrftoken"].value
+
+    from rest_framework_simplejwt.exceptions import TokenError
+    from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+
+    def revoked_during_rotation(_serializer, _attrs):
+        raise TokenError("Token is blacklisted")
+
+    monkeypatch.setattr(TokenRefreshSerializer, "validate", revoked_during_rotation)
+    response = client.post("/api/token/refresh/", {}, format="json", HTTP_X_CSRFTOKEN=csrf)
+
+    assert response.status_code in (401, 403)  # 403: no authenticator, so DRF downgrades
+    assert response.status_code != 500
+
+
 def test_login_wrong_password_rejected():
     from accounts.models import User
 

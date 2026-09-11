@@ -134,8 +134,18 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 
 class PasswordAwareTokenRefreshSerializer(TokenRefreshSerializer):
     def validate(self, attrs):
+        """Reject a refresh whose user is gone or whose password has changed.
+
+        `super().validate` is inside the guard too, not only the user lookup.
+        It re-reads the token and blacklists it on rotation, so it raises a bare
+        `TokenError` of its own -- which DRF does not translate and which
+        therefore surfaced as a 500 rather than a 401. The window between the
+        two reads is small but real: a concurrent refresh of the same token
+        blacklists it in between, so the exception fired exactly when two tabs
+        restored a session at once.
+        """
         try:
             JWTAuthentication().get_user(self.token_class(attrs["refresh"]))
+            return super().validate(attrs)
         except TokenError as exc:
             raise AuthenticationFailed("Refresh session is invalid.") from exc
-        return super().validate(attrs)

@@ -10,7 +10,7 @@
 // everywhere), and a modal for each of the two that are not safe (password,
 // deletion). A destructive action inside a menu that closes when you click
 // past it is a destructive action waiting to be half-completed.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   changePassword,
   deleteAccount,
@@ -230,6 +230,12 @@ export default function AccountMenu({
   onLogout,
   onUserChange,
   triggerClass = "hidden md:flex",
+  // The drawer scrolls, so it clips on the x axis too: a fixed-width panel
+  // anchored to the trigger's right edge spilled 36px past the drawer and lost
+  // the first characters of every label ("mber since", "hange password"). There
+  // the panel should simply be as wide as the drawer, so say so at the call
+  // site rather than guessing from a measurement inside a clipped box.
+  panelFill = false,
   testId = "user-email",
 }) {
   const [open, setOpen] = useState(false);
@@ -242,6 +248,22 @@ export default function AccountMenu({
     lastName: user?.last_name || "",
   });
   const wrap = useRef(null);
+  const [alignLeft, setAlignLeft] = useState(false);
+
+  // The panel hangs off the right edge of its trigger, which puts it off the
+  // left edge of the window whenever the trigger sits near it. That is not an
+  // edge case: between `lg` and roughly 1500px the header wraps the account
+  // chip onto a second row at x=24, and a 320px panel anchored to its right
+  // edge then starts at -85 -- half the menu, including every label, unreadable
+  // and unclickable. Flip the anchor when there is no room, rather than picking
+  // one side and hoping.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const trigger = wrap.current?.firstElementChild;
+    const panel = wrap.current?.querySelector('[role="dialog"]');
+    if (!trigger || !panel) return;
+    setAlignLeft(trigger.getBoundingClientRect().right < panel.offsetWidth);
+  }, [open, panelFill]);
 
   // Close on Escape or on a click that lands outside. Both listeners are only
   // mounted while the menu is open, so a closed menu costs the page nothing.
@@ -325,7 +347,11 @@ export default function AccountMenu({
           role="dialog"
           aria-label="Account"
           data-testid="account-menu"
-          className="absolute right-0 z-40 mt-2 w-80 origin-top-right rounded-xl border border-border bg-panel p-3 shadow-2xl"
+          className={`absolute z-40 mt-2 rounded-xl border border-border bg-panel p-3 shadow-2xl ${
+            panelFill
+              ? "inset-x-0 origin-top"
+              : `w-80 ${alignLeft ? "left-0 origin-top-left" : "right-0 origin-top-right"}`
+          }`}
         >
           <div className="flex items-center gap-3 border-b border-border pb-3">
             <span className="app-user-avatar !h-10 !w-10 !text-base" aria-hidden="true">{initial}</span>

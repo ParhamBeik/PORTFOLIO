@@ -153,6 +153,7 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
               onLogout={onLogout}
               onUserChange={onUserChange}
               triggerClass="flex w-full"
+              panelFill
               testId="user-email-mobile"
             />
           </div>
@@ -291,7 +292,18 @@ export default function Shell({ user, onLogout, onUserChange }) {
         onUserChange={onUserChange}
       />
 
-      <main id="main" tabIndex={-1} className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 lg:px-6">
+      {/* `flex-1` alone makes main fill the space LEFT OVER, which lands the
+          footer exactly on the fold while the route is still loading. Every
+          data route then grows past a screen and pushes the footer out of view
+          — one move, no content of its own, and the whole of this app's
+          cumulative layout shift (0.05 on Breakdown, Best Overall and My
+          Optimal; the footer was the only node either the browser or Lighthouse
+          ever reported). Reserving a screen of content puts the footer below
+          the fold from the first paint, so its move is no longer a shift a
+          reader can see. The pages genuinely shorter than this — the legal
+          text, onboarding — pay one header's worth of extra scroll to reach
+          it. */}
+      <main id="main" tabIndex={-1} className="mx-auto min-h-[100svh] w-full max-w-7xl flex-1 px-4 py-6 lg:px-6">
         {error && (
           <div className="mb-4">
             <ErrorState error={{ message: `Could not load portfolios: ${error}` }} onRetry={reload} />

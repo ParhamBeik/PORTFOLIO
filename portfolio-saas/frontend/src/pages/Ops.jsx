@@ -1338,8 +1338,16 @@ const QUOTA_PLAN_META = {
  * guarded them behind `limit > 0`. The backend already computes
  * `effective_limit` for exactly this -- disclosed if known, else the configured
  * per-plan expectation -- and the console was throwing it away.
+ *
+ * A ceiling of zero is the OTHER case, and it is not exhaustion: the Market
+ * product is deliberately unmetered (`MARKETDATA_PLAN_LIMIT_BRS=0`), so it has
+ * no ceiling to be near. Rendered against the metered layout it read
+ * "475 / 0 today", a 0% meter and "Remaining 0" -- an operator's cue to go
+ * looking for a wallet that had run dry, when nothing had. Unmetered wallets
+ * therefore get a layout with no denominator, no meter and no remainder, and
+ * keep only the usage split, which is the part that still means something.
  */
-function QuotaWallets({ quota }) {
+export function QuotaWallets({ quota }) {
   const plans = Object.values(quota?.plans || {});
   if (!plans.length) return <p className="text-sm text-muted">No quota data.</p>;
   return (
@@ -1351,6 +1359,13 @@ function QuotaWallets({ quota }) {
         const archive = plan.archive_used || 0;
         const live = plan.live_used || 0;
         const other = plan.other_used || 0;
+        // `metered` is the backend's own declaration, not a guess from the
+        // ceiling: a plan could in principle be metered with an unknown limit.
+        const metered = plan.metered !== false;
+        // Everything the wallet spent that no bucket claimed. Without it the
+        // segments described 221 of tsetmc's 9,950 calls and the bar looked
+        // almost empty at 100% used.
+        const unattributed = plan.unattributed || 0;
         const left = Math.max(0, ceiling - used);
         const pct = pctOf(used, ceiling);
         const disclosed = (plan.limit || 0) > 0;
@@ -1366,16 +1381,19 @@ function QuotaWallets({ quota }) {
                 <div className="text-sm font-medium">{meta.title}</div>
                 <div className="truncate text-xs text-muted">{meta.scope}</div>
               </div>
-              <Badge variant={plan.blocked ? "critical" : meterTone}>
-                {plan.blocked ? "Provider blocked" : `${pct.toFixed(0)}%`}
+              <Badge variant={plan.blocked ? "critical" : metered ? meterTone : "neutral"}>
+                {plan.blocked ? "Provider blocked" : metered ? `${pct.toFixed(0)}%` : "Unmetered"}
               </Badge>
             </div>
 
             <div className="flex items-baseline gap-1.5">
               <span className="text-xl font-semibold tabular">{num(used)}</span>
-              <span className="text-sm text-muted">/ {num(ceiling)} today</span>
+              <span className="text-sm text-muted">
+                {metered ? `/ ${num(ceiling)} today` : "requests today"}
+              </span>
             </div>
 
+            {metered && (
             <div
               className="flex h-2.5 overflow-hidden rounded-full bg-panel"
               role="progressbar"
@@ -1391,7 +1409,9 @@ function QuotaWallets({ quota }) {
               <div className="h-full bg-[var(--c-s3)]" style={{ width: `${pctOf(archive, ceiling)}%` }} title={`Archive ${num(archive)}`} />
               <div className="h-full bg-[var(--c-good)]" style={{ width: `${pctOf(live, ceiling)}%` }} title={`Live ${num(live)}`} />
               <div className="h-full bg-muted" style={{ width: `${pctOf(other, ceiling)}%` }} title={`Other ${num(other)}`} />
+              <div className="h-full bg-[var(--c-s7)]" style={{ width: `${pctOf(unattributed, ceiling)}%` }} title={`Unattributed ${num(unattributed)}`} />
             </div>
+            )}
 
             <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
               <div className="flex justify-between gap-2">
@@ -1404,26 +1424,37 @@ function QuotaWallets({ quota }) {
                 <dt className="text-muted">Other</dt><dd className="tabular">{num(other)}</dd>
               </div>
               <div className="flex justify-between gap-2">
-                <dt className="text-muted">Remaining</dt><dd className="tabular">{num(left)}</dd>
+                <dt className="text-muted">Unattributed</dt><dd className="tabular">{num(unattributed)}</dd>
               </div>
+              {metered && (
+                <div className="flex justify-between gap-2">
+                  <dt className="text-muted">Remaining</dt><dd className="tabular">{num(left)}</dd>
+                </div>
+              )}
             </dl>
 
             {/* The two numbers that explain why the archive stopped while the
                 wallet still had budget: quota held back for the live loop, and
                 how much of the rest today's pacing has released so far. */}
             <div className="border-t border-border pt-2 text-xs text-muted">
-              <div className="flex justify-between gap-2">
-                <span>Reserved for live prices</span>
-                <span className="tabular">{num(plan.live_reserve)}</span>
-              </div>
-              <div className="flex justify-between gap-2">
-                <span>Archive may spend now</span>
-                <span className="tabular">{num(plan.archive_allowance_now)}</span>
-              </div>
+              {metered && (
+                <>
+                  <div className="flex justify-between gap-2">
+                    <span>Reserved for live prices</span>
+                    <span className="tabular">{num(plan.live_reserve)}</span>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <span>Archive may spend now</span>
+                    <span className="tabular">{num(plan.archive_allowance_now)}</span>
+                  </div>
+                </>
+              )}
               <p className="mt-1.5">
-                {disclosed
-                  ? "Ceiling disclosed by the provider."
-                  : "Ceiling is our configured expectation — the provider only states it on an error response."}
+                {!metered
+                  ? "This product is not daily-metered — the provider reports no ceiling, so there is nothing to run out of."
+                  : disclosed
+                    ? "Ceiling disclosed by the provider."
+                    : "Ceiling is our configured expectation — the provider only states it on an error response."}
               </p>
             </div>
           </div>

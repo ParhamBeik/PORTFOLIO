@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import Dashboard from "./Dashboard.jsx";
 import MyOptimal from "./MyOptimal.jsx";
+import { QuotaWallets } from "./Ops.jsx";
 
 // Mock API endpoints called by Dashboard and MyOptimal
 vi.mock("../api.js", () => ({
@@ -216,5 +217,29 @@ describe("Page Rendering Tests", () => {
       screen.getByTestId("optimal-scenario-tabs-max_sharpe")
     ).toBeInTheDocument();
     expect(screen.getByTestId("optimal-as-of")).toBeInTheDocument();
+  });
+
+  it("renders an unmetered provider product without a false zero ceiling", () => {
+    render(
+      <QuotaWallets
+        quota={{
+          plans: {
+            brs: {
+              plan: "brs",
+              metered: false,
+              used: 475,
+              archive_used: 200,
+              live_used: 250,
+              other_used: 25,
+              unattributed: 0,
+            },
+          },
+        }}
+      />
+    );
+
+    expect(screen.getByText("Unmetered")).toBeInTheDocument();
+    expect(screen.getByText("requests today")).toBeInTheDocument();
+    expect(screen.queryByText(/\/ 0 today/)).not.toBeInTheDocument();
   });
 });

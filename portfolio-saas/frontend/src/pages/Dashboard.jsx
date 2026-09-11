@@ -782,11 +782,15 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
   };
 
   const toggleManageMode = (mode) => {
-    setManageMode((current) => {
-      const next = current === mode ? null : mode;
-      if (next === "edit") portfolio.reload();
-      return next;
-    });
+    // The next mode is derived here rather than inside a `setManageMode`
+    // updater. React runs an updater *during render* -- twice under
+    // StrictMode -- so calling `portfolio.reload()` from inside one set state
+    // on PortfolioProvider mid-render (React's "Cannot update a component while
+    // rendering a different component") and issued the accounts request twice
+    // on every click of Edit.
+    const next = manageMode === mode ? null : mode;
+    setManageMode(next);
+    if (next === "edit") portfolio.reload();
     setDrafts({});
     setActionError(null);
   };
