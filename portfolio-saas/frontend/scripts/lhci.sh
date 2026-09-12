@@ -42,6 +42,7 @@ cat > /tmp/lh-stub.conf <<'CONF'
 server {
     listen 8000;
     default_type application/json;
+    location = /api/auth/registration/ { return 200 '{"registration_open":true}'; }
     location / { return 401 '{"detail":"Authentication credentials were not provided."}'; }
 }
 CONF
