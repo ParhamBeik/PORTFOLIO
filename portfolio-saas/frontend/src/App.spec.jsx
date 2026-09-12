@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 vi.mock("./api.js", () => ({
@@ -16,5 +16,5 @@ it("keeps an emailed reset link reachable when a session already exists", async 
   window.history.pushState({}, "", "/reset-password?uid=MQ&token=token");
   render(<App />);
   expect(await screen.findByTestId("reset-card")).toBeInTheDocument();
-  expect(document.title).toBe("Reset password — Holdings");
+  await waitFor(() => expect(document.title).toBe("Reset password — Holdings"));
 });
