@@ -1,5 +1,14 @@
 import { useState } from "react";
-import { auth, login, me, register, requestPasswordReset, sessionExpiry } from "../api.js";
+import {
+  auth,
+  login,
+  me,
+  register,
+  registrationStatus,
+  requestPasswordReset,
+  sessionExpiry,
+} from "../api.js";
+import { useApi } from "../useApi.js";
 import Logo from "./Logo.jsx";
 import { Button, Input } from "./ui.jsx";
 
@@ -50,6 +59,7 @@ function friendlyError(msg) {
 }
 
 export default function Auth({ onAuthed }) {
+  const registration = useApi(registrationStatus, []);
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -66,16 +76,10 @@ export default function Auth({ onAuthed }) {
   const emailValid = EMAIL_RE.test(email.trim());
   const checks = getPasswordChecks(password, confirmPassword, registering);
   const strength = calculateStrength(password, checks);
-  // Memberships are closed, and `registering` is how that is said here: the
-  // sign-up tab shows the notice below and its button never enables. This reads
-  // like a bug -- a complete form, a working submit handler, and a button that
-  // can never be pressed -- so: it is deliberate, and it mirrors
-  // `REGISTRATION_OPEN = False` in the server's settings. If memberships reopen,
-  // BOTH must change, plus the notice; none of the three reads the other.
-  // Signing up would also need every requirement in the checklist to pass,
-  // including the confirmation match, which is what `checks` is already for.
-  const registrationClosed = registering;
-  const canSubmit = emailValid && (forgetting || Boolean(password)) && !registrationClosed;
+  const registrationOpen = registration.data?.registration_open === true;
+  const registrationClosed = registering && !registrationOpen;
+  const passwordValid = Boolean(password) && (!registering || checks.every((check) => check.ok));
+  const canSubmit = emailValid && (forgetting || passwordValid) && !registrationClosed;
 
   const switchMode = (next) => {
     setMode(next);
@@ -182,18 +186,20 @@ export default function Auth({ onAuthed }) {
           >
             Sign in
           </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "signup"}
-            data-testid="auth-toggle-register"
-            onClick={() => switchMode("signup")}
-            className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
-              mode === "signup" ? "bg-[var(--c-accent-fill)] text-white" : "text-muted hover:text-text"
-            }`}
-          >
-            Create account
-          </button>
+          {registrationOpen && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "signup"}
+              data-testid="auth-toggle-register"
+              onClick={() => switchMode("signup")}
+              className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+                mode === "signup" ? "bg-[var(--c-accent-fill)] text-white" : "text-muted hover:text-text"
+              }`}
+            >
+              Create account
+            </button>
+          )}
         </div>
 
         {error && (
@@ -207,7 +213,7 @@ export default function Auth({ onAuthed }) {
           </div>
         )}
 
-        {registering && (
+        {registrationClosed && (
           <div
             data-testid="auth-registration-closed"
             role="status"

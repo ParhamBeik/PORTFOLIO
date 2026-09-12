@@ -32,6 +32,7 @@ def clear_auth_throttles():
     cache.clear()
 
 
+@override_settings(REGISTRATION_OPEN=False)
 def test_register_is_closed_without_creating_a_user():
     client = APIClient()
     resp = client.post(
@@ -42,6 +43,15 @@ def test_register_is_closed_without_creating_a_user():
     assert resp.status_code == 403
     assert resp.json()["detail"] == "New memberships are currently closed."
     assert not User.objects.filter(email="new@test.test").exists()
+
+
+@pytest.mark.parametrize("is_open", [False, True])
+def test_registration_status_matches_the_server_gate(is_open):
+    with override_settings(REGISTRATION_OPEN=is_open):
+        resp = APIClient().get("/api/auth/registration/")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"registration_open": is_open}
 
 
 def test_login_returns_access_and_sets_refresh_cookie():
@@ -860,8 +870,10 @@ PUBLIC_ROUTES = {
     # carries its own tight `password_reset` throttle scope.
     "api/auth/password-reset/",
     "api/auth/password-reset/confirm/",
-    # Gated separately by settings.REGISTRATION_OPEN, which is False.
+    # Gated separately by settings.REGISTRATION_OPEN.
     "api/auth/register/",
+    # Lets the signed-out UI mirror that server gate without duplicating it.
+    "api/auth/registration/",
     # Probes. The compose healthcheck, the on-VPS watchdog and the GitHub
     # Actions probe all poll these, and none of them carries a token.
     "api/health/",

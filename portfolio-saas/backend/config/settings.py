@@ -219,7 +219,7 @@ SIMPLE_JWT = {
     "CHECK_REVOKE_TOKEN": True,
 }
 JWT_COOKIE_SECURE = not DEBUG
-REGISTRATION_OPEN = False
+REGISTRATION_OPEN = os.getenv("REGISTRATION_OPEN", "0") == "1"
 
 # Mail. `.env.production.example` has named these for some time; Django does
 # not read EMAIL_* from the environment on its own, so a filled-in env file

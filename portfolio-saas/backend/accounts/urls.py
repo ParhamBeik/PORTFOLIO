@@ -12,10 +12,12 @@ from .views import (
     PasswordResetConfirmView,
     PasswordResetRequestView,
     RegisterView,
+    RegistrationStatusView,
 )
 
 urlpatterns = [
     path("register/", RegisterView.as_view(), name="register"),
+    path("registration/", RegistrationStatusView.as_view(), name="registration-status"),
     path("export/", ExportView.as_view(), name="export"),
     path("login/", CookieTokenObtainPairView.as_view(), name="login"),
     path("csrf/", CsrfView.as_view(), name="csrf"),

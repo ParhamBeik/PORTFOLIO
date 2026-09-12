@@ -16,4 +16,5 @@ it("keeps an emailed reset link reachable when a session already exists", async 
   window.history.pushState({}, "", "/reset-password?uid=MQ&token=token");
   render(<App />);
   expect(await screen.findByTestId("reset-card")).toBeInTheDocument();
+  expect(document.title).toBe("Reset password — Holdings");
 });

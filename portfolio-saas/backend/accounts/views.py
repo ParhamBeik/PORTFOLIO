@@ -271,6 +271,13 @@ class RegisterView(generics.CreateAPIView):
         return _set_refresh_cookie(response, request, refresh)
 
 
+class RegistrationStatusView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({"registration_open": settings.REGISTRATION_OPEN})
+
+
 class MeView(APIView):
     def get(self, request):
         return Response(UserSerializer(request.user).data)

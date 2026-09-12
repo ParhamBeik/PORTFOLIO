@@ -11,7 +11,7 @@ import {
   StatTile,
   Tabs,
 } from "../components/ui.jsx";
-import { dateTime, humanize, indexPoint, num, signedToman, toman } from "../format.js";
+import { dateTime, humanize, indexPoint, num, toman } from "../format.js";
 import { useApi } from "../useApi.js";
 
 const MODES = [
@@ -107,7 +107,7 @@ function Verdict({ result }) {
       />
       <StatTile
         label={s.difference_tomans >= 0 ? "You came out ahead" : "The road not taken wins"}
-        value={signedToman(s.difference_tomans)}
+        value={toman(Math.abs(s.difference_tomans))}
         valueTone={s.difference_tomans >= 0 ? "good" : "critical"}
         sub={`${s.start_date} → ${s.end_date}`}
         testId="comparison-difference"

@@ -190,6 +190,7 @@ function extractError(detail) {
 }
 
 // Auth
+export const registrationStatus = () => api("/api/auth/registration/");
 export const register = (email, password) =>
   api("/api/auth/register/", { method: "POST", body: { email, password } });
 export const login = (email, password) =>

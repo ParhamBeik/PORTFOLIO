@@ -1410,11 +1410,7 @@ function CoverageNote({ coverage }) {
   );
 }
 
-function RiskAddView({ activeId, basis, window, labelFor }) {
-  const state = useApi(
-    () => diversifiers(activeId, { basis, window: Number(window) }),
-    [activeId, basis, window]
-  );
+function RiskAddView({ state, labelFor }) {
   return (
     <Async {...state} testId="dashboard-risk-add-body">
       {(data) => {
@@ -1467,6 +1463,11 @@ function RiskCard({ activeId, basis, valuationState }) {
     () => analytics(activeId, { basis, window: Number(window) }),
     [activeId, basis, window]
   );
+  const diversifierState = useApi(
+    () => diversifiers(activeId, { basis, window: Number(window) }),
+    [activeId, basis, window]
+  );
+  const riskBusy = state.loading || diversifierState.loading;
   const items = valuationState?.data?.items || [];
   // The amounts below are these items' `value`, which the valuation endpoint has
   // already re-expressed, so they are labelled with the basis it says it applied
@@ -1494,7 +1495,7 @@ function RiskCard({ activeId, basis, valuationState }) {
       testId="dashboard-risk"
       actions={(
         <Tabs
-          options={RISK_WINDOWS}
+          options={RISK_WINDOWS.map((option) => ({ ...option, disabled: riskBusy }))}
           value={window}
           onChange={setWindow}
           label="Window"
@@ -1546,9 +1547,7 @@ function RiskCard({ activeId, basis, valuationState }) {
           caption="Each dot is an asset you could ADD at a 5% position — not a swap for something you hold. Further right means it would calm the portfolio more; higher means it also returned more over the days measured. Ranking is by the calming effect only; past return never enters it."
         >
           <RiskAddView
-            activeId={activeId}
-            basis={basis}
-            window={window}
+            state={diversifierState}
             labelFor={labelFor}
           />
         </RiskPanel>

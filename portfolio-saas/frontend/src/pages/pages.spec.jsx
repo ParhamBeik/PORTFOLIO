@@ -2,10 +2,11 @@
 // for the primary Dashboard and MyOptimal pages against static fixture payloads at the component-boundary tier of the testing pyramid.
 
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import Dashboard from "./Dashboard.jsx";
+import Comparison from "./Comparison.jsx";
 import MyOptimal from "./MyOptimal.jsx";
 import { QuotaWallets } from "./Ops.jsx";
 
@@ -26,6 +27,7 @@ vi.mock("../api.js", () => ({
   benchmarks: vi.fn(),
   insights: vi.fn(),
   adminAssetEvidence: vi.fn(),
+  comparison: vi.fn(),
 }));
 
 // Mock charts component to avoid canvas context dependencies in jsdom
@@ -149,6 +151,57 @@ describe("Page Rendering Tests", () => {
     expect(
       notes.compareDocumentPosition(liabilities) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
+
+    const nextAnalytics = new Promise(() => {});
+    api.analytics.mockReturnValueOnce(nextAnalytics);
+    const window90 = screen.getByTestId("dashboard-risk-window-90");
+    await waitFor(() => expect(window90).toBeEnabled());
+    fireEvent.click(window90);
+    await waitFor(() => {
+      expect(screen.getByTestId("dashboard-risk-window-365")).toBeDisabled();
+    });
+  });
+
+  it("shows an unsigned amount when the alternative wins", async () => {
+    api.comparison.mockImplementation((_accountId, options) => {
+      if (!options) {
+        return Promise.resolve({
+          holdings: [{ key: "mine", label: "Mine" }],
+          targets: [{ key: "alt", label: "Alternative" }],
+          omitted_holdings: [],
+        });
+      }
+      return Promise.resolve({
+        mode: "counterfactual",
+        series: [
+          { label: "Mine", unit: "toman", points: [{ date: "2026-09-01", value: 10 }] },
+          { label: "Alternative", unit: "toman", points: [{ date: "2026-09-01", value: 20 }] },
+        ],
+        summary: {
+          actual_end_tomans: 1000000000,
+          alternative_end_tomans: 5912390000,
+          difference_tomans: -4912390000,
+          invested_tomans: 900000000,
+          start_date: "2026-01-01",
+          end_date: "2026-09-01",
+        },
+        warnings: [],
+      });
+    });
+
+    render(
+      <MemoryRouter>
+        <Comparison />
+      </MemoryRouter>
+    );
+    fireEvent.change(await screen.findByTestId("comparison-target"), {
+      target: { value: "alt" },
+    });
+
+    const difference = await screen.findByTestId("comparison-difference");
+    expect(difference).toHaveTextContent("The road not taken wins");
+    expect(difference).toHaveTextContent("4,912,390,000 T");
+    expect(difference).not.toHaveTextContent("-4,912,390,000 T");
   });
 
   it("renders MyOptimal with scenarios and recommended weights", async () => {

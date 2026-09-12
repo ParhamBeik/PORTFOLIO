@@ -19,6 +19,34 @@ const Family = lazy(() => import("./pages/Family.jsx"));
 const Comparison = lazy(() => import("./pages/Comparison.jsx"));
 const AssetHistory = lazy(() => import("./pages/AssetHistory.jsx"));
 
+const PAGE_TITLES = {
+  "/": "Portfolio",
+  "/ledger": "Ledger",
+  "/family": "Breakdown",
+  "/breakdown": "Breakdown",
+  "/comparison": "Comparison",
+  "/prices": "Price history",
+  "/optimal": "My Optimal",
+  "/universe": "Best Overall",
+  "/best-overall": "Best Overall",
+  "/ops": "Operations",
+  "/onboarding": "Onboarding",
+  "/privacy": "Privacy",
+  "/terms": "Terms",
+  "/reset-password": "Reset password",
+};
+
+function RouteTitle({ signedIn = false }) {
+  const { pathname } = useLocation();
+
+  useEffect(() => {
+    const page = PAGE_TITLES[pathname] || (signedIn ? "Portfolio" : "Sign in");
+    document.title = `${page} — Holdings`;
+  }, [pathname, signedIn]);
+
+  return null;
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [ready, setReady] = useState(false);
@@ -56,6 +84,7 @@ export default function App() {
   if (!user) {
     return (
       <BrowserRouter>
+        <RouteTitle />
         {notice && (
           <p role="alert" className="p-3 text-center text-sm text-[var(--c-warn-text)]">
             {notice}
@@ -88,6 +117,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
+      <RouteTitle signedIn />
       <PortfolioProvider key={user.id} enabled>
         <Suspense fallback={<Loading testId="route-loading" />}>
           <Routes>
