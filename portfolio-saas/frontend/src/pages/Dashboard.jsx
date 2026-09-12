@@ -1653,8 +1653,8 @@ function HistoryQualityCard({ activeId }) {
 
 
 
-function InsightsCard({ activeId }) {
-  const state = useApi(() => insights(activeId), [activeId]);
+function InsightsCard({ activeId, refreshKey }) {
+  const state = useApi(() => insights(activeId), [activeId, refreshKey]);
   const tone = (severity) =>
     severity === "ok" ? "good"
     : severity === "warning" || severity === "high" ? "warn"
@@ -1683,7 +1683,7 @@ function InsightsCard({ activeId }) {
 
 export default function Dashboard({ user }) {
   const portfolio = usePortfolio();
-  const { activeId, basis } = portfolio;
+  const { activeId, basis, revision } = portfolio;
   const valuationState = useApi(() => valuation(activeId, basis), [activeId, basis], { pollMs: 60000 });
 
   return (
@@ -1699,7 +1699,7 @@ export default function Dashboard({ user }) {
         </div>
         <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} staff={!!user?.is_staff} />
         <HistoryQualityCard activeId={activeId} />
-        <InsightsCard activeId={activeId} />
+        <InsightsCard activeId={activeId} refreshKey={revision} />
         <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} />
         <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
         <ExcludedDisclosure valuationState={valuationState} />

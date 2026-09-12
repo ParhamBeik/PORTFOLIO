@@ -13,6 +13,7 @@ const ACTIVE_KEY = "lattice_active_account";
 
 export function PortfolioProvider({ children, enabled }) {
   const [accounts, setAccounts] = useState([]);
+  const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState("");
   const [activeId, setActiveId] = useState(() => {
@@ -27,6 +28,7 @@ export function PortfolioProvider({ children, enabled }) {
     try {
       const list = await listAccounts();
       setAccounts(list);
+      setRevision((cur) => cur + 1);
       // If the active portfolio was deleted (or is stale), fall back to All.
       setActiveId((cur) =>
         cur != null && list.some((a) => a.id === cur) ? cur : null
@@ -70,7 +72,7 @@ export function PortfolioProvider({ children, enabled }) {
 
   return (
     <PortfolioContext.Provider
-      value={{ accounts, activeId, setActive, reload, loading, error, basis, setBasis }}
+      value={{ accounts, activeId, setActive, reload, loading, error, basis, setBasis, revision }}
     >
       {children}
     </PortfolioContext.Provider>
