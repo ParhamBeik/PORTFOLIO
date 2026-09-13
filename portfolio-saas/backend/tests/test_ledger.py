@@ -1028,11 +1028,35 @@ class TestTradeEndpoint:
         holding = Holding.objects.get(account=account, asset=asset_catalog["emami_coin"])
         response = self._client(account.user).patch(
             f"/api/accounts/{account.id}/holdings/{holding.id}/",
-            {"quantity": "0"},
+            {"quantity": "0", "confirm_sell_all": True},
             format="json",
         )
         assert response.status_code == 200, response.data
         assert not Holding.objects.filter(pk=holding.id).exists()
+        assert LedgerEntry.objects.filter(
+            account=account, asset=asset_catalog["emami_coin"], kind=LedgerEntry.Kind.SELL
+        ).count() == 1
+
+    def test_dashboard_requires_confirmation_before_selling_all(
+        self, account, asset_catalog, write_prices
+    ):
+        write_prices({"emami_coin": Decimal("176000000")})
+        execute_trade(account=account, asset=asset_catalog["emami_coin"], side="buy", quantity=Decimal("1"))
+        holding = Holding.objects.get(account=account, asset=asset_catalog["emami_coin"])
+
+        response = self._client(account.user).patch(
+            f"/api/accounts/{account.id}/holdings/{holding.id}/",
+            {"quantity": "0"},
+            format="json",
+        )
+
+        assert response.status_code == 400
+        assert "confirm_sell_all" in response.data
+        holding.refresh_from_db()
+        assert holding.quantity == Decimal("1")
+        assert not LedgerEntry.objects.filter(
+            account=account, asset=asset_catalog["emami_coin"], kind=LedgerEntry.Kind.SELL
+        ).exists()
 
     def test_house_holding_rejects_nonpositive_price(self, account, asset_catalog):
         response = self._client(account.user).post(

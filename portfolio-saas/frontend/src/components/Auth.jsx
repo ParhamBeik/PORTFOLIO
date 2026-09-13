@@ -58,9 +58,9 @@ function friendlyError(msg) {
   return msg || "An unexpected error occurred.";
 }
 
-export default function Auth({ onAuthed }) {
+export default function Auth({ onAuthed, initialMode = "login" }) {
   const registration = useApi(registrationStatus, []);
-  const [mode, setMode] = useState("login");
+  const [mode, setMode] = useState(initialMode);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -78,6 +78,11 @@ export default function Auth({ onAuthed }) {
   const strength = calculateStrength(password, checks);
   const registrationOpen = registration.data?.registration_open === true;
   const registrationClosed = registering && !registrationOpen;
+  // Both flags fail closed: until the status request resolves (or if it fails)
+  // `data` is null, so we neither offer a signup tab nor promise a reset email.
+  // Hiding something briefly is recoverable; offering a button that silently
+  // does nothing is what this replaces.
+  const selfServiceReset = registration.data?.self_service_reset === true;
   const passwordValid = Boolean(password) && (!registering || checks.every((check) => check.ok));
   const canSubmit = emailValid && (forgetting || passwordValid) && !registrationClosed;
 
@@ -316,14 +321,20 @@ export default function Auth({ onAuthed }) {
 
         {mode === "login" && (
           <div className="mb-4 text-right">
-            <Button
-              type="button"
-              variant="link"
-              data-testid="auth-forgot"
-              onClick={() => switchMode("forgot")}
-            >
-              Forgot password?
-            </Button>
+            {selfServiceReset ? (
+              <Button
+                type="button"
+                variant="link"
+                data-testid="auth-forgot"
+                onClick={() => switchMode("forgot")}
+              >
+                Forgot password?
+              </Button>
+            ) : (
+              <p className="text-xs text-muted" data-testid="auth-reset-unavailable">
+                Lost your password? Ask the operator to send you a reset link.
+              </p>
+            )}
           </div>
         )}
 

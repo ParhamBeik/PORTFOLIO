@@ -5,9 +5,12 @@ Merged from 3 files; each section keeps its original banner.
 
 from datetime import timedelta
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor
 import io
+import threading
 
 from django.core.cache import cache
+from django.db import close_old_connections, connections
 from django.test import override_settings
 from django.utils import timezone
 import pytest
@@ -51,7 +54,30 @@ def test_registration_status_matches_the_server_gate(is_open):
         resp = APIClient().get("/api/auth/registration/")
 
     assert resp.status_code == 200
-    assert resp.json() == {"registration_open": is_open}
+    # The test settings use the locmem mail backend, which counts as
+    # deliverable -- mail is captured, and a developer reading a reset link out
+    # of `mail.outbox` is a working flow.
+    assert resp.json() == {"registration_open": is_open, "self_service_reset": True}
+
+
+@pytest.mark.parametrize(
+    ("backend", "host", "deliverable"),
+    [
+        ("django.core.mail.backends.smtp.EmailBackend", "smtp.example.com", True),
+        # Django's own default host. An environment that never set EMAIL_HOST
+        # looks exactly like this, which is what production was doing.
+        ("django.core.mail.backends.smtp.EmailBackend", "localhost", False),
+        ("django.core.mail.backends.smtp.EmailBackend", "127.0.0.1", False),
+        ("django.core.mail.backends.smtp.EmailBackend", "", False),
+        ("django.core.mail.backends.console.EmailBackend", "", True),
+    ],
+)
+def test_registration_status_reports_whether_reset_mail_can_be_sent(backend, host, deliverable):
+    with override_settings(EMAIL_BACKEND=backend, EMAIL_HOST=host):
+        resp = APIClient().get("/api/auth/registration/")
+
+    assert resp.status_code == 200
+    assert resp.json()["self_service_reset"] is deliverable
 
 
 def test_login_returns_access_and_sets_refresh_cookie():
@@ -1202,3 +1228,252 @@ class TestAdminPasswordResetLink:
 
         assert response.status_code == 404
         assert "link" not in response.data
+
+
+# ----------------------------------------------------------------------
+# Member administration. `is_active` is the entire ban mechanism in this
+# product, so these cover the lever itself and the two ways using it could
+# lock the installation out of its own admin.
+
+
+def _staff(make_user, email, superuser=False):
+    user = make_user(email=email)
+    User.objects.filter(pk=user.pk).update(is_staff=True, is_superuser=superuser)
+    user.refresh_from_db()
+    return user
+
+
+def test_member_list_is_staff_only_and_reports_status_and_portfolios(make_user):
+    staff = _staff(make_user, "roster-staff@test.test")
+    member = make_user(email="roster-member@test.test")
+    Account.objects.create(user=member, name="Main")
+
+    assert _client(member).get("/api/auth/admin/users/").status_code == 403
+
+    rows = {row["email"]: row for row in _client(staff).get("/api/auth/admin/users/").json()}
+    assert rows["roster-member@test.test"]["is_active"] is True
+    assert rows["roster-member@test.test"]["accounts_count"] == 1
+    assert rows["roster-staff@test.test"]["accounts_count"] == 0
+
+
+def test_member_list_filters_by_active_flag(make_user):
+    staff = _staff(make_user, "filter-staff@test.test")
+    banned = make_user(email="filter-banned@test.test")
+    User.objects.filter(pk=banned.pk).update(is_active=False)
+
+    active = _client(staff).get("/api/auth/admin/users/?active=1").json()
+    inactive = _client(staff).get("/api/auth/admin/users/?active=0").json()
+
+    assert banned.email not in [row["email"] for row in active]
+    assert [row["email"] for row in inactive] == [banned.email]
+
+
+def test_deactivating_a_member_revokes_their_live_refresh_tokens(make_user):
+    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    staff = _staff(make_user, "ban-staff@test.test")
+    member = make_user(email="ban-member@test.test")
+    refresh = RefreshToken.for_user(member)
+
+    resp = _client(staff).patch(
+        f"/api/auth/admin/users/{member.pk}/", {"is_active": False}, format="json"
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["is_active"] is False
+    member.refresh_from_db()
+    assert member.is_active is False
+    # The point of the revoke: without it the member's refresh token keeps
+    # minting access tokens for its full lifetime and the ban does not take.
+    assert BlacklistedToken.objects.filter(token__jti=refresh["jti"]).exists()
+
+
+def test_a_deactivated_member_can_neither_log_in_nor_refresh(make_user):
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    member = make_user(email="inactive@test.test")
+    refresh = str(RefreshToken.for_user(member))
+    User.objects.filter(pk=member.pk).update(is_active=False)
+
+    client = APIClient()
+    login = client.post(
+        "/api/auth/login/",
+        {"email": "inactive@test.test", "password": "Sup3rSecret!"},
+        format="json",
+    )
+    client.cookies["ps_refresh"] = refresh
+    refreshed = client.post("/api/token/refresh/", {}, format="json")
+
+    assert login.status_code == 401
+    # This endpoint deliberately has no authenticator because the refresh
+    # credential is an HttpOnly cookie; DRF may render AuthenticationFailed as
+    # 403 when it cannot emit a WWW-Authenticate challenge.
+    assert refreshed.status_code in (401, 403)
+
+
+def test_an_operator_cannot_deactivate_their_own_account(make_user):
+    staff = _staff(make_user, "self-ban@test.test")
+
+    resp = _client(staff).patch(
+        f"/api/auth/admin/users/{staff.pk}/", {"is_active": False}, format="json"
+    )
+
+    assert resp.status_code == 400
+    assert "your own account" in resp.json()["detail"]
+    staff.refresh_from_db()
+    assert staff.is_active is True
+
+
+def test_the_last_active_superuser_cannot_be_deactivated(make_user):
+    """Otherwise the installation can be locked out of its own admin.
+
+    Two superusers here, and the requester is a third party (plain staff), so
+    the self-deactivation guard cannot be what refuses the last one -- this
+    isolates the superuser-count guard.
+    """
+    staff = _staff(make_user, "count-staff@test.test")
+    first_root = _staff(make_user, "op-one@test.test", superuser=True)
+    second_root = _staff(make_user, "op-two@test.test", superuser=True)
+
+    # Two active superusers: removing one is allowed.
+    allowed = _client(staff).patch(
+        f"/api/auth/admin/users/{second_root.pk}/", {"is_active": False}, format="json"
+    )
+    # Only `first_root` is left, so now the same call is refused.
+    refused = _client(staff).patch(
+        f"/api/auth/admin/users/{first_root.pk}/", {"is_active": False}, format="json"
+    )
+    # Reinstating is never refused.
+    reinstated = _client(staff).patch(
+        f"/api/auth/admin/users/{second_root.pk}/", {"is_active": True}, format="json"
+    )
+
+    assert allowed.status_code == 200
+    assert refused.status_code == 400
+    assert "last active superuser" in refused.json()["detail"]
+    assert reinstated.status_code == 200
+    first_root.refresh_from_db()
+    assert first_root.is_active is True
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_deactivations_leave_one_active_superuser(make_user, monkeypatch):
+    """Integration: concurrent staff requests must serialize the root-count check."""
+    from accounts.serializers import AdminUserSerializer
+
+    staff = _staff(make_user, "race-staff@test.test")
+    first_root = _staff(make_user, "race-one@test.test", superuser=True)
+    second_root = _staff(make_user, "race-two@test.test", superuser=True)
+    original_save = AdminUserSerializer.save
+    both_requests_started = threading.Barrier(2)
+    first_save = threading.Event()
+    second_save = threading.Event()
+    arrivals = 0
+    arrivals_lock = threading.Lock()
+
+    def delayed_save(serializer, **kwargs):
+        nonlocal arrivals
+        with arrivals_lock:
+            arrivals += 1
+            if arrivals == 1:
+                first_save.set()
+            else:
+                second_save.set()
+        # Before the lock fix both requests reach save and continue together.
+        # With it, request two cannot reach save until request one commits.
+        second_save.wait(timeout=0.5)
+        return original_save(serializer, **kwargs)
+
+    monkeypatch.setattr(AdminUserSerializer, "save", delayed_save)
+
+    def deactivate(user):
+        close_old_connections()
+        try:
+            both_requests_started.wait(timeout=3)
+            client = APIClient()
+            client.force_authenticate(staff)
+            return client.patch(
+                f"/api/auth/admin/users/{user.pk}/", {"is_active": False}, format="json"
+            ).status_code
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(deactivate, (first_root, second_root)))
+
+    assert sorted(results) == [200, 400]
+    assert User.objects.filter(is_superuser=True, is_active=True).count() == 1
+
+
+def test_reinstating_a_member_restores_login(make_user):
+    staff = _staff(make_user, "reinstate-staff@test.test")
+    member = make_user(email="reinstate-member@test.test")
+    User.objects.filter(pk=member.pk).update(is_active=False)
+
+    resp = _client(staff).patch(
+        f"/api/auth/admin/users/{member.pk}/", {"is_active": True}, format="json"
+    )
+    login = APIClient().post(
+        "/api/auth/login/",
+        {"email": "reinstate-member@test.test", "password": "Sup3rSecret!"},
+        format="json",
+    )
+
+    assert resp.status_code == 200
+    assert login.status_code == 200
+
+
+def test_member_patch_requires_the_is_active_field(make_user):
+    staff = _staff(make_user, "patch-staff@test.test")
+    member = make_user(email="patch-member@test.test")
+
+    resp = _client(staff).patch(
+        f"/api/auth/admin/users/{member.pk}/", {"is_staff": True}, format="json"
+    )
+
+    assert resp.status_code == 400
+    member.refresh_from_db()
+    assert member.is_staff is False
+
+
+def test_missing_member_is_a_404(make_user):
+    staff = _staff(make_user, "missing-staff@test.test")
+
+    resp = _client(staff).patch(
+        "/api/auth/admin/users/999999/", {"is_active": False}, format="json"
+    )
+
+    assert resp.status_code == 404
+
+
+# ----------------------------------------------------------------------
+# Self-service reset when there is no relay. The endpoint must answer
+# identically either way -- a different answer enumerates accounts -- but it
+# must not spend EMAIL_TIMEOUT seconds proving a dead host is dead.
+
+
+@override_settings(
+    EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend", EMAIL_HOST="localhost"
+)
+def test_password_reset_sends_nothing_when_mail_is_not_deliverable(make_user, monkeypatch):
+    from django.core import mail
+
+    make_user(email="no-relay@test.test")
+    attempted = []
+    monkeypatch.setattr(
+        "accounts.views._send_reset_mail", lambda user: attempted.append(user)
+    )
+    client = APIClient()
+
+    known = client.post(
+        "/api/auth/password-reset/", {"email": "no-relay@test.test"}, format="json"
+    )
+    unknown = client.post(
+        "/api/auth/password-reset/", {"email": "nobody@test.test"}, format="json"
+    )
+
+    assert known.status_code == 200
+    assert known.json()["detail"] == unknown.json()["detail"]
+    assert attempted == []
+    assert mail.outbox == []

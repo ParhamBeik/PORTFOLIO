@@ -305,13 +305,14 @@ export const updateHolding = (
   id,
   {
     quantity, unitPriceTomans, areaSqm, pricePerSqmMillion,
-    purchasePricePerSqmMillion, displayName, isHidden, occurredAt,
+    purchasePricePerSqmMillion, displayName, isHidden, occurredAt, confirmSellAll,
   } = {}
 ) =>
   api(`/api/accounts/${accountId}/holdings/${id}/`, {
     method: "PATCH",
     body: {
       ...numeric("quantity", quantity),
+      ...(confirmSellAll ? { confirm_sell_all: true } : {}),
       ...numeric("unit_price_tomans", unitPriceTomans),
       ...numeric("area_sqm", areaSqm),
       ...numeric("price_per_sqm_million", pricePerSqmMillion),
@@ -570,6 +571,11 @@ export const adminAssets = (params) => api(`/api/admin/assets/${qs(params)}`);
 // happens to be staff-only, and the two admin surfaces are mounted separately.
 export const adminPasswordResetLink = (email) =>
   api("/api/auth/admin/password-reset-link/", { method: "POST", body: { email } });
+export const adminUsers = (params) => api(`/api/auth/admin/users/${qs(params)}`);
+// `is_active` is the whole ban mechanism: clearing it rejects the access token
+// immediately and the server also revokes outstanding refresh tokens.
+export const adminSetUserActive = (id, isActive) =>
+  api(`/api/auth/admin/users/${id}/`, { method: "PATCH", body: { is_active: isActive } });
 export const adminAssetEvidence = (key) =>
   api(`/api/admin/assets/${encodeURIComponent(key)}/evidence/`);
 export const adminAssetRetry = (key) =>

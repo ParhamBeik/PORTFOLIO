@@ -822,12 +822,18 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
       );
       return;
     }
+    if (!row.is_house && Number(qty) === 0 && !window.confirm(
+      `Sell all of ${holdingLabel(row)}? This records a sale in your ledger and removes it from holdings.`
+    )) {
+      return;
+    }
     const key = holdingsRowKey(row);
     setSavingKey(key);
     setActionError(null);
     try {
       await updateHolding(accountId, holding.id, {
         quantity: qty,
+        confirmSellAll: !row.is_house && Number(qty) === 0,
         areaSqm: row.is_house ? draft.area : undefined,
         unitPriceTomans: isManualPriceEditable(row) ? draft.price : undefined,
       });

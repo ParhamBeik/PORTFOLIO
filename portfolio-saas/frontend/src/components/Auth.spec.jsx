@@ -23,7 +23,10 @@ afterEach(cleanup);
 
 beforeEach(() => {
   vi.clearAllMocks();
-  api.registrationStatus.mockResolvedValue({ registration_open: true });
+  api.registrationStatus.mockResolvedValue({
+    registration_open: true,
+    self_service_reset: true,
+  });
 });
 
 describe("Auth recovery", () => {
@@ -68,7 +71,7 @@ describe("Auth recovery", () => {
       detail: "If an account exists for that email, a reset link has been sent.",
     });
     render(<Auth onAuthed={() => {}} />);
-    fireEvent.click(screen.getByTestId("auth-forgot"));
+    fireEvent.click(await screen.findByTestId("auth-forgot"));
     fireEvent.change(screen.getByTestId("auth-email-input"), {
       target: { value: "member@example.com" },
     });

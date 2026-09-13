@@ -10,6 +10,8 @@ import {
   adminAssetRetry,
   adminOverview,
   adminPasswordResetLink,
+  adminSetUserActive,
+  adminUsers,
   adminWorkflows,
 } from "../api.js";
 import { CountTrend, Donut, StackedStatusBar } from "../components/charts.jsx";
@@ -1584,6 +1586,166 @@ function formatAge(seconds) {
  * It confers nothing a superuser lacks -- Django admin can already set any
  * password outright -- and it stops being needed the day a relay is configured.
  */
+/**
+ * Who has an account, and the one lever that takes it away.
+ *
+ * `is_active` is the entire ban mechanism in this product -- there is no
+ * suspension model and no plan tier -- and until now it could only be reached
+ * through Django admin, where the user form is the wrong tool: it also exposes
+ * the password hash. Deactivating here additionally revokes the member's live
+ * refresh tokens server-side, so the ban takes effect on the next request rather
+ * than whenever their access token happens to lapse.
+ *
+ * Reloads the whole list after a toggle rather than patching the row in place:
+ * the server is the authority on whether the change was allowed (it refuses
+ * self-deactivation and the last active superuser), and a locally-mutated row
+ * would show a ban that did not happen.
+ */
+function MembersPanel() {
+  const [search, setSearch] = useState("");
+  const [searchDebounced, setSearchDebounced] = useState("");
+  const [members, setMembers] = useState([]);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [busyId, setBusyId] = useState(0);
+
+  useEffect(() => {
+    const id = setTimeout(() => setSearchDebounced(search.trim()), 250);
+    return () => clearTimeout(id);
+  }, [search]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setMembers(await adminUsers({ search: searchDebounced || undefined }));
+    } catch (err) {
+      setError(err?.message || "Failed to load members");
+    } finally {
+      setLoading(false);
+    }
+  }, [searchDebounced]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const toggle = async (row) => {
+    setBusyId(row.id);
+    setError("");
+    try {
+      await adminSetUserActive(row.id, !row.is_active);
+      await load();
+    } catch (err) {
+      setError(err?.message || "Failed to update member");
+    } finally {
+      setBusyId(0);
+    }
+  };
+
+  const columns = [
+    {
+      key: "email",
+      header: "Member",
+      render: (row) => (
+        <div className="min-w-0">
+          <div className="truncate text-text">{row.email}</div>
+          {(row.first_name || row.last_name) && (
+            <div className="truncate text-xs text-muted">
+              {`${row.first_name} ${row.last_name}`.trim()}
+            </div>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "role",
+      header: "Role",
+      render: (row) => (
+        <Badge variant={row.is_superuser ? "warn" : "neutral"}>
+          {row.is_superuser ? "superuser" : row.is_staff ? "staff" : "member"}
+        </Badge>
+      ),
+    },
+    {
+      key: "is_active",
+      header: "Status",
+      render: (row) => (
+        <Badge variant={row.is_active ? "good" : "critical"}>
+          {row.is_active ? "active" : "deactivated"}
+        </Badge>
+      ),
+    },
+    { key: "accounts_count", header: "Portfolios", align: "right",
+      render: (row) => num(row.accounts_count) },
+    { key: "date_joined", header: "Joined", render: (row) => dateTime(row.date_joined) },
+    {
+      key: "last_login",
+      header: "Last sign-in",
+      render: (row) => (row.last_login ? dateTime(row.last_login) : "—"),
+    },
+    {
+      key: "actions",
+      header: "",
+      align: "right",
+      render: (row) => (
+        <Button
+          variant={row.is_active ? "ghost" : "primary"}
+          disabled={busyId === row.id}
+          onClick={() => toggle(row)}
+          data-testid={`ops-member-toggle-${row.id}`}
+          className="text-xs"
+        >
+          {busyId === row.id
+            ? "Saving…"
+            : row.is_active
+              ? "Deactivate"
+              : "Reinstate"}
+        </Button>
+      ),
+    },
+  ];
+
+  return (
+    <Card
+      title="Members"
+      subtitle="Everyone with an account. Deactivating revokes their sessions immediately."
+      testId="ops-members"
+      actions={
+        <Button variant="ghost" className="text-xs" onClick={load} disabled={loading}>
+          {loading ? "Loading…" : "Refresh"}
+        </Button>
+      }
+    >
+      <Input
+        label="Search members by email"
+        className="mb-3 w-full max-w-sm"
+        placeholder="Search by email…"
+        value={search}
+        onChange={(event) => setSearch(event.target.value)}
+        data-testid="ops-members-search"
+      />
+      {error && (
+        <p
+          className="mb-3 text-xs text-[var(--c-critical-text)]"
+          role="alert"
+          data-testid="ops-members-error"
+        >
+          {error}
+        </p>
+      )}
+      <Table
+        columns={columns}
+        rows={members}
+        rowKey={(row) => row.id}
+        empty="No members match that search."
+        testId="ops-members-table"
+        caption="Registered members and their access status"
+      />
+    </Card>
+  );
+}
+
 function OperatorResetLink() {
   const [email, setEmail] = useState("");
   const [state, setState] = useState({ status: "idle" });
@@ -1932,6 +2094,11 @@ function OverviewPanel({ overview, tickSeries, depths, onNavigate, user }) {
         </div>
         {user?.is_superuser && <OperatorResetLink />}
       </Card>
+
+      {/* Staff, not superuser: reading the roster and suspending an abusive
+          account is day-to-day operations. Minting a password reset link is not
+          -- that hands over access to someone else's portfolio. */}
+      {user?.is_staff && <MembersPanel />}
 
       <AttentionPanel liveHeld={liveHeld} warehouse={warehouse} onNavigate={onNavigate} />
 

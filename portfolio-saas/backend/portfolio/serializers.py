@@ -44,6 +44,10 @@ class HoldingSerializer(serializers.ModelSerializer):
         min_value=Decimal("0"),
         required=False,
     )
+    # A zero target is a sell-all only when the holding is ledger-backed. Keep
+    # the acknowledgement in the write payload so a client cannot bypass the
+    # confirmation the dashboard shows before it creates that sale.
+    confirm_sell_all = serializers.BooleanField(required=False, write_only=True)
     asset_key = serializers.SlugRelatedField(
         source="asset", slug_field="key", queryset=Asset.objects.none(), required=False
     )
@@ -91,7 +95,7 @@ class HoldingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Holding
         fields = ("id", "asset_key", "asset_name", "asset_name_fa", "asset_class", "is_house", "is_manual",
-                  "quantity", "unit_price_tomans", "area_sqm", "mortgage_deduction_tomans",
+                  "quantity", "confirm_sell_all", "unit_price_tomans", "area_sqm", "mortgage_deduction_tomans",
                   "display_name", "label", "is_hidden",
                   "price_per_sqm_million", "purchase_price_per_sqm_million",
                   "price_per_sqm_tomans", "gross_value_tomans",

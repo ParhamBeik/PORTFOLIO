@@ -193,6 +193,14 @@ REST_FRAMEWORK = {
         # Tight on purpose: this endpoint sends mail. The anon bucket is 30/min
         # and would let a bot empty an SMTP quota. Tests clear the cache.
         "password_reset": os.getenv("PASSWORD_RESET_THROTTLE", "5/hour"),
+        # Credential-guessing deserves its own bucket. On the shared `anon`
+        # rate these two competed with the signed-out page's own boot requests
+        # (registration status, CSRF), so several people signing up from one
+        # office IP could exhaust the bucket by using the app correctly while a
+        # brute-force attempt still got 30 guesses a minute. Env-tunable so a
+        # room full of guests can be accommodated without a deploy.
+        "login": os.getenv("LOGIN_THROTTLE", "20/min"),
+        "register": os.getenv("REGISTER_THROTTLE", "10/min"),
     },
     # M5: render Decimal as a string so large Toman values stay exact on the wire.
     "DEFAULT_RENDERER_CLASSES": ("config.api.DecimalStringJSONRenderer",),

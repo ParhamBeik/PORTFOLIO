@@ -25,6 +25,7 @@ from django.utils.dateparse import parse_datetime
 
 from accounts.models import User
 from config.health import PRICE_STALE_AFTER
+from config.mail import mail_is_deliverable
 from portfolio.models import Account, Holding, LedgerEntry, Price, Snapshot
 
 from .models import (
@@ -483,6 +484,9 @@ def outbound_mail():
     backend = str(getattr(settings, "EMAIL_BACKEND", ""))
     host = str(getattr(settings, "EMAIL_HOST", ""))
     port = int(getattr(settings, "EMAIL_PORT", 25) or 25)
+    # The configuration half of the question lives in `config.mail` because the
+    # sign-in card needs the same rule to decide whether to offer self-service
+    # reset. Only the socket probe below is ours alone.
     if "smtp" not in backend:
         # console / locmem / filebased: mail is captured somewhere local. That
         # is correct in dev and in the test suite, and is not a fault.
@@ -493,11 +497,10 @@ def outbound_mail():
             "host": "",
             "message": "Mail is captured locally by this backend, not delivered.",
         }
-    # A loopback host counts as unset, not as configured. Django's global
-    # default for EMAIL_HOST is "localhost", so this is what an environment that
-    # never set the variable looks like -- and a mail relay inside the
-    # application container is not a deployment anyone here intends.
-    if not host or host in ("localhost", "127.0.0.1", "::1"):
+    # A loopback host counts as unset, not as configured -- see `config.mail`,
+    # which owns that rule. Reaching here means the backend is SMTP, so this is
+    # exactly "an SMTP backend with no usable host".
+    if not mail_is_deliverable():
         return {
             "ok": False,
             "status": "unconfigured",

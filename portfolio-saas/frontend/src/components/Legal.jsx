@@ -36,10 +36,10 @@ export default function Legal({ kind, authed = false }) {
           </>
         )}
       </div>
-      {/* A signed-in reader reaches these from the footer of every page, and
-          "Back to sign in" pointed them at /login -- not a route in the
-          authenticated tree, so it fell through to `*` and bounced them to the
-          dashboard without explanation. */}
+      {/* A signed-in reader reaches these from the footer of every page, so
+          "Back to sign in" would bounce them off their own session. Both targets
+          are now declared routes in their respective trees; /login used to
+          resolve only by falling through to the signed-out catch-all. */}
       <Link
         to={authed ? "/" : "/login"}
         data-testid="legal-back-link"

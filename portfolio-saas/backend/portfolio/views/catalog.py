@@ -230,6 +230,18 @@ class HoldingDetailView(generics.RetrieveUpdateDestroyAPIView):
                 raise ValidationError(str(exc)) from exc
             return
         if not asset.is_house:
+            if (
+                data.get("quantity") == 0
+                and LedgerEntry.objects.filter(
+                    account=serializer.instance.account, asset=asset
+                ).exists()
+                and not data.get("confirm_sell_all", False)
+            ):
+                raise ValidationError({
+                    "confirm_sell_all": [
+                        "Confirm selling all units before removing this holding."
+                    ]
+                })
             try:
                 serializer.instance = adjust_holding_quantity(
                     user=self.request.user,

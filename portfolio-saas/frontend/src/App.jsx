@@ -34,7 +34,58 @@ const PAGE_TITLES = {
   "/privacy": "Privacy",
   "/terms": "Terms",
   "/reset-password": "Reset password",
+  "/login": "Sign in",
+  "/signup": "Create account",
 };
+
+// Where to send someone after they sign in. Only a same-origin absolute path is
+// accepted: `next` arrives in a URL anyone can hand out, so `//evil.com` (a
+// protocol-relative URL) and a backslash variant (browsers normalise `\` to `/`)
+// are open-redirect payloads, not paths. Anything else falls back to the root.
+function safeNext(search) {
+  const raw = new URLSearchParams(search).get("next");
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) {
+    return "/";
+  }
+  return raw;
+}
+
+// The signed-out catch-all. Sends an unauthenticated deep link to /login while
+// remembering where it was going, so a shared link to /ledger survives the
+// detour instead of silently becoming "/".
+function LoginRedirect() {
+  const { pathname, search, hash } = useLocation();
+  const attempted = `${pathname}${search}${hash}`;
+  return (
+    <Navigate
+      replace
+      to={
+        pathname === "/"
+          ? "/login"
+          : `/login?next=${encodeURIComponent(attempted)}`
+      }
+    />
+  );
+}
+
+// Signing in swaps one BrowserRouter for another, and the new one reads whatever
+// URL the address bar holds -- which is still /login. Rewriting the URL before
+// the state change is what makes the signed-in tree mount on the requested page;
+// `HoldingsGate` still overrides it for an account with no holdings, which is the
+// intended first-run path.
+function AuthRoute({ mode, onAuthed }) {
+  const { search } = useLocation();
+  return (
+    <Auth
+      initialMode={mode}
+      onAuthed={(profile) => {
+        const next = safeNext(search);
+        if (next !== "/login") window.history.replaceState(null, "", next);
+        onAuthed(profile);
+      }}
+    />
+  );
+}
 
 function RouteTitle({ signedIn = false }) {
   const { pathname } = useLocation();
@@ -81,6 +132,11 @@ export default function App() {
 
   if (!ready) return <Loading testId="app-boot" />;
 
+  const onAuthed = (profile) => {
+    setNotice("");
+    setUser(profile);
+  };
+
   if (!user) {
     return (
       <BrowserRouter>
@@ -99,17 +155,18 @@ export default function App() {
           <Route path="/privacy" element={<Legal kind="privacy" />} />
           <Route path="/terms" element={<Legal kind="terms" />} />
           <Route path="/reset-password" element={<ResetPassword />} />
+          {/* Real routes, not just a catch-all: /signup is a URL you can hand
+              someone, and `Legal`'s "Back to sign in" link targets /login,
+              which previously resolved only by accident. */}
           <Route
-            path="*"
-            element={
-              <Auth
-                onAuthed={(profile) => {
-                  setNotice("");
-                  setUser(profile);
-                }}
-              />
-            }
+            path="/login"
+            element={<AuthRoute mode="login" onAuthed={onAuthed} />}
           />
+          <Route
+            path="/signup"
+            element={<AuthRoute mode="signup" onAuthed={onAuthed} />}
+          />
+          <Route path="*" element={<LoginRedirect />} />
         </Routes>
       </BrowserRouter>
     );
@@ -122,6 +179,10 @@ export default function App() {
         <Suspense fallback={<Loading testId="route-loading" />}>
           <Routes>
             <Route path="/reset-password" element={<ResetPassword />} />
+            {/* A signed-in visitor has no business on the auth card -- and one
+                lands here whenever sign-in did not rewrite the URL. */}
+            <Route path="/login" element={<Navigate to="/" replace />} />
+            <Route path="/signup" element={<Navigate to="/" replace />} />
             <Route
               element={
                 <Shell

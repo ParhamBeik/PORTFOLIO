@@ -1,6 +1,7 @@
 from django.urls import path
 from .views import (
     AdminPasswordResetLinkView,
+    AdminUserDetailView,
     AdminUserListView,
     ChangePasswordView,
     CookieTokenObtainPairView,
@@ -32,6 +33,11 @@ urlpatterns = [
         name="password-reset-confirm",
     ),
     path("admin/users/", AdminUserListView.as_view(), name="admin-users"),
+    path(
+        "admin/users/<int:pk>/",
+        AdminUserDetailView.as_view(),
+        name="admin-user-detail",
+    ),
     path(
         "admin/password-reset-link/",
         AdminPasswordResetLinkView.as_view(),

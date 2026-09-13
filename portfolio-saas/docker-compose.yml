@@ -31,9 +31,15 @@ x-backend-env: &backend-env
   ANALYTICS_THROTTLE: ${ANALYTICS_THROTTLE:-60/min}
   ANALYTICS_MAX_CONCURRENT_PER_USER: ${ANALYTICS_MAX_CONCURRENT_PER_USER:-2}
   ANALYTICS_MAX_CONCURRENT_GLOBAL: ${ANALYTICS_MAX_CONCURRENT_GLOBAL:-5}
+  LOGIN_THROTTLE: ${LOGIN_THROTTLE:-20/min}
+  REGISTER_THROTTLE: ${REGISTER_THROTTLE:-10/min}
+  # Open in dev. The code default is 0 -- fail-safe for any deployment nobody
+  # configured -- but a closed signup locally means `e2e/auth.spec.js` cannot see
+  # the register tab it asserts on, and a developer cannot exercise the flow at
+  # all without knowing to export a variable no error message mentions.
+  REGISTRATION_OPEN: ${REGISTRATION_OPEN:-1}
   EMAIL_BACKEND: ${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}
   EMAIL_FILE_PATH: ${EMAIL_FILE_PATH:-/app/test-emails}
-  FRONTEND_VERIFICATION_URL: ${FRONTEND_VERIFICATION_URL:-http://localhost:5173/verify-email}
   FRONTEND_PASSWORD_RESET_URL: ${FRONTEND_PASSWORD_RESET_URL:-http://localhost:5173/reset-password}
   BRS_API_KEY: ${BRS_API_KEY:-}
   BRS_URL: ${BRS_URL:-https://Api.BrsApi.ir/Market/Gold_Currency.php}

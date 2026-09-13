@@ -27,6 +27,8 @@ vi.mock("../api.js", () => ({
   benchmarks: vi.fn(),
   insights: vi.fn(),
   adminAssetEvidence: vi.fn(),
+  updateHolding: vi.fn(),
+  removeHolding: vi.fn(),
   comparison: vi.fn(),
 }));
 
@@ -55,7 +57,11 @@ vi.mock("../components/PortfolioContext.jsx", () => ({
   usePortfolio: () => ({
     activeAccount: { id: 1, name: "Main Portfolio" },
     activeId: 1,
-    accounts: [{ id: 1, name: "Main Portfolio" }],
+    accounts: [{
+      id: 1,
+      name: "Main Portfolio",
+      holdings: [{ id: 42, asset_key: "kama_stock", quantity: "1000" }],
+    }],
     basis: "nominal_toman",
     setBasis: vi.fn(),
     setActive: vi.fn(),
@@ -160,6 +166,47 @@ describe("Page Rendering Tests", () => {
     await waitFor(() => {
       expect(screen.getByTestId("dashboard-risk-window-365")).toBeDisabled();
     });
+  });
+
+  it("asks before selling all of an edited holding", async () => {
+    api.valuation.mockResolvedValue({
+      total: 500000000,
+      items: [{
+        key: "kama_stock",
+        name: "Kama Stock",
+        quantity: "1000",
+        quantity_step: "1",
+        unit_price: 3000,
+        value: 300000,
+        quality_status: "complete",
+      }],
+    });
+    api.snapshots.mockResolvedValue({ series: [] });
+    api.getPerformance.mockResolvedValue({ performance_available: false });
+    api.accountDataQuality.mockResolvedValue({ quality_status: "complete", assets: [] });
+    api.analytics.mockResolvedValue({});
+    api.diversifiers.mockResolvedValue([]);
+    api.benchmarks.mockResolvedValue({ benchmarks: [] });
+    api.insights.mockResolvedValue({});
+    api.updateHolding.mockResolvedValue({});
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    fireEvent.click(await screen.findByTestId("dashboard-holdings-manage-edit"));
+    fireEvent.change(screen.getByTestId("dashboard-holdings-edit-qty"), {
+      target: { value: "0" },
+    });
+    fireEvent.click(screen.getByTestId("dashboard-holdings-save"));
+
+    expect(confirm).toHaveBeenCalledWith(
+      "Sell all of Kama Stock? This records a sale in your ledger and removes it from holdings."
+    );
+    expect(api.updateHolding).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("dashboard-holdings-save"));
+    await waitFor(() => expect(api.updateHolding).toHaveBeenCalledWith(1, 42, {
+      quantity: "0", confirmSellAll: true, areaSqm: undefined, unitPriceTomans: undefined,
+    }));
   });
 
   it("shows an unsigned amount when the alternative wins", async () => {

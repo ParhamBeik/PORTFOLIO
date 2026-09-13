@@ -79,6 +79,37 @@ class UserSerializer(serializers.ModelSerializer):
         )
 
 
+class AdminUserSerializer(serializers.ModelSerializer):
+    """The member list as an operator needs to read it.
+
+    Separate from `UserSerializer` on purpose: that one is also the
+    `/api/auth/me/` payload, and `is_active` there would be a field every signed
+    -in client receives about itself and can do nothing with. This one is only
+    ever served behind `IsAdminUser`.
+
+    `is_active` is the whole ban mechanism in this codebase -- there is no
+    suspension model -- so it is the one writable field.
+    """
+
+    accounts_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = (
+            "id",
+            "email",
+            "first_name",
+            "last_name",
+            "is_active",
+            "is_staff",
+            "is_superuser",
+            "date_joined",
+            "last_login",
+            "accounts_count",
+        )
+        read_only_fields = tuple(f for f in fields if f != "is_active")
+
+
 class ChangePasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField(write_only=True, required=True)
     new_password = serializers.CharField(write_only=True, required=True)

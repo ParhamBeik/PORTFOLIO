@@ -12,6 +12,7 @@ from django.core.cache import cache
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.core.mail import send_mail
 from django.db import transaction
+from django.db.models import Count
 from django.http import HttpResponse
 from django.middleware.csrf import get_token
 from django.utils import timezone
@@ -29,10 +30,12 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, Ou
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
+from config.mail import mail_is_deliverable
 from portfolio.models import Account, Holding, ImportBatch, LedgerEntry
 
 from .models import User
 from .serializers import (
+    AdminUserSerializer,
     ChangePasswordSerializer,
     PasswordAwareTokenRefreshSerializer,
     PasswordResetConfirmSerializer,
@@ -103,6 +106,9 @@ def _set_refresh_cookie(response, request, refresh: str):
 
 
 class CookieTokenObtainPairView(TokenObtainPairView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
+
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
         # JWT login never fires Django's user_logged_in, so last_login stays
@@ -249,6 +255,8 @@ class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "register"
 
     def create(self, request, *args, **kwargs):
         if not settings.REGISTRATION_OPEN:
@@ -272,10 +280,24 @@ class RegisterView(generics.CreateAPIView):
 
 
 class RegistrationStatusView(APIView):
+    """What the signed-out card may offer, answered before it renders.
+
+    Two flags, both server-owned. `self_service_reset` is here rather than on
+    its own endpoint because this is already the one request the sign-in card
+    makes before painting, and a second round trip to decide whether to draw a
+    link is a round trip for nothing.
+
+    Deliberately configuration-only (`config.mail`): this route is public and
+    unauthenticated, so it must not open a socket to a relay.
+    """
+
     permission_classes = [AllowAny]
 
     def get(self, request):
-        return Response({"registration_open": settings.REGISTRATION_OPEN})
+        return Response({
+            "registration_open": settings.REGISTRATION_OPEN,
+            "self_service_reset": mail_is_deliverable(),
+        })
 
 
 class MeView(APIView):
@@ -359,6 +381,20 @@ class PasswordResetRequestView(APIView):
         serializer.is_valid(raise_exception=True)
         email = User.objects.normalize_email(serializer.validated_data["email"])
         user = User.objects.filter(email__iexact=email, is_active=True).first()
+        if not mail_is_deliverable():
+            # No relay, so there is nothing to attempt. The answer is unchanged
+            # -- it must stay identical for every address either way, or this
+            # endpoint enumerates accounts -- but skipping the send drops a
+            # guaranteed EMAIL_TIMEOUT-second stall from a public route, and the
+            # log line says "misconfigured" instead of a connection traceback.
+            # `RegistrationStatusView` reports the same fact, so the UI hides
+            # the link rather than promising mail nobody can send.
+            logger.warning(
+                "password-reset: mail is not deliverable; no send attempted "
+                "(EMAIL_HOST=%r). Issue a link via admin/password-reset-link/.",
+                settings.EMAIL_HOST,
+            )
+            return Response({"detail": RESET_ACCEPTED})
         if user is not None:
             try:
                 _send_reset_mail(user)
@@ -522,11 +558,86 @@ class AdminUserListView(generics.ListAPIView):
     """Staff-only search/list view of registered users."""
 
     permission_classes = [IsAdminUser]
-    serializer_class = UserSerializer
+    serializer_class = AdminUserSerializer
 
     def get_queryset(self):
-        queryset = User.objects.all().order_by("-date_joined")
+        # Annotated rather than serialized per row: "does this member actually
+        # use the product" is the first question an operator asks, and a
+        # SerializerMethodField counting `obj.accounts` is an N+1 query.
+        queryset = User.objects.annotate(
+            accounts_count=Count("accounts", distinct=True)
+        ).order_by("-date_joined")
         search = self.request.query_params.get("search")
         if search:
             queryset = queryset.filter(email__icontains=search)
+        active = self.request.query_params.get("active")
+        if active in ("0", "1"):
+            queryset = queryset.filter(is_active=active == "1")
         return queryset
+
+
+class AdminUserDetailView(APIView):
+    """Deactivate or reinstate a member. The only ban lever there is.
+
+    `is_active` is checked by `JWTAuthentication.get_user`, so clearing it stops
+    the *access* token at once -- but a live refresh token would still mint new
+    ones for up to its full lifetime, which is how a ban becomes a ban that did
+    not take. `_revoke_all` closes that.
+
+    Two refusals, both 400 with a reason rather than a later 500: an operator
+    cannot lock themselves out mid-session, and the last active superuser cannot
+    be removed, which would leave the installation with no way back into its own
+    admin.
+    """
+
+    permission_classes = [IsAdminUser]
+
+    def patch(self, request, pk: int):
+        if not isinstance(request.data, dict) or "is_active" not in request.data:
+            return Response({"is_active": ["This field is required."]}, status=400)
+        form = AdminUserSerializer(data=request.data, partial=True)
+        form.is_valid(raise_exception=True)
+        is_active = form.validated_data["is_active"]
+
+        with transaction.atomic():
+            # Lock the complete active-superuser set in a stable order before
+            # deciding whether one may be removed. Locking only the target
+            # leaves two simultaneous requests free to each see the other root
+            # and remove both. This is the invariant's serialization point.
+            if not is_active:
+                list(
+                    User.objects.select_for_update()
+                    .filter(is_superuser=True, is_active=True)
+                    .order_by("pk")
+                    .values_list("pk", flat=True)
+                )
+            user = User.objects.select_for_update().filter(pk=pk).first()
+            if user is None:
+                return Response({"detail": "No such user."}, status=404)
+            if not is_active:
+                if user.pk == request.user.pk:
+                    return Response(
+                        {"detail": "You cannot deactivate your own account."}, status=400
+                    )
+                if user.is_superuser and not User.objects.filter(
+                    is_superuser=True, is_active=True
+                ).exclude(pk=user.pk).exists():
+                    return Response(
+                        {"detail": "This is the last active superuser."}, status=400
+                    )
+            serializer = AdminUserSerializer(user, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            if not is_active:
+                _revoke_all(user)
+        logger.warning(
+            "member %s by uid=%s for uid=%s",
+            "reinstated" if is_active else "deactivated",
+            request.user.pk,
+            user.pk,
+        )
+        fresh = (
+            User.objects.annotate(accounts_count=Count("accounts", distinct=True))
+            .get(pk=user.pk)
+        )
+        return Response(AdminUserSerializer(fresh).data)
