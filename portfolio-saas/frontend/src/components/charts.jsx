@@ -47,7 +47,7 @@ export const STATUS_COLOR = {
   critical: "var(--c-critical)",
 };
 
-export const COVERAGE_COLORS = {
+const COVERAGE_COLORS = {
   complete: "var(--c-good)",
   fresh: "var(--c-good)",
   partial: "var(--c-warn)",
@@ -193,7 +193,7 @@ function EChart({ option, height, label, testId, className = "w-full" }) {
 }
 
 /** Y domain tightly around series values (~8% pad; never forced through 0). */
-export function moneyTrendDomain(dataMin, dataMax) {
+function moneyTrendDomain(dataMin, dataMax) {
   const min = Number(dataMin);
   const max = Number(dataMax);
   if (!Number.isFinite(min) || !Number.isFinite(max)) return [0, 1];
@@ -206,7 +206,7 @@ export function moneyTrendDomain(dataMin, dataMax) {
 }
 
 /** Stacked-share Y domain: symmetric around 50% so the even-split line stays centered. */
-export function shareTrendDomain(data, seriesKeys) {
+function shareTrendDomain(data, seriesKeys) {
   if (!data?.length || !seriesKeys?.length || seriesKeys.length <= 1) return [0, 1];
 
   let reach = 0;

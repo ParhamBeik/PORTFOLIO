@@ -10,7 +10,7 @@
 import { isWholeUnit } from "./format.js";
 
 export const QUANTITY_MIN = 0.000001;
-export const QUANTITY_MAX = 1e14; // max_digits 20 - decimal_places 6
+const QUANTITY_MAX = 1e14; // max_digits 20 - decimal_places 6
 
 export const positive = (v) => v !== "" && Number(v) > 0;
 

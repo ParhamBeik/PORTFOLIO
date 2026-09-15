@@ -23,7 +23,7 @@ let refreshPromise = null;
 // guaranteed failures on every first visit.
 const SESSION_HINT = "lattice_session";
 
-export function hasSessionHint() {
+function hasSessionHint() {
   try {
     return localStorage.getItem(SESSION_HINT) === "1";
   } catch {

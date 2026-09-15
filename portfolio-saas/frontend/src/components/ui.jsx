@@ -134,7 +134,7 @@ export function Badge({ children, variant = "neutral", title, testId }) {
  * a number chosen independently at each call site -- which is exactly how the
  * three different values above happened.
  */
-export const DISABLED_DIM = "disabled:cursor-not-allowed disabled:opacity-60";
+const DISABLED_DIM = "disabled:cursor-not-allowed disabled:opacity-60";
 
 export function Button({ variant = "ghost", className = "", ...props }) {
   // `-fill` on the two solid variants: white on the display accent is 3.64:1 and
