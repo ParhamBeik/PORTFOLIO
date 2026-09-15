@@ -17,7 +17,15 @@ from celery import shared_task
 from django.db import transaction
 
 from accounts.models import User
-from portfolio.models import Asset, DailyPriceAverage, Price, Snapshot
+from .models import (
+    Account,
+    Asset,
+    DailyPriceAverage,
+    Holding,
+    LedgerEntry,
+    Price,
+    Snapshot,
+)
 from portfolio.services import asset_value, invalidate_prices_cache
 from portfolio.services.valuation import (
     _archive_replacements,
@@ -36,6 +44,10 @@ from django.db.models.functions import TruncDate
 from django.utils import timezone
 
 from portfolio.optimization_models import OptimizationSnapshot
+from django.core.cache import cache
+from marketdata.models import GoldCurrencyHistory, WorkflowRun
+from marketdata.workflows import WorkflowOutcome
+from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
 
 # `portfolio.services.optimization` imports cvxpy, which drags in scs and its
 # bundled OpenBLAS. Importing it here put that library into every process that
@@ -50,7 +62,6 @@ logger = logging.getLogger(__name__)
 def _overlay_usdt_irt_from_warehouse(prices: dict) -> dict:
     """Use archived USDT/IRT when the free feed only echoed the USD peg."""
     from decimal import Decimal
-    from marketdata.models import GoldCurrencyHistory
 
     usd = Decimal(str(prices.get("usd_cash") or 0))
     current = Decimal(str(prices.get("usdt_irt") or 0))
@@ -409,8 +420,6 @@ def fetch_and_publish():
     archive backfill needed.
     """
     from marketdata.market_state import live_interval_seconds, market_state
-    from marketdata.models import WorkflowRun
-    from marketdata.workflows import WorkflowOutcome
 
     # The live lane was the one pipeline stage with no structured record at all:
     # a plain-text line that could not be grouped, counted or queried, and whose
@@ -478,8 +487,6 @@ def aggregate_daily_price_averages(date_str: str | None = None):
     from datetime import timedelta
     from django.db.models import Avg, Count
     from django.utils import timezone
-    from marketdata.models import WorkflowRun
-    from marketdata.workflows import WorkflowOutcome
 
     outcome = WorkflowOutcome(
         "aggregate_daily_price_averages", destination_table="DailyPriceAverage"
@@ -792,7 +799,6 @@ def prune_expired_refresh_tokens():
     The delete cascades to `BlacklistedToken` (its FK to `OutstandingToken` is
     the primary key), so both tables are bounded by one statement.
     """
-    from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
 
     deleted, _ = OutstandingToken.objects.filter(
         expires_at__lt=timezone.now()
@@ -804,8 +810,6 @@ def prune_expired_refresh_tokens():
 
 
 def _ledger_prune(workflow, table, metadata):
-    from marketdata.models import WorkflowRun
-    from marketdata.workflows import WorkflowOutcome
 
     WorkflowOutcome(workflow, destination_table=table).finish(
         WorkflowRun.Outcome.SUCCESS,
@@ -823,9 +827,7 @@ def refresh_if_stale(account, basis: str = "real_toman", *, force: bool = False)
     optimizations. Skips if the latest snapshot is younger than 15 minutes
     and the scoped price/ledger fingerprint matches.
     """
-    from django.core.cache import cache
     from django.utils import timezone
-    from portfolio.models import Holding, LedgerEntry
     from portfolio.optimization_models import OptimizationSnapshot
     from portfolio.services.returns import _price_version_fingerprint
     # From the concern module, not the package root: `views/__init__` is a
@@ -891,7 +893,6 @@ def refresh_if_stale(account, basis: str = "real_toman", *, force: bool = False)
 @shared_task(ignore_result=True)
 def refresh_my_optimal_snapshot(account_id: int, basis: str = "real_toman", force: bool = False):
     """Asynchronously refresh the default MyOptimal snapshot for one account."""
-    from portfolio.models import Account
     account = Account.objects.select_related("user").filter(id=account_id).first()
     if account:
         refresh_if_stale(account, basis=basis, force=force)
@@ -900,7 +901,6 @@ def refresh_my_optimal_snapshot(account_id: int, basis: str = "real_toman", forc
 @shared_task(ignore_result=True)
 def sweep_my_optimal_snapshots():
     """Nightly sweep refreshing stale MyOptimal snapshots for all active accounts."""
-    from portfolio.models import Account
     accounts = (
         Account.objects.filter(holdings__isnull=False)
         .distinct()
@@ -914,7 +914,6 @@ def sweep_my_optimal_snapshots():
 def debounce_my_optimal_refresh(account_id: int):
     """Debounce triggering a MyOptimal refresh for an account after ledger/holding change."""
     from django.conf import settings
-    from django.core.cache import cache
     if getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):
         return
     key = f"debounce:my_optimal:{account_id}"
