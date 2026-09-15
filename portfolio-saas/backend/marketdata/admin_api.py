@@ -13,6 +13,9 @@ from marketdata.admin_telemetry import get_ops_overview, invalidate_ops_cache
 from marketdata.coverage_report import list_ops_assets
 from marketdata.evidence import assemble_asset_evidence
 from marketdata.models import ArchiveFetchState, SystemLogEvent, WorkflowRun
+from .integrity import update_symbol_integrity
+from .workflows import WorkflowOutcome
+from django.conf import settings
 
 
 class OpsPagination(PageNumberPagination):
@@ -192,7 +195,6 @@ def enqueue_archive_retries(ids, actor_email, *, require_failed=True):
     if all(is_plan_blocked(plan) for plan in PLANS):
         raise RetryBlocked(503, "Provider quota exhausted; retry blocked.")
 
-    from django.conf import settings
     from redis import Redis
 
     try:
@@ -201,7 +203,6 @@ def enqueue_archive_retries(ids, actor_email, *, require_failed=True):
         raise RetryBlocked(503, "Broker unavailable; retry blocked.") from exc
 
     from marketdata.tasks import retry_archive_job_task
-    from marketdata.workflows import WorkflowOutcome
 
     qs = ArchiveFetchState.objects.filter(id__in=ids)
     if require_failed:
@@ -364,8 +365,6 @@ class AdminAssetRecomputeIntegrityView(APIView):
         payload, symbols = _asset_symbols(key)
         if payload is None:
             return Response({"detail": "Asset not found."}, status=404)
-        from marketdata.integrity import update_symbol_integrity
-        from marketdata.workflows import WorkflowOutcome
 
         results = [update_symbol_integrity(symbol) for symbol in symbols]
         WorkflowOutcome(
@@ -401,7 +400,6 @@ class AdminAssetRefreshView(APIView):
             result = enqueue_archive_retries(ids, request.user.email, require_failed=False)
         except RetryBlocked as err:
             return Response({"detail": err.detail}, status=err.status)
-        from marketdata.workflows import WorkflowOutcome
 
         WorkflowOutcome(
             "ops_refresh",
