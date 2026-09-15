@@ -43,6 +43,9 @@ from .returns import (
 
 # Same risk-free proxy as diagnostics, kept here so the optimizer is standalone.
 from django.conf import settings
+from django.utils import timezone
+from marketdata.currency import partition_tse_asset_keys, tse_unit_verified
+from portfolio.models import Asset
 RISK_FREE_RATE_ANNUAL = float(getattr(settings, "RISK_FREE_RATE_ANNUAL", 0.30))
 TRADING_DAYS_PER_YEAR = 252
 
@@ -151,7 +154,6 @@ class MixedUnitUniverseBlocked(Exception):
 
 
 def _guard_mixed_tse_units(keys) -> None:
-    from marketdata.currency import partition_tse_asset_keys, tse_unit_verified
 
     if tse_unit_verified():
         return
@@ -598,7 +600,6 @@ def _proxy_groups(keys) -> dict[str, list[str]]:
     single column keeps the estimate well-posed AND keeps the holding in the
     portfolio, instead of dropping it for having no history of its own.
     """
-    from portfolio.models import Asset
 
     groups: dict[str, list[str]] = {}
     rows = Asset.objects.filter(key__in=list(keys)).exclude(proxy_key="").values_list(
@@ -1364,7 +1365,6 @@ def optimize(
     from portfolio.services.returns import normalize_as_of, get_universe_by_mode
     as_of_dt = normalize_as_of(as_of)
     import jdatetime
-    from django.utils import timezone
 
     rate_date = as_of_dt or timezone.now()
     jalali_year = jdatetime.date.fromgregorian(date=rate_date.date()).year
@@ -2136,7 +2136,6 @@ def _efficient_frontier(
     from portfolio.services.returns import normalize_as_of
     as_of_dt = normalize_as_of(as_of)
     import jdatetime
-    from django.utils import timezone
 
     rate_date = as_of_dt or timezone.now()
     risk_free_annual = settings.RATE_FOR(
