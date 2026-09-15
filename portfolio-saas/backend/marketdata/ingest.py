@@ -18,7 +18,7 @@ Conventions:
 """
 import logging
 from decimal import Decimal
-from . import jalali, validation
+from . import calendars, jalali, jalali as jalali_mod, validation
 from .currency import canonical_symbol, gold_history_storage_unit, to_toman
 from .models import (
     CodalAnnouncement,
@@ -36,6 +36,12 @@ from .models import (
     StockSymbolMetadata,
     StockTransactionTick,
 )
+from .workflows import current_correlation_id
+from datetime import timedelta
+from django.conf import settings
+from django.db import transaction
+from django.db.models import Q
+from django.utils import timezone
 
 
 logger = logging.getLogger(__name__)
@@ -149,8 +155,6 @@ def provider_symbol(record) -> str:
 
 
 def _lineage():
-    from django.utils import timezone
-    from .workflows import current_correlation_id
 
     return {
         "ingested_at": timezone.now(),
@@ -459,7 +463,6 @@ def ingest_transactions(
             "ingest_transactions(%s, %s): skipped %d malformed record(s) (%s)",
             symbol, day, malformed, ", ".join(sorted(malformed_reasons)),
         )
-    from django.db import transaction
 
     with transaction.atomic():
         if replace:
@@ -607,8 +610,6 @@ def _enqueue_codal_extractions(rows):
     `report__isnull=True` is what makes this idempotent -- an announcement already
     extracted is simply not selected, so a repeated payload enqueues nothing.
     """
-    from django.conf import settings
-    from django.db.models import Q
 
     from .codal_storage import origin_unreachable
     from .tasks import _dispatch_codal_ids
@@ -643,7 +644,6 @@ def _number(value):
 
 def ingest_derivative_snapshots(kind, payload) -> tuple[int, int]:
     """Persist provider snapshots without pretending they are historical data."""
-    from django.utils import timezone
 
     rows = flatten_records(payload)
     observed_at = timezone.now()
@@ -899,7 +899,6 @@ def ingest_market_snapshots(asset_class, payload) -> tuple[int, int]:
     module: `symbol`/`price` (Market/* endpoints, e.g. gold/currency/crypto)
     and `l18`/`pl`/`pc` (Tsetmc/* endpoints).
     """
-    from django.utils import timezone
 
     rows = flatten_records(payload)
     observed_at = timezone.now()
@@ -946,10 +945,7 @@ def aggregate_market_daily_bars(asset_class, jalali_date, *, symbols=None) -> tu
     there was nothing to fetch, so a legitimate no-data day never shows up as
     a gap in `MarketDailyBar`'s own row-existence completeness signal.
     """
-    from datetime import timedelta
 
-    from . import calendars
-    from . import jalali as jalali_mod
 
     start = jalali_mod.to_datetime(jalali_date)
     end = start + timedelta(days=1)
@@ -1052,7 +1048,6 @@ def ingest_direct_crypto_history(symbol, unit, candles) -> tuple[int, int]:
     symbol would put two units in one column keyed by one symbol -- the failure
     this warehouse has paid for more than once.
     """
-    from django.utils import timezone
 
     if not candles:
         return 0, 0
