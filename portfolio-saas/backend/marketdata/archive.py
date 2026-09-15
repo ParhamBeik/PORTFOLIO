@@ -1,6 +1,11 @@
 """Gap-driven archive worker that verifies provider rows landed in PostgreSQL."""
 import logging
-from datetime import timedelta
+from datetime import timedelta, timezone as dt_timezone
+from .catalog import sync_provider_catalog
+from django.core.cache import cache
+from portfolio.models import Holding
+import random
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -10,7 +15,14 @@ from django.db.models import F, IntegerField, Q, Sum, Value
 from django.db.models.functions import Least
 from django.utils import timezone
 
-from . import ingest, jalali, market_state, validation
+from . import (
+    endpoints as endpoint_registry,
+    ingest,
+    jalali,
+    market_state,
+    reversal,
+    validation,
+)
 from .fetchers import (
     fetch_candlesticks,
     fetch_codal_announcements,
@@ -25,7 +37,9 @@ from .models import (
     CodalAnnouncement,
     DailyStockHistory,
     GoldCurrencyHistory,
+    InstrumentListingHistory,
     MarketCandle,
+    MarketInstrument,
     RealLegalHistory,
     RejectedRecord,
     ShareholderRecord,
@@ -256,7 +270,6 @@ _ENDPOINT_REGISTRY_KEY = {
 
 def source_for(endpoint):
     """Provider path the archive job actually calls, or empty if it calls none."""
-    from . import endpoints as endpoint_registry
 
     return endpoint_registry.source_for(_ENDPOINT_REGISTRY_KEY.get(endpoint, ""))
 
@@ -276,8 +289,6 @@ def disabled_endpoints():
 
 
 def ensure_archive_states(stock_symbols=None, gold_symbols=None):
-    from .models import MarketInstrument
-    from .catalog import sync_provider_catalog
 
     if not MarketInstrument.objects.filter(eligible=True).exists():
         # This branch is the cold-start bootstrap: with no eligible instrument
@@ -303,7 +314,6 @@ def ensure_archive_states(stock_symbols=None, gold_symbols=None):
         from .tasks import tracked_brs_symbols
         gold_symbols = tracked_brs_symbols()
 
-    import re
     rows = []
     disabled = disabled_endpoints()
     for symbol in stock_symbols:
@@ -878,7 +888,6 @@ def _defer_for_prereq(state, *, now, error=""):
 
 def next_quota_day_start(now=None):
     """UTC datetime of the next Tehran midnight (provider quota day boundary)."""
-    from datetime import timezone as dt_timezone
 
     now = now or timezone.now()
     local = now.astimezone(market_state.TEHRAN)
@@ -901,7 +910,6 @@ def spread_over_next_quota_day(now=None, *, rng=None):
     spread stops at `MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR` because a state that
     wakes after the ramp closes has no allowance left to claim that day.
     """
-    import random
 
     rng = rng or random
     start = next_quota_day_start(now)
@@ -1244,7 +1252,6 @@ def _tick_share_now():
     Cached briefly: this runs on every claim and the count is a full scan of the
     state table. A stale answer only mis-sizes one batch.
     """
-    from django.core.cache import cache
 
     full = float(getattr(settings, "MARKETDATA_TICK_QUOTA_SHARE", 0.25))
     gated = float(getattr(settings, "MARKETDATA_TICK_SHARE_WHILE_DAILY_GAPS", 0.05))
@@ -1411,8 +1418,6 @@ def get_deep_tier_symbols(all_symbols: set[str] | None = None) -> set[str]:
     request, and is the better proxy anyway: market cap counts shares that never
     trade, and only tradeable names are worth deep intraday history.
     """
-    from portfolio.models import Holding
-    from . import reversal
 
     held = set(
         Holding.objects.filter(quantity__gt=0)
@@ -1435,7 +1440,6 @@ def grow_tick_windows(step_days=90):
 
     Clamped to MAX_TICK_WINDOW_DAYS to prevent PositiveSmallIntegerField overflow.
     """
-    from .models import InstrumentListingHistory
 
     tick_endpoint = ArchiveFetchState.Endpoint.STOCK_TRANSACTION_TICKS
     done = list(
