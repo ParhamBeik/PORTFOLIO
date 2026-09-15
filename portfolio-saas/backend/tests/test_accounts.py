@@ -338,6 +338,88 @@ def test_a_second_signup_on_the_same_email_is_refused():
 
 
 @override_settings(REGISTRATION_OPEN=True)
+def test_an_address_is_one_identity_whatever_case_it_is_typed_in():
+    """`Case@…` and `case@…` are the same member, not two empty portfolios.
+
+    Django's `normalize_email` lowercases only the domain, so before this both
+    spellings registered successfully and the second person got a fresh empty
+    account. To them their holdings had disappeared. Password reset was already
+    case-insensitive (`email__iexact`), so the product also let you reset a
+    password for an address you could not sign in with.
+    """
+    first = register(email="Case@Example.com")
+    assert first.status_code == 201
+    assert User.objects.get().email == "case@example.com", "stored uncanonicalised"
+
+    duplicate = register(email="case@example.com", password="An0ther-Passw0rd!")
+
+    assert duplicate.status_code == 400, "a case variant created a second member"
+    assert "email" in duplicate.json()
+    assert User.objects.count() == 1
+
+
+@override_settings(REGISTRATION_OPEN=True)
+@pytest.mark.parametrize("typed", ["case@example.com", "Case@Example.com", "CASE@EXAMPLE.COM"])
+def test_sign_in_accepts_the_address_in_any_case(typed):
+    register(email="Case@Example.com", password="Str0ng-Passw0rd!")
+
+    response = APIClient().post(
+        "/api/auth/login/", {"email": typed, "password": "Str0ng-Passw0rd!"}, format="json"
+    )
+
+    assert response.status_code == 200, f"cannot sign in as {typed}"
+    assert response.json()["access"]
+
+
+@override_settings(REGISTRATION_OPEN=True)
+def test_signing_in_by_a_case_variant_still_stamps_last_login():
+    """The Ops member list reads last_login; it must not miss a real sign-in."""
+    register(email="Stamp@Example.com", password="Str0ng-Passw0rd!")
+
+    APIClient().post(
+        "/api/auth/login/",
+        {"email": "STAMP@example.com", "password": "Str0ng-Passw0rd!"},
+        format="json",
+    )
+
+    assert User.objects.get(email="stamp@example.com").last_login is not None
+
+
+def test_the_canonicalising_migration_folds_case_and_refuses_collisions():
+    """Two rows folding onto one address must stop the deploy, not pick a winner.
+
+    Dropping one destroys a member's portfolio, and keeping both leaves exactly
+    the ambiguity `get_by_natural_key` now assumes cannot exist -- so the
+    migration raises and a human decides which account is real. Production was
+    measured before this shipped (7 users, 0 non-lowercase, 0 collisions), so
+    this guard is for the databases nobody measured.
+    """
+    import importlib
+
+    from django.apps import apps as django_apps
+
+    migration = importlib.import_module("accounts.migrations.0002_lowercase_emails")
+
+    # Straight from create(): the manager would canonicalise, which is the very
+    # thing this migration exists to have done for rows written before it.
+    User.objects.bulk_create([
+        User(email="Folds@Example.com", password="x"),
+        User(email="Untouched@example.com", password="x"),
+    ])
+    User.objects.filter(email="Untouched@example.com").update(email="second@example.com")
+
+    migration.lowercase_emails(django_apps, None)
+
+    assert set(User.objects.values_list("email", flat=True)) == {
+        "folds@example.com", "second@example.com",
+    }
+
+    User.objects.create(email="FOLDS@example.com", password="x")
+    with pytest.raises(RuntimeError, match="differ only by case"):
+        migration.lowercase_emails(django_apps, None)
+
+
+@override_settings(REGISTRATION_OPEN=True)
 def test_the_new_member_can_immediately_use_the_product():
     """The token minted at signup opens every screen the shell renders first.
 

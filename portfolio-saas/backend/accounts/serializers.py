@@ -25,6 +25,22 @@ class RegisterSerializer(serializers.ModelSerializer):
         )
         read_only_fields = ("id",)
 
+    def to_internal_value(self, data):
+        """Canonicalise the address BEFORE the field validators run.
+
+        `validate_<field>` is too late: DRF runs a field's own validators --
+        `UniqueValidator` among them -- inside `run_validation`, before the
+        serializer-level hook. So a signup for `Taken@example.com` against a
+        stored `taken@example.com` would clear the uniqueness check, reach
+        `create_user`, normalize there, and hit the database constraint as an
+        unhandled IntegrityError: a 500 where the member should have been told
+        the address is already registered.
+        """
+        email = (data or {}).get("email")
+        if isinstance(email, str):
+            data = {**data, "email": User.objects.normalize_email(email)}
+        return super().to_internal_value(data)
+
     def validate_password(self, value):
         # ModelSerializer.create bypasses AUTH_PASSWORD_VALIDATORS, so enforce
         # them here; user attrs let UserAttributeSimilarityValidator compare.
