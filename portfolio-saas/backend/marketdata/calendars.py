@@ -21,7 +21,15 @@ from bisect import bisect_right
 from django.db.models import Count, Sum
 from django.core.cache import cache
 
-from .models import DailyStockHistory, MarketCandle
+from .models import (
+    DailyStockHistory,
+    DerivativeContract,
+    GoldCurrencyHistory,
+    MarketCandle,
+    MarketSnapshot,
+)
+from . import jalali
+from django.db.models.functions import TruncDate
 
 # Fewest distinct gold/FX symbols on a day before that feed's own publishing
 # pattern is trusted as a market calendar (see gold_currency_quoting_days).
@@ -108,7 +116,6 @@ def gold_currency_quoting_days(*, start=None, end=None) -> set[str]:
     data, so it is excluded from the expected set. Mirrors the fifth-of-peak
     floor `actual_trading_days` already uses for the TSE calendar.
     """
-    from .models import GoldCurrencyHistory
 
     cache_key = f"marketdata:fx-quoting-days:{start}:{end}"
     cached = cache.get(cache_key)
@@ -289,10 +296,7 @@ def _snapshot_quoting_days(asset_class: str, *, start=None, end=None) -> set[str
     """
     from django.core.cache import cache
     from django.db.models import Count
-    from django.db.models.functions import TruncDate
 
-    from . import jalali
-    from .models import MarketSnapshot
 
     cache_key = f"marketdata:snapshot-quoting-days:{asset_class}:{start}:{end}"
     cached = cache.get(cache_key)
@@ -386,7 +390,6 @@ def is_contract_expired(kind: str, contract_code: str, date: str) -> bool:
     it is "there is nothing to fetch," and must not consume retry budget or
     be flagged as a gap in `MarketDailyBar`.
     """
-    from .models import DerivativeContract
 
     contract = DerivativeContract.objects.filter(
         kind=kind, contract_code=contract_code
