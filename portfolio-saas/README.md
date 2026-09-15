@@ -16,7 +16,8 @@ safeguards: [`docs/REFERENCE.md`](docs/REFERENCE.md).
 ## Quick start (dev)
 
 ```bash
-# from portfolio-saas/ — create .env with your BRS + TSETMC keys (gitignored)
+# from portfolio-saas/ — .env is gitignored; fill in your BRS + TSETMC keys
+cp .env.example .env
 docker compose up --build
 ```
 
