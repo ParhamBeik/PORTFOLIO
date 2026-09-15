@@ -34,6 +34,16 @@ from ..services.optimization import (
 from ..services.returns import daily_returns_matrix
 from rest_framework.permissions import IsAdminUser
 from ._common import _int_param, _scope, concurrency_cap
+from django.core.cache import cache as _cache
+from marketdata.models import (
+    AssetMetricSnapshot,
+    MarketInstrument,
+    RejectedRecord,
+    SymbolIntegrity,
+)
+from portfolio.optimization_models import OptimizationSnapshot
+from portfolio.serializers import OptimizationSnapshotSerializer
+import copy
 
 # Both uses sit inside `except` handlers whose whole point is to degrade
 # gracefully -- one when the broker will not take a background refresh, one when
@@ -466,7 +476,6 @@ class MyOptimalView(APIView):
 
     @staticmethod
     def _cache_key(user, account, basis, max_assets=None, target_volatility=None):
-        from django.core.cache import cache as _cache  # local import mirrors module style
         from ..services.returns import _price_version_fingerprint
 
         ledger_q = LedgerEntry.objects.filter(account__user=user)
@@ -508,7 +517,6 @@ class MyOptimalView(APIView):
     @concurrency_cap
     def get(self, request):
         from ..services.returns import _price_version_fingerprint
-        from ..optimization_models import OptimizationSnapshot
         from django.utils import timezone
 
         account = _scope(request)
@@ -714,7 +722,6 @@ def _asset_class_leaders():
     Only the 1-year window is populated today (nightly_asset_metrics' default),
     so this is independent of the window the user has selected on the page.
     """
-    from marketdata.models import AssetMetricSnapshot, MarketInstrument
     from marketdata.universe import get_candidate_universe
 
     candidates, _ = get_candidate_universe()
@@ -748,8 +755,6 @@ class BestOverallView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        import copy
-        from ..optimization_models import OptimizationSnapshot
         from ..tasks import SCENARIOS, WINDOWS_DAYS
 
         # Trades are per caller: the nightly snapshot is market-wide and must
@@ -795,7 +800,6 @@ class AssetRankingView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from marketdata.models import AssetMetricSnapshot
 
         account = _scope(request)
         if account is None:
@@ -1074,7 +1078,6 @@ class IntegrityView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        from marketdata.models import SymbolIntegrity, RejectedRecord
 
         try:
             page = max(1, int(request.query_params.get("page") or 1))
@@ -1129,8 +1132,6 @@ class OptimizationSnapshotListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from ..optimization_models import OptimizationSnapshot
-        from ..serializers import OptimizationSnapshotSerializer
 
         account_id_raw = request.query_params.get("account_id")
         try:
@@ -1163,8 +1164,6 @@ class OptimizationSnapshotLatestView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from ..optimization_models import OptimizationSnapshot
-        from ..serializers import OptimizationSnapshotSerializer
         account_id_raw = request.query_params.get("account_id")
         if account_id_raw is not None and account_id_raw != "":
             try:
