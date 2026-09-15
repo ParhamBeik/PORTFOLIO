@@ -4,9 +4,32 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from marketdata.currency import holding_value_to_toman
+from marketdata.currency import holding_value_to_toman, is_tse_priced, to_toman
 
-from ..models import HOUSE_AREA_SQM, Account, Asset, Holding, LedgerEntry
+from portfolio.models import (
+    Account,
+    Asset,
+    HOUSE_AREA_SQM,
+    Holding,
+    LedgerEntry,
+    Liability,
+    Price,
+    Snapshot,
+)
+from .timeline import house_area_as_of, house_marks_as_of
+from .valuation import _house_value, asset_value, invalidate_prices_cache
+from collections import defaultdict, deque
+from django.db.models import Q
+from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS
+from marketdata.models import GoldCurrencyHistory, MarketCandle
+from marketdata.provenance import (
+    BRS_SERIES_ENDPOINTS,
+    STOCK_SERIES_ENDPOINTS,
+    daily_bar_price,
+    rate_on,
+    rejected_pairs,
+    toman_per_dollar,
+)
 
 
 class LedgerError(Exception):
@@ -399,8 +422,6 @@ def record_manual_price(asset: Asset, unit_price_tomans) -> None:
     """
     if unit_price_tomans is None:
         return
-    from portfolio.models import Price
-    from portfolio.services.valuation import invalidate_prices_cache
 
     Price.objects.create(
         asset=asset,
@@ -502,7 +523,6 @@ def entry_value_tomans(entry) -> Decimal | None:
     through the same helper the P&L column uses: divide the product, never the
     price.
     """
-    from portfolio.services.valuation import _house_value
 
     if entry.amount_tomans is not None:
         return entry.amount_tomans
@@ -526,8 +546,6 @@ def synthetic_position_rows(accounts, ledger_rows, prices: dict | None = None) -
     these rows carried a quantity and nothing else: a manual gold bar whose price
     the owner had typed in showed "—" for both its price and its value.
     """
-    from marketdata.currency import is_tse_priced
-    from portfolio.services.valuation import asset_value
 
     prices = prices or {}
     covered = {
@@ -740,7 +758,6 @@ def rebuild_projections(account: Account) -> dict:
             "cash_balance_tomans", "ledger_complete", "track_cash", "updated_at",
         ]
     )
-    from portfolio.models import Liability
     # Only the rows this function minted. Scoping the reap to `asset__isnull`
     # instead reached every secured debt on the account, so a user's own
     # mortgage — which names the house by definition — was erased by the next
@@ -967,10 +984,6 @@ def _apply_house_to_snapshots(account, asset, *, before, sign) -> int:
     before the property was bought. Adding such a house again double-counts it
     across the entire invented history, which is what `sign=-1` exists to undo.
     """
-    from django.db.models import Q
-    from portfolio.models import Snapshot
-    from portfolio.services.timeline import house_area_as_of, house_marks_as_of
-    from portfolio.services.valuation import _house_value
 
     before = before or timezone.now()
     key = asset.key
@@ -1095,7 +1108,6 @@ def _latest_live_price(asset: Asset) -> Decimal | None:
     Refusing is the only safe reading of "I know this is dollars and I have no
     rate"; the caller already raises a clear PriceResolutionError from None.
     """
-    from portfolio.models import Price
 
     from .returns import USD_QUOTED_KEYS
 
@@ -1117,7 +1129,6 @@ def _live_price_fetched_today(asset: Asset) -> Decimal | None:
     today, and it is hours old by design. A price from a previous day is not --
     that is a dead feed, and the warehouse close is the better answer.
     """
-    from portfolio.models import Price
 
     row = (
         Price.objects.filter(asset=asset, price__gt=0)
@@ -1131,7 +1142,6 @@ def _live_price_fetched_today(asset: Asset) -> Decimal | None:
 
 def _latest_usd_toman_rate() -> Decimal | None:
     """Live Toman-per-dollar, from the same `usd_cash` row the panel uses."""
-    from portfolio.models import Price
 
     row = (
         Price.objects.filter(asset__key="usd_cash", price__gt=0)
@@ -1151,9 +1161,7 @@ def _daily_bar_or_live_price(asset: Asset, j_date: str) -> Decimal:
     live row is missing. The bar is distilled from the same provider field the
     live price is read from, so both sides of this fallback share a unit.
     """
-    from marketdata.provenance import daily_bar_price
     from marketdata.calendars import market_for_asset, sessions_between
-    from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS
 
     # Converted, not raw. This is the only branch that turns a bar into DURABLE
     # user data -- `LedgerEntry.price_tomans` -- and it used to return the
@@ -1179,7 +1187,6 @@ def _daily_bar_or_live_price(asset: Asset, j_date: str) -> Decimal:
 
 
 def assert_not_before_history(asset: Asset, when) -> None:
-    from marketdata.models import GoldCurrencyHistory, MarketCandle
 
     if asset.is_manual or asset.is_house:
         return
@@ -1214,17 +1221,7 @@ def assert_not_before_history(asset: Asset, when) -> None:
 
 def resolve_historical_price(asset: Asset, when) -> Decimal:
     """Warehouse close on `when`, else latest live Price. Raises if none."""
-    from marketdata.currency import to_toman
     from marketdata.calendars import market_for_asset, sessions_between
-    from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS
-    from marketdata.models import GoldCurrencyHistory, MarketCandle
-    from marketdata.provenance import (
-        BRS_SERIES_ENDPOINTS,
-        STOCK_SERIES_ENDPOINTS,
-        rate_on,
-        rejected_pairs,
-        toman_per_dollar,
-    )
 
     assert_not_before_history(asset, when)
     if asset.is_manual or asset.is_house:
@@ -1329,7 +1326,6 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
 
 def entry_pnl_map(entries, prices: dict) -> dict[int, dict]:
     """Map ledger pk -> {pnl_tomans, pnl_kind}. Unknown stays null, never 0."""
-    from collections import defaultdict, deque
 
     result = {
         entry.pk: {"pnl_tomans": None, "pnl_kind": None} for entry in entries
