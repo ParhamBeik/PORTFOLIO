@@ -26,6 +26,17 @@ from ..services.visibility import hidden_asset_ids
 from ..services.deflator import cpi_for_date, normalize_basis
 from ..services.performance import account_performance
 from ._common import _express_real_toman, _express_usd_real, _fx_rate, _int_param, _scope, _with_usd
+from marketdata import jalali
+from marketdata.currency import is_tse_priced, to_toman
+from marketdata.integrity import compute_symbol_integrity
+from marketdata.jalali import from_gregorian
+from marketdata.models import (
+    GoldCurrencyHistory,
+    MarketCandle,
+    RejectedRecord,
+    SymbolIntegrity,
+)
+from marketdata.provenance import daily_bar_price, rate_on, toman_per_dollar
 
 
 class AccountPerformanceView(APIView):
@@ -48,7 +59,6 @@ class AccountDataQualityView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, account_id):
-        from marketdata.integrity import compute_symbol_integrity
 
         account = request.user.accounts.filter(pk=account_id).first()
         if account is None:
@@ -514,7 +524,6 @@ _PRICE_HISTORY_REJECTIONS = (
 
 
 def _rejected_dates(symbol, since_jalali):
-    from marketdata.models import RejectedRecord
 
     return set(
         RejectedRecord.objects.filter(
@@ -527,7 +536,6 @@ def _rejected_dates(symbol, since_jalali):
 
 def _tse_price_history(asset, since_jalali):
     """TSE daily closes, Rial and provider-verbatim like the rest of the table."""
-    from marketdata.models import MarketCandle
 
     rejected = _rejected_dates(asset.tse_symbol, since_jalali)
     for timeframe in (MarketCandle.UNADJUSTED, MarketCandle.ADJUSTED):
@@ -567,9 +575,6 @@ def _brs_price_history(asset, since_jalali):
     number drawn on a Toman axis is off by five orders of magnitude, and the
     unit is declared precisely so it never has to be guessed.
     """
-    from marketdata.currency import to_toman
-    from marketdata.models import GoldCurrencyHistory
-    from marketdata.provenance import daily_bar_price, rate_on, toman_per_dollar
 
     rejected = _rejected_dates(asset.brs_symbol, since_jalali)
     rows = [
@@ -645,7 +650,6 @@ def _to_gregorian_points(points):
     series renders ~621 years early. An unparseable date yields no point rather
     than a wrong one.
     """
-    from marketdata import jalali
 
     out = []
     for point in points:
@@ -682,8 +686,6 @@ class PriceHistoryView(APIView):
         if asset is None:
             return Response({"detail": "Unknown asset."}, status=404)
 
-        from marketdata.currency import is_tse_priced
-        from marketdata.jalali import from_gregorian
 
         since = timezone.now() - timedelta(days=days)
         since_jalali = from_gregorian(since)
@@ -705,7 +707,6 @@ class PriceHistoryView(APIView):
         # converts to the Toman every non-TSE price in this codebase is quoted in.
         unit = "Rial" if is_tse_priced(asset) else "Toman"
 
-        from marketdata.models import SymbolIntegrity
         symbol_key = asset.tse_symbol or asset.brs_symbol or asset.key
         integrity = SymbolIntegrity.objects.filter(symbol=symbol_key).first()
         caveats = []
