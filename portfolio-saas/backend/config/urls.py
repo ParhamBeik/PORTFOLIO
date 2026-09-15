@@ -2,7 +2,7 @@
 from django.contrib import admin
 from django.urls import include, path
 from accounts.views import CookieTokenRefreshView
-from portfolio.views import AdminCleanPricesExecuteView, AdminCleanPricesScanView
+from portfolio.views.admin_ops import AdminCleanPricesExecuteView, AdminCleanPricesScanView
 from .health import HealthView, PriceFeedView, ReadyView
 
 # Monkeypatch django admin index page to inject operational telemetry

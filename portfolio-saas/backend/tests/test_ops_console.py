@@ -34,7 +34,7 @@ from marketdata.tasks import _retry_code, prune_workflow_runs
 from marketdata.tasks import capture_operational_metrics
 from marketdata.workflows import WorkflowOutcome
 from portfolio.models import Account, Asset, Holding, Liability
-from portfolio.views import AdminCleanPricesExecuteView
+from portfolio.views.admin_ops import AdminCleanPricesExecuteView
 
 pytestmark = pytest.mark.django_db
 

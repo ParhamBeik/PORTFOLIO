@@ -1,123 +1,13 @@
 """Portfolio endpoints, split by concern.
 
-Was one 2,871-line module. The seams follow the groupings `urls.py`
-already used, and every public name is re-exported here so importers --
-`urls.py` chief among them -- see exactly the surface they saw before.
-"""
-from ._common import (  # noqa: F401
-    concurrency_cap,
-)
-from .admin_ops import (  # noqa: F401
-    AdminCleanPricesExecuteView,
-    AdminCleanPricesScanView,
-    admin_logger,
-)
-from .analytics import (  # noqa: F401
-    AnalyticsView,
-    AssetRankingView,
-    AssetReturnsView,
-    BenchmarkSeriesView,
-    BestOverallView,
-    ComparisonView,
-    DiversifierCandidatesView,
-    FrontierView,
-    InsightsView,
-    IntegrityView,
-    MAX_ASSETS_CEILING,
-    MAX_TARGET_VOLATILITY,
-    MIN_TARGET_VOLATILITY,
-    MyOptimalView,
-    OptimizationSnapshotLatestView,
-    OptimizationSnapshotListView,
-    OptimizationView,
-    RobustnessView,
-)
-from .catalog import (  # noqa: F401
-    AccountDetailView,
-    AccountListCreateView,
-    AssetCatalogView,
-    AssetListView,
-    EnsureAssetView,
-    HoldingDetailView,
-    HoldingListCreateView,
-    LiabilityDetailView,
-    LiabilityListCreateView,
-)
-from .ledger import (  # noqa: F401
-    LedgerEntryDetailView,
-    LedgerImportCommitView,
-    LedgerImportView,
-    LedgerIndexView,
-    LedgerListCreateView,
-    LedgerPositionView,
-    LedgerReverseView,
-    TradeView,
-    TransactionDestroyView,
-    TransactionListView,
-    TransactionUndoView,
-)
-from .valuation import (  # noqa: F401
-    AccountDataQualityView,
-    AccountPerformanceView,
-    AccountValuationView,
-    LatestPricesView,
-    PRICE_HISTORY_MAX_DAYS,
-    PerformanceView,
-    PriceHistoryView,
-    SnapshotListView,
-    ValuationView,
-)
+Was one 2,871-line module. The seams follow the groupings `urls.py` already
+used: `catalog`, `ledger`, `valuation`, `analytics`, `admin_ops`, and `_common`
+for what two or more of them share.
 
-__all__ = [
-    "AccountDataQualityView",
-    "AccountDetailView",
-    "AccountListCreateView",
-    "AccountPerformanceView",
-    "AccountValuationView",
-    "AdminCleanPricesExecuteView",
-    "AdminCleanPricesScanView",
-    "AnalyticsView",
-    "AssetCatalogView",
-    "AssetListView",
-    "AssetRankingView",
-    "AssetReturnsView",
-    "BenchmarkSeriesView",
-    "BestOverallView",
-    "ComparisonView",
-    "DiversifierCandidatesView",
-    "EnsureAssetView",
-    "FrontierView",
-    "HoldingDetailView",
-    "HoldingListCreateView",
-    "InsightsView",
-    "IntegrityView",
-    "LatestPricesView",
-    "LedgerEntryDetailView",
-    "LedgerImportCommitView",
-    "LedgerImportView",
-    "LedgerIndexView",
-    "LedgerListCreateView",
-    "LedgerPositionView",
-    "LedgerReverseView",
-    "LiabilityDetailView",
-    "LiabilityListCreateView",
-    "MAX_ASSETS_CEILING",
-    "MAX_TARGET_VOLATILITY",
-    "MIN_TARGET_VOLATILITY",
-    "MyOptimalView",
-    "OptimizationSnapshotLatestView",
-    "OptimizationSnapshotListView",
-    "OptimizationView",
-    "PRICE_HISTORY_MAX_DAYS",
-    "PerformanceView",
-    "PriceHistoryView",
-    "RobustnessView",
-    "SnapshotListView",
-    "TradeView",
-    "TransactionDestroyView",
-    "TransactionListView",
-    "TransactionUndoView",
-    "ValuationView",
-    "admin_logger",
-    "concurrency_cap",
-]
+Import from the concern module, not from here -- `from .views.ledger import
+TradeView`. This package root deliberately exports nothing, so there is exactly
+one place each view can be imported from and one place to look for it.
+
+A view belongs in the module its URL prefix belongs to. Put a shared helper in
+`_common` only once a second module needs it.
+"""

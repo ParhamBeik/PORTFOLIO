@@ -3,51 +3,58 @@
 Grouped top-down the way a request would find them: catalog & CRUD, valuation,
 prices, then the Pro analytics endpoints.
 """
-import importlib
 from django.urls import path
 
-from .views import (
-    AccountDetailView,
-    AccountListCreateView,
-    AccountValuationView,
+from .views.analytics import (
     AnalyticsView,
-    AssetListView,
-    AssetCatalogView,
-    EnsureAssetView,
-    AssetReturnsView,
     AssetRankingView,
+    AssetReturnsView,
     BenchmarkSeriesView,
-    ComparisonView,
     BestOverallView,
+    ComparisonView,
     DiversifierCandidatesView,
     FrontierView,
+    InsightsView,
+    IntegrityView,
+    MyOptimalView,
+    OptimizationSnapshotLatestView,
+    OptimizationSnapshotListView,
+    OptimizationView,
+    RobustnessView,
+)
+from .views.catalog import (
+    AccountDetailView,
+    AccountListCreateView,
+    AssetCatalogView,
+    AssetListView,
+    EnsureAssetView,
     HoldingDetailView,
     HoldingListCreateView,
     LiabilityDetailView,
     LiabilityListCreateView,
-    LedgerListCreateView,
-    LedgerReverseView,
-    LedgerIndexView,
+)
+from .views.ledger import (
     LedgerEntryDetailView,
-    LedgerPositionView,
-    LedgerImportView,
     LedgerImportCommitView,
-    AccountPerformanceView,
-    AccountDataQualityView,
-    InsightsView,
-    LatestPricesView,
-    MyOptimalView,
-    RobustnessView,
-    OptimizationView,
-    PriceHistoryView,
-    SnapshotListView,
+    LedgerImportView,
+    LedgerIndexView,
+    LedgerListCreateView,
+    LedgerPositionView,
+    LedgerReverseView,
     TradeView,
     TransactionDestroyView,
     TransactionListView,
     TransactionUndoView,
-    ValuationView,
+)
+from .views.valuation import (
+    AccountDataQualityView,
+    AccountPerformanceView,
+    AccountValuationView,
+    LatestPricesView,
     PerformanceView,
-    IntegrityView,
+    PriceHistoryView,
+    SnapshotListView,
+    ValuationView,
 )
 
 urlpatterns = [
@@ -111,6 +118,8 @@ urlpatterns = [
     path("integrity/", IntegrityView.as_view(), name="integrity"),
 
     # Optimization snapshots API (MVP)
-    path("optimization/snapshots/", importlib.import_module(".views", package=__package__).OptimizationSnapshotListView.as_view(), name="optimization-snapshots"),
-    path("optimization/snapshots/latest/", importlib.import_module(".views", package=__package__).OptimizationSnapshotLatestView.as_view(), name="optimization-snapshots-latest"),
+    path("optimization/snapshots/", OptimizationSnapshotListView.as_view(),
+         name="optimization-snapshots"),
+    path("optimization/snapshots/latest/", OptimizationSnapshotLatestView.as_view(),
+         name="optimization-snapshots-latest"),
 ]
