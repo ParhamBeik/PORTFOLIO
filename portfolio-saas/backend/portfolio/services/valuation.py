@@ -12,9 +12,44 @@ from decimal import Decimal
 from django.core.cache import cache
 from django.utils import timezone
 
-from marketdata.currency import holding_value_to_toman, is_tse_priced
+from marketdata.currency import (
+    FOREIGN_QUOTE_UNITS,
+    holding_value_to_toman,
+    is_tse_priced,
+    to_toman,
+)
 
-from ..models import HOUSE_AREA_SQM, HOUSE_PRICE_SCALE, Account, Asset, Holding, Price
+from portfolio.models import (
+    Account,
+    Asset,
+    HOUSE_AREA_SQM,
+    HOUSE_PRICE_SCALE,
+    Holding,
+    LedgerEntry,
+    Liability,
+    Price,
+)
+from .timeline import cash_as_of, holdings_as_of, house_state_as_of, load_house_marks
+from .visibility import hidden_asset_ids, hidden_keys
+from marketdata.calendars import candle_close_qs, market_closure_days
+from marketdata.market_state import (
+    CLOSED_DAYTIME,
+    DAYTIME_START,
+    OPEN,
+    SESSION_START,
+    TEHRAN,
+    TRADING_WEEKDAYS,
+)
+from marketdata.models import GoldCurrencyHistory
+from marketdata.provenance import (
+    BRS_SERIES_ENDPOINTS,
+    PRICE_SERIES_ENDPOINTS,
+    STOCK_SERIES_ENDPOINTS,
+    daily_bar_price,
+    rate_on,
+    rejected_pairs,
+    toman_per_dollar,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +99,6 @@ def current_market_state() -> str:
 
 def _asset_market_is_open(asset, state: str) -> bool:
     """Return whether this asset's live feed should be authoritative now."""
-    from marketdata.market_state import CLOSED_DAYTIME, OPEN
 
     if asset.asset_class == Asset.AssetClass.CRYPTO:
         return True
@@ -277,7 +311,6 @@ def _daily_bar_as_of(asset, jalali_str) -> tuple[Decimal, int]:
     forward-fill bound applies to it too.
     """
     from marketdata.calendars import market_for_asset, sessions_between
-    from marketdata.provenance import daily_bar_price
 
     rows = daily_bar_price([asset], as_of=jalali_str, latest_only=True)
     if not rows:
@@ -341,13 +374,6 @@ def _latest_archive_closes(assets) -> tuple[dict, dict]:
     for the live-only classes that have no provider history endpoint at all.
     Rows the warehouse recorded as rejected are excluded from all three.
     """
-    from marketdata.calendars import candle_close_qs
-    from marketdata.models import GoldCurrencyHistory
-    from marketdata.provenance import (
-        PRICE_SERIES_ENDPOINTS,
-        daily_bar_price,
-        rejected_pairs,
-    )
 
     stock_symbols = {
         asset.tse_symbol: asset.key
@@ -589,12 +615,6 @@ def _clock_sessions_elapsed(asset, fetched_at, now) -> int:
 
     import jdatetime
 
-    from marketdata.market_state import (
-        DAYTIME_START,
-        SESSION_START,
-        TEHRAN,
-        TRADING_WEEKDAYS,
-    )
 
     now_local = now.astimezone(TEHRAN)
     quote_local = fetched_at.astimezone(TEHRAN)
@@ -631,7 +651,6 @@ def _known_closure_days(tse: bool, start, end) -> frozenset:
 
     import jdatetime
 
-    from marketdata.calendars import market_closure_days
 
     if not tse or start >= end:
         return frozenset()
@@ -783,8 +802,6 @@ def value_account(
     snapshot writers pass it, so the recorded history keeps one meaning and
     switching an asset off never puts a step in it.
     """
-    from portfolio.models import Liability
-    from portfolio.services.visibility import hidden_asset_ids
     prices = prices if prices is not None else get_latest_prices()
     items, hidden_items, excluded, total = [], [], [], Decimal("0")
     hidden_ids = set() if include_hidden else hidden_asset_ids([account] if account.pk else [])
@@ -1011,7 +1028,6 @@ HIDDEN_ADJUSTMENT_MAX_DAYS = 1095
 
 
 def _accounts_have_buy_sell(accounts, asset_ids=None) -> bool:
-    from portfolio.models import LedgerEntry
 
     qs = LedgerEntry.objects.filter(
         account__in=list(accounts),
@@ -1111,19 +1127,7 @@ def compute_dynamic_net_worth_series(
         session_calendar,
         sessions_between,
     )
-    from marketdata.models import GoldCurrencyHistory
-    from marketdata.provenance import (
-        BRS_SERIES_ENDPOINTS,
-        STOCK_SERIES_ENDPOINTS,
-        daily_bar_price,
-        rejected_pairs,
-    )
     from portfolio.models import Holding, Liability
-    from portfolio.services.timeline import (
-        house_state_as_of,
-        load_house_marks,
-    )
-    from portfolio.services.visibility import hidden_asset_ids
 
     days = max(1, min(int(days), max_days or SYNTHETIC_HISTORY_MAX_DAYS))
     now = timezone.now()
@@ -1575,15 +1579,6 @@ def resolve_asset_point_in_time_price(
         candle_close_qs,
         sessions_between,
     )
-    from marketdata.models import GoldCurrencyHistory
-    from marketdata.provenance import (
-        BRS_SERIES_ENDPOINTS,
-        STOCK_SERIES_ENDPOINTS,
-        rejected_pairs,
-        rate_on,
-        toman_per_dollar,
-    )
-    from marketdata.currency import FOREIGN_QUOTE_UNITS, to_toman
     from portfolio.services.returns import USD_QUOTED_KEYS
 
     price = Decimal("0")
@@ -1660,9 +1655,6 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     from django.utils import timezone
     from portfolio.services.deflator import cpi_for_date, normalize_basis
     from portfolio.services.returns import normalize_as_of, to_jalali_str
-    from portfolio.services.timeline import cash_as_of, holdings_as_of
-    from portfolio.services.visibility import hidden_keys
-    from marketdata.models import GoldCurrencyHistory
     from portfolio.models import Asset
 
     as_of_dt = normalize_as_of(as_of)
@@ -1816,8 +1808,6 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
             cash = cash / cpi * Decimal("100")
         total += cash
 
-    from portfolio.models import Liability
-    from portfolio.services.visibility import hidden_asset_ids
     liabilities = Liability.objects.filter(account__in=accounts).exclude(
         asset_id__in=hidden_asset_ids(list(accounts))
     )
