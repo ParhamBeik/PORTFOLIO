@@ -7,9 +7,21 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from django.conf import settings
 
-from marketdata.fetchers import MarketDataFetchError, fetch_json
+from marketdata.fetchers import (
+    MarketDataFetchError,
+    fetch_gold_currency_pro_history_24h,
+    fetch_json,
+)
 from marketdata.quota import BRS, LIVE, TSETMC, QuotaExhausted
 from portfolio.live import find_symbol_record
+from datetime import datetime
+from django.core.cache import cache
+from marketdata import ingest
+from marketdata.sources import nobitex, tgju, wallex
+from marketdata.sources.http import SourceError
+from marketdata.workflows import submit_with_context
+from portfolio.models import Asset
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -141,8 +153,6 @@ def _usdt_irt_quote(brs_key):
     saving is shared across worker processes rather than per-process. A cache
     miss just buys it again; there is no correctness dependency on the TTL.
     """
-    from django.core.cache import cache
-    from marketdata.fetchers import fetch_gold_currency_pro_history_24h
 
     ttl = int(getattr(settings, "MARKETDATA_USDT_QUOTE_TTL_SECONDS", 600) or 0)
     key = "marketdata:usdt_irt_quote"
@@ -182,7 +192,6 @@ def _required_symbols():
     market catalog changes the answer immediately, and pricing their new
     holding matters more than saving one request.
     """
-    from portfolio.models import Asset
 
     return {
         symbol.upper()
@@ -206,8 +215,6 @@ def _direct_job():
     the price loop with it -- the paid one is still there, which is precisely
     the property that makes running both worth the extra request.
     """
-    from marketdata.sources import nobitex, tgju, wallex
-    from marketdata.sources.http import SourceError
 
     result = {}
     rows = []
@@ -331,7 +338,6 @@ def _brs_verification_due():
 
 
 def _tsetmc_job(tsetmc_url, tsetmc_key, tsetmc_symbol_url):
-    from django.core.cache import cache
     result = {"tsetmc": fetch_tsetmc(tsetmc_url, tsetmc_key)}
     kama_record = _find_symbol_record(result["tsetmc"], KAMA_SYMBOL)
     if _extract_price(kama_record) <= 0:
@@ -372,7 +378,6 @@ def fetch_all_markets(api_settings):
     starts from a fresh context, so quota attempts billed inside these threads
     were invisible to the workflow ledger that owns them.
     """
-    from marketdata.workflows import submit_with_context
 
     raw_data = {}
     jobs = []
@@ -382,11 +387,7 @@ def fetch_all_markets(api_settings):
     tsetmc_url = api_settings.get("tsetmc_url")
     tsetmc_key = api_settings.get("tsetmc_api_key")
 
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    from marketdata import ingest
     from marketdata.fetchers import fetch_market_index
-    from marketdata.sources import tgju
     from marketdata.market_state import (
         claim_provider_state_probe,
         live_job_keys,
