@@ -277,6 +277,139 @@ def test_register_rejects_too_short_password_over_http():
     assert not User.objects.filter(email="short@test.test").exists()
 
 
+# ---------------------------------------------------------------------------
+# SIGNUP, END TO END. Everything above this banner tests registration being
+# REFUSED -- closed gate, weak password, short password. Nothing tested that it
+# ever succeeds, or that the person it creates can then use the product. Those
+# are the two things a paying customer does first, and they were the two the
+# suite could not have caught breaking.
+
+
+def register(email="newcomer@test.test", password="Str0ng-Passw0rd!", **extra):
+    """Sign up over HTTP exactly as the sign-up card does."""
+    return APIClient().post(
+        "/api/auth/register/",
+        {"email": email, "password": password, **extra},
+        format="json",
+    )
+
+
+def as_registered_user(response):
+    """An API client carrying a freshly registered user's access token."""
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.json()['access']}")
+    return client
+
+
+@override_settings(REGISTRATION_OPEN=True)
+def test_signup_creates_a_usable_session_in_one_round_trip():
+    """201 with an access token AND the refresh cookie, not a bare user row.
+
+    The card signs the new member straight in -- if this ever returned only the
+    user, registration would look like it worked and drop the person back on the
+    sign-in form with no session.
+    """
+    response = register(first_name="New", last_name="Comer")
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["access"]
+    assert body["user"]["email"] == "newcomer@test.test"
+    assert body["session_expires_at"]
+    assert "ps_refresh" in response.cookies, "no refresh cookie: the session dies on reload"
+    # Never echo the credential back, in any form.
+    assert "password" not in body["user"]
+
+    user = User.objects.get(email="newcomer@test.test")
+    assert user.is_active
+    assert not user.is_staff and not user.is_superuser
+    assert user.check_password("Str0ng-Passw0rd!"), "password stored unhashed or unset"
+
+
+@override_settings(REGISTRATION_OPEN=True)
+def test_a_second_signup_on_the_same_email_is_refused():
+    assert register(email="taken@test.test").status_code == 201
+
+    response = register(email="taken@test.test", password="An0ther-Passw0rd!")
+
+    assert response.status_code == 400
+    assert "email" in response.json()
+    assert User.objects.filter(email="taken@test.test").count() == 1
+
+
+@override_settings(REGISTRATION_OPEN=True)
+def test_the_new_member_can_immediately_use_the_product():
+    """The token minted at signup opens every screen the shell renders first.
+
+    A brand-new member owns nothing, so the interesting failure is not 403 -- it
+    is a 500 from a service that assumed at least one holding.
+    """
+    client = as_registered_user(register(email="firstday@test.test"))
+
+    for path in (
+        "/api/auth/me/",
+        "/api/accounts/",
+        "/api/assets/",
+        "/api/valuation/",
+        "/api/snapshots/",
+        "/api/insights/",
+        "/api/analytics/",
+        "/api/ledger/",
+        "/api/comparison/",
+        "/api/optimization/best-overall/",
+        "/api/optimization/frontier/",
+    ):
+        assert client.get(path).status_code == 200, f"{path} is not usable on day one"
+
+
+@override_settings(REGISTRATION_OPEN=True)
+def test_an_empty_portfolio_explains_itself_rather_than_erroring():
+    """The two endpoints that cannot answer without holdings must say why.
+
+    `/api/optimization/my-optimal/` is a 400 for a member with nothing priced,
+    and that is correct -- but the frontend prints `detail` verbatim, so an
+    empty `detail` would reach a first-time user as a bare "Something went
+    wrong" on the page the product is named for.
+    """
+    client = as_registered_user(register(email="nothingyet@test.test"))
+
+    response = client.get("/api/optimization/my-optimal/")
+
+    assert response.status_code == 400
+    assert response.json()["detail"].strip(), "no explanation for an empty portfolio"
+
+
+@override_settings(REGISTRATION_OPEN=True)
+def test_a_new_member_starts_with_nothing_and_sees_nobody_elses_rows(make_user):
+    """Signup must not inherit state, and must not leak the neighbours'.
+
+    The isolation sweep below proves this for a fabricated user. This proves it
+    for one created the way real members are created, because the route that
+    mints them is the one place a default account or a shared queryset would be
+    introduced.
+    """
+    stranger = make_user(email="incumbent@test.test")
+    Account.objects.create(user=stranger, name="Theirs")
+
+    client = as_registered_user(register(email="cleanslate@test.test"))
+
+    assert client.get("/api/accounts/").json() == []
+    valuation = client.get("/api/valuation/").json()
+    assert valuation["total"] == "0"
+    assert valuation["items"] == [] and valuation["accounts"] == []
+    newcomer = User.objects.get(email="cleanslate@test.test")
+    assert not Account.objects.filter(user=newcomer).exists()
+
+    # ...and the incumbent's account is a 404, not a 403: the route must not
+    # confirm that the object exists at all.
+    theirs = Account.objects.get(user=stranger)
+    assert client.get(f"/api/accounts/{theirs.id}/").status_code == 404
+    assert client.patch(
+        f"/api/accounts/{theirs.id}/", {"name": "Mine now"}, format="json"
+    ).status_code == 404
+    assert Account.objects.get(id=theirs.id).name == "Theirs"
+
+
 def test_update_user_profile(make_user):
     user = make_user(email="profile@test.test")
     user.first_name = "OldFirst"
