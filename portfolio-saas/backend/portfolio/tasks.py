@@ -526,13 +526,11 @@ def run_global_optimization_snapshot(payload: dict | None = None):
     """
     try:
         from decimal import Decimal
-        from django.utils import timezone
         from portfolio.services.optimization import optimize
         from .optimization_models import OptimizationSnapshot
         from .services.valuation import get_latest_prices, value_account
         from .models import Account
 
-        now = timezone.now()
         prices = get_latest_prices()
 
         results = []

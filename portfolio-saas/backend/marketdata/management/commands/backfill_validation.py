@@ -194,7 +194,7 @@ class Command(BaseCommand):
                 sha256.update(chunk)
         manifest_sha = sha256.hexdigest()
 
-        self.stdout.write(self.style.SUCCESS(f"\nDry-run completed successfully!"))
+        self.stdout.write(self.style.SUCCESS("\nDry-run completed successfully!"))
         self.stdout.write(f"Proposed Confirmed Corporate Actions: {len(confirmed_actions)}")
         self.stdout.write(f"Proposed Unconfirmed Candidates: {len(unconfirmed_candidates)}")
         self.stdout.write(f"Proposed Series Spikes: {len(spikes)}")
