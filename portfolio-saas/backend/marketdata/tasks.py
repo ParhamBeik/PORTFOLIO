@@ -17,25 +17,60 @@ import re
 import time
 import uuid
 from collections import Counter
-from datetime import timedelta
+from datetime import datetime, time as dtime, timedelta
 
 from celery import group, shared_task
 from django.conf import settings
 from django.utils import timezone
 
-from . import ingest, jalali
+from . import archive, endpoints as endpoint_registry, ingest, jalali, live_states
 from .archive import (
     _ENDPOINT_PLAN,
     claim_archive_batch,
     claim_archive_maintenance,
+    destination_for,
     ensure_archive_states,
-    run_archive_state as process_archive_state,
     grow_tick_windows,
+    reopen_states_with_gaps,
+    run_archive_state as process_archive_state,
+    source_for,
 )
 from .catalog import sync_provider_catalog
-from .fetchers import (
-    fetch_symbol_data,
+from .fetchers import fetch_symbol_data, probe_meter
+from .admin_telemetry import (
+    collect_metric_payload,
+    get_ops_overview,
+    invalidate_ops_cache,
 )
+from .codal_pipeline import extract_report
+from .integrity import market_outage_windows, update_all_symbols_integrity
+from .models import (
+    ApiRequestQuota,
+    ArchiveFetchState,
+    AssetMetricSnapshot,
+    AssetSignalSnapshot,
+    CodalAnnouncement,
+    CodalReport,
+    CorporateAction,
+    GoldCurrencyHistory,
+    MarketCandle,
+    MarketInstrument,
+    OperationalMetricSnapshot,
+    RejectedRecord,
+    StockSymbolMetadata,
+    SymbolIntegrity,
+    WorkflowRun,
+)
+from .validation import detect_factor_ratio_actions, screen_series
+from .workflows import WorkflowOutcome
+from decimal import Decimal
+from django.db.models import Q, Sum
+from portfolio.models import Asset, Price
+from portfolio.services import signals as signal_math
+from portfolio.services.diagnostics import _load_index_returns
+from portfolio.services.returns import invalidate_returns_cache
+from zoneinfo import ZoneInfo
+import math
 
 
 @shared_task
@@ -53,7 +88,6 @@ def capture_derivative_snapshots():
     bill the live bucket, and the quota reserve can only be exact if the schedule
     it prices is the schedule that runs.
     """
-    from . import live_states
     from .fetchers import fetch_derivatives
 
     # Insert-only and idempotent. Self-seeding here rather than in some earlier
@@ -94,7 +128,6 @@ def capture_market_snapshots():
     Nav.php is retired -- it never produced a usable series and billed TSETMC.
     Cadence comes from `LiveFetchState`.
     """
-    from . import live_states
     live_states.ensure_live_states()  # see capture_derivative_snapshots
 
     results = {}
@@ -205,8 +238,6 @@ def _codal_status_outcome():
 
 @shared_task
 def extract_codal_report(announcement_id):
-    from .codal_pipeline import extract_report
-    from .models import WorkflowRun
 
     outcome = _ledgered(
         "extract_codal_report",
@@ -252,10 +283,8 @@ def queue_codal_extractions():
     UNSUPPORTED and PARSED are terminal on purpose -- a missing artifact URL or a
     successful extraction should not be retried every night.
     """
-    from django.db.models import Q
 
     from .codal_storage import origin_unreachable
-    from .models import CodalAnnouncement, CodalReport, WorkflowRun
 
     outcome = _ledgered("queue_codal_extractions", endpoint="codal_artifacts")
     if not settings.CODAL_ENABLED:
@@ -314,9 +343,6 @@ def operational_health_check():
     from redis import Redis
 
     from config.observability import notify
-    from portfolio.models import Price
-    from . import archive
-    from .models import ApiRequestQuota, ArchiveFetchState, SymbolIntegrity, WorkflowRun
 
     alerts = []
     latest = Price.objects.order_by("-fetched_at").values_list(
@@ -405,7 +431,6 @@ def operational_health_check():
     # avoid. Ask whether there is quota to make progress with first; if there is
     # and nothing has moved in 30 minutes, that is a real stall.
     from .quota import archive_capacity
-    from django.db.models import Q
 
     stale_before = timezone.now() - timedelta(seconds=settings.ARCHIVE_PROGRESS_STALE_SECONDS)
     capacity_by_plan = archive_capacity()
@@ -434,7 +459,6 @@ def operational_health_check():
 
     # Per plan: each subscription is its own ledger, and summing them would let
     # an overcount on one wallet cancel an undercount on the other.
-    from .quota import quota_day as _quota_day
 
     for quota in ApiRequestQuota.objects.filter(day=_quota_day()):
         bucket_total = quota.archive_used + quota.live_used + quota.other_used
@@ -471,7 +495,7 @@ def operational_health_check():
 def retry_archive_job_task(state_id):
     from .archive import run_archive_state
     run_archive_state(state_id)
-from .quota import QuotaExhausted
+from .quota import QuotaExhausted, quota_day, quota_day as _quota_day
 from portfolio.live.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
@@ -487,8 +511,6 @@ def _ledgered(workflow, *, endpoint="", destination_table="", source=None, symbo
     either. Pass `source=""` explicitly for a workflow that genuinely has no
     origin -- a scheduler, a prune, an aggregation over rows already stored.
     """
-    from .workflows import WorkflowOutcome
-    from . import endpoints as endpoint_registry
 
     if source is None:
         source = endpoint_registry.source_for(endpoint)
@@ -502,13 +524,11 @@ def _ledgered(workflow, *, endpoint="", destination_table="", source=None, symbo
 
 
 def _finish_ok(outcome, **values):
-    from .models import WorkflowRun
 
     outcome.finish(WorkflowRun.Outcome.SUCCESS, **values)
 
 
 def _finish_fail(outcome, err):
-    from .models import WorkflowRun
 
     outcome.finish(
         WorkflowRun.Outcome.FAILED,
@@ -553,8 +573,6 @@ def _pause():
 
 def tracked_tse_symbols() -> list[str]:
     """TSE symbols to sync: active portfolio stocks + all catalog-eligible TSE stocks + configured extras."""
-    from portfolio.models import Asset
-    from .models import MarketInstrument
 
     symbols = list(
         Asset.objects.filter(is_active=True, asset_class=Asset.AssetClass.STOCK)
@@ -578,8 +596,6 @@ def tracked_tse_symbols() -> list[str]:
 
 def tracked_brs_symbols() -> list[str]:
     """BrsApi gold/currency symbols to sync: active portfolio assets + all catalog-eligible BRS gold/currency symbols."""
-    from portfolio.models import Asset
-    from .models import MarketInstrument
 
     symbols = list(
         Asset.objects.filter(
@@ -610,7 +626,6 @@ def tracked_brs_symbols() -> list[str]:
 def _invalidate_returns():
     # Lazy: portfolio.services.returns imports pandas; keep worker startup light
     # and avoid an import cycle at module load.
-    from portfolio.services.returns import invalidate_returns_cache
 
     invalidate_returns_cache()
 
@@ -639,7 +654,6 @@ def sync_symbol_metadata():
     (`reversal.liquid_symbols`) precisely so it does not depend on this job, but
     the fundamentals themselves still do.
     """
-    from .models import StockSymbolMetadata
     from .quota import QuotaExhausted
 
     outcome = _ledgered("sync_symbol_metadata", destination_table="StockSymbolMetadata")
@@ -706,8 +720,6 @@ def _retry_code(last_error):
 @shared_task(ignore_result=True)
 def run_archive_state(state_id):
     """Process one claimed ArchiveFetchState (HTTP + ingest)."""
-    from .models import ArchiveFetchState, WorkflowRun
-    from .archive import destination_for, source_for
 
     initial = ArchiveFetchState.objects.get(pk=state_id)
     outcome = _ledgered(
@@ -778,8 +790,6 @@ def run_archive_state(state_id):
 @shared_task(ignore_result=True)
 def archive_tick():
     """Claim a quota-safe batch and fan out one task per archive state."""
-    from .models import WorkflowRun
-    from .workflows import WorkflowOutcome
 
     outcome = None
     redis_client = get_redis()
@@ -915,13 +925,6 @@ def weekly_warehouse_audit():
 @shared_task(ignore_result=True)
 def capture_operational_metrics():
     """Capture one idempotent 15-minute ops point and retain 90 days."""
-    from marketdata.admin_telemetry import (
-        collect_metric_payload,
-        get_ops_overview,
-        invalidate_ops_cache,
-    )
-    from marketdata.models import OperationalMetricSnapshot, WorkflowRun
-    from marketdata.workflows import WorkflowOutcome
 
     outcome = WorkflowOutcome(
         "capture_operational_metrics",
@@ -967,13 +970,8 @@ def _quota_attribution_drift():
     fixed. Surfaced here so it shows up on the Ops console rather than needing a
     shell and a hand-written aggregate.
     """
-    from datetime import datetime, time as dtime
-    from zoneinfo import ZoneInfo
 
-    from django.db.models import Sum
 
-    from .models import ApiRequestQuota, WorkflowRun
-    from .quota import quota_day
 
     try:
         day = quota_day()
@@ -1006,7 +1004,6 @@ def prune_workflow_runs():
     SystemLogEvent rows stay untouched -- they are a frozen historical archive
     and nothing writes to them any more.
     """
-    from .models import WorkflowRun
 
     cutoff = timezone.now() - timedelta(days=settings.WORKFLOW_RETENTION_DAYS)
     deleted, _ = WorkflowRun.objects.filter(created_at__lt=cutoff).delete()
@@ -1031,9 +1028,7 @@ def reconcile_quota_meters():
     what the accuracy is worth: without it the safety margin has to absorb the
     unknown, and a margin sized for an unknown is indistinguishable from waste.
     """
-    from .fetchers import probe_meter
     from .quota import PLANS, quota_day, unattributed_used
-    from .models import ApiRequestQuota, WorkflowRun
 
     outcome = _ledgered("reconcile_quota_meters", destination_table="ApiRequestQuota")
     try:
@@ -1164,8 +1159,6 @@ def nightly_data_integrity():
     point is that a fresh unit regression shows up in the log the night it
     appears, instead of surfacing months later inside somebody's valuation.
     """
-    from marketdata.archive import reopen_states_with_gaps
-    from marketdata.integrity import market_outage_windows, update_all_symbols_integrity
     results = update_all_symbols_integrity()
 
     outages = market_outage_windows()
@@ -1224,18 +1217,8 @@ def nightly_data_integrity():
 @shared_task(ignore_result=True)
 def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
     """Derive corporate actions, then persist unexplained cross-day spikes."""
-    from decimal import Decimal
-    import math
     from django.conf import settings
 
-    from .models import (
-        CodalAnnouncement,
-        CorporateAction,
-        MarketCandle,
-        RejectedRecord,
-        GoldCurrencyHistory,
-    )
-    from .validation import detect_factor_ratio_actions, screen_series
 
     # Helper functions for gold/currency validation
     def get_gold_currency_asset_class(symbol):
@@ -1476,10 +1459,8 @@ def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
 def nightly_asset_metrics(window_days=365):
     import numpy as np
 
-    from portfolio.services.diagnostics import _load_index_returns
     from portfolio.services.returns import daily_returns_matrix, periods_per_year
     from . import jalali
-    from .models import AssetMetricSnapshot, MarketInstrument
 
     instruments = {
         row.symbol: row
@@ -1590,10 +1571,8 @@ def nightly_asset_signals(window_days=365):
     and the flag is what lets the UI refuse to present a stance drawn from a
     series with holes in it as actionable.
     """
-    from portfolio.services import signals as signal_math
     from portfolio.services.returns import daily_returns_matrix
     from . import jalali
-    from .models import AssetSignalSnapshot, MarketInstrument, SymbolIntegrity
 
     outcome = _ledgered(
         "nightly_asset_signals", destination_table="AssetSignalSnapshot"
