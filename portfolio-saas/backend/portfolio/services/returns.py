@@ -36,10 +36,28 @@ from django.core.cache import cache
 from django.db.models import Max
 
 from marketdata.currency import tse_close_to_toman
-from marketdata.integrity import MAX_OUTAGE_CALENDAR_DAYS
+from marketdata.integrity import (
+    MAX_FORWARD_FILL_SESSIONS,
+    MAX_OUTAGE_CALENDAR_DAYS,
+    MIN_COVERAGE,
+)
 from marketdata.provenance import PRICE_SERIES_ENDPOINTS, rejected_pairs
 from portfolio.models import Asset, Price
 from .deflator import normalize_basis, to_basis
+from datetime import timedelta
+from django.conf import settings
+from django.utils import timezone
+from marketdata.calendars import candle_close_qs, market_closure_days
+from marketdata.models import (
+    DailyStockHistory,
+    GoldCurrencyHistory,
+    InstrumentListingHistory,
+    MarketCandle,
+    MarketDailyBar,
+    MarketInstrument,
+    RejectedRecord,
+    SymbolIntegrity,
+)
 
 # How many days of price history to load by default (the buffer is so a one-day
 # gap doesn't drop a return row off the front).
@@ -102,15 +120,6 @@ def _price_version_fingerprint(asset_keys=None) -> str:
     Lazy import: portfolio -> marketdata is the allowed dependency direction
     (marketdata never imports portfolio's domain).
     """
-    from marketdata.models import (
-        DailyStockHistory,
-        GoldCurrencyHistory,
-        InstrumentListingHistory,
-        MarketCandle,
-        MarketDailyBar,
-        RejectedRecord,
-        SymbolIntegrity,
-    )
 
     if asset_keys is None:
         symbols = None
@@ -210,7 +219,6 @@ def _closure_explained(left: pd.Timestamp, right: pd.Timestamp) -> bool:
     emits a row per symbol carrying the previous price with zero volume and zero
     trades, so the market-wide totals are zero.
     """
-    from marketdata.calendars import market_closure_days
 
     closures = market_closure_days(
         start=to_jalali_str(left), end=to_jalali_str(right)
@@ -351,7 +359,6 @@ def resolve_universe(
     optimizer's candidate universe would hand it two identical columns to choose
     between, which is a singular covariance and an arbitrary allocation.
     """
-    from marketdata.models import InstrumentListingHistory, MarketInstrument
 
     resolved = []
     assets = {a.key: a for a in Asset.objects.filter(is_active=True).exclude(is_house=True)}
@@ -572,8 +579,6 @@ def _load_price_panel(
             days=history_days + _HISTORY_BUFFER_DAYS
         )
 
-    from marketdata.calendars import candle_close_qs
-    from marketdata.models import SymbolIntegrity, GoldCurrencyHistory
     # A current nightly assessment must not leak into a historical cutoff. Its
     # window may contain observations that did not exist at that cutoff; the
     # bounded panel checks below are the point-in-time integrity gate instead.
@@ -727,7 +732,6 @@ def _load_price_panel(
 
     from portfolio.models import Asset
     from marketdata.calendars import market_for_asset, sessions_between
-    from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS
 
     univ_keys = [item["key"] for item in resolved_univ]
     asset_map = {a.key: a for a in Asset.objects.filter(key__in=univ_keys)}
@@ -873,10 +877,7 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
     rows = list(rows)
 
     # Exclude RejectedRecord matches
-    from django.utils import timezone
     from portfolio.models import Asset
-    from django.conf import settings
-    from datetime import timedelta
 
     assets = {a.key: (a.tse_symbol or a.brs_symbol or "") for a in Asset.objects.filter(key__in=keys)}
     symbols = [s for s in assets.values() if s]
@@ -998,7 +999,6 @@ def _build_returns_matrix(
     excludes it either way -- forward-filling past MAX_FORWARD_FILL_SESSIONS
     invents prices, and a made-up return is worse than a missing one.
     """
-    from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS, MIN_COVERAGE
 
     if panel.empty:
         return pd.DataFrame(), [], []
@@ -1012,7 +1012,6 @@ def _build_returns_matrix(
     warnings: list[dict] = []
     keep: list[str] = []
 
-    from django.utils import timezone
     from marketdata.calendars import market_for_asset, sessions_between
     from portfolio.models import Asset
 
