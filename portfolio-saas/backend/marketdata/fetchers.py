@@ -224,18 +224,12 @@ def fetch_json(
     raise TransientMarketDataError("Provider request failed.")
 
 
-# One deliberately-invalid request per plan, chosen for the smallest response
-# the provider will produce. The provider validates the parameter before it
-# does any work, so the answer is a ~460-byte HTTP 400 carrying the account
-# block -- and it is billed exactly like any other request, which is why the
-# probe reserves quota for itself.
-#
-# BRS is omitted: the gold/currency plan has no daily quota limit in the
-# provider account (usage_today_limit: 0), and sending synthetic bad requests
-# (e.g. history=bogus) triggers upstream provider abuse/malformed query alerts.
-_METER_PROBES = {
-    "tsetmc": ("Tsetmc/Index.php", {"type": 99}),
-}
+# Deliberately invalid probes are completely retired across all plans.
+# Triggering synthetic 400 Bad Requests to extract the provider's `account`
+# block trips upstream firewall alerts and wastes billed requests. Quota is
+# tracked locally in ApiRequestQuota, and genuine error responses (429s, 5xxs)
+# reconcile the counter naturally when they occur.
+_METER_PROBES = {}
 
 
 def probe_meter(plan):

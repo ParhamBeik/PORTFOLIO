@@ -1382,39 +1382,15 @@ def test_reconcile_records_the_limit_the_provider_reports(settings):
     assert (row.limit, row.used) == (10000, 12)
 
 
-def test_meter_probe_reserves_then_reconciles_provider_truth(settings):
-    """Integration: one probe joins HTTP billing to the shared quota ledger."""
+def test_meter_probe_retired_across_all_plans(settings):
+    """Unit test: verifies synthetic 400 probes are completely retired for all plans."""
     from marketdata.fetchers import probe_meter
-    from marketdata.quota import TSETMC, unattributed_used
+    from marketdata.quota import BRS, TSETMC
 
     settings.TSETMC_API_KEY = "test-key"
-    settings.MARKETDATA_OTHER_REQUEST_BUDGET = 200
-    response = mock.Mock(status_code=400)
-    response.json.return_value = {
-        "account": {
-            "usage_today": 321,
-            "usage_today_limit": 10_000,
-            "request_block": 137,
-        }
-    }
-    with patch("marketdata.fetchers.requests.get", return_value=response) as get:
-        account = probe_meter(TSETMC)
-
-    row = ApiRequestQuota.objects.get(plan=TSETMC)
-    assert account["usage_today"] == row.used == 321
-    assert row.limit == 10_000
-    assert row.other_used == 1
-    assert unattributed_used(row) == 320
-    assert get.call_args.kwargs["params"] == {"key": "test-key", "type": 99}
-
-
-def test_unprobed_plan_does_not_issue_http_request(settings):
-    """Unit test for unmetered plans: pure logic at the top of the test pyramid verifying no HTTP probe is dispatched."""
-    from marketdata.fetchers import probe_meter
-    from marketdata.quota import BRS
-
     settings.BRS_API_KEY = "test-key"
     with patch("marketdata.fetchers.requests.get") as get:
+        assert probe_meter(TSETMC) is None
         assert probe_meter(BRS) is None
     get.assert_not_called()
 
