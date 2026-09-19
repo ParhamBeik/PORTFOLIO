@@ -1408,6 +1408,17 @@ def test_meter_probe_reserves_then_reconciles_provider_truth(settings):
     assert get.call_args.kwargs["params"] == {"key": "test-key", "type": 99}
 
 
+def test_unprobed_plan_does_not_issue_http_request(settings):
+    """Unit test for unmetered plans: pure logic at the top of the test pyramid verifying no HTTP probe is dispatched."""
+    from marketdata.fetchers import probe_meter
+    from marketdata.quota import BRS
+
+    settings.BRS_API_KEY = "test-key"
+    with patch("marketdata.fetchers.requests.get") as get:
+        assert probe_meter(BRS) is None
+    get.assert_not_called()
+
+
 def test_each_provider_plan_keeps_its_own_wallet(settings):
     """A spent paid product must not block the unmetered Market product."""
     from marketdata.quota import BRS, TSETMC

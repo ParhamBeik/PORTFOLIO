@@ -229,9 +229,12 @@ def fetch_json(
 # does any work, so the answer is a ~460-byte HTTP 400 carrying the account
 # block -- and it is billed exactly like any other request, which is why the
 # probe reserves quota for itself.
+#
+# BRS is omitted: the gold/currency plan has no daily quota limit in the
+# provider account (usage_today_limit: 0), and sending synthetic bad requests
+# (e.g. history=bogus) triggers upstream provider abuse/malformed query alerts.
 _METER_PROBES = {
     "tsetmc": ("Tsetmc/Index.php", {"type": 99}),
-    "brs": ("Market/Gold_Currency_Pro.php", {"history": "bogus"}),
 }
 
 
