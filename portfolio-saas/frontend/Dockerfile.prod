@@ -15,7 +15,9 @@ WORKDIR /app
 ARG VITE_SENTRY_DSN=""
 ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN
 COPY package.json package-lock.json* ./
-RUN npm ci
+# ponytail: cap registry concurrency on the Iran VPS; raise it if builds become too slow.
+# CI runs the dependency audit separately, so this install need not repeat it.
+RUN npm ci --no-audit --maxsockets=3
 COPY . .
 RUN npm run build
 
