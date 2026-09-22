@@ -23,6 +23,7 @@ reads to decide what to requeue:
   but the category's fact rules found nothing," which is a parser-coverage
   question, not a fetch problem).
 """
+from decimal import Decimal, InvalidOperation
 from django.db import transaction
 from django.utils import timezone
 
@@ -120,10 +121,20 @@ def _persist_parsed(report, artifact, parsed):
             )
             for index, section in enumerate(parsed.sections)
         ]
+        _max_dec = Decimal("1e26")
         for fact in parsed.facts:
             coordinates = fact["source_coordinates"]
             table = tables[coordinates["table_index"]] if "table_index" in coordinates else None
             section = sections[0] if not table and sections else None
+            num_val = fact.get("numeric_value")
+            if num_val is not None:
+                try:
+                    if abs(Decimal(str(num_val))) >= _max_dec:
+                        fact["numeric_value"] = None
+                        if not fact.get("text_value"):
+                            fact["text_value"] = str(num_val)
+                except (InvalidOperation, TypeError):
+                    fact["numeric_value"] = None
             CodalFact.objects.create(
                 report=report,
                 table=table,

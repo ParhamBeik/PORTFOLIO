@@ -64,6 +64,9 @@ def _clean(value):
     return str(value).strip()
 
 
+_MAX_DECIMAL = Decimal("1e26")
+
+
 def parse_number(value):
     normalized = _clean(value).translate(PERSIAN_DIGITS)
     normalized = normalized.replace("٬", "").replace(",", "").replace("−", "-")
@@ -72,7 +75,10 @@ def parse_number(value):
     if not normalized or normalized in ("-", ".", "-."):
         return None
     try:
-        return Decimal(normalized)
+        parsed = Decimal(normalized)
+        if abs(parsed) >= _MAX_DECIMAL:
+            return None
+        return parsed
     except InvalidOperation:
         return None
 

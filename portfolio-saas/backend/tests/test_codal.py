@@ -678,3 +678,14 @@ def test_disabled_codal_sweeper_reports_why_it_skipped(settings):
     assert tasks.queue_codal_extractions() == 0
     run = WorkflowRun.objects.filter(workflow="queue_codal_extractions").latest("id")
     assert (run.outcome, run.error_code) == (WorkflowRun.Outcome.SKIPPED, "codal_disabled")
+
+
+def test_parse_number_guards_against_numeric_overflow():
+    """Numbers with absolute value >= 10^26 exceed DecimalField(38, 12) and must return None."""
+    from marketdata.codal_parsers import parse_number
+
+    huge_number_str = "1" + "0" * 27
+    assert parse_number(huge_number_str) is None
+
+    valid_number_str = "123,456,789"
+    assert parse_number(valid_number_str) == 123456789
