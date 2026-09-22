@@ -15,9 +15,10 @@ WORKDIR /app
 ARG VITE_SENTRY_DSN=""
 ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN
 COPY package.json package-lock.json* ./
-# ponytail: cap registry concurrency on the Iran VPS; raise it if builds become too slow.
-# CI runs the dependency audit separately, so this install need not repeat it.
-RUN npm ci --no-audit --maxsockets=3
+# Constrain Node to TLS 1.2: Iranian gateways drop TLS 1.3 ClientHello to Cloudflare
+# (registry.npmjs.org), causing npm to hang indefinitely. TLS 1.2 succeeds in seconds.
+ENV NODE_OPTIONS="--tls-max-v1.2"
+RUN npm ci --no-audit
 COPY . .
 RUN npm run build
 

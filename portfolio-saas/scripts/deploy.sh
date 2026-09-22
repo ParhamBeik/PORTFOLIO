@@ -44,6 +44,7 @@ fi
 curl -fsS --retry 12 --retry-delay 5 "https://${domain}/api/health/ready/"
 "${compose[@]}" exec -T celery_worker_live celery -A config inspect ping
 "${compose[@]}" exec -T celery_worker_archive celery -A config inspect ping
+"${compose[@]}" exec -T celery_worker_codal celery -A config inspect ping
 
 # Beat is a scheduler, not a worker: `celery inspect ping` does not answer for
 # it, so it was the one service this script never verified -- and it is the one
