@@ -35,6 +35,9 @@ x-backend-env: &backend-env
   CODAL_S3_SECRET_KEY: ${CODAL_S3_SECRET_KEY:?set CODAL_S3_SECRET_KEY}
   CODAL_S3_REGION: ${CODAL_S3_REGION:-us-east-1}
   CODAL_HTTP_PROXY: ${CODAL_HTTP_PROXY:-}
+  REGISTRATION_OPEN: ${REGISTRATION_OPEN:-1}
+  CODAL_ENABLED: ${CODAL_ENABLED:-1}
+  MARKETDATA_LIVE_INTERVAL_OPEN: ${MARKETDATA_LIVE_INTERVAL_OPEN:-20}
   SNAPSHOT_PRUNE_ENABLED: "1"
   PRICE_PRUNE_ENABLED: "1"
   EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
@@ -293,33 +296,33 @@ services:
   # at ~10% of a core. Set CODAL_ENABLED=1 and uncomment this block together; the
   # flag alone controls the queue route and the beat entry, but only this block
   # creates the worker that would consume the queue.
-  # celery_worker_codal:
-  #   build: ./backend
-  #   restart: unless-stopped
-  #   logging: *logging
-  #   entrypoint: []
-  #   depends_on:
-  #     backend:
-  #       condition: service_healthy
-  #     db:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #     minio:
-  #       condition: service_healthy
-  #   environment: *backend-env
-  #   command: celery -A config worker -l info --concurrency=4 -Q codal -n codal@%h --max-memory-per-child=600000
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "celery -A config inspect ping -d codal@$$HOSTNAME"]
-  #     interval: 60s
-  #     timeout: 15s
-  #     retries: 3
-  #     start_period: 40s
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         cpus: "1"
-  #         memory: 2g
+  celery_worker_codal:
+    build: ./backend
+    restart: unless-stopped
+    logging: *logging
+    entrypoint: []
+    depends_on:
+      backend:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment: *backend-env
+    command: celery -A config worker -l info --concurrency=4 -Q codal -n codal@%h --max-memory-per-child=600000
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d codal@$$HOSTNAME"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2g
 
   celery_beat:
     build: ./backend

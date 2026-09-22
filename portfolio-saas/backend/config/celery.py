@@ -70,11 +70,11 @@ app.conf.update(
 # Crontab times are declared directly in Tehran local time. ZoneInfo owns any
 # future timezone-policy changes; no hand-converted UTC hours are duplicated.
 app.conf.beat_schedule = {
-    # Beat ticks every minute; the task itself enforces the real cadence, which
+    # Beat ticks every 20s; the task itself enforces the real cadence, which
     # depends on whether the TSE is open (see marketdata/market_state.py).
     "fetch-prices-every-minute": {
         "task": "portfolio.tasks.fetch_and_publish",
-        "schedule": 60.0,
+        "schedule": 20.0,
     },
     "marketdata-archive-every-minute": {
         "task": "marketdata.tasks.archive_tick",

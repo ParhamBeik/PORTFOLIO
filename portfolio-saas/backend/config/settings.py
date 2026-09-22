@@ -227,7 +227,7 @@ SIMPLE_JWT = {
     "CHECK_REVOKE_TOKEN": True,
 }
 JWT_COOKIE_SECURE = not DEBUG
-REGISTRATION_OPEN = os.getenv("REGISTRATION_OPEN", "0") == "1"
+REGISTRATION_OPEN = os.getenv("REGISTRATION_OPEN", "1") == "1"
 
 # Mail. `.env.production.example` has named these for some time; Django does
 # not read EMAIL_* from the environment on its own, so a filled-in env file
@@ -553,7 +553,7 @@ MARKETDATA_TICK_VOLUME_TOLERANCE = float(
 # out) and CODAL_HTTP_PROXY is unset, so every attempt burned CPU retrying a
 # connect that cannot succeed: ~20,000 no-op workflow runs and 583 connect
 # timeouts in one day. Turn back on once the network path exists.
-CODAL_ENABLED = os.getenv("CODAL_ENABLED", "0") == "1"
+CODAL_ENABLED = os.getenv("CODAL_ENABLED", "1") == "1"
 # Codal announcements are paged 20 per request and a mature symbol has ~50 pages,
 # so "all history for all symbols" is ~32,000 requests -- more than three days of
 # the whole archive budget. Only page 1 was ever fetched, which stored 2% and
@@ -633,7 +633,7 @@ WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "14"))
 # gold/currency job to OPEN/CLOSED_DAYTIME, so 23:00-07:00 fetched nothing at
 # all: eight hours with no crypto or FX price, on markets that trade around the
 # clock. The unmetered product makes the overnight cadence safe.
-MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "60"))
+MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "20"))
 MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "90"))
 MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "180"))
 
