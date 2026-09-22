@@ -84,6 +84,9 @@ def parse_number(value):
 
 
 def parse_excel(content):
+    sample = content[:2048].lstrip().lower()
+    if b"<html" in sample or b"<!doctype html" in sample or b"<table" in sample:
+        return parse_html(content)
     from openpyxl import load_workbook
 
     workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)

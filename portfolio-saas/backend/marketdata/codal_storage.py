@@ -21,14 +21,20 @@ ALLOWED_TYPES = {
     "excel": (
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "application/vnd.ms-excel",
+        "application/ms-excel",
+        "application/x-msexcel",
         "application/octet-stream",
     ),
     "pdf": ("application/pdf", "application/octet-stream"),
     "attachment": (
         "application/pdf",
         "application/zip",
+        "application/x-zip-compressed",
         "application/octet-stream",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+        "application/ms-excel",
+        "application/x-msexcel",
     ),
 }
 
@@ -137,7 +143,10 @@ def _valid_magic(kind, content):
     if kind == "pdf":
         return content.startswith(b"%PDF-")
     if kind == "excel":
-        return content.startswith(b"PK\x03\x04") or content.startswith(b"\xd0\xcf\x11\xe0")
+        if content.startswith(b"PK\x03\x04") or content.startswith(b"\xd0\xcf\x11\xe0"):
+            return True
+        sample = content[:2048].lstrip().lower()
+        return b"<html" in sample or b"<!doctype html" in sample or b"<table" in sample
     if kind == "html":
         sample = content[:2048].lstrip().lower()
         return b"<html" in sample or b"<!doctype html" in sample or b"<table" in sample

@@ -689,3 +689,16 @@ def test_parse_number_guards_against_numeric_overflow():
 
     valid_number_str = "123,456,789"
     assert parse_number(valid_number_str) == 123456789
+
+
+def test_parse_excel_handles_html_workbook():
+    """Codal often renders Excel as HTML tables with Office XML namespaces."""
+    from marketdata.codal_parsers import parse_excel
+    from marketdata.codal_storage import _valid_magic
+
+    html_excel = b'<html xmlns:x="urn:schemas-microsoft-com:office:excel"><body><table><tr><th>\xd9\x85\xd8\xa8\xd9\x84\xd8\xba</th></tr><tr><td>1000</td></tr></table></body></html>'
+    assert _valid_magic("excel", html_excel) is True
+    parsed = parse_excel(html_excel)
+    assert len(parsed.tables) == 1
+    assert parsed.tables[0]["headers"] == ["مبلغ"]
+    assert parsed.tables[0]["rows"] == [["1000"]]
