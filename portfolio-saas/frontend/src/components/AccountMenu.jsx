@@ -20,6 +20,7 @@ import {
   updateProfile,
 } from "../api.js";
 import { dateTime } from "../format.js";
+import { isNative } from "../mobile.js";
 import { Badge, Button, ErrorState, Input, Modal } from "./ui.jsx";
 
 /** Staff is a real capability here — it is what puts Ops in the nav. */
@@ -312,8 +313,11 @@ export default function AccountMenu({
     // `logoutSession(true)` blacklists every refresh token this user holds,
     // including the one in this tab, so there is no signed-in state left to
     // return to — hence the same exit as a plain log out.
-    await logoutSession(true);
-    onLogout();
+    try {
+      await logoutSession(true);
+    } finally {
+      onLogout();
+    }
   };
 
   return (
@@ -411,7 +415,7 @@ export default function AccountMenu({
               Sign out on every device
             </MenuItem>
             <MenuItem
-              onClick={() => run(downloadExport, "Export downloaded.")}
+              onClick={() => run(downloadExport, isNative ? "Export ready to share." : "Export downloaded.")}
               disabled={busy}
               testId="account-export"
             >

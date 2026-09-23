@@ -1,0 +1,30 @@
+# Holdings mobile release guide
+
+Holdings uses the same React screens for the website, iOS, and Android. Capacitor bundles the built frontend into each native project. Windows uses the responsive website. The mobile package ID is `ir.parhambm.holdings` on both platforms.
+
+## Architecture and behavior
+
+- The app calls the Django API over HTTPS. Its default API origin is `https://portfolio.parhambm.ir`; set `VITE_API_URL` at build time to target a staging HTTPS server. Do not put a development server URL into a release build.
+- Browser sessions keep the existing HTTP-only refresh cookie and CSRF flow. Mobile sessions use `/api/auth/mobile/` login, registration, refresh, logout, logout-all, and password-change endpoints. The API checks the Capacitor origin and returns a rotating refresh token in JSON. The app keeps the refresh token in iOS Keychain or Android Keystore-backed secure storage, and the access token only in memory. A normal web origin cannot call the body-token endpoints through CORS. This origin check is not device attestation.
+- The online UI contains Portfolio, Activity, Markets, Guidance, onboarding, account settings, and admin-only Operations. Legacy URLs redirect to those destinations. Operations links to Django admin open in the device browser.
+- When the device disconnects, the app replaces online pages with a read-only offline screen. It saves only the last fetched account names, totals, holdings, allocation inputs, and 30-day net-worth points in encrypted, account-scoped secure storage. It displays the saved timestamp and the server-declared monetary basis. Device PIN, passcode, or biometric authentication is required on each cold launch and after returning from background before showing the saved figures. Sign-out removes the local snapshot and refresh token. Other data and all editing require a connection.
+- The offline screen's sign-out clears local credentials immediately. If the device is disconnected, the server cannot receive a revocation request; a previously issued refresh token expires under the normal server policy. Online sign-out calls the server first.
+- The native shell opens outbound links through the system browser, shares data exports using the native share sheet, responds to Android Back, and respects safe areas. There is no push notification, offline editing, or separate biometric sign-in.
+
+## Build and run
+
+1. Install Node.js and the frontend dependencies: `cd frontend && npm ci`. Install current Xcode from the Mac App Store for iOS, or Android Studio with the SDK and emulator for Android. Xcode Command Line Tools alone cannot build an iOS app. Use a Mac for iOS signing and simulator runs. Android can be built on a supported desktop platform.
+2. Set the API target only if building against staging: `export VITE_API_URL=https://your-staging-host`. That server must include `capacitor://localhost` and `http://localhost` in CORS, serve the mobile auth endpoints, and have a valid TLS certificate. For a production build, unset `VITE_API_URL` to use the production origin.
+3. Run `npm run build:mobile` in `frontend/`. This runs Vite and syncs assets/plugins into `ios/` and `android/`. Run it after each frontend or plugin change.
+4. Run `npm run ios` to open Xcode, select a simulator or device, set the Apple development team under Signing & Capabilities, then build. Run `npm run android` to open Android Studio, allow Gradle/SDK setup, select an emulator or device, then build. The same app ID must be kept for all builds of an installed test app.
+5. For private testing, archive and upload the signed iOS build to TestFlight internal testing. Publish an Android App Bundle to a Play Console internal testing track. Keep signing certificates, provisioning profiles, Android upload keys, and API credentials outside Git. If local SDK setup is impractical, select a build service only after the app and API are ready for device testing; use the same app ID and signing ownership.
+
+App icons and splash graphics are generated in the native projects from `frontend/public/lattice.svg` and `frontend/assets/holdings-foreground.svg` / `holdings-splash.svg`. Native project changes are committed; generated copied web assets, build outputs, and local signing files are ignored.
+
+## Verification and release gate
+
+Run backend auth tests and the full backend suite against fixture-backed local/staging databases; run `npm run lint`, `npm run build`, `npm run test:vitest`, and `npm run test:unit`. Browser review must cover 390px phone, 768px tablet, and 1366px laptop widths, including all four destinations, onboarding, account settings, Operations role denial, and legacy redirects. Native simulator/device review must cover first login, relaunch refresh rotation, password change, logout/revocation, Android Back, admin external links, Persian asset names, Toman/Rial/USD unit labels, offline unlock after background, account switching, and offline edit blocking.
+
+The MVP staging checklist in `MVP-IMPLEMENTATION-CHECKLIST.md` still has financial storage conversion, rounding audit, provider counter bootstrap, and deployment gates open. Do not point a device build at production for authenticated testing until the new server API is deployed and those gates have passed. Initial production smoke checks are read-only: sign in with a test account, inspect totals and unit labels, browse destinations, validate roles and redirects, then sign out. Use fixtures for automated write tests.
+
+The project was generated and web/backend tests run on a Mac without full Xcode or an Android SDK, so native simulator and signed-binary results must be recorded after those tools are installed.

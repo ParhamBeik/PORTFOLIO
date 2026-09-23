@@ -1,5 +1,73 @@
 @import "tailwindcss";
 
+.native-app body {
+  padding-top: env(safe-area-inset-top);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+}
+
+.native-connection {
+  position: fixed;
+  z-index: 100;
+  right: 0;
+  bottom: env(safe-area-inset-bottom);
+  left: 0;
+  padding: 0.6rem 1rem;
+  border-top: 1px solid var(--c-warn-text);
+  background: var(--c-panel);
+  color: var(--c-warn-text);
+  text-align: center;
+  font-size: 0.875rem;
+}
+
+@media (max-width: 639px) {
+  .responsive-table,
+  .responsive-table tbody,
+  .responsive-table tr,
+  .responsive-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .responsive-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .responsive-table tr {
+    margin-bottom: 0.75rem;
+    border: 1px solid var(--c-border);
+    border-radius: 0.75rem;
+    padding: 0.5rem;
+  }
+
+  .responsive-table td {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-width: 0;
+    padding: 0.45rem;
+    text-align: right;
+    overflow-wrap: anywhere;
+  }
+
+  .responsive-table td::before {
+    content: attr(data-label);
+    flex: 0 0 42%;
+    color: var(--c-muted);
+    text-align: left;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+}
+
 /* Design tokens.
  *
  * Dark is the default; light swaps in from the OS preference. There is no

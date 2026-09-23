@@ -23,6 +23,7 @@ import {
   Input,
   PageHeader,
   Pager,
+  Select,
   StatTile,
   Table,
   Tabs,
@@ -383,6 +384,20 @@ function AssetInspector() {
             />
           </div>
 
+          <div className="flex items-end gap-2 sm:hidden">
+            <Select label="Sort assets" value={ordering.replace(/^-/, "")} onChange={(event) => setOrdering(event.target.value)}>
+              <option value="name">Name</option>
+              <option value="key">Key</option>
+              <option value="asset_class">Class</option>
+              <option value="live_status">Live status</option>
+              <option value="age_seconds">Age</option>
+              <option value="integrity_status">179d gate</option>
+            </Select>
+            <Button variant="ghost" onClick={() => setOrdering((current) => current.startsWith("-") ? current.slice(1) : `-${current}`)}>
+              {ordering.startsWith("-") ? "Descending" : "Ascending"}
+            </Button>
+          </div>
+
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
             <StatTile label="Matching assets" value={num(catalog.count)} sub={catalogLoading ? "Loading…" : `${num(catalog.results?.length)} on this page`} />
             <StatTile label="Needs attention" value={num(attentionCount)} sub="Stale, missing, failed gate, or archive" valueTone={attentionCount ? "warn" : "good"} />
@@ -393,7 +408,7 @@ function AssetInspector() {
           {catalogError && <p role="alert" className="text-sm text-[var(--c-warn-text)]">{catalogError}</p>}
 
           <div className="overflow-x-auto rounded-lg border border-border" data-testid="ops-asset-catalog">
-            <table className="w-full text-sm">
+            <table className="responsive-table w-full text-sm">
               <thead>
                 <tr className="border-b border-border bg-panel-2 text-left">
                   {[
@@ -427,31 +442,34 @@ function AssetInspector() {
                         data-testid="ops-asset-row"
                         className={`cursor-pointer border-b border-border/60 last:border-0 hover:bg-panel-2 ${selected ? "bg-accent/10" : ""}`}
                         onClick={() => selectRow(row)}
+                        onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectRow(row); } }}
+                        tabIndex={0}
+                        aria-label={`Inspect ${row.display_name || row.name}`}
                         aria-selected={selected}
                       >
-                        <td className="px-3 py-2 font-medium">{row.display_name || row.name}</td>
-                        <td className="px-3 py-2 font-mono text-xs text-muted">{row.key}</td>
-                        <td className="px-3 py-2">{row.asset_class}</td>
-                        <td className="px-3 py-2 text-xs text-muted">
+                        <td data-label="Name" className="px-3 py-2 font-medium">{row.display_name || row.name}</td>
+                        <td data-label="Key" className="px-3 py-2 font-mono text-xs text-muted">{row.key}</td>
+                        <td data-label="Class" className="px-3 py-2">{row.asset_class}</td>
+                        <td data-label="TSE / BRS" className="px-3 py-2 text-xs text-muted">
                           {row.tse_symbol || "—"}{row.brs_symbol ? ` · ${row.brs_symbol}` : ""}
                         </td>
-                        <td className="px-3 py-2">
+                        <td data-label="Live" className="px-3 py-2">
                           <Badge variant={tone(row.live_status)}>{humanize(row.live_status)}</Badge>
                         </td>
-                        <td className="px-3 py-2 tabular text-right text-muted">
+                        <td data-label="Age" className="px-3 py-2 tabular text-right text-muted">
                           {row.age_seconds != null ? `${num(row.age_seconds)}s` : "—"}
                         </td>
-                        <td className="px-3 py-2">
+                        <td data-label="179d gate" className="px-3 py-2">
                           <Badge variant={tone(row.integrity_status)}>{humanize(row.integrity_status)}</Badge>
                         </td>
-                        <td className="px-3 py-2">
+                        <td data-label="Archive" className="px-3 py-2">
                           {row.archive_status ? (
                             <Badge variant={tone(row.archive_status)}>{humanize(row.archive_status)}</Badge>
                           ) : (
                             <span className="text-muted">—</span>
                           )}
                         </td>
-                        <td className="px-3 py-2">{row.held ? "Yes" : "—"}</td>
+                        <td data-label="Held" className="px-3 py-2">{row.held ? "Yes" : "—"}</td>
                       </tr>
                     );
                   })

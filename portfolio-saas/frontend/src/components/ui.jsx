@@ -340,7 +340,7 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
   if (!rows?.length) return <Empty testId={testId ? `${testId}-empty` : undefined}>{empty}</Empty>;
   return (
     <div className="overflow-x-auto">
-      <table data-testid={testId} className="w-full text-sm">
+      <table data-testid={testId} className="responsive-table w-full text-sm">
         {caption && <caption className="sr-only">{caption}</caption>}
         <thead>
           <tr className="border-b border-border text-left">
@@ -370,6 +370,7 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
               {columns.map((c) => (
                 <td
                   key={c.key}
+                  data-label={c.header}
                   className={`px-3 py-2 ${c.align === "right" ? "text-right" : ""}`}
                 >
                   {c.render ? c.render(row) : row[c.key]}

@@ -1,7 +1,17 @@
 // Tiny API client: wraps fetch with JWT auth + auto-refresh on expiry.
 // Keep it dependency-free; this is the whole networking layer.
+import {
+  API_ORIGIN,
+  captureOfflineResponse,
+  clearMobileData,
+  getRefreshToken,
+  isNative,
+  prepareMobileAccount,
+  setRefreshToken,
+  shareExport,
+} from "./mobile.js";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+const API_BASE = import.meta.env.VITE_API_URL || (isNative ? API_ORIGIN : "");
 export const SESSION_EXPIRED_EVENT = "lattice:session-expired";
 let accessToken = null;
 let refreshPromise = null;
@@ -83,6 +93,28 @@ async function csrfToken() {
 
 async function refreshAccessToken() {
   if (refreshPromise) return refreshPromise;
+  if (isNative) {
+    refreshPromise = (async () => {
+      const refresh = await getRefreshToken();
+      if (!refresh) return null;
+      const res = await fetch(`${API_BASE}/api/auth/mobile/refresh/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh }),
+      });
+      if (res.status === 401) {
+        await clearMobileData();
+        return null;
+      }
+      if (!res.ok) throw apiError(`Session refresh failed (${res.status}).`, res.status);
+      const data = await res.json();
+      await setRefreshToken(data.refresh);
+      auth.tokens = data;
+      sessionExpiry.set(data.session_expires_at);
+      return data.access;
+    })().finally(() => { refreshPromise = null; });
+    return refreshPromise;
+  }
   refreshPromise = csrfToken().then((csrf) => fetch(`${API_BASE}/api/token/refresh/`, {
     method: "POST",
     credentials: "include",
@@ -105,10 +137,30 @@ async function refreshAccessToken() {
 // Resolves null without touching the network when this browser has never held a
 // session. `App.jsx` already treats null as "anonymous", which is a normal state.
 export const restoreSession = () =>
-  (hasSessionHint() ? refreshAccessToken() : Promise.resolve(null));
+  (isNative || hasSessionHint() ? refreshAccessToken() : Promise.resolve(null));
 
 export async function logoutSession(allDevices = false) {
   try {
+    if (isNative) {
+      const refresh = await getRefreshToken();
+      if (allDevices) {
+        await api("/api/auth/mobile/logout-all/", { method: "POST", body: {} });
+        return;
+      }
+      try {
+        await fetch(`${API_BASE}/api/auth/mobile/logout/`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(auth.token ? { Authorization: `Bearer ${auth.token}` } : {}),
+          },
+          body: JSON.stringify({ refresh }),
+        });
+      } catch {
+        // A sign-out while the connection is dropping still clears the device.
+      }
+      return;
+    }
     const csrf = await csrfToken();
     await fetch(`${API_BASE}/api/auth/${allDevices ? "logout-all" : "logout"}/`, {
       method: "POST",
@@ -123,10 +175,12 @@ export async function logoutSession(allDevices = false) {
   } finally {
     auth.logout();
     sessionExpiry.set(null);
+    if (isNative) await clearMobileData();
   }
 }
 
 function expireSession() {
+  if (isNative) void clearMobileData().catch(() => {});
   auth.logout();
   sessionExpiry.set(null);
   window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
@@ -148,7 +202,7 @@ export async function api(path, { method = "GET", body, _retried = false } = {})
   if (auth.token) headers.Authorization = `Bearer ${auth.token}`;
   const res = await fetch(`${API_BASE}${path}`, {
     method,
-    credentials: "include",
+    credentials: isNative ? "omit" : "include",
     headers,
     body: isForm ? body : body ? JSON.stringify(body) : undefined,
   });
@@ -171,7 +225,10 @@ export async function api(path, { method = "GET", body, _retried = false } = {})
       res.status
     );
   }
-  return res.status === 204 ? null : res.json();
+  if (res.status === 204) return null;
+  const data = await res.json();
+  if (method === "GET") captureOfflineResponse(path, data);
+  return data;
 }
 
 // DRF errors come in several shapes: {"detail": "..."} for auth/permission,
@@ -192,9 +249,25 @@ function extractError(detail) {
 // Auth
 export const registrationStatus = () => api("/api/auth/registration/");
 export const register = (email, password) =>
-  api("/api/auth/register/", { method: "POST", body: { email, password } });
+  api(isNative ? "/api/auth/mobile/register/" : "/api/auth/register/", {
+    method: "POST", body: { email, password },
+  }).then(async (data) => {
+    if (isNative) {
+      await prepareMobileAccount(data.user.id);
+      await setRefreshToken(data.refresh);
+    }
+    return data;
+  });
 export const login = (email, password) =>
-  api("/api/auth/login/", { method: "POST", body: { email, password } });
+  api(isNative ? "/api/auth/mobile/login/" : "/api/auth/login/", {
+    method: "POST", body: { email, password },
+  }).then(async (data) => {
+    if (isNative) {
+      await prepareMobileAccount(data.user.id);
+      await setRefreshToken(data.refresh);
+    }
+    return data;
+  });
 export const requestPasswordReset = (email) =>
   api("/api/auth/password-reset/", { method: "POST", body: { email } });
 export const confirmPasswordReset = ({ uid, token, newPassword, confirmPassword }) =>
@@ -216,18 +289,19 @@ export const updateProfile = ({ firstName, lastName }) =>
     body: { first_name: firstName, last_name: lastName },
   });
 export const changePassword = ({ oldPassword, newPassword, confirmPassword }) =>
-  api("/api/auth/change-password/", {
+  api(isNative ? "/api/auth/mobile/change-password/" : "/api/auth/change-password/", {
     method: "POST",
     body: {
       old_password: oldPassword,
       new_password: newPassword,
       confirm_password: confirmPassword,
     },
-  }).then((data) => {
+  }).then(async (data) => {
     // The server rotates every token when a password changes, so the access
     // token in hand is dead the moment this returns. Adopting the fresh pair it
     // hands back is what keeps the user signed in instead of bouncing them to
     // the login screen for having successfully changed their password.
+    if (isNative) await setRefreshToken(data.refresh);
     auth.tokens = data;
     return data;
   });
@@ -235,6 +309,9 @@ export const deleteAccount = (password) =>
   api("/api/auth/me/", {
     method: "DELETE",
     body: { password, confirmation: "DELETE" },
+  }).then(async (data) => {
+    if (isNative) await clearMobileData();
+    return data;
   });
 
 /**
@@ -247,11 +324,12 @@ export const deleteAccount = (password) =>
  */
 export async function downloadExport() {
   const res = await fetch(`${API_BASE}/api/auth/export/`, {
-    credentials: "include",
+    credentials: isNative ? "omit" : "include",
     headers: auth.token ? { Authorization: `Bearer ${auth.token}` } : {},
   });
   if (!res.ok) throw apiError(`Export failed (${res.status}).`, res.status);
   const blob = await res.blob();
+  if (isNative) return shareExport(blob);
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;

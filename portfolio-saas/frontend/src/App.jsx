@@ -1,6 +1,9 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
-import { me, restoreSession, SESSION_EXPIRED_EVENT } from "./api.js";
+import { auth, me, restoreSession, SESSION_EXPIRED_EVENT } from "./api.js";
+import { clearMobileData, hasOfflineSnapshot, isNative } from "./mobile.js";
+import { Network } from "@capacitor/network";
+import OfflinePortfolio from "./OfflinePortfolio.jsx";
 import Auth from "./components/Auth.jsx";
 import ResetPassword from "./components/ResetPassword.jsx";
 import Legal from "./components/Legal.jsx";
@@ -111,6 +114,25 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [ready, setReady] = useState(false);
   const [notice, setNotice] = useState("");
+  const [offline, setOffline] = useState(false);
+  const [offlineAvailable, setOfflineAvailable] = useState(false);
+
+  useEffect(() => {
+    if (!isNative) return undefined;
+    let live = true;
+    const onConnection = async (event) => {
+      if (event.detail) return;
+      const available = await hasOfflineSnapshot().catch(() => false);
+      if (!live) return;
+      setOfflineAvailable(available);
+      setOffline(true);
+    };
+    window.addEventListener("holdings:network-change", onConnection);
+    return () => {
+      live = false;
+      window.removeEventListener("holdings:network-change", onConnection);
+    };
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -124,6 +146,13 @@ export default function App() {
         setUser(token ? await me() : null);
       } catch {
         setUser(null); // Anonymous is a normal state, not an error.
+        if (isNative) {
+          const connected = await Network.getStatus().then((s) => s.connected).catch(() => true);
+          if (!connected) {
+            setOfflineAvailable(await hasOfflineSnapshot().catch(() => false));
+            setOffline(true);
+          }
+        }
       } finally {
         setReady(true);
       }
@@ -140,6 +169,28 @@ export default function App() {
   }, []);
 
   if (!ready) return <Loading testId="app-boot" />;
+
+  if (offline) {
+    return <OfflinePortfolio available={offlineAvailable} onSignOut={async () => {
+      auth.logout();
+      await clearMobileData();
+      setUser(null);
+      setOffline(false);
+    }} onReconnect={async () => {
+      try {
+        const token = await restoreSession();
+        if (!token) {
+          setOffline(false);
+          setNotice("Your session expired. Please sign in again.");
+          return;
+        }
+        setUser(await me());
+        setOffline(false);
+      } catch {
+        throw new Error("Still offline. Your saved portfolio remains available.");
+      }
+    }} />;
+  }
 
   const onAuthed = (profile) => {
     setNotice("");

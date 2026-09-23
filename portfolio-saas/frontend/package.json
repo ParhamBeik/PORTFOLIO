@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite --host",
     "build": "vite build",
+    "build:mobile": "vite build && cap sync",
+    "ios": "cap open ios",
+    "android": "cap open android",
     "preview": "vite preview --host",
     "lint": "eslint .",
     "test:unit": "node --test src/*.test.mjs",
@@ -15,6 +18,16 @@
     "test:lighthouse:auth": "npm i --no-save --silent lighthouse@12 chrome-launcher && node scripts/lh-authenticated.mjs"
   },
   "dependencies": {
+    "@aparajita/capacitor-biometric-auth": "^10.0.0",
+    "@aparajita/capacitor-secure-storage": "^8.0.1",
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/browser": "^8.0.4",
+    "@capacitor/core": "^8.5.2",
+    "@capacitor/filesystem": "^8.1.3",
+    "@capacitor/ios": "^8.5.2",
+    "@capacitor/network": "^8.0.1",
+    "@capacitor/share": "^8.0.2",
     "@sentry/react": "10.73.0",
     "echarts": "6.1.0",
     "react": "19.2.8",
@@ -22,6 +35,7 @@
     "react-router-dom": "7.18.3"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.2",
     "@playwright/test": "1.63.0",
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/jest-dom": "^7.0.1",
