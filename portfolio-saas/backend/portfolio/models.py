@@ -7,11 +7,11 @@ Scale design:
   O(sources), not O(users).
 - "Latest price per asset" is read with one Postgres DISTINCT ON query over a
   (asset, fetched_at) index, then cached. No per-asset queries.
-- `Snapshot` rows are written on the cron after each fetch (bulk, one per user),
-  so the write rate is bounded by schedule frequency, not by user count or price
-  volatility. Current value is computed live from holdings x latest prices.
+- `Snapshot` keeps one Tehran-day close per scope. Current value is computed
+  live from holdings x latest prices, without persisting intraday points.
 """
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
+from zoneinfo import ZoneInfo
 
 import jdatetime
 from django.conf import settings
@@ -42,6 +42,7 @@ HOUSE_PRICE_SCALE = Decimal("1000000")
 # to six places while the other Cash rows are banknotes. See `Asset.quantity_step`,
 # which is the one place this question is answered.
 DIVISIBLE_QUANTITY_KEYS = frozenset({"gold_18k_gram", "usdt_irt"})
+USD_QUOTED_KEYS = ("bitcoin_usd", "gold_ounce_usd")
 
 
 
@@ -59,10 +60,6 @@ class Asset(models.Model):
         STOCK = "Stock", "Stock"
         REAL_ESTATE = "Real Estate", "Real Estate"
         CRYPTO = "Crypto", "Crypto"
-
-    class Currency(models.TextChoices):
-        IRT = "IRT", "Tomans"
-        USD = "USD", "USD"
 
     key = models.SlugField(max_length=64, unique=True)
     name = models.CharField(max_length=120)
@@ -84,7 +81,6 @@ class Asset(models.Model):
     asset_class = models.CharField(
         max_length=16, choices=AssetClass.choices, default=AssetClass.GOLD
     )
-    currency = models.CharField(max_length=3, choices=Currency.choices, default=Currency.IRT)
     # Manual assets (e.g. Swiss gold bars) are priced from settings, not APIs.
     is_manual = models.BooleanField(default=False)
     # Real estate is valued by a formula, not quantity x unit price.
@@ -163,6 +159,26 @@ class Asset(models.Model):
             return "0.000001"
         return "1"
 
+    @property
+    def quantity_scale(self) -> int:
+        return 1_000_000 if self.quantity_step == "0.000001" else 1
+
+    @property
+    def quote_unit(self) -> str:
+        # Provider-native foreign quotes keep their own precision.
+        if self.key in USD_QUOTED_KEYS:
+            return "usd"
+        return "rial" if self.tse_symbol else "toman"
+
+    @property
+    def valuation_unit(self) -> str:
+        return "toman"
+
+    @property
+    def exposure_group(self) -> str:
+        # These remain two distinct instruments; only risk exposure is shared.
+        return "usd" if self.key in {"usd_cash", "usdt_irt"} else self.asset_class.lower().replace(" ", "_")
+
     def save(self, *args, **kwargs):
         self.full_clean()
         return super().save(*args, **kwargs)
@@ -189,7 +205,7 @@ class Account(models.Model):
     goal = models.CharField(max_length=40, blank=True, default="")
     tracking_started_at = models.DateTimeField(null=True, blank=True)
     cash_balance_tomans = models.DecimalField(
-        max_digits=24, decimal_places=4, default=0
+        max_digits=24, decimal_places=0, default=0
     )
     ledger_complete = models.BooleanField(
         default=False,
@@ -218,6 +234,17 @@ class Account(models.Model):
         return f"{self.user.email} / {self.name}"
 
 
+def _to_atomic_quantity(value, asset: Asset) -> int | None:
+    if value is None:
+        return None
+    amount = Decimal(value)
+    scale = Decimal(asset.quantity_scale)
+    atomic = amount * scale
+    if atomic != atomic.to_integral_value():
+        raise ValidationError("Quantity is smaller than this asset's atomic unit.")
+    return int(atomic)
+
+
 class Holding(models.Model):
     """Quantity of one asset held in one account. Mirrors current_state.json."""
 
@@ -226,10 +253,16 @@ class Holding(models.Model):
     )
     asset = models.ForeignKey(Asset, on_delete=models.PROTECT, related_name="holdings")
     quantity = models.DecimalField(max_digits=20, decimal_places=6, default=0)
-    # For houses, quantity stores price-per-sqm-million (the formula input).
+    # Dual-written migration shadow. Keep legacy reads until every service and
+    # serializer can read integer atomic units exclusively.
+    quantity_atomic = models.BigIntegerField(null=True, blank=True)
+    price_per_sqm_tomans = models.DecimalField(
+        max_digits=24, decimal_places=0, null=True, blank=True
+    )
+    # A house's unit price is money, not a holding quantity.
     area_sqm = models.DecimalField(max_digits=10, decimal_places=2, default=HOUSE_AREA_SQM)
     mortgage_deduction_tomans = models.DecimalField(
-        max_digits=20, decimal_places=4, default=Decimal("0")
+        max_digits=20, decimal_places=0, default=Decimal("0")
     )
     # This user's own name for their copy of the asset ("Dad's gold bar", "Home").
     # Blank falls back to the catalog name. It lives here rather than on Asset
@@ -273,11 +306,22 @@ class Holding(models.Model):
             or self.asset.key
         )
 
-    @property
-    def price_per_sqm_tomans(self) -> Decimal | None:
-        if not self.asset.is_house:
-            return None
-        return Decimal(self.quantity) * HOUSE_PRICE_SCALE
+    def save(self, *args, **kwargs):
+        changed = kwargs.get("update_fields")
+        if changed is None or "quantity" in changed or "asset" in changed:
+            if self.asset.is_house:
+                self.price_per_sqm_tomans = (
+                    Decimal(self.quantity) * HOUSE_PRICE_SCALE
+                ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+                self.quantity_atomic = None
+            else:
+                self.quantity_atomic = _to_atomic_quantity(self.quantity, self.asset)
+                self.price_per_sqm_tomans = None
+            if changed is not None:
+                kwargs["update_fields"] = set(changed) | {
+                    "quantity_atomic", "price_per_sqm_tomans"
+                }
+        return super().save(*args, **kwargs)
 
 
 def owner_display_names(accounts=None) -> dict[int, str]:
@@ -459,9 +503,14 @@ class LedgerEntry(models.Model):
         blank=True,
     )
     kind = models.CharField(max_length=24, choices=Kind.choices)
-    # Always positive; `side` carries the direction.
+    # Always positive; `side` carries the direction. The atomic and house-price
+    # fields are dual-written shadows until every caller is cut over.
     quantity = models.DecimalField(
         max_digits=20, decimal_places=6, null=True, blank=True
+    )
+    quantity_atomic = models.BigIntegerField(null=True, blank=True)
+    price_per_sqm_tomans = models.DecimalField(
+        max_digits=24, decimal_places=0, null=True, blank=True
     )
     # Provider-scale unit price at execution; 0 when the asset had no price yet.
     # TSE uses the legacy Rial/one-tenth-share convention; other assets use Toman.
@@ -469,13 +518,13 @@ class LedgerEntry(models.Model):
         max_digits=20, decimal_places=4, null=True, blank=True
     )
     amount_tomans = models.DecimalField(
-        max_digits=24, decimal_places=4, null=True, blank=True
+        max_digits=24, decimal_places=0, null=True, blank=True
     )
     area_sqm = models.DecimalField(
         max_digits=10, decimal_places=2, null=True, blank=True
     )
     mortgage_deduction_tomans = models.DecimalField(
-        max_digits=20, decimal_places=4, null=True, blank=True
+        max_digits=20, decimal_places=0, null=True, blank=True
     )
     note = models.CharField(max_length=200, blank=True, default="")
     timestamp = models.DateTimeField(db_index=True, default=timezone.now)
@@ -579,6 +628,27 @@ class LedgerEntry(models.Model):
             kwargs["kind"] = side
         super().__init__(*args, **kwargs)
 
+    def save(self, *args, **kwargs):
+        changed = kwargs.get("update_fields")
+        if changed is None or "quantity" in changed or "asset" in changed:
+            asset = self.asset if self.asset_id else None
+            if asset and asset.is_house and self.quantity is not None:
+                self.price_per_sqm_tomans = (
+                    Decimal(self.quantity) * HOUSE_PRICE_SCALE
+                ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+                self.quantity_atomic = None
+            else:
+                self.quantity_atomic = (
+                    _to_atomic_quantity(self.quantity, asset)
+                    if asset and self.quantity is not None else None
+                )
+                self.price_per_sqm_tomans = None
+            if changed is not None:
+                kwargs["update_fields"] = set(changed) | {
+                    "quantity_atomic", "price_per_sqm_tomans"
+                }
+        return super().save(*args, **kwargs)
+
     @property
     def side(self):
         return self.kind if self.kind in self.Side.values else ""
@@ -613,13 +683,7 @@ Transaction = LedgerEntry
 
 
 class Snapshot(models.Model):
-    """Per-user net worth at a point in time, for history charts.
-
-    Written in bulk by the cron after each price fetch (one row per user). The
-    global price map is NOT duplicated here: it lives once in the Price table, so
-    a snapshot only stores the derived total (M4 — was a per-user-per-fetch copy
-    of the whole map).
-    """
+    """One authoritative Tehran-day close per user and optional account."""
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="snapshots"
@@ -627,11 +691,12 @@ class Snapshot(models.Model):
     account = models.ForeignKey(
         Account, on_delete=models.CASCADE, related_name="snapshots", null=True, blank=True
     )
-    total_value_tomans = models.DecimalField(max_digits=24, decimal_places=4, default=0)
+    total_value_tomans = models.DecimalField(max_digits=24, decimal_places=0, default=0)
     timestamp = models.DateTimeField(db_index=True, default=timezone.now)
+    day = models.DateField(db_index=True)
     is_estimated = models.BooleanField(
         default=False,
-        help_text="True for downtime-gap backfilled rows (fabricated from recovery-time prices, not real history).",
+        help_text="Legacy estimated observation; new daily closes are always real.",
     )
     is_session_close = models.BooleanField(
         default=False,
@@ -640,12 +705,47 @@ class Snapshot(models.Model):
 
     class Meta:
         ordering = ["-timestamp"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "account", "day"],
+                condition=models.Q(account__isnull=False),
+                name="uniq_snapshot_account_day",
+            ),
+            models.UniqueConstraint(
+                fields=["user", "day"],
+                condition=models.Q(account__isnull=True),
+                name="uniq_snapshot_user_day",
+            ),
+        ]
         indexes = [
             models.Index(fields=["user", "-timestamp"], name="idx_snapshot_user_time"),
             # Backs the daily history grouping in SnapshotListView, which always
             # filters on user + account together before partitioning by day.
             models.Index(fields=["user", "account", "timestamp"], name="idx_snapshot_user_acct_time"),
         ]
+
+    def save(self, *args, **kwargs):
+        self.day = timezone.localtime(self.timestamp, ZoneInfo("Asia/Tehran")).date()
+        if kwargs.get("update_fields") is not None:
+            kwargs["update_fields"] = set(kwargs["update_fields"]) | {"day"}
+        return super().save(*args, **kwargs)
+
+
+class MonetaryRoundingAudit(models.Model):
+    """Permanent before/after evidence for the zero-decimal money migration."""
+
+    source_table = models.CharField(max_length=80)
+    source_id = models.BigIntegerField()
+    field_name = models.CharField(max_length=80)
+    before_value = models.DecimalField(max_digits=30, decimal_places=6)
+    after_value = models.DecimalField(max_digits=30, decimal_places=0)
+    delta = models.DecimalField(max_digits=30, decimal_places=6)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=["source_table", "source_id", "field_name"],
+            name="uniq_monetary_rounding_audit_source",
+        )]
 
 
 class Liability(models.Model):
@@ -696,7 +796,7 @@ class Liability(models.Model):
     # The declared balance, and the fallback for every liability that has no
     # schedule. Still the authority for `other`; for a loan with terms it is
     # what was last written down, and `outstanding_tomans` supersedes it.
-    amount_tomans = models.DecimalField(max_digits=20, decimal_places=4)
+    amount_tomans = models.DecimalField(max_digits=20, decimal_places=0)
     lender = models.CharField(
         max_length=120, blank=True, default="",
         help_text="Bank or institution the money is owed to.",
@@ -717,7 +817,7 @@ class Liability(models.Model):
 
     # --- Repayment schedule. All optional; see `balance_basis`. ---
     principal_tomans = models.DecimalField(
-        max_digits=20, decimal_places=4, null=True, blank=True,
+        max_digits=20, decimal_places=0, null=True, blank=True,
         help_text="Amount originally borrowed.",
     )
     annual_rate_pct = models.DecimalField(
@@ -728,7 +828,7 @@ class Liability(models.Model):
         null=True, blank=True, help_text="Total number of monthly installments."
     )
     monthly_installment_tomans = models.DecimalField(
-        max_digits=20, decimal_places=4, null=True, blank=True,
+        max_digits=20, decimal_places=0, null=True, blank=True,
         help_text="Installment actually paid, when it is known but the rate is not.",
     )
     # Stored Gregorian (DateField), but counted in Jalali months -- see
@@ -813,10 +913,10 @@ class Liability(models.Model):
         n = int(self.term_months)
         rate = self._monthly_rate()
         if rate == 0:
-            return (principal / n).quantize(Decimal("0.0001"))
+            return (principal / n).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         growth = (Decimal(1) + rate) ** n
         return (principal * rate * growth / (growth - Decimal(1))).quantize(
-            Decimal("0.0001")
+            Decimal("1"), rounding=ROUND_HALF_UP
         )
 
     def outstanding_tomans(self, as_of=None) -> Decimal:
@@ -845,7 +945,7 @@ class Liability(models.Model):
 
         if basis == self.BalanceBasis.INSTALLMENTS:
             remaining = Decimal(self.monthly_installment_tomans) * (n - paid)
-            return max(Decimal("0"), remaining).quantize(Decimal("0.0001"))
+            return max(Decimal("0"), remaining).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
         principal = Decimal(self.principal_tomans)
         rate = self._monthly_rate()
@@ -855,7 +955,7 @@ class Liability(models.Model):
             growth = (Decimal(1) + rate) ** n
             paid_growth = (Decimal(1) + rate) ** paid
             remaining = principal * (growth - paid_growth) / (growth - Decimal(1))
-        return max(Decimal("0"), remaining).quantize(Decimal("0.0001"))
+        return max(Decimal("0"), remaining).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
     def payoff_on(self):
         """The Jalali month the last installment falls in, as a Gregorian date.
@@ -906,4 +1006,3 @@ def _on_holding_changed(sender, instance, **kwargs):
             debounce_my_optimal_refresh(instance.account_id)
         except Exception:
             pass
-

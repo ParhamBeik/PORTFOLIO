@@ -60,7 +60,38 @@ class OptimizationSnapshot(models.Model):
         indexes = [
             models.Index(fields=["account", "scenario", "basis", "-created_at"], name="opt_snap_lookup_idx"),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["account", "scenario", "basis", "window_days"],
+                condition=models.Q(account__isnull=False),
+                name="uniq_current_account_optimization",
+            ),
+            models.UniqueConstraint(
+                fields=["scenario", "basis", "window_days"],
+                condition=models.Q(account__isnull=True),
+                name="uniq_current_global_optimization",
+            ),
+        ]
 
     def __str__(self):
         acct = f"account={self.account_id}" if self.account_id else "global"
         return f"OptimizationSnapshot({self.scenario}/{self.basis}) {acct} @ {self.created_at.isoformat()}"
+
+
+def save_current_optimization(*, account, scenario, basis="real_toman", window_days,
+                              payload, price_version="", as_of=None, created_by=None):
+    """Atomically replace the current result for one exact optimization key."""
+    row, _ = OptimizationSnapshot.objects.update_or_create(
+        account=account,
+        scenario=scenario,
+        basis=basis,
+        window_days=window_days,
+        defaults={
+            "payload": payload,
+            "price_version": price_version,
+            "as_of": as_of,
+            "created_by": created_by,
+            "created_at": timezone.now(),
+        },
+    )
+    return row

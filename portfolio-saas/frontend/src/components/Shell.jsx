@@ -9,12 +9,9 @@ const APP_NAME = "Holdings";
 
 const PAGES = [
   { to: "/", label: "Portfolio", end: true },
-  { to: "/ledger", label: "Ledger" },
-  { to: "/family", label: "Breakdown" },
-  { to: "/comparison", label: "Comparison" },
-  { to: "/prices", label: "Prices" },
-  { to: "/optimal", label: "My Optimal" },
-  { to: "/universe", label: "Best Overall" },
+  { to: "/activity", label: "Activity" },
+  { to: "/markets", label: "Markets" },
+  { to: "/guidance", label: "Guidance" },
 ];
 
 const BASES = [
@@ -54,12 +51,12 @@ function NavItem({ to, end, testId, children, onClick }) {
  * The page links, rendered twice: inline above `lg`, in the drawer below it.
  *
  * Two copies means two sets of test ids, and only one can be the canonical
- * `nav-ledger` — a duplicate id resolves to whichever the DOM happens to hold
+ * `nav-activity` — a duplicate id resolves to whichever the DOM happens to hold
  * and a hidden one is not clickable. The inline rail keeps the plain names
  * because that is the one on screen at the width the suites run at; the drawer
  * suffixes `-mobile`, the same convention `AccountMenu` already uses.
  */
-function NavLinks({ staff, suffix = "", onNavigate }) {
+function NavLinks({ admin, suffix = "", onNavigate }) {
   const id = (label) => `nav-${label.toLowerCase().replace(/\s+/g, "-")}${suffix}`;
   return (
     <>
@@ -68,8 +65,8 @@ function NavLinks({ staff, suffix = "", onNavigate }) {
           {p.label}
         </NavItem>
       ))}
-      {staff && (
-        <NavItem to="/ops" testId={id("Ops")} onClick={onNavigate}>Ops</NavItem>
+      {admin && (
+        <NavItem to="/ops" testId={id("Operations")} onClick={onNavigate}>Operations</NavItem>
       )}
     </>
   );
@@ -142,7 +139,7 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
 
         <div className="flex-1 overflow-y-auto px-4 py-4">
           <nav aria-label="Primary" className="app-nav-stack" data-testid="nav-mobile">
-            <NavLinks staff={user?.is_staff} suffix="-mobile" onNavigate={onClose} />
+            <NavLinks admin={user?.role === "admin"} suffix="-mobile" onNavigate={onClose} />
           </nav>
 
           {/* Account settings that only exist above the md breakpoint are
@@ -260,7 +257,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
             className="app-nav-rail order-2"
             data-testid="nav"
           >
-            <NavLinks staff={user?.is_staff} />
+            <NavLinks admin={user?.role === "admin"} />
           </nav>
 
           <div className="order-2 ml-auto flex items-center gap-2 sm:gap-3 lg:order-4 lg:ml-0">

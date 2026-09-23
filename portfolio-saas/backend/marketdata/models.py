@@ -75,7 +75,7 @@ class JalaliDerivedDateTime(models.DateTimeField):
 class ApiRequestQuota(models.Model):
     """Per-day, per-plan provider-call counter shared by every worker.
 
-    One row per (day, provider product). The path family selects the product;
+    One row per (day, provider product). Endpoint plus parameters select it;
     API-key equality does not merge their provider-reported usage semantics.
     See `marketdata.quota`.
     """
@@ -84,11 +84,16 @@ class ApiRequestQuota(models.Model):
     # `marketdata.quota.TSETMC` / `.BRS`. Not a TextChoices enum: the plan set is
     # owned by the quota module, and importing it here would invert the
     # models -> quota dependency that every other module relies on.
-    plan = models.CharField(max_length=16, default="tsetmc")
+    plan = models.CharField(max_length=16, default="aio")
     # 0 means undisclosed or unmetered; `quota.effective_limit` combines this
     # report with the configured per-product expectation.
     limit = models.PositiveIntegerField(default=0)
     used = models.PositiveIntegerField(default=0)
+    local_attempts = models.PositiveIntegerField(default=0)
+    successful_requests = models.PositiveIntegerField(default=0)
+    provider_used = models.PositiveIntegerField(null=True, blank=True)
+    provider_observed_at = models.DateTimeField(null=True, blank=True)
+    provider_observation_source = models.CharField(max_length=12, blank=True, default="")
     archive_used = models.PositiveIntegerField(default=0)
     live_used = models.PositiveIntegerField(default=0)
     other_used = models.PositiveIntegerField(default=0)

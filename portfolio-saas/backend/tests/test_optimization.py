@@ -225,8 +225,19 @@ def _client(user):
 
 def _make_portfolio(user, catalog, holdings: dict, account_name="Main"):
     acct = Account.objects.create(user=user, name=account_name)
+    # Some optimizer fixtures express positions as fractions of a basket.
+    # Scale the whole basket, preserving its weights, so indivisible assets
+    # such as coins are represented by valid whole units.
+    places = max(
+        (max(0, -Decimal(str(qty)).as_tuple().exponent)
+         for key, qty in holdings.items() if catalog[key].quantity_scale == 1),
+        default=0,
+    )
+    scale = Decimal(10) ** places
     for key, qty in holdings.items():
-        Holding.objects.create(account=acct, asset=catalog[key], quantity=Decimal(str(qty)))
+        Holding.objects.create(
+            account=acct, asset=catalog[key], quantity=Decimal(str(qty)) * scale
+        )
     return acct
 
 
@@ -1499,7 +1510,9 @@ def test_run_best_overall_snapshots_writes_one_per_window_and_scenario(held_univ
     assert snaps.count() > 0
     for snap in snaps:
         assert snap.window_days in WINDOWS_DAYS
-        assert snap.scenario in SCENARIOS
+        assert snap.scenario in SCENARIOS or (
+            snap.scenario == "risk_parity" and snap.window_days in (365, 1095)
+        )
 
 
 def test_run_best_overall_snapshots_skips_when_universe_too_small():
@@ -1532,8 +1545,8 @@ def test_optimization_snapshot_views_keep_account_data_isolated(make_user):
     owner = make_user(email="snapshot-owner@test.test")
     other_user = make_user(email="snapshot-other@test.test")
     staff = make_user(email="snapshot-staff@test.test")
-    staff.is_staff = True
-    staff.save(update_fields=["is_staff"])
+    staff.role = User.Role.ADMIN
+    staff.save(update_fields=["role"])
 
     owner_account = Account.objects.create(user=owner, name="Owner")
     other_account = Account.objects.create(user=other_user, name="Other")
@@ -2980,7 +2993,7 @@ def test_max_assets_budgets_for_proxy_expansion(synthetic_history, cardinality_u
 def test_cardinality_reports_frozen_holdings_separately(synthetic_history, cardinality_user):
     """A holding the solver cannot measure is counted, not hidden or sold."""
     Asset.objects.create(
-        key="unmeasurable", name="Unmeasurable", asset_class="Gold", currency="IRT",
+        key="unmeasurable", name="Unmeasurable", asset_class="Gold",
     )
     weights = {
         "emami_coin": 0.2, "bitcoin_usd": 0.2, "usd_cash": 0.2,
@@ -3169,4 +3182,3 @@ def test_my_optimal_knobs_bypass_snapshot(synthetic_history, make_user):
     resp2 = client.get(f"/api/optimization/my-optimal/?account={acct.id}&max_assets=3")
     assert resp2.status_code == 200
     assert resp2.json()["max_assets"] == 3
-

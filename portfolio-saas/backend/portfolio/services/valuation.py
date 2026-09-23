@@ -132,9 +132,8 @@ def _dollar_quotes_to_toman(prices: dict) -> dict:
     the primary one. The returns matrix is untouched by this -- it reads the
     Price table directly and converts these columns itself.
 
-    `Asset.currency` cannot answer this. It says what the asset IS, not what its
-    price is quoted in: `usd_cash` is also USD and its price is Toman per
-    dollar, so converting by that field would inflate every dollar bill held.
+    Asset identity cannot answer this: `usd_cash` is a physical dollar but its
+    price is Toman per dollar, so treating it as USD-quoted would inflate cash.
 
     Without a rate the price becomes 0 rather than staying in dollars -- passing
     the foreign number through is the failure `currency.to_toman` refuses. Zero

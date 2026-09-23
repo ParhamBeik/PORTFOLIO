@@ -1,6 +1,6 @@
-"""Staff-only maintenance endpoints.
+"""Admin-role maintenance endpoints.
 
-Separated so the `IsAdminUser` surface is small enough to audit at a
+Separated so the `IsRoleAdmin` surface is small enough to audit at a
 glance, and so a destructive operation can never be one import away
 from an ordinary user-facing view."""
 import logging
@@ -8,7 +8,7 @@ import logging
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.permissions import IsAdminUser
+from accounts.permissions import IsRoleAdmin
 from portfolio.management.commands.clean_mispriced_data import audit_and_repair_prices
 
 admin_logger = logging.getLogger("portfolio.admin")
@@ -17,7 +17,7 @@ admin_logger = logging.getLogger("portfolio.admin")
 class AdminCleanPricesScanView(APIView):
     """Scan database for mispriced price rows and corrupted snapshots (Admin only)."""
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     def get(self, request):
         stats = audit_and_repair_prices(fix=False)
@@ -32,7 +32,7 @@ class AdminCleanPricesExecuteView(APIView):
     bare POST — a single accidental click must not be enough to trigger it.
     """
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
     CONFIRM_PHRASE = "DELETE MISPRICED DATA"
 
     def post(self, request):

@@ -24,9 +24,8 @@ import { Badge, Button, ErrorState, Input, Modal } from "./ui.jsx";
 
 /** Staff is a real capability here — it is what puts Ops in the nav. */
 function roleOf(user) {
-  if (user?.is_superuser) return { label: "Owner", variant: "good", hint: "Full administrative access" };
-  if (user?.is_staff) return { label: "Admin", variant: "good", hint: "Can reach the operator console" };
-  return { label: "Member", variant: "neutral", hint: "Standard account" };
+  if (user?.role === "admin") return { label: "Admin", variant: "good", hint: "Can reach Operations" };
+  return { label: "User", variant: "neutral", hint: "Standard account" };
 }
 
 const fullName = (user) =>
@@ -369,7 +368,7 @@ export default function AccountMenu({
           <div className="border-b border-border py-2">
             <Row label="Member since">{user.date_joined ? dateTime(user.date_joined) : "—"}</Row>
             <Row label="Signed in">{expires ? `this session ends ${expires}` : "active"}</Row>
-            <Row label="Operator console">{user.is_staff ? "Available" : "Not available"}</Row>
+            <Row label="Operations">{user.role === "admin" ? "Available" : "Not available"}</Row>
           </div>
 
           <div className="border-b border-border py-3">

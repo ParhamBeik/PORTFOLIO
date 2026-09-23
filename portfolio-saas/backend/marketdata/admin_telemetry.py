@@ -16,6 +16,7 @@ import shutil
 from datetime import timedelta
 
 from django.conf import settings
+from django.contrib import admin
 from django.core.cache import cache
 from django.db import connection, transaction
 from django.db.models import Avg, Count, Max, Min, Q, Sum, Value
@@ -256,6 +257,38 @@ def get_database_bytes():
             return int(row[0]) if row and row[0] is not None else 0
     except Exception:
         return 0
+
+
+def admin_model_inventory():
+    """One cached, read-only index of every Django-admin table for Operations."""
+    hypertables = _hypertables()
+    rows = []
+    with connection.cursor() as cursor:
+        for model in admin.site._registry:
+            table = model._meta.db_table
+            cursor.execute(
+                "SELECT reltuples, pg_total_relation_size(oid) "
+                "FROM pg_class WHERE oid = to_regclass(%s)", [table]
+            )
+            result = cursor.fetchone()
+            if result is None:
+                continue
+            count, size = result
+            if table in hypertables:
+                cursor.execute(
+                    "SELECT approximate_row_count(%s), hypertable_size(%s)",
+                    [table, table],
+                )
+                count, size = cursor.fetchone()
+            rows.append({
+                "app": model._meta.app_label,
+                "model": model._meta.verbose_name_plural.title(),
+                "table": table,
+                "rows_estimated": max(0, int(count)) if count is not None else None,
+                "bytes": int(size) if size is not None else None,
+                "admin_path": f"/admin/{model._meta.app_label}/{model._meta.model_name}/",
+            })
+    return sorted(rows, key=lambda row: (row["app"], row["model"]))
 
 
 def _codal_volume_bytes():
@@ -1121,6 +1154,7 @@ def get_ops_overview():
         "last_success": ctx["last_success"],
         "users": ctx["users"],
         "database_counts": {"approximate": True, "counts": get_cached_db_counts()},
+        "admin_model_inventory": admin_model_inventory(),
         "database_rows": [
             {**row, "latest": _latest_iso(row["latest"])} for row in ctx["database_rows"]
         ],
@@ -1147,7 +1181,7 @@ def _user_domain_health():
     last_snapshot = Snapshot.objects.aggregate(value=Max("timestamp"))["value"]
     return {
         "total": User.objects.count(),
-        "staff": User.objects.filter(is_staff=True).count(),
+        "staff": User.objects.filter(role="admin").count(),
         "active": User.objects.filter(is_active=True).count(),
         "with_accounts": User.objects.filter(accounts__isnull=False).distinct().count(),
         "accounts": Account.objects.count(),

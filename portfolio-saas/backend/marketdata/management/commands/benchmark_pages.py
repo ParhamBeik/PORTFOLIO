@@ -119,7 +119,7 @@ class Command(BaseCommand):
         else:
             # Ops endpoints are staff-only, so default to a staff user or half
             # the run reports 403 and looks misleadingly fast.
-            user = User.objects.filter(is_staff=True).order_by("id").first()
+            user = User.objects.filter(role="admin").order_by("id").first()
             if user is None:
                 raise CommandError("no staff user to authenticate as; pass --email")
         host = opts["host"] or (settings.ALLOWED_HOSTS[0] if settings.ALLOWED_HOSTS else "testserver")

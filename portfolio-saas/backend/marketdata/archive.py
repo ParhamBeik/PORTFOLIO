@@ -207,7 +207,7 @@ _ENDPOINT_PLAN = {
     ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS: TSETMC,
     # Codal/* bills the same subscription as Tsetmc/*.
     ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS: TSETMC,
-    ArchiveFetchState.Endpoint.GOLD_DAILY: BRS,
+    ArchiveFetchState.Endpoint.GOLD_DAILY: TSETMC,
     # Not retired and not branched for, so it reaches the final `else` and is
     # fetched as gold history off the BRS key. No state has ever been created for
     # it; the mapping records where it would spend, not an endorsement.
@@ -526,7 +526,7 @@ def _fetch_and_ingest(state):
             payload = direct_payload
         else:
             increment_historical_full_used()
-            payload = fetch_gold_currency_pro_history_daily(settings.BRS_API_KEY, symbol)
+            payload = fetch_gold_currency_pro_history_daily(settings.TSETMC_API_KEY, symbol)
         result = ingest.ingest_gold_currency_history(payload)
         expected = _gold_dates(payload)
         stored = set(GoldCurrencyHistory.objects.filter(

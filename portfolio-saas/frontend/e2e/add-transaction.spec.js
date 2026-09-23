@@ -24,7 +24,7 @@ test.describe("add transaction", () => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }
-    await page.getByTestId("nav-ledger").click();
+    await page.getByTestId("nav-activity").click();
     const add = page.getByTestId("ledger-add");
     if (!(await add.isVisible({ timeout: 20000 }).catch(() => false))) {
       test.skip(true, "no add control on this account");

@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -23,6 +23,10 @@ class AssetSerializer(serializers.ModelSerializer):
     # rather than by a fraction of one. Same declaration the valuation rows and
     # the catalog search carry; see `Asset.quantity_step`.
     quantity_step = serializers.CharField(read_only=True)
+    quantity_scale = serializers.IntegerField(read_only=True)
+    quote_unit = serializers.CharField(read_only=True)
+    valuation_unit = serializers.CharField(read_only=True)
+    exposure_group = serializers.CharField(read_only=True)
 
     class Meta:
         model = Asset
@@ -30,7 +34,8 @@ class AssetSerializer(serializers.ModelSerializer):
         # a join key: a non-empty one means this asset's prices are quoted in
         # Rial. The add-transaction dialog labels its price field from it, and
         # must use the same test the server does (currency.is_tse_priced).
-        fields = ("id", "key", "name", "name_fa", "asset_class", "currency",
+        fields = ("id", "key", "name", "name_fa", "asset_class", "quote_unit",
+                  "valuation_unit", "exposure_group", "quantity_scale",
                   "is_manual", "is_house", "is_active", "tse_symbol",
                   "quantity_step")
 
@@ -122,7 +127,7 @@ class HoldingSerializer(serializers.ModelSerializer):
 
     def get_gross_value_tomans(self, obj):
         price = obj.price_per_sqm_tomans
-        return None if price is None else str(price * Decimal(obj.area_sqm))
+        return None if price is None else str((price * Decimal(obj.area_sqm)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
     def validate_quantity(self, value):
         if value == 0 and self.context.get("request") and self.context["request"].method == "POST":
@@ -249,9 +254,7 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_unit_price_currency(self, obj):
-        from marketdata.currency import is_tse_priced
-
-        return "rial" if is_tse_priced(obj.asset) else "toman"
+        return obj.asset.quote_unit if obj.asset_id else "toman"
 
     def get_asset_symbol(self, obj):
         if not obj.asset_id:
@@ -262,7 +265,7 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
         from .services.ledger import entry_value_tomans
 
         value = entry_value_tomans(obj)
-        return None if value is None else str(value)
+        return None if value is None else str(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
     def _pnl(self, obj):
         return (self.context.get("pnl") or {}).get(obj.pk) or {}

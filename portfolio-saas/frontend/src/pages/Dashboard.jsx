@@ -1703,7 +1703,7 @@ export default function Dashboard({ user }) {
           </div>
           <AllocationCard state={valuationState} />
         </div>
-        <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} staff={!!user?.is_staff} />
+        <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} staff={user?.role === "admin"} />
         <HistoryQualityCard activeId={activeId} />
         <InsightsCard activeId={activeId} refreshKey={revision} />
         <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} />

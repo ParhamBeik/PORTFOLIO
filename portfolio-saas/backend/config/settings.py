@@ -285,6 +285,10 @@ BRS_URL = os.getenv(
     "BRS_URL", "https://Api.BrsApi.ir/Market/Gold_Currency.php"
 )
 TSETMC_API_KEY = os.getenv("TSETMC_API_KEY", "")
+BRSAPI_ACCOUNT_PHONE = os.getenv("BRSAPI_ACCOUNT_PHONE", "")
+# Only enable after a VPS-origin panel read is verified to return the two
+# account meters without spending a market-data request or triggering blocks.
+MARKETDATA_PANEL_METER_ENABLED = os.getenv("MARKETDATA_PANEL_METER_ENABLED", "0") == "1"
 TSETMC_URL = os.getenv("TSETMC_URL", "https://Api.BrsApi.ir/Tsetmc/AllSymbols.php")
 TSETMC_SYMBOL_URL = os.getenv(
     "TSETMC_SYMBOL_URL", "https://Api.BrsApi.ir/Tsetmc/Symbol.php"
@@ -293,7 +297,7 @@ TSETMC_SYMBOL_URL = os.getenv(
 # --------------------------------------------------------------- direct sources
 #
 # BrsApi resells data that the origins publish for free. Its TSETMC product is
-# metered at ~10,000/day; the current Market product is unmetered. The paid
+# metered at ~10,000/day; the current Market product has a 1,500/day limit. The paid
 # ceiling -- not disk or CPU -- bounds stock-history backfill. Direct origins
 # also remove a provider dependency from the live path.
 #
@@ -371,9 +375,9 @@ DIRECT_SOURCE_COOLDOWN_SECONDS = int(os.getenv("DIRECT_SOURCE_COOLDOWN_SECONDS",
 # Seconds to sleep between BrsApi calls inside one sync task (paid API courtesy).
 MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "0.05"))
 # NOTE: there is deliberately no MARKETDATA_DAILY_REQUEST_LIMIT any more. The
-# provider products have different semantics: TSETMC is metered and Market is
-# currently unmetered. The limit is learned from the provider's `account` block,
-# with a per-product fallback; see marketdata/quota.py.
+# provider products have separate meters (currently 10,000 AIO and 1,500
+# Market CGCC requests/day). The limit comes from a provider observation when
+# available, with a per-product fallback; see marketdata/quota.py.
 MARKETDATA_WINDOW_LIMIT = int(os.getenv("MARKETDATA_WINDOW_LIMIT", "1000"))
 MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
 
@@ -401,22 +405,17 @@ MARKETDATA_OTHER_REQUEST_BUDGET = int(os.getenv("MARKETDATA_OTHER_REQUEST_BUDGET
 # any 10 days: that gap is what let archive spend 10,034 of 10,000 requests
 # before dawn on 2026-08-26 while live_used sat at 0.
 MARKETDATA_PLAN_LIMIT_TSETMC = int(os.getenv("MARKETDATA_PLAN_LIMIT_TSETMC", "10000"))
-# 0 means UNMETERED, not empty. Measured against the live API on 2026-09-09:
-# `Market/*` reports `type: "خرید نشده"` (not purchased) with
-# `usage_today_limit: 0`, and calls to Gold_Currency, Cryptocurrency and
-# Commodity move no counter at all. The 1,500 here until then was a lapsed
-# subscription, and defending it cost the gold/currency backfill all but 150
-# requests a day. Set this to the real number if the plan is bought again --
-# though the provider will disclose it on its own once it does.
-MARKETDATA_PLAN_LIMIT_BRS = int(os.getenv("MARKETDATA_PLAN_LIMIT_BRS", "0"))
+# The September 22 panel reports a 1,500-request Market CGCC limit. A
+# provider-observed limit supersedes this fallback; zero means unmetered.
+MARKETDATA_PLAN_LIMIT_BRS = int(os.getenv("MARKETDATA_PLAN_LIMIT_BRS", "1500"))
 # Archive stops this far short of the ceiling so the wallet is never actually
 # exhausted. Exhaustion trips the breaker, and the breaker is what took the live
 # lane down with it.
 #
 # 150 -> 50 on 2026-09-09. A margin is insurance against not knowing what the
-# provider has really billed, and `reconcile_quota_meters` now asks it every
-# five minutes while spending. Buying certainty is cheaper than reserving
-# against its absence.
+# provider has really billed. Once the account-panel reader is verified and
+# enabled, it checks every five minutes; until then this margin remains a
+# conservative fallback, not a guarantee of exact reconciliation.
 MARKETDATA_PLAN_SAFETY_MARGIN = int(os.getenv("MARKETDATA_PLAN_SAFETY_MARGIN", "50"))
 # How long a tripped plan breaker stays closed before it lets ONE request
 # through to ask the provider again. The breaker used to latch until Tehran
@@ -617,7 +616,7 @@ WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "14"))
 # Tightened 2026-09-04 (120/240/240 -> 60/90/180) after eight days of measured
 # spend showed both meters far under-used. Cost, per trading day:
 #
-#   Market/* (currently unmetered)  gold/FX/crypto, one request per cycle
+#   Market/* (1,500/day meter)  gold/FX/crypto, one request per cycle
 #     open      4.5h / 60s  = 270
 #     daytime  11.5h / 90s  = 460      (07:00-08:30 and 13:00-23:00)
 #     overnight 8.0h / 180s = 160      (newly polled at all -- see below)
@@ -632,7 +631,8 @@ WORKFLOW_RETENTION_DAYS = int(os.getenv("WORKFLOW_RETENTION_DAYS", "14"))
 # Overnight is no longer a blackout. It was 240s but `live_job_keys` gated the
 # gold/currency job to OPEN/CLOSED_DAYTIME, so 23:00-07:00 fetched nothing at
 # all: eight hours with no crypto or FX price, on markets that trade around the
-# clock. The unmetered product makes the overnight cadence safe.
+# clock. The 1,500/day Market allowance accommodates this overnight cadence,
+# subject to the live budget and provider-observed meter.
 MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "20"))
 MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "90"))
 MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "180"))
@@ -649,8 +649,8 @@ MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS = int(
     os.getenv("MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS", "900")
 )
 # Buy the provider gold/FX board on EVERY cycle rather than only as a fallback,
-# and let the extractor blend it with the direct origins. Costs ~890 unmetered
-# provider requests on a trading day, and
+# and let the extractor blend it with the direct origins. Costs ~890 metered
+# Market requests on a trading day, and
 # BrsApi declares a unit string per row where TGJU needs slug mapping.
 MARKETDATA_BLEND_PAID_BOARD = os.getenv("MARKETDATA_BLEND_PAID_BOARD", "1") == "1"
 # The live loop's USDT/IRT fallback quote (`Gold_Currency_Pro.php?history=1`)

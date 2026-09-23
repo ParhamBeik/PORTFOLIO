@@ -35,6 +35,13 @@ from portfolio.services.returns import daily_returns_matrix, _load_live_price_pa
 from portfolio.services.valuation import get_latest_prices, value_as_of
 from portfolio.tasks import run_price_fetch
 
+
+def _seal_test_day(*, close_keys=frozenset()):
+    from portfolio.tasks import _write_snapshots
+
+    day = timezone.localdate() - timedelta(days=1)
+    return _write_snapshots(get_latest_prices(), day=day, session_close_keys=set(close_keys))
+
 pytestmark = pytest.mark.django_db
 
 
@@ -577,7 +584,7 @@ def _patch_fetch(monkeypatch, payload):
     monkeypatch.setattr(mod, "fetch_all_markets", lambda _settings: payload)
 
 
-def test_fetch_writes_prices_and_snapshots(asset_catalog, raw_market_sample, monkeypatch):
+def test_fetch_writes_prices_but_not_intraday_snapshots(asset_catalog, raw_market_sample, monkeypatch):
     user = User.objects.create_user(email="fetch@test.test", password="Sup3rSecret!")
     Account.objects.create(user=user, name="Main")
     _patch_fetch(monkeypatch, raw_market_sample)
@@ -589,9 +596,8 @@ def test_fetch_writes_prices_and_snapshots(asset_catalog, raw_market_sample, mon
 
     keys = set(Price.objects.values_list("asset__key", flat=True))
     assert {"emami_coin", "kama_stock", "usd_cash"}.issubset(keys)
-    # One account=None whole-user row + one per-account row (the user has a
-    # single empty account), so both the aggregate and per-portfolio charts
-    # have history. Both are 0: the account holds nothing.
+    assert Snapshot.objects.filter(user=user).count() == 0
+    _seal_test_day()
     assert Snapshot.objects.filter(user=user).count() == 2
     assert Snapshot.objects.filter(user=user, account=None).count() == 1
     snap = Snapshot.objects.get(user=user, account=None)
@@ -675,6 +681,7 @@ def test_fetch_snapshots_use_archive_guard_for_bad_latest_price(asset_catalog, m
     out = StringIO()
     call_command("fetch_prices", stdout=out)
     latest = Price.objects.filter(asset=gold).order_by("-id").first()
+    _seal_test_day()
     snap = Snapshot.objects.get(user=user, account=None)
     assert latest.price == Decimal("479000000")
     assert snap.total_value_tomans == Decimal("958000000")
@@ -703,6 +710,7 @@ def test_closed_tse_fetch_persists_archive_close(asset_catalog, raw_market_sampl
     latest = Price.objects.filter(asset=stock).order_by("-id").first()
     assert latest.price == Decimal("5200")
     assert latest.source == "ARCHIVE"
+    _seal_test_day(close_keys={stock.key})
     snapshot = Snapshot.objects.get(user=user, account=None)
     # The archive close is Rial; the snapshot is Toman. 10 shares x 5,200 Rial.
     assert snapshot.total_value_tomans == Decimal("5200")
@@ -722,6 +730,7 @@ def test_partial_fetch_keeps_previous_prices_in_snapshots(asset_catalog, monkeyp
 
     call_command("fetch_prices", stdout=StringIO())
 
+    _seal_test_day()
     assert Snapshot.objects.get(user=user, account=None).total_value_tomans == Decimal("800000000")
     assert Price.objects.filter(asset=gold).count() == 1
 
@@ -740,6 +749,7 @@ def test_fetch_snapshots_subtract_liabilities(asset_catalog, monkeypatch):
 
     call_command("fetch_prices", stdout=StringIO())
 
+    _seal_test_day()
     assert Snapshot.objects.get(user=user, account=account).total_value_tomans == Decimal("500000000")
     assert Snapshot.objects.get(user=user, account=None).total_value_tomans == Decimal("500000000")
 
@@ -783,8 +793,7 @@ def test_run_price_fetch_concurrency_lock(asset_catalog, raw_market_sample, monk
 
 
 @pytest.mark.django_db
-def test_run_price_fetch_downtime_gap_tagging(asset_catalog, raw_market_sample, monkeypatch):
-    """Verify that snapshots generated for downtime gaps are tagged with is_estimated=True."""
+def test_run_price_fetch_does_not_generate_downtime_rows(asset_catalog, raw_market_sample, monkeypatch):
     import portfolio.tasks as mod
     monkeypatch.setattr(mod, "fetch_all_markets", lambda _settings: raw_market_sample)
     # Disable Redis during this test to avoid lock interference
@@ -793,27 +802,42 @@ def test_run_price_fetch_downtime_gap_tagging(asset_catalog, raw_market_sample, 
     user = User.objects.create_user(email="gap@test.test", password="Sup3rSecret!")
     account = Account.objects.create(user=user, name="Main")
 
-    # Seed one old snapshot to establish a downtime gap
-    old_time = timezone.now() - timedelta(minutes=10)
-    # Use update() to bypass auto_now_add=True restriction
-    snap1 = Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("1000"))
-    snap2 = Snapshot.objects.create(user=user, account=None, total_value_tomans=Decimal("1000"))
-    Snapshot.objects.filter(id__in=[snap1.id, snap2.id]).update(timestamp=old_time)
+    old_time = timezone.now() - timedelta(days=2)
+    Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("1000"), timestamp=old_time)
+    Snapshot.objects.create(user=user, account=None, total_value_tomans=Decimal("1000"), timestamp=old_time)
 
-    # Execute fetch (will detect gap and backfill missing intervals)
     res = run_price_fetch()
     assert res["written"] is True
+    assert Snapshot.objects.filter(user=user).count() == 2
+    assert not Snapshot.objects.filter(user=user, is_estimated=True).exists()
+    _seal_test_day()
+    assert Snapshot.objects.filter(user=user).count() == 4
+    _seal_test_day()
+    assert Snapshot.objects.filter(user=user).count() == 4
 
-    # Check that the backfilled snapshots are marked as estimated
-    estimated_snaps = Snapshot.objects.filter(user=user, is_estimated=True)
-    assert estimated_snaps.exists()
-    assert estimated_snaps.values("timestamp").distinct().count() > 1
-    assert estimated_snaps.order_by("timestamp").first().timestamp < timezone.now() - timedelta(minutes=2)
-    
-    # Real current snapshot must not be estimated
-    current_snaps = Snapshot.objects.filter(user=user, is_estimated=False).order_by("-timestamp")
-    # There should be 4: the original 2 (one account, one user) + 2 new ones (one account, one user)
-    assert current_snaps.count() == 4
+
+def test_daily_snapshot_task_is_idempotent_and_uses_tehran_day(asset_catalog, monkeypatch):
+    from portfolio import tasks
+
+    gold = asset_catalog["emami_coin"]
+    user = User.objects.create_user(email="daily@test.test", password="Sup3rSecret!")
+    account = Account.objects.create(user=user, name="Main")
+    account.holdings.create(asset=gold, quantity=Decimal("2"))
+    monkeypatch.setattr(tasks, "get_latest_prices", lambda: {gold.key: Decimal("400000000")})
+    monkeypatch.setattr(tasks, "_archive_replacements", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(tasks, "guard_price_map", lambda prices, **_kwargs: prices)
+
+    first = tasks.write_daily_net_worth_snapshot()
+    second = tasks.write_daily_net_worth_snapshot()
+    assert first == second
+    assert first["rows"] == 2
+    assert Snapshot.objects.filter(user=user).count() == 2
+    assert set(Snapshot.objects.filter(user=user).values_list("day", flat=True)) == {
+        timezone.localdate() - timedelta(days=1)
+    }
+    assert set(Snapshot.objects.filter(user=user).values_list("total_value_tomans", flat=True)) == {
+        Decimal("800000000")
+    }
 
 
 # ----------------------------------------------------------------------
@@ -1118,17 +1142,17 @@ def test_snapshot_purge_is_scoped_per_user(asset_catalog, db):
     normal_account = Account.objects.create(user=normal, name="Main")
 
     # Whale: legit history clusters around 10,000,000,000 Tomans.
-    for _ in range(6):
-        Snapshot.objects.create(user=whale, account=whale_account, total_value_tomans=Decimal("10000000000"))
+    for index in range(6):
+        Snapshot.objects.create(user=whale, account=whale_account, total_value_tomans=Decimal("10000000000"), timestamp=timezone.now() - timedelta(days=index + 2))
     whale_outlier = Snapshot.objects.create(
-        user=whale, account=whale_account, total_value_tomans=Decimal("100000000000")  # 10x median -> corrupt
+        user=whale, account=whale_account, total_value_tomans=Decimal("100000000000"), timestamp=timezone.now() - timedelta(days=8)
     )
 
     # Normal user: legit history clusters around 50,000,000 Tomans — far below
     # the whale's median, so a global-median filter would wrongly flag these.
     normal_snaps = [
-        Snapshot.objects.create(user=normal, account=normal_account, total_value_tomans=Decimal("50000000"))
-        for _ in range(6)
+        Snapshot.objects.create(user=normal, account=normal_account, total_value_tomans=Decimal("50000000"), timestamp=timezone.now() - timedelta(days=index + 2))
+        for index in range(6)
     ]
 
     stats = audit_and_repair_prices(fix=True)

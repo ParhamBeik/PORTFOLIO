@@ -64,7 +64,7 @@
   <section class="ops-card">
     <h3>Users</h3>
     <div class="ops-stat">{{ users.total }}</div>
-    <div class="ops-muted">{{ users.staff }} staff · {{ users.pro }} Pro</div>
+    <div class="ops-muted">{{ users.staff }} admins · {{ users.pro }} Pro</div>
   </section>
   <section class="ops-card">
     <h3>Disk</h3>
@@ -74,12 +74,7 @@
 </div>
 
 <div class="ops-links" aria-label="Operational records">
-  <a href="{% url 'admin:marketdata_archivefetchstate_changelist' %}?verified_complete__exact=0">Pending archive states</a>
-  <a href="{% url 'admin:marketdata_workflowrun_changelist' %}">Workflow runs</a>
-  <a href="{% url 'admin:marketdata_systemlogevent_changelist' %}?level__exact=ERROR">Errors</a>
-  <a href="{% url 'admin:marketdata_rejectedrecord_changelist' %}?disposition__exact=quarantined">Rejected records</a>
-  <a href="{% url 'admin:marketdata_symbolintegrity_changelist' %}?passes_gate__exact=0">Failed integrity gates</a>
-  <a href="{% url 'admin:marketdata_operationalmetricsnapshot_changelist' %}">Metric snapshots</a>
+  <a href="/ops">Open Operations</a>
 </div>
 
 <div class="ops-columns">

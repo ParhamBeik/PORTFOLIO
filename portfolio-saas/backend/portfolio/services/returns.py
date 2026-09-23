@@ -42,7 +42,7 @@ from marketdata.integrity import (
     MIN_COVERAGE,
 )
 from marketdata.provenance import PRICE_SERIES_ENDPOINTS, rejected_pairs
-from portfolio.models import Asset, Price
+from portfolio.models import Asset, Price, USD_QUOTED_KEYS
 from .deflator import normalize_basis, to_basis
 from datetime import timedelta
 from django.conf import settings
@@ -72,7 +72,6 @@ TRADING_DAYS_PER_YEAR = 252
 RETURNS_CACHE_KEY = "returns:daily:{history_days}d:v{version}"
 RETURNS_CACHE_TTL = 600
 # Asset keys whose raw price is in USD; multiply through by usd_cash to Toman.
-USD_QUOTED_KEYS = ("bitcoin_usd", "gold_ounce_usd")
 # Extra days we fetch upstream of the window so resampling keeps the first row.
 _HISTORY_BUFFER_DAYS = 7
 # MAX_OUTAGE_CALENDAR_DAYS lives in marketdata.integrity (imported above) --

@@ -95,7 +95,10 @@ def _row_from_asset(asset: Asset) -> dict:
         "name": asset.name,
         "name_fa": asset.name_fa,
         "asset_class": asset.asset_class,
-        "currency": asset.currency,
+        "quote_unit": asset.quote_unit,
+        "valuation_unit": asset.valuation_unit,
+        "exposure_group": asset.exposure_group,
+        "quantity_scale": asset.quantity_scale,
         "is_manual": asset.is_manual,
         "is_house": asset.is_house,
         "is_active": asset.is_active,
@@ -106,6 +109,11 @@ def _row_from_asset(asset: Asset) -> dict:
 def _row_from_instrument(inst: MarketInstrument, asset: Asset | None) -> dict:
     if asset is not None:
         return _row_from_asset(asset)
+    candidate = Asset(
+        key="usdt_irt" if inst.symbol in {"USDT", "USDT_IRT"} else "",
+        asset_class=_class_for(inst),
+        tse_symbol=inst.symbol if inst.source == MarketInstrument.Source.TSETMC else "",
+    )
     return {
         "key": None,
         "source": inst.source,
@@ -116,7 +124,10 @@ def _row_from_instrument(inst: MarketInstrument, asset: Asset | None) -> dict:
         "name": inst.name or inst.symbol,
         "name_fa": inst.name or inst.symbol,
         "asset_class": _class_for(inst),
-        "currency": Asset.Currency.IRT,
+        "quote_unit": candidate.quote_unit,
+        "valuation_unit": candidate.valuation_unit,
+        "exposure_group": candidate.exposure_group,
+        "quantity_scale": candidate.quantity_scale,
         "is_manual": False,
         "is_house": False,
         "is_active": True,
@@ -124,9 +135,7 @@ def _row_from_instrument(inst: MarketInstrument, asset: Asset | None) -> dict:
         # one unit of something is lives on the model and must have exactly one
         # implementation, or the wizard and the holdings editor start disagreeing
         # about whether a share divides.
-        "quantity_step": Asset(
-            key="", asset_class=_class_for(inst), is_house=False
-        ).quantity_step,
+        "quantity_step": candidate.quantity_step,
     }
 
 
@@ -282,7 +291,6 @@ def ensure_asset(*, source: str, symbol: str) -> Asset:
         ),
         "name_fa": display,
         "asset_class": asset_class,
-        "currency": Asset.Currency.IRT,
         "is_active": True,
         "owner": None,
     }

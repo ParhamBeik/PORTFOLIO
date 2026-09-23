@@ -139,7 +139,7 @@ def fetch_tsetmc_symbol(tsetmc_symbol_url, tsetmc_api_key, symbol):
 FETCH_TIMEOUT = 90
 
 
-def _usdt_irt_quote(brs_key):
+def _usdt_irt_quote(aio_key):
     """The USDT/IRT fallback quote, cached so it is not bought every cycle.
 
     This is a *fallback*: `extractor._lookup_usdt_toman` only reaches for it when
@@ -147,7 +147,7 @@ def _usdt_irt_quote(brs_key):
     `_overlay_usdt_irt_from_warehouse` can still cover it after that. Buying it
     on every single cycle made a rarely-read fallback the second most expensive
     thing on the Market/* meter -- at the tightened cadence it would have been
-    ~900 requests/day, more than the live board itself.
+    ~900 AIO requests/day, more than the live board itself.
 
     Cached in the Django cache (Redis in every deployed environment), so the
     saving is shared across worker processes rather than per-process. A cache
@@ -163,7 +163,7 @@ def _usdt_irt_quote(brs_key):
                 return cached
         except Exception:
             pass  # Cache down is not a reason to skip the quote.
-    quote = fetch_gold_currency_pro_history_24h(brs_key, "USDT")
+    quote = fetch_gold_currency_pro_history_24h(aio_key, "USDT")
     if quote and ttl > 0:
         try:
             cache.set(key, quote, timeout=ttl)
@@ -172,11 +172,11 @@ def _usdt_irt_quote(brs_key):
     return quote
 
 
-def _brs_job(brs_url, brs_key):
+def _brs_job(brs_url, brs_key, aio_key):
     result = {"brsapi": fetch_brsapi(brs_url, brs_key)}
-    if brs_key:
+    if aio_key:
         try:
-            usdt_quote = _usdt_irt_quote(brs_key)
+            usdt_quote = _usdt_irt_quote(aio_key)
             if usdt_quote:
                 result["usdt_irt_quote"] = usdt_quote
         except Exception as exc:
@@ -285,8 +285,8 @@ def _blend_paid_board():
     """Whether to buy the paid gold/FX board on every cycle, not just as a fallback.
 
     At the 60/90/180s cadences this is ~890 board requests on a trading day.
-    The current Market product is unmetered, but the rolling request window still
-    shapes bursts.
+    Market CGCC now has a 1,500-request daily limit, and the rolling window
+    also shapes bursts.
     """
     return bool(getattr(settings, "MARKETDATA_BLEND_PAID_BOARD", False))
 
@@ -486,7 +486,7 @@ def fetch_all_markets(api_settings):
             # string on every row where TGJU needs slug mapping, and TGJU is known
             # to keep answering on slugs that have stopped updating, which
             # `direct_complete` cannot distinguish from a live one.
-            jobs.append(submit_with_context(executor, _brs_job, brs_url, brs_key))
+            jobs.append(submit_with_context(executor, _brs_job, brs_url, brs_key, tsetmc_key))
         else:
             logger.info("Direct market sources cover the mapped board; skipping BRS fallback.")
     else:

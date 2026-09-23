@@ -81,6 +81,10 @@ def test_admin_overview_requires_staff(free_user, staff_user):
     assert "with_accounts" in users
     assert "snapshots_24h" in users
     assert "last_snapshot_at" in users
+    inventory = body["admin_model_inventory"]
+    assert any(row["admin_path"] == "/admin/portfolio/snapshot/" for row in inventory)
+    assert any(row["admin_path"] == "/admin/token_blacklist/blacklistedtoken/" for row in inventory)
+    assert all("rows_estimated" in row and "bytes" in row for row in inventory)
 
 
 def test_ops_overview_says_when_password_reset_mail_cannot_be_sent(staff_user):
@@ -616,8 +620,8 @@ def test_admin_dashboard_requires_staff(make_user):
 def test_admin_dashboard_renders_operational_history(make_user, monkeypatch):
     cache.clear()
     user = make_user()
-    user.is_staff = True
-    user.save(update_fields=["is_staff"])
+    user.role = User.Role.ADMIN
+    user.save(update_fields=["role"])
     now = timezone.now()
     OperationalMetricSnapshot.objects.create(
         captured_at=now - timedelta(days=1),
@@ -706,8 +710,8 @@ def test_prune_prices_keeps_latest_and_ledgers(settings, make_user, asset_catalo
 
 def _staff_client(make_user):
     user = make_user(email="staffadmin@test.test")
-    user.is_staff = True
-    user.save(update_fields=["is_staff"])
+    user.role = User.Role.ADMIN
+    user.save(update_fields=["role"])
     client = APIClient()
     client.force_authenticate(user=user)
     return client
@@ -1012,6 +1016,7 @@ def test_stale_archive_alert_is_silent_when_there_is_no_quota_to_spend(settings)
     outside the 2h38m burst, which is not a stall.
     """
     from marketdata.models import ArchiveFetchState
+    from marketdata.quota import BRS, TSETMC
     from marketdata.tasks import operational_health_check
 
     ArchiveFetchState.objects.create(
@@ -1020,7 +1025,7 @@ def test_stale_archive_alert_is_silent_when_there_is_no_quota_to_spend(settings)
     )
 
     with (
-        patch("marketdata.quota.archive_capacity", return_value={"tsetmc": 0, "brs": 0}),
+        patch("marketdata.quota.archive_capacity", return_value={TSETMC: 0, BRS: 0}),
         patch("config.observability.notify") as notify,
     ):
         operational_health_check()
@@ -1028,7 +1033,7 @@ def test_stale_archive_alert_is_silent_when_there_is_no_quota_to_spend(settings)
 
     # Same silence, but with quota available, is a real stall.
     with (
-        patch("marketdata.quota.archive_capacity", return_value={"tsetmc": 4_000, "brs": 0}),
+        patch("marketdata.quota.archive_capacity", return_value={TSETMC: 4_000, BRS: 0}),
         patch("config.observability.notify") as notify,
     ):
         operational_health_check()
@@ -1039,6 +1044,7 @@ def test_stale_archive_alert_is_silent_when_there_is_no_quota_to_spend(settings)
 def test_stale_archive_alert_ignores_capacity_for_other_provider(settings):
     """BRS room cannot make a TSETMC-only backlog runnable."""
     from marketdata.models import ArchiveFetchState
+    from marketdata.quota import BRS, TSETMC
     from marketdata.tasks import operational_health_check
 
     ArchiveFetchState.objects.create(
@@ -1046,7 +1052,7 @@ def test_stale_archive_alert_ignores_capacity_for_other_provider(settings):
         symbol="tsetmc-only", verified_complete=False,
     )
     with (
-        patch("marketdata.quota.archive_capacity", return_value={"tsetmc": 0, "brs": 1_500}),
+        patch("marketdata.quota.archive_capacity", return_value={TSETMC: 0, BRS: 1_500}),
         patch("config.observability.notify") as notify,
     ):
         operational_health_check()
@@ -1164,7 +1170,7 @@ def test_ledgered_names_the_provider_path_from_the_registry():
 @pytest.fixture
 def auth_client(db, make_user):
     user = make_user(email="admin@test.test")
-    user.is_staff = True
+    user.role = "admin"
     user.save()
     client = APIClient()
     client.force_authenticate(user=user)
@@ -1176,7 +1182,7 @@ def test_liability_netting_in_valuation(db, make_user):
     account = Account.objects.create(name="Test Account", user=user)
     
     asset = Asset.objects.create(
-        key="gold_18k_gram", name="Gold 18k", asset_class="Gold", currency="IRT"
+        key="gold_18k_gram", name="Gold 18k", asset_class="Gold"
     )
     # Create holding
     Holding.objects.create(account=account, asset=asset, quantity=Decimal("10"))
@@ -1242,7 +1248,7 @@ def test_house_mortgage_is_deducted_exactly_once(db, make_user):
     account = Account.objects.create(name="Home", user=user)
     house = Asset.objects.create(
         key="house_main", name="House", asset_class="Real Estate",
-        currency="IRT", is_house=True,
+        is_house=True,
     )
     Holding.objects.create(
         account=account, asset=house, quantity=Decimal("100"),
@@ -1271,7 +1277,7 @@ def test_house_opening_position_without_mortgage_invents_none(db, make_user):
     account = Account.objects.create(name="Home", user=user)
     house = Asset.objects.create(
         key="house_two", name="House Two", asset_class="Real Estate",
-        currency="IRT", is_house=True,
+        is_house=True,
     )
     create_ledger_entry(
         account=account, asset=house, kind=LedgerEntry.Kind.OPENING_POSITION,
@@ -1305,7 +1311,7 @@ def test_a_house_mortgage_is_owned_by_the_replay_and_a_users_debt_is_not(db, mak
     account = Account.objects.create(name="Home", user=user)
     house = Asset.objects.create(
         key="house_three", name="House Three", asset_class="Real Estate",
-        currency="IRT", is_house=True,
+        is_house=True,
     )
     create_ledger_entry(
         account=account, asset=house, kind=LedgerEntry.Kind.OPENING_POSITION,

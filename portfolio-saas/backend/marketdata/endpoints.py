@@ -44,10 +44,8 @@ class Endpoint:
     path: str
     nature: str
     bucket: str
-    # Which provider subscription bills this call. BrsApi issues one key per
-    # product -- `Tsetmc/*` and `Codal/*` use the paid daily meter, while the
-    # current `Market/*` product is unmetered. The path, not the API-key string,
-    # selects the provider product.
+    # Default provider product. `billing_product` handles parameter-dependent
+    # endpoints; neither the path nor API-key string alone is always enough.
     plan: str = TSETMC
     # Params the provider rejects the request without (beyond `key`).
     required_params: tuple = ()
@@ -77,7 +75,7 @@ REGISTRY = {
         ),
         Endpoint(
             key="gold_currency_pro",
-            plan=BRS,
+            plan=TSETMC,
             path="Market/Gold_Currency_Pro.php",
             nature=Nature.LIVE,
             bucket=LIVE,
@@ -174,7 +172,7 @@ REGISTRY = {
         ),
         Endpoint(
             key="gold_currency_history",
-            plan=BRS,
+            plan=TSETMC,
             path="Market/Gold_Currency_Pro.php",
             nature=Nature.HISTORICAL_FULL,
             bucket=ARCHIVE,
@@ -228,6 +226,18 @@ REGISTRY = {
 
 def get(key):
     return REGISTRY[key]
+
+
+def billing_product(endpoint, parameters=None):
+    """Provider product billed by a concrete request.
+
+    Keep parameters in the contract so a provider mode can change billing
+    without changing callers. The isolated 2026-09-23 counter matrix proved
+    that Gold_Currency_Pro bills AIO with no history parameter, history=1,
+    and history=2. Gold_Currency.php bills Market CGCC instead.
+    """
+    item = get(endpoint) if isinstance(endpoint, str) else endpoint
+    return item.plan
 
 
 def bucket_for(key):

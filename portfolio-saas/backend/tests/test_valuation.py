@@ -949,29 +949,24 @@ def test_same_day_snapshots_use_latest_live_point(make_user):
     _mark_traded(account, asset)
 
     now = timezone.now()
-    Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("100000"), timestamp=now - timedelta(hours=3))
-    Snapshot.objects.create(
-        user=user,
-        account=account,
-        total_value_tomans=Decimal("105000"),
-        timestamp=now - timedelta(hours=1),
-        is_session_close=True,
-    )
-    Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("110000"), timestamp=now - timedelta(minutes=5))
+    yesterday = now - timedelta(days=1)
+    Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("105000"), timestamp=yesterday, is_session_close=True)
 
     res = client.get(f"/api/snapshots/?days=7&account={account.id}")
     assert res.status_code == 200
     series = res.json()["series"]
 
-    assert len(series) == 1
-    assert series[0]["date"] == now.strftime("%Y-%m-%d")
+    assert len(series) == 2
+    assert series[0]["date"] == yesterday.strftime("%Y-%m-%d")
     assert Decimal(series[0]["total"]) == Decimal("105000")
     assert series[0]["is_session_close"] is True
+    assert series[1]["date"] == now.strftime("%Y-%m-%d")
+    assert Snapshot.objects.filter(user=user, account=account).count() == 1
 
 
 @pytest.mark.django_db
 def test_day_avg_prefers_live_over_estimated_gap_fills(make_user):
-    """Gap-fill estimates must not drag a day that also has live snaps."""
+    """A completed close is retained; the live point is derived, never stored."""
     user = make_user("chart_live_pref@example.com")
     client = APIClient()
     client.force_authenticate(user=user)
@@ -984,24 +979,16 @@ def test_day_avg_prefers_live_over_estimated_gap_fills(make_user):
     _mark_traded(account, asset)
 
     now = timezone.now()
-    for i in range(10):
-        Snapshot.objects.create(
-            user=user,
-            account=account,
-            total_value_tomans=Decimal("18000000000"),
-            timestamp=now - timedelta(minutes=2 * i),
-            is_estimated=True,
-        )
     Snapshot.objects.create(
         user=user,
         account=account,
         total_value_tomans=Decimal("27000000000"),
-        timestamp=now,
+        timestamp=now - timedelta(days=1),
         is_estimated=False,
     )
 
     series = client.get(f"/api/snapshots/?days=7&account={account.id}").json()["series"]
-    assert len(series) == 1
+    assert len(series) == 2
     assert Decimal(series[0]["total"]) == Decimal("27000000000")
     assert series[0]["is_estimated"] is False
 
@@ -1015,13 +1002,12 @@ def test_snapshots_across_multiple_days_yield_one_point_per_day(make_user):
     _mark_traded(account, asset)
     now = timezone.now()
 
-    for offset_days, values in enumerate([[100000, 102000], [200000], [300000, 301000, 299000]]):
+    for offset_days, value in enumerate([100000, 200000, 300000], start=1):
         day = now - timedelta(days=offset_days)
-        for i, value in enumerate(values):
-            Snapshot.objects.create(
-                user=user, account=account, total_value_tomans=Decimal(str(value)),
-                timestamp=day - timedelta(hours=i),
-            )
+        Snapshot.objects.create(
+            user=user, account=account, total_value_tomans=Decimal(str(value)),
+            timestamp=day,
+        )
 
     client = APIClient()
     client.force_authenticate(user=user)
@@ -1029,7 +1015,7 @@ def test_snapshots_across_multiple_days_yield_one_point_per_day(make_user):
     assert res.status_code == 200
     series = res.json()["series"]
 
-    assert len(series) == 3
+    assert len(series) == 4
     # Oldest first.
     assert series[0]["date"] < series[1]["date"] < series[2]["date"]
 
@@ -1052,11 +1038,11 @@ def test_days_all_returns_history_beyond_one_year(make_user):
     client.force_authenticate(user=user)
 
     capped = client.get(f"/api/snapshots/?days=365&account={account.id}").json()["series"]
-    assert len(capped) == 1
+    assert len(capped) == 2
     assert capped[0]["date"] == (timezone.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     full = client.get(f"/api/snapshots/?days=all&account={account.id}").json()["series"]
-    assert len(full) == 2
+    assert len(full) == 3
     assert full[0]["date"] == old_snapshot_time.strftime("%Y-%m-%d")
 
 
@@ -1076,7 +1062,7 @@ def test_snapshot_series_does_not_fabricate_pre_history(make_user):
     series = client.get("/api/snapshots/?days=30").json()["series"]
 
     assert series[0]["date"] == snapshot_time.strftime("%Y-%m-%d")
-    assert len(series) == 1
+    assert len(series) == 2
 
 
 @pytest.mark.django_db
@@ -1784,7 +1770,7 @@ def test_seed_assets_leaves_user_properties_active(asset_catalog, make_user):
     user = make_user(email="seed@test.test")
     mine = Asset.objects.create(
         key="re-abc123", name="Home", asset_class="Real Estate",
-        currency="IRT", is_house=True, owner=user,
+        is_house=True, owner=user,
     )
 
     call_command("seed_assets")
@@ -2097,8 +2083,8 @@ def test_history_older_than_the_recompute_bound_is_still_netted(
 
     assert resp.status_code == 200, resp.data
     series = resp.data["series"]
-    assert len(series) == 2
-    # Both points netted, including the one older than the ceiling.
+    assert len(series) == 3
+    # Both stored points and today's derived point are netted.
     assert all(Decimal(str(p["total"])) == Decimal("200") for p in series), series
     # And the out-of-reach one is honest about being an estimate.
     assert series[0]["approximated"] is True

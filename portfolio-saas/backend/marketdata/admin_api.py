@@ -5,7 +5,7 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAdminUser
+from accounts.permissions import IsRoleAdmin
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -31,7 +31,7 @@ def _parse_dt(value: str | None):
 
 
 class AdminOverviewView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     def get(self, request):
         if request.query_params.get("refresh") in ("1", "true", "yes"):
@@ -40,7 +40,7 @@ class AdminOverviewView(APIView):
 
 
 class AdminWorkflowListView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     ORDERING = {
         "created_at": "created_at",
@@ -107,7 +107,7 @@ class AdminWorkflowListView(APIView):
 
 
 class AdminArchiveStateListView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     ORDERING = {
         "last_attempt_at": "last_attempt_at",
@@ -243,7 +243,7 @@ def enqueue_archive_retries(ids, actor_email, *, require_failed=True):
 
 
 class AdminArchiveRetryView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     def post(self, request):
         ids = request.data.get("ids") or []
@@ -258,7 +258,7 @@ class AdminArchiveRetryView(APIView):
 
 
 class AdminAssetListView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     ORDERING = {
         "name",
@@ -317,7 +317,7 @@ class AdminAssetListView(APIView):
 
 
 class AdminAssetEvidenceView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     def get(self, request, key):
         payload = assemble_asset_evidence(key)
@@ -334,7 +334,7 @@ def _asset_symbols(key):
 
 
 class AdminAssetRetryView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     def post(self, request, key):
         if not request.data.get("confirm"):
@@ -357,7 +357,7 @@ class AdminAssetRetryView(APIView):
 
 
 class AdminAssetRecomputeIntegrityView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     def post(self, request, key):
         if not request.data.get("confirm"):
@@ -383,7 +383,7 @@ class AdminAssetRecomputeIntegrityView(APIView):
 
 
 class AdminAssetRefreshView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     def post(self, request, key):
         if not request.data.get("confirm"):

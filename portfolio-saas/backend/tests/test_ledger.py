@@ -682,7 +682,7 @@ def account(asset_catalog, make_user):
     return acc
 
 
-def test_buy_creates_holding_ledger_and_snapshot(account, asset_catalog, write_prices):
+def test_buy_creates_holding_ledger_without_intraday_snapshot(account, asset_catalog, write_prices):
     write_prices({"emami_coin": Decimal("176000000")})
     result = execute_trade(
         account=account, asset=asset_catalog["emami_coin"], side="buy", quantity=Decimal("3")
@@ -693,18 +693,30 @@ def test_buy_creates_holding_ledger_and_snapshot(account, asset_catalog, write_p
     txn = Transaction.objects.filter(account=account, kind="buy").get()
     assert txn.quantity == Decimal("3")
     assert txn.price_tomans == Decimal("176000000.0000")
-    assert Snapshot.objects.filter(user=account.user, account=None).count() == 1
+    assert Snapshot.objects.filter(user=account.user, account=None).count() == 0
     assert result["holding_quantity"] == "3"
     assert Decimal(result["holding_quantity"]) == Decimal("3")
     account.refresh_from_db()
     assert account.cash_balance_tomans == _FUND - (Decimal("176000000") * 3)
 
 
+def test_cash_entry_rounds_half_up_before_projection(account):
+    entry = create_ledger_entry(
+        account=account, kind=LedgerEntry.Kind.DEPOSIT,
+        amount_tomans=Decimal("1.5"),
+    )
+    assert entry.amount_tomans == Decimal("2")
+    entry.refresh_from_db()
+    account.refresh_from_db()
+    assert entry.amount_tomans == Decimal("2")
+    assert account.cash_balance_tomans == _FUND + Decimal("2")
+
+
 def test_buy_accumulates_into_existing_holding(account, asset_catalog, write_prices):
-    write_prices({"emami_coin": Decimal("176000000")})
-    execute_trade(account=account, asset=asset_catalog["emami_coin"], side="buy", quantity=Decimal("2"))
-    execute_trade(account=account, asset=asset_catalog["emami_coin"], side="buy", quantity=Decimal("1.5"))
-    holding = Holding.objects.get(account=account, asset=asset_catalog["emami_coin"])
+    write_prices({"gold_18k_gram": Decimal("176000000")})
+    execute_trade(account=account, asset=asset_catalog["gold_18k_gram"], side="buy", quantity=Decimal("2"))
+    execute_trade(account=account, asset=asset_catalog["gold_18k_gram"], side="buy", quantity=Decimal("1.5"))
+    holding = Holding.objects.get(account=account, asset=asset_catalog["gold_18k_gram"])
     assert holding.quantity == Decimal("3.5")
     assert Transaction.objects.filter(account=account, kind="buy").count() == 2
 
@@ -788,8 +800,8 @@ def test_undo_latest_trade_reverses_holding_and_stamps_snapshots(
     assert not Holding.objects.filter(
         account=account, asset=asset_catalog["emami_coin"]
     ).exists()
-    assert Snapshot.objects.filter(user=account.user, account=None).count() == 2
-    assert Snapshot.objects.filter(user=account.user, account=account).count() == 2
+    assert Snapshot.objects.filter(user=account.user, account=None).count() == 0
+    assert Snapshot.objects.filter(user=account.user, account=account).count() == 0
 
 
 def test_legacy_transaction_delete_preserves_ownership_boundary(
@@ -1152,13 +1164,13 @@ def test_backfill_ledger_gap_command(account, asset_catalog, write_prices):
     """Orphan holdings become opening_position rows, not invented buys."""
     Holding.objects.create(
         account=account,
-        asset=asset_catalog["emami_coin"],
+        asset=asset_catalog["gold_18k_gram"],
         quantity=Decimal("12.5"),
     )
-    write_prices({"emami_coin": Decimal("20000000")})
+    write_prices({"gold_18k_gram": Decimal("20000000")})
 
     assert not Transaction.objects.filter(
-        account=account, asset=asset_catalog["emami_coin"]
+        account=account, asset=asset_catalog["gold_18k_gram"]
     ).exists()
 
     from django.core.management import call_command
@@ -1169,7 +1181,7 @@ def test_backfill_ledger_gap_command(account, asset_catalog, write_prices):
     ).exists()
 
     call_command("backfill_ledger_gap", "--price-source=latest", "--commit")
-    txn = Transaction.objects.get(account=account, asset=asset_catalog["emami_coin"])
+    txn = Transaction.objects.get(account=account, asset=asset_catalog["gold_18k_gram"])
     assert txn.kind == "opening_position"
     assert txn.quantity == Decimal("12.5")
 
@@ -1773,16 +1785,12 @@ def test_restamping_a_property_does_not_double_count_existing_snapshots(
     # One snapshot from before the house existed, one from after.
     old = Snapshot.objects.create(
         user=account.user, account=account, total_value_tomans=Decimal("1000"),
-    )
-    Snapshot.objects.filter(pk=old.pk).update(
-        timestamp=mark.timestamp - dt.timedelta(days=30)
+        timestamp=mark.timestamp - dt.timedelta(days=30),
     )
     recent = Snapshot.objects.create(
         user=account.user, account=account,
         total_value_tomans=Decimal("1000") + house_value,
-    )
-    Snapshot.objects.filter(pk=recent.pk).update(
-        timestamp=mark.timestamp + dt.timedelta(days=1)
+        timestamp=mark.timestamp + dt.timedelta(days=1),
     )
 
     target = (mark.timestamp - dt.timedelta(days=60)).date().isoformat()
@@ -2726,7 +2734,7 @@ def test_set_cost_basis_refuses_an_ambiguous_property_name(make_user):
     for suffix in ("a", "b"):
         asset = Asset.objects.create(
             key=f"re-tehran-{suffix}", name="Tehran flat",
-            asset_class="Real Estate", currency="IRT", is_house=True, owner=user,
+            asset_class="Real Estate", is_house=True, owner=user,
         )
         record_house_mark(
             user=user, account_id=account.id, asset=asset,

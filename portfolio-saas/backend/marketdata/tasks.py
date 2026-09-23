@@ -36,7 +36,7 @@ from .archive import (
     source_for,
 )
 from .catalog import sync_provider_catalog
-from .fetchers import fetch_symbol_data, probe_meter
+from .fetchers import fetch_symbol_data
 from .admin_telemetry import (
     collect_metric_payload,
     get_ops_overview,
@@ -460,13 +460,35 @@ def operational_health_check():
     # Per plan: each subscription is its own ledger, and summing them would let
     # an overcount on one wallet cancel an undercount on the other.
 
+    from django.core.cache import cache
+    from .quota import provider_variance
+
     for quota in ApiRequestQuota.objects.filter(day=_quota_day()):
         bucket_total = quota.archive_used + quota.live_used + quota.other_used
-        if bucket_total != quota.used:
+        # Pre-migration rows have no local_attempts baseline. Never compare
+        # buckets with `used`: that is an admission safety counter which may be
+        # raised by provider reconciliation without assigning a workload lane.
+        if quota.local_attempts and bucket_total != quota.local_attempts:
             alerts.append((
                 "quota-ledger-drift",
-                {"plan": quota.plan, "used": quota.used, "bucket_total": bucket_total},
+                {"plan": quota.plan, "local_attempts": quota.local_attempts,
+                 "bucket_total": bucket_total},
             ))
+        variance = provider_variance(quota)
+        if variance is not None:
+            key = f"quota:variance-alert:{quota.day}:{quota.plan}"
+            try:
+                previous = cache.get(key)
+                if variance > 0 and (previous is None or variance > previous):
+                    alerts.append(("quota-provider-variance-rising", {
+                        "plan": quota.plan, "day": quota.day.isoformat(),
+                        "previous": previous, "variance": variance,
+                        "provider_used": quota.provider_used,
+                        "local_attempts": quota.local_attempts,
+                    }))
+                cache.set(key, variance, timeout=172800)
+            except Exception:
+                logger.warning("Could not retain quota variance alert baseline", exc_info=True)
 
     # Pass the usage breakdown rather than calling this bare. With no argument
     # `database_bytes`/`codal_bytes` default to 0, so before the filesystem
@@ -1013,71 +1035,24 @@ def prune_workflow_runs():
 
 @shared_task(ignore_result=True)
 def reconcile_quota_meters():
-    """Ask the provider what it has actually billed today, one request per plan.
+    """Read BrsApi's account panel, never an intentionally invalid API call."""
+    if not settings.MARKETDATA_PANEL_METER_ENABLED:
+        return {"status": "disabled"}
+    from .provider_meter import read_panel_metrics
+    from .quota import quota_day, reconcile_panel_metrics
 
-    This is the only way to know. BrsApi does not report usage on a successful
-    response, so between error responses the local counter is an estimate that
-    can only drift downward -- it was 2,226 requests light on 2026-09-08, and
-    the response to that was a 1.30 correction factor on the archive's ceiling
-    that threw away 1,950 requests a day. A probe costs one request and replaces
-    the guess with the number the vendor panel shows.
-
-    **Probes only while a plan is spending.** The counter cannot drift when
-    nothing is being fetched, so an idle plan is skipped and a quiet night costs
-    nothing. In practice this is ~1-3% of the wallet on an active day, which is
-    what the accuracy is worth: without it the safety margin has to absorb the
-    unknown, and a margin sized for an unknown is indistinguishable from waste.
-    """
-    from .quota import PLANS, quota_day, unattributed_used
-
-    outcome = _ledgered("reconcile_quota_meters", destination_table="ApiRequestQuota")
-    try:
-        from django.core.cache import cache
-
-        day = quota_day()
-        probed, skipped = {}, []
-        for plan in PLANS:
-            row = ApiRequestQuota.objects.filter(day=day, plan=plan).first()
-            used = row.used if row else 0
-            mark_key = f"quota:meter:last_used:{plan}:{day}"
-            if used and cache.get(mark_key) == used:
-                skipped.append(plan)
-                continue
-            account = probe_meter(plan)
-            if account is None:
-                skipped.append(plan)
-                continue
-            row = ApiRequestQuota.objects.filter(day=day, plan=plan).first()
-            cache.set(mark_key, row.used if row else used, timeout=_SECONDS_PER_DAY)
-            probed[plan] = {
-                "provider_usage": account.get("usage_today"),
-                "provider_limit": account.get("usage_today_limit"),
-                "local_used": row.used if row else used,
-                "unattributed": unattributed_used(row),
-            }
-            drift = probed[plan]["unattributed"]
-            if drift > _QUOTA_DRIFT_ALERT:
-                logger.warning(
-                    "quota_drift plan=%s unattributed=%d of %d billed; something is "
-                    "spending this key outside reserve_request",
-                    plan, drift, probed[plan]["local_used"],
-                )
-        outcome.finish(
-            WorkflowRun.Outcome.SUCCESS,
-            rows_accepted=len(probed),
-            metadata={"probed": probed, "skipped": skipped},
-        )
-        return probed
-    except Exception as err:
-        _finish_fail(outcome, err)
-        raise
+    day = quota_day()
+    metrics = read_panel_metrics()
+    observed_at = timezone.now()
+    result = reconcile_panel_metrics(metrics, day=day, observed_at=observed_at)
+    logger.info("provider_panel_meter_observed day=%s products=%s", day, sorted(result))
+    return result
 
 
 #: Unattributed requests on one plan that mean the ledger has stopped describing
 #: reality. Sized above the handful a deploy or a manual probe leaves behind and
 #: well under the 2,226 seen on 2026-09-08.
 _QUOTA_DRIFT_ALERT = 200
-_SECONDS_PER_DAY = 86400
 
 
 @shared_task(ignore_result=True)

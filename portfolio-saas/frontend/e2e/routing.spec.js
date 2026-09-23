@@ -9,14 +9,14 @@ test.describe("routing aliases", () => {
   });
 
   test("route aliases redirect correctly when signed in", async ({ page }) => {
-    // Direct navigation to /breakdown should alias to /family
-    await page.goto("/breakdown");
-    await page.waitForURL("**/family");
-    expect(page.url()).toContain("/family");
+    // Legacy breakdown opens the Portfolio breakdown section.
+    await page.goto("/breakdown?account=1#allocation");
+    await page.waitForURL("**/?account=1&view=breakdown#allocation");
+    expect(page.url()).toContain("/?account=1&view=breakdown#allocation");
 
-    // Direct navigation to /best-overall should alias to /universe
+    // Legacy market optimization opens the Guidance benchmark section.
     await page.goto("/best-overall");
-    await page.waitForURL("**/universe");
-    expect(page.url()).toContain("/universe");
+    await page.waitForURL("**/guidance?view=benchmark");
+    expect(page.url()).toContain("/guidance?view=benchmark");
   });
 });

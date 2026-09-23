@@ -4,6 +4,7 @@ These are the expensive endpoints: they carry the analytics throttle
 scope and the concurrency cap, and several read a precomputed snapshot
 rather than solving in the request path."""
 import logging
+from datetime import date
 from decimal import Decimal
 import numpy as np
 import pandas as pd
@@ -32,7 +33,7 @@ from ..services.optimization import (
     optimize,
 )
 from ..services.returns import daily_returns_matrix
-from rest_framework.permissions import IsAdminUser
+from accounts.permissions import IsRoleAdmin
 from ._common import _int_param, _scope, concurrency_cap
 from django.core.cache import cache as _cache
 from marketdata.models import (
@@ -41,7 +42,7 @@ from marketdata.models import (
     RejectedRecord,
     SymbolIntegrity,
 )
-from portfolio.optimization_models import OptimizationSnapshot
+from portfolio.optimization_models import OptimizationSnapshot, save_current_optimization
 from portfolio.serializers import OptimizationSnapshotSerializer
 import copy
 
@@ -599,7 +600,7 @@ class MyOptimalView(APIView):
         if is_default_knobs and account is not None:
             if any(w.get("status") == "ok" for w in body.get("windows", [])):
                 try:
-                    OptimizationSnapshot.objects.create(
+                    save_current_optimization(
                         account=account,
                         scenario="my_optimal",
                         basis=requested_basis,
@@ -613,6 +614,113 @@ class MyOptimalView(APIView):
                     logger.warning("Failed to save default OptimizationSnapshot: %s", exc)
 
         return Response(body)
+
+
+def _covers_window(payload, days):
+    """Do not call a short sample a three-year recommendation."""
+    window = payload.get("data_window") or {}
+    try:
+        start = date.fromisoformat(window["start"][:10])
+        end = date.fromisoformat(window["end"][:10])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (end - start).days >= int(days * 0.8)
+
+
+class GuidanceView(APIView):
+    """One personal rebalance and one market benchmark, with explicit fallback."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "analytics"
+
+    @concurrency_cap
+    def get(self, request):
+        from ..services.deflator import CpiUnavailable
+        from ..services.returns import get_universe_by_mode
+
+        account = _scope(request)
+        profile = request.user.risk_profile
+        scenario = {
+            "conservative": "min_volatility",
+            "balanced": "risk_parity",
+            "growth": "max_sharpe",
+        }[profile]
+        weights, total, _ = _current_weights_and_total(request.user, account)
+        personal = None
+        selected_days = None
+        basis = "real_toman"
+        if weights:
+            universe = get_universe_by_mode("held", user=request.user, account=account)
+            for days in (1095, 365):
+                try:
+                    candidate = optimize(
+                        scenario=scenario, current_weights=weights,
+                        total_value_tomans=total, user=request.user,
+                        history_days=days, universe=universe,
+                        held_keys=frozenset(weights), basis=basis,
+                    )
+                except CpiUnavailable:
+                    basis = "nominal_toman"
+                    try:
+                        candidate = optimize(
+                            scenario=scenario, current_weights=weights,
+                            total_value_tomans=total, user=request.user,
+                            history_days=days, universe=universe,
+                            held_keys=frozenset(weights), basis=basis,
+                        )
+                    except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate,
+                            MixedUnitUniverseBlocked, CpiUnavailable):
+                        continue
+                except (UniverseTooSmall, SolverError, NoAssetBeatsRiskFreeRate,
+                        MixedUnitUniverseBlocked):
+                    continue
+                if days == 1095 and not _covers_window(candidate, days):
+                    continue
+                personal = candidate
+                selected_days = days
+                break
+
+        benchmark = None
+        benchmark_days = None
+        for days in (1095, 365):
+            snap = (
+                OptimizationSnapshot.objects.filter(
+                    account__isnull=True, scenario="risk_parity", window_days=days
+                ).order_by("-created_at", "-pk").first()
+            )
+            if snap is None or not isinstance(snap.payload, dict):
+                continue
+            if days == 1095 and not _covers_window(snap.payload, days):
+                continue
+            benchmark = {
+                "target_weights": snap.payload.get("target_weights", {}),
+                "metrics": snap.payload.get("metrics", {}),
+                "data_window": snap.payload.get("data_window"),
+                "as_of": snap.as_of or snap.created_at,
+            }
+            benchmark_days = days
+            break
+
+        return Response({
+            "risk_profile": profile,
+            "scenario": scenario,
+            "personal": None if personal is None else {
+                "target_weights": personal.get("target_weights", {}),
+                "rebalance_trades": personal.get("rebalance_trades", []),
+                "metrics": personal.get("metrics", {}),
+                "data_window": personal.get("data_window"),
+            },
+            "personal_window_days": selected_days,
+            "benchmark": benchmark,
+            "benchmark_window_days": benchmark_days,
+            "basis": basis,
+            "fallback_disclosed": selected_days == 365 or benchmark_days == 365,
+            "fallback_reason": (
+                "Three years of usable history were unavailable; showing one year."
+                if selected_days == 365 or benchmark_days == 365 else None
+            ),
+        })
 
 
 class RobustnessView(APIView):
@@ -1075,7 +1183,7 @@ class BenchmarkSeriesView(APIView):
 class IntegrityView(APIView):
     """Retrieve symbols integrity quality metrics and rejected records."""
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     def get(self, request):
 
