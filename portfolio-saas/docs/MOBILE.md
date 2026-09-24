@@ -33,3 +33,18 @@ The MVP staging checklist in `MVP-IMPLEMENTATION-CHECKLIST.md` still has financi
 - This Mac has Java 21, Android SDK Platform 36, Build Tools 35.0.0, and an Android 35 ARM emulator installed. On this network, Google's normal Android SDK and Maven host returned 404, so the packages were obtained from Google's redirector and verified against Google's repository checksums. The local Gradle build used a temporary Maven redirector init script. Standard SDK/Gradle downloads should work on other networks.
 - Authenticated production testing remains gated: the default production API does not yet have the new mobile auth deployment, and the MVP financial migration and release checklist gates are open. The fixture test used a debug-only Android network policy permitting cleartext to `localhost` over `adb reverse`; release builds retain HTTPS-only policy. Use a fixture-backed staging API for any broader role, unit, and mutation checks before production.
 - Xcode 27 is installed on this Mac, but `xcrun simctl` and `xcodebuild` are blocked until the Mac administrator accepts Apple's Xcode/SDK license with `sudo xcodebuild -license accept`. iOS simulator verification remains pending. Xcode cannot run on the Linux VPS. Signed private distribution also requires the owner's Apple and Android signing setup.
+
+### VPS Android build
+
+The Debian 13 VPS at `45.139.10.12` has OpenJDK 21 and a separate Android SDK under `/opt/apps/holdings-mobile-build/sdk`. A copy of this branch's tracked frontend lives under `/opt/apps/holdings-mobile-build/source/portfolio-saas/frontend`. It was built on 2026-09-24 with the existing `node:22-alpine` image for `npm ci && npm run build:mobile`, then with:
+
+```sh
+cd /opt/apps/holdings-mobile-build/source/portfolio-saas/frontend/android
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+ANDROID_HOME=/opt/apps/holdings-mobile-build/sdk \
+./gradlew :app:assembleDebug --no-daemon
+```
+
+The resulting `app/build/outputs/apk/debug/app-debug.apk` is a 7.4 MB debug APK. `aapt` confirmed `ir.parhambm.holdings`, minimum SDK 24, and target SDK 36; `apksigner verify` confirmed an APK v2 signature. SHA-256: `75c08b7a255e966f078c9b93f9da097c1b67a912bc3c1e6b35b48ca867f5f006`. This debug signature is local to the VPS and is not a release signing key. Before each new VPS build, copy current tracked frontend source from the isolated branch and rerun `npm ci && npm run build:mobile`. The live portfolio deployment and Docker containers were not changed. About 8 GB remained free after the build; monitor disk space before adding emulator images or keeping multiple build artifacts.
+
+The same isolated source also passed frontend lint, 53 Vitest checks, and 26 Node unit checks in `node:22-alpine` on the VPS.
