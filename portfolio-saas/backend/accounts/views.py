@@ -21,7 +21,8 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.views.decorators.csrf import csrf_protect
 from rest_framework import generics, status
-from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from .permissions import IsRoleAdmin
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
@@ -429,11 +430,11 @@ class AdminPasswordResetLinkView(APIView):
     change here.
     """
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     def post(self, request):
-        if not request.user.is_superuser:
-            return Response({"detail": "Superuser access required."}, status=403)
+        if request.user.role != User.Role.ADMIN:
+            return Response({"detail": "Admin access required."}, status=403)
         email = request.data.get("email") if isinstance(request.data, dict) else None
         if not isinstance(email, str) or not email.strip():
             return Response({"detail": "email is required."}, status=400)
@@ -519,17 +520,22 @@ class ExportView(APIView):
             ),
             "ledger.csv": _csv_bytes(
                 ["id", "account_id", "kind", "asset_id", "quantity", "price_tomans", "amount_tomans", "timestamp", "source", "external_id"],
-                LedgerEntry.objects.filter(account_id__in=account_ids).values_list(
-                    "id", "account_id", "kind", "asset_id", "quantity",
-                    "price_tomans", "amount_tomans", "timestamp", "source",
-                    "external_id",
+                (
+                    (entry.id, entry.account_id, entry.kind, entry.asset_id,
+                     entry.quantity, entry.price_tomans, entry.amount_tomans,
+                     entry.timestamp, entry.source, entry.external_id)
+                    for entry in LedgerEntry.objects.filter(account_id__in=account_ids)
+                    .select_related("asset")
                 ),
             ),
             "holdings.csv": _csv_bytes(
                 ["id", "account_id", "asset_id", "quantity", "area_sqm", "mortgage_deduction_tomans"],
-                Holding.objects.filter(account_id__in=account_ids).values_list(
-                    "id", "account_id", "asset_id", "quantity", "area_sqm",
-                    "mortgage_deduction_tomans",
+                (
+                    (holding.id, holding.account_id, holding.asset_id,
+                     holding.quantity, holding.area_sqm,
+                     holding.mortgage_deduction_tomans)
+                    for holding in Holding.objects.filter(account_id__in=account_ids)
+                    .select_related("asset")
                 ),
             ),
             "imports.csv": _csv_bytes(
@@ -555,9 +561,9 @@ class ExportView(APIView):
 
 
 class AdminUserListView(generics.ListAPIView):
-    """Staff-only search/list view of registered users."""
+    """Admin-only search/list view of registered users."""
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
     serializer_class = AdminUserSerializer
 
     def get_queryset(self):
@@ -590,7 +596,7 @@ class AdminUserDetailView(APIView):
     admin.
     """
 
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsRoleAdmin]
 
     def patch(self, request, pk: int):
         if not isinstance(request.data, dict) or "is_active" not in request.data:
@@ -607,7 +613,7 @@ class AdminUserDetailView(APIView):
             if not is_active:
                 list(
                     User.objects.select_for_update()
-                    .filter(is_superuser=True, is_active=True)
+                    .filter(role=User.Role.ADMIN, is_active=True)
                     .order_by("pk")
                     .values_list("pk", flat=True)
                 )
@@ -619,11 +625,11 @@ class AdminUserDetailView(APIView):
                     return Response(
                         {"detail": "You cannot deactivate your own account."}, status=400
                     )
-                if user.is_superuser and not User.objects.filter(
-                    is_superuser=True, is_active=True
+                if user.role == User.Role.ADMIN and not User.objects.filter(
+                    role=User.Role.ADMIN, is_active=True
                 ).exclude(pk=user.pk).exists():
                     return Response(
-                        {"detail": "This is the last active superuser."}, status=400
+                        {"detail": "This is the last active admin."}, status=400
                     )
             serializer = AdminUserSerializer(user, data=request.data, partial=True)
             serializer.is_valid(raise_exception=True)

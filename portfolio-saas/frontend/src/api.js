@@ -208,6 +208,8 @@ export const confirmPasswordReset = ({ uid, token, newPassword, confirmPassword 
     },
   });
 export const me = () => api("/api/auth/me/");
+export const setRiskProfile = (riskProfile) =>
+  api("/api/auth/me/", { method: "PATCH", body: { risk_profile: riskProfile } });
 export const updateProfile = ({ firstName, lastName }) =>
   api("/api/auth/me/", {
     method: "PATCH",
@@ -551,6 +553,7 @@ export const robustness = (account = null, { scenario, window, targetVolatility 
 };
 export const bestOverall = (account = null) =>
   api(`/api/optimization/best-overall/${qs({ account })}`);
+export const guidance = (account = null) => api(`/api/guidance/${qs({ account })}`);
 
 function qs(params) {
   const u = new URLSearchParams();

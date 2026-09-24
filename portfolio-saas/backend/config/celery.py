@@ -70,6 +70,10 @@ app.conf.update(
 # Crontab times are declared directly in Tehran local time. ZoneInfo owns any
 # future timezone-policy changes; no hand-converted UTC hours are duplicated.
 app.conf.beat_schedule = {
+    "write-daily-net-worth": {
+        "task": "portfolio.tasks.write_daily_net_worth_snapshot",
+        "schedule": crontab(hour=0, minute=1),
+    },
     # Beat ticks every 20s; the task itself enforces the real cadence, which
     # depends on whether the TSE is open (see marketdata/market_state.py).
     "fetch-prices-every-minute": {
@@ -85,14 +89,6 @@ app.conf.beat_schedule = {
     # once the backlog has taken its share, and `next_post_close` scheduling
     # already makes them due at the right moment. Held symbols' same-day close
     # comes from the live lane, which is reserved first.
-    # One request per spending plan, every five minutes, to read the provider's
-    # own meter. Everything else in this file divides up a number; this is the
-    # only entry that checks the number is real. It self-skips while a plan is
-    # idle, so the cost tracks activity rather than the clock.
-    "marketdata-reconcile-quota-meters": {
-        "task": "marketdata.tasks.reconcile_quota_meters",
-        "schedule": 300.0,
-    },
     "marketdata-low-rate-maintenance": {
         "task": "marketdata.tasks.archive_maintenance",
         "schedule": crontab(hour=4, minute=10),
@@ -180,12 +176,6 @@ app.conf.beat_schedule = {
         "task": "marketdata.tasks.weekly_warehouse_audit",
         "schedule": crontab(day_of_week=5, hour=5, minute=0),
     },
-    # Snapshot retention. No-op unless SNAPSHOT_PRUNE_ENABLED=1 (see
-    # portfolio/tasks.py) -- deleting rows needs explicit sign-off.
-    "prune-snapshots-nightly": {
-        "task": "portfolio.tasks.prune_snapshots",
-        "schedule": crontab(hour=2, minute=0),
-    },
     "prune-prices-nightly": {
         "task": "portfolio.tasks.prune_prices",
         "schedule": crontab(hour=2, minute=20),
@@ -213,6 +203,13 @@ app.conf.beat_schedule = {
         "schedule": crontab(hour=2, minute=45),
     },
 }
+
+# Do not poll an unverified account endpoint or create no-op workflow rows.
+if os.getenv("MARKETDATA_PANEL_METER_ENABLED", "0") == "1":
+    app.conf.beat_schedule["marketdata-read-provider-panel"] = {
+        "task": "marketdata.tasks.reconcile_quota_meters",
+        "schedule": 300.0,
+    }
 
 if settings.CODAL_ENABLED:
     # Sweeper only -- new announcements are queued at ingest time. Frequent

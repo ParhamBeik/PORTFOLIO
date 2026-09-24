@@ -8,7 +8,7 @@ from __future__ import annotations
 from django.db.models import Count, Q
 from django.utils import timezone
 
-from portfolio.models import Asset, Holding, Price, owner_display_names
+from portfolio.models import Asset, Holding, Price, owner_display_names, positive_price_q
 
 from .archive import _RETIRED_ARCHIVE_ENDPOINTS
 from .evidence import LIVE_PRICE_FRESH_SECONDS
@@ -120,7 +120,7 @@ def _pct(part: int, whole: int) -> float:
 
 def _latest_prices_by_asset() -> dict[int, Price]:
     out: dict[int, Price] = {}
-    for row in Price.objects.filter(price__gt=0).order_by("asset_id", "-fetched_at", "-id"):
+    for row in Price.objects.filter(positive_price_q()).order_by("asset_id", "-fetched_at", "-id"):
         if row.asset_id not in out:
             out[row.asset_id] = row
     return out
@@ -577,4 +577,3 @@ def list_ops_assets(
         ],
         "results": rows,
     }
-

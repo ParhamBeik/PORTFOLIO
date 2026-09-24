@@ -1334,7 +1334,7 @@ class TestTrackD(APITestCase):
         assert res.status_code == status.HTTP_403_FORBIDDEN
         
         # Authenticate as staff
-        self.pro_user.is_staff = True
+        self.pro_user.role = "admin"
         self.pro_user.save()
         
         res = self.client.get(reverse("integrity"))

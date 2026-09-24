@@ -44,7 +44,9 @@ from marketdata.models import GoldCurrencyHistory
 from marketdata import quota
 from marketdata.quota import (
     ARCHIVE,
+    BRS,
     LIVE,
+    TSETMC,
     QuotaExhausted,
     quota_day,
     reconcile_account,
@@ -424,15 +426,8 @@ def test_every_archive_endpoint_declares_which_wallet_it_spends():
         assert plan is None or plan in PLANS, f"{endpoint} claims unknown plan {plan}"
 
 
-def test_a_spent_plan_stops_claiming_its_endpoints_but_not_the_others(monkeypatch):
-    """Capacity is per wallet, so the claim filter has to be per wallet too.
-
-    11,719 of 11,759 states bill TSETMC and 38 bill BRS. Sizing the batch off
-    the roomiest wallet meant that once TSETMC was spent, BRS's idle 1,500 kept
-    capacity non-zero and full batches were still claimed from a pool that is
-    99.7% TSETMC -- 11,053 refusals an hour, each writing a ledger row. The gold
-    states must still get through, which is why this cannot just stop the tick.
-    """
+def test_a_spent_aio_plan_stops_claiming_history_even_with_market_room(monkeypatch):
+    """Gold history also bills AIO; unused Market room cannot fund backfill."""
     from marketdata import archive
     from marketdata.models import ArchiveFetchState as State
 
@@ -440,10 +435,10 @@ def test_a_spent_plan_stops_claiming_its_endpoints_but_not_the_others(monkeypatc
     tick = _state("spent-plan-tick", Endpoint.STOCK_TRANSACTION_TICKS)
     gold = _state("spent-plan-gold", Endpoint.GOLD_DAILY)
 
-    monkeypatch.setattr(archive, "archive_capacity", lambda: {"tsetmc": 0, "brs": 500})
+    monkeypatch.setattr(archive, "archive_capacity", lambda: {TSETMC: 0, BRS: 500})
     claimed = set(archive.claim_archive_batch(limit=50))
 
-    assert gold.pk in claimed, "the plan with room must still be worked"
+    assert gold.pk not in claimed
     assert stock.pk not in claimed
     assert tick.pk not in claimed
     # And the states left alone are genuinely untouched, not deferred: their
@@ -894,9 +889,9 @@ def test_archive_tick_records_spent_budget_once_per_quota_day(monkeypatch):
 
     client.set.side_effect = claim_once
     monkeypatch.setattr(tasks, "get_redis", lambda: client)
-    monkeypatch.setattr("marketdata.quota.archive_capacity", lambda: {"tsetmc": 0})
+    monkeypatch.setattr("marketdata.quota.archive_capacity", lambda: {TSETMC: 0})
     monkeypatch.setattr("marketdata.quota.archive_idle_reason", lambda _plan: "live_reserved")
-    monkeypatch.setattr("marketdata.quota.PLANS", ("tsetmc",))
+    monkeypatch.setattr("marketdata.quota.PLANS", (TSETMC,))
 
     archive_tick()
     archive_tick()
@@ -976,7 +971,7 @@ def test_queue_slots_uses_broker_depth_and_fails_closed(monkeypatch):
 def test_archive_claim_includes_each_due_endpoint_before_filling_priority(monkeypatch):
     import marketdata.archive as archive
 
-    monkeypatch.setattr(archive, "archive_capacity", lambda: {"tsetmc": 10, "brs": 10})
+    monkeypatch.setattr(archive, "archive_capacity", lambda: {TSETMC: 10, BRS: 10})
     monkeypatch.setattr(archive, "_archive_prereqs_ready", lambda state: True)
     ArchiveFetchState.objects.create(endpoint="stock_history_unadjusted", symbol="price")
     ArchiveFetchState.objects.create(endpoint="stock_transaction_ticks", symbol="ticks")

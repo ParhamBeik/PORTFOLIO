@@ -28,6 +28,7 @@ from portfolio.models import (
     LedgerEntry,
     Liability,
     Price,
+    positive_price_q,
 )
 from .timeline import cash_as_of, holdings_as_of, house_state_as_of, load_house_marks
 from .visibility import hidden_asset_ids, hidden_keys
@@ -132,9 +133,8 @@ def _dollar_quotes_to_toman(prices: dict) -> dict:
     the primary one. The returns matrix is untouched by this -- it reads the
     Price table directly and converts these columns itself.
 
-    `Asset.currency` cannot answer this. It says what the asset IS, not what its
-    price is quoted in: `usd_cash` is also USD and its price is Toman per
-    dollar, so converting by that field would inflate every dollar bill held.
+    Asset identity cannot answer this: `usd_cash` is a physical dollar but its
+    price is Toman per dollar, so treating it as USD-quoted would inflate cash.
 
     Without a rate the price becomes 0 rather than staying in dollars -- passing
     the foreign number through is the failure `currency.to_toman` refuses. Zero
@@ -180,7 +180,7 @@ def get_latest_prices() -> dict:
 
     latest = (
         Price.objects.select_related("asset")
-        .filter(asset__is_active=True, price__gt=0)
+        .filter(positive_price_q(), asset__is_active=True)
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     )
@@ -215,7 +215,7 @@ def guard_price_map(prices: dict, *, fill_missing=True, archive_replacements=Non
     # live price if it is not from an older session than the one already held.
     latest_db_rows = list(
         Price.objects.select_related("asset")
-        .filter(asset__is_active=True, price__gt=0)
+        .filter(positive_price_q(), asset__is_active=True)
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     )
@@ -279,7 +279,7 @@ def stored_price_sessions(keys) -> dict:
     return {
         row.asset.key: row.fetched_at
         for row in Price.objects.select_related("asset")
-        .filter(asset__key__in=list(keys), price__gt=0)
+        .filter(positive_price_q(), asset__key__in=list(keys))
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     }

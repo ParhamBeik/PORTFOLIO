@@ -32,6 +32,18 @@ from marketdata.sources.http import SourceResponseError
 FIXTURES = Path(__file__).parent / "fixtures" / "sources"
 TEHRAN = ZoneInfo("Asia/Tehran")
 
+
+def test_paid_usdt_pro_quote_uses_aio_key(monkeypatch):
+    from portfolio.live import fetcher
+
+    seen = []
+    monkeypatch.setattr(fetcher, "fetch_brsapi", lambda _url, key: {"board_key": key})
+    monkeypatch.setattr(
+        fetcher, "_usdt_irt_quote", lambda key: seen.append(key) or None
+    )
+    fetcher._brs_job("https://paid.example", "market-key", "aio-key")
+    assert seen == ["aio-key"]
+
 #: The capture instant. Ages are measured against this so the staleness tests
 #: assert on the fixture's own clock and do not rot as the calendar moves.
 CAPTURED_AT = datetime(2026, 8, 31, 19, 35, 0, tzinfo=TEHRAN)

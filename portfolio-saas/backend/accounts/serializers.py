@@ -76,8 +76,8 @@ class UserSerializer(serializers.ModelSerializer):
             "email",
             "first_name",
             "last_name",
-            "is_staff",
-            "is_superuser",
+            "role",
+            "risk_profile",
             # What the account panel needs to say "member since" and to show
             # whether this person can reach the operator console. Both were
             # already decided server-side and simply never told to the client,
@@ -88,8 +88,7 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = (
             "id",
             "email",
-            "is_staff",
-            "is_superuser",
+            "role",
             "date_joined",
             "last_login",
         )
@@ -101,7 +100,7 @@ class AdminUserSerializer(serializers.ModelSerializer):
     Separate from `UserSerializer` on purpose: that one is also the
     `/api/auth/me/` payload, and `is_active` there would be a field every signed
     -in client receives about itself and can do nothing with. This one is only
-    ever served behind `IsAdminUser`.
+    ever served behind the role-based admin permission.
 
     `is_active` is the whole ban mechanism in this codebase -- there is no
     suspension model -- so it is the one writable field.
@@ -117,8 +116,7 @@ class AdminUserSerializer(serializers.ModelSerializer):
             "first_name",
             "last_name",
             "is_active",
-            "is_staff",
-            "is_superuser",
+            "role",
             "date_joined",
             "last_login",
             "accounts_count",

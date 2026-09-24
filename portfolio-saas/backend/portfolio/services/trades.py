@@ -11,7 +11,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from ..models import Account, Asset, Holding, LedgerEntry, Snapshot, Transaction
+from ..models import Account, Asset, Holding, LedgerEntry, Transaction
 from .ledger import (
     LedgerError,
     PriceResolutionError,
@@ -19,7 +19,7 @@ from .ledger import (
     resolve_historical_price,
     reverse_ledger_entry,
 )
-from .valuation import value_account, value_user
+from .valuation import value_user
 
 
 class TradeError(Exception):
@@ -51,19 +51,9 @@ def _q(value) -> Decimal:
 
 
 def _stamp_snapshots(user, account: Account) -> dict:
-    # Snapshots record everything owned, hidden holdings included, matching the
-    # cron writer in portfolio.tasks. The stored series has to keep one meaning
-    # across its whole length: if the writer started omitting whatever was
-    # switched off today, the chart would show a cliff on the day someone ticked
-    # a box. The read path subtracts hidden assets across the entire window
-    # instead -- see SnapshotListView / valuation.hidden_value_series.
-    valuation = value_user(user, include_hidden=True)
-    account_total = value_account(account, include_hidden=True)["total"]
-    Snapshot.objects.bulk_create([
-        Snapshot(user=user, account=None, total_value_tomans=valuation["total"]),
-        Snapshot(user=user, account=account, total_value_tomans=account_total),
-    ])
-    return valuation
+    # Today's valuation is derived on read. Trades must never append an
+    # intraday row to the authoritative completed-day history.
+    return value_user(user, include_hidden=True)
 
 
 def _map_ledger_error(exc: LedgerError) -> TradeError:
@@ -124,7 +114,6 @@ def provision_asset(symbol_or_key: str) -> Asset:
         key=key,
         name=mi.name or mi.symbol,
         asset_class=asset_class,
-        currency=Asset.Currency.IRT,
         tse_symbol=mi.symbol if mi.source == MarketInstrument.Source.TSETMC else "",
         brs_symbol=mi.symbol if mi.source == MarketInstrument.Source.BRS else "",
         is_active=True,
@@ -215,7 +204,7 @@ def execute_trade(
         "asset_key": asset.key,
         "side": side,
         "quantity": str(qty),
-        "price_tomans": str(price),
+        "price_tomans": str(entry.price_tomans),
         "holding_quantity": format(new_qty.normalize(), "f"),
         "cash_flow_tomans": str(entry.amount_tomans or Decimal("0")),
         "total_value_tomans": total_value,

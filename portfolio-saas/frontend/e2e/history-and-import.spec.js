@@ -10,7 +10,7 @@ test.describe("history and import surfaces", () => {
   });
 
   test("shows a single-asset history answer", async ({ page }) => {
-    await page.getByTestId("nav-prices").click();
+    await page.getByTestId("nav-markets").click();
     await expect(page.getByTestId("asset-history-card")).toBeVisible({ timeout: 20000 });
     await expect(
       page.getByTestId("asset-history-result").or(page.getByTestId("asset-history-empty")).first()
@@ -27,7 +27,7 @@ test.describe("history and import surfaces", () => {
     );
     if (!ids.length) test.skip(true, "no portfolio to import into");
     await scope.selectOption(ids[0]);
-    await page.getByTestId("nav-ledger").click();
+    await page.getByTestId("nav-activity").click();
     const importButton = page.getByTestId("ledger-import");
     await importButton.click();
     // A deposit, not an opening entry: preview runs the real ledger rules in a

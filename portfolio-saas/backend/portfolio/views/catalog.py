@@ -93,7 +93,6 @@ def _mint_property_asset(user, name: str) -> Asset:
         key=f"re-{uuid4().hex[:12]}",
         name=name[:120],
         asset_class=Asset.AssetClass.REAL_ESTATE,
-        currency=Asset.Currency.IRT,
         is_house=True,
         is_active=True,
         owner=user,

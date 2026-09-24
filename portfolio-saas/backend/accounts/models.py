@@ -51,11 +51,16 @@ class UserManager(BaseUserManager):
         return user
 
     def create_user(self, email, password=None, **extra_fields):
+        extra_fields.setdefault(
+            "role",
+            "admin" if extra_fields.get("is_staff") or extra_fields.get("is_superuser") else "user",
+        )
         extra_fields.setdefault("is_staff", False)
         extra_fields.setdefault("is_superuser", False)
         return self._create_user(email, password, **extra_fields)
 
     def create_superuser(self, email, password=None, **extra_fields):
+        extra_fields["role"] = "admin"
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
         if extra_fields.get("is_staff") is not True:
@@ -66,9 +71,22 @@ class UserManager(BaseUserManager):
 
 
 class User(AbstractUser):
+    class Role(models.TextChoices):
+        ADMIN = "admin", "Admin"
+        USER = "user", "User"
+
+    class RiskProfile(models.TextChoices):
+        CONSERVATIVE = "conservative", "Conservative"
+        BALANCED = "balanced", "Balanced"
+        GROWTH = "growth", "Growth"
+
     # Email is the login identifier.
     username = None
     email = models.EmailField(unique=True)
+    role = models.CharField(max_length=5, choices=Role.choices, default=Role.USER)
+    risk_profile = models.CharField(
+        max_length=12, choices=RiskProfile.choices, default=RiskProfile.BALANCED
+    )
     # Dead: the payment integration and its Payment model are gone, and nothing has
     # ever written this. Dropped in the Phase 3 schema migration.
     customer_id = models.CharField(max_length=64, blank=True, default="")
@@ -77,6 +95,27 @@ class User(AbstractUser):
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(role="admin", is_staff=True, is_superuser=True)
+                    | models.Q(role="user", is_staff=False, is_superuser=False)
+                ),
+                name="user_role_matches_django_flags",
+            )
+        ]
+
+    def save(self, *args, **kwargs):
+        # Django admin and DRF still depend on these internal compatibility flags.
+        update_fields = kwargs.get("update_fields")
+        admin = self.role == self.Role.ADMIN
+        self.is_staff = admin
+        self.is_superuser = admin
+        if update_fields is not None:
+            kwargs["update_fields"] = set(update_fields) | {"role", "is_staff", "is_superuser"}
+        return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
         """Tear the portfolio down innermost-first, then delete the user.
@@ -108,6 +147,3 @@ class User(AbstractUser):
         Liability.objects.filter(account__in=accounts).delete()
         accounts.delete()
         return super().delete(*args, **kwargs)
-
-
-

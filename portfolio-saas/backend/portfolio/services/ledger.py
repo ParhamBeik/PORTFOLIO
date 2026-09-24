@@ -1,5 +1,5 @@
 """Immutable account-ledger writes and derived projection updates."""
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import transaction
 from django.utils import timezone
@@ -15,6 +15,7 @@ from portfolio.models import (
     Liability,
     Price,
     Snapshot,
+    positive_price_q,
 )
 from .timeline import house_area_as_of, house_marks_as_of
 from .valuation import _house_value, asset_value, invalidate_prices_cache
@@ -128,6 +129,10 @@ def _cash_delta(
     return Decimal("0")
 
 
+def _whole_toman(value):
+    return value.quantize(Decimal("1"), rounding=ROUND_HALF_UP) if value is not None else None
+
+
 @transaction.atomic
 def create_ledger_entry(
     *, account: Account, kind: str, occurred_at=None, asset: Asset | None = None,
@@ -160,10 +165,12 @@ def create_ledger_entry(
             LedgerEntry.Kind.FEE,
         },
     )
+    amount = _whole_toman(amount)
     area = _decimal(area_sqm, "area_sqm")
     mortgage = _decimal(
         mortgage_deduction_tomans, "mortgage_deduction_tomans", allow_zero=True
     )
+    mortgage = _whole_toman(mortgage)
     cost_basis = _decimal(cost_basis_tomans, "cost_basis_tomans")
     if cost_basis is not None and kind not in COST_BASIS_KINDS:
         # A buy already states what was paid, in `price_tomans`. Accepting a
@@ -186,6 +193,8 @@ def create_ledger_entry(
                 unit_price = resolve_historical_price(asset, occurred_at)
             except PriceResolutionError as exc:
                 raise LedgerError(str(exc)) from exc
+        if asset.quote_unit != "usd":
+            unit_price = _whole_toman(unit_price)
         # A quantity x price product, so it crosses the TSE Rial/Toman boundary
         # exactly like a valuation does. It reads as Toman everywhere
         # downstream -- `_projection_state` debits `Account.cash_balance_tomans`
@@ -195,7 +204,9 @@ def create_ledger_entry(
         # like a product.
         amount = holding_value_to_toman(
             asset, quantity * unit_price
-        ).quantize(Decimal("0.0001"))
+        ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    elif unit_price is not None and (asset is None or asset.quote_unit != "usd"):
+        unit_price = _whole_toman(unit_price)
     if area is not None or mortgage is not None:
         # A revaluation carries the same terms as the opening it supersedes, so
         # both house mark kinds may set them. Anything else still may not.
@@ -354,7 +365,7 @@ def update_ledger_entry(
     if unit_price_tomans is not None:
         entry.price_tomans = _decimal(unit_price_tomans, "unit_price_tomans", required=True)
     if amount_tomans is not None:
-        entry.amount_tomans = _decimal(amount_tomans, "amount_tomans", required=True)
+        entry.amount_tomans = _whole_toman(_decimal(amount_tomans, "amount_tomans", required=True))
     if area_sqm is not None:
         # Same rule create_ledger_entry applies: only a house mark carries a size.
         if not (entry.asset and entry.asset.is_house) or entry.kind not in HOUSE_MARK_KINDS:
@@ -378,7 +389,7 @@ def update_ledger_entry(
             raise LedgerError("Buy/sell entries need quantity and unit price.")
         entry.amount_tomans = holding_value_to_toman(
             entry.asset, qty * price
-        ).quantize(Decimal("0.0001"))
+        ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     entry.save()
     _commit_projections(entry.account)
     return entry
@@ -1131,7 +1142,7 @@ def _live_price_fetched_today(asset: Asset) -> Decimal | None:
     """
 
     row = (
-        Price.objects.filter(asset=asset, price__gt=0)
+        Price.objects.filter(positive_price_q(), asset=asset)
         .order_by("-fetched_at")
         .first()
     )
@@ -1144,7 +1155,7 @@ def _latest_usd_toman_rate() -> Decimal | None:
     """Live Toman-per-dollar, from the same `usd_cash` row the panel uses."""
 
     row = (
-        Price.objects.filter(asset__key="usd_cash", price__gt=0)
+        Price.objects.filter(positive_price_q(), asset__key="usd_cash")
         .order_by("-fetched_at")
         .first()
     )

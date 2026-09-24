@@ -4,7 +4,7 @@
  * The header renders its links twice — inline above `lg`, in the drawer below
  * it — and two copies of one component is how duplicate test ids and dead
  * click targets get made. So the assertions here are about exactly that: the
- * canonical `nav-ledger` belongs to the inline rail, the drawer's copy is
+ * canonical `nav-activity` belongs to the inline rail, the drawer's copy is
  * suffixed, and the drawer does not exist in the DOM until it is opened.
  *
  * The scroll lock is asserted too. A drawer that leaves `body` scrollable lets
@@ -40,7 +40,7 @@ vi.mock("./PortfolioContext.jsx", () => ({
 
 const { default: Shell } = await import("./Shell.jsx");
 
-const USER = { email: "someone@example.com", is_staff: false };
+const USER = { email: "someone@example.com", role: "user" };
 
 const mount = () =>
   render(
@@ -62,11 +62,11 @@ describe("Shell header", () => {
 
   it("gives the inline rail the canonical nav ids", () => {
     mount();
-    const ledger = screen.getByTestId("nav-ledger");
-    expect(ledger).toBeInTheDocument();
+    const activity = screen.getByTestId("nav-activity");
+    expect(activity).toBeInTheDocument();
     // Exactly one, or a click resolves to whichever copy the DOM happens to
     // hold — and the other copy is hidden and unclickable.
-    expect(screen.queryAllByTestId("nav-ledger")).toHaveLength(1);
+    expect(screen.queryAllByTestId("nav-activity")).toHaveLength(1);
   });
 });
 
@@ -80,7 +80,7 @@ describe("Shell drawer", () => {
     const drawer = screen.getByTestId("nav-drawer");
     expect(drawer).toHaveAttribute("aria-modal", "true");
     expect(drawer).toHaveAttribute("role", "dialog");
-    expect(screen.getByTestId("nav-ledger-mobile")).toBeInTheDocument();
+    expect(screen.getByTestId("nav-activity-mobile")).toBeInTheDocument();
   });
 
   it("locks the page behind it and releases it on close", () => {
@@ -104,7 +104,7 @@ describe("Shell drawer", () => {
   it("closes when a link inside it is followed", () => {
     mount();
     fireEvent.click(screen.getByTestId("nav-toggle"));
-    fireEvent.click(screen.getByTestId("nav-ledger-mobile"));
+    fireEvent.click(screen.getByTestId("nav-activity-mobile"));
     expect(screen.queryByTestId("nav-drawer")).toBeNull();
   });
 
@@ -113,7 +113,7 @@ describe("Shell drawer", () => {
     fireEvent.click(screen.getByTestId("nav-toggle"));
 
     // A keyboard user, three links into the menu.
-    const target = screen.getByTestId("nav-breakdown-mobile");
+    const target = screen.getByTestId("nav-guidance-mobile");
     target.focus();
     expect(document.activeElement).toBe(target);
 

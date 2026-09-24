@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 from rest_framework.test import APIClient
 
+from accounts.models import User
 from marketdata import calendars
 from marketdata import ingest, jalali
 from marketdata import quota
@@ -326,9 +327,9 @@ def test_rebuild_preserves_non_ledger_holdings_and_real_estate_terms(
         occurred_at=started_at,
     )
     Holding.objects.create(account=ledger_account, asset=manual, quantity=3)
-    Holding.objects.filter(account=ledger_account, asset=coin).update(quantity=99)
+    Holding.objects.filter(account=ledger_account, asset=coin).update(quantity_atomic=99)
     Holding.objects.filter(account=ledger_account, asset=house).update(
-        quantity=99,
+        price_per_sqm_tomans=99_000_000,
         area_sqm=1,
         mortgage_deduction_tomans=1,
     )
@@ -1763,8 +1764,8 @@ def test_steady_inflation_is_not_flagged():
 @pytest.fixture
 def staff_client(db, make_user):
     user = make_user(email="evidence-admin@example.com")
-    user.is_staff = True
-    user.save(update_fields=["is_staff"])
+    user.role = User.Role.ADMIN
+    user.save(update_fields=["role"])
     client = APIClient()
     client.force_authenticate(user=user)
     return client

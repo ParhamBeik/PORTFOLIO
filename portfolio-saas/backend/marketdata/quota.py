@@ -1,45 +1,21 @@
-"""Atomic daily and 5-minute window provider quota shared by every web and Celery process.
+"""Atomic daily and 5-minute window provider quota shared by web and workers.
 
-Two dimensions, and they are not the same thing:
+Provider products are AIO and Market CGCC. Workload buckets (live, archive,
+other) are local attribution only. The same API key can charge different
+products: the Gold_Currency_Pro path bills AIO in all tested modes, while
+Gold_Currency.php bills Market CGCC. The isolated provider-counter matrix on
+2026-09-23 confirmed this for Pro default, history=1, and history=2. The
+September 22 panel showed 10,023 AIO and 761 Market requests while the old
+source-family local split showed 9,848 and 936. The exact 175-request mismatch was
+the old Market archive/other total; historical bucket rows remain unchanged.
 
-* **plan** -- which provider meter is billed. BrsApi bills **one API key against
-  independent per-product meters, chosen by the endpoint's path family**.
-  Measured directly against the live API on 2026-09-09 by probing each path and
-  watching which counter moved:
+`used` is the conservative admission counter; `local_attempts`, bucket counts,
+`successful_requests`, and `provider_used` are distinct evidence. Reconciliation
+must never make a bucket claim responsibility for provider-observed variance.
 
-  ===========================  =========================  ==================
-  Path family                  Product                    Daily ceiling
-  ===========================  =========================  ==================
-  ``Tsetmc/*``, ``Codal/*``    purchased (خرید شده)       **10,000**
-  ``Market/Gold_Currency_Pro`` NOT purchased (خرید نشده)  0 -- free tier
-  other ``Market/*``           free                       not metered at all
-  ===========================  =========================  ==================
-
-  So there is exactly **one paid wallet**. The 1,500/day gold/FX/crypto plan
-  this file assumed until 2026-09-09 had lapsed: the provider reports that
-  product as `خرید نشده` with `exp: null`, and a hit on `Gold_Currency.php`,
-  `Cryptocurrency.php` or `Commodity.php` moves no counter at all. We were
-  reserving 1,200 of a phantom 1,500 for live and leaving gold backfill 150
-  requests a day, to protect a meter that does not exist.
-
-  The key is therefore **not** the thing that selects the plan, and the two env
-  vars deliberately hold the same value in production. Earlier comments in this
-  file claimed "one API key per plan"; that was wrong and actively misleading --
-  someone reading it would conclude the deployment was misconfigured and "fix"
-  it by inventing a second key. `endpoints.Endpoint.plan` is the only correct
-  mapping, because only the path decides which meter the provider debits.
-
-  A plan with an effective limit of 0 is **unmetered**, not empty. That is the
-  provider's own semantics (`usage_today_limit: 0` on a free product), so an
-  unmetered plan gets no daily ceiling and no live reserve -- only the rolling
-  5-minute window shapes it.
-* **bucket** -- which lane inside a plan is spending (live prices, archive
-  backfill, or incidental metadata). This is our own allocation policy.
-
-Conflating the two is what broke production on 2026-08-24: one shared counter
-capped at 9,800 meant a full TSETMC backfill refused gold/currency requests that
-still had 79% of the BRS plan free, so the USDT quote failed 201 times in a day
-and dollar-denominated holdings went stale.
+A provider-reported limit of zero means unmetered, not exhausted. The current
+Market CGCC limit is 1,500 requests; configured limits are fallbacks until the
+provider reports a value for that day.
 
 The allocation policy, in one line: **live keeps what it still needs, archive
 gets the rest.**
@@ -60,14 +36,12 @@ refusal still breaks the circuit for that plan until the Tehran-midnight reset.
 `effective_limit` falls back to a configured per-plan expectation only until a
 real answer arrives.
 
-**Getting that real answer is deliberate, not incidental.** The `account` block
-does not ride on a successful response -- verified 2026-09-09 -- so the counter
-used to drift unobserved between error responses, by 2,226 requests on
-2026-09-08. `fetchers.probe_meter` buys the block for one request, and
-`tasks.reconcile_quota_meters` does that every five minutes while a plan is
-spending. Roughly 1-3% of the wallet buys a counter that matches the vendor
-panel, which is what makes the rest of this file's arithmetic trustworthy
-instead of merely plausible.
+The provider `account` block is absent from successful responses. Error
+responses may supply a counter, but when they do not, `provider_used` remains
+unknown; local attempts must never be presented as provider-observed billing.
+The account-panel meter is optional and disabled until its credentials and
+non-billing behavior are verified in production. Operations must show the
+observation timestamp and never present a stale panel reading as live usage.
 
 Do not replace that with a correction factor. One existed here between
 2026-09-08 and 2026-09-09 -- archive's leftover divided by 1.30, to "account
@@ -90,6 +64,7 @@ from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 
 from portfolio.live.redis_client import get_redis
@@ -104,8 +79,11 @@ LIVE = "live"
 OTHER = "other"
 
 # Provider subscriptions. One counter row and one circuit breaker per plan.
-TSETMC = "tsetmc"
-BRS = "brs"
+AIO = "aio"
+MARKET_CGCC = "market_cgcc"
+# Existing call sites name source families; their values are provider products.
+TSETMC = AIO
+BRS = MARKET_CGCC
 PLANS = (TSETMC, BRS)
 
 # Shares of the provider's single 1,000-per-5-minute window. They sum to 1.0 so
@@ -149,6 +127,7 @@ REASON_PLAN_BLOCKED = "plan_blocked"
 REASON_BUCKET_EXHAUSTED = "bucket_exhausted"
 REASON_LIVE_RESERVED = "live_reserved"
 REASON_ARCHIVE_PACED = "archive_paced"
+REASON_PROVIDER_OBSERVATION = "provider_observation_pending"
 
 #: Refusals that mean "wait, and try again shortly" rather than "the wallet is
 #: spent". The distinction is the whole point:
@@ -168,7 +147,9 @@ REASON_ARCHIVE_PACED = "archive_paced"
 #: `live_reserved` back out of this set in the same commit.
 #:
 #: `plan_blocked` and `bucket_exhausted` remain day-scoped.
-PACING_REASONS = frozenset({REASON_ARCHIVE_PACED, REASON_LIVE_RESERVED})
+PACING_REASONS = frozenset({
+    REASON_ARCHIVE_PACED, REASON_LIVE_RESERVED, REASON_PROVIDER_OBSERVATION,
+})
 
 
 class QuotaExhausted(RuntimeError):
@@ -532,8 +513,8 @@ def _quota_row(plan, *, locked=False):
 
 
 _PLAN_LIMIT_SETTING = {
-    TSETMC: "MARKETDATA_PLAN_LIMIT_TSETMC",
-    BRS: "MARKETDATA_PLAN_LIMIT_BRS",
+    AIO: "MARKETDATA_PLAN_LIMIT_TSETMC",
+    MARKET_CGCC: "MARKETDATA_PLAN_LIMIT_BRS",
 }
 
 
@@ -736,8 +717,9 @@ def live_day_cost(plan, row=None, now=None):
     # whose planner simulates to ~300 and whose measured spend is 114-191. That
     # was a response to the 2026-09-08 429 at 10,058/10,000, but the cause there
     # was the 2,226 requests the counter could not see, not an under-sized
-    # reserve -- and `reconcile_quota_meters` addresses that directly now. The
-    # floor that remains lives on the *reserve*
+    # reserve. That 2,226-request drift is still not automatically reconciled:
+    # successful provider responses omit meter data and the probe is disabled.
+    # The floor that remains lives on the *reserve*
     # (`MARKETDATA_LIVE_RESERVE_MIN`), which is the quantity a floor makes sense
     # on, and FLOOR keeps its other job as the basis of `bucket_budget(LIVE)`.
     cap = bucket_budget(LIVE, plan, row)
@@ -942,6 +924,20 @@ def reserve_request(bucket=OTHER, plan=TSETMC, *, holding_probe=False):
     field = f"{bucket}_used"
     with transaction.atomic():
         row = _quota_row(plan, locked=True)
+        # A product-key migration creates a new row even when this account has
+        # already spent most of today's provider wallet. Do not admit a request
+        # against that empty local row until the panel has seeded its counter.
+        if settings.MARKETDATA_PANEL_METER_ENABLED and row.provider_used is None:
+            raise QuotaExhausted(
+                f"Waiting for the {plan} provider meter before admitting requests.",
+                reason=REASON_PROVIDER_OBSERVATION,
+            )
+        ceiling = effective_limit(plan, row)
+        if ceiling and row.used >= ceiling:
+            raise QuotaExhausted(
+                f"The {plan} provider product has reached its daily limit.",
+                reason=REASON_PLAN_BLOCKED,
+            )
         budget = bucket_budget(bucket, plan, row=row)
         if budget is not None and getattr(row, field) >= budget:
             raise QuotaExhausted(
@@ -967,9 +963,17 @@ def reserve_request(bucket=OTHER, plan=TSETMC, *, holding_probe=False):
         _check_and_record_window(bucket)
 
         row.used += 1
+        row.local_attempts += 1
         setattr(row, field, getattr(row, field) + 1)
-        row.save(update_fields=["used", field, "updated_at"])
+        row.save(update_fields=["used", "local_attempts", field, "updated_at"])
         return (row.limit - row.used) if row.limit else None
+
+
+def record_success(plan):
+    """Record a completed JSON response separately from attempted HTTP calls."""
+    ApiRequestQuota.objects.filter(day=quota_day(), plan=plan).update(
+        successful_requests=F("successful_requests") + 1
+    )
 
 
 # Advisory-check cache. Process-local rather than Redis on purpose: this is a
@@ -1093,6 +1097,11 @@ def reconcile_account(account, plan=TSETMC):
         # reserve that keeps `catalog_sync` and `sync_symbol_metadata` alive and
         # made the console attribute the app's own blind spot to a named lane.
         # `unattributed_used` derives it instead, and nothing budgets against it.
+        if usage is not None and (row.provider_used is None or usage > row.provider_used):
+            row.provider_used = usage
+            row.provider_observed_at = timezone.now()
+            row.provider_observation_source = "response"
+            updates.extend(("provider_used", "provider_observed_at", "provider_observation_source"))
         if usage is not None and usage > row.used:
             logger.info(
                 "quota reconciled plan=%s day_usage %d->%d unattributed=%d",
@@ -1111,6 +1120,40 @@ def reconcile_account(account, plan=TSETMC):
     return block
 
 
+def reconcile_panel_metrics(metrics, *, day, observed_at):
+    """Merge a complete panel snapshot without rewriting local attribution."""
+    if day != quota_day() or set(metrics) != set(PLANS):
+        raise ValueError("Panel observation must cover both products on the current Tehran day.")
+    result = {}
+    with transaction.atomic():
+        for plan in PLANS:
+            reported = metrics[plan]
+            usage, limit = int(reported["used"]), int(reported["limit"])
+            if usage < 0 or limit < 0:
+                raise ValueError("Provider counters cannot be negative.")
+            row = _quota_row(plan, locked=True)
+            fields = []
+            if row.provider_used is None or usage >= row.provider_used:
+                row.provider_used = usage
+                row.provider_observed_at = observed_at
+                row.provider_observation_source = "panel"
+                fields.extend(("provider_used", "provider_observed_at", "provider_observation_source"))
+            if usage > row.used:
+                row.used = usage
+                fields.append("used")
+            if row.limit != limit:
+                row.limit = limit
+                fields.append("limit")
+            if fields:
+                row.save(update_fields=[*fields, "updated_at"])
+            result[plan] = {
+                "provider_used": row.provider_used,
+                "local_attempts": row.local_attempts,
+                "variance": provider_variance(row),
+            }
+    return result
+
+
 def unattributed_used(row):
     """Requests the provider billed that no bucket of ours claims.
 
@@ -1123,7 +1166,18 @@ def unattributed_used(row):
     if row is None:
         return 0
     attributed = (row.archive_used or 0) + (row.live_used or 0) + (row.other_used or 0)
-    return max(0, (row.used or 0) - attributed)
+    if row.provider_used is None:
+        return 0
+    return max(0, row.provider_used - attributed)
+
+
+def provider_variance(row):
+    """Signed provider billing minus local attempts attributed to buckets."""
+    if row is None or row.provider_used is None:
+        return None
+    return row.provider_used - (
+        (row.archive_used or 0) + (row.live_used or 0) + (row.other_used or 0)
+    )
 
 
 def remaining_requests(bucket=None, plan=TSETMC):
@@ -1238,6 +1292,12 @@ def get_quota_status():
             # trusted; a persistently rising value means something is spending
             # the key outside `reserve_request`.
             "unattributed": unattributed_used(row),
+            "provider_variance": provider_variance(row),
+            "provider_used": row.provider_used if row else None,
+            "provider_observed_at": row.provider_observed_at.isoformat() if row and row.provider_observed_at else None,
+            "provider_observation_source": row.provider_observation_source if row else "",
+            "local_attempts": row.local_attempts if row else 0,
+            "successful_requests": row.successful_requests if row else 0,
             # What the reserve maths actually used: disclosed if we have it,
             # otherwise the configured expectation. Shown so an operator can see
             # the difference between "provider said 10,000" and "we assumed it".

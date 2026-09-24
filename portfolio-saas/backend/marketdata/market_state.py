@@ -221,8 +221,8 @@ def live_interval_seconds():
 
     Budget at the current 60/90/180 cadences, per trading day: ~270 polls while
     the TSE is open, ~460 daytime and ~160 overnight. The stock lane bills only
-    the open ones against the 10,000/day TSETMC meter. The Market product is
-    currently unmetered, and free origins cover most gold/FX cycles. Full
+    the open ones against the 10,000/day AIO meter. Market CGCC is limited to
+    1,500/day, and free origins cover most gold/FX cycles. Full
     arithmetic lives in `config.settings`.
     """
     return {

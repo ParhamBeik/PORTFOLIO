@@ -3,10 +3,10 @@
 Live valuation, the net-worth series, the price screen and performance.
 All of it reads; none of it writes."""
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
+from zoneinfo import ZoneInfo
 from django.conf import settings
-from django.db.models import Avg, F, Window
-from django.db.models.functions import RowNumber
+from django.db.models import Avg
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 from rest_framework import status
@@ -14,7 +14,7 @@ from rest_framework.exceptions import NotFound
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from ..models import Asset, Holding, LedgerEntry, Price, Snapshot, Transaction
+from ..models import Holding, LedgerEntry, Price, Snapshot, Transaction
 from ..services import get_latest_prices, value_account, value_user
 from ..services.catalog import resolve_asset_key
 from ..services.valuation import (
@@ -115,7 +115,7 @@ class AccountDataQualityView(APIView):
         # Warehouse coverage is operator telemetry (row counts across the
         # whole store). A member asking "can I trust MY symbols" does not
         # need it, and computing it is the expensive half of this view.
-        if request.user.is_staff:
+        if request.user.role == "admin":
             from marketdata.coverage_report import build_warehouse_coverage
             payload["warehouse_coverage"] = build_warehouse_coverage()
         return Response(payload)
@@ -290,21 +290,7 @@ def _cpi_window_provenance(series: list[dict]) -> dict:
 
 
 class SnapshotListView(APIView):
-    """Per-user net-worth history for the FREE trend chart, plus trade markers.
-
-    One point per calendar day: the verified session-close snapshot when one
-    exists, otherwise the latest non-estimated snapshot, or the latest estimated
-    gap-fill when no live snapshot exists. `?days=all`
-    returns the full history. `trades` carries the
-    buy/sell events in the same window so the chart can annotate the exact
-    points where holdings changed.
-
-    Holdings-only accounts (no BUY/SELL ledger) with thin Snapshot coverage get
-    a warehouse-backed synthetic series capped at 90 days.
-
-    `?account=<id>` scopes both the snapshot series and the trade markers to one
-    portfolio (reads that account's per-account snapshot rows); absent = aggregate.
-    """
+    """Completed Tehran-day closes plus today's derived point and trade markers."""
 
     permission_classes = [IsAuthenticated]
 
@@ -320,13 +306,12 @@ class SnapshotListView(APIView):
                 days = 30
             days = max(1, min(days, 3650))
         now = timezone.now()
+        today = timezone.localtime(now, ZoneInfo("Asia/Tehran")).date()
         account = _scope(request)
         basis = request.query_params.get("basis") or "nominal_toman"
-        snapshots = Snapshot.objects.filter(
-            user=request.user, total_value_tomans__gt=0
-        )
+        snapshots = Snapshot.objects.filter(user=request.user, day__lt=today)
         if not show_all:
-            snapshots = snapshots.filter(timestamp__gte=now - timedelta(days=days))
+            snapshots = snapshots.filter(day__gte=today - timedelta(days=days - 1))
         if account is not None:
             snapshots = snapshots.filter(account=account)
         else:
@@ -334,33 +319,9 @@ class SnapshotListView(APIView):
         prices = get_latest_prices()
         usd_rate = Decimal(prices.get("usd_cash", 0) or 0)
 
-        # Use one representative observation per day. Averaging intraday
-        # snapshots makes a closed-market chart disagree with the authoritative
-        # session close and can turn a large final-price move into a misleading
-        # portfolio cliff.
-        daily = list(
-            snapshots
-            .annotate(day=TruncDate("timestamp"))
-            .annotate(
-                row_number=Window(
-                    expression=RowNumber(),
-                    partition_by=[TruncDate("timestamp")],
-                    order_by=[
-                        F("is_session_close").desc(),
-                        F("is_estimated").asc(),
-                        F("timestamp").desc(),
-                    ],
-                )
-            )
-            .filter(row_number=1)
-            .values(
-                "day",
-                "total_value_tomans",
-                "is_estimated",
-                "is_session_close",
-            )
-            .order_by("day")
-        )
+        daily = list(snapshots.values(
+            "day", "total_value_tomans", "is_estimated", "is_session_close"
+        ).order_by("day"))
 
         accounts = [account] if account is not None else list(request.user.accounts.all())
         holdings_only = bool(accounts) and not LedgerEntry.objects.filter(
@@ -395,23 +356,14 @@ class SnapshotListView(APIView):
                 for row in dynamic
             ]
         else:
-            # No snapshot rows yet (brand-new user) -> fall back to today's live
-            # total. Hidden holdings included, so this row means the same thing as
-            # the stored rows it stands in for and goes through the same
-            # subtraction below rather than being netted twice.
-            if not daily:
-                fallback_val = (
-                    value_account(account, include_hidden=True)["total"]
-                    if account
-                    else value_user(request.user, include_hidden=True)["total"]
-                )
-                if fallback_val > 0:
-                    daily = [{
-                        "day": now.date(),
-                        "total_value_tomans": fallback_val,
-                        "is_estimated": False,
-                        "is_session_close": False,
-                    }]
+            current_total = (
+                value_account(account, include_hidden=True)["total"]
+                if account else value_user(request.user, include_hidden=True)["total"]
+            )
+            daily.append({
+                "day": today, "total_value_tomans": current_total,
+                "is_estimated": False, "is_session_close": False,
+            })
 
             series = []
             for row in daily:
@@ -430,11 +382,11 @@ class SnapshotListView(APIView):
             # forward, or the chart would step down on the day the box was
             # unticked. USD is derived after the subtraction for the same reason.
             _subtract_hidden_holdings(request.user, account, series, now)
-            for row in series:
-                total = Decimal(row["total"])
-                row["total_usd"] = (
-                    str(round(total / usd_rate, 2)) if usd_rate > 0 else None
-                )
+
+        for row in series:
+            total = Decimal(str(row["total"])).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            row["total"] = str(total)
+            row["total_usd"] = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
 
         trades = (
             Transaction.objects.filter(
@@ -587,13 +539,14 @@ def _brs_price_history(asset, since_jalali):
         if row["date"] not in rejected
     ]
     if rows:
+        from portfolio.services.returns import USD_QUOTED_KEYS
         rates, rate_dates = toman_per_dollar([row["date"] for row in rows])
         points = []
         for row in rows:
             # An unlabelled row on a foreign-quoted asset is a refusal, not a
             # pass-through: `to_toman` hands an unlabelled number back
             # unchanged, which is right for a Toman quote and catastrophic here.
-            if not row["unit"] and asset.currency == Asset.Currency.USD:
+            if not row["unit"] and (asset.key == "usd_cash" or asset.key in USD_QUOTED_KEYS):
                 continue
             price = to_toman(
                 asset.brs_symbol,
@@ -633,7 +586,9 @@ def _live_price_history(asset, since):
         .exclude(source="ARCHIVE")
         .annotate(day=TruncDate("fetched_at"))
         .values("day")
-        .annotate(avg_price=Avg("price"))
+        .annotate(avg_price=Avg(
+            "price_foreign" if asset.quote_unit == "usd" else "price_iranian"
+        ))
         .order_by("day")
     )
     return [

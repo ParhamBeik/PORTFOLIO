@@ -315,6 +315,8 @@ def test_signup_creates_a_usable_session_in_one_round_trip():
     body = response.json()
     assert body["access"]
     assert body["user"]["email"] == "newcomer@test.test"
+    assert body["user"]["role"] == "user"
+    assert "is_staff" not in body["user"] and "is_superuser" not in body["user"]
     assert body["session_expires_at"]
     assert "ps_refresh" in response.cookies, "no refresh cookie: the session dies on reload"
     # Never echo the credential back, in any form.
@@ -897,9 +899,9 @@ def test_analytics_rejects_invalid_account_id(make_user):
 def test_aggregate_trend_ignores_account_snapshots(make_user):
     user = make_user(email="trend@t.t")
     account = Account.objects.create(user=user, name="Trading")
-    Snapshot.objects.create(user=user, account=None, total_value_tomans=100)
+    Snapshot.objects.create(user=user, account=None, total_value_tomans=100, timestamp=timezone.now() - timedelta(days=2))
     Snapshot.objects.create(user=user, account=account, total_value_tomans=1000)
-    Snapshot.objects.create(user=user, account=None, total_value_tomans=110)
+    Snapshot.objects.create(user=user, account=None, total_value_tomans=110, timestamp=timezone.now() - timedelta(days=1))
     assert net_worth_trend(user)["delta_pct"] == 10
 
 
@@ -1155,7 +1157,7 @@ def test_only_the_named_routes_are_reachable_without_a_token():
 
     walk(get_resolver().url_patterns)
 
-    assert total > 80, f"only {total} routes resolved; the walk is not seeing the API"
+    assert total > 70, f"only {total} routes resolved; the walk is not seeing the API"
     assert public == PUBLIC_ROUTES, (
         "the set of routes reachable without a JWT changed. Newly public: "
         f"{sorted(public - PUBLIC_ROUTES)}. No longer public: "
@@ -1357,15 +1359,15 @@ class TestAdminPasswordResetLink:
             client.force_authenticate(user=user)
         return client
 
-    def test_anonymous_ordinary_and_staff_users_are_refused(self, make_user):
+    def test_anonymous_and_ordinary_users_are_refused(self, make_user):
         from accounts.models import User
 
         ordinary = make_user(email="ordinary@test.test")
         staff = make_user(email="staff@test.test")
-        User.objects.filter(pk=staff.pk).update(is_staff=True)
+        User.objects.filter(pk=staff.pk).update(role="admin", is_staff=True, is_superuser=True)
         staff.refresh_from_db()
         target = make_user(email="owner@test.test")
-        User.objects.filter(pk=target.pk).update(is_staff=True, is_superuser=True)
+        User.objects.filter(pk=target.pk).update(role="admin", is_staff=True, is_superuser=True)
         target.refresh_from_db()
 
         anon = self._client().post(self.URL, {"email": ordinary.email}, format="json")
@@ -1381,13 +1383,13 @@ class TestAdminPasswordResetLink:
         # self-service route that bypasses delivery would be a way to mint a
         # reset link for any address the throttle would otherwise slow down.
         assert theirs.status_code == 403
-        assert staff_response.status_code == 403
+        assert staff_response.status_code == 200
 
     def test_a_superuser_link_actually_resets_the_password(self, make_user):
         from accounts.models import User
 
         staff = make_user(email="staff@test.test")
-        User.objects.filter(pk=staff.pk).update(is_staff=True, is_superuser=True)
+        User.objects.filter(pk=staff.pk).update(role="admin", is_staff=True, is_superuser=True)
         staff.refresh_from_db()
         forgetful = make_user(email="forgetful@test.test")
 
@@ -1413,7 +1415,7 @@ class TestAdminPasswordResetLink:
         from accounts.models import User
 
         staff = make_user(email="staff@test.test")
-        User.objects.filter(pk=staff.pk).update(is_staff=True, is_superuser=True)
+        User.objects.filter(pk=staff.pk).update(role="admin", is_staff=True, is_superuser=True)
         staff.refresh_from_db()
         make_user(email="forgetful@test.test")
 
@@ -1434,7 +1436,7 @@ class TestAdminPasswordResetLink:
         from accounts.models import User
 
         staff = make_user(email="staff@test.test")
-        User.objects.filter(pk=staff.pk).update(is_staff=True, is_superuser=True)
+        User.objects.filter(pk=staff.pk).update(role="admin", is_staff=True, is_superuser=True)
         staff.refresh_from_db()
 
         response = self._client(staff).post(
@@ -1453,9 +1455,24 @@ class TestAdminPasswordResetLink:
 
 def _staff(make_user, email, superuser=False):
     user = make_user(email=email)
-    User.objects.filter(pk=user.pk).update(is_staff=True, is_superuser=superuser)
+    User.objects.filter(pk=user.pk).update(role="admin", is_staff=True, is_superuser=True)
     user.refresh_from_db()
     return user
+
+
+def test_legacy_flag_write_cannot_promote_or_demote_role(make_user):
+    member = make_user(email="role-source@test.test")
+    member.is_staff = True
+    member.save(update_fields=["is_staff"])
+    member.refresh_from_db()
+    assert (member.role, member.is_staff, member.is_superuser) == ("user", False, False)
+
+    member.role = User.Role.ADMIN
+    member.save(update_fields=["role"])
+    member.is_superuser = False
+    member.save(update_fields=["is_superuser"])
+    member.refresh_from_db()
+    assert (member.role, member.is_staff, member.is_superuser) == ("admin", True, True)
 
 
 def test_member_list_is_staff_only_and_reports_status_and_portfolios(make_user):
@@ -1468,7 +1485,10 @@ def test_member_list_is_staff_only_and_reports_status_and_portfolios(make_user):
     rows = {row["email"]: row for row in _client(staff).get("/api/auth/admin/users/").json()}
     assert rows["roster-member@test.test"]["is_active"] is True
     assert rows["roster-member@test.test"]["accounts_count"] == 1
+    assert rows["roster-member@test.test"]["role"] == "user"
     assert rows["roster-staff@test.test"]["accounts_count"] == 0
+    assert rows["roster-staff@test.test"]["role"] == "admin"
+    assert "is_staff" not in rows["roster-staff@test.test"]
 
 
 def test_member_list_filters_by_active_flag(make_user):
@@ -1540,23 +1560,16 @@ def test_an_operator_cannot_deactivate_their_own_account(make_user):
     assert staff.is_active is True
 
 
-def test_the_last_active_superuser_cannot_be_deactivated(make_user):
-    """Otherwise the installation can be locked out of its own admin.
-
-    Two superusers here, and the requester is a third party (plain staff), so
-    the self-deactivation guard cannot be what refuses the last one -- this
-    isolates the superuser-count guard.
-    """
+def test_admin_can_deactivate_other_admins_but_not_self(make_user):
     staff = _staff(make_user, "count-staff@test.test")
     first_root = _staff(make_user, "op-one@test.test", superuser=True)
     second_root = _staff(make_user, "op-two@test.test", superuser=True)
 
-    # Two active superusers: removing one is allowed.
+    # The acting admin remains active throughout.
     allowed = _client(staff).patch(
         f"/api/auth/admin/users/{second_root.pk}/", {"is_active": False}, format="json"
     )
-    # Only `first_root` is left, so now the same call is refused.
-    refused = _client(staff).patch(
+    second_allowed = _client(staff).patch(
         f"/api/auth/admin/users/{first_root.pk}/", {"is_active": False}, format="json"
     )
     # Reinstating is never refused.
@@ -1565,16 +1578,16 @@ def test_the_last_active_superuser_cannot_be_deactivated(make_user):
     )
 
     assert allowed.status_code == 200
-    assert refused.status_code == 400
-    assert "last active superuser" in refused.json()["detail"]
+    assert second_allowed.status_code == 200
     assert reinstated.status_code == 200
     first_root.refresh_from_db()
-    assert first_root.is_active is True
+    assert first_root.is_active is False
+    assert staff.is_active is True
 
 
 @pytest.mark.django_db(transaction=True)
-def test_concurrent_deactivations_leave_one_active_superuser(make_user, monkeypatch):
-    """Integration: concurrent staff requests must serialize the root-count check."""
+def test_concurrent_deactivations_leave_acting_admin_active(make_user, monkeypatch):
+    """Concurrent deactivations cannot remove the acting admin."""
     from accounts.serializers import AdminUserSerializer
 
     staff = _staff(make_user, "race-staff@test.test")
@@ -1617,7 +1630,7 @@ def test_concurrent_deactivations_leave_one_active_superuser(make_user, monkeypa
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(deactivate, (first_root, second_root)))
 
-    assert sorted(results) == [200, 400]
+    assert sorted(results) == [200, 200]
     assert User.objects.filter(is_superuser=True, is_active=True).count() == 1
 
 

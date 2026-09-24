@@ -13,6 +13,7 @@ pytestmark = pytest.mark.django_db
 
 def test_probe_claim_is_silent_when_tsetmc_has_no_leftover(settings):
     from marketdata.models import ArchiveFetchState
+    from marketdata.quota import BRS, TSETMC
     from marketdata.suspension import PROBE_INTERVAL, claim_probe_batch
     from django.utils import timezone
 
@@ -25,7 +26,7 @@ def test_probe_claim_is_silent_when_tsetmc_has_no_leftover(settings):
     )
     with mock.patch(
         "marketdata.quota.archive_capacity",
-        return_value={"tsetmc": 0, "brs": 400},
+        return_value={TSETMC: 0, BRS: 400},
     ):
         assert claim_probe_batch(now=now) == []
     parked = ArchiveFetchState.objects.get(symbol="parked")
@@ -58,11 +59,12 @@ def test_failed_alert_send_does_not_burn_dedupe_and_logs_undelivered():
 
 def test_burst_probes_take_at_most_two_tsetmc_slots():
     from marketdata.burst_probes import claim_burst_probes
+    from marketdata.quota import BRS, TSETMC
 
     with (
         mock.patch(
             "marketdata.quota.archive_capacity",
-            return_value={"tsetmc": 80, "brs": 0},
+            return_value={TSETMC: 80, BRS: 0},
         ),
         mock.patch(
             "marketdata.suspension.claim_probe_batch",
@@ -78,11 +80,12 @@ def test_burst_probes_take_at_most_two_tsetmc_slots():
 
 def test_burst_probes_skip_when_tsetmc_is_empty():
     from marketdata.burst_probes import claim_burst_probes
+    from marketdata.quota import BRS, TSETMC
 
     with (
         mock.patch(
             "marketdata.quota.archive_capacity",
-            return_value={"tsetmc": 0, "brs": 400},
+            return_value={TSETMC: 0, BRS: 400},
         ),
         mock.patch("marketdata.suspension.claim_probe_batch") as claim,
     ):

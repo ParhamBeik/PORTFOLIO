@@ -3,6 +3,7 @@
 Dates here are source-native Jalali strings (CharFields), so no date_hierarchy;
 plain ordering + search covers the browse cases.
 """
+from django.apps import apps
 from django.contrib import admin
 
 from .models import (
@@ -95,10 +96,18 @@ class ArchiveFetchStateAdmin(admin.ModelAdmin):
 
 @admin.register(ApiRequestQuota)
 class ApiRequestQuotaAdmin(admin.ModelAdmin):
-    list_display = ("day", "plan", "used", "limit", "remaining_display", "archive_used", "live_used", "other_used", "updated_at")
+    list_display = (
+        "day", "plan", "provider_used", "provider_observed_at", "provider_observation_source", "local_attempts", "successful_requests",
+        "provider_variance_display", "used", "limit", "remaining_display",
+        "archive_used", "live_used", "other_used", "updated_at",
+    )
     ordering = ("-day", "plan")
     list_filter = ("plan",)
-    readonly_fields = ("day", "plan", "used", "limit", "archive_used", "live_used", "other_used", "updated_at")
+    readonly_fields = (
+        "day", "plan", "provider_used", "provider_observed_at", "provider_observation_source", "local_attempts", "successful_requests",
+        "provider_variance_display", "used", "limit", "archive_used",
+        "live_used", "other_used", "updated_at",
+    )
     list_per_page = 30
 
     @admin.display(description="Remaining")
@@ -107,6 +116,22 @@ class ApiRequestQuotaAdmin(admin.ModelAdmin):
 
         limit = effective_limit(obj.plan, obj)
         return max(0, limit - obj.used) if limit else "unmetered"
+
+    @admin.display(description="Provider − local")
+    def provider_variance_display(self, obj):
+        from .quota import provider_variance
+
+        variance = provider_variance(obj)
+        return variance if variance is not None else "unknown"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +180,7 @@ class StaffReadOnlyAdmin(admin.ModelAdmin):
     """Operational evidence is visible to staff and never editable here."""
 
     def has_view_permission(self, request, obj=None):
-        return request.user.is_staff
+        return request.user.role == "admin"
 
     def has_add_permission(self, request):
         return False
@@ -290,3 +315,17 @@ class GoldCurrencyHistoryAdmin(admin.ModelAdmin):
 class MarketIndexDataAdmin(admin.ModelAdmin):
     list_display = ("date", "time", "index_overall", "index_overall_change", "trade_value")
     search_fields = ("date",)
+
+
+class WarehouseDiagnosticsAdmin(StaffReadOnlyAdmin):
+    """All warehouse tables are inspectable; writes stay in validated pipelines."""
+
+    list_per_page = 50
+
+    def get_readonly_fields(self, request, obj=None):
+        return tuple(field.name for field in self.model._meta.fields)
+
+
+for model in apps.get_app_config("marketdata").get_models():
+    if not admin.site.is_registered(model):
+        admin.site.register(model, WarehouseDiagnosticsAdmin)

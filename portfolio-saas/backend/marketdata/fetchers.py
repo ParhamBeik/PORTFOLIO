@@ -68,7 +68,9 @@ def _extract_account(response):
     that the local counter could only self-heal when something broke -- and it
     drifted silently in between (2,226 requests on 2026-09-08).
 
-    `probe_meter` exists to buy that block deliberately.
+    The old meter probe is disabled: invalid-request probes themselves can be
+    billed and trigger provider firewall alerts. We only record an `account`
+    block when a genuine provider response supplies one.
 
     Swallowing parse failures here keeps a malformed body from masking the real
     HTTP error that the caller will raise.
@@ -219,6 +221,9 @@ def fetch_json(
                 ) from exc
             time.sleep(backoff_factor * (2 ** (attempt - 1)))
             continue
+        from .quota import record_success
+
+        record_success(quota_plan)
         clear_plan_breaker(quota_plan, bucket=quota_bucket)
         return payload
     raise TransientMarketDataError("Provider request failed.")
@@ -233,22 +238,11 @@ _METER_PROBES = {}
 
 
 def probe_meter(plan):
-    """Spend one request to read `plan`'s true meter, and reconcile to it.
+    """Return provider meter evidence when a vetted probe exists; otherwise None.
 
-    Returns the provider's `account` block, or None if the plan could not be
-    probed. The block is the only way to see what the vendor panel sees: the
-    provider does not report usage on a successful response (see
-    `_extract_account`), so without this the local counter drifts unobserved
-    until an error happens to disclose the truth.
-
-    Deliberately triggering a 400 is not a trick -- it is the cheapest legal way
-    to ask "what is my usage", and the provider charges for it either way. The
-    alternative was a 1.30 multiplier applied to the archive's ceiling to
-    *guess* at the drift, which silently discarded 1,950 TSETMC requests a day.
-
-    Skipped while the plan's breaker is tripped: the breaker's own half-open
-    request is the one probe that should reach a plan the provider is refusing,
-    and a second one would spend it.
+    No active probe is configured: successful API calls omit the account block,
+    and synthetic 400s were retired after firewall alerts. Genuine error
+    responses still reconcile usage in `_request_json`.
     """
     from django.conf import settings
 
@@ -258,7 +252,9 @@ def probe_meter(plan):
         return None
     if is_plan_blocked(plan):
         return None
-    api_key = settings.TSETMC_API_KEY if plan == "tsetmc" else settings.BRS_API_KEY
+    from .quota import AIO
+
+    api_key = settings.TSETMC_API_KEY if plan == AIO else settings.BRS_API_KEY
     if not api_key:
         return None
 
@@ -325,7 +321,7 @@ def _call(endpoint_key, api_key, **params):
         endpoint.url,
         params={"key": api_key, **{k: str(v) for k, v in query.items()}},
         quota_bucket=endpoint.bucket,
-        quota_plan=endpoint.plan,
+        quota_plan=endpoints.billing_product(endpoint, query),
     )
 
 

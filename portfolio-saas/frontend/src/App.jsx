@@ -9,18 +9,18 @@ import { hasAnyHoldings } from "./holdingsGate.js";
 import Shell from "./components/Shell.jsx";
 import { Loading } from "./components/ui.jsx";
 
-const Dashboard = lazy(() => import("./pages/Dashboard.jsx"));
-const MyOptimal = lazy(() => import("./pages/MyOptimal.jsx"));
-const BestOverall = lazy(() => import("./pages/BestOverall.jsx"));
 const Onboarding = lazy(() => import("./pages/Onboarding.jsx"));
 const Ops = lazy(() => import("./pages/Ops.jsx"));
-const Ledger = lazy(() => import("./pages/Ledger.jsx"));
-const Family = lazy(() => import("./pages/Family.jsx"));
-const Comparison = lazy(() => import("./pages/Comparison.jsx"));
-const AssetHistory = lazy(() => import("./pages/AssetHistory.jsx"));
+const PortfolioDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.PortfolioDestination })));
+const ActivityDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.ActivityDestination })));
+const MarketsDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.MarketsDestination })));
+const GuidanceDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.GuidanceDestination })));
 
 const PAGE_TITLES = {
   "/": "Portfolio",
+  "/activity": "Activity",
+  "/markets": "Markets",
+  "/guidance": "Guidance",
   "/ledger": "Ledger",
   "/family": "Breakdown",
   "/breakdown": "Breakdown",
@@ -66,6 +66,15 @@ function LoginRedirect() {
       }
     />
   );
+}
+
+function LegacyRedirect({ to }) {
+  const { search, hash } = useLocation();
+  const [path, targetQuery = ""] = to.split("?");
+  const params = new URLSearchParams(search);
+  for (const [key, value] of new URLSearchParams(targetQuery)) params.set(key, value);
+  const query = params.toString();
+  return <Navigate to={`${path}${query ? `?${query}` : ""}${hash}`} replace />;
 }
 
 // Signing in swaps one BrowserRouter for another, and the new one reads whatever
@@ -198,16 +207,19 @@ export default function App() {
               <Route path="/privacy" element={<Legal kind="privacy" authed />} />
               <Route path="/terms" element={<Legal kind="terms" authed />} />
               <Route element={<HoldingsGate user={user} />}>
-                <Route index element={<Dashboard user={user} />} />
-                <Route path="/optimal" element={<MyOptimal />} />
-                <Route path="/universe" element={<BestOverall />} />
-                <Route path="/best-overall" element={<Navigate to="/universe" replace />} />
+                <Route index element={<PortfolioDestination user={user} />} />
+                <Route path="/activity" element={<ActivityDestination />} />
+                <Route path="/markets" element={<MarketsDestination />} />
+                <Route path="/guidance" element={<GuidanceDestination user={user} onUserChange={setUser} />} />
+                <Route path="/optimal" element={<LegacyRedirect to="/guidance?view=personal" />} />
+                <Route path="/universe" element={<LegacyRedirect to="/guidance?view=benchmark" />} />
+                <Route path="/best-overall" element={<LegacyRedirect to="/guidance?view=benchmark" />} />
                 <Route path="/onboarding" element={<Onboarding />} />
-                <Route path="/ledger" element={<Ledger />} />
-                <Route path="/family" element={<Family />} />
-                <Route path="/breakdown" element={<Navigate to="/family" replace />} />
-                <Route path="/comparison" element={<Comparison />} />
-                <Route path="/prices" element={<AssetHistory />} />
+                <Route path="/ledger" element={<LegacyRedirect to="/activity" />} />
+                <Route path="/family" element={<LegacyRedirect to="/?view=breakdown" />} />
+                <Route path="/breakdown" element={<LegacyRedirect to="/?view=breakdown" />} />
+                <Route path="/comparison" element={<LegacyRedirect to="/markets?view=comparison" />} />
+                <Route path="/prices" element={<LegacyRedirect to="/markets?view=prices" />} />
                 <Route path="/ops" element={<Ops user={user} />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>
@@ -232,7 +244,7 @@ function HoldingsGate({ user }) {
   const exempt =
     pathname === "/privacy" ||
     pathname === "/terms" ||
-    (pathname === "/ops" && user?.is_staff);
+    (pathname === "/ops" && user?.role === "admin");
 
   if (loading || exempt) return <Outlet />;
 

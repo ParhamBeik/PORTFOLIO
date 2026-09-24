@@ -63,7 +63,6 @@ def asset_catalog(db):
             defaults={
                 "name": key.replace("_", " ").title(),
                 "asset_class": cls,
-                "currency": cur,
                 "is_manual": manual,
                 "is_house": house,
                 "tse_symbol": rest[0] if rest else "",
@@ -82,7 +81,7 @@ def write_prices(db):
         for key, value in prices.items():
             asset, _ = Asset.objects.get_or_create(
                 key=key,
-                defaults={"name": key, "asset_class": "Gold", "currency": "IRT"},
+                defaults={"name": key, "asset_class": "Gold"},
             )
             Price.objects.create(asset=asset, price=value, source="TEST")
         cache.delete("prices:latest")

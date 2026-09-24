@@ -57,7 +57,7 @@ class Command(BaseCommand):
             if k in asset_map:
                 Price.objects.get_or_create(
                     asset=asset_map[k],
-                    price=v,
+                    price_iranian=v,
                     defaults={"source": "SEED"}
                 )
 
@@ -98,8 +98,7 @@ class Command(BaseCommand):
             defaults={
                 "first_name": "Admin",
                 "last_name": "User",
-                "is_staff": True,
-                "is_superuser": True,
+                "role": User.Role.ADMIN,
                 "is_active": True,
             },
         )

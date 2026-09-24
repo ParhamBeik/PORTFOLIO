@@ -26,6 +26,30 @@ from marketdata.quota import (
 pytestmark = pytest.mark.django_db
 
 
+def test_billing_product_matches_isolated_provider_counter_matrix():
+    from marketdata.endpoints import billing_product
+
+    assert billing_product("market_index", {"type": 1}) == TSETMC
+    assert billing_product("codal_announcements", {}) == TSETMC
+    assert billing_product("gold_currency_pro", {}) == TSETMC
+    assert billing_product("gold_currency_history", {"history": 1}) == TSETMC
+    assert billing_product("gold_currency_history", {"history": 2}) == TSETMC
+
+
+def test_provider_reconciliation_keeps_local_attribution_separate():
+    from marketdata.quota import get_quota_status, reconcile_account
+
+    row = ApiRequestQuota.objects.create(
+        day=quota.quota_day(), plan=TSETMC, used=4, local_attempts=4,
+        successful_requests=3, archive_used=2, live_used=1, other_used=1,
+    )
+    reconcile_account({"usage_today": 7, "limit": 10_000}, TSETMC)
+    row.refresh_from_db()
+    assert (row.archive_used, row.live_used, row.other_used) == (2, 1, 1)
+    assert (row.local_attempts, row.successful_requests, row.provider_used) == (4, 3, 7)
+    assert get_quota_status()["plans"][TSETMC]["provider_variance"] == 3
+
+
 def test_live_day_cost_uses_simulated_spend_on_a_spending_day(settings):
     settings.MARKETDATA_LIVE_REQUEST_FLOOR = 1_200
     settings.MARKETDATA_LIVE_REQUEST_HEADROOM = 500

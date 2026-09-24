@@ -715,6 +715,7 @@ function WarehouseCoveragePanel({ warehouse }) {
 function TablesPanel({ overview }) {
   const tables = overview?.coverage?.tables;
   const rows = overview?.database_rows || [];
+  const inventory = overview?.admin_model_inventory || [];
   if (!tables) return null;
 
   const liveRows = rows.filter((r) => LIVE_TABLE_KEYS.has(r.key));
@@ -724,6 +725,10 @@ function TablesPanel({ overview }) {
     { name: "Live pipeline", value: tables.live_row_total || 0 },
     { name: "Warehouse", value: tables.warehouse_row_total || 0 },
   ].filter((d) => d.value > 0);
+  const domainDonut = Object.entries(inventory.reduce((counts, row) => {
+    counts[row.app] = (counts[row.app] || 0) + 1;
+    return counts;
+  }, {})).map(([name, value]) => ({ name, value }));
 
   const tableCol = [
     { key: "label", header: "Table" },
@@ -803,6 +808,30 @@ function TablesPanel({ overview }) {
           <CountTrend data={historySeries(history, "stock_transaction_ticks")} label="Tick rows" color="var(--c-s4)" />
         </Card>
       </div>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Card title="All admin models" subtitle="Every registered table, grouped by application." testId="ops-tables-inventory-summary">
+          <StatTile label="Inspectable models" value={num(inventory.length)} sub="Open a row in Django admin for records and filters" />
+        </Card>
+        {domainDonut.length > 0 && (
+          <Card title="Models by application" testId="ops-tables-inventory-chart">
+            <Donut data={domainDonut} valueFormat={(value) => num(value)} />
+          </Card>
+        )}
+      </div>
+      <Card title="Complete model inventory" subtitle="Row counts are PostgreSQL estimates; a dash means not measured. Token secrets are never shown here." testId="ops-tables-inventory">
+        <Table
+          rows={inventory}
+          rowKey={(row) => row.admin_path}
+          empty="No admin models available."
+          columns={[
+            { key: "model", header: "Model", render: (row) => <a href={row.admin_path} className="text-link hover:underline">{row.model}</a> },
+            { key: "app", header: "Application" },
+            { key: "rows_estimated", header: "Approx. rows", align: "right", render: (row) => row.rows_estimated == null ? "—" : num(row.rows_estimated) },
+            { key: "bytes", header: "Size", align: "right", render: (row) => gb(row.bytes) },
+          ]}
+        />
+      </Card>
     </div>
   );
 }
@@ -1326,8 +1355,8 @@ function InfraWorkers({ workers }) {
 // do not say that one of them is the gold/FX/crypto wallet, which is the whole
 // reason the two are not interchangeable.
 const QUOTA_PLAN_META = {
-  tsetmc: { title: "TSETMC wallet", scope: "Stocks, Codal filings, IME" },
-  brs: { title: "Market wallet", scope: "Gold, FX, crypto, commodities" },
+  aio: { title: "AIO", scope: "TSETMC, Codal, and Pro daily history" },
+  market_cgcc: { title: "Market CGCC", scope: "Live gold, FX, crypto, and commodities" },
 };
 
 /** One panel per provider subscription. They are separate wallets, not one pool.
@@ -1341,9 +1370,9 @@ const QUOTA_PLAN_META = {
  * `effective_limit` for exactly this -- disclosed if known, else the configured
  * per-plan expectation -- and the console was throwing it away.
  *
- * A ceiling of zero is the OTHER case, and it is not exhaustion: the Market
- * product is deliberately unmetered (`MARKETDATA_PLAN_LIMIT_BRS=0`), so it has
- * no ceiling to be near. Rendered against the metered layout it read
+ * A ceiling of zero is the OTHER case, and it is not exhaustion: a provider
+ * product can report no daily meter, so it has no ceiling to be near.
+ * Rendered against the metered layout it read
  * "475 / 0 today", a 0% meter and "Remaining 0" -- an operator's cue to go
  * looking for a wallet that had run dry, when nothing had. Unmetered wallets
  * therefore get a layout with no denominator, no meter and no remainder, and
@@ -1368,6 +1397,7 @@ export function QuotaWallets({ quota }) {
         // segments described 221 of tsetmc's 9,950 calls and the bar looked
         // almost empty at 100% used.
         const unattributed = plan.unattributed || 0;
+        const variance = plan.provider_variance;
         const left = Math.max(0, ceiling - used);
         const pct = pctOf(used, ceiling);
         const disclosed = (plan.limit || 0) > 0;
@@ -1389,19 +1419,29 @@ export function QuotaWallets({ quota }) {
             </div>
 
             <div className="flex items-baseline gap-1.5">
-              <span className="text-xl font-semibold tabular">{num(used)}</span>
+              <span className="text-xl font-semibold tabular">{plan.provider_used == null ? "—" : num(plan.provider_used)}</span>
               <span className="text-sm text-muted">
-                {metered ? `/ ${num(ceiling)} today` : "requests today"}
+                {metered ? `/ ${num(ceiling)} provider-billed requests` : "provider-billed requests"}
               </span>
             </div>
+            <p className="text-xs text-muted">
+              {plan.provider_observed_at
+                ? `Observed ${dateTime(plan.provider_observed_at)} via ${plan.provider_observation_source || "provider response"}; not live.`
+                : "Provider counter not observed; billing cannot be reconciled yet."}
+            </p>
+            {variance != null && variance !== 0 && (
+              <Badge variant="warn">
+                Provider/local variance {variance > 0 ? "+" : ""}{num(variance)}
+              </Badge>
+            )}
 
             {metered && (
             <div
               className="flex h-2.5 overflow-hidden rounded-full bg-panel"
               role="progressbar"
-              aria-label={`${meta.title} quota used`}
+              aria-label={`${meta.title} safe-budget counter`}
               aria-valuenow={Math.round(pct)}
-              aria-valuetext={`${num(used)} of ${num(ceiling)} requests today`}
+              aria-valuetext={`${num(used)} of ${num(ceiling)} safe-budget counter`}
               aria-valuemin={0}
               aria-valuemax={100}
             >
@@ -1417,6 +1457,15 @@ export function QuotaWallets({ quota }) {
 
             <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
               <div className="flex justify-between gap-2">
+                <dt className="text-muted">Local attempts</dt><dd className="tabular">{num(plan.local_attempts)}</dd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <dt className="text-muted">Successful</dt><dd className="tabular">{num(plan.successful_requests)}</dd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <dt className="text-muted">Local safe-budget count</dt><dd className="tabular">{num(used)}</dd>
+              </div>
+              <div className="flex justify-between gap-2">
                 <dt className="text-muted">Archive</dt><dd className="tabular">{num(archive)}</dd>
               </div>
               <div className="flex justify-between gap-2">
@@ -1426,11 +1475,11 @@ export function QuotaWallets({ quota }) {
                 <dt className="text-muted">Other</dt><dd className="tabular">{num(other)}</dd>
               </div>
               <div className="flex justify-between gap-2">
-                <dt className="text-muted">Unattributed</dt><dd className="tabular">{num(unattributed)}</dd>
+                <dt className="text-muted">Unattributed</dt><dd className="tabular">{plan.provider_used == null ? "—" : num(unattributed)}</dd>
               </div>
               {metered && (
                 <div className="flex justify-between gap-2">
-                  <dt className="text-muted">Remaining</dt><dd className="tabular">{num(left)}</dd>
+                  <dt className="text-muted">Safe allowance</dt><dd className="tabular">{num(left)}</dd>
                 </div>
               )}
             </dl>
@@ -1453,10 +1502,12 @@ export function QuotaWallets({ quota }) {
               )}
               <p className="mt-1.5">
                 {!metered
-                  ? "This product is not daily-metered — the provider reports no ceiling, so there is nothing to run out of."
+                  ? plan.provider_observed_at
+                    ? "The provider reports no daily ceiling for this product."
+                    : "No daily ceiling is configured or observed; confirm with the provider."
                   : disclosed
                     ? "Ceiling disclosed by the provider."
-                    : "Ceiling is our configured expectation — the provider only states it on an error response."}
+                    : "Ceiling is our configured expectation until a provider counter is observed."}
               </p>
             </div>
           </div>
@@ -1662,8 +1713,8 @@ function MembersPanel() {
       key: "role",
       header: "Role",
       render: (row) => (
-        <Badge variant={row.is_superuser ? "warn" : "neutral"}>
-          {row.is_superuser ? "superuser" : row.is_staff ? "staff" : "member"}
+        <Badge variant={row.role === "admin" ? "warn" : "neutral"}>
+          {row.role === "admin" ? "admin" : "user"}
         </Badge>
       ),
     },
@@ -2092,19 +2143,19 @@ function OverviewPanel({ overview, tickSeries, depths, onNavigate, user }) {
             sub={`${num(overview.users?.snapshots_24h)} in 24h`}
           />
         </div>
-        {user?.is_superuser && <OperatorResetLink />}
+        {user?.role === "admin" && <OperatorResetLink />}
       </Card>
 
       {/* Staff, not superuser: reading the roster and suspending an abusive
           account is day-to-day operations. Minting a password reset link is not
           -- that hands over access to someone else's portfolio. */}
-      {user?.is_staff && <MembersPanel />}
+      {user?.role === "admin" && <MembersPanel />}
 
       <AttentionPanel liveHeld={liveHeld} warehouse={warehouse} onNavigate={onNavigate} />
 
       <Card
         title="Provider quota by product"
-        subtitle="The paid stock product is daily-metered; the Market product is currently unmetered."
+        subtitle="Provider product counters and local request attribution. Compare them before acting on remaining capacity."
         testId="ops-overview-quota"
       >
         <QuotaWallets quota={overview.quota} />
@@ -2263,7 +2314,7 @@ export default function Ops({ user }) {
     };
   }, [overview]);
 
-  if (!user?.is_staff) return <Navigate to="/" replace />;
+  if (user?.role !== "admin") return <Navigate to="/" replace />;
 
   const generatedAtMs = overview?.generated_at ? Date.parse(overview.generated_at) : null;
   const ageSec = generatedAtMs != null && !Number.isNaN(generatedAtMs)

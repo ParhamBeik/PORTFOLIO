@@ -37,6 +37,10 @@ if [[ -n "$("${compose[@]}" ps -q db)" ]] && "${compose[@]}" exec -T db pg_isrea
   "${project_dir}/scripts/backup_postgres.sh"
 fi
 "${compose[@]}" build
+# This release drops legacy quantity/price columns. Old web and worker images
+# must not continue reading or writing those columns while migrate runs.
+# Keep DB/Redis/MinIO up; the new images start only after migration succeeds.
+"${compose[@]}" stop celery_beat celery_worker_live celery_worker_archive celery_worker_codal backend frontend
 "${compose[@]}" run --rm migrate
 "${compose[@]}" up -d --remove-orphans
 "${compose[@]}" exec -T backend python manage.py check --deploy --fail-level WARNING

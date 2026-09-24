@@ -324,8 +324,8 @@ describe("Page Rendering Tests", () => {
       <QuotaWallets
         quota={{
           plans: {
-            brs: {
-              plan: "brs",
+            market_cgcc: {
+              plan: "market_cgcc",
               metered: false,
               used: 475,
               archive_used: 200,
@@ -339,7 +339,8 @@ describe("Page Rendering Tests", () => {
     );
 
     expect(screen.getByText("Unmetered")).toBeInTheDocument();
-    expect(screen.getByText("requests today")).toBeInTheDocument();
-    expect(screen.queryByText(/\/ 0 today/)).not.toBeInTheDocument();
+    expect(screen.getByText("provider-billed requests")).toBeInTheDocument();
+    expect(screen.getByText(/Provider counter not observed/)).toBeInTheDocument();
+    expect(screen.queryByText(/\/ 0 provider-billed requests/)).not.toBeInTheDocument();
   });
 });
