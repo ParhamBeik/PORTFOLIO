@@ -17,6 +17,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
   # Advisories are published on the vendor's schedule, not ours, so a
   # dependency audit that only runs on push is blind for however long nobody
   # pushes. That is how 46 CVEs across four dependencies accumulated unnoticed
@@ -204,7 +205,7 @@ jobs:
     needs: [backend, frontend, deploy-configured]
     if: >-
       github.ref == 'refs/heads/main'
-      && github.event_name == 'push'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && needs.deploy-configured.outputs.ready == 'true'
     runs-on: ubuntu-latest
     # A GitHub Environment gives this job its own secrets and an optional
@@ -223,7 +224,7 @@ jobs:
           printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+          ssh -v -o ConnectTimeout=15 -i ~/.ssh/deploy_key -o BatchMode=yes \
               "${VPS_USER}@${VPS_HOST}" 'bash -euo pipefail -s' <<'REMOTE'
           repo=/opt/apps/portfolio-repo
           cd "$repo"
