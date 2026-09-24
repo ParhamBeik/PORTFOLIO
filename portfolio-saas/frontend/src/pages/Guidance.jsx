@@ -31,7 +31,7 @@ export default function Guidance({ user, onUserChange }) {
   const { activeId } = usePortfolio();
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
-  const result = useApi(() => guidance(activeId), [activeId, user.risk_profile], { timeoutMs: 30000 });
+  const result = useApi(() => guidance(activeId), [activeId, user.risk_profile], { timeoutMs: 120000 });
   const assets = useApi(listAssets, []);
   const labelFor = useMemo(() => {
     const names = new Map((assets.data || []).map((asset) => [asset.key, assetLabel(asset)]));
