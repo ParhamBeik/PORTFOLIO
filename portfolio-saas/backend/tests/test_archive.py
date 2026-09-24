@@ -1351,7 +1351,7 @@ def test_archive_bucket_has_no_hardcoded_ceiling(settings):
 
 
 def test_provider_account_reconciles_local_counter(settings):
-    """Provider drift is monotonic and remains explicitly unattributed."""
+    """Pre-observation usage is a baseline; later drift remains visible."""
     from marketdata.quota import unattributed_used
 
     reserve_request(ARCHIVE)
@@ -1360,12 +1360,17 @@ def test_provider_account_reconciles_local_counter(settings):
     assert row.used == 4021
     assert row.archive_used == 1
     assert row.other_used == 0
-    assert unattributed_used(row) == 4020
+    assert row.provider_baseline_used == 4020
+    assert unattributed_used(row) == 0
+    reconcile_account({"usage_today": 4023})
+    row.refresh_from_db()
+    assert row.provider_baseline_used == 4020
+    assert unattributed_used(row) == 2
     # An out-of-order provider response must not re-open already spent quota.
     reconcile_account({"usage_today": 4000})
-    assert ApiRequestQuota.objects.get().used == 4021
+    assert ApiRequestQuota.objects.get().used == 4023
     assert reconcile_account(None) == 0
-    assert ApiRequestQuota.objects.get().used == 4021
+    assert ApiRequestQuota.objects.get().used == 4023
 
 
 def test_reconcile_records_the_limit_the_provider_reports(settings):

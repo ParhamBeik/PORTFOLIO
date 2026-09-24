@@ -1096,7 +1096,8 @@ def reconcile_account(account, plan=TSETMC):
         # 200/day budget report 2,226 spent (2026-09-08), which zeroed the
         # reserve that keeps `catalog_sync` and `sync_symbol_metadata` alive and
         # made the console attribute the app's own blind spot to a named lane.
-        # `unattributed_used` derives it instead, and nothing budgets against it.
+        # After the first observation, `unattributed_used` derives any drift;
+        # pre-observation provider usage stays in its own baseline.
         if usage is not None and (row.provider_used is None or usage > row.provider_used):
             if row.provider_baseline_used is None:
                 row.provider_baseline_used = max(0, usage - row.local_attempts)
@@ -1107,8 +1108,8 @@ def reconcile_account(account, plan=TSETMC):
             updates.extend(("provider_used", "provider_observed_at", "provider_observation_source"))
         if usage is not None and usage > row.used:
             logger.info(
-                "quota reconciled plan=%s day_usage %d->%d unattributed=%d",
-                plan, row.used, usage, usage - row.used,
+                "quota reconciled plan=%s day_usage %d->%d post_baseline_variance=%s",
+                plan, row.used, usage, provider_variance(row),
             )
             row.used = usage
             updates.append("used")
