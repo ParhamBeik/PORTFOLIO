@@ -267,8 +267,31 @@ def test_cached_overview_still_reports_live_health(staff_user):
     assert second.json()["generated_at"] != first_generated, (
         "generated_at came from the cache, so the health block is stale too"
     )
-    for key in ("checks", "price_feed", "status", "overall_status", "queue"):
+    for key in ("checks", "price_feed", "status", "overall_status", "queue", "quota"):
         assert key in second.json(), f"live health key {key!r} missing from a cached response"
+
+
+def test_cached_overview_reads_latest_stored_provider_quota(staff_user):
+    from marketdata.models import ApiRequestQuota
+    from marketdata.quota import AIO, quota_day
+
+    cache.clear()
+    row = ApiRequestQuota.objects.create(
+        day=quota_day(), plan=AIO, used=7, provider_used=7,
+        provider_baseline_used=7,
+    )
+    client = _auth(APIClient(), staff_user)
+    first = client.get("/api/admin/overview/")
+    assert first.status_code == 200
+    assert first.json()["quota"]["plans"][AIO]["provider_used"] == 7
+
+    row.provider_used = 8
+    row.used = 8
+    row.save(update_fields=["provider_used", "used"])
+    second = client.get("/api/admin/overview/")
+    assert second.status_code == 200
+    assert second.json()["quota"]["plans"][AIO]["provider_used"] == 8
+    assert second.json()["quota"]["plans"][AIO]["provider_variance"] == 1
 
 
 def test_hypertable_lookup_failure_is_never_cached(monkeypatch):

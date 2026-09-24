@@ -12,6 +12,7 @@ Status on 2026-09-24. Checked items are implemented and tested; deployment statu
 - [x] Implement and test provider-counter observation and rising-variance alert.
   - [x] Verify the VPS account-panel read and prove two stopped-worker reads do not move either meter; stage the opt-in flag in the VPS-only environment for deployment.
   - [x] Separate the pre-observation provider baseline from subsequent local attribution, so activating the new product rows mid-day does not report all earlier provider usage as variance.
+  - [x] Keep quota live within the cached Operations overview; display a negative signed variance as an observation-time race, not a billing alert.
 
 ## Authorization and administration
 
@@ -50,6 +51,7 @@ Status on 2026-09-24. Checked items are implemented and tested; deployment statu
 - [x] Run complete backend/frontend tests and local smoke checks.
   - [x] Backend 1,194 passed / 1 skipped; migration autodetector reports no changes on a clean database; frontend 26 unit and 50 component tests, lint, build; staged browser E2E 23 passed / 3 skipped, plus one heavy comparison matrix not run.
 - [x] Deploy commit `b8a68b8` manually through the normal VPS deployment script after CI test gates passed; migrations, backup, service health, public routes, role consistency, and financial audit rows verified.
-- [ ] Deploy the cold-request timeout and quota-baseline follow-up; verify the Operations display and post-baseline reconciliation on production.
+- [x] Deploy the cold-request timeout and quota-baseline follow-up; verify the Operations display and post-baseline reconciliation on production (`6456ef8`).
+- [ ] Deploy and verify the live-quota cache follow-up.
 - [ ] Repair GitHub-hosted runner SSH access; CI test gates pass, but its deploy job times out before reaching the VPS. Local Mac SSH and manual deployment work.
 - [ ] Verify a complete next Tehran-day quota cycle with provider totals and local attribution. Preserve any genuine unattributed variance instead of forcing equality.

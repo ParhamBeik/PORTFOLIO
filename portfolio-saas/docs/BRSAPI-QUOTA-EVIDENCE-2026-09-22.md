@@ -142,3 +142,14 @@ provider total is never overwritten with a local estimate or forced to match.
 The first fully comparable day is the next Tehran-day reset. A genuine
 post-baseline variance must remain visible and be investigated; the mid-day
 baseline is not proof that all application calls reconcile exactly.
+
+At the 2026-09-24 19:13 Tehran panel observation, Market CGCC read 638:
+the 610 baseline plus 28 local requests, with zero variance at that instant.
+One local request then began after the panel snapshot. The interface briefly
+showed 29 local attempts against the last 638-provider reading, a signed
+variance of −1. This is an observation-time race, not evidence that the
+provider forgave a request. Negative values are shown as provisional rather
+than raised as unexplained-billing alerts. Operations now reads the stored
+provider counter and local attribution on every page load even when its
+expensive warehouse overview comes from cache; it never silently serves a
+15-minute-old quota panel.

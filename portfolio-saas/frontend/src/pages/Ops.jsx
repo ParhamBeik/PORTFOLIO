@@ -1430,8 +1430,10 @@ export function QuotaWallets({ quota }) {
                 : "Provider counter not observed; billing cannot be reconciled yet."}
             </p>
             {variance != null && variance !== 0 && (
-              <Badge variant="warn">
-                Since-baseline provider/local variance {variance > 0 ? "+" : ""}{num(variance)}
+              <Badge variant={variance > 0 ? "warn" : "neutral"}>
+                {variance > 0
+                  ? `Unattributed since baseline +${num(variance)}`
+                  : `Provider snapshot trails local by ${num(-variance)} (may be in flight)`}
               </Badge>
             )}
 
