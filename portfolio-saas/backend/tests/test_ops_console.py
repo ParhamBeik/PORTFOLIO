@@ -79,6 +79,8 @@ def test_admin_overview_requires_staff(free_user, staff_user):
     users = body["users"]
     assert users["total"] >= 1
     assert "with_accounts" in users
+    assert users["admins"] >= 1
+    assert "staff" not in users
     assert "snapshots_24h" in users
     assert "last_snapshot_at" in users
     inventory = body["admin_model_inventory"]

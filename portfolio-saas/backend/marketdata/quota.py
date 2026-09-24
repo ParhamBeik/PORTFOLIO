@@ -1098,6 +1098,9 @@ def reconcile_account(account, plan=TSETMC):
         # made the console attribute the app's own blind spot to a named lane.
         # `unattributed_used` derives it instead, and nothing budgets against it.
         if usage is not None and (row.provider_used is None or usage > row.provider_used):
+            if row.provider_baseline_used is None:
+                row.provider_baseline_used = max(0, usage - row.local_attempts)
+                updates.append("provider_baseline_used")
             row.provider_used = usage
             row.provider_observed_at = timezone.now()
             row.provider_observation_source = "response"
@@ -1133,6 +1136,9 @@ def reconcile_panel_metrics(metrics, *, day, observed_at):
                 raise ValueError("Provider counters cannot be negative.")
             row = _quota_row(plan, locked=True)
             fields = []
+            if row.provider_baseline_used is None:
+                row.provider_baseline_used = max(0, usage - row.local_attempts)
+                fields.append("provider_baseline_used")
             if row.provider_used is None or usage >= row.provider_used:
                 row.provider_used = usage
                 row.provider_observed_at = observed_at
@@ -1155,7 +1161,7 @@ def reconcile_panel_metrics(metrics, *, day, observed_at):
 
 
 def unattributed_used(row):
-    """Requests the provider billed that no bucket of ours claims.
+    """Post-baseline provider requests that no local bucket claims.
 
     Positive drift means something spent this plan without passing
     `reserve_request` -- a manual probe from a shell, another deployment holding
@@ -1165,17 +1171,15 @@ def unattributed_used(row):
     """
     if row is None:
         return 0
-    attributed = (row.archive_used or 0) + (row.live_used or 0) + (row.other_used or 0)
-    if row.provider_used is None:
-        return 0
-    return max(0, row.provider_used - attributed)
+    variance = provider_variance(row)
+    return max(0, variance) if variance is not None else 0
 
 
 def provider_variance(row):
-    """Signed provider billing minus local attempts attributed to buckets."""
-    if row is None or row.provider_used is None:
+    """Signed provider billing since baseline minus attributed local attempts."""
+    if row is None or row.provider_used is None or row.provider_baseline_used is None:
         return None
-    return row.provider_used - (
+    return row.provider_used - row.provider_baseline_used - (
         (row.archive_used or 0) + (row.live_used or 0) + (row.other_used or 0)
     )
 
@@ -1294,6 +1298,7 @@ def get_quota_status():
             "unattributed": unattributed_used(row),
             "provider_variance": provider_variance(row),
             "provider_used": row.provider_used if row else None,
+            "provider_baseline_used": row.provider_baseline_used if row else None,
             "provider_observed_at": row.provider_observed_at.isoformat() if row and row.provider_observed_at else None,
             "provider_observation_source": row.provider_observation_source if row else "",
             "local_attempts": row.local_attempts if row else 0,

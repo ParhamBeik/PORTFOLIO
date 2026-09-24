@@ -97,14 +97,14 @@ class ArchiveFetchStateAdmin(admin.ModelAdmin):
 @admin.register(ApiRequestQuota)
 class ApiRequestQuotaAdmin(admin.ModelAdmin):
     list_display = (
-        "day", "plan", "provider_used", "provider_observed_at", "provider_observation_source", "local_attempts", "successful_requests",
+        "day", "plan", "provider_used", "provider_baseline_used", "provider_observed_at", "provider_observation_source", "local_attempts", "successful_requests",
         "provider_variance_display", "used", "limit", "remaining_display",
         "archive_used", "live_used", "other_used", "updated_at",
     )
     ordering = ("-day", "plan")
     list_filter = ("plan",)
     readonly_fields = (
-        "day", "plan", "provider_used", "provider_observed_at", "provider_observation_source", "local_attempts", "successful_requests",
+        "day", "plan", "provider_used", "provider_baseline_used", "provider_observed_at", "provider_observation_source", "local_attempts", "successful_requests",
         "provider_variance_display", "used", "limit", "archive_used",
         "live_used", "other_used", "updated_at",
     )
@@ -117,7 +117,7 @@ class ApiRequestQuotaAdmin(admin.ModelAdmin):
         limit = effective_limit(obj.plan, obj)
         return max(0, limit - obj.used) if limit else "unmetered"
 
-    @admin.display(description="Provider − local")
+    @admin.display(description="Provider since baseline − local")
     def provider_variance_display(self, obj):
         from .quota import provider_variance
 

@@ -961,7 +961,7 @@ def _db_connection_metrics() -> dict:
 
 
 def get_admin_telemetry_context():
-    """Build the staff-only operational dashboard context."""
+    """Build the admin-only operational dashboard context."""
     now = timezone.now()
     checks = {"database": False, "cache": False}
     try:
@@ -1181,7 +1181,7 @@ def _user_domain_health():
     last_snapshot = Snapshot.objects.aggregate(value=Max("timestamp"))["value"]
     return {
         "total": User.objects.count(),
-        "staff": User.objects.filter(role="admin").count(),
+        "admins": User.objects.filter(role="admin").count(),
         "active": User.objects.filter(is_active=True).count(),
         "with_accounts": User.objects.filter(accounts__isnull=False).distinct().count(),
         "accounts": Account.objects.count(),

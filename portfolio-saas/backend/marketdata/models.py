@@ -92,6 +92,7 @@ class ApiRequestQuota(models.Model):
     local_attempts = models.PositiveIntegerField(default=0)
     successful_requests = models.PositiveIntegerField(default=0)
     provider_used = models.PositiveIntegerField(null=True, blank=True)
+    provider_baseline_used = models.PositiveIntegerField(null=True, blank=True)
     provider_observed_at = models.DateTimeField(null=True, blank=True)
     provider_observation_source = models.CharField(max_length=12, blank=True, default="")
     archive_used = models.PositiveIntegerField(default=0)

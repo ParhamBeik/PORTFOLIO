@@ -89,8 +89,19 @@ def test_panel_reconciliation_preserves_local_counts_and_observation_time():
     assert (row.provider_used, row.used, row.limit) == (9465, 9465, 10000)
     assert (row.local_attempts, row.successful_requests, row.live_used, row.archive_used) == (3, 2, 1, 2)
     assert (row.provider_observed_at, row.provider_observation_source) == (observed_at, "panel")
-    assert result[AIO]["variance"] == 9462
-    assert ApiRequestQuota.objects.get(day=quota_day(), plan=MARKET_CGCC).provider_used == 627
+    assert row.provider_baseline_used == 9462
+    assert result[AIO]["variance"] == 0
+    market = ApiRequestQuota.objects.get(day=quota_day(), plan=MARKET_CGCC)
+    assert (market.provider_used, market.provider_baseline_used) == (627, 627)
+
+    newer = parse_panel_metrics(PANEL)
+    newer[AIO]["used"] = 9467
+    newer[MARKET_CGCC]["used"] = 628
+    result = reconcile_panel_metrics(newer, day=quota_day(), observed_at=observed_at)
+    row.refresh_from_db()
+    assert row.provider_baseline_used == 9462
+    assert result[AIO]["variance"] == 2
+    assert result[MARKET_CGCC]["variance"] == 1
 
 
 @pytest.mark.django_db

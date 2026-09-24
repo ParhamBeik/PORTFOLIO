@@ -755,7 +755,7 @@ function PricingGlossaryDisclosure() {
   );
 }
 
-function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
+function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
   const [manageMode, setManageMode] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [savingKey, setSavingKey] = useState(null);
@@ -1132,7 +1132,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
             });
           }
 
-          if (staff) {
+          if (admin) {
             columns.push({
               key: "why",
               header: "",
@@ -1259,7 +1259,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, staff }) {
                   onSaved={reloadAll}
                 />
               )}
-              {staff && whyKey && <WhyDrawer assetKey={whyKey} onClose={() => setWhyKey(null)} />}
+              {admin && whyKey && <WhyDrawer assetKey={whyKey} onClose={() => setWhyKey(null)} />}
             </>
           );
         }}
@@ -1703,7 +1703,7 @@ export default function Dashboard({ user }) {
           </div>
           <AllocationCard state={valuationState} />
         </div>
-        <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} staff={user?.role === "admin"} />
+        <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} admin={user?.role === "admin"} />
         <HistoryQualityCard activeId={activeId} />
         <InsightsCard activeId={activeId} refreshKey={revision} />
         <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} />

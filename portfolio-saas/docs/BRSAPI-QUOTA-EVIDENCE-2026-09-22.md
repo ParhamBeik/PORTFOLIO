@@ -126,3 +126,19 @@ future provider behavior. The VPS-only enable flag is staged for the next
 deployment. New product rows now refuse requests until a provider observation
 seeds the admission counter, preventing a mid-day rename from creating a fresh
 zero-usage wallet. Local attribution remains distinct from the provider total.
+
+## Production activation, 2026-09-24
+
+The opt-in panel meter was enabled in the VPS-only environment and deployed.
+The first observed product totals were AIO 9,977/10,000 and Market CGCC
+610/1,500. They are exact provider-reported daily request totals, but the new
+product rows began after the Tehran day started. Usage before that observation
+cannot be assigned to local `archive`, `live`, or `other` buckets from these
+rows. The Operations view now identifies it as a separate, immutable
+pre-observation baseline. Signed variance is computed only on the subsequent
+provider delta versus subsequent locally attributed attempts. The full daily
+provider total is never overwritten with a local estimate or forced to match.
+
+The first fully comparable day is the next Tehran-day reset. A genuine
+post-baseline variance must remain visible and be investigated; the mid-day
+baseline is not proof that all application calls reconcile exactly.
