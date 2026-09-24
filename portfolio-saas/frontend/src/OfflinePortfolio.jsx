@@ -33,13 +33,25 @@ export default function OfflinePortfolio({ available, onReconnect, onSignOut }) 
   useEffect(() => {
     let live = true;
     let listener;
+    let pauseListener;
+    const lock = () => {
+      setSnapshot(null);
+      setScope("");
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden) lock();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     NativeApp.addListener("appStateChange", ({ isActive }) => {
-      if (!isActive) {
-        setSnapshot(null);
-        setScope("");
-      }
+      if (!isActive) lock();
     }).then((handle) => { if (live) listener = handle; else handle.remove(); });
-    return () => { live = false; listener?.remove(); };
+    NativeApp.addListener("pause", lock).then((handle) => { if (live) pauseListener = handle; else handle.remove(); });
+    return () => {
+      live = false;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      listener?.remove();
+      pauseListener?.remove();
+    };
   }, []);
 
   const unlock = async () => {

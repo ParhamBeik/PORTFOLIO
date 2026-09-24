@@ -5,6 +5,9 @@ const entries = new Map();
 vi.mock("@capacitor/core", () => ({ Capacitor: { isNativePlatform: () => true } }));
 vi.mock("@aparajita/capacitor-secure-storage", () => ({
   SecureStorage: {
+    // Native Capacitor proxies expose `then`; async functions must not return
+    // the proxy or Promise will try to call this unimplemented plugin method.
+    then: () => { throw new Error("SecureStorage.then() is not implemented"); },
     setKeyPrefix: vi.fn(), setSynchronize: vi.fn(),
     get: async (key) => entries.get(key) ?? null,
     set: async (key, value) => { entries.set(key, value); },

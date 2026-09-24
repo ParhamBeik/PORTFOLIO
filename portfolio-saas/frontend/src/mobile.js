@@ -9,6 +9,13 @@ export const isNative = Capacitor.isNativePlatform();
 export const API_ORIGIN = "https://portfolio.parhambm.ir";
 
 let storageReady;
+// Capacitor plugin proxies expose a dynamic `then` method. Returning the proxy
+// from an async function makes Promise treat it as a thenable and stalls boot.
+const secureStore = {
+  get: (...args) => SecureStorage.get(...args),
+  set: (...args) => SecureStorage.set(...args),
+  remove: (...args) => SecureStorage.remove(...args),
+};
 async function storage() {
   if (!isNative) throw new Error("Device storage is only available in the mobile app.");
   storageReady ||= (async () => {
@@ -16,7 +23,7 @@ async function storage() {
     await SecureStorage.setSynchronize(false);
   })();
   await storageReady;
-  return SecureStorage;
+  return secureStore;
 }
 
 export async function getRefreshToken() {
