@@ -14,7 +14,7 @@ printf '%s  %s\n' "${digest}" "${artifact}" > "${scratch}/backups/${artifact}.sh
 cat > "${scratch}/bin/docker" <<'SH'
 #!/usr/bin/env bash
 if [[ " $* " == *" ps --status running --services "* ]]; then
-  printf '%s\n' db redis minio backend celery_worker_live celery_worker_archive celery_beat frontend
+  printf '%s\n' db redis broker minio backend celery_worker_live celery_worker_archive celery_beat frontend
 fi
 SH
 chmod +x "${scratch}/bin/docker"

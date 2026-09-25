@@ -37,6 +37,47 @@ if [[ -n "$("${compose[@]}" ps -q db)" ]] && "${compose[@]}" exec -T db pg_isrea
   "${project_dir}/scripts/backup_postgres.sh"
 fi
 "${compose[@]}" build
+# The first broker cutover cannot abandon work in Redis DB 2. Stop producers,
+# leave old workers draining, and only switch once queued and unacked messages
+# reach zero. Results remain on DB 2 and do not count as outstanding work.
+backend_cid="$("${compose[@]}" ps -q backend)"
+if [[ -n "${backend_cid}" ]] && docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${backend_cid}" \
+  | grep -qx 'CELERY_BROKER_URL=redis://redis:6379/2'; then
+  drain_timeout="${BROKER_DRAIN_TIMEOUT_SECONDS:-300}"
+  [[ "${drain_timeout}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "BROKER_DRAIN_TIMEOUT_SECONDS must be a positive integer" >&2
+    exit 1
+  }
+  resume_legacy_services() {
+    "${compose[@]}" start backend celery_worker_live celery_worker_archive celery_worker_codal celery_beat
+  }
+  "${compose[@]}" stop celery_beat backend
+  legacy_pending() {
+    "${compose[@]}" exec -T redis redis-cli -n 2 --raw EVAL \
+      'return redis.call("LLEN","live")+redis.call("LLEN","archive")+redis.call("LLEN","codal")+redis.call("HLEN","unacked")' 0
+  }
+  drain_deadline=$(( $(date +%s) + drain_timeout ))
+  while true; do
+    if ! pending="$(legacy_pending)" || [[ ! "${pending}" =~ ^[0-9]+$ ]]; then
+      resume_legacy_services
+      echo "Could not inspect legacy Celery queue; restored old services and aborted broker cutover." >&2
+      exit 1
+    fi
+    ((pending > 0)) || break
+    if (( $(date +%s) >= drain_deadline )); then
+      resume_legacy_services
+      echo "Legacy Celery queue did not drain; restored old producers and aborted broker cutover." >&2
+      exit 1
+    fi
+    sleep 5
+  done
+  "${compose[@]}" stop celery_worker_live celery_worker_archive celery_worker_codal
+  if ! pending="$(legacy_pending)" || [[ "${pending}" != 0 ]]; then
+    resume_legacy_services
+    echo "Legacy workers requeued tasks while stopping; restored old services and aborted broker cutover." >&2
+    exit 1
+  fi
+fi
 # This release drops legacy quantity/price columns. Old web and worker images
 # must not continue reading or writing those columns while migrate runs.
 # Keep DB/Redis/MinIO up; the new images start only after migration succeeds.
