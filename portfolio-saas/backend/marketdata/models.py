@@ -553,6 +553,12 @@ class CodalAnnouncement(models.Model):
     company_name = models.CharField(max_length=255, blank=True, default="")
     title = models.TextField()
     code = models.CharField(max_length=64, blank=True, default="")
+    # These fields contain only the provider's value at ingest. Historic
+    # `category` was also overwritten by document extraction, so it cannot be
+    # used as proof of provider classification for existing rows.
+    source_category = models.IntegerField(choices=Category.choices, null=True, blank=True)
+    source_category_title = models.CharField(max_length=120, blank=True, default="")
+    source_is_audited = models.BooleanField(null=True, blank=True)
     category = models.IntegerField(choices=Category.choices, null=True, blank=True, db_index=True)
     category_title = models.CharField(max_length=120, blank=True, default="")
     is_audited = models.BooleanField(null=True, blank=True)

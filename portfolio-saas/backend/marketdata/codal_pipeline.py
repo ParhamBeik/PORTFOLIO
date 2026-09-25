@@ -291,10 +291,9 @@ def extract_report(announcement_id):
     report.verification_status = CodalVerification.EXTRACTED
     report.extracted_at = timezone.now()
     report.save()
-    announcement.category = report.category
-    announcement.category_title = report.report_type
-    announcement.is_audited = report.is_audited
-    announcement.save(update_fields=["category", "category_title", "is_audited"])
+    # Report category/audit flags are interpretations. Never write them over
+    # the announcement's source fields: a subsequent classifier would treat an
+    # inferred category as a provider-confirmed fact.
     return report, {
         "artifact_count": len(downloaded),
         "parsed_from": chosen.kind if chosen else "",

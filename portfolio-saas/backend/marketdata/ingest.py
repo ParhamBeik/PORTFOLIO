@@ -526,6 +526,8 @@ def ingest_shareholders(symbol: str, payload, date: str = "") -> tuple[int, int]
 
 def ingest_codal(payload) -> tuple[int, int]:
     """Announcement.php payload -> CodalAnnouncement rows."""
+    from .codal_classification import classify
+
     records = (payload or {}).get("announcement") if isinstance(payload, dict) else None
     if not isinstance(records, list):
         return 0, 0 if payload is None else 1
@@ -554,6 +556,10 @@ def ingest_codal(payload) -> tuple[int, int]:
     for rec in accepted:
         try:
             cat_val = rec.get("category")
+            source_category = int(cat_val) if cat_val is not None else None
+            source_category_title = rec.get("category_title", "") or ""
+            source_is_audited = rec.get("is_audited") if isinstance(rec.get("is_audited"), bool) else None
+            classification = classify(rec["title"], source_category, source_category_title)
             rows.append(CodalAnnouncement(
                 # Strip: the provider pads some symbols with a trailing space
                 # ("زقیام " vs "زقیام"). Storing it verbatim silently broke every
@@ -564,9 +570,15 @@ def ingest_codal(payload) -> tuple[int, int]:
                 title=rec["title"],
                 # Already ASCII-folded above, before validation.
                 code=rec["code"],
-                category=int(cat_val) if cat_val is not None else None,
-                category_title=rec.get("category_title", "") or "",
-                is_audited=rec.get("is_audited") if isinstance(rec.get("is_audited"), bool) else None,
+                source_category=source_category,
+                source_category_title=source_category_title,
+                source_is_audited=source_is_audited,
+                category=source_category,
+                category_title=source_category_title,
+                doc_type=classification.doc_type,
+                tier=classification.tier,
+                classified_by=classification.classified_by,
+                is_audited=source_is_audited,
                 date_title=rec["date_title"],
                 date_send=rec["date_send"],
                 time_send=rec["time_send"],

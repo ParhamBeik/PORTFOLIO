@@ -63,6 +63,9 @@ def test_company_dossier_exposes_price_conflict_but_no_unverified_metrics(make_u
     )
     CodalAnnouncement.objects.create(
         symbol="کاما", title="Income statement", code="x", date_publish=day,
+        category=CodalAnnouncement.Category.AUDITOR_REPORT,
+        category_title="Auditor Notes & Opinion",
+        doc_type="financial_statements", classified_by="title",
         link="https://www.codal.ir/Reports/Decision.aspx?LetterSerial=123",
     )
     client = APIClient()
@@ -76,6 +79,8 @@ def test_company_dossier_exposes_price_conflict_but_no_unverified_metrics(make_u
     assert response.status_code == 200, response.data
     data = response.data
     assert data["company"]["sector"] == "Metals"
+    assert data["disclosures"][0]["category"] == "Financial Statements"
+    assert data["disclosures"][0]["category_basis"] == "title"
     assert Decimal(data["price"]["points"][0]["close_rial"]) == Decimal("1000")
     assert data["price"]["unit"] == "Rial per share"
     assert data["price"]["candle_disagreements_over_1pct"] == 1

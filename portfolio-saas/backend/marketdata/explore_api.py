@@ -231,7 +231,8 @@ class StockDossierView(APIView):
                 {
                     "title": row.title,
                     "published_jalali": row.date_publish,
-                    "category": row.category_title,
+                    "category": row.doc_type.replace("_", " ").title() if row.doc_type else "Unclassified",
+                    "category_basis": row.classified_by if row.doc_type else "none",
                     "source_url": _safe_codal_link(row.link),
                     "metric_status": "unverified",
                 }

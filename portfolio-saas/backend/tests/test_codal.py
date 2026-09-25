@@ -69,11 +69,13 @@ def test_statement_title_not_reclassified_by_body_or_audit_flag():
         title="صورت های مالی تلفیقی دوره منتهی به ۱۴۰۵/۳/۳۱ (حسابرسی نشده)",
         code="", link_excel="",
     )
+    announcement.is_audited = True  # mixed-provenance legacy value
     classified = classify_announcement(
         announcement, parsed_text="شرکت فرعی؛ اصلاحیه گزارش ۱۴۰۴/۱/۳۱"
     )
     assert classified["category"] == CodalAnnouncement.Category.STATEMENTS
     assert classified["is_consolidated"] is True
+    assert classified["is_audited"] is False
     assert classified["is_correction"] is False
     assert classified["period_end"] == "1405-03-31"
 
@@ -386,6 +388,9 @@ def test_unreconciled_category_is_needs_review_not_parsed(monkeypatch):
 
     assert report.status == CodalReport.Status.NEEDS_REVIEW
     assert report.error_code.startswith("no_typed_facts")
+    announcement.refresh_from_db()
+    assert announcement.category is None
+    assert announcement.category_title == ""
 
 
 def test_regression_guard_refuses_to_overwrite_good_facts_with_nothing(monkeypatch):
@@ -656,6 +661,7 @@ def test_unknown_or_degenerate_titles_land_in_tier_3_without_crashing(title):
 def _make(symbol, code, title, category=None, date_publish="1404-01-01"):
     return CodalAnnouncement.objects.create(
         symbol=symbol, code=code, title=title, category=category,
+        source_category=category,
         date_publish=date_publish,
     )
 
@@ -703,6 +709,20 @@ def test_classify_command_dry_run_writes_nothing():
     row = CodalAnnouncement.objects.get(symbol="TEST2", code="C1")
     assert row.tier is None
     assert row.doc_type == ""
+
+
+@pytest.mark.django_db
+def test_classify_command_does_not_treat_legacy_report_category_as_provider():
+    row = _make("TEST2", "C2", "صورت‌های مالی سال مالی منتهی به ۱۴۰۴/۱۲/۲۹")
+    row.category = CodalAnnouncement.Category.AUDITOR_REPORT
+    row.category_title = "Auditor Notes & Opinion"
+    row.save(update_fields=["category", "category_title"])
+
+    call_command("classify_codal_announcements")
+
+    row.refresh_from_db()
+    assert row.doc_type == "financial_statements"
+    assert row.classified_by == "title"
 
 
 @pytest.mark.django_db

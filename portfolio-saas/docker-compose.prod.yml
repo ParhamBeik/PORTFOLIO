@@ -226,7 +226,7 @@ services:
     environment: *backend-env
     volumes:
       - staticfiles:/app/staticfiles
-    command: sh -c "python manage.py migrate --noinput && python manage.py seed_assets && python manage.py collectstatic --noinput"
+    command: sh -c "python manage.py migrate --noinput && python manage.py classify_codal_announcements && python manage.py seed_assets && python manage.py collectstatic --noinput"
 
   backend:
     build: ./backend

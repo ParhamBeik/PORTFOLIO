@@ -149,8 +149,28 @@ def test_ingest_codal_idempotent():
     assert created == 1
     ann = CodalAnnouncement.objects.get()
     assert ann.symbol == "وبملت" and ann.date_publish == "1403-10-30"
+    assert ann.doc_type == "interim_financials"
+    assert ann.classified_by == "title"
     created, skipped = ingest.ingest_codal(CODAL_PAYLOAD)
     assert created == 0 and skipped == 1
+
+
+@pytest.mark.django_db
+def test_ingest_codal_preserves_provider_category_separately():
+    payload = {"announcement": [{
+        **CODAL_PAYLOAD["announcement"][0],
+        "category": 2,
+        "category_title": "Periodic Financial Statements",
+        "is_audited": False,
+    }]}
+    created, _ = ingest.ingest_codal(payload)
+    assert created == 1
+    row = CodalAnnouncement.objects.get()
+    assert row.source_category == 2
+    assert row.source_category_title == "Periodic Financial Statements"
+    assert row.source_is_audited is False
+    assert row.doc_type == "financial_statements"
+    assert row.classified_by == "category"
 
 
 @pytest.mark.django_db

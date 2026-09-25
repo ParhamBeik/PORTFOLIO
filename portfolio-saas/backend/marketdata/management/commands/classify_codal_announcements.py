@@ -1,12 +1,11 @@
-"""Retroactively label existing CodalAnnouncement rows via title/category classification.
+"""Label announcements from title or preserved provider category.
 
-Integration test (exercises the ORM through call_command) -- see
-tests/test_codal_classification.py. Zero API calls: this only reads columns
-already in the warehouse (title, category) through the pure
+Zero API calls: this only reads title and source_category through the pure
 marketdata.codal_classification.classify() function; it never touches a PDF/
 Excel link. Idempotent -- classify() is a deterministic function of columns
 already on the row, so re-running (e.g. after a rule change) converges to the
-same state and only rewrites rows whose verdict actually changed.
+same state and only rewrites rows whose verdict actually changed. Historic
+category values may have been overwritten by extraction; they are not source.
 """
 import collections
 
@@ -33,12 +32,12 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         dry_run = options["dry_run"]
 
-        # 76,666 rows of short text/int columns is a few tens of MB -- well
+        # Short text/int columns fit in memory at the present warehouse size.
         # within one process's memory, so this loads once rather than paying
         # for a server-side cursor that then has to interleave with writes.
         rows = list(
             CodalAnnouncement.objects.only(
-                "id", "title", "category", "category_title",
+                "id", "title", "source_category", "source_category_title",
                 "doc_type", "tier", "classified_by",
             )
         )
@@ -49,7 +48,7 @@ class Command(BaseCommand):
         to_write = []
 
         for row in rows:
-            result = classify(row.title, row.category, row.category_title)
+            result = classify(row.title, row.source_category, row.source_category_title)
             tier_counts[result.tier] += 1
             doc_type_counts[result.doc_type] += 1
             source_counts[result.classified_by] += 1

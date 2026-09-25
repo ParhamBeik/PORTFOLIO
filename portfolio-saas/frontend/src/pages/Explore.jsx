@@ -217,7 +217,7 @@ function Company({ symbol }) {
                             {item.title}
                           </a>
                         ) : <span>{item.title}</span>}
-                        <span className="mt-1 block text-xs text-muted">{item.published_jalali || "Date unavailable"} · {item.category || "Unclassified"} · Raw filing</span>
+                        <span className="mt-1 block text-xs text-muted">{item.published_jalali || "Date unavailable"} · {item.category || "Unclassified"} ({item.category_basis === "category" ? "provider label" : item.category_basis === "title" ? "title-based label" : "unclassified"}) · Raw filing</span>
                       </li>
                     ))}
                   </ul>

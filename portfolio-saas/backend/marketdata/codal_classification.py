@@ -236,7 +236,9 @@ def classify_announcement(announcement, parsed_text=""):
         )
     is_correction = any(word in title for word in ("اصلاحیه", "اصلاح", "جایگزین"))
     is_consolidated = any(word in title for word in ("تلفیقی", "گروه و شرکت"))
-    audited = announcement.is_audited
+    # Historic is_audited was overwritten by extraction and has mixed
+    # provenance. Only the separate ingest field can be called source data.
+    audited = announcement.source_is_audited
     if audited is None:
         if "حسابرسی نشده" in title:
             audited = False
