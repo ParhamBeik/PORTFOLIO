@@ -133,9 +133,26 @@ if [[ -n "${RCLONE_REMOTE:-}" ]]; then
 fi
 
 evidence="${backup_dir}/backup-evidence-${stamp}.json"
-printf '{"created_at":"%s","database_artifact":"%s","database_sha256":"%s","decrypt_verified":true,"off_host_verified":%s}\n' \
-  "$(date -u +%FT%TZ)" "$(basename "${destination}")" "${checksum}" \
-  "${upload_verified}" | publish "${evidence}"
+if [[ "${upload_verified}" == true ]] || [[ ! -f "${evidence}" ]] || \
+  ! python3 - "${evidence}" "$(basename "${destination}")" "${checksum}" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        evidence = json.load(source)
+    valid = (evidence.get("database_artifact") == sys.argv[2]
+             and evidence.get("database_sha256") == sys.argv[3]
+             and evidence.get("decrypt_verified") is True
+             and evidence.get("off_host_verified") is True)
+except (OSError, ValueError):
+    valid = False
+sys.exit(0 if valid else 1)
+PY
+then
+  printf '{"created_at":"%s","database_artifact":"%s","database_sha256":"%s","decrypt_verified":true,"off_host_verified":%s}\n' \
+    "$(date -u +%FT%TZ)" "$(basename "${destination}")" "${checksum}" \
+    "${upload_verified}" | publish "${evidence}"
+fi
 
 if [[ "$(TZ="${BACKUP_TIMEZONE:-Asia/Tehran}" date +%u)" == "7" ]]; then
   # `cp` truncates an existing destination in place, so it carries the same

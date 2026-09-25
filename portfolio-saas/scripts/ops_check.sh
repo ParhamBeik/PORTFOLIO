@@ -18,19 +18,29 @@ if [[ -z "${latest}" ]] || (( $(date +%s) - $(stat -f %m "${latest}" 2>/dev/null
 fi
 
 # A fresh dump on the database host is not a recoverable backup after host
-# loss. The backup job records true only after reading the remote bytes back
-# and checking their hashes; surface that result in the hourly host check.
+# loss. A VPS upload or the Mac pull records true only after checking off-host
+# bytes; require the receipt to match the latest artifact and checksum.
 if [[ -n "${latest}" ]]; then
   stamp="$(basename "${latest}" | sed -n 's/^daily-\(.*\)\.dump\.enc$/\1/p')"
   evidence="${backup_dir}/backup-evidence-${stamp}.json"
-  if [[ ! -r "${evidence}" ]] || ! python3 - "${evidence}" "$(basename "${latest}")" <<'PY'
+  if [[ ! -r "${evidence}" || ! -r "${latest}.sha256" ]] || ! python3 - "${evidence}" "$(basename "${latest}")" "${latest}.sha256" <<'PY'
 import json
+import re
 import sys
 
 try:
     with open(sys.argv[1], encoding="utf-8") as source:
         record = json.load(source)
-    valid = record.get("database_artifact") == sys.argv[2] and record.get("off_host_verified") is True
+    with open(sys.argv[3], encoding="utf-8") as source:
+        digest, filename = source.read().split()
+    valid = (
+        bool(re.fullmatch(r"[0-9a-f]{64}", digest))
+        and filename == sys.argv[2]
+        and record.get("database_artifact") == sys.argv[2]
+        and record.get("database_sha256") == digest
+        and record.get("decrypt_verified") is True
+        and record.get("off_host_verified") is True
+    )
 except (OSError, ValueError):
     valid = False
 sys.exit(0 if valid else 1)
