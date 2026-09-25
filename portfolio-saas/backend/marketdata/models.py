@@ -633,6 +633,13 @@ class DerivativeSnapshot(models.Model):
         indexes = [models.Index(fields=["contract", "-observed_at"], name="marketdata__contrac_1eb881_idx")]
 
 
+class CodalVerification(models.TextChoices):
+    LEGACY_UNVERIFIED = "legacy_unverified", "Legacy, unverified"
+    EXTRACTED = "extracted", "Extracted, unverified"
+    RECONCILED = "reconciled", "Source reconciled"
+    QUARANTINED = "quarantined", "Quarantined"
+
+
 class CodalReport(models.Model):
     """Versioned extraction state for one immutable Codal announcement."""
 
@@ -674,6 +681,10 @@ class CodalReport(models.Model):
     )
     quality = models.CharField(
         max_length=24, choices=Quality.choices, default=Quality.UNKNOWN, db_index=True
+    )
+    verification_status = models.CharField(
+        max_length=24, choices=CodalVerification.choices,
+        default=CodalVerification.LEGACY_UNVERIFIED,
     )
     error_code = models.CharField(max_length=64, blank=True, default="")
     extracted_at = models.DateTimeField(null=True, blank=True)
@@ -779,11 +790,63 @@ class CodalFact(models.Model):
     dimensions = models.JSONField(default=dict)
     confidence = models.DecimalField(max_digits=5, decimal_places=4, default=1)
     quality = models.CharField(max_length=24, default="validated", db_index=True)
+    verification_status = models.CharField(
+        max_length=24, choices=CodalVerification.choices,
+        default=CodalVerification.LEGACY_UNVERIFIED,
+    )
     parser_version = models.CharField(max_length=32, default="1")
     source_coordinates = models.JSONField(default=dict)
 
     class Meta:
         indexes = [models.Index(fields=["fact_code", "period_end", "quality"])]
+
+
+class CodalExtraction(models.Model):
+    """One immutable parser run against exact archived Codal bytes."""
+
+    report = models.ForeignKey(
+        CodalReport, on_delete=models.PROTECT, related_name="extractions"
+    )
+    artifact = models.ForeignKey(
+        CodalArtifact, on_delete=models.PROTECT, related_name="extractions"
+    )
+    checksum_sha256 = models.CharField(max_length=64)
+    parser_version = models.CharField(max_length=32)
+    parsed_at = models.DateTimeField(auto_now_add=True)
+    table_count = models.PositiveIntegerField(default=0)
+    section_count = models.PositiveIntegerField(default=0)
+    fact_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["report", "artifact", "checksum_sha256", "parser_version"],
+                name="uniq_codal_extraction_bytes_parser",
+            )
+        ]
+
+
+class CodalCandidateFact(models.Model):
+    """Unverified reading of a source cell; raw artifact retains the evidence."""
+
+    extraction = models.ForeignKey(
+        CodalExtraction, on_delete=models.PROTECT, related_name="candidates"
+    )
+    fact_code = models.CharField(max_length=160)
+    raw_value = models.TextField(blank=True, default="")
+    numeric_value = models.DecimalField(
+        max_digits=38, decimal_places=12, null=True, blank=True
+    )
+    unit = models.CharField(max_length=64, blank=True, default="")
+    currency = models.CharField(max_length=16, blank=True, default="")
+    period_start = models.CharField(max_length=10, blank=True, default="")
+    period_end = models.CharField(max_length=10, blank=True, default="")
+    dimensions = models.JSONField(default=dict)
+    source_coordinates = models.JSONField(default=dict)
+    verification_status = models.CharField(
+        max_length=24, choices=CodalVerification.choices,
+        default=CodalVerification.EXTRACTED,
+    )
 
 
 class CorporateAction(models.Model):

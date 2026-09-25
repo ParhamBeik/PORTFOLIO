@@ -65,17 +65,18 @@ def _clean(value):
 
 
 _MAX_DECIMAL = Decimal("1e26")
+_NUMBER = re.compile(r"-?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?\Z")
 
 
 def parse_number(value):
     normalized = _clean(value).translate(PERSIAN_DIGITS)
-    normalized = normalized.replace("٬", "").replace(",", "").replace("−", "-")
-    normalized = normalized.replace("٫", ".").replace("(", "-").replace(")", "")
-    normalized = re.sub(r"[^0-9.\-]", "", normalized)
-    if not normalized or normalized in ("-", ".", "-."):
+    normalized = normalized.replace("٬", ",").replace("٫", ".").replace("−", "-")
+    if normalized.startswith("(") and normalized.endswith(")"):
+        normalized = "-" + normalized[1:-1].strip()
+    if not _NUMBER.fullmatch(normalized):
         return None
     try:
-        parsed = Decimal(normalized)
+        parsed = Decimal(normalized.replace(",", ""))
         if abs(parsed) >= _MAX_DECIMAL:
             return None
         return parsed
@@ -215,12 +216,13 @@ def extract_typed_facts(parsed, category, period_end=""):
                 number = parse_number(value)
                 facts.append({
                     "fact_code": fact_code,
+                    "raw_value": value,
                     "numeric_value": number,
                     "text_value": "" if number is not None else value,
                     "period_end": period_end,
                     "dimensions": dimensions,
                     "confidence": parsed.confidence,
-                    "quality": "validated",
+                    "quality": "extracted",
                     "source_coordinates": {"table_index": table_index, "row": row_index + 2, "column": col_index + 1},
                 })
     if not facts:
@@ -230,15 +232,18 @@ def extract_typed_facts(parsed, category, period_end=""):
             fact_code = _match_fact_code(line, fields)
             if not fact_code:
                 continue
-            number = parse_number(line)
+            # A text line is context, not a numeric cell. The announcement
+            # number in a correction notice must never become revenue.
+            number = None
             facts.append({
                 "fact_code": fact_code,
+                "raw_value": line,
                 "numeric_value": number,
                 "text_value": line if number is None else "",
                 "period_end": period_end,
                 "dimensions": {},
                 "confidence": parsed.confidence,
-                "quality": "validated",
+                "quality": "extracted",
                 "source_coordinates": {"line": line_index + 1},
             })
     parsed.facts = facts
@@ -246,7 +251,7 @@ def extract_typed_facts(parsed, category, period_end=""):
 
 
 def category_reconciles(parsed, category):
-    """Conservative publication gate: known category plus at least one typed fact."""
+    """Extraction-coverage signal, never a financial validation verdict."""
     return bool(category in CATEGORY_FIELDS and parsed.facts)
 
 

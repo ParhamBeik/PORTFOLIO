@@ -11,6 +11,8 @@ from .models import (
     ArchiveFetchState,
     CodalAnnouncement,
     CodalArtifact,
+    CodalCandidateFact,
+    CodalExtraction,
     CodalFact,
     CodalReport,
     DailyStockHistory,
@@ -237,8 +239,8 @@ class CodalArtifactInline(admin.TabularInline):
 
 @admin.register(CodalReport)
 class CodalReportAdmin(admin.ModelAdmin):
-    list_display = ("id", "symbol", "category", "report_type", "period_end", "status", "quality", "updated_at")
-    list_filter = ("category", "status", "quality", "is_audited", "is_consolidated", "is_correction")
+    list_display = ("id", "symbol", "category", "report_type", "period_end", "status", "verification_status", "updated_at")
+    list_filter = ("category", "status", "verification_status", "is_audited", "is_consolidated", "is_correction")
     search_fields = ("announcement__symbol", "announcement__title", "letter_type")
     inlines = (CodalArtifactInline,)
 
@@ -249,13 +251,30 @@ class CodalReportAdmin(admin.ModelAdmin):
 
 @admin.register(CodalFact)
 class CodalFactAdmin(admin.ModelAdmin):
-    list_display = ("fact_code", "symbol", "period_end", "numeric_value", "unit", "quality", "confidence")
-    list_filter = ("fact_code", "quality", "report__category")
+    list_display = ("fact_code", "symbol", "period_end", "numeric_value", "unit", "verification_status", "confidence")
+    list_filter = ("fact_code", "verification_status", "report__category")
     search_fields = ("report__announcement__symbol", "fact_code", "text_value")
 
     @admin.display(ordering="report__announcement__symbol")
     def symbol(self, obj):
         return obj.report.announcement.symbol
+
+
+@admin.register(CodalExtraction)
+class CodalExtractionAdmin(StaffReadOnlyAdmin):
+    list_display = ("id", "report", "artifact", "parser_version", "fact_count", "parsed_at")
+    readonly_fields = tuple(field.name for field in CodalExtraction._meta.fields)
+    ordering = ("-parsed_at",)
+
+
+@admin.register(CodalCandidateFact)
+class CodalCandidateFactAdmin(StaffReadOnlyAdmin):
+    list_display = (
+        "fact_code", "raw_value", "numeric_value", "period_end",
+        "verification_status", "extraction",
+    )
+    list_filter = ("verification_status", "fact_code")
+    readonly_fields = tuple(field.name for field in CodalCandidateFact._meta.fields)
 
 
 # ---------------------------------------------------------------------------

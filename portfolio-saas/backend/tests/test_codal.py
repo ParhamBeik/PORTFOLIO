@@ -6,6 +6,7 @@ Merged from 4 files; each section keeps its original banner.
 from decimal import Decimal
 
 from django.core.management import call_command
+from django.test import override_settings
 import pytest
 
 from marketdata import codal_parsers
@@ -17,11 +18,12 @@ from marketdata.codal_classification import (
     TIER_3,
     classify,
     normalize_title,
+    classify_announcement,
 )
 from marketdata.codal_parsers import ParsedDocument
 from marketdata.codal_storage import CodalArtifactRejected, CodalBlockedNetwork
 from marketdata.models import CodalAnnouncement
-from marketdata.models import CodalArtifact, CodalReport
+from marketdata.models import CodalArtifact, CodalReport, CodalVerification
 
 pytestmark = pytest.mark.django_db
 
@@ -44,6 +46,33 @@ def test_parse_number_handles_parenthesized_negatives():
 
 def test_parse_number_returns_none_for_non_numeric():
     assert codal_parsers.parse_number("سود") is None
+    assert codal_parsers.parse_number("این اطلاعیه اصلاحیه اطلاعیه شماره ( ۱۵۱۹۴۶۷ ) است") is None
+    assert codal_parsers.parse_number("۱۴۰۵/۰۳/۳۱") is None
+    assert codal_parsers.parse_number("1,23") is None
+
+
+def test_financial_text_line_cannot_publish_a_reference_as_revenue():
+    parsed = ParsedDocument(
+        text="درآمد: این اطلاعیه اصلاحیه اطلاعیه شماره ( ۱۵۱۹۴۶۷ ) است"
+    )
+    fact = codal_parsers.extract_typed_facts(parsed, category=2).facts[0]
+    assert fact["fact_code"] == "financial.revenue"
+    assert fact["numeric_value"] is None
+    assert fact["quality"] == "extracted"
+
+
+def test_statement_title_not_reclassified_by_body_or_audit_flag():
+    announcement = _announcement(
+        title="صورت های مالی تلفیقی دوره منتهی به ۱۴۰۵/۳/۳۱ (حسابرسی نشده)",
+        code="", link_excel="",
+    )
+    classified = classify_announcement(
+        announcement, parsed_text="شرکت فرعی؛ اصلاحیه گزارش ۱۴۰۴/۱/۳۱"
+    )
+    assert classified["category"] == CodalAnnouncement.Category.STATEMENTS
+    assert classified["is_consolidated"] is True
+    assert classified["is_correction"] is False
+    assert classified["period_end"] == "1405-03-31"
 
 
 def test_longest_keyword_match_does_not_collapse_rate_and_revenue_into_quantity():
@@ -130,7 +159,11 @@ def test_happy_path_downloads_stores_parses_and_marks_parsed(monkeypatch):
     report, result = codal_pipeline.extract_report(announcement.pk)
 
     assert report.status == CodalReport.Status.PARSED
-    assert report.quality == CodalReport.Quality.VALIDATED
+    assert report.quality == CodalReport.Quality.DEGRADED
+    assert report.verification_status == CodalVerification.EXTRACTED
+    candidate = report.extractions.get().candidates.get()
+    assert candidate.verification_status == CodalVerification.EXTRACTED
+    assert candidate.raw_value == "100"
     assert result["fact_count"] == 1
     artifact = CodalArtifact.objects.get(report=report)
     assert artifact.fetch_status == CodalArtifact.FetchStatus.STORED
@@ -236,7 +269,7 @@ def test_regression_guard_refuses_to_overwrite_good_facts_with_nothing(monkeypat
     }])
     monkeypatch.setattr(codal_pipeline, "parse_artifact", lambda kind, content: good_parse)
     report, _ = codal_pipeline.extract_report(announcement.pk)
-    assert report.facts.count() == 1
+    assert report.extractions.get().candidates.count() == 1
 
     # Non-empty (so it passes the "nothing parseable at all" check) but no
     # header matches this category's fact table -- extract_typed_facts yields
@@ -245,12 +278,84 @@ def test_regression_guard_refuses_to_overwrite_good_facts_with_nothing(monkeypat
         "name": "s1", "sheet_name": "s1",
         "headers": ["ستون نامربوط"], "rows": [["x"]], "source_coordinates": {},
     }])
+    monkeypatch.setattr(codal_pipeline, "load_artifact", lambda artifact: b"x")
     monkeypatch.setattr(codal_pipeline, "parse_artifact", lambda kind, content: no_match_parse)
-    with pytest.raises(codal_pipeline.CodalExtractionRegressed):
-        codal_pipeline.extract_report(announcement.pk)
+    report, result = codal_pipeline.extract_report(announcement.pk)
 
     report.refresh_from_db()
-    assert report.facts.count() == 1  # untouched by the failed re-parse
+    assert report.extractions.get().candidates.count() == 1
+    assert report.status == CodalReport.Status.NEEDS_REVIEW
+    assert report.verification_status == CodalVerification.QUARANTINED
+    assert result["error_code"] == "extraction_regressed"
+
+
+def test_archived_bytes_are_reused_and_parser_versions_append(monkeypatch):
+    announcement = _announcement()
+    calls = []
+
+    def download(url, kind):
+        calls.append(url)
+        return url, "application/vnd.ms-excel", b"same-bytes"
+
+    monkeypatch.setattr(codal_pipeline, "download_artifact", download)
+    monkeypatch.setattr(
+        codal_pipeline, "store_artifact", lambda content, content_type, kind: ("key", "checksum")
+    )
+    monkeypatch.setattr(codal_pipeline, "load_artifact", lambda artifact: b"same-bytes")
+    monkeypatch.setattr(
+        codal_pipeline, "parse_artifact",
+        lambda kind, content: ParsedDocument(tables=[{
+            "name": "s1", "sheet_name": "s1", "headers": ["مقدار فروش"],
+            "rows": [["100"]], "source_coordinates": {},
+        }]),
+    )
+
+    report, _ = codal_pipeline.extract_report(announcement.pk)
+    first = report.extractions.get()
+    codal_pipeline.extract_report(announcement.pk)
+    assert report.extractions.count() == 1
+    assert len(calls) == 1
+
+    with override_settings(CODAL_PARSER_VERSION="next"):
+        codal_pipeline.extract_report(announcement.pk)
+    assert report.extractions.count() == 2
+    assert report.extractions.get(pk=first.pk).candidates.get().raw_value == "100"
+    assert len(calls) == 1
+
+
+def test_archived_artifact_rejects_changed_bytes(monkeypatch):
+    import hashlib
+    import io
+
+    artifact = CodalArtifact(
+        s3_key="codal/fixture", size_bytes=5,
+        checksum_sha256=hashlib.sha256(b"right").hexdigest(),
+    )
+
+    class Client:
+        def get_object(self, **kwargs):
+            return {"Body": io.BytesIO(b"wrong")}
+
+    monkeypatch.setattr(codal_storage, "_client", lambda: Client())
+    with pytest.raises(codal_storage.CodalBlockedStorage, match="archive_integrity_mismatch"):
+        codal_storage.load_artifact(artifact)
+
+
+def test_revision_links_only_to_earlier_same_scope_report():
+    original = _announcement(date_publish="1405-01-01", time_publish="09:00:00")
+    first = _announcement(date_publish="1405-01-02", time_publish="09:00:00")
+    second = _announcement(date_publish="1405-01-03", time_publish="09:00:00")
+    future = _announcement(date_publish="1405-01-04", time_publish="09:00:00")
+    for announcement, correction in (
+        (original, False), (first, True), (second, True), (future, True)
+    ):
+        CodalReport.objects.create(
+            announcement=announcement, report_type="Monthly Production & Sales",
+            period_end="1404-12-29", is_correction=correction,
+        )
+    assert codal_pipeline._find_revision(first.report) == original.report
+    assert codal_pipeline._find_revision(second.report) == first.report
+    assert codal_pipeline._find_revision(original.report) is None
 
 
 # ----------------------------------------------------------------------

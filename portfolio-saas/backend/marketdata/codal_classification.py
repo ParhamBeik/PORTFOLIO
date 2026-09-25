@@ -181,15 +181,15 @@ _LETTER_CATEGORY = {
 
 _TITLE_CATEGORY = (
     (("امیدنامه", "پذیره نویسی", "عرضه عمومی"), _CodalAnnouncement.Category.PROSPECTUS),
-    (("شرکت فرعی", "تلفیقی", "زیرمجموعه"), _CodalAnnouncement.Category.SUBSIDIARIES),
-    (("حسابرسی", "حسابرس", "اظهارنظر"), _CodalAnnouncement.Category.AUDITOR_REPORT),
+    (("گزارش حسابرس", "اظهارنظر حسابرس", "حسابرس مستقل"), _CodalAnnouncement.Category.AUDITOR_REPORT),
     (("افزایش سرمایه", "ثبت سرمایه"), _CodalAnnouncement.Category.CAPITAL_INCREASE),
     (("مجمع", "تقسیم سود"), _CodalAnnouncement.Category.ASSEMBLY_DECISION),
     (("حاکمیت شرکتی", "کمیته", "کنترل داخلی"), _CodalAnnouncement.Category.GOVERNANCE),
     (("فعالیت هیئت مدیره", "گزارش هیئت"), _CodalAnnouncement.Category.BOARD_REPORT),
     (("پرتفوی", "سرمایه گذاری"), _CodalAnnouncement.Category.PORTFOLIO),
     (("تولید و فروش", "فعالیت ماهانه"), _CodalAnnouncement.Category.PRODUCTION_SALES),
-    (("صورت مالی", "صورت سود", "ترازنامه", "جریان وجوه"), _CodalAnnouncement.Category.STATEMENTS),
+    (("صورت مالی", "صورتهای مالی", "صورت های مالی", "صورت سود", "ترازنامه", "جریان وجوه"), _CodalAnnouncement.Category.STATEMENTS),
+    (("شرکت فرعی", "زیرمجموعه"), _CodalAnnouncement.Category.SUBSIDIARIES),
     (("افشای اطلاعات", "شفاف سازی", "شفاف‌سازی"), _CodalAnnouncement.Category.GENERAL),
 )
 
@@ -200,10 +200,17 @@ def _letter_type(announcement):
 
 
 def _period(title, fallback=""):
-    matches = re.findall(r"1[34]\d{2}[-/]\d{1,2}[-/]\d{1,2}", title or "")
-    if matches:
-        return matches[-1].replace("/", "-")
-    return fallback[:10]
+    import jdatetime
+
+    for source in (normalize_title(title), normalize_title(fallback)):
+        matches = re.findall(r"(?<!\d)(1[34]\d{2})[-/](\d{1,2})[-/](\d{1,2})(?!\d)", source)
+        for year, month, day in reversed(matches):
+            try:
+                parsed = jdatetime.date(int(year), int(month), int(day))
+            except ValueError:
+                continue
+            return f"{parsed.year:04d}-{parsed.month:02d}-{parsed.day:02d}"
+    return ""
 
 
 def classify_announcement(announcement, parsed_text=""):
@@ -214,7 +221,9 @@ def classify_announcement(announcement, parsed_text=""):
     truth) and title keywords otherwise -- independent of `classify()`'s
     doc_type/tier above, which serves a different consumer (coverage report).
     """
-    title = f"{announcement.title or ''} {parsed_text[:4000]}"
+    # Body text contains references to other reports and subsidiaries. It must
+    # not change the identity, period, or correction status of this notice.
+    title = normalize_title(announcement.title or "")
     letter_type = _letter_type(announcement)
     category = _LETTER_CATEGORY.get(letter_type)
     # let58 covers both operating issuers and investment companies.
