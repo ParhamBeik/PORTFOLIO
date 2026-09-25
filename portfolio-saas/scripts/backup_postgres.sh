@@ -76,25 +76,24 @@ if [[ -f "${destination}" ]]; then
     printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" \
       | publish "${destination}.sha256"
   fi
-  echo "Created ${destination}"
-  exit 0
+  echo "Revalidated ${destination}"
+else
+  "${compose[@]}" exec -T db sh -c \
+    'exec pg_dump --format=custom --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 310000 \
+        -pass "file:${passphrase_file}" -out "${partial}"
+  mv "${partial}" "${destination}"
+
+  # Generate SQL to /dev/null so pg_restore drains and validates the whole archive.
+  # Listing the table of contents only validates the header and can accept a dump
+  # truncated after the TOC; pipefail also makes a decrypt failure fatal.
+  verify_backup "${destination}" || {
+    echo "Backup verification failed: ${destination} did not decrypt into a readable archive." >&2
+    exit 1
+  }
+  checksum="$(checksum_file "${destination}")"
+  printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" | publish "${destination}.sha256"
 fi
-
-"${compose[@]}" exec -T db sh -c \
-  'exec pg_dump --format=custom --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
-  | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 310000 \
-      -pass "file:${passphrase_file}" -out "${partial}"
-mv "${partial}" "${destination}"
-
-# Generate SQL to /dev/null so pg_restore drains and validates the whole archive.
-# Listing the table of contents only validates the header and can accept a dump
-# truncated after the TOC; pipefail also makes a decrypt failure fatal.
-verify_backup "${destination}" || {
-  echo "Backup verification failed: ${destination} did not decrypt into a readable archive." >&2
-  exit 1
-}
-checksum="$(checksum_file "${destination}")"
-printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" | publish "${destination}.sha256"
 
 # Off-host copy. Everything above this line still leaves the only copy of the
 # database on the same host as the database, so a host loss takes both.
@@ -121,6 +120,14 @@ if [[ -n "${RCLONE_REMOTE:-}" ]]; then
            "expected exactly 1 object at ${remote_path}, rclone reported '${remote_count}'." >&2
       exit 1
     }
+    # A single object of the right size may still contain wrong bytes. Read
+    # the remote object back and compare its digest before claiming recovery.
+    remote_checksum="$(rclone cat "${remote_path}" | sha256sum | awk '{print $1}')"
+    local_checksum="$(checksum_file "${artifact}")"
+    [[ "${remote_checksum}" == "${local_checksum}" ]] || {
+      echo "Off-host checksum mismatch: ${remote_path}" >&2
+      exit 1
+    }
   done
   upload_verified=true
 fi
@@ -139,12 +146,16 @@ fi
 
 prune() {
   local keep="$1" pattern="$2" files
-  mapfile -t files < <(find "${backup_dir}" -maxdepth 1 -type f -name "${pattern}" -print | sort -r)
+  files=()
+  while IFS= read -r file; do files+=("${file}"); done \
+    < <(find "${backup_dir}" -maxdepth 1 -type f -name "${pattern}" -print | sort -r)
   if ((${#files[@]} > keep)); then
     for file in "${files[@]:keep}"; do rm -f -- "${file}" "${file}.sha256"; done
   fi
 }
 
-prune 7 'daily-*.dump.enc'
-prune 4 'weekly-*.dump.enc'
+# The production host has limited free space; longer retention belongs on the
+# verified off-host destination, not beside the live database.
+prune 2 'daily-*.dump.enc'
+prune 1 'weekly-*.dump.enc'
 echo "Created ${destination}"
