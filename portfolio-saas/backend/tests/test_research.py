@@ -113,6 +113,23 @@ def test_unsupported_question_abstains_without_provider_call(make_user, monkeypa
     assert ResearchBudgetDay.objects.count() == 0
 
 
+@pytest.mark.parametrize("question", [
+    "What were sales in 1404?",
+    "What were sales in ۱۴۰۵/۰۱?",
+    "What were sales in 2020?",
+])
+def test_explicit_uncovered_period_never_routes_to_latest_fact(make_user, monkeypatch, question):
+    client = _client(make_user)
+    monkeypatch.setattr(views, "_monthly_sales", lambda *args: _monthly())
+    monkeypatch.setattr(provider.requests, "post", lambda *args, **kwargs: pytest.fail("provider called"))
+    response = client.post("/api/research/runs/", {
+        "symbol": "فولاد", "question": question, "max_cost_usd": "0.01",
+    }, format="json")
+    assert response.status_code == 200
+    assert response.data["status"] == "abstained"
+    assert response.data["cost_usd"] == "0"
+
+
 def test_model_selects_server_claim_and_usage_is_charged(make_user, monkeypatch, tmp_path):
     client = _client(make_user)
     monkeypatch.setattr(views, "_monthly_sales", lambda *args: _monthly())

@@ -2,6 +2,8 @@
 
 This is an evidence ledger for the running VPS at `45.139.10.12` and the implementation branch `codex/trustworthy-research-foundation`. It is a baseline, not a claim that the financial warehouse is already suitable for investment decisions. The complete public-table column inventory is [production-schema-2026-09-25.csv](production-schema-2026-09-25.csv). That inventory contains names and types, no account records or secrets.
 
+The companion [product contract](product-scope-2026-09-25.md) maps the user's protected views, daily research workflow, candidate pages for retirement, and question families to explicit data gates.
+
 ## Product boundary
 
 Preserve the Activity ledger and the Portfolio, Net Worth, Allocation, Holdings, and Performance views. The current Markets, Guidance, risk, optimization, and operations surfaces are candidates for consolidation or removal after their data dependencies and users are checked. A successful rebuild means a user can ask an ad hoc financial question, inspect the exact source and calculation behind every reported number, and see a clear refusal when the warehouse cannot support the answer. Personal portfolio state and the shared research warehouse remain separate.

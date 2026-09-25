@@ -2,6 +2,7 @@
 
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
+import re
 
 from django.conf import settings
 from django.utils import timezone
@@ -27,6 +28,28 @@ _UNSUPPORTED_TOPICS = (
     "ارزش‌گذاری", "دلار", "صنعت", "رقیب", "رقبا", "رمزارز", "ارز دیجیتال",
 )
 _INCOME_TOPICS = ("profit", "margin", "net income", "operating revenue", "سود", "حاشیه")
+_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
+def _matching_period_observations(question, observations):
+    """An explicit date cannot be answered with a different filing's year/month."""
+    text = question.translate(_DIGITS)
+    years = set(re.findall(r"(?<!\d)(?:13|14|20)\d{2}(?!\d)", text))
+    months = {
+        f"{year}-{int(month):02d}"
+        for year, month in re.findall(r"(?<!\d)((?:13|14)\d{2})[-/](\d{1,2})(?:[-/]\d{1,2})?(?!\d)", text)
+        if 1 <= int(month) <= 12
+    }
+    if not years and not months:
+        return observations
+    return {
+        key: value for key, value in observations.items()
+        if value["sources"] and years.issubset({
+            source["period_end_jalali"][:4] for source in value["sources"]
+        }) and months.issubset({
+            source["period_end_jalali"][:7] for source in value["sources"]
+        })
+    }
 
 
 def _abstain(user, symbol, question, ceiling, evidence, reason):
@@ -100,6 +123,9 @@ class ResearchRunView(APIView):
         if any(term in question.casefold() for term in _UNSUPPORTED_TOPICS):
             return _abstain(request.user, symbol, question, ceiling, evidence, "question_needs_uncertified_data")
         if not income["points"] and any(term in question.casefold() for term in _INCOME_TOPICS):
+            return _abstain(request.user, symbol, question, ceiling, evidence, "question_needs_uncertified_data")
+        observations = _matching_period_observations(question, observations)
+        if not observations:
             return _abstain(request.user, symbol, question, ceiling, evidence, "question_needs_uncertified_data")
         try:
             config = load_config()
