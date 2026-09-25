@@ -33,6 +33,16 @@ describe("company research", () => {
       company: { name: "Foolad", symbol: "فولاد", sector: "Steel" },
       price: { points: [], paired_candle_days: 0, candle_disagreements_over_1pct: 0, source: "TSETMC" },
       monthly_sales: { points: [source], verified_periods: 1, withheld_periods: 0, latest_filing_periods: 1 },
+      financial_metrics: {
+        points: [{
+          period_start_jalali: "1405-01-01", period_end_jalali: "1405-03-31",
+          scope: "standalone", audited: false, revenue: "834166799",
+          net_profit: "120356493", net_margin_pct: "14.43",
+          artifact_id: 14169, published_jalali: "1405-05-01",
+          source_url: source.source_url,
+          source_coordinates: { revenue: { address: "B4" }, net_profit: { address: "B21" } },
+        }], verified_periods: 1, withheld_periods: 0,
+      },
       coverage: [], disclosures: [],
     });
     api.researchSettings.mockResolvedValue({
@@ -60,5 +70,6 @@ describe("company research", () => {
     expect(await screen.findByText(/Highest among verified months/)).toBeInTheDocument();
     expect(screen.getByText(/Model cost: \$0\.0004/)).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: /Codal filing/i })[0]).toHaveAttribute("href", source.source_url);
+    expect(screen.getByTestId("explore-income-evidence")).toHaveTextContent(/revenue cell B4 · profit cell B21/i);
   });
 });

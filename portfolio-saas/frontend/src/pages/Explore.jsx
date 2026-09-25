@@ -20,10 +20,17 @@ const COVERAGE_LABELS = {
 };
 
 const RESEARCH_GAPS = {
-  no_verified_monthly_sales: "No monthly sales for this company have passed source reconciliation in the last year.",
+  no_verified_financial_evidence: "No monthly sales or income statement for this company has passed source reconciliation in the available window.",
   question_needs_uncertified_data: "This question needs profit, USD, industry, or other evidence that has not passed validation.",
-  unsupported_by_verified_tools: "The verified monthly-sales tools cannot answer that question yet.",
+  unsupported_by_verified_tools: "The verified sales and income observations cannot answer that question yet.",
 };
+
+function reportedAmount(value) {
+  const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(String(value));
+  if (!match) return "—";
+  const fraction = (match[3] || "").replace(/0+$/, "");
+  return `${match[1]}${match[2].replace(/\B(?=(\d{3})+(?!\d))/g, ",")}${fraction ? `.${fraction}` : ""}`;
+}
 
 function ResearchPanel({ symbol }) {
   const settings = useApi(() => researchSettings(), []);
@@ -53,8 +60,8 @@ function ResearchPanel({ symbol }) {
 
   return (
     <Card
-      title="Ask about this company's sales"
-      subtitle="One bounded GapGPT call selects from source-backed calculations. Profit, USD, and peer questions abstain until their data is verified."
+      title="Ask about verified sales and income"
+      subtitle="One bounded GapGPT call selects from source-backed calculations. USD, peer, and valuation questions still abstain."
       testId="explore-research"
     >
       <Async {...settings} testId="explore-research-settings">
@@ -87,14 +94,16 @@ function ResearchPanel({ symbol }) {
                     <ul className="mt-1 space-y-1 text-xs text-muted">
                       {claim.sources.map((source) => (
                         <li key={`${claim.id}-${source.extraction_id}`}>
-                          {source.period_end_jalali} · source row {source.source_coordinates.row ?? "?"}, column {source.source_coordinates.column ?? "?"} · artifact {source.artifact_id}
+                          {source.period_end_jalali} · {source.scope
+                            ? `${source.scope} income cells ${source.source_coordinates.revenue.address} / ${source.source_coordinates.net_profit.address}`
+                            : `sales row ${source.source_coordinates.row ?? "?"}, column ${source.source_coordinates.column ?? "?"}`} · artifact {source.artifact_id}
                           {source.source_url && <> · <a href={source.source_url} target="_blank" rel="noopener noreferrer" className="text-accent underline">Codal filing</a></>}
                         </li>
                       ))}
                     </ul>
                   </div>
                 )) : <p className="text-sm">{RESEARCH_GAPS[result.reason] || "The verified evidence cannot answer this question."}</p>}
-                {result.coverage && <p className="text-xs text-muted">Coverage: {result.coverage.verified_periods} verified, {result.coverage.withheld_periods} withheld latest filings.</p>}
+                {result.coverage && <p className="text-xs text-muted">Coverage: sales {result.coverage.verified_periods} verified / {result.coverage.withheld_periods} withheld; income {result.coverage.income_verified_periods} verified / {result.coverage.income_withheld_periods} withheld latest filings.</p>}
                 <p className="text-xs text-muted">Model cost: ${num(Number(result.cost_usd), 6)} ({result.cost_basis}). Numeric claims come from stored calculations; the model selected which ones address your question.</p>
               </div>
             )}
@@ -116,17 +125,18 @@ function Company({ symbol }) {
         const rows = price.points.map((point) => ({ x: point.date, close: Number(point.close_rial) }));
         const sales = data.monthly_sales;
         const salesRows = sales.points.map((point) => ({ x: point.date, sales: Number(point.value) }));
+        const income = data.financial_metrics;
         return (
           <div className="space-y-5" data-testid="explore-company">
             <Card
               title={`${data.company.name || symbol} · ${symbol}`}
               subtitle={[data.company.sector, data.company.subsector, data.company.isin].filter(Boolean).join(" · ")}
               testId="explore-identity"
-              actions={<Badge variant={sales.points.length ? "good" : "warn"}>{sales.points.length ? "Monthly sales checked" : "Financial metrics unverified"}</Badge>}
+              actions={<Badge variant={sales.points.length || income?.points?.length ? "good" : "warn"}>{sales.points.length || income?.points?.length ? "Source-checked figures" : "Financial metrics unverified"}</Badge>}
             >
               <p className="text-sm text-muted">
                 Company classification comes from the TSE instrument catalog. Monthly sales appear only where the
-                current Codal filing reconciles to its source rows. Profit and margin figures remain unverified.
+                current Codal filing reconciles to its source rows. Income figures appear only for supported statement templates with verified issuer, unit, period, and arithmetic.
               </p>
             </Card>
 
@@ -188,6 +198,26 @@ function Company({ symbol }) {
                 </details>
               )}
             </Card>
+            <Card
+              title="Revenue and net profit"
+              subtitle="Reported income statement figures in million Rial. Standalone and consolidated filings stay separate; a newer unverified filing withholds an older figure."
+              testId="explore-income"
+              actions={<Badge variant={income?.withheld_periods ? "warn" : income?.points?.length ? "good" : "warn"}>{income?.verified_periods || 0} checked · {income?.withheld_periods || 0} withheld</Badge>}
+            >
+              {income?.points?.length ? (
+                <div className="max-h-96 space-y-3 overflow-y-auto" data-testid="explore-income-evidence">
+                  {income.points.slice().reverse().map((point) => (
+                    <div key={`${point.period_end_jalali}-${point.scope}`} className="border-b border-border pb-3 text-sm">
+                      <p className="font-medium">{point.period_start_jalali} → {point.period_end_jalali} · {point.scope} · {point.audited ? "audited" : "unaudited"}</p>
+                      <p>Revenue {reportedAmount(point.revenue)} · net profit {reportedAmount(point.net_profit)} million Rial · net margin {point.net_margin_pct}%</p>
+                      <p className="text-xs text-muted">Filed {point.published_jalali || "date unavailable"}{point.is_correction ? " · correction" : ""} · artifact {point.artifact_id} · revenue cell {point.source_coordinates.revenue.address} · profit cell {point.source_coordinates.net_profit.address}</p>
+                      {point.source_url && <a className="text-xs text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">Original Codal filing</a>}
+                    </div>
+                  ))}
+                </div>
+              ) : <Empty testId="explore-no-income">No income statement has passed source reconciliation in this window.</Empty>}
+              <p className="mt-3 text-xs text-muted">The source cells and arithmetic were checked against the archived filing. This does not audit the company’s accounts or make interim and annual figures comparable.</p>
+            </Card>
             <ResearchPanel symbol={symbol} />
 
             <div className="grid gap-5 lg:grid-cols-2">
@@ -207,7 +237,7 @@ function Company({ symbol }) {
                   ))}
                 </ul>
               </Card>
-              <Card title="Original disclosures" subtitle="Source announcements; only the sales totals above have passed source reconciliation." testId="explore-disclosures">
+              <Card title="Original disclosures" subtitle="Source announcements; reconciled sales and income figures appear above where available." testId="explore-disclosures">
                 {data.disclosures.length ? (
                   <ul className="space-y-3 text-sm">
                     {data.disclosures.map((item, index) => (

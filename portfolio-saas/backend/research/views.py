@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle, UserRateThrottle
 from rest_framework.views import APIView
 
-from marketdata.explore_api import _instrument, _monthly_sales
+from marketdata.explore_api import _income_statements, _instrument, _monthly_sales
 from marketdata.jalali import TEHRAN, from_gregorian
 
 from .budget import BudgetExceeded, finish, reserve
@@ -22,10 +22,11 @@ from .provider import (
 
 
 _UNSUPPORTED_TOPICS = (
-    "profit", "margin", "net income", "balance sheet", "valuation", "usd", "dollar",
-    "crypto", "industry", "peer", "سود", "حاشیه", "ترازنامه", "ارزش گذاری",
+    "balance sheet", "valuation", "usd", "dollar",
+    "crypto", "industry", "peer", "dividend", "ترازنامه", "ارزش گذاری", "سود نقدی",
     "ارزش‌گذاری", "دلار", "صنعت", "رقیب", "رقبا", "رمزارز", "ارز دیجیتال",
 )
+_INCOME_TOPICS = ("profit", "margin", "net income", "operating revenue", "سود", "حاشیه")
 
 
 def _abstain(user, symbol, question, ceiling, evidence, reason):
@@ -57,7 +58,7 @@ class ResearchSettingsView(APIView):
             "max_run_usd": str(settings.RESEARCH_MAX_RUN_USD),
             "daily_budget_usd": str(settings.RESEARCH_DAILY_BUDGET_USD),
             "default_run_usd": str(min(settings.RESEARCH_MAX_RUN_USD, Decimal("0.01"))),
-            "supported_evidence": ["source_reconciled_monthly_sales"],
+            "supported_evidence": ["source_reconciled_monthly_sales", "source_reconciled_income_statements"],
         })
 
 
@@ -85,14 +86,20 @@ class ResearchRunView(APIView):
         monthly = _monthly_sales(
             symbol, from_gregorian(today - timedelta(days=365)), from_gregorian(today),
         )
-        observations = build_observations(monthly)
+        income = _income_statements(
+            symbol, from_gregorian(today - timedelta(days=3650)), from_gregorian(today),
+        )
+        observations = build_observations(monthly, income)
         evidence = {
-            "scope": "one_tse_company_monthly_sales_last_365_days",
+            "scope": "one_tse_company_sales_365_days_income_3650_days",
             "monthly_sales": monthly,
+            "income_statements": income,
         }
-        if not monthly["points"]:
-            return _abstain(request.user, symbol, question, ceiling, evidence, "no_verified_monthly_sales")
+        if not observations:
+            return _abstain(request.user, symbol, question, ceiling, evidence, "no_verified_financial_evidence")
         if any(term in question.casefold() for term in _UNSUPPORTED_TOPICS):
+            return _abstain(request.user, symbol, question, ceiling, evidence, "question_needs_uncertified_data")
+        if not income["points"] and any(term in question.casefold() for term in _INCOME_TOPICS):
             return _abstain(request.user, symbol, question, ceiling, evidence, "question_needs_uncertified_data")
         try:
             config = load_config()
@@ -146,6 +153,9 @@ class ResearchRunView(APIView):
                 "latest_filing_periods": monthly["latest_filing_periods"],
                 "verified_periods": monthly["verified_periods"],
                 "withheld_periods": monthly["withheld_periods"],
+                "income_latest_filing_periods": income["latest_filing_periods"],
+                "income_verified_periods": income["verified_periods"],
+                "income_withheld_periods": income["withheld_periods"],
             },
         })
 

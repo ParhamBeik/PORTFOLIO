@@ -48,6 +48,21 @@ def _monthly():
     }
 
 
+def _income():
+    return {
+        "status": "verified", "latest_filing_periods": 1,
+        "verified_periods": 1, "withheld_periods": 0,
+        "points": [{
+            "period_start_jalali": "1405-01-01", "period_end_jalali": "1405-03-31",
+            "scope": "standalone", "audited": False,
+            "revenue": "834166799", "net_profit": "120356493",
+            "net_margin_pct": "14.43", "artifact_id": 14169,
+            "artifact_sha256": "c" * 64, "extraction_id": 42,
+            "source_coordinates": {"revenue": {"address": "B4"}, "net_profit": {"address": "B21"}},
+        }],
+    }
+
+
 def _config(tmp_path):
     path = tmp_path / "gapgpt.env"
     path.write_text(
@@ -124,6 +139,27 @@ def test_model_selects_server_claim_and_usage_is_charged(make_user, monkeypatch,
     day = ResearchBudgetDay.objects.get()
     assert day.reserved_usd == 0
     assert day.spent_usd == Decimal("0.000400")
+
+
+def test_income_question_uses_certified_cells_without_monthly_sales(make_user, monkeypatch, tmp_path):
+    client = _client(make_user)
+    monkeypatch.setattr(views, "_monthly_sales", lambda *args: {
+        "points": [], "latest_filing_periods": 0, "verified_periods": 0, "withheld_periods": 0,
+    })
+    monkeypatch.setattr(views, "_income_statements", lambda *args: _income())
+    monkeypatch.setattr(
+        provider.requests, "post",
+        lambda *args, **kwargs: _response({"supported": True, "selected_ids": ["income_standalone_net_profit"]}),
+    )
+    with override_settings(GAPGPT_CONFIG_FILE=str(_config(tmp_path))):
+        response = client.post("/api/research/runs/", {
+            "symbol": "فولاد", "question": "What was its net profit?", "max_cost_usd": "0.01",
+        }, format="json")
+    assert response.status_code == 200, response.data
+    assert response.data["status"] == "answered"
+    assert "120,356,493 million Rial" in response.data["claims"][0]["statement"]
+    assert response.data["claims"][0]["sources"][0]["source_coordinates"]["net_profit"]["address"] == "B21"
+    assert response.data["coverage"]["income_verified_periods"] == 1
 
 
 def test_budget_rejects_before_provider_call(make_user, monkeypatch, tmp_path):

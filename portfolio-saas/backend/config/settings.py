@@ -605,6 +605,7 @@ CODAL_S3_REGION = os.getenv("CODAL_S3_REGION", "us-east-1")
 # of its current status -- not wired to any auto-reprocessing yet, just the
 # version stamp CodalReport/CodalParsedTable/CodalFact rows carry.
 CODAL_PARSER_VERSION = os.getenv("CODAL_PARSER_VERSION", "4")
+CODAL_STATEMENT_PARSER_VERSION = os.getenv("CODAL_STATEMENT_PARSER_VERSION", "5")
 
 # 14, not 30. At 30 the nightly prune had never deleted a row -- the ledger was
 # only 20 days old -- while the table grew to 877 MB on 845k rows, because

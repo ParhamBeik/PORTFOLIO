@@ -1,4 +1,4 @@
-"""Deterministic monthly-sales observations available to the AI router."""
+"""Deterministic, source-backed observations available to the AI router."""
 
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -21,10 +21,33 @@ def _change(current, previous):
     return percent.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def build_observations(monthly_sales):
+def build_observations(monthly_sales, income=None):
     points = monthly_sales["points"]
-    if not points:
-        return {}
+    result = {}
+    if points:
+        result.update(_sales_observations(monthly_sales))
+    for scope in ("standalone", "consolidated"):
+        scope_points = [point for point in (income or {}).get("points", []) if point["scope"] == scope]
+        if not scope_points:
+            continue
+        latest = max(scope_points, key=lambda point: point["period_end_jalali"])
+        period = f"{latest['period_start_jalali']}–{latest['period_end_jalali']}"
+        qualifier = f"{scope}, {'audited' if latest['audited'] else 'unaudited'}"
+        for key, label, statement in (
+            ("revenue", "operating revenue", f"{_money(latest['revenue'])}"),
+            ("net_profit", "net profit", f"{_money(latest['net_profit'])}"),
+            ("net_margin", "net profit margin", f"{latest['net_margin_pct']}% (net profit / revenue)"),
+        ):
+            result[f"income_{scope}_{key}"] = {
+                "description": f"Latest verified {scope} income statement {label} for this company, with filing period and audit status",
+                "statement": f"Latest verified {qualifier} income statement for {period}: {label} {statement}.",
+                "sources": [latest],
+            }
+    return result
+
+
+def _sales_observations(monthly_sales):
+    points = monthly_sales["points"]
     latest = points[-1]
     highest = max(points, key=lambda point: (Decimal(point["value"]), point["period_end_jalali"]))
     lowest = min(points, key=lambda point: (Decimal(point["value"]), point["period_end_jalali"]))

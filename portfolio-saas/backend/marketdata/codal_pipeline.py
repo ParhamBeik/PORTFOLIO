@@ -41,6 +41,7 @@ from .codal_storage import (
     load_artifact,
     store_artifact,
 )
+from .codal_statements import parse_income_statement
 from .models import (
     CodalArtifact,
     CodalCandidateFact,
@@ -139,7 +140,7 @@ def _persist_parsed(report, artifact, parsed):
                 dimensions=fact.get("dimensions", {}),
                 source_coordinates=fact["source_coordinates"],
                 verification_status=(
-                    CodalVerification.RECONCILED if fact is reconciled_total
+                    CodalVerification.RECONCILED if fact is reconciled_total or fact.get("verification_status") == CodalVerification.RECONCILED
                     else CodalVerification.EXTRACTED
                 ),
             ))
@@ -158,7 +159,10 @@ def extract_report(announcement_id):
     initial = classify_announcement(announcement)
     for field, value in initial.items():
         setattr(report, field, value)
-    report.parser_version = settings.CODAL_PARSER_VERSION
+    report.parser_version = (
+        settings.CODAL_STATEMENT_PARSER_VERSION
+        if report.category == 2 else settings.CODAL_PARSER_VERSION
+    )
     report.status = CodalReport.Status.FETCHING
     report.save()
 
@@ -239,6 +243,8 @@ def extract_report(announcement_id):
 
     parsed = None
     chosen = None
+    chosen_income = []
+    first_generic = None
     parse_errors = []
     for kind, artifact, content in downloaded:
         if kind == CodalArtifact.Kind.ATTACHMENT:
@@ -248,9 +254,24 @@ def extract_report(announcement_id):
         except Exception as exc:
             parse_errors.append(type(exc).__name__)
             continue
-        if candidate.tables or candidate.sections or candidate.text:
-            parsed, chosen = candidate, artifact
+        if not (candidate.tables or candidate.sections or candidate.text):
+            continue
+        if first_generic is None:
+            first_generic = (candidate, artifact)
+        if report.category == 2:
+            income = parse_income_statement(
+                content, symbol=announcement.symbol, company_name=announcement.company_name,
+                title=announcement.title, period_end=report.period_end,
+                is_consolidated=report.is_consolidated, is_audited=report.is_audited,
+            ) if kind in (CodalArtifact.Kind.EXCEL, CodalArtifact.Kind.HTML) else []
+            if not income:
+                continue
+            parsed, chosen, chosen_income = candidate, artifact, income
             break
+        parsed, chosen = candidate, artifact
+        break
+    if parsed is None and first_generic is not None:
+        parsed, chosen = first_generic
     if parsed is None:
         # Downloaded fine, but nothing usable came out of any of them --
         # a template problem, not a network one. Not retried.
@@ -263,7 +284,8 @@ def extract_report(announcement_id):
     for field, value in metadata.items():
         setattr(report, field, value)
     extract_typed_facts(parsed, report.category, report.period_end)
-    reconciled = category_reconciles(parsed, report.category)
+    parsed.facts.extend(chosen_income)
+    reconciled = bool(chosen_income) or category_reconciles(parsed, report.category)
     try:
         _persist_parsed(report, chosen, parsed)
     except CodalExtractionRegressed:
