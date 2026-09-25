@@ -194,6 +194,10 @@ def test_usdt_denominated_current_value_matches_opening_denomination(make_user):
         date=to_jalali_str(timezone.now() - dt.timedelta(days=101)),
         close_price=Decimal("60000"),
     )
+    GoldCurrencyHistory.objects.create(
+        symbol="USDT_IRT", date=to_jalali_str(timezone.now()),
+        close_price=Decimal("60000"),
+    )
 
     result = account_performance(account, basis="usdt_denominated")
 
@@ -234,20 +238,32 @@ def test_usd_conversion_rate_is_read_as_of_the_date_it_is_given():
 
 
 @pytest.mark.django_db
-def test_usd_conversion_rate_falls_back_to_the_live_map_when_unwarehoused(monkeypatch):
-    """The live tick stays the last resort, which is where it was the only source.
-
-    Before the day's gold/currency row is ingested there is no row at or before
-    `as_of`, and `_current_value` still has to answer.
-    """
+def test_unwarehoused_conversion_rate_is_unavailable(monkeypatch):
+    """A live quote cannot stand in for dated evidence in performance."""
     from portfolio.services import performance as perf
 
     monkeypatch.setattr(perf, "get_latest_prices", lambda: {"usd_cash": "123456"})
 
-    assert perf._conversion_rate("usd_denominated", timezone.now()) == Decimal("123456")
-    # USDT is deliberately NOT given that fallback: it reports
-    # conversion_rate_unavailable rather than quoting a dollar rate as USDT.
+    assert perf._conversion_rate("usd_denominated", timezone.now()) is None
     assert perf._conversion_rate("usdt_denominated", timezone.now()) is None
+
+
+@pytest.mark.django_db
+def test_usdt_never_borrows_dollar_rate_and_stale_rate_is_unavailable():
+    from portfolio.services.performance import _conversion_rate
+    from portfolio.services.returns import to_jalali_str
+
+    observed = timezone.now() - dt.timedelta(days=8)
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date=to_jalali_str(timezone.now()),
+        close_price=Decimal("150000"),
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USDT_IRT", date=to_jalali_str(observed),
+        close_price=Decimal("149000"),
+    )
+    assert _conversion_rate("usdt_denominated", timezone.now()) is None
+    assert _conversion_rate("usd_denominated", timezone.now()) == Decimal("150000")
 
 
 @pytest.mark.django_db

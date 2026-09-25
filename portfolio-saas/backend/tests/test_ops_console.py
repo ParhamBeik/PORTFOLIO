@@ -1364,7 +1364,7 @@ def test_a_house_mortgage_is_owned_by_the_replay_and_a_users_debt_is_not(db, mak
     assert typed.derived is False
 
 
-def test_usdt_basis_conversion_fallback(db):
+def test_usdt_basis_requires_its_own_rate(db):
     from portfolio.services.deflator import to_basis
     
     # Seed historical rate for USD only
@@ -1375,10 +1375,24 @@ def test_usdt_basis_conversion_fallback(db):
     import pandas as pd
     series = pd.Series([100000.0], index=[pd.Timestamp("2026-03-21", tz="UTC")])
     
-    # Convert using usdt_denominated basis. Since USDT_IRT is missing, it should fallback to USD.
+    # A dollar observation does not establish the price of USDT.
     res = to_basis(series, "usdt_denominated")
-    assert not res.isna().all()
-    assert res.iloc[0] == 2.0  # 100,000 / 50,000 = 2.0
+    assert res.isna().all()
+
+
+def test_sparse_currency_series_never_carries_a_month_old_rate(db):
+    import pandas as pd
+    from portfolio.services.deflator import to_basis
+
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date="1405-01-01", close_price=Decimal("50000")
+    )
+    points = pd.to_datetime(["2026-03-21", "2026-04-21"], utc=True)
+    series = pd.Series([100000.0, 100000.0], index=points)
+
+    converted = to_basis(series, "usd_denominated")
+    assert converted.iloc[0] == 2.0
+    assert pd.isna(converted.iloc[1])
 
 
 def test_admin_endpoints(auth_client, db):

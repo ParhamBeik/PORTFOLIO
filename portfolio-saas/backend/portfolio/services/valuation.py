@@ -1031,7 +1031,11 @@ def _accounts_have_buy_sell(accounts, asset_ids=None) -> bool:
 
     qs = LedgerEntry.objects.filter(
         account__in=list(accounts),
-        kind__in=[LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL],
+        kind__in=[
+            LedgerEntry.Kind.BUY,
+            LedgerEntry.Kind.SELL,
+            LedgerEntry.Kind.RIGHTS_ISSUE,
+        ],
     )
     if asset_ids is not None:
         qs = qs.filter(asset_id__in=asset_ids)
@@ -1062,18 +1066,24 @@ def _walked_quantities(accounts, day_ends) -> dict:
             key = holding.asset.key
             quantities[key] = quantities.get(key, Decimal("0")) + _q(holding.quantity)
 
-    moves = LedgerEntry.objects.filter(
-        account__in=accounts,
-        timestamp__gt=min(day_ends),
-        kind__in=[
-            LedgerEntry.Kind.OPENING_POSITION,
-            LedgerEntry.Kind.BUY,
-            LedgerEntry.Kind.SELL,
-        ],
-        asset__isnull=False,
-        asset__is_house=False,
-    ).select_related("asset").order_by("-timestamp")
-    moves = list(moves)
+    from .ledger import active_entries
+
+    moves = sorted(
+        (
+            entry for entry in active_entries(accounts)
+            if entry.timestamp > min(day_ends)
+            and entry.asset_id is not None
+            and not entry.asset.is_house
+            and entry.kind in {
+                LedgerEntry.Kind.OPENING_POSITION,
+                LedgerEntry.Kind.BUY,
+                LedgerEntry.Kind.SELL,
+                LedgerEntry.Kind.RIGHTS_ISSUE,
+            }
+        ),
+        key=lambda entry: (entry.timestamp, entry.pk),
+        reverse=True,
+    )
 
     walked, cursor = {}, 0
     for day_end in sorted(day_ends, reverse=True):
@@ -1082,12 +1092,11 @@ def _walked_quantities(accounts, day_ends) -> dict:
             key = entry.asset.key
             adds = entry.kind in {
                 LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.BUY,
+                LedgerEntry.Kind.RIGHTS_ISSUE,
             }
-            # A reversal carries the kind it undoes, so its effect on the walk is
-            # the mirror image. Same rule, same place, as `holdings_as_of`.
             step = _q(entry.quantity)
             quantities[key] = quantities.get(key, Decimal("0")) + (
-                -step if adds != (entry.reversal_of_id is not None) else step
+                -step if adds else step
             )
             cursor += 1
         walked[day_end] = {k: v for k, v in quantities.items() if v > Decimal("0")}
@@ -1650,6 +1659,40 @@ def resolve_asset_point_in_time_price(
     return price, stale_sessions, source
 
 
+def conversion_rate_as_of(basis: str, as_of) -> Decimal | None:
+    """Use the requested currency's own accepted rate within five calendar days."""
+    from .returns import to_jalali_str
+    import jdatetime
+
+    symbol = {
+        "usd_denominated": "USD",
+        "usdt_denominated": "USDT_IRT",
+    }.get(basis)
+    if symbol is None:
+        return None
+    jalali = to_jalali_str(as_of)
+    rejected = rejected_pairs([symbol], BRS_SERIES_ENDPOINTS)
+    row = (
+        GoldCurrencyHistory.objects.filter(
+            symbol=symbol, date__lte=jalali, close_price__gt=0
+        )
+        .exclude(date__in=[day for sym, day in rejected if sym == symbol])
+        .order_by("-date")
+        .first()
+    )
+    if row is None:
+        return None
+    try:
+        year, month, day = (int(part) for part in row.date.split("-"))
+        observed = jdatetime.date(year, month, day).togregorian()
+    except (TypeError, ValueError):
+        return None
+    requested = as_of.date() if hasattr(as_of, "date") else as_of
+    if (requested - observed).days > 5:
+        return None
+    return Decimal(str(row.close_price))
+
+
 def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     """Compute valuation of portfolio assets as of a specific date and basis."""
     from django.utils import timezone
@@ -1672,41 +1715,8 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     usd_rate = Decimal("1")
     conversion_source = None
     if basis in ("usd_denominated", "usdt_denominated"):
-        from marketdata.calendars import sessions_between
-        from marketdata.provenance import BRS_SERIES_ENDPOINTS, rejected_pairs
-
-        rejected = rejected_pairs(["USDT_IRT", "USD"], BRS_SERIES_ENDPOINTS)
-
-        def usable_rate(symbol):
-            row = (
-                GoldCurrencyHistory.objects.filter(
-                    symbol=symbol, date__lte=jalali_str, close_price__gt=0
-                )
-                .exclude(date__in=[day for sym, day in rejected if sym == symbol])
-                .order_by("-date")
-                .first()
-            )
-            if row is None:
-                return None
-            stale = sessions_between(row.date, jalali_str, market="gold_currency")
-            return Decimal(str(row.close_price)) if stale <= MAX_FORWARD_FILL_SESSIONS else None
-
-        rate_found = False
-        if basis == "usdt_denominated":
-            usdt_rate = usable_rate("USDT_IRT")
-            if usdt_rate is not None:
-                usd_rate = usdt_rate
-                conversion_source = "USDT"
-                rate_found = True
-
-        if not rate_found:
-            historical_usd_rate = usable_rate("USD")
-            if historical_usd_rate is not None:
-                usd_rate = historical_usd_rate
-                conversion_source = "USD"
-                rate_found = True
-
-        if not rate_found:
+        rate = conversion_rate_as_of(basis, as_of_dt)
+        if rate is None:
             return {
                 "total": 0.0,
                 "items": [],
@@ -1715,6 +1725,8 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
                 "quality_status": "unavailable",
                 "excluded": [{"reason": "missing_conversion_rate"}],
             }
+        usd_rate = rate
+        conversion_source = "USDT" if basis == "usdt_denominated" else "USD"
     cpi = Decimal(str(cpi_for_date(as_of_dt))) if basis == "real_toman" else None
 
     excluded = []

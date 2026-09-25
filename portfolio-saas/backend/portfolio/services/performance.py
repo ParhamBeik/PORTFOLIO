@@ -1,5 +1,6 @@
 """Ledger-aware, account-scoped investment performance."""
 import datetime as dt
+import hashlib
 from decimal import Decimal
 
 from django.core.cache import cache
@@ -11,62 +12,15 @@ from marketdata.currency import holding_value_to_toman, is_tse_priced
 from ..models import LedgerEntry
 from .deflator import cpi_for_date, normalize_basis
 from .timeline import xirr
-from .valuation import get_latest_prices, value_account, value_as_of
+from .valuation import conversion_rate_as_of, get_latest_prices, value_account, value_as_of
 
 # Below this many tracked days, an annualized return (XIRR) is noise, not signal.
 MIN_TRACKING_DAYS_FOR_ANNUALIZED = 90
 
 
 def _conversion_rate(basis: str, as_of) -> Decimal | None:
-    """Resolve the Toman-per-unit rate for a USD/USDT basis, AS OF a date.
-
-    Mirrors `valuation.value_as_of`'s resolution order so the segment-boundary
-    valuation and the cash flow that crosses it are never priced at two
-    different rates.
-
-    `usd_denominated` used to ignore `as_of` entirely and return
-    `get_latest_prices()["usd_cash"]` -- today's live tick -- while
-    `usdt_denominated` beside it correctly read the warehouse at the date it was
-    handed. Both callers pass a real date: `_flow_amount` passes
-    `entry.timestamp`, which is when the deposit actually happened. So in
-    `account_performance`'s TWR loop, `before_value` came from
-    `value_as_of(as_of=entry.timestamp)` at the historical rate and `flow` came
-    back at today's, and `segment_start = before_value + signed_flow` added two
-    dollar figures measured with two different rulers. Against a currency that
-    has lost most of its value over the tracked period, a deposit made two years
-    ago was divided by a rate several times too large, so the flow was
-    understated by that factor and both TWR and XIRR came out wrong -- silently,
-    with no `quality_status` to show for it.
-
-    The live map stays as the last resort for the USD basis only, which is where
-    it was already the only source: it is what `_current_value` needs before the
-    day's gold/currency row has been ingested.
-    """
-    from marketdata.models import GoldCurrencyHistory
-    from .returns import to_jalali_str
-
-    if basis not in ("usd_denominated", "usdt_denominated"):
-        return None
-
-    jalali = to_jalali_str(as_of)
-    row = None
-    if basis == "usdt_denominated":
-        row = (
-            GoldCurrencyHistory.objects.filter(symbol="USDT_IRT", date__lte=jalali)
-            .order_by("-date").first()
-        )
-    if not row or row.close_price <= 0:
-        row = (
-            GoldCurrencyHistory.objects.filter(symbol="USD", date__lte=jalali)
-            .order_by("-date").first()
-        )
-    if row and row.close_price > 0:
-        return Decimal(str(row.close_price))
-
-    if basis == "usd_denominated":
-        rate = Decimal(str(get_latest_prices().get("usd_cash", 0) or 0))
-        return rate if rate > 0 else None
-    return None
+    """Match every performance cash flow to the valuation's dated FX rule."""
+    return conversion_rate_as_of(basis, as_of)
 
 
 def _current_value(account, basis: str) -> Decimal | None:
@@ -167,6 +121,12 @@ def _position_metrics(account) -> dict:
     from .visibility import hidden_asset_ids
 
     hidden_ids = hidden_asset_ids([account])
+    prices = get_latest_prices()
+    held_keys = account.holdings.values_list("asset__key", flat=True)
+    price_version = hashlib.blake2s(
+        repr(sorted((key, str(prices.get(key))) for key in held_keys)).encode(),
+        digest_size=12,
+    ).hexdigest()
     version = account.transactions.aggregate(
         count=Count("id"), max_id=Max("id"), id_sum=Sum("id"),
         # An EDIT moves none of the three above -- same rows, same ids -- so
@@ -181,12 +141,11 @@ def _position_metrics(account) -> dict:
         # Ticking an asset off changes this result without touching a single
         # ledger row, so the visibility set has to be part of the key or the
         # cached answer outlives the toggle for an hour.
-        f"{'-'.join(str(i) for i in sorted(hidden_ids))}"
+        f"{'-'.join(str(i) for i in sorted(hidden_ids))}:{price_version}"
     )
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
-    prices = get_latest_prices()
     valuation_items = {
         item["key"]: item
         for item in value_account(account).get("items", [])

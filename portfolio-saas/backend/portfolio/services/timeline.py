@@ -86,16 +86,19 @@ def holdings_as_of(user, account, date) -> Dict[str, Decimal]:
         target = datetime.datetime.combine(date, datetime.time.max)
         target = timezone.make_aware(target, timezone.get_current_timezone())
 
-    transactions = LedgerEntry.objects.filter(
-        account=account,
-        timestamp__gt=target
-    ).select_related("asset")
+    # Corrections remove both the original and its reversal from the current
+    # projection. Historical reconstruction must use that same corrected ledger;
+    # unwinding only a later reversal would resurrect a canceled position.
+    from .ledger import active_entries
+
+    transactions = active_entries(account)
 
     for txn in transactions:
-        if txn.asset_id is None or txn.kind not in {
+        if txn.timestamp <= target or txn.asset_id is None or txn.kind not in {
             LedgerEntry.Kind.OPENING_POSITION,
             LedgerEntry.Kind.BUY,
             LedgerEntry.Kind.SELL,
+            LedgerEntry.Kind.RIGHTS_ISSUE,
         }:
             continue
         # Houses are marks, not positions: unwinding them additively would drive
@@ -104,20 +107,19 @@ def holdings_as_of(user, account, date) -> Dict[str, Decimal]:
             continue
         asset_key = txn.asset.key
         qty = _q(txn.quantity)
-        reversed_effect = txn.reversal_of_id is not None
-        
         if asset_key not in current_qty:
             current_qty[asset_key] = Decimal("0")
-            
+
         adds_position = txn.kind in {
             LedgerEntry.Kind.OPENING_POSITION,
             LedgerEntry.Kind.BUY,
+            LedgerEntry.Kind.RIGHTS_ISSUE,
         }
-        if adds_position != reversed_effect:
+        if adds_position:
             current_qty[asset_key] -= qty
         else:
             current_qty[asset_key] += qty
-            
+
     result = {}
     for k, v in current_qty.items():
         if v > Decimal("0"):
@@ -132,7 +134,12 @@ def holdings_as_of(user, account, date) -> Dict[str, Decimal]:
 
 
 def cash_as_of(user, account, at) -> Decimal:
-    """Return the derived account cash balance at an exact timestamp."""
+    """Replay corrected cash history through an exact timestamp.
+
+    Cashless trades never settle, even if a later deposit starts cash tracking.
+    Replaying from the first entry also keeps that transition consistent with
+    the current projection and avoids inventing cash by unwinding old buys.
+    """
     if account.user_id != user.id:
         return Decimal("0")
     if isinstance(at, datetime.datetime):
@@ -142,24 +149,19 @@ def cash_as_of(user, account, at) -> Decimal:
             datetime.datetime.combine(at, datetime.time.max),
             timezone.get_current_timezone(),
         )
-    cash = _q(account.cash_balance_tomans)
-    positive = {
-        LedgerEntry.Kind.OPENING_CASH,
-        LedgerEntry.Kind.DEPOSIT,
-        LedgerEntry.Kind.SELL,
-        LedgerEntry.Kind.DIVIDEND,
-    }
-    negative = {
-        LedgerEntry.Kind.WITHDRAWAL,
-        LedgerEntry.Kind.BUY,
-        LedgerEntry.Kind.FEE,
-    }
-    for entry in LedgerEntry.objects.filter(account=account, timestamp__gt=target):
-        amount = _q(entry.amount_tomans)
-        effect = amount if entry.kind in positive else -amount if entry.kind in negative else Decimal("0")
-        if entry.reversal_of_id is not None:
-            effect = -effect
-        cash -= effect
+    from .ledger import CASH_KINDS, _cash_delta, active_entries
+
+    cash = Decimal("0")
+    settling = False
+    for entry in active_entries(account):
+        if entry.timestamp > target:
+            break
+        if entry.kind in CASH_KINDS:
+            settling = True
+        cash += _cash_delta(
+            entry.kind, _q(entry.amount_tomans), reverse=False,
+            track_cash=settling,
+        )
     return cash
 
 def xirr(cashflows: List[tuple[datetime.date, Decimal]]) -> Optional[float]:
