@@ -51,6 +51,7 @@ INSTALLED_APPS = [
     "corsheaders",
     "accounts",
     "portfolio",
+    "research",
 ]
 
 MIDDLEWARE = [
@@ -190,6 +191,7 @@ REST_FRAMEWORK = {
         "anon": os.getenv("ANON_THROTTLE", "30/min"),
         "user": os.getenv("USER_THROTTLE", "120/min"),
         "analytics": os.getenv("ANALYTICS_THROTTLE", "60/min"),
+        "research": os.getenv("RESEARCH_THROTTLE", "10/hour"),
         # Tight on purpose: this endpoint sends mail. The anon bucket is 30/min
         # and would let a bot empty an SMTP quota. Tests clear the cache.
         "password_reset": os.getenv("PASSWORD_RESET_THROTTLE", "5/hour"),
@@ -214,6 +216,14 @@ REST_FRAMEWORK = {
 # can raise them the same way it raises the throttles.
 ANALYTICS_MAX_CONCURRENT_PER_USER = int(os.getenv("ANALYTICS_MAX_CONCURRENT_PER_USER", "2"))
 ANALYTICS_MAX_CONCURRENT_GLOBAL = int(os.getenv("ANALYTICS_MAX_CONCURRENT_GLOBAL", "5"))
+
+# GapGPT credentials are projected from the News deployment into one read-only
+# file on the portfolio backend. No provider secret is stored in a model or sent
+# to the browser. A run chooses its own smaller cap in the research UI.
+GAPGPT_CONFIG_FILE = os.getenv("GAPGPT_CONFIG_FILE", "/run/secrets/gapgpt.env")
+RESEARCH_MAX_RUN_USD = Decimal(os.getenv("RESEARCH_MAX_RUN_USD", "0.10"))
+RESEARCH_DAILY_BUDGET_USD = Decimal(os.getenv("RESEARCH_DAILY_BUDGET_USD", "1.00"))
+RESEARCH_MAX_OUTPUT_TOKENS = int(os.getenv("RESEARCH_MAX_OUTPUT_TOKENS", "160"))
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),

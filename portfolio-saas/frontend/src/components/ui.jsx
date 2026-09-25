@@ -194,6 +194,16 @@ export function Input({ label, className = "", ...props }) {
   );
 }
 
+export function Textarea({ label, className = "", ...props }) {
+  return (
+    <textarea
+      aria-label={label}
+      className={`rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-sm text-text placeholder:text-muted ${className}`}
+      {...props}
+    />
+  );
+}
+
 /**
  * A day, chosen on the calendar the reader actually uses.
  *

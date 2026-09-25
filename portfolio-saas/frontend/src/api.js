@@ -479,6 +479,11 @@ export const exploreStocks = (query = "") =>
   api(`/api/explore/stocks/?q=${encodeURIComponent(query)}`);
 export const stockDossier = (symbol, days = 365) =>
   api(`/api/explore/stocks/${encodeURIComponent(symbol)}/?days=${days}`);
+export const researchSettings = () => api("/api/research/settings/");
+export const runResearch = (symbol, question, maxCostUsd) =>
+  api("/api/research/runs/", {
+    method: "POST", body: { symbol, question, max_cost_usd: maxCostUsd },
+  });
 
 // Portfolio against what you could have held instead, indexed to 100.
 /**

@@ -38,6 +38,9 @@ x-backend-env: &backend-env
   CODAL_S3_REGION: ${CODAL_S3_REGION:-us-east-1}
   CODAL_HTTP_PROXY: ${CODAL_HTTP_PROXY:-}
   CODAL_ENABLED: ${CODAL_ENABLED:-1}
+  GAPGPT_CONFIG_FILE: /run/secrets/gapgpt.env
+  RESEARCH_MAX_RUN_USD: ${RESEARCH_MAX_RUN_USD:-0.10}
+  RESEARCH_DAILY_BUDGET_USD: ${RESEARCH_DAILY_BUDGET_USD:-1.00}
   MARKETDATA_LIVE_INTERVAL_OPEN: ${MARKETDATA_LIVE_INTERVAL_OPEN:-20}
   SNAPSHOT_PRUNE_ENABLED: "1"
   PRICE_PRUNE_ENABLED: "1"
@@ -216,6 +219,8 @@ services:
       migrate:
         condition: service_completed_successfully
     environment: *backend-env
+    volumes:
+      - ${GAPGPT_CONFIG_HOST_FILE:-./deploy/gapgpt-disabled.env}:/run/secrets/gapgpt.env:ro
     expose: ["8000"]
     ulimits: *no-core
     healthcheck:

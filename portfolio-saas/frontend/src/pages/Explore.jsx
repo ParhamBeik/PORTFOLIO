@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { exploreStocks, stockDossier } from "../api.js";
+import { exploreStocks, researchSettings, runResearch, stockDossier } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
-import { Async, Badge, Button, Card, Empty, Input, PageHeader, Tabs } from "../components/ui.jsx";
+import { Async, Badge, Button, Card, Empty, Field, Input, PageHeader, Tabs, Textarea } from "../components/ui.jsx";
 import { date, num, rial } from "../format.js";
 import { useApi } from "../useApi.js";
 
@@ -18,6 +18,92 @@ const COVERAGE_LABELS = {
   stock_candle_unadjusted: "Unadjusted candles",
   codal_announcements: "Codal disclosures",
 };
+
+const RESEARCH_GAPS = {
+  no_verified_monthly_sales: "No monthly sales for this company have passed source reconciliation in the last year.",
+  question_needs_uncertified_data: "This question needs profit, USD, industry, or other evidence that has not passed validation.",
+  unsupported_by_verified_tools: "The verified monthly-sales tools cannot answer that question yet.",
+};
+
+function ResearchPanel({ symbol }) {
+  const settings = useApi(() => researchSettings(), []);
+  const [question, setQuestion] = useState("");
+  const [budget, setBudget] = useState("0.01");
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    if (settings.data) setBudget(settings.data.default_run_usd);
+  }, [settings.data]);
+
+  async function submit(event) {
+    event.preventDefault();
+    setWorking(true);
+    setError("");
+    setResult(null);
+    try {
+      setResult(await runResearch(symbol, question.trim(), budget));
+    } catch (caught) {
+      setError(caught.message || "Research could not complete.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return (
+    <Card
+      title="Ask about this company's sales"
+      subtitle="One bounded GapGPT call selects from source-backed calculations. Profit, USD, and peer questions abstain until their data is verified."
+      testId="explore-research"
+    >
+      <Async {...settings} testId="explore-research-settings">
+        {(config) => (
+          <div className="space-y-3">
+            <p className="text-xs text-muted">
+              {config.provider_status === "ready"
+                ? `Model: ${config.provider_model}. Your question goes to GapGPT; portfolio holdings do not. Choose a per-run cost ceiling; the server also enforces a daily research ceiling.`
+                : "GapGPT is not yet connected to the News project's server-side settings. Verified charts above remain available."}
+            </p>
+            <form className="space-y-3" onSubmit={submit}>
+              <Field label="Your question" hint="For example: Which verified month had the highest sales?">
+                <Textarea value={question} onChange={(event) => setQuestion(event.target.value)} rows={3} minLength={3} maxLength={600} required className="w-full" label="Sales research question" data-testid="explore-research-question" />
+              </Field>
+              <div className="flex flex-wrap items-end gap-3">
+                <Field label="Maximum model cost (USD)" hint={`Server limit $${config.max_run_usd} per run`}>
+                  <Input type="number" min="0.000001" max={config.max_run_usd} step="0.000001" value={budget} onChange={(event) => setBudget(event.target.value)} required label="Maximum model cost in USD" data-testid="explore-research-budget" />
+                </Field>
+                <Button type="submit" variant="primary" disabled={working || config.provider_status !== "ready"} data-testid="explore-research-submit">
+                  {working ? "Checking evidence…" : "Run research"}
+                </Button>
+              </div>
+            </form>
+            {error && <p role="alert" className="text-sm text-[var(--c-critical-text)]">{error}</p>}
+            {result && (
+              <div className="space-y-3 border-t border-border pt-3" data-testid="explore-research-result">
+                {result.claims?.length ? result.claims.map((claim) => (
+                  <div key={claim.id} className="text-sm">
+                    <p>{claim.statement}</p>
+                    <ul className="mt-1 space-y-1 text-xs text-muted">
+                      {claim.sources.map((source) => (
+                        <li key={`${claim.id}-${source.extraction_id}`}>
+                          {source.period_end_jalali} · source row {source.source_coordinates.row ?? "?"}, column {source.source_coordinates.column ?? "?"} · artifact {source.artifact_id}
+                          {source.source_url && <> · <a href={source.source_url} target="_blank" rel="noopener noreferrer" className="text-accent underline">Codal filing</a></>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )) : <p className="text-sm">{RESEARCH_GAPS[result.reason] || "The verified evidence cannot answer this question."}</p>}
+                {result.coverage && <p className="text-xs text-muted">Coverage: {result.coverage.verified_periods} verified, {result.coverage.withheld_periods} withheld latest filings.</p>}
+                <p className="text-xs text-muted">Model cost: ${num(Number(result.cost_usd), 6)} ({result.cost_basis}). Numeric claims come from stored calculations; the model selected which ones address your question.</p>
+              </div>
+            )}
+          </div>
+        )}
+      </Async>
+    </Card>
+  );
+}
 
 function Company({ symbol }) {
   const [days, setDays] = useState("365");
@@ -102,6 +188,7 @@ function Company({ symbol }) {
                 </details>
               )}
             </Card>
+            <ResearchPanel symbol={symbol} />
 
             <div className="grid gap-5 lg:grid-cols-2">
               <Card title="Warehouse coverage" subtitle="Ingestion progress, not a guarantee that every value is correct." testId="explore-coverage">
