@@ -29,7 +29,9 @@ from django.db.models import Q
 from django.utils import timezone
 
 from .codal_classification import classify_announcement
-from .codal_parsers import category_reconciles, extract_typed_facts, parse_artifact
+from .codal_parsers import (
+    category_reconciles, extract_typed_facts, parse_artifact, reconcile_monthly_sales,
+)
 from .codal_storage import (
     CodalArtifactRejected,
     CodalBlockedNetwork,
@@ -115,6 +117,7 @@ def _persist_parsed(report, artifact, parsed):
         if not created:
             return extraction
         _max_dec = Decimal("1e26")
+        reconciled_total = reconcile_monthly_sales(parsed.facts) if report.category == 3 else None
         candidates = []
         for fact in parsed.facts:
             num_val = fact.get("numeric_value")
@@ -135,6 +138,10 @@ def _persist_parsed(report, artifact, parsed):
                 period_end=fact.get("period_end", ""),
                 dimensions=fact.get("dimensions", {}),
                 source_coordinates=fact["source_coordinates"],
+                verification_status=(
+                    CodalVerification.RECONCILED if fact is reconciled_total
+                    else CodalVerification.EXTRACTED
+                ),
             ))
         CodalCandidateFact.objects.bulk_create(candidates, batch_size=1000)
         return extraction

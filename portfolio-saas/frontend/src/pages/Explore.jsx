@@ -28,17 +28,19 @@ function Company({ symbol }) {
       {(data) => {
         const price = data.price;
         const rows = price.points.map((point) => ({ x: point.date, close: Number(point.close_rial) }));
+        const sales = data.monthly_sales;
+        const salesRows = sales.points.map((point) => ({ x: point.date, sales: Number(point.value) }));
         return (
           <div className="space-y-5" data-testid="explore-company">
             <Card
               title={`${data.company.name || symbol} · ${symbol}`}
               subtitle={[data.company.sector, data.company.subsector, data.company.isin].filter(Boolean).join(" · ")}
               testId="explore-identity"
-              actions={<Badge variant="warn">Financial metrics unverified</Badge>}
+              actions={<Badge variant={sales.points.length ? "good" : "warn"}>{sales.points.length ? "Monthly sales checked" : "Financial metrics unverified"}</Badge>}
             >
               <p className="text-sm text-muted">
-                Company classification comes from the TSE instrument catalog. The stored Codal figures have not
-                passed unit, period, and source reconciliation, so they cannot yet support a profit or margin comparison.
+                Company classification comes from the TSE instrument catalog. Monthly sales appear only where the
+                current Codal filing reconciles to its source rows. Profit and margin figures remain unverified.
               </p>
             </Card>
 
@@ -69,6 +71,38 @@ function Company({ symbol }) {
               </div>
             </Card>
 
+            <Card
+              title="Monthly sales"
+              subtitle="Current-month reported sales in million Rial. A later unverified correction withholds the older value."
+              testId="explore-monthly-sales"
+              actions={<Badge variant={sales.withheld_periods ? "warn" : sales.points.length ? "good" : "warn"}>{sales.verified_periods} checked · {sales.withheld_periods} withheld</Badge>}
+            >
+              {salesRows.length ? (
+                <MultiLineTrend
+                  series={[{ key: "sales", name: `${symbol} (million Rial)` }]}
+                  data={salesRows}
+                  formatValue={(value) => `${num(value, 0)} million Rial`}
+                  formatAxis={(value) => num(value, 0)}
+                  label={`${symbol} source-reconciled monthly sales in million Rial`}
+                />
+              ) : <Empty testId="explore-no-monthly-sales">No monthly sales total has passed source reconciliation in this window.</Empty>}
+              <p className="mt-3 text-xs text-muted">Verified means source-row arithmetic, period, denomination, and archived artifact checksum were checked. It is not an audit of the company’s accounts.</p>
+              {sales.points.length > 0 && (
+                <details className="mt-3 text-sm" data-testid="explore-sales-evidence">
+                  <summary className="cursor-pointer">Inspect source cells</summary>
+                  <ul className="mt-2 max-h-56 space-y-2 overflow-y-auto">
+                    {sales.points.slice().reverse().map((point) => (
+                      <li key={`${point.period_end_jalali}-${point.extraction_id}`} className="border-b border-border pb-2">
+                        <span>{point.period_end_jalali}: {num(Number(point.value), 0)} million Rial</span>
+                        <span className="block text-xs text-muted">Filed {point.published_jalali || "date unavailable"}{point.is_correction ? " · correction" : ""} · report {point.report_id} · {point.source_coordinates.css || point.source_coordinates.sheet || "table"}, row {point.source_coordinates.row ?? "?"}, column {point.source_coordinates.column ?? "?"}</span>
+                        {point.source_url && <a className="text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">Original Codal filing</a>}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </Card>
+
             <div className="grid gap-5 lg:grid-cols-2">
               <Card title="Warehouse coverage" subtitle="Ingestion progress, not a guarantee that every value is correct." testId="explore-coverage">
                 <ul className="space-y-3">
@@ -86,7 +120,7 @@ function Company({ symbol }) {
                   ))}
                 </ul>
               </Card>
-              <Card title="Original disclosures" subtitle="Source announcements only; no extracted figure is treated as verified." testId="explore-disclosures">
+              <Card title="Original disclosures" subtitle="Source announcements; only the sales totals above have passed source reconciliation." testId="explore-disclosures">
                 {data.disclosures.length ? (
                   <ul className="space-y-3 text-sm">
                     {data.disclosures.map((item, index) => (
@@ -96,7 +130,7 @@ function Company({ symbol }) {
                             {item.title}
                           </a>
                         ) : <span>{item.title}</span>}
-                        <span className="mt-1 block text-xs text-muted">{item.published_jalali || "Date unavailable"} · {item.category || "Unclassified"} · Metrics unverified</span>
+                        <span className="mt-1 block text-xs text-muted">{item.published_jalali || "Date unavailable"} · {item.category || "Unclassified"} · Raw filing</span>
                       </li>
                     ))}
                   </ul>

@@ -4,6 +4,8 @@ Merged from 4 files; each section keeps its original banner.
 """
 
 from decimal import Decimal
+from io import StringIO
+from pathlib import Path
 
 from django.core.management import call_command
 from django.test import override_settings
@@ -24,6 +26,7 @@ from marketdata.codal_parsers import ParsedDocument
 from marketdata.codal_storage import CodalArtifactRejected, CodalBlockedNetwork
 from marketdata.models import CodalAnnouncement
 from marketdata.models import CodalArtifact, CodalReport, CodalVerification
+from marketdata.models import CodalCandidateFact, CodalExtraction
 
 pytestmark = pytest.mark.django_db
 
@@ -93,6 +96,47 @@ def test_extract_typed_facts_from_a_table():
     codes = {fact["fact_code"] for fact in result.facts}
     assert codes == {"sales.quantity", "sales.rate"}
     assert codal_parsers.category_reconciles(result, category=3) is True
+
+
+def test_realistic_monthly_sales_html_keeps_period_unit_and_source_cell():
+    fixture = Path(__file__).parent / "fixtures/codal/monthly_sales_merged_headers.html"
+    parsed = codal_parsers.parse_excel(fixture.read_bytes())
+    result = codal_parsers.extract_typed_facts(parsed, category=3, period_end="1405-03-31")
+
+    total = [fact for fact in result.facts if fact["fact_code"] == "sales.revenue" and fact["dimensions"]["row_kind"] == "total"]
+    assert len(total) == 1
+    assert total[0]["numeric_value"] == Decimal("545287525")
+    assert total[0]["unit"] == "million_rial"
+    assert total[0]["currency"] == "IRR"
+    assert total[0]["period_start"] == "1405-03-01"
+    assert total[0]["period_end"] == "1405-03-31"
+    assert total[0]["source_coordinates"]["row"] == 15
+    assert total[0]["source_coordinates"]["column"] == 6
+    assert all(fact["numeric_value"] != Decimal("50879260") for fact in result.facts)
+    product = next(fact for fact in result.facts if fact["dimensions"]["product"] == "محصولات سرد" and fact["fact_code"] == "sales.revenue")
+    assert product["numeric_value"] == Decimal("100340717")
+    assert product["dimensions"]["channel"] == "فروش داخلی"
+    assert codal_parsers.reconcile_monthly_sales(result.facts) is total[0]
+
+    wrong = [dict(fact) for fact in result.facts]
+    wrong_total = next(fact for fact in wrong if fact["dimensions"]["row_kind"] == "total" and fact["fact_code"] == "sales.revenue")
+    wrong_total["numeric_value"] += 1
+    assert codal_parsers.reconcile_monthly_sales(wrong) is None
+
+
+def test_unrecognized_multi_period_table_does_not_publish_keyword_facts():
+    content = b"<html><table><tr><th colspan='2'>Unknown period</th></tr><tr><th>Product</th><th>Revenue</th></tr><tr><td>X</td><td>123</td></tr></table></html>"
+    parsed = codal_parsers.parse_html(content)
+    result = codal_parsers.extract_typed_facts(parsed, category=3, period_end="1405-03-31")
+    assert result.facts == []
+
+
+def test_monthly_parser_withholds_non_month_end_inferred_start():
+    fixture = Path(__file__).parent / "fixtures/codal/monthly_sales_merged_headers.html"
+    content = fixture.read_bytes().replace("۱۴۰۵/۰۳/۳۱".encode(), "۱۴۰۵/۰۳/۳۰".encode())
+    parsed = codal_parsers.parse_excel(content)
+    result = codal_parsers.extract_typed_facts(parsed, category=3, period_end="1405-03-30")
+    assert result.facts == []
 
 
 def test_category_reconciles_is_false_without_facts():
@@ -168,6 +212,96 @@ def test_happy_path_downloads_stores_parses_and_marks_parsed(monkeypatch):
     artifact = CodalArtifact.objects.get(report=report)
     assert artifact.fetch_status == CodalArtifact.FetchStatus.STORED
     assert artifact.s3_key == "codal/sha256/ab/deadbeef.xlsx"
+
+
+def test_monthly_total_is_only_reconciled_fact_after_source_arithmetic(monkeypatch):
+    fixture = Path(__file__).parent / "fixtures/codal/monthly_sales_merged_headers.html"
+    content = fixture.read_bytes()
+    announcement = _announcement(
+        title="گزارش فعالیت ماهانه دوره ۱ ماهه منتهی به ۱۴۰۵/۰۳/۳۱"
+    )
+    monkeypatch.setattr(
+        codal_pipeline, "download_artifact",
+        lambda url, kind: (url, "application/vnd.ms-excel", content),
+    )
+    monkeypatch.setattr(
+        codal_pipeline, "store_artifact",
+        lambda body, content_type, kind: ("codal/fixture/monthly.html", "a" * 64),
+    )
+
+    report, _ = codal_pipeline.extract_report(announcement.pk)
+
+    assert report.status == CodalReport.Status.PARSED
+    assert report.verification_status == CodalVerification.EXTRACTED
+    candidates = report.extractions.get().candidates.all()
+    reconciled = [c for c in candidates if c.verification_status == CodalVerification.RECONCILED]
+    assert len(reconciled) == 1
+    assert reconciled[0].fact_code == "sales.revenue"
+    assert reconciled[0].numeric_value == Decimal("545287525")
+    assert reconciled[0].unit == "million_rial"
+    assert reconciled[0].source_coordinates["column"] == 6
+
+
+def test_monthly_total_with_bad_arithmetic_remains_unverified(monkeypatch):
+    fixture = Path(__file__).parent / "fixtures/codal/monthly_sales_merged_headers.html"
+    content = fixture.read_bytes().replace("۵۴۵,۲۸۷,۵۲۵".encode(), "۵۴۵,۲۸۷,۵۲۶".encode())
+    announcement = _announcement(
+        title="گزارش فعالیت ماهانه دوره ۱ ماهه منتهی به ۱۴۰۵/۰۳/۳۱"
+    )
+    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (url, "application/vnd.ms-excel", content))
+    monkeypatch.setattr(codal_pipeline, "store_artifact", lambda body, content_type, kind: ("codal/fixture/bad.html", "b" * 64))
+
+    report, _ = codal_pipeline.extract_report(announcement.pk)
+
+    assert report.extractions.get().candidates.filter(verification_status=CodalVerification.RECONCILED).count() == 0
+
+
+def test_reparse_monthly_sales_uses_archive_and_preserves_prior_run(monkeypatch):
+    from marketdata.management.commands import reparse_monthly_sales
+
+    fixture = Path(__file__).parent / "fixtures/codal/monthly_sales_merged_headers.html"
+    announcement = _announcement(title="گزارش فعالیت ماهانه دوره ۱ ماهه منتهی به ۱۴۰۵/۰۳/۳۱")
+    report = CodalReport.objects.create(
+        announcement=announcement,
+        category=CodalAnnouncement.Category.PRODUCTION_SALES,
+        parser_version="3",
+    )
+    artifact = CodalArtifact.objects.create(
+        report=report, kind=CodalArtifact.Kind.EXCEL,
+        source_url=announcement.link_excel,
+        s3_key="codal/fixture/monthly.html", checksum_sha256="a" * 64,
+        fetch_status=CodalArtifact.FetchStatus.STORED,
+    )
+    old = CodalExtraction.objects.create(
+        report=report, artifact=artifact, checksum_sha256=artifact.checksum_sha256,
+        parser_version="3", fact_count=1,
+    )
+    CodalCandidateFact.objects.create(
+        extraction=old, fact_code="sales.revenue", raw_value="unknown",
+        verification_status=CodalVerification.EXTRACTED,
+    )
+    monkeypatch.setattr(reparse_monthly_sales, "load_artifact", lambda _: fixture.read_bytes())
+    output = StringIO()
+    call_command("reparse_monthly_sales", symbol=announcement.symbol, dry_run=True, stdout=output)
+    assert "reconciled_totals=1" in output.getvalue()
+    assert report.extractions.count() == 1
+
+    output = StringIO()
+    call_command("reparse_monthly_sales", symbol=announcement.symbol, stdout=output)
+    assert "reconciled_totals=1" in output.getvalue()
+    assert report.extractions.count() == 2
+    assert old.candidates.get().verification_status == CodalVerification.EXTRACTED
+    certified = report.extractions.get(parser_version="4").candidates.get(
+        verification_status=CodalVerification.RECONCILED,
+    )
+    assert certified.numeric_value == Decimal("545287525")
+    assert certified.period_end == "1405-03-31"
+    assert certified.source_coordinates["column"] == 6
+
+    output = StringIO()
+    call_command("reparse_monthly_sales", symbol=announcement.symbol, stdout=output)
+    assert "skipped=1" in output.getvalue()
+    assert report.extractions.count() == 2
 
 
 def test_network_failure_is_retryable_status(monkeypatch):

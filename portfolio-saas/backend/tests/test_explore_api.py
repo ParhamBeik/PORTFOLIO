@@ -4,12 +4,18 @@ from datetime import timedelta
 from decimal import Decimal
 
 import pytest
+from django.conf import settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
 from marketdata import jalali
 from marketdata.models import (
     CodalAnnouncement,
+    CodalArtifact,
+    CodalCandidateFact,
+    CodalExtraction,
+    CodalReport,
+    CodalVerification,
     DailyStockHistory,
     MarketCandle,
     MarketInstrument,
@@ -90,3 +96,61 @@ def test_explore_rejects_unbounded_windows_and_unsafe_disclosure_links(make_user
     assert client.get("/api/explore/stocks/?q=" + "a" * 101).status_code == 400
     response = client.get("/api/explore/stocks/کاما/")
     assert response.data["disclosures"][0]["source_url"] is None
+
+
+def test_monthly_sales_requires_reconciled_latest_filing(make_user):
+    _stock()
+    period_end = jalali.from_gregorian(
+        timezone.localtime(timezone.now(), jalali.TEHRAN).date() - timedelta(days=60)
+    )
+    announcement = CodalAnnouncement.objects.create(
+        symbol="کاما", title="Monthly sales", code="original",
+        date_publish=period_end,
+        link="https://www.codal.ir/Reports/Decision.aspx?LetterSerial=123",
+    )
+    report = CodalReport.objects.create(
+        announcement=announcement,
+        category=CodalAnnouncement.Category.PRODUCTION_SALES,
+        period_end=period_end,
+    )
+    artifact = CodalArtifact.objects.create(
+        report=report, kind=CodalArtifact.Kind.EXCEL,
+        source_url="https://excel.codal.ir/report.xlsx",
+        checksum_sha256="a" * 64, fetch_status=CodalArtifact.FetchStatus.STORED,
+    )
+    extraction = CodalExtraction.objects.create(
+        report=report, artifact=artifact,
+        checksum_sha256=artifact.checksum_sha256,
+        parser_version=settings.CODAL_PARSER_VERSION,
+    )
+    CodalCandidateFact.objects.create(
+        extraction=extraction, fact_code="sales.revenue",
+        numeric_value=Decimal("123456"), raw_value="123,456",
+        unit="million_rial", currency="IRR",
+        period_start=f"{period_end[:8]}01", period_end=period_end,
+        dimensions={"row_kind": "total"},
+        source_coordinates={"table": 1, "row": 15, "column": 6},
+        verification_status=CodalVerification.RECONCILED,
+    )
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+    monthly = client.get("/api/explore/stocks/کاما/").data["monthly_sales"]
+    assert monthly["status"] == "verified"
+    assert monthly["points"][0]["value"] == "123456.000000000000"
+    assert monthly["points"][0]["source_coordinates"] == {"table": 1, "row": 15, "column": 6}
+
+    corrected = CodalAnnouncement.objects.create(
+        symbol="کاما", title="Corrected monthly sales", code="correction",
+        date_publish=jalali.from_gregorian(
+            timezone.localtime(timezone.now(), jalali.TEHRAN).date() - timedelta(days=30)
+        ),
+    )
+    CodalReport.objects.create(
+        announcement=corrected,
+        category=CodalAnnouncement.Category.PRODUCTION_SALES,
+        period_end=period_end, is_correction=True,
+    )
+    monthly = client.get("/api/explore/stocks/کاما/").data["monthly_sales"]
+    assert monthly["status"] == "unavailable_unverified"
+    assert monthly["verified_periods"] == 0
+    assert monthly["withheld_periods"] == 1

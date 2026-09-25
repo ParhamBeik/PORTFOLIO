@@ -6,8 +6,10 @@ disagreement instead of quietly choosing a winner.
 """
 
 from datetime import timedelta
+from collections import defaultdict
 from urllib.parse import urlparse
 
+from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
@@ -18,6 +20,9 @@ from . import jalali
 from .models import (
     ArchiveFetchState,
     CodalAnnouncement,
+    CodalCandidateFact,
+    CodalReport,
+    CodalVerification,
     DailyStockHistory,
     MarketCandle,
     MarketInstrument,
@@ -37,6 +42,75 @@ def _instrument(symbol):
 def _safe_codal_link(url):
     parsed = urlparse(url or "")
     return url if parsed.scheme == "https" and parsed.hostname in {"codal.ir", "www.codal.ir"} else None
+
+
+def _monthly_sales(symbol, start, end):
+    """Latest filing for each month wins; an unverified correction hides prior totals."""
+    reports = CodalReport.objects.filter(
+        announcement__symbol=symbol,
+        category=CodalAnnouncement.Category.PRODUCTION_SALES,
+        period_end__gte=start, period_end__lte=end,
+    ).select_related("announcement").order_by(
+        "-announcement__date_publish", "-announcement__time_publish", "-pk"
+    )
+    latest = {}
+    for report in reports:
+        latest.setdefault(report.period_end, report)
+    candidates = defaultdict(list)
+    for fact in CodalCandidateFact.objects.filter(
+        extraction__report_id__in=[report.pk for report in latest.values()],
+        extraction__parser_version=settings.CODAL_PARSER_VERSION,
+        verification_status=CodalVerification.RECONCILED,
+        fact_code="sales.revenue",
+        unit="million_rial", currency="IRR",
+    ).select_related("extraction__artifact"):
+        candidates[fact.extraction.report_id].append(fact)
+
+    points = []
+    for period_end, report in sorted(latest.items()):
+        eligible = [fact for fact in candidates[report.pk] if (
+            fact.numeric_value is not None
+            and fact.numeric_value >= 0
+            and fact.period_end == period_end
+            and fact.period_start == f"{period_end[:8]}01"
+            and fact.dimensions.get("row_kind") == "total"
+            and fact.extraction.checksum_sha256 == fact.extraction.artifact.checksum_sha256
+        )]
+        # Distinct reconciled readings of the same filing need a human review.
+        if not eligible or len({fact.numeric_value for fact in eligible}) != 1:
+            continue
+        fact = max(eligible, key=lambda item: (item.extraction.parsed_at, item.pk))
+        day = jalali.to_gregorian(period_end)
+        if day is None:
+            continue
+        points.append({
+            "date": day.isoformat(),
+            "period_start_jalali": fact.period_start,
+            "period_end_jalali": period_end,
+            "value": str(fact.numeric_value),
+            "source_url": _safe_codal_link(report.announcement.link),
+            "published_jalali": report.announcement.date_publish,
+            "is_correction": report.is_correction,
+            "report_id": report.pk,
+            "extraction_id": fact.extraction_id,
+            "artifact_id": fact.extraction.artifact_id,
+            "artifact_sha256": fact.extraction.checksum_sha256,
+            "source_coordinates": fact.source_coordinates,
+            "verification": CodalVerification.RECONCILED,
+        })
+    return {
+        "status": (
+            "verified" if points and len(points) == len(latest)
+            else "partially_verified" if points else "unavailable_unverified"
+        ),
+        "measure": "monthly_sales_revenue",
+        "unit": "million_rial",
+        "currency": "IRR",
+        "latest_filing_periods": len(latest),
+        "verified_periods": len(points),
+        "withheld_periods": len(latest) - len(points),
+        "points": points,
+    }
 
 
 class StockSearchView(APIView):
@@ -167,4 +241,5 @@ class StockDossierView(APIView):
                 "status": "unavailable_unverified",
                 "reason": "Stored Codal extraction has not passed unit, period, and source reconciliation.",
             },
+            "monthly_sales": _monthly_sales(symbol, start, end_jalali),
         })
