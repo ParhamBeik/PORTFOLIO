@@ -17,6 +17,29 @@ if [[ -z "${latest}" ]] || (( $(date +%s) - $(stat -f %m "${latest}" 2>/dev/null
   failures+=("backup older than ${backup_age_hours}h")
 fi
 
+# A fresh dump on the database host is not a recoverable backup after host
+# loss. The backup job records true only after reading the remote bytes back
+# and checking their hashes; surface that result in the hourly host check.
+if [[ -n "${latest}" ]]; then
+  stamp="$(basename "${latest}" | sed -n 's/^daily-\(.*\)\.dump\.enc$/\1/p')"
+  evidence="${backup_dir}/backup-evidence-${stamp}.json"
+  if [[ ! -r "${evidence}" ]] || ! python3 - "${evidence}" "$(basename "${latest}")" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        record = json.load(source)
+    valid = record.get("database_artifact") == sys.argv[2] and record.get("off_host_verified") is True
+except (OSError, ValueError):
+    valid = False
+sys.exit(0 if valid else 1)
+PY
+  then
+    failures+=("latest database backup has no verified off-host copy")
+  fi
+fi
+
 # Every long-running service in docker-compose.prod.yml, i.e. the ones carrying
 # `restart: unless-stopped`. `migrate` is deliberately absent: it is `restart:
 # "no"` and is SUPPOSED to have exited by the time this runs.
