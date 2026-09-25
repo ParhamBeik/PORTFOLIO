@@ -8,6 +8,8 @@ Preserve the Activity ledger and the Portfolio, Net Worth, Allocation, Holdings,
 
 The attached `financial_agent_warehouse_plan.md` is a proposal to test, not a schema specification to implement literally. In particular, a single USD rate applied to every statement line would mix stock and flow measures. IAS 21 distinguishes transaction-date rates for income and expenses from closing rates for balance-sheet items; a period average is only a practical approximation when rates do not fluctuate significantly. An economic free-market-USD comparison also needs its own explicit convention and may differ from an accounting presentation. Store the original Rial fact, rate series, source, and conversion method before publishing a USD-derived number. [IFRS IAS 21](https://www.ifrs.org/content/dam/ifrs/publications/pdf-standards/english/2024/issued/part-a/ias-21-the-effects-of-changes-in-foreign-exchange-rates.pdf?bypass=on)
 
+The plan's example “net margin in USD” is not a distinct financial ratio when profit and revenue are translated consistently: the common currency factor cancels. The real questions are which profit and revenue periods and consolidation scopes are comparable, and whether separate translation dates would change the economic comparison. A cross-industry ranking cannot treat a bank's interest income, an industrial company's sales, and a holding company's investment gains as one interchangeable revenue field. Asset-class-specific facts and formulas remain separate; comparisons state their eligibility rules rather than filling absent fields with zero.
+
 ## Live data and integrity findings
 
 | Area | Observed production state | Consequence |
