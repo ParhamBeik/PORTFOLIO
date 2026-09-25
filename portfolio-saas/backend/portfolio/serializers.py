@@ -48,6 +48,7 @@ class HoldingSerializer(serializers.ModelSerializer):
         decimal_places=6,
         min_value=Decimal("0"),
         required=False,
+        normalize_output=True,
     )
     # A zero target is a sell-all only when the holding is ledger-backed. Keep
     # the acknowledgement in the write payload so a client cannot bypass the
@@ -69,7 +70,7 @@ class HoldingSerializer(serializers.ModelSerializer):
         write_only=True,
     )
     # A property is described the way its owner describes it: how big, and what a
-    # square meter is worth. `quantity` stores the second of those in millions of
+    # square meter is worth. `quantity` exposes the second in millions of
     # Toman (see HOUSE_AREA_SQM / valuation._house_value), which is meaningless on
     # screen, so it is never the field the client reads or writes for a house.
     price_per_sqm_million = serializers.DecimalField(
@@ -137,7 +138,7 @@ class HoldingSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         request = self.context.get("request")
         creating = request is not None and request.method == "POST"
-        # A house's price-per-sqm and the generic `quantity` are the same column;
+        # A house's price-per-sqm is accepted via the generic `quantity` API;
         # accept either name and normalise here so no downstream branch has to.
         if "price_per_sqm_million" in attrs:
             attrs["quantity"] = attrs.pop("price_per_sqm_million")
@@ -206,12 +207,17 @@ class LedgerEntryInputSerializer(serializers.Serializer):
 
 
 class LedgerEntrySerializer(serializers.ModelSerializer):
+    quantity = serializers.DecimalField(
+        max_digits=20, decimal_places=6, allow_null=True,
+        read_only=True, normalize_output=True,
+    )
     asset_key = serializers.CharField(source="asset.key", allow_null=True, read_only=True)
     asset_name = serializers.CharField(source="asset.name", allow_null=True, read_only=True)
     asset_name_fa = serializers.CharField(source="asset.name_fa", allow_null=True, read_only=True)
     occurred_at = serializers.DateTimeField(source="timestamp", read_only=True)
     unit_price_tomans = serializers.DecimalField(
-        source="price_tomans", max_digits=20, decimal_places=4, allow_null=True, read_only=True
+        source="price_tomans", max_digits=20, decimal_places=4,
+        allow_null=True, read_only=True, normalize_output=True,
     )
     pnl_tomans = serializers.SerializerMethodField()
     pnl_kind = serializers.SerializerMethodField()

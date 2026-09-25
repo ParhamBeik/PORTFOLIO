@@ -152,7 +152,7 @@ def synthetic_history(asset_catalog, db):
             # for max_sharpe. +2.5%/-2% => ~0.5% every 2 days => ~65%/yr.
             "bitcoin_usd": ("60000.0", lambda d: Decimal("1.025") if d % 2 == 0 else (Decimal("1") / Decimal("1.02"))),
             "usd_cash": ("63000.0", lambda d: Decimal("1.0001") if d % 2 == 0 else Decimal("0.9999")),
-            "kama_stock": ("5000.0", Decimal("1.0005")),
+            "kama_stock": ("500000.0", Decimal("1.0005")),
         },
     )
     return {k: asset_catalog[k] for k in
@@ -168,7 +168,7 @@ def kama_short_history(asset_catalog, db):
             "emami_coin": ("400000000.0", Decimal("1.001")),
             "bitcoin_usd": ("60000.0", lambda d: Decimal("1.025") if d % 2 == 0 else (Decimal("1") / Decimal("1.02"))),
             "usd_cash": ("63000.0", lambda d: Decimal("1.0001") if d % 2 == 0 else Decimal("0.9999")),
-            "kama_stock": ("5000.0", Decimal("1.0005")),
+            "kama_stock": ("500000.0", Decimal("1.0005")),
         },
         kama_days=10,
     )
@@ -263,8 +263,9 @@ def test_daily_returns_known_values(synthetic_history):
     usd_asset = Asset.objects.get(key="usd_cash")
     btc_raw = (
         pd.DataFrame.from_records(
-            Price.objects.filter(asset=btc_asset).values("fetched_at", "price")
+            Price.objects.filter(asset=btc_asset).values("fetched_at", "price_foreign")
         )
+        .rename(columns={"price_foreign": "price"})
         .assign(fetched_at=lambda d: pd.to_datetime(d["fetched_at"], utc=True))
         .set_index("fetched_at")
         .sort_index()
@@ -276,8 +277,9 @@ def test_daily_returns_known_values(synthetic_history):
     )
     usd_raw = (
         pd.DataFrame.from_records(
-            Price.objects.filter(asset=usd_asset).values("fetched_at", "price")
+            Price.objects.filter(asset=usd_asset).values("fetched_at", "price_iranian")
         )
+        .rename(columns={"price_iranian": "price"})
         .assign(fetched_at=lambda d: pd.to_datetime(d["fetched_at"], utc=True))
         .set_index("fetched_at")
         .sort_index()

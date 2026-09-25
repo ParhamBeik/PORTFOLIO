@@ -17,6 +17,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
   # Advisories are published on the vendor's schedule, not ours, so a
   # dependency audit that only runs on push is blind for however long nobody
   # pushes. That is how 46 CVEs across four dependencies accumulated unnoticed
@@ -204,27 +205,16 @@ jobs:
     needs: [backend, frontend, deploy-configured]
     if: >-
       github.ref == 'refs/heads/main'
-      && github.event_name == 'push'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && needs.deploy-configured.outputs.ready == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, vps-deploy]
     # A GitHub Environment gives this job its own secrets and an optional
     # manual approval gate; add reviewers there if a deploy should ever pause.
     environment: production
     steps:
       - name: Deploy origin/main to the VPS
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
         run: |
           set -Eeuo pipefail
-          install -d -m 700 ~/.ssh
-          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
-              "${VPS_USER}@${VPS_HOST}" 'bash -euo pipefail -s' <<'REMOTE'
           repo=/opt/apps/portfolio-repo
           cd "$repo"
           git fetch --prune origin main
@@ -244,7 +234,6 @@ jobs:
           # Missing or unreachable mail is reported as degraded. The superuser
           # recovery link keeps accounts recoverable until a relay is configured.
           ./scripts/deploy.sh
-          REMOTE
 
       # `if: success()`, never `always()`. With `always()` this step ran after a
       # failed deploy and printed "Deployed <sha> to production." directly under

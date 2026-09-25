@@ -13,7 +13,11 @@ from marketdata.provider_meter import (
     parse_panel_metrics,
     read_panel_metrics,
 )
-from marketdata.quota import AIO, MARKET_CGCC, quota_day, reconcile_panel_metrics
+from marketdata.quota import (
+    AIO, LIVE, MARKET_CGCC, OTHER, QuotaExhausted,
+    REASON_PLAN_BLOCKED, REASON_PROVIDER_OBSERVATION,
+    quota_day, reconcile_panel_metrics, reserve_request,
+)
 from marketdata.tasks import reconcile_quota_meters
 
 
@@ -85,8 +89,19 @@ def test_panel_reconciliation_preserves_local_counts_and_observation_time():
     assert (row.provider_used, row.used, row.limit) == (9465, 9465, 10000)
     assert (row.local_attempts, row.successful_requests, row.live_used, row.archive_used) == (3, 2, 1, 2)
     assert (row.provider_observed_at, row.provider_observation_source) == (observed_at, "panel")
-    assert result[AIO]["variance"] == 9462
-    assert ApiRequestQuota.objects.get(day=quota_day(), plan=MARKET_CGCC).provider_used == 627
+    assert row.provider_baseline_used == 9462
+    assert result[AIO]["variance"] == 0
+    market = ApiRequestQuota.objects.get(day=quota_day(), plan=MARKET_CGCC)
+    assert (market.provider_used, market.provider_baseline_used) == (627, 627)
+
+    newer = parse_panel_metrics(PANEL)
+    newer[AIO]["used"] = 9467
+    newer[MARKET_CGCC]["used"] = 628
+    result = reconcile_panel_metrics(newer, day=quota_day(), observed_at=observed_at)
+    row.refresh_from_db()
+    assert row.provider_baseline_used == 9462
+    assert result[AIO]["variance"] == 2
+    assert result[MARKET_CGCC]["variance"] == 1
 
 
 @pytest.mark.django_db
@@ -100,3 +115,37 @@ def test_panel_task_is_opt_in_and_does_not_probe_when_disabled(settings):
     with patch("marketdata.provider_meter.read_panel_metrics", return_value=parse_panel_metrics(PANEL)):
         result = reconcile_quota_meters()
     assert result[AIO]["provider_used"] == 9465
+
+
+@pytest.mark.django_db
+def test_enabled_meter_blocks_new_product_row_until_provider_bootstrap(settings):
+    settings.MARKETDATA_PANEL_METER_ENABLED = True
+    with (
+        patch("marketdata.quota.is_plan_blocked", return_value=False),
+        patch("marketdata.quota.live_reserve_remaining", return_value=0),
+        patch("marketdata.quota._check_and_record_window"),
+    ):
+        with pytest.raises(QuotaExhausted) as error:
+            reserve_request(OTHER, MARKET_CGCC)
+        assert error.value.reason == REASON_PROVIDER_OBSERVATION
+        assert error.value.is_pacing
+        assert not ApiRequestQuota.objects.filter(day=quota_day(), plan=MARKET_CGCC).exists()
+
+        reconcile_panel_metrics(parse_panel_metrics(PANEL), day=quota_day(), observed_at=datetime.now(ZoneInfo("Asia/Tehran")))
+        reserve_request(OTHER, MARKET_CGCC)
+        row = ApiRequestQuota.objects.get(day=quota_day(), plan=MARKET_CGCC)
+        assert (row.used, row.local_attempts, row.provider_used) == (628, 1, 627)
+
+
+@pytest.mark.django_db
+def test_live_cannot_exceed_observed_product_limit(settings):
+    settings.MARKETDATA_PANEL_METER_ENABLED = True
+    metrics = parse_panel_metrics(PANEL)
+    metrics[AIO]["used"] = metrics[AIO]["limit"]
+    reconcile_panel_metrics(metrics, day=quota_day(), observed_at=datetime.now(ZoneInfo("Asia/Tehran")))
+    with patch("marketdata.quota.is_plan_blocked", return_value=False):
+        with pytest.raises(QuotaExhausted) as error:
+            reserve_request(LIVE, AIO)
+    assert error.value.reason == REASON_PLAN_BLOCKED
+    row = ApiRequestQuota.objects.get(day=quota_day(), plan=AIO)
+    assert row.local_attempts == 0

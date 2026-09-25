@@ -111,3 +111,45 @@ No further AIO endpoint probes were sent after observing the provider meter
 above its 10,000 daily limit. The browser session is sufficient for manual
 before/after proof; it is not a credential source available to the unattended
 VPS worker after deployment.
+
+## VPS panel-reader proof, 2026-09-24
+
+The account phone was placed only in the VPS `.env.production` (mode 600), not
+in Git. A VPS-origin HTTPS request to the panel overview returned HTTP 200,
+`successful=true`, with AIO `9,943/10,000` and Market CGCC `364/1,500`.
+The scheduler and three provider workers were then stopped. Two consecutive
+authenticated panel reads returned those same counters without movement; no
+market-data endpoint request was made during this check. All stopped workers
+and the scheduler were restarted, with live and archive workers healthy.
+This proves that these two panel reads were not billed; it does not guarantee
+future provider behavior. The VPS-only enable flag is staged for the next
+deployment. New product rows now refuse requests until a provider observation
+seeds the admission counter, preventing a mid-day rename from creating a fresh
+zero-usage wallet. Local attribution remains distinct from the provider total.
+
+## Production activation, 2026-09-24
+
+The opt-in panel meter was enabled in the VPS-only environment and deployed.
+The first observed product totals were AIO 9,977/10,000 and Market CGCC
+610/1,500. They are exact provider-reported daily request totals, but the new
+product rows began after the Tehran day started. Usage before that observation
+cannot be assigned to local `archive`, `live`, or `other` buckets from these
+rows. The Operations view now identifies it as a separate, immutable
+pre-observation baseline. Signed variance is computed only on the subsequent
+provider delta versus subsequent locally attributed attempts. The full daily
+provider total is never overwritten with a local estimate or forced to match.
+
+The first fully comparable day is the next Tehran-day reset. A genuine
+post-baseline variance must remain visible and be investigated; the mid-day
+baseline is not proof that all application calls reconcile exactly.
+
+At the 2026-09-24 19:13 Tehran panel observation, Market CGCC read 638:
+the 610 baseline plus 28 local requests, with zero variance at that instant.
+One local request then began after the panel snapshot. The interface briefly
+showed 29 local attempts against the last 638-provider reading, a signed
+variance of −1. This is an observation-time race, not evidence that the
+provider forgave a request. Negative values are shown as provisional rather
+than raised as unexplained-billing alerts. Operations now reads the stored
+provider counter and local attribution on every page load even when its
+expensive warehouse overview comes from cache; it never silently serves a
+15-minute-old quota panel.

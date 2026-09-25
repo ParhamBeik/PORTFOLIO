@@ -72,12 +72,12 @@ def _resolve_asset(lookup: str):
 
 
 def _displayed_value(asset):
-    from portfolio.models import Price
+    from portfolio.models import Price, positive_price_q
 
     if asset is None:
         return None
     row = (
-        Price.objects.filter(asset=asset, price__gt=0)
+        Price.objects.filter(positive_price_q(), asset=asset)
         .order_by("-fetched_at", "-id")
         .first()
     )

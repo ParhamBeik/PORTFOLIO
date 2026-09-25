@@ -23,7 +23,6 @@ import {
   Input,
   PageHeader,
   Pager,
-  Select,
   StatTile,
   Table,
   Tabs,
@@ -384,20 +383,6 @@ function AssetInspector() {
             />
           </div>
 
-          <div className="flex items-end gap-2 sm:hidden">
-            <Select label="Sort assets" value={ordering.replace(/^-/, "")} onChange={(event) => setOrdering(event.target.value)}>
-              <option value="name">Name</option>
-              <option value="key">Key</option>
-              <option value="asset_class">Class</option>
-              <option value="live_status">Live status</option>
-              <option value="age_seconds">Age</option>
-              <option value="integrity_status">179d gate</option>
-            </Select>
-            <Button variant="ghost" onClick={() => setOrdering((current) => current.startsWith("-") ? current.slice(1) : `-${current}`)}>
-              {ordering.startsWith("-") ? "Descending" : "Ascending"}
-            </Button>
-          </div>
-
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
             <StatTile label="Matching assets" value={num(catalog.count)} sub={catalogLoading ? "Loading…" : `${num(catalog.results?.length)} on this page`} />
             <StatTile label="Needs attention" value={num(attentionCount)} sub="Stale, missing, failed gate, or archive" valueTone={attentionCount ? "warn" : "good"} />
@@ -408,7 +393,7 @@ function AssetInspector() {
           {catalogError && <p role="alert" className="text-sm text-[var(--c-warn-text)]">{catalogError}</p>}
 
           <div className="overflow-x-auto rounded-lg border border-border" data-testid="ops-asset-catalog">
-            <table className="responsive-table w-full text-sm">
+            <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border bg-panel-2 text-left">
                   {[
@@ -442,34 +427,31 @@ function AssetInspector() {
                         data-testid="ops-asset-row"
                         className={`cursor-pointer border-b border-border/60 last:border-0 hover:bg-panel-2 ${selected ? "bg-accent/10" : ""}`}
                         onClick={() => selectRow(row)}
-                        onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectRow(row); } }}
-                        tabIndex={0}
-                        aria-label={`Inspect ${row.display_name || row.name}`}
                         aria-selected={selected}
                       >
-                        <td data-label="Name" className="px-3 py-2 font-medium">{row.display_name || row.name}</td>
-                        <td data-label="Key" className="px-3 py-2 font-mono text-xs text-muted">{row.key}</td>
-                        <td data-label="Class" className="px-3 py-2">{row.asset_class}</td>
-                        <td data-label="TSE / BRS" className="px-3 py-2 text-xs text-muted">
+                        <td className="px-3 py-2 font-medium">{row.display_name || row.name}</td>
+                        <td className="px-3 py-2 font-mono text-xs text-muted">{row.key}</td>
+                        <td className="px-3 py-2">{row.asset_class}</td>
+                        <td className="px-3 py-2 text-xs text-muted">
                           {row.tse_symbol || "—"}{row.brs_symbol ? ` · ${row.brs_symbol}` : ""}
                         </td>
-                        <td data-label="Live" className="px-3 py-2">
+                        <td className="px-3 py-2">
                           <Badge variant={tone(row.live_status)}>{humanize(row.live_status)}</Badge>
                         </td>
-                        <td data-label="Age" className="px-3 py-2 tabular text-right text-muted">
+                        <td className="px-3 py-2 tabular text-right text-muted">
                           {row.age_seconds != null ? `${num(row.age_seconds)}s` : "—"}
                         </td>
-                        <td data-label="179d gate" className="px-3 py-2">
+                        <td className="px-3 py-2">
                           <Badge variant={tone(row.integrity_status)}>{humanize(row.integrity_status)}</Badge>
                         </td>
-                        <td data-label="Archive" className="px-3 py-2">
+                        <td className="px-3 py-2">
                           {row.archive_status ? (
                             <Badge variant={tone(row.archive_status)}>{humanize(row.archive_status)}</Badge>
                           ) : (
                             <span className="text-muted">—</span>
                           )}
                         </td>
-                        <td data-label="Held" className="px-3 py-2">{row.held ? "Yes" : "—"}</td>
+                        <td className="px-3 py-2">{row.held ? "Yes" : "—"}</td>
                       </tr>
                     );
                   })
@@ -1408,12 +1390,12 @@ export function QuotaWallets({ quota }) {
         const archive = plan.archive_used || 0;
         const live = plan.live_used || 0;
         const other = plan.other_used || 0;
+        const baseline = plan.provider_baseline_used || 0;
         // `metered` is the backend's own declaration, not a guess from the
         // ceiling: a plan could in principle be metered with an unknown limit.
         const metered = plan.metered !== false;
-        // Everything the wallet spent that no bucket claimed. Without it the
-        // segments described 221 of tsetmc's 9,950 calls and the bar looked
-        // almost empty at 100% used.
+        // Only post-observation drift is unattributed. Earlier provider usage
+        // is a separate baseline, not a local bucket or a reconciliation error.
         const unattributed = plan.unattributed || 0;
         const variance = plan.provider_variance;
         const left = Math.max(0, ceiling - used);
@@ -1448,8 +1430,10 @@ export function QuotaWallets({ quota }) {
                 : "Provider counter not observed; billing cannot be reconciled yet."}
             </p>
             {variance != null && variance !== 0 && (
-              <Badge variant="warn">
-                Provider/local variance {variance > 0 ? "+" : ""}{num(variance)}
+              <Badge variant={variance > 0 ? "warn" : "neutral"}>
+                {variance > 0
+                  ? `Unattributed since baseline +${num(variance)}`
+                  : `Provider snapshot trails local by ${num(-variance)} (may be in flight)`}
               </Badge>
             )}
 
@@ -1463,9 +1447,7 @@ export function QuotaWallets({ quota }) {
               aria-valuemin={0}
               aria-valuemax={100}
             >
-              {/* Every bucket, always: listing only archive and live left 53 of
-                  tsetmc's calls apparently unaccounted for when they were
-                  simply `other`. */}
+              <div className="h-full bg-[var(--c-s6)]" style={{ width: `${pctOf(baseline, ceiling)}%` }} title={`Pre-observation baseline ${num(baseline)}`} />
               <div className="h-full bg-[var(--c-s3)]" style={{ width: `${pctOf(archive, ceiling)}%` }} title={`Archive ${num(archive)}`} />
               <div className="h-full bg-[var(--c-good)]" style={{ width: `${pctOf(live, ceiling)}%` }} title={`Live ${num(live)}`} />
               <div className="h-full bg-muted" style={{ width: `${pctOf(other, ceiling)}%` }} title={`Other ${num(other)}`} />
@@ -1482,6 +1464,9 @@ export function QuotaWallets({ quota }) {
               </div>
               <div className="flex justify-between gap-2">
                 <dt className="text-muted">Local safe-budget count</dt><dd className="tabular">{num(used)}</dd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <dt className="text-muted">Before first observation</dt><dd className="tabular">{plan.provider_baseline_used == null ? "—" : num(baseline)}</dd>
               </div>
               <div className="flex justify-between gap-2">
                 <dt className="text-muted">Archive</dt><dd className="tabular">{num(archive)}</dd>
@@ -1652,7 +1637,7 @@ function formatAge(seconds) {
  * user redeems it through the ordinary reset page and chooses their own
  * password. The operator never sees it.
  *
- * It confers nothing a superuser lacks -- Django admin can already set any
+ * It confers nothing an admin lacks -- Django admin can already set any
  * password outright -- and it stops being needed the day a relay is configured.
  */
 /**
@@ -1667,7 +1652,7 @@ function formatAge(seconds) {
  *
  * Reloads the whole list after a toggle rather than patching the row in place:
  * the server is the authority on whether the change was allowed (it refuses
- * self-deactivation and the last active superuser), and a locally-mutated row
+ * self-deactivation and the last active admin), and a locally-mutated row
  * would show a ban that did not happen.
  */
 function MembersPanel() {
@@ -2143,7 +2128,7 @@ function OverviewPanel({ overview, tickSeries, depths, onNavigate, user }) {
           <StatTile
             label="Users"
             value={num(overview.users?.total)}
-            sub={`${num(overview.users?.active)} active · ${num(overview.users?.staff)} staff`}
+            sub={`${num(overview.users?.active)} active · ${num(overview.users?.admins)} admins`}
             testId="ops-overview-users-total"
           />
           <StatTile
@@ -2164,9 +2149,7 @@ function OverviewPanel({ overview, tickSeries, depths, onNavigate, user }) {
         {user?.role === "admin" && <OperatorResetLink />}
       </Card>
 
-      {/* Staff, not superuser: reading the roster and suspending an abusive
-          account is day-to-day operations. Minting a password reset link is not
-          -- that hands over access to someone else's portfolio. */}
+      {/* Admin-only roster and account recovery controls. */}
       {user?.role === "admin" && <MembersPanel />}
 
       <AttentionPanel liveHeld={liveHeld} warehouse={warehouse} onNavigate={onNavigate} />

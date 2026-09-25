@@ -28,6 +28,7 @@ from portfolio.models import (
     LedgerEntry,
     Liability,
     Price,
+    positive_price_q,
 )
 from .timeline import cash_as_of, holdings_as_of, house_state_as_of, load_house_marks
 from .visibility import hidden_asset_ids, hidden_keys
@@ -179,7 +180,7 @@ def get_latest_prices() -> dict:
 
     latest = (
         Price.objects.select_related("asset")
-        .filter(asset__is_active=True, price__gt=0)
+        .filter(positive_price_q(), asset__is_active=True)
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     )
@@ -214,7 +215,7 @@ def guard_price_map(prices: dict, *, fill_missing=True, archive_replacements=Non
     # live price if it is not from an older session than the one already held.
     latest_db_rows = list(
         Price.objects.select_related("asset")
-        .filter(asset__is_active=True, price__gt=0)
+        .filter(positive_price_q(), asset__is_active=True)
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     )
@@ -278,7 +279,7 @@ def stored_price_sessions(keys) -> dict:
     return {
         row.asset.key: row.fetched_at
         for row in Price.objects.select_related("asset")
-        .filter(asset__key__in=list(keys), price__gt=0)
+        .filter(positive_price_q(), asset__key__in=list(keys))
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     }

@@ -59,7 +59,34 @@ rows are written once at 00:01 Tehran for the prior day; current-day value is
 derived at read time. A final fresh restore and rehearsal is still required
 after the financial-storage migration is written.
 
-This rehearses only the migrations currently implemented. It does **not**
-authorize production deployment yet: the atomic-quantity read-path cutover,
-remaining monetary boundaries, and fresh staging rehearsal are required before
-release.
+At the 2026-09-23 checkpoint this did **not** authorize production deployment:
+the atomic-quantity read-path cutover and remaining monetary boundaries were
+still required. The cutover was rehearsed the next day, as recorded below.
+
+## Atomic-storage cutover rehearsal, 2026-09-24
+
+With the preserved isolated TimescaleDB staging database, migration
+`portfolio.0043_atomic_quantity_cutover` applied successfully. It first
+verified that every old decimal quantity exactly matched its integer atomic
+or whole-Toman property-price representation, then wrote permanent
+`QuantityConversionAudit` rows and dropped the legacy quantity columns.
+The audit has 16 holding rows (13 atomic, 3 property) and 134 ledger rows
+(129 atomic, 5 property). Maximum reconstructed quantity difference is zero
+for both tables. `manage.py check` and `migrate --check` passed afterward.
+The stage contains the temporary test user from the earlier rehearsal; the
+production database remains unchanged. This closes the quantity-storage
+cutover; the mixed-unit monetary-price boundary was rehearsed next, below.
+
+## Iranian/foreign quote split rehearsal, 2026-09-24
+
+Migration `portfolio.0044_split_quote_prices` applied to the same isolated
+staging copy. It moved 77,555 Iranian live price rows into zero-decimal
+`price_iranian`; no such row had a fractional source value. The separate
+four-decimal foreign field preserves provider-native quotes. All 398 daily
+averages received one price storage field. Of those, 284 fractional Iranian
+averages were rounded `ROUND_HALF_UP` and recorded in the permanent monetary
+audit; aggregate delta is −0.4823 Toman across the entire table. The 134
+ledger rows had no fractional execution unit price. The one fractional
+cost-basis row is a property's **millions of Toman per square metre** quote
+(`3.7000`), where the fractional part represents 700,000 whole Toman and
+must not be rounded as though it were Toman.

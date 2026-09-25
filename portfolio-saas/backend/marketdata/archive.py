@@ -1420,7 +1420,7 @@ def get_deep_tier_symbols(all_symbols: set[str] | None = None) -> set[str]:
     """
 
     held = set(
-        Holding.objects.filter(quantity__gt=0)
+        Holding.objects.filter(quantity_atomic__gt=0)
         .exclude(asset__tse_symbol="")
         .values_list("asset__tse_symbol", flat=True)
     )

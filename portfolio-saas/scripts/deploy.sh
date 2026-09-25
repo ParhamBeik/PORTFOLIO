@@ -26,10 +26,10 @@ fi
 # comment.
 free_bytes="$(df -PB1 /var/lib/docker | awk 'NR==2 {print $4}')"
 free_gb=$(( free_bytes / 1024 / 1024 / 1024 ))
-if (( free_gb < 10 )); then
+if (( free_gb < 5 )); then
   echo "Only ${free_gb} GB free on the Docker device. A deploy needs room for a ~1.7 GB dump plus an image build; refusing to start one that cannot finish." >&2
   exit 1
-elif (( free_gb < 20 )); then
+elif (( free_gb < 15 )); then
   echo "WARNING: ${free_gb} GB free on the Docker device. See the Ops console's disk meter." >&2
 fi
 
@@ -37,6 +37,10 @@ if [[ -n "$("${compose[@]}" ps -q db)" ]] && "${compose[@]}" exec -T db pg_isrea
   "${project_dir}/scripts/backup_postgres.sh"
 fi
 "${compose[@]}" build
+# This release drops legacy quantity/price columns. Old web and worker images
+# must not continue reading or writing those columns while migrate runs.
+# Keep DB/Redis/MinIO up; the new images start only after migration succeeds.
+"${compose[@]}" stop celery_beat celery_worker_live celery_worker_archive celery_worker_codal backend frontend
 "${compose[@]}" run --rm migrate
 "${compose[@]}" up -d --remove-orphans
 "${compose[@]}" exec -T backend python manage.py check --deploy --fail-level WARNING

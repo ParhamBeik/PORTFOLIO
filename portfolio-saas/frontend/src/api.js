@@ -649,7 +649,7 @@ export const adminArchiveRetry = (ids) =>
   api("/api/admin/archive-states/retry/", { method: "POST", body: { ids, confirm: true } });
 export const adminAssets = (params) => api(`/api/admin/assets/${qs(params)}`);
 // Under /api/auth/, not /api/admin/: this is an accounts-app endpoint that
-// happens to be staff-only, and the two admin surfaces are mounted separately.
+// is admin-only, and the two admin surfaces are mounted separately.
 export const adminPasswordResetLink = (email) =>
   api("/api/auth/admin/password-reset-link/", { method: "POST", body: { email } });
 export const adminUsers = (params) => api(`/api/auth/admin/users/${qs(params)}`);

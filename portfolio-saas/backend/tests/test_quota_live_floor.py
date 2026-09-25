@@ -47,7 +47,8 @@ def test_provider_reconciliation_keeps_local_attribution_separate():
     row.refresh_from_db()
     assert (row.archive_used, row.live_used, row.other_used) == (2, 1, 1)
     assert (row.local_attempts, row.successful_requests, row.provider_used) == (4, 3, 7)
-    assert get_quota_status()["plans"][TSETMC]["provider_variance"] == 3
+    assert row.provider_baseline_used == 3
+    assert get_quota_status()["plans"][TSETMC]["provider_variance"] == 0
 
 
 def test_live_day_cost_uses_simulated_spend_on_a_spending_day(settings):

@@ -204,7 +204,7 @@ def execute_trade(
         "asset_key": asset.key,
         "side": side,
         "quantity": str(qty),
-        "price_tomans": str(price),
+        "price_tomans": str(entry.price_tomans),
         "holding_quantity": format(new_qty.normalize(), "f"),
         "cash_flow_tomans": str(entry.amount_tomans or Decimal("0")),
         "total_value_tomans": total_value,

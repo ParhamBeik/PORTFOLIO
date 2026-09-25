@@ -614,17 +614,22 @@ class ExportView(APIView):
             ),
             "ledger.csv": _csv_bytes(
                 ["id", "account_id", "kind", "asset_id", "quantity", "price_tomans", "amount_tomans", "timestamp", "source", "external_id"],
-                LedgerEntry.objects.filter(account_id__in=account_ids).values_list(
-                    "id", "account_id", "kind", "asset_id", "quantity",
-                    "price_tomans", "amount_tomans", "timestamp", "source",
-                    "external_id",
+                (
+                    (entry.id, entry.account_id, entry.kind, entry.asset_id,
+                     entry.quantity, entry.price_tomans, entry.amount_tomans,
+                     entry.timestamp, entry.source, entry.external_id)
+                    for entry in LedgerEntry.objects.filter(account_id__in=account_ids)
+                    .select_related("asset")
                 ),
             ),
             "holdings.csv": _csv_bytes(
                 ["id", "account_id", "asset_id", "quantity", "area_sqm", "mortgage_deduction_tomans"],
-                Holding.objects.filter(account_id__in=account_ids).values_list(
-                    "id", "account_id", "asset_id", "quantity", "area_sqm",
-                    "mortgage_deduction_tomans",
+                (
+                    (holding.id, holding.account_id, holding.asset_id,
+                     holding.quantity, holding.area_sqm,
+                     holding.mortgage_deduction_tomans)
+                    for holding in Holding.objects.filter(account_id__in=account_ids)
+                    .select_related("asset")
                 ),
             ),
             "imports.csv": _csv_bytes(

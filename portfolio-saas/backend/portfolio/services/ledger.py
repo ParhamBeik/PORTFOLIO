@@ -15,6 +15,7 @@ from portfolio.models import (
     Liability,
     Price,
     Snapshot,
+    positive_price_q,
 )
 from .timeline import house_area_as_of, house_marks_as_of
 from .valuation import _house_value, asset_value, invalidate_prices_cache
@@ -192,6 +193,8 @@ def create_ledger_entry(
                 unit_price = resolve_historical_price(asset, occurred_at)
             except PriceResolutionError as exc:
                 raise LedgerError(str(exc)) from exc
+        if asset.quote_unit != "usd":
+            unit_price = _whole_toman(unit_price)
         # A quantity x price product, so it crosses the TSE Rial/Toman boundary
         # exactly like a valuation does. It reads as Toman everywhere
         # downstream -- `_projection_state` debits `Account.cash_balance_tomans`
@@ -202,6 +205,8 @@ def create_ledger_entry(
         amount = holding_value_to_toman(
             asset, quantity * unit_price
         ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    elif unit_price is not None and (asset is None or asset.quote_unit != "usd"):
+        unit_price = _whole_toman(unit_price)
     if area is not None or mortgage is not None:
         # A revaluation carries the same terms as the opening it supersedes, so
         # both house mark kinds may set them. Anything else still may not.
@@ -1137,7 +1142,7 @@ def _live_price_fetched_today(asset: Asset) -> Decimal | None:
     """
 
     row = (
-        Price.objects.filter(asset=asset, price__gt=0)
+        Price.objects.filter(positive_price_q(), asset=asset)
         .order_by("-fetched_at")
         .first()
     )
@@ -1150,7 +1155,7 @@ def _latest_usd_toman_rate() -> Decimal | None:
     """Live Toman-per-dollar, from the same `usd_cash` row the panel uses."""
 
     row = (
-        Price.objects.filter(asset__key="usd_cash", price__gt=0)
+        Price.objects.filter(positive_price_q(), asset__key="usd_cash")
         .order_by("-fetched_at")
         .first()
     )

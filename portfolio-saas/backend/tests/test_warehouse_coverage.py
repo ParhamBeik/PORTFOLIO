@@ -327,9 +327,9 @@ def test_rebuild_preserves_non_ledger_holdings_and_real_estate_terms(
         occurred_at=started_at,
     )
     Holding.objects.create(account=ledger_account, asset=manual, quantity=3)
-    Holding.objects.filter(account=ledger_account, asset=coin).update(quantity=99)
+    Holding.objects.filter(account=ledger_account, asset=coin).update(quantity_atomic=99)
     Holding.objects.filter(account=ledger_account, asset=house).update(
-        quantity=99,
+        price_per_sqm_tomans=99_000_000,
         area_sqm=1,
         mortgage_deduction_tomans=1,
     )

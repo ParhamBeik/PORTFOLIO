@@ -25,11 +25,13 @@ class Command(BaseCommand):
             "accounts": Account.objects.order_by("id").values_list(
                 "user__email", "name", "cash_balance_tomans"
             ),
-            "ledger": LedgerEntry.objects.order_by("id").values_list(
-                "account__name", "kind", "quantity", "amount_tomans"
+            "ledger": (
+                (entry.account.name, entry.kind, entry.quantity, entry.amount_tomans)
+                for entry in LedgerEntry.objects.select_related("account", "asset").order_by("id")
             ),
-            "holdings": Holding.objects.order_by("id").values_list(
-                "account__name", "asset__key", "quantity"
+            "holdings": (
+                (holding.account.name, holding.asset.key, holding.quantity)
+                for holding in Holding.objects.select_related("account", "asset").order_by("id")
             ),
         }
         normalized = {

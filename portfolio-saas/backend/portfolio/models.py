@@ -139,16 +139,15 @@ class Asset(models.Model):
         Nearly everything in this catalog is COUNTED -- a share, a coin, a bar,
         a banknote -- and an editor that steps those by 0.0001 offers a quantity
         that cannot exist. Three units genuinely divide: crypto, gold sold by
-        the gram, and the tether token. `Holding.quantity` stores six decimal
-        places, so that is the floor for the divisible ones.
+        the gram, and the tether token. Atomic integer storage has six-place
+        precision for divisible assets.
 
-        A property is not measured in units at all -- its `quantity` column
-        holds the price of a square meter in millions of Toman -- so it steps
-        freely and the editor labels that field as a price, not a count.
+        A property is not measured in units at all: its integer
+        `price_per_sqm_tomans` is exposed as millions of Toman through the
+        compatibility `quantity` property.
 
-        Advisory: this is what the editor offers, not a constraint the API
-        enforces. A holding that is already fractional keeps its value; nothing
-        here rounds one.
+        The model rejects quantities below their atomic unit; the editor step
+        communicates that same limit to users.
         """
         if self.is_house:
             return "any"
@@ -245,6 +244,20 @@ def _to_atomic_quantity(value, asset: Asset) -> int | None:
     return int(atomic)
 
 
+def _split_quote_price(value, asset: Asset | None):
+    """Whole Iranian money, provider-native precision for foreign quotes."""
+    if value is None:
+        return None, None
+    amount = Decimal(value)
+    if asset and asset.quote_unit == "usd":
+        return None, amount
+    return amount.quantize(Decimal("1"), rounding=ROUND_HALF_UP), None
+
+
+def positive_price_q():
+    return models.Q(price_iranian__gt=0) | models.Q(price_foreign__gt=0)
+
+
 class Holding(models.Model):
     """Quantity of one asset held in one account. Mirrors current_state.json."""
 
@@ -252,9 +265,8 @@ class Holding(models.Model):
         Account, on_delete=models.CASCADE, related_name="holdings"
     )
     asset = models.ForeignKey(Asset, on_delete=models.PROTECT, related_name="holdings")
-    quantity = models.DecimalField(max_digits=20, decimal_places=6, default=0)
-    # Dual-written migration shadow. Keep legacy reads until every service and
-    # serializer can read integer atomic units exclusively.
+    # The database stores integer atomic units; ``quantity`` below is the
+    # human-readable compatibility property used by services and APIs.
     quantity_atomic = models.BigIntegerField(null=True, blank=True)
     price_per_sqm_tomans = models.DecimalField(
         max_digits=24, decimal_places=0, null=True, blank=True
@@ -283,7 +295,14 @@ class Holding(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["account", "asset"], name="uniq_asset_per_account"
-            )
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(quantity_atomic__isnull=False, price_per_sqm_tomans__isnull=True)
+                    | models.Q(quantity_atomic__isnull=True, price_per_sqm_tomans__isnull=False)
+                ),
+                name="holding_one_quantity_storage",
+            ),
         ]
 
     @property
@@ -306,22 +325,41 @@ class Holding(models.Model):
             or self.asset.key
         )
 
+    @property
+    def quantity(self):
+        if hasattr(self, "_quantity_pending"):
+            return self._quantity_pending
+        if self.asset.is_house:
+            return Decimal(self.price_per_sqm_tomans or 0) / HOUSE_PRICE_SCALE
+        return Decimal(self.quantity_atomic or 0) / self.asset.quantity_scale
+
+    @quantity.setter
+    def quantity(self, value):
+        self._quantity_pending = Decimal(value)
+
     def save(self, *args, **kwargs):
         changed = kwargs.get("update_fields")
-        if changed is None or "quantity" in changed or "asset" in changed:
+        if changed is None or "quantity" in changed or "asset" in changed or hasattr(self, "_quantity_pending"):
+            quantity = (
+                type(self).objects.select_related("asset").get(pk=self.pk).quantity
+                if self.pk and changed and "asset" in changed and not hasattr(self, "_quantity_pending")
+                else self.quantity
+            )
             if self.asset.is_house:
                 self.price_per_sqm_tomans = (
-                    Decimal(self.quantity) * HOUSE_PRICE_SCALE
+                    quantity * HOUSE_PRICE_SCALE
                 ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
                 self.quantity_atomic = None
             else:
-                self.quantity_atomic = _to_atomic_quantity(self.quantity, self.asset)
+                self.quantity_atomic = _to_atomic_quantity(quantity, self.asset)
                 self.price_per_sqm_tomans = None
             if changed is not None:
-                kwargs["update_fields"] = set(changed) | {
+                kwargs["update_fields"] = (set(changed) - {"quantity"}) | {
                     "quantity_atomic", "price_per_sqm_tomans"
                 }
-        return super().save(*args, **kwargs)
+        result = super().save(*args, **kwargs)
+        self.__dict__.pop("_quantity_pending", None)
+        return result
 
 
 def owner_display_names(accounts=None) -> dict[int, str]:
@@ -364,7 +402,8 @@ class Price(models.Model):
         UNKNOWN = "UNKNOWN", "Unknown"
 
     asset = models.ForeignKey(Asset, on_delete=models.CASCADE, related_name="prices")
-    price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    price_iranian = models.DecimalField(max_digits=20, decimal_places=0, null=True, blank=True)
+    price_foreign = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
     fetched_at = models.DateTimeField(auto_now_add=True, db_index=True)
     source = models.CharField(max_length=16, default="API")
 
@@ -383,10 +422,36 @@ class Price(models.Model):
 
     class Meta:
         ordering = ["-fetched_at"]
+        constraints = [models.CheckConstraint(
+            condition=(
+                models.Q(price_iranian__isnull=False, price_foreign__isnull=True)
+                | models.Q(price_iranian__isnull=True, price_foreign__isnull=False)
+            ),
+            name="price_one_quote_storage",
+        )]
         indexes = [
             # Latest-price-per-asset lookups.
             models.Index(fields=["asset", "-fetched_at"], name="idx_price_asset_time"),
         ]
+
+    @property
+    def price(self):
+        return self.price_foreign if self.price_foreign is not None else self.price_iranian
+
+    @price.setter
+    def price(self, value):
+        self.price_iranian, self.price_foreign = _split_quote_price(
+            value, self.asset if self.asset_id else None
+        )
+
+    def save(self, *args, **kwargs):
+        if kwargs.get("update_fields") is not None and "price" in kwargs["update_fields"]:
+            kwargs["update_fields"] = (set(kwargs["update_fields"]) - {"price"}) | {
+                "price_iranian", "price_foreign"
+            }
+        if self.price is None:
+            self.price = 0
+        return super().save(*args, **kwargs)
 
 
 class DailyPriceAverage(models.Model):
@@ -411,7 +476,8 @@ class DailyPriceAverage(models.Model):
     )
     # Jalali YYYY-MM-DD, matching the date keys warehouse tables use.
     date = models.CharField(max_length=10, db_index=True)
-    avg_price = models.DecimalField(max_digits=20, decimal_places=4)
+    avg_price_iranian = models.DecimalField(max_digits=20, decimal_places=0, null=True, blank=True)
+    avg_price_foreign = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
     sample_count = models.PositiveIntegerField(default=0)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -420,11 +486,38 @@ class DailyPriceAverage(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["asset", "date"], name="uniq_daily_price_average_asset_date"
-            )
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(avg_price_iranian__isnull=False, avg_price_foreign__isnull=True)
+                    | models.Q(avg_price_iranian__isnull=True, avg_price_foreign__isnull=False)
+                ),
+                name="daily_average_one_quote_storage",
+            ),
         ]
         indexes = [
             models.Index(fields=["asset", "-date"], name="daily_price_avg_asset_date_idx"),
         ]
+
+    @property
+    def avg_price(self):
+        return (
+            self.avg_price_foreign
+            if self.avg_price_foreign is not None else self.avg_price_iranian
+        )
+
+    @avg_price.setter
+    def avg_price(self, value):
+        self.avg_price_iranian, self.avg_price_foreign = _split_quote_price(
+            value, self.asset if self.asset_id else None
+        )
+
+    def save(self, *args, **kwargs):
+        if kwargs.get("update_fields") is not None and "avg_price" in kwargs["update_fields"]:
+            kwargs["update_fields"] = (set(kwargs["update_fields"]) - {"avg_price"}) | {
+                "avg_price_iranian", "avg_price_foreign"
+            }
+        return super().save(*args, **kwargs)
 
 
 class ImportBatch(models.Model):
@@ -479,8 +572,8 @@ class LedgerEntry(models.Model):
         # this existed the house carried a single price across all of history,
         # which hid every rial of appreciation from the net-worth chart and
         # baked today's price into the opening balance, understating TWR.
-        # `quantity` holds price-per-sqm in millions, matching the house
-        # convention used by Holding.quantity; `area_sqm` travels with it.
+        # The `quantity` compatibility property exposes price-per-sqm in
+        # millions; `area_sqm` travels with it.
         # Marks REPLACE rather than accumulate -- see timeline.house_marks_as_of.
         VALUATION_MARK = "valuation_mark", "Valuation mark"
         # افزایش سرمایه: the company issues shares to existing holders for no
@@ -504,17 +597,17 @@ class LedgerEntry(models.Model):
     )
     kind = models.CharField(max_length=24, choices=Kind.choices)
     # Always positive; `side` carries the direction. The atomic and house-price
-    # fields are dual-written shadows until every caller is cut over.
-    quantity = models.DecimalField(
-        max_digits=20, decimal_places=6, null=True, blank=True
-    )
+    # fields are the authoritative storage; ``quantity`` is derived below.
     quantity_atomic = models.BigIntegerField(null=True, blank=True)
     price_per_sqm_tomans = models.DecimalField(
         max_digits=24, decimal_places=0, null=True, blank=True
     )
     # Provider-scale unit price at execution; 0 when the asset had no price yet.
     # TSE uses the legacy Rial/one-tenth-share convention; other assets use Toman.
-    price_tomans = models.DecimalField(
+    price_iranian = models.DecimalField(
+        max_digits=20, decimal_places=0, null=True, blank=True
+    )
+    price_foreign = models.DecimalField(
         max_digits=20, decimal_places=4, null=True, blank=True
     )
     amount_tomans = models.DecimalField(
@@ -589,6 +682,20 @@ class LedgerEntry(models.Model):
         constraints = [
             models.CheckConstraint(
                 condition=(
+                    models.Q(quantity_atomic__isnull=True)
+                    | models.Q(price_per_sqm_tomans__isnull=True)
+                ),
+                name="ledger_one_quantity_storage",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(price_iranian__isnull=True)
+                    | models.Q(price_foreign__isnull=True)
+                ),
+                name="ledger_one_quote_storage",
+            ),
+            models.CheckConstraint(
+                condition=(
                     ~models.Q(
                         kind__in=[
                             "opening_position", "buy", "sell", "valuation_mark",
@@ -596,8 +703,10 @@ class LedgerEntry(models.Model):
                     )
                     | (
                         models.Q(asset__isnull=False)
-                        & models.Q(quantity__isnull=False)
-                        & models.Q(quantity__gt=0)
+                        & (
+                            models.Q(quantity_atomic__gt=0)
+                            | models.Q(price_per_sqm_tomans__gt=0)
+                        )
                     )
                 ),
                 name="ledger_asset_event_fields",
@@ -628,26 +737,66 @@ class LedgerEntry(models.Model):
             kwargs["kind"] = side
         super().__init__(*args, **kwargs)
 
+    @property
+    def quantity(self):
+        if hasattr(self, "_quantity_pending"):
+            return self._quantity_pending
+        if self.asset_id is None:
+            return None
+        if self.asset.is_house:
+            return (
+                Decimal(self.price_per_sqm_tomans) / HOUSE_PRICE_SCALE
+                if self.price_per_sqm_tomans is not None else None
+            )
+        return (
+            Decimal(self.quantity_atomic) / self.asset.quantity_scale
+            if self.quantity_atomic is not None else None
+        )
+
+    @quantity.setter
+    def quantity(self, value):
+        self._quantity_pending = Decimal(value) if value is not None else None
+
+    @property
+    def price_tomans(self):
+        return self.price_foreign if self.price_foreign is not None else self.price_iranian
+
+    @price_tomans.setter
+    def price_tomans(self, value):
+        self.price_iranian, self.price_foreign = _split_quote_price(
+            value, self.asset if self.asset_id else None
+        )
+
     def save(self, *args, **kwargs):
         changed = kwargs.get("update_fields")
-        if changed is None or "quantity" in changed or "asset" in changed:
+        if changed is not None and "price_tomans" in changed:
+            changed = (set(changed) - {"price_tomans"}) | {"price_iranian", "price_foreign"}
+            kwargs["update_fields"] = changed
+        if changed is None or "quantity" in changed or "asset" in changed or hasattr(self, "_quantity_pending"):
             asset = self.asset if self.asset_id else None
-            if asset and asset.is_house and self.quantity is not None:
+            quantity = (
+                type(self).objects.select_related("asset").get(pk=self.pk).quantity
+                if self.pk and changed and "asset" in changed and not hasattr(self, "_quantity_pending")
+                else self.quantity
+            )
+            if asset and asset.is_house and quantity is not None:
                 self.price_per_sqm_tomans = (
-                    Decimal(self.quantity) * HOUSE_PRICE_SCALE
+                    quantity * HOUSE_PRICE_SCALE
                 ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
                 self.quantity_atomic = None
             else:
                 self.quantity_atomic = (
-                    _to_atomic_quantity(self.quantity, asset)
-                    if asset and self.quantity is not None else None
+                    _to_atomic_quantity(quantity, asset)
+                    if asset and quantity is not None else None
                 )
                 self.price_per_sqm_tomans = None
             if changed is not None:
-                kwargs["update_fields"] = set(changed) | {
+                kwargs["update_fields"] = (set(changed) - {"quantity"}) | {
                     "quantity_atomic", "price_per_sqm_tomans"
                 }
-        return super().save(*args, **kwargs)
+        result = super().save(*args, **kwargs)
+        self.__dict__.pop("_quantity_pending", None)
+        return result
 
     @property
     def side(self):
@@ -745,6 +894,26 @@ class MonetaryRoundingAudit(models.Model):
         constraints = [models.UniqueConstraint(
             fields=["source_table", "source_id", "field_name"],
             name="uniq_monetary_rounding_audit_source",
+        )]
+
+
+class QuantityConversionAudit(models.Model):
+    """Permanent exact before/after evidence for atomic quantity storage."""
+
+    source_table = models.CharField(max_length=80)
+    source_id = models.BigIntegerField()
+    asset_id = models.BigIntegerField()
+    before_quantity = models.DecimalField(max_digits=20, decimal_places=6)
+    after_quantity_atomic = models.BigIntegerField(null=True, blank=True)
+    after_price_per_sqm_tomans = models.DecimalField(
+        max_digits=24, decimal_places=0, null=True, blank=True
+    )
+    quantity_scale = models.PositiveIntegerField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=["source_table", "source_id"],
+            name="uniq_quantity_conversion_audit_source",
         )]
 
 

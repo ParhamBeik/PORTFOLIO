@@ -127,6 +127,7 @@ REASON_PLAN_BLOCKED = "plan_blocked"
 REASON_BUCKET_EXHAUSTED = "bucket_exhausted"
 REASON_LIVE_RESERVED = "live_reserved"
 REASON_ARCHIVE_PACED = "archive_paced"
+REASON_PROVIDER_OBSERVATION = "provider_observation_pending"
 
 #: Refusals that mean "wait, and try again shortly" rather than "the wallet is
 #: spent". The distinction is the whole point:
@@ -146,7 +147,9 @@ REASON_ARCHIVE_PACED = "archive_paced"
 #: `live_reserved` back out of this set in the same commit.
 #:
 #: `plan_blocked` and `bucket_exhausted` remain day-scoped.
-PACING_REASONS = frozenset({REASON_ARCHIVE_PACED, REASON_LIVE_RESERVED})
+PACING_REASONS = frozenset({
+    REASON_ARCHIVE_PACED, REASON_LIVE_RESERVED, REASON_PROVIDER_OBSERVATION,
+})
 
 
 class QuotaExhausted(RuntimeError):
@@ -921,6 +924,20 @@ def reserve_request(bucket=OTHER, plan=TSETMC, *, holding_probe=False):
     field = f"{bucket}_used"
     with transaction.atomic():
         row = _quota_row(plan, locked=True)
+        # A product-key migration creates a new row even when this account has
+        # already spent most of today's provider wallet. Do not admit a request
+        # against that empty local row until the panel has seeded its counter.
+        if settings.MARKETDATA_PANEL_METER_ENABLED and row.provider_used is None:
+            raise QuotaExhausted(
+                f"Waiting for the {plan} provider meter before admitting requests.",
+                reason=REASON_PROVIDER_OBSERVATION,
+            )
+        ceiling = effective_limit(plan, row)
+        if ceiling and row.used >= ceiling:
+            raise QuotaExhausted(
+                f"The {plan} provider product has reached its daily limit.",
+                reason=REASON_PLAN_BLOCKED,
+            )
         budget = bucket_budget(bucket, plan, row=row)
         if budget is not None and getattr(row, field) >= budget:
             raise QuotaExhausted(
@@ -1079,16 +1096,20 @@ def reconcile_account(account, plan=TSETMC):
         # 200/day budget report 2,226 spent (2026-09-08), which zeroed the
         # reserve that keeps `catalog_sync` and `sync_symbol_metadata` alive and
         # made the console attribute the app's own blind spot to a named lane.
-        # `unattributed_used` derives it instead, and nothing budgets against it.
+        # After the first observation, `unattributed_used` derives any drift;
+        # pre-observation provider usage stays in its own baseline.
         if usage is not None and (row.provider_used is None or usage > row.provider_used):
+            if row.provider_baseline_used is None:
+                row.provider_baseline_used = max(0, usage - row.local_attempts)
+                updates.append("provider_baseline_used")
             row.provider_used = usage
             row.provider_observed_at = timezone.now()
             row.provider_observation_source = "response"
             updates.extend(("provider_used", "provider_observed_at", "provider_observation_source"))
         if usage is not None and usage > row.used:
             logger.info(
-                "quota reconciled plan=%s day_usage %d->%d unattributed=%d",
-                plan, row.used, usage, usage - row.used,
+                "quota reconciled plan=%s day_usage %d->%d post_baseline_variance=%s",
+                plan, row.used, usage, provider_variance(row),
             )
             row.used = usage
             updates.append("used")
@@ -1116,6 +1137,9 @@ def reconcile_panel_metrics(metrics, *, day, observed_at):
                 raise ValueError("Provider counters cannot be negative.")
             row = _quota_row(plan, locked=True)
             fields = []
+            if row.provider_baseline_used is None:
+                row.provider_baseline_used = max(0, usage - row.local_attempts)
+                fields.append("provider_baseline_used")
             if row.provider_used is None or usage >= row.provider_used:
                 row.provider_used = usage
                 row.provider_observed_at = observed_at
@@ -1138,7 +1162,7 @@ def reconcile_panel_metrics(metrics, *, day, observed_at):
 
 
 def unattributed_used(row):
-    """Requests the provider billed that no bucket of ours claims.
+    """Post-baseline provider requests that no local bucket claims.
 
     Positive drift means something spent this plan without passing
     `reserve_request` -- a manual probe from a shell, another deployment holding
@@ -1148,17 +1172,15 @@ def unattributed_used(row):
     """
     if row is None:
         return 0
-    attributed = (row.archive_used or 0) + (row.live_used or 0) + (row.other_used or 0)
-    if row.provider_used is None:
-        return 0
-    return max(0, row.provider_used - attributed)
+    variance = provider_variance(row)
+    return max(0, variance) if variance is not None else 0
 
 
 def provider_variance(row):
-    """Signed provider billing minus local attempts attributed to buckets."""
-    if row is None or row.provider_used is None:
+    """Signed provider billing since baseline minus attributed local attempts."""
+    if row is None or row.provider_used is None or row.provider_baseline_used is None:
         return None
-    return row.provider_used - (
+    return row.provider_used - row.provider_baseline_used - (
         (row.archive_used or 0) + (row.live_used or 0) + (row.other_used or 0)
     )
 
@@ -1277,6 +1299,7 @@ def get_quota_status():
             "unattributed": unattributed_used(row),
             "provider_variance": provider_variance(row),
             "provider_used": row.provider_used if row else None,
+            "provider_baseline_used": row.provider_baseline_used if row else None,
             "provider_observed_at": row.provider_observed_at.isoformat() if row and row.provider_observed_at else None,
             "provider_observation_source": row.provider_observation_source if row else "",
             "local_attempts": row.local_attempts if row else 0,

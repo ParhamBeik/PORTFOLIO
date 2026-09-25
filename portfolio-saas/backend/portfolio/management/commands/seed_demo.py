@@ -57,7 +57,7 @@ class Command(BaseCommand):
             if k in asset_map:
                 Price.objects.get_or_create(
                     asset=asset_map[k],
-                    price=v,
+                    price_iranian=v,
                     defaults={"source": "SEED"}
                 )
 

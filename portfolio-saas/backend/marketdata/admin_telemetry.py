@@ -961,7 +961,7 @@ def _db_connection_metrics() -> dict:
 
 
 def get_admin_telemetry_context():
-    """Build the staff-only operational dashboard context."""
+    """Build the admin-only operational dashboard context."""
     now = timezone.now()
     checks = {"database": False, "cache": False}
     try:
@@ -1181,7 +1181,7 @@ def _user_domain_health():
     last_snapshot = Snapshot.objects.aggregate(value=Max("timestamp"))["value"]
     return {
         "total": User.objects.count(),
-        "staff": User.objects.filter(role="admin").count(),
+        "admins": User.objects.filter(role="admin").count(),
         "active": User.objects.filter(is_active=True).count(),
         "with_accounts": User.objects.filter(accounts__isnull=False).distinct().count(),
         "accounts": Account.objects.count(),
@@ -1197,12 +1197,10 @@ def live_health_overlay():
 
     Caching the whole overview for 15 minutes makes the page load instantly but
     would also let it report a healthy price feed a quarter of an hour after the
-    feed died -- which defeats the point of an ops console. These four are the
-    ones that answer "is it broken right now", and they are cheap: the price
-    timestamp is an indexed MAX, queue depth is a Redis read, and the worker
-    ping is bounded by its own timeout. The expensive warehouse, disk and
-    coverage sections stay cached, because their answers do not change minute to
-    minute.
+    feed died -- which defeats the point of an ops console. Quota counters are
+    equally time-sensitive: the panel is observed separately, but its stored
+    reading and local attempts must be read fresh on every page load. These
+    checks are cheap; expensive warehouse, disk and coverage stay cached.
     """
     now = timezone.now()
     db_conn = _db_connection_metrics()
@@ -1273,6 +1271,7 @@ def live_health_overlay():
             "depth": sum((queues.get("depths") or {}).values()),
         },
         "users": _user_domain_health(),
+        "quota": get_quota_status(),
     }
 
 

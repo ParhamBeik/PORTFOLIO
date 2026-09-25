@@ -894,7 +894,7 @@ class TestTradeEndpoint:
         assert response.status_code == 201, response.data
         entry = Transaction.objects.filter(account=account, kind="buy").get()
         assert entry.timestamp == occurred_at
-        assert entry.price_tomans == Decimal("123456.7500")
+        assert entry.price_tomans == Decimal("123457")
         # Compatibility map: imported → csv on the ledger.
         assert entry.source == "csv"
 
@@ -1132,7 +1132,7 @@ def test_execute_trade_with_custom_price(account, asset_catalog):
     assert holding.quantity == Decimal("5")
     txn = Transaction.objects.filter(account=account, kind="buy").get()
     assert txn.quantity == Decimal("5")
-    assert txn.price_tomans == Decimal("123456.7890")
+    assert txn.price_tomans == Decimal("123457")
 
 
 def test_past_sell_before_buy_is_rejected(account, asset_catalog):
@@ -1430,7 +1430,7 @@ class TestTrackA:
         execute_trade(account=acc, asset=asset, side="buy", quantity="5", price_tomans="1000")
         acc.cash_balance_tomans = Decimal("1")
         acc.save(update_fields=["cash_balance_tomans"])
-        Holding.objects.filter(account=acc).update(quantity=Decimal("99"))
+        Holding.objects.filter(account=acc).update(quantity_atomic=99)
 
         call_command("reconcile_ledger", "--fix")
         acc.refresh_from_db()

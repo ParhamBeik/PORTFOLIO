@@ -1501,7 +1501,7 @@ def test_fetch_writes_price_for_catalog_stock(asset_catalog, monkeypatch):
     )
     out = run_price_fetch()
     assert out["priced"].get("tse-shapna") == 4321
-    assert Price.objects.filter(asset__key="tse-shapna", price=4321).exists()
+    assert Price.objects.filter(asset__key="tse-shapna", price_iranian=4321).exists()
 
 
 def test_apply_instrument_prices_leaves_seed_quote(raw_market_sample):

@@ -25,6 +25,7 @@ from .models import (
     LedgerEntry,
     Price,
     Snapshot,
+    positive_price_q,
 )
 from portfolio.services import asset_value, get_latest_prices, invalidate_prices_cache
 from portfolio.services.valuation import (
@@ -194,7 +195,7 @@ def _write_prices(priced: dict, *, sources: dict | None = None) -> None:
     latest_rows = {
         row.asset.key: row
         for row in Price.objects.select_related("asset")
-        .filter(asset__key__in=priced.keys(), price__gt=0)
+        .filter(positive_price_q(), asset__key__in=priced.keys())
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     }
@@ -421,7 +422,10 @@ def aggregate_daily_price_averages(date_str: str | None = None):
     for asset in Asset.objects.filter(is_active=True, is_house=False):
         stats = Price.objects.filter(
             asset=asset, source="API", fetched_at__gte=since,
-        ).aggregate(avg=Avg("price"), n=Count("id"))
+        ).aggregate(
+            avg=Avg("price_foreign" if asset.quote_unit == "usd" else "price_iranian"),
+            n=Count("id"),
+        )
         if not stats["n"]:
             continue
         DailyPriceAverage.objects.update_or_create(

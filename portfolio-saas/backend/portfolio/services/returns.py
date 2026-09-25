@@ -33,7 +33,8 @@ import jdatetime
 import numpy as np
 import pandas as pd
 from django.core.cache import cache
-from django.db.models import Max
+from django.db.models import DecimalField, Max
+from django.db.models.functions import Coalesce
 
 from marketdata.currency import tse_close_to_toman
 from marketdata.integrity import (
@@ -42,7 +43,7 @@ from marketdata.integrity import (
     MIN_COVERAGE,
 )
 from marketdata.provenance import PRICE_SERIES_ENDPOINTS, rejected_pairs
-from portfolio.models import Asset, Price, USD_QUOTED_KEYS
+from portfolio.models import Asset, Price, USD_QUOTED_KEYS, positive_price_q
 from .deflator import normalize_basis, to_basis
 from datetime import timedelta
 from django.conf import settings
@@ -859,7 +860,8 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
         return pd.DataFrame()
 
     qs = Price.objects.filter(
-        asset__is_active=True, asset__key__in=keys, fetched_at__gte=cutoff, price__gt=0
+        positive_price_q(), asset__is_active=True, asset__key__in=keys,
+        fetched_at__gte=cutoff,
     ).exclude(asset__is_house=True)
 
     if as_of is not None:
@@ -868,6 +870,10 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
     rows = (
         qs.select_related("asset")
         .order_by("asset__key", "fetched_at")
+        .annotate(price=Coalesce(
+            "price_iranian", "price_foreign",
+            output_field=DecimalField(max_digits=20, decimal_places=4),
+        ))
         .values("asset__key", "fetched_at", "price")
     )
     if not rows:

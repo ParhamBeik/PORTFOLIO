@@ -1,6 +1,6 @@
 # Portfolio MVP implementation checklist
 
-Status on 2026-09-23. A checked item means implemented and verified locally, not deployed.
+Status on 2026-09-24. Checked items are implemented and tested; deployment status is tracked separately below.
 
 ## Quota
 
@@ -9,8 +9,10 @@ Status on 2026-09-23. A checked item means implemented and verified locally, not
 - [x] Classify `Gold_Currency_Pro` using endpoint parameters and test the rule locally.
 - [x] Run an isolated <10-request provider counter matrix for TSETMC, Codal, Market live, and Pro default/history modes; save before/after evidence in `BRSAPI-QUOTA-EVIDENCE-2026-09-22.md`. This ran after, not at, the Tehran reset; repeat at reset if that timing is a strict release criterion.
 - [x] Verify every registered provider path from the VPS against the paused-worker BrsApi panel; 13 successful paths and two billed HTTP 400 cases are documented in the same evidence report.
-- [ ] Automate reliable provider-counter observation and alert on rising product-level variance.
-  - [x] Implement and test an opt-in read-only panel reader, observation timestamps, and rising-variance alert; activation still needs a verified VPS account-panel credentialed read.
+- [x] Implement and test provider-counter observation and rising-variance alert.
+  - [x] Verify the VPS account-panel read and prove two stopped-worker reads do not move either meter; stage the opt-in flag in the VPS-only environment for deployment.
+  - [x] Separate the pre-observation provider baseline from subsequent local attribution, so activating the new product rows mid-day does not report all earlier provider usage as variance.
+  - [x] Keep quota live within the cached Operations overview; display a negative signed variance as an observation-time race, not a billing alert.
 
 ## Authorization and administration
 
@@ -24,11 +26,12 @@ Status on 2026-09-23. A checked item means implemented and verified locally, not
 
 - [x] Expose quote unit, valuation unit, exposure group, and quantity scale in asset API responses; physical USD and USDT remain separate instruments.
 - [x] Remove the legacy `Asset.currency` database field after converting its remaining consumers.
-- [ ] Convert Iranian money to zero-decimal storage, and divisible quantities to integer atomic units.
-- [ ] Move property price-per-square-metre out of `quantity`.
-- [ ] Generate and verify the permanent row-level rounding audit and aggregate financial delta.
+- [x] Split live, daily-average, and ledger execution prices into zero-decimal Iranian and precision-preserving foreign fields; retain fractional property acquisition quotes expressed in millions of Toman.
+- [x] Store divisible quantities as integer atomic units and property price-per-square-metre as whole Toman; remove legacy decimal quantity columns after exact verification.
+- [x] Generate and verify the permanent row-level rounding audit and aggregate financial delta.
   - [x] Eight unambiguous Toman fields converted and rehearsed; 48 changed rows in a permanent audit, net ledger delta 0 and retained-snapshot delta +0.0123 Toman. Mixed-unit prices and quantities remain.
-  - [x] Add and rehearse exact integer-atomic quantity and whole-Toman property-price shadow columns. All 16 staging holdings and 134 quantity-bearing ledger rows reconcile; legacy `quantity` remains the read column until the application cutover.
+  - [x] Rehearse exact integer-atomic quantity and whole-Toman property-price cutover. All 16 staging holdings and 134 quantity-bearing ledger rows reconstruct exactly and have permanent before/after audit rows; the legacy `quantity` columns are removed.
+  - [x] Rehearse mixed-unit price cutover: 77,555 Iranian live quotes and 398 daily averages converted; 284 fractional daily averages audited and rounded, aggregate delta −0.4823 Toman. USD-native quotes retain precision.
 
 ## History, guidance, and product
 
@@ -42,9 +45,13 @@ Status on 2026-09-23. A checked item means implemented and verified locally, not
 
 ## Release gate
 
-- [ ] Prevent a mid-day product-key rename from creating fresh zero-usage wallets while the provider already has billed requests; deploy only with a verified provider-counter bootstrap or a controlled reset-window cutover.
+- [x] Prevent a mid-day product-key rename from creating fresh zero-usage wallets: when the panel meter is enabled, admission waits for the first complete provider observation. Verify this with a database regression test. Production meter is enabled.
 - [x] Verify the 2026-09-23 production backup checksum and restore it into matching isolated TimescaleDB staging; rehearse implemented migrations through `portfolio.0042` (`MVP-STAGING-REHEARSAL-2026-09-23.md`).
-- [ ] Rehearse and audit all financial migrations against a staging copy.
-- [ ] Run complete backend/frontend tests and smoke checks.
-  - [x] Backend 1,189 passed / 1 skipped after admin and meter changes, plus the final added meter-task test passed separately; frontend 26 unit and 50 component tests, lint, build; staged browser E2E 23 passed / 3 skipped, plus one heavy comparison matrix not run.
-- [ ] Deploy, then reconcile provider counters and verify role/financial invariants.
+- [x] Rehearse quantity, eight whole-Toman fields, and mixed-unit price conversion against isolated TimescaleDB staging with permanent row-level audits.
+- [x] Run complete backend/frontend tests and local smoke checks.
+  - [x] Backend 1,194 passed / 1 skipped; migration autodetector reports no changes on a clean database; frontend 26 unit and 50 component tests, lint, build; staged browser E2E 23 passed / 3 skipped, plus one heavy comparison matrix not run.
+- [x] Deploy commit `b8a68b8` manually through the normal VPS deployment script after CI test gates passed; migrations, backup, service health, public routes, role consistency, and financial audit rows verified.
+- [x] Deploy the cold-request timeout and quota-baseline follow-up; verify the Operations display and post-baseline reconciliation on production (`6456ef8`).
+- [ ] Deploy and verify the live-quota cache follow-up.
+- [ ] Repair GitHub-hosted runner SSH access; CI test gates pass, but its deploy job times out before reaching the VPS. Local Mac SSH and manual deployment work.
+- [ ] Verify a complete next Tehran-day quota cycle with provider totals and local attribution. Preserve any genuine unattributed variance instead of forcing equality.
