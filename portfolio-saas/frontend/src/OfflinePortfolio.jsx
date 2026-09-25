@@ -3,6 +3,12 @@ import { App as NativeApp } from "@capacitor/app";
 import { holdingLabel, money, pct, quantity } from "./format.js";
 import { unlockOfflineSnapshot } from "./mobile.js";
 
+/** Stable list key: prefer the snapshot's `key`, then identity fields, then index. */
+export function holdingRowKey(item, index = 0) {
+  if (item?.key) return String(item.key);
+  return `${item?.account_id ?? "all"}:${item?.asset_key || item?.asset || item?.label || index}`;
+}
+
 function Trend({ series, basis }) {
   const values = (series || []).map((row) => Number(row.total)).filter(Number.isFinite);
   if (values.length < 2) return <p className="text-sm text-muted">No saved chart for this view.</p>;
@@ -133,7 +139,7 @@ export default function OfflinePortfolio({ available, onReconnect, onSignOut }) 
           <section className="rounded-xl border border-border bg-panel p-5">
             <h2 className="mb-3 font-semibold">Holdings</h2>
             <ul>{(selected.valuation.items || []).map((item, index) =>
-              <li key={`${item.account_id || "all"}:${item.asset_key || item.asset || index}`} className="flex justify-between gap-3 border-b border-border py-3 text-sm">
+              <li key={holdingRowKey(item, index)} className="flex justify-between gap-3 border-b border-border py-3 text-sm">
                 <span dir="auto">{holdingLabel(item)}<small className="block text-muted">{quantity(item.quantity, item.quantity_step)}</small></span>
                 <span className="text-right">{money(item.value, basis)}</span>
               </li>
