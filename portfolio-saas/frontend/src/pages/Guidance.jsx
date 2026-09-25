@@ -52,7 +52,10 @@ export default function Guidance({ user, onUserChange }) {
 
   return (
     <div>
-      <PageHeader title="Guidance" subtitle="One rebalance for your holdings, plus one market benchmark. Historical analysis is not investment advice." />
+      <PageHeader title="Legacy guidance" subtitle="Experimental rebalance models retained for existing links while their inputs and formulas are audited." />
+      <p className="mb-5 rounded border border-border bg-panel-2 p-3 text-sm text-muted" role="note">
+        These rankings have not passed the source checks required for the new research workspace. Use Portfolio for holdings and performance, and Explore for source-backed company figures.
+      </p>
       <div className="mb-5 max-w-xs">
         <Select label="Risk profile" value={user.risk_profile || "balanced"} onChange={changeProfile} disabled={saving} data-testid="guidance-risk-profile">
           {PROFILE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}

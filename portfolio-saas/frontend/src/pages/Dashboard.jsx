@@ -12,16 +12,11 @@ import {
   updateHolding,
   removeHolding,
   adminAssetEvidence,
-  analytics,
-  diversifiers,
   benchmarks,
-  insights,
 } from "../api.js";
 import {
   ago,
   area,
-  assetLabel,
-  date,
   holdingLabel,
   humanize,
   indexPoint,
@@ -39,10 +34,7 @@ import {
 } from "../format.js";
 import {
   AreaTrend,
-  CorrelationHeatmap,
-  DiversifierScatter,
   Donut,
-  MoneyVsRisk,
   MultiLineTrend,
 } from "../components/charts.jsx";
 import {
@@ -1270,298 +1262,6 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
 
 
 
-const RISK_WINDOWS = [
-  { value: "90", label: "90d" },
-  { value: "180", label: "180d" },
-  { value: "365", label: "365d" },
-];
-
-function riskShareRows(weights = {}, risks = {}, labelFor = (key) => key) {
-  const keys = [...new Set([...Object.keys(weights), ...Object.keys(risks)])];
-  return keys
-    .map((key) => {
-      const weight_share = Number(weights[key] || 0);
-      const risk_share = Number(risks[key] || 0);
-      return {
-        key: labelFor(key),
-        weight_share,
-        risk_share,
-        gap: risk_share - weight_share,
-      };
-    })
-    .filter((row) => row.weight_share > 0 || row.risk_share > 0)
-    .sort((a, b) => b.gap - a.gap);
-}
-
-/** One stacked panel: a heading, a sentence saying what to look for, the chart. */
-function RiskPanel({ title, caption, children }) {
-  return (
-    <section className="border-t border-border pt-5 first:border-0 first:pt-0">
-      <h3 className="text-sm font-semibold">{title}</h3>
-      <p className="mt-1 mb-3 max-w-prose text-xs text-muted">{caption}</p>
-      {children}
-    </section>
-  );
-}
-
-function RiskClassView({ data, valueByClass, basis }) {
-  const div = data.diversification || {};
-  const rows = riskShareRows(div.weight_by_class, div.risk_by_class);
-  if (!rows.length) return <Empty testId="dashboard-risk-class-empty">No class risk data.</Empty>;
-  return (
-    <div data-testid="dashboard-risk-class-view">
-      <MoneyVsRisk
-        rows={rows}
-        label="Share of money versus share of risk by asset class"
-        coverage={div.mean_weight_covered}
-        valueFor={(key) => valueByClass[key]}
-        basis={basis}
-        testId="risk-money-vs-risk-class"
-      />
-    </div>
-  );
-}
-
-function RiskAssetView({ data, labelFor, valueByLabel, basis }) {
-  const div = data.diversification || {};
-  const rows = (div.concentration_gap || []).map((row) => ({
-    ...row,
-    key: labelFor(row.key),
-  }));
-  if (!rows.length) return <Empty testId="dashboard-risk-asset-empty">No asset risk data.</Empty>;
-  return (
-    <div data-testid="dashboard-risk-asset-view">
-      <MoneyVsRisk
-        rows={rows}
-        label="Share of money versus share of risk by asset"
-        coverage={div.mean_weight_covered}
-        valueFor={(key) => valueByLabel[key]}
-        basis={basis}
-        testId="risk-money-vs-risk"
-      />
-    </div>
-  );
-}
-
-function RiskCorrelationView({ data, labelFor }) {
-  const correlation = data.correlation || {};
-  if ((correlation.assets || []).length < 2) {
-    return <Empty testId="dashboard-risk-correlation-empty">Not enough overlapping assets.</Empty>;
-  }
-  return (
-    <div data-testid="dashboard-risk-correlation-view">
-      <CorrelationHeatmap
-        assets={correlation.assets.map(labelFor)}
-        matrix={correlation.matrix}
-        testId="risk-correlation"
-      />
-    </div>
-  );
-}
-
-/**
- * What was actually measured, under controls that imply something else.
- *
- * Two gaps, both invisible until printed. The window buttons ask for 90/180/365
- * days, but the panel starts after the last gap in the warehouse
- * (`returns._trim_to_contiguous`), so on a history that reopened three months
- * ago all three buttons can resolve to the same rows. And every correlation
- * here carries a standard error of roughly 1/sqrt(n) — at n≈65 that is ±0.12,
- * wide enough that the top of a ranking is not distinguishable from its middle.
- * Printing n is what lets a reader tell an ordering from a coin flip.
- */
-function MeasurementNote({ window, requestedDays, children, testId }) {
-  if (!window?.observations) return null;
-  const se = 1 / Math.sqrt(window.observations);
-  // Two thirds of what was asked for is the point where "90d" stops describing
-  // the answer. Below it, say so; above it the button and the data agree.
-  const truncated = requestedDays > 0 && window.observations < requestedDays * 0.66;
-  return (
-    <p className="mt-2 text-xs text-muted" data-testid={testId}>
-      Measured on {window.observations} shared trading days ({date(window.start)} –{" "}
-      {date(window.end)})
-      {truncated
-        ? ", which is as far back as the price history reaches — not the window selected above"
-        : ""}
-      . At this sample size a correlation is good to about ±{se.toFixed(2)}, so
-      treat the ordering near the top as a shortlist rather than a ranking.
-      {children}
-    </p>
-  );
-}
-
-/**
- * Which part of the book these shares are shares OF.
- *
- * Every number in this card is normalized over the assets that have usable
- * daily price history — property never does, and neither does anything newly
- * listed, halted, or gated by the integrity check. So an asset's "share of your
- * money" here is not the Weight column in Holdings, which is a share of
- * everything listed. Both are right; only the denominators differ, and until
- * this said so the two columns simply disagreed on the same screen.
- */
-function CoverageNote({ coverage }) {
-  if (!coverage) return null;
-  const analyzed = coverage.analyzable_holdings;
-  const total = coverage.total_holdings;
-  if (!total || analyzed === total) return null;
-  return (
-    <p className="mb-3 text-xs text-muted" data-testid="dashboard-risk-coverage-note">
-      Based on {analyzed} of your {total} holdings — {pct(coverage.value_analyzable_pct)} of
-      what the portfolio is worth. Property and anything without enough price
-      history cannot be given a volatility, so they are left out and the shares
-      below are shares of what remains. That is why these percentages do not
-      match the Weight column in Holdings.
-    </p>
-  );
-}
-
-function RiskAddView({ state, labelFor }) {
-  return (
-    <Async {...state} testId="dashboard-risk-add-body">
-      {(data) => {
-        if (!data.candidates?.length) {
-          // Addressable, like every other panel's empty state: `Async` renders
-          // its own testId only when it does NOT reach this branch.
-          return (
-            <Empty testId="dashboard-risk-add-empty">
-              No candidate has enough overlapping history to score yet.
-            </Empty>
-          );
-        }
-        return (
-          <div data-testid="dashboard-risk-add-view">
-            <DiversifierScatter
-              candidates={data.candidates.map((row) => ({ ...row, key: labelFor(row.key) }))}
-              held={(data.held || []).map((row) => ({ ...row, key: labelFor(row.key) }))}
-              testId="risk-diversifier-scatter"
-            />
-            <MeasurementNote
-              window={data.data_window}
-              requestedDays={data.window}
-              testId="dashboard-risk-add-window"
-            />
-            {data.basis_requested && data.basis !== data.basis_requested && (
-              <p className="mt-1 text-xs text-muted" data-testid="dashboard-risk-add-basis-note">
-                Scored in nominal Toman: the inflation index does not yet cover
-                every year this window spans, and a half-deflated panel would
-                rank candidates on the calendar rather than on their prices.
-              </p>
-            )}
-          </div>
-        );
-      }}
-    </Async>
-  );
-}
-
-/**
- * All four risk views, stacked.
- *
- * They used to be behind tabs, which meant three of the four were never seen and
- * the section answered whichever question the user happened to click. Stacking
- * makes the page longer and shows the whole picture, which is the point of it.
- * The time-window control stays because it changes what every panel measures.
- */
-function RiskCard({ activeId, basis, valuationState }) {
-  const [window, setWindow] = useState("180");
-  const state = useApi(
-    () => analytics(activeId, { basis, window: Number(window) }),
-    [activeId, basis, window]
-  );
-  const diversifierState = useApi(
-    () => diversifiers(activeId, { basis, window: Number(window) }),
-    [activeId, basis, window]
-  );
-  const riskBusy = state.loading || diversifierState.loading;
-  const items = valuationState?.data?.items || [];
-  // The amounts below are these items' `value`, which the valuation endpoint has
-  // already re-expressed, so they are labelled with the basis it says it applied
-  // rather than with the one this card requested for its risk window.
-  const itemBasis = valuationState?.data?.basis || basis;
-  const labelFor = (key) => {
-    const item = items.find((i) => i.key === key);
-    return item ? holdingLabel(item) : assetLabel({ key });
-  };
-  // The charts identify rows by their display label, so the amount has to be
-  // reachable under the same key the tooltip is handed.
-  const valueByLabel = {};
-  const valueByClass = {};
-  for (const item of items) {
-    const value = Number(item.value || 0);
-    valueByLabel[holdingLabel(item)] = value;
-    const cls = humanize(item.class || "other");
-    valueByClass[cls] = (valueByClass[cls] || 0) + value;
-  }
-
-  return (
-    <Card
-      title="Risk"
-      subtitle="Where your money sits, where your risk actually comes from, and what would spread it out."
-      testId="dashboard-risk"
-      actions={(
-        <Tabs
-          options={RISK_WINDOWS.map((option) => ({ ...option, disabled: riskBusy }))}
-          value={window}
-          onChange={setWindow}
-          label="Window"
-          testId="dashboard-risk-window"
-        />
-      )}
-    >
-      <div className="space-y-5">
-        <Async {...state} testId="dashboard-risk-body">
-          {(data) => (
-            <>
-              <CoverageNote coverage={data.coverage} />
-              <RiskPanel
-                title="Risk by class"
-                caption="Two dots per row: the share of your money in that class, and the share of your portfolio's swings it accounts for. A risk dot far right of the money dot means that class moves the portfolio more than its size suggests."
-              >
-                <RiskClassView data={data} valueByClass={valueByClass} basis={itemBasis} />
-              </RiskPanel>
-              <RiskPanel
-                title="Risk by asset"
-                caption="The same comparison, one row per holding. The widest gaps are the positions worth trimming first."
-              >
-                <RiskAssetView data={data} labelFor={labelFor} valueByLabel={valueByLabel} basis={itemBasis} />
-              </RiskPanel>
-              <RiskPanel
-                title="Correlations"
-                caption="How closely each pair moves together. Warm cells move in lockstep and give you less protection than owning two things suggests; cool cells pull against each other."
-              >
-                <RiskCorrelationView data={data} labelFor={labelFor} />
-                {/* The same n governs all three panels above — they are one
-                    covariance estimate viewed three ways — so the caveat is
-                    stated once, under the chart it is most obviously about. */}
-                <MeasurementNote
-                  window={data.data_window}
-                  requestedDays={data.history_days}
-                  testId="dashboard-risk-window-note"
-                >
-                  {" "}
-                  Every panel above this one is built from the same days.
-                </MeasurementNote>
-              </RiskPanel>
-            </>
-          )}
-        </Async>
-        {/* Its own request and its own Async: a slow or empty diversifier
-            response must not hold up the three panels above it. */}
-        <RiskPanel
-          title="Where diversification would come from"
-          caption="Each dot is an asset you could ADD at a 5% position — not a swap for something you hold. Further right means it would calm the portfolio more; higher means it also returned more over the days measured. Ranking is by the calming effect only; past return never enters it."
-        >
-          <RiskAddView
-            state={diversifierState}
-            labelFor={labelFor}
-          />
-        </RiskPanel>
-      </div>
-    </Card>
-  );
-}
-
 function ExcludedDisclosure({ valuationState }) {
   const excluded = valuationState.data?.excluded;
   if (!excluded?.length) return null;
@@ -1659,42 +1359,14 @@ function HistoryQualityCard({ activeId }) {
 
 
 
-function InsightsCard({ activeId, refreshKey }) {
-  const state = useApi(() => insights(activeId), [activeId, refreshKey]);
-  const tone = (severity) =>
-    severity === "ok" ? "good"
-    : severity === "warning" || severity === "high" ? "warn"
-    : "neutral";
-  return (
-    <Card title="Portfolio notes" testId="dashboard-insights">
-      <Async {...state} testId="dashboard-insights-body" empty="No notes yet.">
-        {(data) => {
-          const rows = [data.concentration, data.gold_band, data.net_worth_trend].filter(Boolean);
-          return (
-            <ul className="space-y-2 text-sm">
-              {rows.map((row, i) => (
-                <li key={i} data-testid={`dashboard-insights-${i}`}>
-                  <Badge variant={tone(row.severity)}>{humanize(row.severity || "info")}</Badge>
-                  {" "}
-                  {row.message}
-                </li>
-              ))}
-            </ul>
-          );
-        }}
-      </Async>
-    </Card>
-  );
-}
-
 export default function Dashboard({ user }) {
   const portfolio = usePortfolio();
-  const { activeId, basis, revision } = portfolio;
+  const { activeId, basis } = portfolio;
   const valuationState = useApi(() => valuation(activeId, basis), [activeId, basis], { pollMs: 60000 });
 
   return (
     <div>
-      <PageHeader title="Portfolio" subtitle="Your holdings, valued live, with performance and risk alongside." />
+      <PageHeader title="Portfolio" subtitle="Your holdings, net worth, allocation, and performance in the selected valuation basis." />
       <div className="space-y-6">
         <HeroRow state={valuationState} basis={basis} />
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
@@ -1705,11 +1377,9 @@ export default function Dashboard({ user }) {
         </div>
         <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} admin={user?.role === "admin"} />
         <HistoryQualityCard activeId={activeId} />
-        <InsightsCard activeId={activeId} refreshKey={revision} />
         <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} />
         <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
         <ExcludedDisclosure valuationState={valuationState} />
-        <RiskCard activeId={activeId} basis={basis} valuationState={valuationState} />
       </div>
     </div>
   );

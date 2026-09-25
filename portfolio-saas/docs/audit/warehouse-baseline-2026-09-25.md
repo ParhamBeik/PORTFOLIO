@@ -12,6 +12,8 @@ The attached `financial_agent_warehouse_plan.md` is a proposal to test, not a sc
 
 The plan's example “net margin in USD” is not a distinct financial ratio when profit and revenue are translated consistently: the common currency factor cancels. The real questions are which profit and revenue periods and consolidation scopes are comparable, and whether separate translation dates would change the economic comparison. A cross-industry ranking cannot treat a bank's interest income, an industrial company's sales, and a holding company's investment gains as one interchangeable revenue field. Asset-class-specific facts and formulas remain separate; comparisons state their eligibility rules rather than filling absent fields with zero.
 
+The proposed `StandardIncomeStatement` labels fields `revenue_rial` while its heading says the raw values are **millions of Rials**. That naming error would silently overstate or understate a downstream conversion by 1,000,000. The implemented candidate facts keep `unit="million_rial"` beside the exact source cell; any later normalized table must carry an explicit scale rather than rely on a suffix.
+
 ## Live data and integrity findings
 
 | Area | Observed production state | Consequence |

@@ -18,7 +18,7 @@ This translates the user's research goal into a product contract. It does not in
 | `/activity` | Preserve | Ledger and transaction correction history are core record-keeping. |
 | `/explore` | Grow as primary research path | Source-backed TSE company view and bounded question routing exist in the draft. It does not yet cover crypto research, cross-company screens, or USD comparisons. |
 | `/markets` | Keep reachable during migration | It holds price history and asset comparisons, including non-stock data that Explore does not replace. Move validated workflows into asset-specific exploration before removing its navigation. |
-| `/guidance` and portfolio risk panels | Candidate for retirement or a separately labeled experimental area | The user finds these of little value; earlier product scoring is not evidence that their underlying forecasts or optimization assumptions are correct. Audit formulas and inputs before retaining any decision claim. |
+| `/guidance` and portfolio risk panels | Removed from primary navigation and Portfolio in the draft; old `/guidance` links remain reachable during transition | The user finds these of little value; earlier product scoring is not evidence that their underlying forecasts or optimization assumptions are correct. Audit formulas and inputs before retaining any decision claim. |
 | `/ops` | Preserve for operators, outside the research flow | Recovery, pipeline, and source coverage checks are necessary even if users rarely visit this page. |
 
 Old deep links still redirect to their current destinations. Deleting a route before its underlying data path and saved links have a replacement would remove access, so pruning is staged by workflow rather than by file count.

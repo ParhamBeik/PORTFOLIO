@@ -12,7 +12,6 @@ const PAGES = [
   { to: "/activity", label: "Activity" },
   { to: "/explore", label: "Explore" },
   { to: "/markets", label: "Markets" },
-  { to: "/guidance", label: "Guidance" },
 ];
 
 const BASES = [
@@ -247,8 +246,8 @@ export default function Shell({ user, onLogout, onUserChange }) {
             </label>
           </div>
 
-          {/* From `lg` up there is room for the links inline, and a drawer for
-              seven tabs on a desktop would be hiding navigation for no reason.
+          {/* From `lg` up there is room for the links inline, and a drawer on
+              desktop would be hiding navigation for no reason.
               The breakpoint lives on `.app-nav-rail` in index.css, not in a
               `hidden lg:flex` here: that utility and the component class are
               both single-class selectors, so the later stylesheet wins and the
