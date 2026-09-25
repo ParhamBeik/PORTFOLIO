@@ -11,6 +11,7 @@ import { Loading } from "./components/ui.jsx";
 
 const Onboarding = lazy(() => import("./pages/Onboarding.jsx"));
 const Ops = lazy(() => import("./pages/Ops.jsx"));
+const Explore = lazy(() => import("./pages/Explore.jsx"));
 const PortfolioDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.PortfolioDestination })));
 const ActivityDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.ActivityDestination })));
 const MarketsDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.MarketsDestination })));
@@ -20,6 +21,7 @@ const PAGE_TITLES = {
   "/": "Portfolio",
   "/activity": "Activity",
   "/markets": "Markets",
+  "/explore": "Explore",
   "/guidance": "Guidance",
   "/ledger": "Ledger",
   "/family": "Breakdown",
@@ -206,6 +208,7 @@ export default function App() {
                   onto a bare page whose only way out said "Back to sign in". */}
               <Route path="/privacy" element={<Legal kind="privacy" authed />} />
               <Route path="/terms" element={<Legal kind="terms" authed />} />
+              <Route path="/explore" element={<Explore />} />
               <Route element={<HoldingsGate user={user} />}>
                 <Route index element={<PortfolioDestination user={user} />} />
                 <Route path="/activity" element={<ActivityDestination />} />

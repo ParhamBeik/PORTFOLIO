@@ -475,6 +475,11 @@ export const snapshots = (days = 30, account = null, basis = null) => {
 export const priceHistory = (assetKey, days = 365) =>
   api(`/api/prices/history/?asset=${encodeURIComponent(assetKey)}&days=${days}`);
 
+export const exploreStocks = (query = "") =>
+  api(`/api/explore/stocks/?q=${encodeURIComponent(query)}`);
+export const stockDossier = (symbol, days = 365) =>
+  api(`/api/explore/stocks/${encodeURIComponent(symbol)}/?days=${days}`);
+
 // Portfolio against what you could have held instead, indexed to 100.
 /**
  * With no `mode`, answers what the pickers may offer; with one, runs that

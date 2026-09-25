@@ -2,6 +2,7 @@
 from django.contrib import admin
 from django.urls import include, path
 from accounts.views import CookieTokenRefreshView
+from marketdata.explore_api import StockDossierView, StockSearchView
 from portfolio.views.admin_ops import AdminCleanPricesExecuteView, AdminCleanPricesScanView
 from .health import HealthView, PriceFeedView, ReadyView
 
@@ -31,6 +32,8 @@ urlpatterns = [
     path("api/admin/clean-prices/scan/", AdminCleanPricesScanView.as_view(), name="admin-clean-prices-scan"),
     path("api/admin/clean-prices/execute/", AdminCleanPricesExecuteView.as_view(), name="admin-clean-prices-execute"),
     path("api/admin/", include("marketdata.admin_api")),
+    path("api/explore/stocks/", StockSearchView.as_view(), name="explore-stock-search"),
+    path("api/explore/stocks/<str:symbol>/", StockDossierView.as_view(), name="explore-stock-dossier"),
     path("api/", include("portfolio.urls")),
     path(
         "api/token/refresh/",
