@@ -881,7 +881,12 @@ class CorporateAction(models.Model):
 
 
 class GoldCurrencyHistory(models.Model):
-    """Gold, Fiat Currency, and Crypto daily price history, purely provider-sourced."""
+    """Gold, Fiat Currency, and Crypto daily price history, purely provider-sourced.
+
+    Twelve fractional places are needed for low-priced USDT-quoted coins.
+    Four places rounded every historical SHIB/USDT close to zero; using the
+    same precision for all OHLC fields prevents an impossible candle.
+    """
 
     class Source(models.TextChoices):
         PROVIDER = "provider", "Provider"
@@ -895,10 +900,10 @@ class GoldCurrencyHistory(models.Model):
     name = models.CharField(max_length=120, blank=True, default="")
     unit = models.CharField(max_length=32, blank=True, default="")
     date = models.CharField(max_length=10, db_index=True)
-    open_price = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
-    high_price = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
-    low_price = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
-    close_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    open_price = models.DecimalField(max_digits=30, decimal_places=12, null=True, blank=True)
+    high_price = models.DecimalField(max_digits=30, decimal_places=12, null=True, blank=True)
+    low_price = models.DecimalField(max_digits=30, decimal_places=12, null=True, blank=True)
+    close_price = models.DecimalField(max_digits=30, decimal_places=12, default=0)
     source = models.CharField(
         max_length=16, choices=Source.choices, default=Source.PROVIDER
     )

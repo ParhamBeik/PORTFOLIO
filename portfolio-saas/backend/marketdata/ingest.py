@@ -1025,8 +1025,8 @@ def aggregate_market_daily_bars(asset_class, jalali_date, *, symbols=None) -> tu
     return created, conflicts + skipped_closed
 
 
-def ingest_direct_crypto_history(symbol, unit, candles) -> tuple[int, int]:
-    """Wallex UDF candles -> GoldCurrencyHistory rows. Insert-only.
+def ingest_direct_crypto_history(symbol, unit, candles, *, repair_zero=False) -> tuple[int, int]:
+    """Wallex UDF candles -> GoldCurrencyHistory rows.
 
     Deliberately never overwrites an existing row, and the reason is the
     validation that justified this backfill at all. Wallex and the incumbent
@@ -1037,8 +1037,10 @@ def ingest_direct_crypto_history(symbol, unit, candles) -> tuple[int, int]:
     have -- rewriting them would stitch two venues into one series and put a
     small discontinuity at every join, in a table the returns matrix reads.
 
-    So this fills holes and leaves history alone. `bulk_create(ignore_conflicts)`
-    on the `(symbol, date)` unique constraint is exactly that behaviour.
+    So this fills holes and leaves valid history alone. An explicit repair pass
+    may replace a persisted zero for the same symbol, quote unit, and provider:
+    zero is not a valid price, and four-decimal storage truncated the entire
+    SHIB/USDT history to zero. The ordinary backfill remains insert-only.
 
     Unit is passed in rather than inferred, per the rule that a quote's currency
     is declared by whoever produced it. Wallex says `quoteAsset`, and the
@@ -1076,4 +1078,23 @@ def ingest_direct_crypto_history(symbol, unit, candles) -> tuple[int, int]:
     created, conflicts = _bulk(
         GoldCurrencyHistory, rows, scope={"symbol": symbol}
     )
-    return created, conflicts + rejected
+    repaired = 0
+    if repair_zero and rows:
+        by_date = {row.date: row for row in rows}
+        damaged = GoldCurrencyHistory.objects.filter(
+            symbol=symbol, unit=unit, source=GoldCurrencyHistory.Source.PROVIDER,
+            date__in=by_date, close_price=0,
+        )
+        fixes = []
+        for stored in damaged:
+            incoming = by_date[stored.date]
+            for field in ("open_price", "high_price", "low_price", "close_price"):
+                setattr(stored, field, getattr(incoming, field))
+            fixes.append(stored)
+        if fixes:
+            GoldCurrencyHistory.objects.bulk_update(
+                fixes, ["open_price", "high_price", "low_price", "close_price"],
+                batch_size=200,
+            )
+            repaired = len(fixes)
+    return created, conflicts + rejected - repaired

@@ -20,6 +20,7 @@ a time from the price loop.
     python manage.py backfill_crypto_history --dry-run
     python manage.py backfill_crypto_history
     python manage.py backfill_crypto_history --coins BTC,ETH --quote TMN
+    python manage.py backfill_crypto_history --coins SHIB --quote USDT --repair-zero
 
 Safe to re-run: the ingest is insert-only against the `(symbol, date)` unique
 constraint, so a second pass adds only genuinely new days.
@@ -67,6 +68,11 @@ class Command(BaseCommand):
         parser.add_argument(
             "--dry-run", action="store_true",
             help="Fetch and report what would land, without writing.",
+        )
+        parser.add_argument(
+            "--repair-zero", action="store_true",
+            help="Replace only zero OHLC rows for the same symbol and quote unit. "
+                 "Valid existing prices remain untouched.",
         )
         parser.add_argument(
             "--sleep", type=float, default=0.4,
@@ -125,7 +131,9 @@ class Command(BaseCommand):
                 if dry:
                     created, known = 0, 0
                 else:
-                    created, known = ingest_direct_crypto_history(symbol, unit, candles)
+                    created, known = ingest_direct_crypto_history(
+                        symbol, unit, candles, repair_zero=options["repair_zero"]
+                    )
                 totals["created"] += created
                 totals["known"] += known
                 totals["pairs"] += 1
