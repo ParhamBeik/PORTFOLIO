@@ -41,6 +41,13 @@ legacy_broker=0
 if [[ -n "${backend_cid}" ]] && docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${backend_cid}" \
   | grep -qx 'CELERY_BROKER_URL=redis://redis:6379/2'; then
   legacy_broker=1
+  declare -A legacy_service_state=()
+  for service in backend celery_worker_live celery_worker_archive celery_worker_codal celery_beat; do
+    service_cid="$("${compose[@]}" ps -q --all "${service}")"
+    if [[ -n "${service_cid}" ]]; then
+      legacy_service_state["${service}"]="$(docker inspect -f '{{.State.Status}}' "${service_cid}")"
+    fi
+  done
   for queue in live archive codal; do
     if ! depth="$("${compose[@]}" exec -T redis redis-cli -n 2 --raw LLEN "${queue}")" \
       || [[ ! "${depth}" =~ ^[0-9]+$ ]]; then
@@ -76,7 +83,9 @@ if (( legacy_broker )); then
   resume_legacy_services() {
     local failed=0
     for service in backend celery_worker_live celery_worker_archive celery_worker_codal celery_beat; do
-      if [[ -n "$("${compose[@]}" ps -q --all "${service}")" ]]; then
+      # A worker intentionally paused before deployment must not wake on a
+      # failed cutover and unexpectedly spend provider quota.
+      if [[ "${legacy_service_state[${service}]:-}" == "running" ]]; then
         if ! "${compose[@]}" start "${service}"; then
           echo "Could not restart legacy ${service}; manual recovery is required." >&2
           failed=1
