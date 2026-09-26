@@ -15,6 +15,8 @@ WHERE a.kind = 'html' AND a.fetch_status = 'stored'
 
 All 5,913 selected MinIO objects were read and SHA-256 checked against their artifact rows; none mismatched. Their total response bytes were 474,062,392. Of these, 1,453 contained an embedded `var datasource =` declaration and 4,460 did not. The embedded `title_En` field spans many issuer-industry and template versions. A title without the subsidiary marker is only *parent-like*; the parser separately verifies issuer and symbol in the source HTML.
 
+The stored statement-candidate HTML is heavily recent. A read-only count by announcement **publication year** found 220 pages through 1402, 585 in 1403, 2,578 in 1404, and 2,530 in 1405; these sum to 5,913. Thus 5,108 pages (86.4%) were published in 1404–1405. Publication year is not the financial period, and these are mixed candidate pages rather than certified statements. Historical research will need a source-backed multi-year acquisition plan; old publication dates alone cannot establish five-year comparable coverage.
+
 | 1405 parent-like V9 income template | Stored candidate pages | Certified income pages | Balance-sheet option advertised |
 | --- | ---: | ---: | ---: |
 | Listed, standalone | 37 | 34 | 37 |
