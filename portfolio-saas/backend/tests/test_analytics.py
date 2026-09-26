@@ -1445,6 +1445,61 @@ def test_a_bar_with_no_dollar_rate_yet_yields_no_row(db):
     assert [date for _symbol, date, _price in rows] == ["1404-01-05"]
 
 
+def test_long_flat_cash_usd_run_withholds_foreign_quoted_prices(db):
+    """A repeated FX row must not price every crypto day as if it were fresh."""
+    from marketdata.models import MarketDailyBar, MarketSnapshot
+    from marketdata.provenance import daily_bar_price, rate_on, toman_per_dollar
+    from portfolio.models import Asset
+
+    coin = Asset.objects.create(
+        key="btc-flat-usd", name="Bitcoin", asset_class=Asset.AssetClass.CRYPTO,
+        brs_symbol="BTC", is_active=True,
+    )
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.BRS, symbol="BTC", name="Bitcoin",
+        category=MarketInstrument.Category.CRYPTO, eligible=True,
+    )
+    MarketSnapshot.objects.create(
+        asset_class="crypto", symbol="BTC", observed_at=timezone.now(),
+        last_price=Decimal("10"), provider_payload={"unit": "تتر"},
+    )
+    for day in range(20, 27):
+        GoldCurrencyHistory.objects.create(
+            symbol="USD", date=f"1404-09-{day:02d}",
+            close_price=Decimal("100000"), unit="تومان",
+        )
+    for day in range(1, 17):
+        GoldCurrencyHistory.objects.create(
+            symbol="USD", date=f"1404-10-{day:02d}",
+            close_price=Decimal("120000"), unit="تومان",
+        )
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date="1404-10-18", close_price=Decimal("130000"), unit="تومان",
+    )
+    for day in ("1404-09-20", "1404-10-01", "1404-10-16", "1404-10-17", "1404-10-18"):
+        MarketDailyBar.objects.create(
+            asset_class=MarketDailyBar.AssetClass.CRYPTO, symbol="BTC", date=day,
+            open_price=Decimal("10"), high_price=Decimal("10"),
+            low_price=Decimal("10"), close_price=Decimal("10"),
+        )
+
+    assert rate_on(*toman_per_dollar(["1404-10-01"]), "1404-10-01") is None
+    assert rate_on(*toman_per_dollar(["1404-10-16"]), "1404-10-16") is None
+    assert rate_on(*toman_per_dollar(["1404-10-17"]), "1404-10-17") is None
+    assert {(date, price) for _symbol, date, price in daily_bar_price([coin])} == {
+        ("1404-09-20", Decimal("1000000")),
+        ("1404-10-18", Decimal("1300000")),
+    }
+    RejectedRecord.objects.create(
+        endpoint="gold_daily", symbol="USD", date="1404-10-18",
+        reason="series_spike", payload={},
+    )
+    assert rate_on(*toman_per_dollar(["1404-10-19"]), "1404-10-19") is None
+    assert [(date, price) for _symbol, date, price in daily_bar_price([coin])] == [
+        ("1404-09-20", Decimal("1000000")),
+    ]
+
+
 @pytest.mark.django_db
 def test_resolve_universe_does_not_query_per_symbol(django_assert_num_queries):
     """The universe branch must batch its MarketInstrument lookups.

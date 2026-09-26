@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bisect
+from itertools import groupby
 
 from .calendars import candle_close_qs
 from .models import (
@@ -152,27 +153,41 @@ def toman_per_dollar(dates=None) -> tuple[dict, list]:
     """Toman-per-dollar by Jalali date, plus a sorted key list for bisecting.
 
     Returns `(rates, sorted_dates)`. Callers convert a row dated D at the newest
-    rate on or before D -- never at today's. A foreign series flattened by one
-    fixed rate is a different asset's returns: it erases every move the rial
-    itself made, which for a 90-day window of a depreciating rial restates the
-    whole history by the drift.
+    rate on or before D -- never at today's. Rejected USD rows and eight
+    consecutive stored observations with an identical close are review gaps,
+    represented by None so as-of lookup cannot carry a preceding quote across
+    them. A flat run is a conservative gate, not a claim about its cause.
     """
     from .models import GoldCurrencyHistory
 
     queryset = GoldCurrencyHistory.objects.filter(symbol="USD", close_price__gt=0)
     if dates:
-        # Bounded BOTH ways. Only the rates spanning the rows being converted
-        # are needed, plus the one immediately before the earliest (which is
-        # what a row on a non-quoting day resolves to). Without the lower bound
-        # a 90-day panel materialised years of USD history to answer 90 lookups.
-        floor = (
-            queryset.filter(date__lte=min(dates)).order_by("-date")
-            .values_list("date", flat=True).first()
-        )
-        queryset = queryset.filter(date__lte=max(dates))
-        if floor is not None:
-            queryset = queryset.filter(date__gte=floor)
-    rates = dict(queryset.order_by("date").values_list("date", "close_price"))
+        # Eight neighbours on either side identify an eight-row flat run even
+        # when the requested date is a non-quoting day just after it. This keeps
+        # a 90-day panel bounded instead of materialising years of FX.
+        first, last = min(dates), max(dates)
+        before = list(queryset.filter(date__lt=first).order_by("-date")
+                      .values_list("date", "close_price")[:8])
+        middle = list(queryset.filter(date__gte=first, date__lte=last)
+                      .order_by("date").values_list("date", "close_price"))
+        after = list(queryset.filter(date__gt=last).order_by("date")
+                     .values_list("date", "close_price")[:8])
+        rows = sorted((*before, *middle, *after))
+    else:
+        rows = list(queryset.order_by("date").values_list("date", "close_price"))
+    rates = dict(rows)
+    for _price, group in groupby(rows, key=lambda row: row[1]):
+        run = list(group)
+        if len(run) >= 8:
+            for day, _ in run:
+                rates[day] = None
+    if rows:
+        rejected = RejectedRecord.objects.filter(
+            symbol="USD", endpoint=ArchiveFetchState.Endpoint.GOLD_DAILY,
+            date__gte=rows[0][0], date__lte=rows[-1][0],
+        ).values_list("date", flat=True)
+        for day in rejected:
+            rates[day] = None
     return rates, sorted(rates)
 
 
