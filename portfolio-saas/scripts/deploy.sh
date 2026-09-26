@@ -33,6 +33,33 @@ elif (( free_gb < 15 )); then
   echo "WARNING: ${free_gb} GB free on the Docker device. See the Ops console's disk meter." >&2
 fi
 
+# A broker cutover cannot drain a queue whose old consumer is absent or paused.
+# Check before the backup/build, and especially before stopping the API: an
+# older Compose stack can have queued Codal jobs but no Codal worker at all.
+backend_cid="$("${compose[@]}" ps -q backend)"
+legacy_broker=0
+if [[ -n "${backend_cid}" ]] && docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${backend_cid}" \
+  | grep -qx 'CELERY_BROKER_URL=redis://redis:6379/2'; then
+  legacy_broker=1
+  for queue in live archive codal; do
+    if ! depth="$("${compose[@]}" exec -T redis redis-cli -n 2 --raw LLEN "${queue}")" \
+      || [[ ! "${depth}" =~ ^[0-9]+$ ]]; then
+      echo "Cannot inspect legacy ${queue} queue; refusing broker cutover." >&2
+      exit 1
+    fi
+    (( depth > 0 )) || continue
+    worker_cid="$("${compose[@]}" ps -q --all "celery_worker_${queue}")"
+    worker_state="missing"
+    if [[ -n "${worker_cid}" ]]; then
+      worker_state="$(docker inspect -f '{{.State.Running}}:{{.State.Paused}}' "${worker_cid}")"
+    fi
+    if [[ "${worker_state}" != "true:false" ]]; then
+      echo "Legacy ${queue} queue has ${depth} jobs, but its worker is ${worker_state}; refusing broker cutover before stopping the API." >&2
+      exit 1
+    fi
+  done
+fi
+
 if [[ -n "$("${compose[@]}" ps -q db)" ]] && "${compose[@]}" exec -T db pg_isready >/dev/null 2>&1; then
   "${project_dir}/scripts/backup_postgres.sh"
 fi
@@ -40,16 +67,18 @@ fi
 # The first broker cutover cannot abandon work in Redis DB 2. Stop producers,
 # leave old workers draining, and only switch once queued and unacked messages
 # reach zero. Results remain on DB 2 and do not count as outstanding work.
-backend_cid="$("${compose[@]}" ps -q backend)"
-if [[ -n "${backend_cid}" ]] && docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${backend_cid}" \
-  | grep -qx 'CELERY_BROKER_URL=redis://redis:6379/2'; then
+if (( legacy_broker )); then
   drain_timeout="${BROKER_DRAIN_TIMEOUT_SECONDS:-300}"
   [[ "${drain_timeout}" =~ ^[1-9][0-9]*$ ]] || {
     echo "BROKER_DRAIN_TIMEOUT_SECONDS must be a positive integer" >&2
     exit 1
   }
   resume_legacy_services() {
-    "${compose[@]}" start backend celery_worker_live celery_worker_archive celery_worker_codal celery_beat
+    for service in backend celery_worker_live celery_worker_archive celery_worker_codal celery_beat; do
+      if [[ -n "$("${compose[@]}" ps -q --all "${service}")" ]]; then
+        "${compose[@]}" start "${service}"
+      fi
+    done
   }
   "${compose[@]}" stop celery_beat backend
   legacy_pending() {
