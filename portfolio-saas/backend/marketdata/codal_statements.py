@@ -87,6 +87,19 @@ def _canonical(value):
     return re.sub(r"[^\w]", "", text)
 
 
+def _html_soup(content):
+    # Some Codal V9 pages declare their charset very late. BeautifulSoup can
+    # guess a legacy encoding despite the original bytes being valid UTF-8,
+    # corrupting Persian issuer, symbol, and unit labels. Keep the raw bytes
+    # for hashing; decode only the parser's in-memory view.
+    if isinstance(content, bytes):
+        try:
+            content = content.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+    return BeautifulSoup(content, "lxml")
+
+
 def _period_start(period_end, months):
     try:
         year, month, day = map(int, period_end.split("-"))
@@ -116,7 +129,7 @@ def balance_sheet_url(income_html, source_url, *, is_consolidated):
         return None
     sheet_id = "14" if is_consolidated else "0"
     expected = "صورتوضعیتمالیتلفیقی" if is_consolidated else "صورتوضعیتمالی"
-    options = BeautifulSoup(income_html, "lxml").select(f'option[value="{sheet_id}"]')
+    options = _html_soup(income_html).select(f'option[value="{sheet_id}"]')
     if len(options) != 1 or _canonical(options[0].get_text(" ", strip=True)) != expected:
         return None
     params = [(key, value) for key, value in params if key.lower() != "sheetid"]
@@ -133,7 +146,7 @@ def parse_income_statement(
     if re.search(r"\(\s*شرکت", str(title or "")):
         # The listed symbol can publish a subsidiary's own statements.
         return []
-    soup = BeautifulSoup(content, "lxml")
+    soup = _html_soup(content)
     company_node = soup.select_one("#ctl00_txbCompanyName")
     symbol_node = soup.select_one("#ctl00_txbSymbol")
     unit_node = soup.select_one("#ctl00_pPriceNote")
@@ -237,7 +250,7 @@ def parse_balance_sheet(
         return []
     if re.search(r"\(\s*شرکت", str(title or "")):
         return []
-    soup = BeautifulSoup(content, "lxml")
+    soup = _html_soup(content)
     company_node = soup.select_one("#ctl00_txbCompanyName")
     symbol_node = soup.select_one("#ctl00_txbSymbol")
     unit_node = soup.select_one("#ctl00_pPriceNote")

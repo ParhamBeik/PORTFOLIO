@@ -21,13 +21,13 @@ All 5,913 selected MinIO objects were read and SHA-256 checked against their art
 | Listed, consolidated | 77 | 72 | 77 |
 | OTC, standalone | 31 | 25 | 31 |
 | OTC, consolidated | 37 | 33 | 37 |
-| Registered, standalone | 26 | 14 | 25 |
+| Registered, standalone | 26 | 15 | 25 |
 | Registered, consolidated | 14 | 12 | 14 |
-| **Total** | **222** | **190** | **221** |
+| **Total** | **222** | **191** | **221** |
 
-The certification count ran the draft V9 income parser against each original stored page and its announcement identity, period, scope, and audit status. It tests exact table versions, labeled cells, million-Rial unit, and gross/net arithmetic. The 190 pages are *possible* source-backed historical income readings after a controlled backfill, not currently published production facts. Corrections can further reduce displayed coverage, and these counts do not establish unique-company or full-stock-universe coverage. The 221 balance options are advertised URLs, not retrieved or certified balance sheets.
+The certification count reran the draft V9 income parser against all 222 original, SHA-256-checked stored pages and their announcement identity, period, scope, and audit status on 2026-09-26 at 10:17 UTC. It tests exact table versions, labeled cells, million-Rial unit, and gross/net arithmetic. The 191 pages are *possible* source-backed historical income readings after a controlled backfill, not currently published production facts. Corrections can further reduce displayed coverage, and these counts do not establish unique-company or full-stock-universe coverage. The 221 balance options are advertised URLs, not retrieved or certified balance sheets.
 
-The first 114 listed-template pages yielded 106 certified income pages. Six rejected pages had no source HTML symbol; two `خچرخش` pages had current-period cells dated `1404/03/31` while the filing and datasource were dated `1404/12/29`. The parser correctly withheld all eight. Remaining OTC/registered refusals need row-level review before changing validation rules.
+The first 114 listed-template pages yielded 106 certified income pages. Across all six template variants, the remaining 31 refusals break down as 26 pages without an HTML symbol field, two `خچرخش` pages whose current-period cells say `1404/03/31` while the filing and datasource say `1404/12/29`, and three registered standalone pages with empty revenue cells that fail the positive-revenue or gross-profit check. These remain withheld. One registered standalone `کهرام` page had a UTF-8 declaration about 35 KB into the response; BeautifulSoup guessed a legacy encoding when passed raw bytes. Decoding its SHA-256-checked UTF-8 bytes before parsing restores six reconciled income facts, including revenue 2,089,753 and net profit −635,952 million Rial. The exact response (artifact 51262, SHA-256 `62711d9962bfaead32d26b6fbd3c1b291cabc3e4c69d862d15af3c80b2b7c1d3`) is a regression fixture. The other 190 accepted results were byte-for-byte unchanged by explicit UTF-8 decoding. A missing source symbol cannot be inferred from the database row without weakening issuer verification.
 
 Four additional public source pairs were captured for regression tests. Each original income page and its separately fetched balance sheet used the same V9 sheet/table IDs and passed exact-cell and arithmetic checks. The SHA-256 columns identify the exact local fixture responses, not every response Codal may generate for a URL.
 

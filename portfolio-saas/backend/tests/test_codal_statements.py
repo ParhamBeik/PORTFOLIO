@@ -140,6 +140,22 @@ def test_unobserved_v9_venue_is_withheld():
     ) == []
 
 
+def test_late_declared_utf8_preserves_issuer_and_exact_source_cells():
+    raw = (FIXTURES / "registered_standalone_late_charset_v9.html").read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == "62711d9962bfaead32d26b6fbd3c1b291cabc3e4c69d862d15af3c80b2b7c1d3"
+    assert raw.find(b"charset=UTF-8") > 30_000
+    facts = {fact["fact_code"]: fact for fact in parse_income_statement(
+        raw, symbol="کهرام", company_name="تولیدی گرانیت بهسرام",
+        title="صورت‌های مالی سال مالی منتهی به ۱۴۰۴/۱۲/۲۹ (حسابرسی نشده)",
+        period_end="1404-12-29", is_consolidated=False, is_audited=False,
+    )}
+    assert facts["income.operating_revenue"]["numeric_value"] == Decimal("2089753")
+    assert facts["income.net_profit"]["numeric_value"] == Decimal("-635952")
+    assert facts["income.net_profit"]["unit"] == "million_rial"
+    source = "https://codal.ir/Reports/Decision.aspx?LetterSerial=mxULoShEsmImmzQQQaQQQyByxHeQ%3d%3d&rt=0&let=6&ct=0&ft=-1"
+    assert balance_sheet_url(raw, source, is_consolidated=False).endswith("sheetId=0")
+
+
 @pytest.mark.django_db
 def test_balance_backfill_archives_source_and_is_idempotent(monkeypatch, capsys):
     from marketdata.management.commands import backfill_balance_sheets as command
