@@ -19,6 +19,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import jalali
+from .codal_classification import classify_announcement
 from .models import (
     ArchiveFetchState,
     CodalAnnouncement,
@@ -120,26 +121,46 @@ _INCOME_CODES = {
     "income.continuing_profit", "income.discontinued_profit", "income.net_profit",
 }
 
+_BALANCE_CODES = {
+    "balance.noncurrent_assets", "balance.cash", "balance.current_assets",
+    "balance.total_assets", "balance.total_equity", "balance.long_term_borrowings",
+    "balance.noncurrent_liabilities", "balance.short_term_borrowings",
+    "balance.current_liabilities", "balance.total_liabilities",
+    "balance.liabilities_and_equity",
+}
+
+
+def _latest_statement_reports(symbol, start, end):
+    """An unprocessed source announcement still supersedes an older reading."""
+    announcements = CodalAnnouncement.objects.filter(symbol=symbol).select_related("report").order_by(
+        "-date_publish", "-time_publish", "-pk"
+    )
+    latest = {}
+    for announcement in announcements:
+        if re.search(r"\(\s*شرکت", announcement.title):
+            continue
+        classified = classify_announcement(announcement)
+        period = classified["period_end"]
+        if (classified["category"] != CodalAnnouncement.Category.STATEMENTS
+                or not period or not start <= period <= end):
+            continue
+        key = (period, classified["is_consolidated"])
+        if key in latest:
+            continue
+        report = getattr(announcement, "report", None)
+        latest[key] = report if (report and report.period_end == period
+                                  and report.is_consolidated is classified["is_consolidated"]
+                                  and report.is_audited is classified["is_audited"]) else None
+    return latest
+
 
 def _income_statements(symbol, start, end):
     """One issuer filing per period and scope; a newer unverified filing wins."""
-    reports = CodalReport.objects.filter(
-        Q(category=CodalAnnouncement.Category.STATEMENTS)
-        | Q(announcement__doc_type="financial_statements"),
-        announcement__symbol=symbol,
-        period_end__gte=start, period_end__lte=end,
-    ).select_related("announcement").order_by(
-        "-announcement__date_publish", "-announcement__time_publish", "-pk"
-    )
-    latest = {}
-    for report in reports:
-        if re.search(r"\(\s*شرکت", report.announcement.title):
-            continue
-        latest.setdefault((report.period_end, report.is_consolidated), report)
+    latest = _latest_statement_reports(symbol, start, end)
 
     candidates = defaultdict(lambda: defaultdict(list))
     for fact in CodalCandidateFact.objects.filter(
-        extraction__report_id__in=[report.pk for report in latest.values()],
+        extraction__report_id__in=[report.pk for report in latest.values() if report],
         extraction__parser_version=settings.CODAL_STATEMENT_PARSER_VERSION,
         verification_status=CodalVerification.RECONCILED,
         fact_code__in=_INCOME_CODES,
@@ -149,6 +170,8 @@ def _income_statements(symbol, start, end):
 
     points = []
     for (period_end, consolidated), report in sorted(latest.items()):
+        if report is None:
+            continue
         readings = []
         for facts in candidates[report.pk].values():
             by_code = {fact.fact_code: fact for fact in facts}
@@ -206,6 +229,97 @@ def _income_statements(symbol, start, end):
             "verified" if points and len(points) == len(latest)
             else "partially_verified" if points else "unavailable_unverified"
         ),
+        "latest_period_by_scope": {
+            scope: max(period for period, consolidated in latest if consolidated is (scope == "consolidated"))
+            for scope in ("standalone", "consolidated")
+            if any(consolidated is (scope == "consolidated") for _, consolidated in latest)
+        },
+        "latest_filing_periods": len(latest),
+        "verified_periods": len(points),
+        "withheld_periods": len(latest) - len(points),
+        "points": points,
+    }
+
+
+def _balance_sheets(symbol, start, end):
+    """Point-in-time balance readings; later unverified corrections withhold."""
+    latest = _latest_statement_reports(symbol, start, end)
+    candidates = defaultdict(lambda: defaultdict(list))
+    for fact in CodalCandidateFact.objects.filter(
+        extraction__report_id__in=[report.pk for report in latest.values() if report],
+        extraction__parser_version=settings.CODAL_STATEMENT_PARSER_VERSION,
+        verification_status=CodalVerification.RECONCILED,
+        fact_code__in=_BALANCE_CODES,
+        unit="million_rial", currency="IRR",
+    ).select_related("extraction__artifact"):
+        candidates[fact.extraction.report_id][fact.extraction_id].append(fact)
+
+    points = []
+    for (period_end, consolidated), report in sorted(latest.items()):
+        if report is None:
+            continue
+        readings = []
+        for facts in candidates[report.pk].values():
+            by_code = {fact.fact_code: fact for fact in facts}
+            first = facts[0]
+            scope = "consolidated" if consolidated else "standalone"
+            sheet_code, table_id = (14, 3230) if consolidated else (0, 3223)
+            if (len(facts) != len(_BALANCE_CODES) or set(by_code) != _BALANCE_CODES
+                    or not re.fullmatch(r"[0-9a-f]{64}", first.extraction.checksum_sha256)
+                    or first.extraction.checksum_sha256 != first.extraction.artifact.checksum_sha256
+                    or not first.extraction.artifact.source_url.endswith(f"sheetId={sheet_code}")
+                    or any(fact.numeric_value is None or fact.period_end != period_end
+                           or fact.period_start != ""
+                           or fact.dimensions.get("statement_scope") != scope
+                           or fact.dimensions.get("audited") is not report.is_audited
+                           or fact.source_coordinates.get("sheet_code") != sheet_code
+                           or fact.source_coordinates.get("table_id") != table_id
+                           for fact in facts)):
+                continue
+            values = {code: by_code[code].numeric_value for code in _BALANCE_CODES}
+            if (values["balance.total_assets"] <= 0
+                    or values["balance.current_assets"] + values["balance.noncurrent_assets"] != values["balance.total_assets"]
+                    or values["balance.current_liabilities"] + values["balance.noncurrent_liabilities"] != values["balance.total_liabilities"]
+                    or values["balance.total_liabilities"] + values["balance.total_equity"] != values["balance.total_assets"]
+                    or values["balance.liabilities_and_equity"] != values["balance.total_assets"]):
+                continue
+            readings.append((first.extraction_id, by_code))
+        if not readings or len({
+            tuple(row[code].numeric_value for code in sorted(_BALANCE_CODES))
+            for _, row in readings
+        }) != 1:
+            continue
+        extraction_id, row = max(readings, key=lambda item: item[0])
+        first = row["balance.total_assets"]
+        points.append({
+            "statement_kind": "balance_sheet",
+            "period_end_jalali": period_end,
+            "scope": "consolidated" if consolidated else "standalone",
+            "audited": report.is_audited,
+            "values": {code.removeprefix("balance."): str(row[code].numeric_value)
+                       for code in sorted(_BALANCE_CODES)},
+            "unit": "million_rial", "currency": "IRR",
+            "source_url": _safe_codal_link(first.extraction.artifact.source_url),
+            "published_jalali": report.announcement.date_publish,
+            "is_correction": report.is_correction,
+            "report_id": report.pk,
+            "extraction_id": extraction_id,
+            "artifact_id": first.extraction.artifact_id,
+            "artifact_sha256": first.extraction.checksum_sha256,
+            "source_coordinates": {code.removeprefix("balance."): row[code].source_coordinates
+                                   for code in sorted(_BALANCE_CODES)},
+            "verification": CodalVerification.RECONCILED,
+        })
+    return {
+        "status": (
+            "verified" if points and len(points) == len(latest)
+            else "partially_verified" if points else "unavailable_unverified"
+        ),
+        "latest_period_by_scope": {
+            scope: max(period for period, consolidated in latest if consolidated is (scope == "consolidated"))
+            for scope in ("standalone", "consolidated")
+            if any(consolidated is (scope == "consolidated") for _, consolidated in latest)
+        },
         "latest_filing_periods": len(latest),
         "verified_periods": len(points),
         "withheld_periods": len(latest) - len(points),
@@ -350,5 +464,6 @@ class StockDossierView(APIView):
                 for row in disclosures
             ],
             "financial_metrics": _income_statements(symbol, start, end_jalali),
+            "balance_sheet": _balance_sheets(symbol, start, end_jalali),
             "monthly_sales": _monthly_sales(symbol, start, end_jalali),
         })

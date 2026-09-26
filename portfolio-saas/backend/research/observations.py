@@ -21,7 +21,7 @@ def _change(current, previous):
     return percent.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def build_observations(monthly_sales, income=None):
+def build_observations(monthly_sales, income=None, balance=None):
     points = monthly_sales["points"]
     result = {}
     if points:
@@ -31,6 +31,9 @@ def build_observations(monthly_sales, income=None):
         if not scope_points:
             continue
         latest = max(scope_points, key=lambda point: point["period_end_jalali"])
+        newest_filing = (income or {}).get("latest_period_by_scope", {}).get(scope)
+        if newest_filing and latest["period_end_jalali"] != newest_filing:
+            continue
         period = f"{latest['period_start_jalali']}–{latest['period_end_jalali']}"
         qualifier = f"{scope}, {'audited' if latest['audited'] else 'unaudited'}"
         for key, label, statement in (
@@ -41,6 +44,32 @@ def build_observations(monthly_sales, income=None):
             result[f"income_{scope}_{key}"] = {
                 "description": f"Latest verified {scope} income statement {label} for this company, with filing period and audit status",
                 "statement": f"Latest verified {qualifier} income statement for {period}: {label} {statement}.",
+                "sources": [latest],
+            }
+
+    for scope in ("standalone", "consolidated"):
+        scope_points = [point for point in (balance or {}).get("points", []) if point["scope"] == scope]
+        if not scope_points:
+            continue
+        latest = max(scope_points, key=lambda point: point["period_end_jalali"])
+        newest_filing = (balance or {}).get("latest_period_by_scope", {}).get(scope)
+        if newest_filing and latest["period_end_jalali"] != newest_filing:
+            continue
+        qualifier = f"{scope}, {'audited' if latest['audited'] else 'unaudited'}"
+        for key, label in (
+            ("total_assets", "total assets"),
+            ("total_liabilities", "total liabilities"),
+            ("total_equity", "total equity"),
+            ("cash", "cash"),
+            ("short_term_borrowings", "short-term borrowings"),
+            ("long_term_borrowings", "long-term borrowings"),
+        ):
+            result[f"balance_{scope}_{key}"] = {
+                "description": f"Latest verified {scope} balance sheet {label} for this company, with date and audit status",
+                "statement": (
+                    f"Latest verified {qualifier} balance sheet at {latest['period_end_jalali']}: "
+                    f"{label} {_money(latest['values'][key])}."
+                ),
                 "sources": [latest],
             }
     return result

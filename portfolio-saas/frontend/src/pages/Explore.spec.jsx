@@ -43,6 +43,22 @@ describe("company research", () => {
           source_coordinates: { revenue: { address: "B4" }, net_profit: { address: "B21" } },
         }], verified_periods: 1, withheld_periods: 0,
       },
+      balance_sheet: {
+        points: [{
+          period_end_jalali: "1405-03-31", scope: "standalone", audited: false,
+          values: {
+            total_assets: "6278290305", total_liabilities: "2896232830",
+            total_equity: "3382057475", cash: "500661833",
+            short_term_borrowings: "563689252", long_term_borrowings: "254997750",
+          },
+          artifact_id: 14170, published_jalali: "1405-05-01",
+          source_url: `${source.source_url}&sheetId=0`,
+          source_coordinates: {
+            total_assets: { address: "B22" }, total_liabilities: { address: "B53" },
+            total_equity: { address: "B35" },
+          },
+        }], verified_periods: 1, withheld_periods: 0,
+      },
       coverage: [], disclosures: [],
     });
     api.researchSettings.mockResolvedValue({
@@ -55,7 +71,7 @@ describe("company research", () => {
     api.runResearch.mockResolvedValue({
       status: "answered", cost_usd: "0.000400", cost_basis: "provider_reported",
       claims: [{ id: "highest", statement: "Highest among verified months: 1405-03-31 at 545,287,525 million Rial.", sources: [source] }],
-      coverage: { verified_periods: 1, withheld_periods: 0 },
+      coverage: { verified_periods: 1, withheld_periods: 0, income_verified_periods: 1, income_withheld_periods: 0, balance_verified_periods: 1, balance_withheld_periods: 0 },
     });
     render(<MemoryRouter initialEntries={["/explore?symbol=فولاد"]}><Explore /></MemoryRouter>);
 
@@ -71,5 +87,30 @@ describe("company research", () => {
     expect(screen.getByText(/Model cost: \$0\.0004/)).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: /Codal filing/i })[0]).toHaveAttribute("href", source.source_url);
     expect(screen.getByTestId("explore-income-evidence")).toHaveTextContent(/revenue cell B4 · profit cell B21/i);
+    expect(screen.getByTestId("explore-balance-evidence")).toHaveTextContent(/assets cell B22 · liabilities cell B53 · equity cell B35/i);
+    expect(screen.getByRole("link", { name: "Original Codal balance sheet" })).toHaveAttribute("href", `${source.source_url}&sheetId=0`);
+  });
+
+  it("shows balance research cells from the archived sheet", async () => {
+    api.runResearch.mockResolvedValue({
+      status: "answered", cost_usd: "0.000400", cost_basis: "provider_reported",
+      claims: [{
+        id: "balance_standalone_total_assets",
+        statement: "Latest verified standalone balance sheet: total assets 6,278,290,305 million Rial.",
+        sources: [{
+          statement_kind: "balance_sheet", scope: "standalone", period_end_jalali: "1405-03-31",
+          artifact_id: 14170, source_url: `${source.source_url}&sheetId=0`,
+          source_coordinates: {
+            total_assets: { address: "B22" }, total_liabilities: { address: "B53" },
+            total_equity: { address: "B35" },
+          },
+        }],
+      }],
+    });
+    render(<MemoryRouter initialEntries={["/explore?symbol=فولاد"]}><Explore /></MemoryRouter>);
+    fireEvent.change(await screen.findByTestId("explore-research-question"), { target: { value: "What are total assets?" } });
+    fireEvent.click(screen.getByTestId("explore-research-submit"));
+    expect(await screen.findByText(/total assets 6,278,290,305 million Rial/i)).toBeInTheDocument();
+    expect(screen.getByTestId("explore-research-result")).toHaveTextContent(/balance cells assets B22 \/ liabilities B53 \/ equity B35/i);
   });
 });

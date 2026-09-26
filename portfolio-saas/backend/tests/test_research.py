@@ -13,6 +13,7 @@ from rest_framework.test import APIClient
 
 from marketdata.models import MarketInstrument
 from research.models import ResearchBudgetDay, ResearchRun
+from research.observations import build_observations
 from research import provider, views
 
 pytestmark = pytest.mark.django_db
@@ -59,6 +60,30 @@ def _income():
             "net_margin_pct": "14.43", "artifact_id": 14169,
             "artifact_sha256": "c" * 64, "extraction_id": 42,
             "source_coordinates": {"revenue": {"address": "B4"}, "net_profit": {"address": "B21"}},
+        }],
+    }
+
+
+def _balance():
+    return {
+        "status": "verified", "latest_filing_periods": 1,
+        "verified_periods": 1, "withheld_periods": 0,
+        "points": [{
+            "statement_kind": "balance_sheet", "period_end_jalali": "1405-03-31",
+            "scope": "standalone", "audited": False,
+            "values": {
+                "total_assets": "6278290305", "total_liabilities": "2896232830",
+                "total_equity": "3382057475", "cash": "500661833",
+                "short_term_borrowings": "563689252", "long_term_borrowings": "254997750",
+            },
+            "artifact_id": 14170, "artifact_sha256": "d" * 64,
+            "extraction_id": 43,
+            "source_url": "https://codal.ir/Reports/Decision.aspx?LetterSerial=x&sheetId=0",
+            "source_coordinates": {
+                "total_assets": {"address": "B22"},
+                "total_liabilities": {"address": "B53"},
+                "total_equity": {"address": "B35"},
+            },
         }],
     }
 
@@ -177,6 +202,69 @@ def test_income_question_uses_certified_cells_without_monthly_sales(make_user, m
     assert "120,356,493 million Rial" in response.data["claims"][0]["statement"]
     assert response.data["claims"][0]["sources"][0]["source_coordinates"]["net_profit"]["address"] == "B21"
     assert response.data["coverage"]["income_verified_periods"] == 1
+
+
+def test_balance_question_uses_source_cells_and_no_income_data(make_user, monkeypatch, tmp_path):
+    client = _client(make_user)
+    monkeypatch.setattr(views, "_monthly_sales", lambda *args: {
+        "points": [], "latest_filing_periods": 0, "verified_periods": 0, "withheld_periods": 0,
+    })
+    monkeypatch.setattr(views, "_income_statements", lambda *args: {
+        "points": [], "latest_filing_periods": 0, "verified_periods": 0, "withheld_periods": 0,
+    })
+    monkeypatch.setattr(views, "_balance_sheets", lambda *args: _balance())
+    monkeypatch.setattr(
+        provider.requests, "post",
+        lambda *args, **kwargs: _response({"supported": True, "selected_ids": ["balance_standalone_total_assets"]}),
+    )
+    with override_settings(GAPGPT_CONFIG_FILE=str(_config(tmp_path))):
+        response = client.post("/api/research/runs/", {
+            "symbol": "فولاد", "question": "What are its total assets on the balance sheet?",
+            "max_cost_usd": "0.01",
+        }, format="json")
+    assert response.status_code == 200, response.data
+    assert response.data["status"] == "answered"
+    assert "6,278,290,305 million Rial" in response.data["claims"][0]["statement"]
+    assert response.data["claims"][0]["sources"][0]["source_coordinates"]["total_assets"]["address"] == "B22"
+    assert response.data["coverage"]["balance_verified_periods"] == 1
+
+
+def test_balance_question_without_balance_evidence_abstains_before_model(make_user, monkeypatch):
+    client = _client(make_user)
+    monkeypatch.setattr(views, "_monthly_sales", lambda *args: _monthly())
+    monkeypatch.setattr(provider.requests, "post", lambda *args, **kwargs: pytest.fail("provider called"))
+    response = client.post("/api/research/runs/", {
+        "symbol": "فولاد", "question": "How much debt does its balance sheet show?",
+        "max_cost_usd": "0.01",
+    }, format="json")
+    assert response.status_code == 200
+    assert response.data["status"] == "abstained"
+    assert response.data["cost_usd"] == "0"
+
+
+def test_latest_statement_claim_is_withheld_when_a_newer_period_is_unverified():
+    monthly = {"points": []}
+    income = _income() | {"latest_period_by_scope": {"standalone": "1405-06-31"}}
+    balance = _balance() | {"latest_period_by_scope": {"standalone": "1405-06-31"}}
+    assert build_observations(monthly, income, balance) == {}
+
+
+@pytest.mark.parametrize("question", [
+    "How much debt does this company have?",
+    "What was its cash flow?",
+    "جریان وجوه نقد شرکت چقدر بود؟",
+])
+def test_unsupported_balance_question_abstains_without_model(make_user, monkeypatch, question):
+    client = _client(make_user)
+    monkeypatch.setattr(views, "_balance_sheets", lambda *args: _balance())
+    monkeypatch.setattr(provider.requests, "post", lambda *args, **kwargs: pytest.fail("provider called"))
+    response = client.post("/api/research/runs/", {
+        "symbol": "فولاد", "question": question,
+        "max_cost_usd": "0.01",
+    }, format="json")
+    assert response.status_code == 200
+    assert response.data["status"] == "abstained"
+    assert response.data["cost_usd"] == "0"
 
 
 def test_budget_rejects_before_provider_call(make_user, monkeypatch, tmp_path):
