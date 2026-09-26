@@ -19,7 +19,8 @@ archive_worker_enabled="$(awk -F= '$1=="ARCHIVE_WORKER_ENABLED"{print $2; exit}'
 codal_worker_enabled="$(awk -F= '$1=="CODAL_WORKER_ENABLED"{print $2; exit}' "${env_file}")"
 archive_worker_enabled="${archive_worker_enabled:-1}"
 codal_worker_enabled="${codal_worker_enabled:-1}"
-handoff_mode="${BROKER_HANDOFF_MODE:-drain}"
+handoff_mode="${BROKER_HANDOFF_MODE:-$(awk -F= '$1=="BROKER_HANDOFF_MODE"{print $2; exit}' "${env_file}")}"
+handoff_mode="${handoff_mode:-drain}"
 [[ "${archive_worker_enabled}" =~ ^[01]$ && "${codal_worker_enabled}" =~ ^[01]$ ]] || {
   echo "ARCHIVE_WORKER_ENABLED and CODAL_WORKER_ENABLED must be 0 or 1" >&2; exit 1;
 }

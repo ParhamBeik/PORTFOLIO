@@ -161,6 +161,19 @@ if grep -q ' up -d --remove-orphans' "${scratch}/docker.log"; then
   exit 1
 fi
 
+# CI invokes deploy.sh without a process-level mode override. Its protected env
+# must select the one-time copy path before the branch is merged.
+printf 'BROKER_HANDOFF_MODE=copy\n' >>"${scratch}/env"
+: >"${scratch}/docker.log"
+if PATH="${scratch}/bin:${PATH}" PROJECT_DIR="${scratch}" ENV_FILE="${scratch}/env" \
+    BACKUP_DIR="${scratch}/receipts" LEGACY_WATCHDOG_PATH="${scratch}/legacy_watchdog" \
+    MOCK_DOCKER_LOG="${scratch}/docker.log" "${scratch}/scripts/deploy.sh" \
+    >"${scratch}/out" 2>"${scratch}/err"; then
+  echo "Migration stub should have stopped env-selected copy mode" >&2
+  exit 1
+fi
+grep -q 'copy_celery_queues.py' "${scratch}/docker.log"
+
 : >"${scratch}/docker.log"
 PATH="${scratch}/bin:${PATH}" PROJECT_DIR="${scratch}" ENV_FILE="${scratch}/env" \
   MOCK_DOCKER_LOG="${scratch}/docker.log" flock -x "${scratch}/env" \
