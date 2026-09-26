@@ -14,7 +14,7 @@ This translates the user's research goal into a product contract. It does not in
 
 | Route or surface | Decision | Evidence and next gate |
 | --- | --- | --- |
-| `/`, Portfolio summary and breakdown | Preserve, simplify within the page | Protected holdings, net worth, allocation, and performance live here. Price and currency boundaries must remain explicit. |
+| `/`, Portfolio summary and breakdown | Preserve, simplify within the page | Protected holdings, net worth, allocation, and performance live here. Price and currency boundaries must remain explicit. Holdings and performance tables now stack labeled rows on phones, preserving the desktop table. |
 | `/activity` | Preserve, improve phone layout | Ledger and transaction correction history are core record-keeping. A 390 px live-production check found the desktop-width history table horizontally scrollable, with transaction values and actions off-screen. The draft stacks the same table cells and actions into labeled mobile rows while keeping the desktop table. |
 | `/explore` | Grow as primary research path | Source-backed TSE company view and bounded question routing exist in the draft. It does not yet cover crypto research, cross-company screens, or USD comparisons. |
 | `/markets` | Keep reachable during migration | It holds price history and asset comparisons, including non-stock data that Explore does not replace. Move validated workflows into asset-specific exploration before removing its navigation. |

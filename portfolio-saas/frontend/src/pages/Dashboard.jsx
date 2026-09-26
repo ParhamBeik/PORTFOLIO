@@ -526,6 +526,8 @@ function PositionsTable({ rows, showAccount }) {
   return (
     <Table
       testId="dashboard-performance-table"
+      caption="Position performance"
+      mobileCards
       rowKey={(r) => r.key}
       rows={rows}
       columns={columns}
@@ -592,6 +594,8 @@ function PerformanceCard({ activeId, basis, accounts }) {
                 )}
                 <Table
                   testId="dashboard-performance-table"
+                  caption="Portfolio performance"
+                  mobileCards
                   rowKey={(r) => r.id}
                   rows={data.accounts}
                   columns={[
@@ -1216,6 +1220,8 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
               )}
               <Table
                 testId="dashboard-holdings-table"
+                caption="Portfolio holdings"
+                mobileCards
                 rowKey={holdingsRowKey}
                 rows={items}
                 columns={columns}
