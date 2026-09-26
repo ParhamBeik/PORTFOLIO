@@ -50,6 +50,9 @@ app.conf.update(
         # Not the archive queue: this is what tells the archive how much it may
         # spend, and it is useless if it queues behind the backlog it governs.
         "marketdata.tasks.reconcile_quota_meters": {"queue": "live"},
+        # A paused archive worker must not silence the check that reports its
+        # backlog and other operational failures.
+        "marketdata.tasks.operational_health_check": {"queue": "live"},
         "marketdata.tasks.capture_operational_metrics": {"queue": "live"},
         "marketdata.tasks.capture_derivative_snapshots": {"queue": "live"},
         "marketdata.tasks.capture_market_snapshots": {"queue": "live"},
