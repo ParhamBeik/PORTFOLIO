@@ -64,7 +64,15 @@ fi
 # Asking for the names and looking for each one turns that into a real
 # assertion, and names the service that is actually down instead of saying
 # "container health check failed" about all eight.
-expected_services=(db redis broker minio backend celery_worker_live celery_worker_archive celery_beat frontend)
+expected_services=(db redis broker minio backend celery_worker_live celery_beat frontend)
+archive_worker_enabled="$(awk -F= '$1=="ARCHIVE_WORKER_ENABLED"{print $2; exit}' "${env_file}")"
+codal_worker_enabled="$(awk -F= '$1=="CODAL_WORKER_ENABLED"{print $2; exit}' "${env_file}")"
+if [[ "${archive_worker_enabled:-1}" == "1" ]]; then
+  expected_services+=(celery_worker_archive)
+fi
+if [[ "${codal_worker_enabled:-1}" == "1" ]]; then
+  expected_services+=(celery_worker_codal)
+fi
 running_services="$("${compose[@]}" ps --status running --services 2>/dev/null || true)"
 for service in "${expected_services[@]}"; do
   grep -qx -- "${service}" <<<"${running_services}" || failures+=("service ${service} is not running")

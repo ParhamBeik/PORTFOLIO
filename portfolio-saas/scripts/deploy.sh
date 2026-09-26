@@ -10,6 +10,17 @@ compose=(docker compose -f "${project_dir}/docker-compose.prod.yml" --env-file "
 docker network inspect vps-edge >/dev/null 2>&1 || { echo "Docker network vps-edge is missing; the VPS reverse proxy at /opt/apps/vps-edge must already be running" >&2; exit 1; }
 domain="$(awk -F= '$1=="PORTFOLIO_DOMAIN"{print $2; exit}' "${env_file}")"
 [[ -n "${domain}" ]] || { echo "PORTFOLIO_DOMAIN is missing from ${env_file}" >&2; exit 1; }
+archive_worker_enabled="$(awk -F= '$1=="ARCHIVE_WORKER_ENABLED"{print $2; exit}' "${env_file}")"
+codal_worker_enabled="$(awk -F= '$1=="CODAL_WORKER_ENABLED"{print $2; exit}' "${env_file}")"
+archive_worker_enabled="${archive_worker_enabled:-1}"
+codal_worker_enabled="${codal_worker_enabled:-1}"
+handoff_mode="${BROKER_HANDOFF_MODE:-drain}"
+[[ "${archive_worker_enabled}" =~ ^[01]$ && "${codal_worker_enabled}" =~ ^[01]$ ]] || {
+  echo "ARCHIVE_WORKER_ENABLED and CODAL_WORKER_ENABLED must be 0 or 1" >&2; exit 1;
+}
+[[ "${handoff_mode}" == "drain" || "${handoff_mode}" == "copy" ]] || {
+  echo "BROKER_HANDOFF_MODE must be drain or copy" >&2; exit 1;
+}
 mail_host="$(awk -F= '$1=="EMAIL_HOST"{print $2; exit}' "${env_file}")"
 if [[ -z "${mail_host}" || "${mail_host}" == "localhost" || "${mail_host}" == "127.0.0.1" ]]; then
   echo "WARNING: EMAIL_HOST is '${mail_host:-<empty>}'. Self-service password reset cannot send mail; use the superuser recovery link until a relay is configured." >&2
@@ -38,9 +49,19 @@ fi
 # older Compose stack can have queued Codal jobs but no Codal worker at all.
 backend_cid="$("${compose[@]}" ps -q --all backend)"
 legacy_broker=0
-if [[ -n "${backend_cid}" ]] && docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${backend_cid}" \
-  | grep -qx 'CELERY_BROKER_URL=redis://redis:6379/2'; then
-  legacy_broker=1
+if [[ -n "${backend_cid}" ]]; then
+  if ! broker_environment="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${backend_cid}")"; then
+    echo "Cannot inspect the current backend broker; refusing deployment." >&2
+    exit 1
+  fi
+  if grep -qx 'CELERY_BROKER_URL=redis://redis:6379/2' <<<"${broker_environment}"; then
+    legacy_broker=1
+  elif ! grep -qx 'CELERY_BROKER_URL=redis://broker:6379/0' <<<"${broker_environment}"; then
+    echo "Current backend uses an unknown broker; refusing deployment." >&2
+    exit 1
+  fi
+fi
+if (( legacy_broker )); then
   declare -A legacy_service_state=()
   for service in backend celery_worker_live celery_worker_archive celery_worker_codal celery_beat; do
     service_cid="$("${compose[@]}" ps -q --all "${service}")"
@@ -48,13 +69,12 @@ if [[ -n "${backend_cid}" ]] && docker inspect -f '{{range .Config.Env}}{{printl
       legacy_service_state["${service}"]="$(docker inspect -f '{{.State.Status}}' "${service_cid}")"
     fi
   done
-  if [[ "${legacy_service_state[celery_worker_archive]:-}" == "paused" ]]; then
-    echo "Legacy archive worker is intentionally paused; Compose would restart it and spend provider quota. Resolve its operating policy before deployment." >&2
+  if [[ "${archive_worker_enabled}" == "1" && "${legacy_service_state[celery_worker_archive]:-}" != "running" ]]; then
+    echo "Archive worker was not running; refusing to start a paid provider consumer during deployment." >&2
     exit 1
   fi
-  codal_enabled="$(awk -F= '$1=="CODAL_ENABLED"{print $2; exit}' "${env_file}")"
-  if [[ "${codal_enabled:-1}" == "1" && -z "${legacy_service_state[celery_worker_codal]:-}" ]]; then
-    echo "Codal is enabled but the legacy worker is absent; validate artifact access and the corrected parser before starting a new worker." >&2
+  if [[ "${codal_worker_enabled}" == "1" && "${legacy_service_state[celery_worker_codal]:-}" != "running" ]]; then
+    echo "Codal worker was not running; validate artifact access and the corrected parser before starting this consumer." >&2
     exit 1
   fi
   for queue in live archive codal; do
@@ -64,6 +84,7 @@ if [[ -n "${backend_cid}" ]] && docker inspect -f '{{range .Config.Env}}{{printl
       exit 1
     fi
     (( depth > 0 )) || continue
+    [[ "${handoff_mode}" == "drain" ]] || continue
     worker_cid="$("${compose[@]}" ps -q --all "celery_worker_${queue}")"
     worker_state="missing"
     if [[ -n "${worker_cid}" ]]; then
@@ -80,9 +101,9 @@ if [[ -n "$("${compose[@]}" ps -q db)" ]] && "${compose[@]}" exec -T db pg_isrea
   "${project_dir}/scripts/backup_postgres.sh"
 fi
 "${compose[@]}" build
-# The first broker cutover cannot abandon work in Redis DB 2. Stop producers,
-# leave old workers draining, and only switch once queued and unacked messages
-# reach zero. Results remain on DB 2 and do not count as outstanding work.
+# The first broker cutover cannot abandon work in Redis DB 2. Drain active
+# consumers or explicitly copy quiesced lists to the durable broker. Results
+# remain on DB 2 and do not count as outstanding work.
 if (( legacy_broker )); then
   drain_timeout="${BROKER_DRAIN_TIMEOUT_SECONDS:-300}"
   [[ "${drain_timeout}" =~ ^[1-9][0-9]*$ ]] || {
@@ -103,7 +124,47 @@ if (( legacy_broker )); then
     done
     (( failed == 0 )) || echo "One or more legacy services did not restart." >&2
   }
-  "${compose[@]}" stop celery_beat backend
+  if [[ "${handoff_mode}" == "copy" ]]; then
+    "${compose[@]}" up -d --no-deps broker
+    "${compose[@]}" exec -T broker redis-cli ping | grep -qx PONG || {
+      echo "New broker is not ready; legacy services are untouched." >&2
+      exit 1
+    }
+    if ! "${compose[@]}" stop celery_beat backend; then
+      resume_legacy_services
+      echo "Could not quiesce legacy producers; aborted queue copy." >&2
+      exit 1
+    fi
+    for service in celery_worker_live celery_worker_archive celery_worker_codal; do
+      # Leave an already paused worker paused until the copy succeeds, so a
+      # failed handoff preserves its exact no-provider-call state.
+      if [[ "${legacy_service_state[${service}]:-}" == "running" ]]; then
+        if ! "${compose[@]}" stop "${service}"; then
+          resume_legacy_services
+          echo "Could not stop legacy ${service}; aborted queue copy." >&2
+          exit 1
+        fi
+      fi
+    done
+    receipt_dir="${BACKUP_DIR:-/var/backups/portfolio}"
+    mkdir -p "${receipt_dir}"
+    receipt_home="$(mktemp -d "${receipt_dir}/broker-handoff-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
+    receipt="$(mktemp "${receipt_home}/receipt.XXXXXX")"
+    if ! "${compose[@]}" run --rm --no-deps -T \
+        -v "${project_dir}/scripts/copy_celery_queues.py:/tmp/copy_celery_queues.py:ro" \
+        --entrypoint python backend /tmp/copy_celery_queues.py \
+        --source redis://redis:6379/2 --target redis://broker:6379/0 \
+        --copy --receipt /tmp/broker-handoff.json >"${receipt}" \
+        || ! python3 -m json.tool "${receipt}" >/dev/null; then
+      rm -f "${receipt}"
+      rmdir "${receipt_home}"
+      resume_legacy_services
+      echo "Queue copy failed; old source queues remain. Inspect the isolated target before retrying." >&2
+      exit 1
+    fi
+    echo "Queue handoff receipt: ${receipt}"
+  else
+    "${compose[@]}" stop celery_beat backend
   legacy_pending() {
     "${compose[@]}" exec -T redis redis-cli -n 2 --raw EVAL \
       'return redis.call("LLEN","live")+redis.call("LLEN","archive")+redis.call("LLEN","codal")+redis.call("HLEN","unacked")' 0
@@ -123,11 +184,12 @@ if (( legacy_broker )); then
     fi
     sleep 5
   done
-  "${compose[@]}" stop celery_worker_live celery_worker_archive celery_worker_codal
-  if ! pending="$(legacy_pending)" || [[ "${pending}" != 0 ]]; then
-    resume_legacy_services
-    echo "Legacy workers requeued tasks while stopping; restored old services and aborted broker cutover." >&2
-    exit 1
+    "${compose[@]}" stop celery_worker_live celery_worker_archive celery_worker_codal
+    if ! pending="$(legacy_pending)" || [[ "${pending}" != 0 ]]; then
+      resume_legacy_services
+      echo "Legacy workers requeued tasks while stopping; restored old services and aborted broker cutover." >&2
+      exit 1
+    fi
   fi
 fi
 # This release drops legacy quantity/price columns. Old web and worker images
@@ -135,13 +197,19 @@ fi
 # Keep DB/Redis/MinIO up; the new images start only after migration succeeds.
 "${compose[@]}" stop celery_beat celery_worker_live celery_worker_archive celery_worker_codal backend frontend
 "${compose[@]}" run --rm migrate
-"${compose[@]}" up -d --remove-orphans
+"${compose[@]}" up -d --remove-orphans \
+  --scale "celery_worker_archive=${archive_worker_enabled}" \
+  --scale "celery_worker_codal=${codal_worker_enabled}"
 "${compose[@]}" exec -T backend python manage.py check --deploy --fail-level WARNING
 "${compose[@]}" exec -T backend python manage.py migrate --check
 curl -fsS --retry 12 --retry-delay 5 "https://${domain}/api/health/ready/"
 "${compose[@]}" exec -T celery_worker_live celery -A config inspect ping
-"${compose[@]}" exec -T celery_worker_archive celery -A config inspect ping
-"${compose[@]}" exec -T celery_worker_codal celery -A config inspect ping
+if [[ "${archive_worker_enabled}" == "1" ]]; then
+  "${compose[@]}" exec -T celery_worker_archive celery -A config inspect ping
+fi
+if [[ "${codal_worker_enabled}" == "1" ]]; then
+  "${compose[@]}" exec -T celery_worker_codal celery -A config inspect ping
+fi
 
 # Beat is a scheduler, not a worker: `celery inspect ping` does not answer for
 # it, so it was the one service this script never verified -- and it is the one

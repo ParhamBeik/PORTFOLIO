@@ -367,8 +367,6 @@ services:
     depends_on:
       celery_worker_live:
         condition: service_healthy
-      celery_worker_archive:
-        condition: service_healthy
     environment: *backend-env
     command: celery -A config beat -l info
     ulimits: *no-core

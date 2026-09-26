@@ -95,6 +95,11 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck --severity=warning scripts/*.sh frontend/scripts/*.sh
+      - name: Test deployment and backup guards
+        working-directory: portfolio-saas
+        run: |
+          bash scripts/test_ops_backup_evidence.sh
+          bash scripts/test_broker_copy_deploy.sh
       - name: Database restore drill
         run: ../scripts/ci_restore_drill.sh
         env:
