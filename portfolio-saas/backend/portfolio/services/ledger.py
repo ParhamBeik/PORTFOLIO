@@ -1107,7 +1107,7 @@ def _latest_live_price(asset: Asset) -> Decimal | None:
     New foreign-seed ticks are converted from their declared provider unit
     before storage. Older rows marked UNKNOWN may be Tether, dollars, or even
     Toman from Wallex; refuse them rather than applying an assumed cash-USD
-    rate. TSE rows remain Rial under the broker-share convention.
+    rate. TSE rows remain Rial and valuation divides their value by ten.
     """
 
     from .returns import USD_QUOTED_KEYS

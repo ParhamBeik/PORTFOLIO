@@ -441,7 +441,7 @@ def aggregate_daily_price_averages(date_str: str | None = None):
         if asset.key in USD_QUOTED_KEYS:
             ticks = ticks.filter(price_unit=Price.Unit.IRT, price_unit_verified=True)
         stats = ticks.aggregate(
-            avg=Avg("price_foreign" if asset.quote_unit == "usd" else "price_iranian"),
+            avg=Avg("price_foreign" if asset.key in USD_QUOTED_KEYS else "price_iranian"),
             n=Count("id"),
         )
         if not stats["n"]:

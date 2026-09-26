@@ -2238,6 +2238,35 @@ def test_a_normalized_live_price_enters_the_ledger_once():
     assert resolve_historical_price(asset, timezone.now()) == Decimal("5700000000")
 
 
+def test_bitcoin_trade_uses_toman_price_and_reports_toman_unit(make_user):
+    from portfolio.serializers import LedgerEntrySerializer
+
+    user = make_user()
+    account = Account.objects.create(user=user, name="Crypto")
+    coin = Asset.objects.create(
+        key="bitcoin_usd", name="Bitcoin", is_active=True,
+        asset_class=Asset.AssetClass.CRYPTO,
+    )
+    Price.objects.create(
+        asset=coin, price=Decimal("5700000000"), source="API",
+        price_unit=Price.Unit.IRT, price_unit_verified=True,
+    )
+    create_ledger_entry(
+        account=account, kind=LedgerEntry.Kind.OPENING_CASH,
+        amount_tomans=Decimal("20000000000"),
+    )
+
+    trade = create_ledger_entry(
+        account=account, kind=LedgerEntry.Kind.BUY, asset=coin,
+        quantity=Decimal("2"),
+    )
+
+    assert trade.price_tomans == Decimal("5700000000")
+    assert trade.price_foreign == Decimal("5700000000")
+    assert trade.amount_tomans == Decimal("11400000000")
+    assert LedgerEntrySerializer(trade).data["unit_price_currency"] == "toman"
+
+
 def test_a_dollar_quote_with_no_rate_refuses_rather_than_storing_dollars():
     from portfolio.services.ledger import PriceResolutionError, resolve_historical_price
 

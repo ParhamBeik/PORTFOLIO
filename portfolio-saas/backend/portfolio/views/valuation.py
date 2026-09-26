@@ -594,7 +594,7 @@ def _live_price_history(asset, since):
         .annotate(day=TruncDate("fetched_at"))
         .values("day")
         .annotate(avg_price=Avg(
-            "price_foreign" if asset.quote_unit == "usd" else "price_iranian"
+            "price_foreign" if asset.key in USD_QUOTED_KEYS else "price_iranian"
         ))
         .order_by("day")
     )
