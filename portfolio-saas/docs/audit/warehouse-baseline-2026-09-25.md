@@ -50,7 +50,7 @@ The external Codal raw-volume archive has two compressed parts with verified SHA
 
 `scripts/pull_codal_archive.sh` now defines a weekly, split archive pull to the external drive, with part hashes, a complete tar listing, object metadata count, and known-artifact payload check; `scripts/install_mac_codal_pull.sh` installed a daily 04:00 check while the Mac and drive are available. A small synthetic archive passed the new capture and same-week reuse paths. The manually captured 2026-W39 archive is this week's initial verified copy; a future full scheduled pull has not yet run. The job does not prune older archives, and failed captures remain visibly partial.
 
-The isolated MinIO restore directory exists on both the Mac and the external drive after a cross-volume copy. Completion of that additional extracted-directory copy is not yet verified; keep the source intact. The independently verified compressed 2026-W39 archive remains on the external drive, and the weekly pull recognized it without recapturing it.
+The isolated MinIO restore directory exists on both the Mac and the external drive after an interrupted cross-volume copy. On 2026-09-26 the Mac source contained 268,250 files and the external extracted directory contained 254,518, so the latter is **incomplete** and must not be treated as another restore point. Keep the source intact. The independently verified compressed 2026-W39 archive remains on the external drive, and the weekly pull recognized it without recapturing it.
 
 ## Target architecture and sequence
 

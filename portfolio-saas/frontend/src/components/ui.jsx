@@ -346,13 +346,13 @@ export function Tabs({ options, value, onChange, label, testId }) {
  * switched off, say. Per row rather than per cell so the treatment cannot drift
  * between columns.
  */
-export function Table({ columns, rows, rowKey, empty = "No rows.", testId, caption, rowClass }) {
+export function Table({ columns, rows, rowKey, empty = "No rows.", testId, caption, rowClass, mobileCards = false }) {
   if (!rows?.length) return <Empty testId={testId ? `${testId}-empty` : undefined}>{empty}</Empty>;
   return (
-    <div className="overflow-x-auto">
-      <table data-testid={testId} className="w-full text-sm">
+    <div className={mobileCards ? "sm:overflow-x-auto" : "overflow-x-auto"}>
+      <table data-testid={testId} className={`w-full text-sm ${mobileCards ? "block sm:table" : ""}`}>
         {caption && <caption className="sr-only">{caption}</caption>}
-        <thead>
+        <thead className={mobileCards ? "sr-only sm:not-sr-only" : ""}>
           <tr className="border-b border-border text-left">
             {columns.map((c) => (
               <th
@@ -368,21 +368,26 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
             ))}
           </tr>
         </thead>
-        <tbody>
+        <tbody className={mobileCards ? "block sm:table-row-group" : ""}>
           {rows.map((row, i) => (
             <tr
               key={rowKey ? rowKey(row) : i}
               data-testid={testId ? `${testId}-row` : undefined}
-              className={`border-b border-border/60 last:border-0 hover:bg-panel-2 ${
+              className={`border-b border-border/60 last:border-0 hover:bg-panel-2 ${mobileCards ? "mb-3 block rounded-lg border border-border/60 p-2 last:mb-0 sm:mb-0 sm:table-row sm:rounded-none sm:border-x-0 sm:border-t-0 sm:p-0" : ""} ${
                 rowClass?.(row) || ""
               }`}
             >
               {columns.map((c) => (
                 <td
                   key={c.key}
-                  className={`px-3 py-2 ${c.align === "right" ? "text-right" : ""}`}
+                  className={`px-3 py-2 ${mobileCards ? "flex items-start justify-between gap-3 sm:table-cell" : ""} ${c.align === "right" ? "text-right" : ""}`}
                 >
-                  {c.render ? c.render(row) : row[c.key]}
+                  {mobileCards && c.header && <span className="shrink-0 text-xs font-medium uppercase text-muted sm:hidden">{c.header}</span>}
+                  {mobileCards ? (
+                    <span className="min-w-0 text-right sm:contents">
+                      {c.render ? c.render(row) : row[c.key]}
+                    </span>
+                  ) : (c.render ? c.render(row) : row[c.key])}
                 </td>
               ))}
             </tr>

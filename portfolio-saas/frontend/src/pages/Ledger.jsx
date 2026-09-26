@@ -607,6 +607,8 @@ export default function Ledger() {
               <>
                 <Table
                   testId="ledger-table"
+                  caption="Transaction history"
+                  mobileCards
                   rowKey={(r) => r.id}
                   rows={rows.slice((current - 1) * size, current * size)}
                   columns={columns}
