@@ -703,7 +703,7 @@ def canonical_gold_symbol(payload, fallback: str = "") -> str:
     return canonical_symbol(raw)
 
 
-def ingest_gold_currency_history(payload) -> tuple[int, int]:
+def ingest_gold_currency_history(payload, *, origin=GoldCurrencyHistory.Origin.BRSAPI) -> tuple[int, int]:
     """Gold_Currency_Pro.php history=2 payload -> GoldCurrencyHistory rows.
 
     The payload carries symbol/name/unit at the top level and the day records
@@ -719,6 +719,8 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
     """
     if not isinstance(payload, dict) or not isinstance(payload.get("history_daily"), list):
         return 0, 0 if payload is None else 1
+    if origin not in (GoldCurrencyHistory.Origin.BRSAPI, GoldCurrencyHistory.Origin.TGJU):
+        raise ValueError("gold history origin must identify the source")
     symbol = canonical_gold_symbol(payload)
     name = payload.get("name", "") or ""
     raw_unit = payload.get("unit", "") or ""
@@ -818,6 +820,7 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
                 low_price=Decimal(str(l)) if l is not None else None,
                 close_price=Decimal(str(c)),
                 source=GoldCurrencyHistory.Source.PROVIDER,
+                origin=origin,
                 **_lineage(),
             ))
         except (KeyError, TypeError, ValueError) as exc:
@@ -835,7 +838,7 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
         GoldCurrencyHistory, rows, scope={"symbol": symbol},
         update_fields=(
             "name", "unit", "open_price", "high_price", "low_price",
-            "close_price", "source", "ingested_at", "last_correlation_id",
+            "close_price", "source", "origin", "ingested_at", "last_correlation_id",
         ),
         unique_fields=("symbol", "date"),
         recent_field="date",
@@ -1083,6 +1086,7 @@ def ingest_direct_crypto_history(symbol, unit, candles, *, repair_zero=False) ->
                 low_price=candle.get("low"),
                 close_price=close,
                 source=GoldCurrencyHistory.Source.PROVIDER,
+                origin=GoldCurrencyHistory.Origin.WALLEX,
                 ingested_at=timezone.now(),
             )
         )
@@ -1102,10 +1106,11 @@ def ingest_direct_crypto_history(symbol, unit, candles, *, repair_zero=False) ->
             incoming = by_date[stored.date]
             for field in ("open_price", "high_price", "low_price", "close_price"):
                 setattr(stored, field, getattr(incoming, field))
+            stored.origin = GoldCurrencyHistory.Origin.WALLEX
             fixes.append(stored)
         if fixes:
             GoldCurrencyHistory.objects.bulk_update(
-                fixes, ["open_price", "high_price", "low_price", "close_price"],
+                fixes, ["open_price", "high_price", "low_price", "close_price", "origin"],
                 batch_size=200,
             )
             repaired = len(fixes)

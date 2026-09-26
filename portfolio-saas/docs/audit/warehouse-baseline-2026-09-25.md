@@ -34,7 +34,7 @@ The proposed `StandardIncomeStatement` labels fields `revenue_rial` while its he
 
 The table counts above are exact `count(*)` results except the total database size, which PostgreSQL rounded. The schema CSV was read from `information_schema.columns`. No personal row values were copied into this audit.
 
-The FX profile reads market rows only; the notebook contains the exact read-only SQL and calendar checks. Source lineage is absent in the old schema rows, so the audit cannot tell whether a specific historical daily rate came from BrsApi, TGJU, a carried close, or a later backfill. The 16-day constant-rate interval could reflect a genuinely closed cash market; nine contemporaneous فولاد trading sessions make an unqualified daily conversion unsafe, not automatically false. A repeated quote is a review trigger, not a value to overwrite with USDT.
+The FX profile reads market rows only; the notebook contains the exact read-only SQL and calendar checks. Source lineage is absent in the old schema rows, so the audit cannot tell whether a specific historical daily rate came from BrsApi, TGJU, a carried close, or a later backfill. A pending schema change records BrsApi, TGJU, or Wallex on newly ingested history; existing rows remain explicitly `unknown` until their origin can be proved. The 16-day constant-rate interval could reflect a genuinely closed cash market; nine contemporaneous فولاد trading sessions make an unqualified daily conversion unsafe, not automatically false. A repeated quote is a review trigger, not a value to overwrite with USDT.
 
 ## Recovery state
 

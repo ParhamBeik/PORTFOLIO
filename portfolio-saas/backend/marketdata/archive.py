@@ -527,7 +527,13 @@ def _fetch_and_ingest(state):
         else:
             increment_historical_full_used()
             payload = fetch_gold_currency_pro_history_daily(settings.TSETMC_API_KEY, symbol)
-        result = ingest.ingest_gold_currency_history(payload)
+        result = ingest.ingest_gold_currency_history(
+            payload,
+            origin=(
+                GoldCurrencyHistory.Origin.TGJU if direct_payload is not None
+                else GoldCurrencyHistory.Origin.BRSAPI
+            ),
+        )
         expected = _gold_dates(payload)
         stored = set(GoldCurrencyHistory.objects.filter(
             symbol=ingest.canonical_gold_symbol(payload, symbol), date__in=expected

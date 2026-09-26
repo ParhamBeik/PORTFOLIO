@@ -180,8 +180,13 @@ def test_ingest_gold_currency_history_idempotent():
     row = GoldCurrencyHistory.objects.get(symbol="IR_COIN_EMAMI", date="1404-03-21")
     # Raw-storage policy: the provider's declared-Toman value is stored verbatim.
     assert row.close_price == 73385000
+    assert row.origin == GoldCurrencyHistory.Origin.BRSAPI
     created, skipped = ingest.ingest_gold_currency_history(GOLD_PAYLOAD)
     assert created == 0 and skipped == 2
+
+    ingest.ingest_gold_currency_history(GOLD_PAYLOAD, origin=GoldCurrencyHistory.Origin.TGJU)
+    row.refresh_from_db()
+    assert row.origin == GoldCurrencyHistory.Origin.TGJU
 
 
 @pytest.mark.django_db

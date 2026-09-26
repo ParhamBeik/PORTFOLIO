@@ -698,6 +698,7 @@ class TestCryptoHistoryIngest:
         assert created == 0 and known == 1
         row = GoldCurrencyHistory.objects.get(symbol="BTC", date="1405-06-09")
         assert row.close_price == Decimal("78841"), "incumbent row must survive"
+        assert row.origin == GoldCurrencyHistory.Origin.UNKNOWN
 
     def test_explicit_precision_repair_only_replaces_zero_same_unit(self):
         from marketdata.ingest import ingest_direct_crypto_history
@@ -719,6 +720,7 @@ class TestCryptoHistoryIngest:
         )
         assert (created, known) == (0, 0)
         assert GoldCurrencyHistory.objects.get(symbol="SHIB").close_price == Decimal("0.000012345678")
+        assert GoldCurrencyHistory.objects.get(symbol="SHIB").origin == GoldCurrencyHistory.Origin.WALLEX
 
         # A different quote book is a different unit, even with the same symbol.
         GoldCurrencyHistory.objects.filter(symbol="SHIB").update(close_price=0, unit="تومان")
@@ -742,6 +744,9 @@ class TestCryptoHistoryIngest:
         )
         assert created == 2
         assert GoldCurrencyHistory.objects.filter(symbol="ETH").count() == 3
+        assert GoldCurrencyHistory.objects.filter(
+            symbol="ETH", origin=GoldCurrencyHistory.Origin.WALLEX
+        ).count() == 2
 
     def test_a_bad_candle_is_rejected_not_stored(self):
         """A zero or negative close is not a price; storing it poisons returns."""

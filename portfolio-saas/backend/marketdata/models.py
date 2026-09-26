@@ -902,6 +902,12 @@ class GoldCurrencyHistory(models.Model):
         # AGGREGATE-tagged row remains valid until the retirement data migration.
         AGGREGATE = "aggregate", "Live-price aggregate (retired)"
 
+    class Origin(models.TextChoices):
+        UNKNOWN = "unknown", "Historic source unknown"
+        BRSAPI = "brsapi", "BrsApi"
+        TGJU = "tgju", "TGJU"
+        WALLEX = "wallex", "Wallex"
+
     symbol = models.CharField(max_length=64, db_index=True)
     name = models.CharField(max_length=120, blank=True, default="")
     unit = models.CharField(max_length=32, blank=True, default="")
@@ -913,6 +919,7 @@ class GoldCurrencyHistory(models.Model):
     source = models.CharField(
         max_length=16, choices=Source.choices, default=Source.PROVIDER
     )
+    origin = models.CharField(max_length=16, choices=Origin.choices, default=Origin.UNKNOWN)
     ingested_at = models.DateTimeField(null=True, blank=True)
     last_correlation_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
 

@@ -1209,6 +1209,7 @@ def test_gold_archive_prefers_tgju_before_paid_brs_fallback(settings):
     assert result[0] == 1
     assert expected == {"1405-06-09"}
     assert stored == {"1405-06-09"}
+    assert GoldCurrencyHistory.objects.get(symbol="USD").origin == GoldCurrencyHistory.Origin.TGJU
 
 
 def test_banking_a_day_counts_as_progress_even_when_the_gap_does_not_shrink():
