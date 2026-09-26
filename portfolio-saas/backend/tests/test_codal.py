@@ -861,6 +861,52 @@ def test_an_unreachable_origin_stops_enqueueing_instead_of_retrying(monkeypatch,
     assert run.error_code == "origin_unreachable"
 
 
+def test_codal_sweeper_skips_announcements_already_pending(monkeypatch, settings):
+    settings.CODAL_ENABLED = True
+    from marketdata import tasks
+
+    pending = _announcement(symbol="A", code="pending")
+    fresh = _announcement(symbol="B", code="fresh")
+    queued = []
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (1, 1))
+    monkeypatch.setattr(tasks, "_pending_codal_ids", lambda: {pending.pk})
+    monkeypatch.setattr(tasks.extract_codal_report, "delay", lambda pk: queued.append(pk))
+
+    assert tasks.queue_codal_extractions() == 1
+    assert queued == [fresh.pk]
+
+
+def test_pending_codal_ids_decode_broker_messages(monkeypatch):
+    import base64
+    import json
+
+    from marketdata import tasks
+
+    def message(task, args):
+        return json.dumps({
+            "headers": {"task": task},
+            "properties": {"body_encoding": "base64"},
+            "body": base64.b64encode(json.dumps([args, {}, {}]).encode()).decode(),
+        }).encode()
+
+    class Broker:
+        def lrange(self, queue, start, stop):
+            assert (queue, start, stop) == ("codal", 0, -1)
+            return [
+                message("marketdata.tasks.extract_codal_report", [42]),
+                message("marketdata.tasks.extract_codal_report", [42]),
+                message("marketdata.tasks.extract_codal_report", [43]),
+            ]
+
+    monkeypatch.setattr("redis.Redis.from_url", lambda _: Broker())
+    assert tasks._pending_codal_ids() == {42, 43}
+
+    monkeypatch.setattr(Broker, "lrange", lambda *args: [b"bad-json"])
+    with pytest.raises(ValueError):
+        tasks._pending_codal_ids()
+
+
 def test_a_rejected_document_does_not_trip_the_origin_breaker(monkeypatch):
     """The origin answered; this file is just unusable. Only connect-level
     failures are evidence about the network."""
