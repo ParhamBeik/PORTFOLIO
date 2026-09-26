@@ -135,8 +135,10 @@ function Company({ symbol }) {
               actions={<Badge variant={sales.points.length || income?.points?.length ? "good" : "warn"}>{sales.points.length || income?.points?.length ? "Source-checked figures" : "Financial metrics unverified"}</Badge>}
             >
               <p className="text-sm text-muted">
-                Company classification comes from the TSE instrument catalog. Monthly sales appear only where the
-                current Codal filing reconciles to its source rows. Income figures appear only for supported statement templates with verified issuer, unit, period, and arithmetic.
+                {data.company.sector ? (
+                  <>Industry is a current provider-reported {data.company.sector_source === "symbol_metadata" ? "symbol metadata" : "instrument catalog"} label, observed {date(data.company.sector_observed_at)}; it does not establish past membership. </>
+                ) : "Industry is unavailable for this stock. "}
+                Monthly sales appear only where the current Codal filing reconciles to its source rows. Income figures appear only for supported statement templates with verified issuer, unit, period, and arithmetic.
               </p>
             </Card>
 

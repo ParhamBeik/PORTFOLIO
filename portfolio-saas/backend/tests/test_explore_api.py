@@ -25,11 +25,12 @@ from marketdata.models import (
 pytestmark = pytest.mark.django_db
 
 
-def _stock(symbol="کاما", eligible=True):
+def _stock(symbol="کاما", eligible=True, provider_group=""):
     return MarketInstrument.objects.create(
         source=MarketInstrument.Source.TSETMC,
         category=MarketInstrument.Category.STOCK,
         symbol=symbol, name=f"Company {symbol}", eligible=eligible,
+        provider_group=provider_group,
     )
 
 
@@ -79,6 +80,7 @@ def test_company_dossier_exposes_price_conflict_but_no_unverified_metrics(make_u
     assert response.status_code == 200, response.data
     data = response.data
     assert data["company"]["sector"] == "Metals"
+    assert data["company"]["sector_source"] == "symbol_metadata"
     assert data["disclosures"][0]["category"] == "Financial Statements"
     assert data["disclosures"][0]["category_basis"] == "title"
     assert Decimal(data["price"]["points"][0]["close_rial"]) == Decimal("1000")
@@ -87,6 +89,20 @@ def test_company_dossier_exposes_price_conflict_but_no_unverified_metrics(make_u
     assert data["price"]["quality"] == "cross_source_disagreement"
     assert data["financial_metrics"]["status"] == "unavailable_unverified"
     assert data["disclosures"][0]["source_url"].startswith("https://www.codal.ir/")
+
+
+def test_company_dossier_labels_catalog_sector_when_detailed_metadata_is_missing(make_user):
+    instrument = _stock(provider_group="فلزات اساسی")
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+
+    response = client.get("/api/explore/stocks/کاما/")
+    assert response.status_code == 200
+    company = response.data["company"]
+    assert company["sector"] == "فلزات اساسی"
+    assert company["sector_source"] == "instrument_catalog"
+    assert company["sector_observed_at"] == instrument.updated_at.isoformat()
+    assert company["subsector"] == ""
 
 
 def test_explore_rejects_unbounded_windows_and_unsafe_disclosure_links(make_user):

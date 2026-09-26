@@ -275,6 +275,15 @@ class StockDossierView(APIView):
         )
 
         metadata = StockSymbolMetadata.objects.filter(l18=symbol).order_by("-updated_at").first()
+        sector = metadata.sector if metadata and metadata.sector else instrument.provider_group
+        sector_source = (
+            "symbol_metadata" if metadata and metadata.sector else
+            "instrument_catalog" if instrument.provider_group else "unavailable"
+        )
+        sector_observed_at = (
+            metadata.updated_at if sector_source == "symbol_metadata" else
+            instrument.updated_at if sector_source == "instrument_catalog" else None
+        )
         states = {
             row.endpoint: row
             for row in ArchiveFetchState.objects.filter(
@@ -294,7 +303,9 @@ class StockDossierView(APIView):
                 "symbol": instrument.symbol,
                 "name": metadata.l30 if metadata else instrument.name,
                 "isin": metadata.isin if metadata else instrument.isin,
-                "sector": metadata.sector if metadata else "",
+                "sector": sector,
+                "sector_source": sector_source,
+                "sector_observed_at": sector_observed_at.isoformat() if sector_observed_at else None,
                 "subsector": metadata.sector_sub if metadata else "",
                 "metadata_updated_at": metadata.updated_at.isoformat() if metadata else None,
             },
