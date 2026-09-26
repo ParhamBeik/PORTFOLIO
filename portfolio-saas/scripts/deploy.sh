@@ -211,6 +211,33 @@ fi
 # Keep DB/Redis/MinIO up; the new images start only after migration succeeds.
 "${compose[@]}" stop celery_beat celery_worker_live celery_worker_archive celery_worker_codal backend frontend
 "${compose[@]}" run --rm migrate
+if (( legacy_broker )) && [[ "${handoff_mode}" == "copy" ]]; then
+  # Recheck immediately before new workers can consume. An out-of-band producer
+  # writing to the old Redis after the receipt would otherwise strand work.
+  if ! "${compose[@]}" run --rm --no-deps -T \
+      -v "${project_dir}/scripts/copy_celery_queues.py:/tmp/copy_celery_queues.py:ro" \
+      --entrypoint python backend /tmp/copy_celery_queues.py \
+      --source redis://redis:6379/2 --target redis://broker:6379/0 \
+      >"${receipt_home}/verify.json" \
+      || ! python3 - "${receipt}" "${receipt_home}/verify.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    receipt = json.load(source)
+with open(sys.argv[2], encoding="utf-8") as source:
+    current = json.load(source)
+if not (
+    current["source_unacked"] == current["target_unacked"] == 0
+    and receipt["queues"] == current["source_queues"] == current["target_queues"]
+):
+    raise SystemExit("Copied queues changed since receipt")
+PY
+  then
+    echo "Queue verification failed after migration; new workers remain stopped. Inspect both brokers and schema before recovery." >&2
+    exit 1
+  fi
+fi
 "${compose[@]}" up -d --remove-orphans \
   --scale "celery_worker_archive=${archive_worker_enabled}" \
   --scale "celery_worker_codal=${codal_worker_enabled}"

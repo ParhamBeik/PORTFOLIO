@@ -65,11 +65,17 @@ if [[ " $* " == *" redis-cli -n 2 --raw LLEN "* ]]; then
 fi
 if [[ " $* " == *" exec -T broker redis-cli ping "* ]]; then printf 'PONG\n'; exit 0; fi
 if [[ " $* " == *"/tmp/copy_celery_queues.py"* ]]; then
-  if [[ "${MOCK_COPY_FAIL:-0}" == "1" ]]; then exit 1; fi
-  printf '{"queues":{"archive":{"count":1},"codal":{"count":1}}}\n'
+  if [[ " $* " == *" --copy "* ]]; then
+    if [[ "${MOCK_COPY_FAIL:-0}" == "1" ]]; then exit 1; fi
+    printf '{"queues":{"live":{"count":0},"archive":{"count":1},"codal":{"count":1}}}\n'
+  elif [[ "${MOCK_VERIFY_DRIFT:-0}" == "1" ]]; then
+    printf '{"source_unacked":0,"target_unacked":0,"source_queues":{"live":{"count":0},"archive":{"count":2},"codal":{"count":1}},"target_queues":{"live":{"count":0},"archive":{"count":1},"codal":{"count":1}}}\n'
+  else
+    printf '{"source_unacked":0,"target_unacked":0,"source_queues":{"live":{"count":0},"archive":{"count":1},"codal":{"count":1}},"target_queues":{"live":{"count":0},"archive":{"count":1},"codal":{"count":1}}}\n'
+  fi
   exit 0
 fi
-if [[ " $* " == *" run --rm migrate "* ]]; then exit 1; fi
+if [[ " $* " == *" run --rm migrate "* ]]; then [[ "${MOCK_MIGRATE_FAIL:-1}" == "0" ]]; exit; fi
 exit 0
 SH
 chmod +x "${scratch}/bin/df" "${scratch}/bin/stat" "${scratch}/bin/docker"
@@ -143,6 +149,17 @@ if grep -q ' start celery_worker_archive\| up -d --remove-orphans' "${scratch}/d
 fi
 receipt="$(find "${scratch}/receipts" -type f | head -1)"
 [[ -n "${receipt}" && "$(/usr/bin/stat -c '%a' "${receipt}")" == 600 ]]
+
+: >"${scratch}/docker.log"
+if MOCK_MIGRATE_FAIL=0 MOCK_VERIFY_DRIFT=1 run_deploy >"${scratch}/out" 2>"${scratch}/err"; then
+  echo "Post-migration queue drift was accepted" >&2
+  exit 1
+fi
+grep -q 'Queue verification failed after migration' "${scratch}/err"
+if grep -q ' up -d --remove-orphans' "${scratch}/docker.log"; then
+  echo "Queue drift started new workers" >&2
+  exit 1
+fi
 
 : >"${scratch}/docker.log"
 PATH="${scratch}/bin:${PATH}" PROJECT_DIR="${scratch}" ENV_FILE="${scratch}/env" \
