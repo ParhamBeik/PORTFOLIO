@@ -77,8 +77,23 @@ chmod +x "${scratch}/bin/df" "${scratch}/bin/stat" "${scratch}/bin/docker"
 run_deploy() {
   PATH="${scratch}/bin:${PATH}" PROJECT_DIR="${scratch}" ENV_FILE="${scratch}/env" \
     BACKUP_DIR="${scratch}/receipts" BROKER_HANDOFF_MODE=copy \
+    LEGACY_WATCHDOG_PATH="${scratch}/legacy_watchdog" \
     MOCK_DOCKER_LOG="${scratch}/docker.log" "${scratch}/scripts/deploy.sh"
 }
+
+: >"${scratch}/legacy_watchdog"
+chmod +x "${scratch}/legacy_watchdog"
+: >"${scratch}/docker.log"
+if run_deploy >"${scratch}/out" 2>"${scratch}/err"; then
+  echo "Executable legacy watchdog was accepted" >&2
+  exit 1
+fi
+grep -q 'Legacy watchdog is executable' "${scratch}/err"
+if grep -q ' build\| stop\| copy_celery_queues.py' "${scratch}/docker.log"; then
+  echo "Legacy watchdog guard allowed deployment work" >&2
+  exit 1
+fi
+chmod -x "${scratch}/legacy_watchdog"
 
 : >"${scratch}/docker.log"
 if run_deploy >"${scratch}/out" 2>"${scratch}/err"; then

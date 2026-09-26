@@ -26,6 +26,15 @@ handoff_mode="${BROKER_HANDOFF_MODE:-drain}"
 [[ "${handoff_mode}" == "drain" || "${handoff_mode}" == "copy" ]] || {
   echo "BROKER_HANDOFF_MODE must be drain or copy" >&2; exit 1;
 }
+if [[ "${handoff_mode}" == "copy" ]]; then
+  # Root cron on the VPS still invokes a watchdog from an older checkout.
+  # It cannot see this env-file lock and could restart old workers mid-copy.
+  legacy_watchdog="${LEGACY_WATCHDOG_PATH:-/opt/apps/portfolio-saas/scripts/watchdog_prices.sh}"
+  if [[ "${legacy_watchdog}" != "${project_dir}/scripts/watchdog_prices.sh" && -x "${legacy_watchdog}" ]]; then
+    echo "Legacy watchdog is executable at ${legacy_watchdog}; disable it and migrate root cron before queue copy." >&2
+    exit 1
+  fi
+fi
 mail_host="$(awk -F= '$1=="EMAIL_HOST"{print $2; exit}' "${env_file}")"
 if [[ -z "${mail_host}" || "${mail_host}" == "localhost" || "${mail_host}" == "127.0.0.1" ]]; then
   echo "WARNING: EMAIL_HOST is '${mail_host:-<empty>}'. Self-service password reset cannot send mail; use the superuser recovery link until a relay is configured." >&2
