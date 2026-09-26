@@ -34,17 +34,22 @@ _ROWS = {
     },
 }
 _SHEETS = {
-    False: ("FinancialStatement-Listed-Product-V9", 1, "Income Statement", "IncomeStatement", 3220, "7"),
+    False: (1, "Income Statement", "IncomeStatement", 3220, "7"),
     True: (
-        "FinancialStatement-Consolidated-Listed-Product-V9", 13,
-        "Consolidated Income Statement", "ConsolidatedIncomeStatement", 3227, "2",
+        13, "Consolidated Income Statement", "ConsolidatedIncomeStatement", 3227, "2",
     ),
 }
+_V9_TITLES = {
+    consolidated: {
+        f"FinancialStatement-{'Consolidated-' if consolidated else ''}{venue}-Product-V9"
+        for venue in ("Listed", "OTC", "Registered")
+    }
+    for consolidated in (False, True)
+}
 _BALANCE_SHEETS = {
-    False: ("FinancialStatement-Listed-Product-V9", 0, "Balance Sheet", "BalanceSheet", 3223, "5"),
+    False: (0, "Balance Sheet", "BalanceSheet", 3223, "5"),
     True: (
-        "FinancialStatement-Consolidated-Listed-Product-V9", 14,
-        "Consolidated Balance Sheet", "ConsolidatedBalanceSheet", 3230, "3",
+        14, "Consolidated Balance Sheet", "ConsolidatedBalanceSheet", 3230, "3",
     ),
 }
 _BALANCE_ROWS = {
@@ -150,12 +155,12 @@ def parse_income_statement(
         source, offset = json.JSONDecoder().raw_decode(scripts[0][match.end():])
         if not scripts[0][match.end() + offset:].lstrip().startswith(";"):
             return []
-        expected_title, sheet_code, sheet_name, alias, table_id, table_version = _SHEETS[is_consolidated]
+        sheet_code, sheet_name, alias, table_id, table_version = _SHEETS[is_consolidated]
         end = normalize_jalali(source["periodEndToDate"])
         months = source["period"]
         start = _period_start(end, months)
         fiscal_start = _period_start(normalize_jalali(source["yearEndToDate"]), 12)
-        if (source["title_En"] != expected_title or source["type"] != 6
+        if (source["title_En"] not in _V9_TITLES[is_consolidated] or source["type"] != 6
                 or source["isConsolidated"] is not is_consolidated
                 or source["isAudited"] is not is_audited
                 or end != period_end or not start or start != fiscal_start
@@ -204,7 +209,7 @@ def parse_income_statement(
                     "statement_scope": "consolidated" if is_consolidated else "standalone",
                     "period_months": months, "audited": is_audited,
                     "issuer": company_node.get_text(" ", strip=True),
-                    "template": expected_title,
+                    "template": source["title_En"],
                 },
                 "source_coordinates": {
                     "sheet_code": sheet_code, "table_id": table_id,
@@ -253,12 +258,12 @@ def parse_balance_sheet(
         source, offset = json.JSONDecoder().raw_decode(scripts[0][match.end():])
         if not scripts[0][match.end() + offset:].lstrip().startswith(";"):
             return []
-        expected_title, sheet_code, sheet_name, alias, table_id, version = _BALANCE_SHEETS[is_consolidated]
+        sheet_code, sheet_name, alias, table_id, version = _BALANCE_SHEETS[is_consolidated]
         end = normalize_jalali(source["periodEndToDate"])
         months = source["period"]
         start = _period_start(end, months)
         fiscal_start = _period_start(normalize_jalali(source["yearEndToDate"]), 12)
-        if (source["title_En"] != expected_title or source["type"] != 6
+        if (source["title_En"] not in _V9_TITLES[is_consolidated] or source["type"] != 6
                 or source["isConsolidated"] is not is_consolidated
                 or source["isAudited"] is not is_audited
                 or end != period_end or not start or start != fiscal_start
@@ -307,7 +312,7 @@ def parse_balance_sheet(
                     "statement_scope": "consolidated" if is_consolidated else "standalone",
                     "reporting_months": months, "audited": is_audited,
                     "issuer": company_node.get_text(" ", strip=True),
-                    "template": expected_title,
+                    "template": source["title_En"],
                 },
                 "source_coordinates": {
                     "sheet_code": sheet_code, "table_id": table_id,

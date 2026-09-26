@@ -1,2 +1,2 @@
 # Preserve archived Codal response bytes, including CRLF and source whitespace.
-portfolio-saas/backend/tests/fixtures/codal/foolad_* -diff -text
+portfolio-saas/backend/tests/fixtures/codal/*.html -diff -text

@@ -94,6 +94,52 @@ def test_balance_sheet_link_requires_advertised_sheet_and_codal_source():
     assert balance_sheet_url(INTERIM, source.replace("codal.ir", "example.com"), is_consolidated=False) is None
 
 
+@pytest.mark.parametrize("venue,scope,symbol,company,serial,revenue,assets", [
+    ("otc", "standalone", "بجهرم", "توسعه مولد نیروگاهی جهرم", "mnKmuErJuqPJH4lQQQaQQQvCwnOg%3d%3d", "22915756", "58426274"),
+    ("otc", "consolidated", "کرومیت", "توسعه معادن کرومیت کاوندگان بنا", "r9mC89jB39KVhOadOOObOOOKQIXg%3d%3d", "2288503", "13382939"),
+    ("registered", "standalone", "لکما", "کارخانجات مخابراتی ایران", "NXh0zzf8btuBRc7NnlYrdg%3d%3d", "614540", "11964352"),
+    ("registered", "consolidated", "دحاوی", "الحاوی", "i8COOObOOOXrPKfcWIiu70yhDpMA%3d%3d", "26618031", "32092974"),
+])
+def test_observed_otc_and_registered_v9_sheets(venue, scope, symbol, company, serial, revenue, assets):
+    prefix = f"{venue}_{scope}"
+    income_html = (FIXTURES / f"{prefix}_income_v9.html").read_bytes()
+    balance_html = (FIXTURES / f"{prefix}_balance_v9.html").read_bytes()
+    arguments = {
+        "symbol": symbol, "company_name": company, "title": "صورت های مالی",
+        "period_end": "1404-12-29", "is_consolidated": scope == "consolidated",
+        "is_audited": False,
+    }
+    income = {fact["fact_code"]: fact for fact in parse_income_statement(income_html, **arguments)}
+    balance = {fact["fact_code"]: fact for fact in parse_balance_sheet(balance_html, **arguments)}
+    assert len(income) == 6
+    assert len(balance) == 11
+    assert income["income.operating_revenue"]["numeric_value"] == Decimal(revenue)
+    assert balance["balance.total_assets"]["numeric_value"] == Decimal(assets)
+    assert balance["balance.total_assets"]["period_start"] == ""
+    expected_venue = "OTC" if venue == "otc" else "Registered"
+    assert expected_venue in income["income.operating_revenue"]["dimensions"]["template"]
+    assert balance_sheet_url(
+        income_html,
+        f"https://codal.ir/Reports/Decision.aspx?LetterSerial={serial}&rt=0&let=6&ct=0&ft=-1",
+        is_consolidated=scope == "consolidated",
+    ).endswith(f"sheetId={14 if scope == 'consolidated' else 0}")
+
+
+def test_unobserved_v9_venue_is_withheld():
+    raw = (FIXTURES / "otc_standalone_income_v9.html").read_bytes()
+    assert parse_income_statement(
+        raw.replace(b"FinancialStatement-OTC-Product-V9", b"FinancialStatement-Unknown-Product-V9"),
+        symbol="بجهرم", company_name="توسعه مولد نیروگاهی جهرم", title="صورت های مالی",
+        period_end="1404-12-29", is_consolidated=False, is_audited=False,
+    ) == []
+    balance = (FIXTURES / "otc_standalone_balance_v9.html").read_bytes()
+    assert parse_balance_sheet(
+        balance.replace(b"FinancialStatement-OTC-Product-V9", b"FinancialStatement-Unknown-Product-V9"),
+        symbol="بجهرم", company_name="توسعه مولد نیروگاهی جهرم", title="صورت های مالی",
+        period_end="1404-12-29", is_consolidated=False, is_audited=False,
+    ) == []
+
+
 @pytest.mark.django_db
 def test_balance_backfill_archives_source_and_is_idempotent(monkeypatch, capsys):
     from marketdata.management.commands import backfill_balance_sheets as command
