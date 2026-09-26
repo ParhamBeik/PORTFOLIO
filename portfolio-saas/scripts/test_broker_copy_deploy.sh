@@ -11,6 +11,7 @@ scratch="$(mktemp -d)"
 trap 'rm -rf "${scratch}"' EXIT
 mkdir -p "${scratch}/bin" "${scratch}/scripts" "${scratch}/receipts"
 cp "${source_dir}/scripts/deploy.sh" "${scratch}/scripts/deploy.sh"
+cp "${source_dir}/scripts/watchdog_prices.sh" "${scratch}/scripts/watchdog_prices.sh"
 touch "${scratch}/docker-compose.prod.yml"
 cat >"${scratch}/env" <<'ENV'
 PORTFOLIO_DOMAIN=portfolio.example.com
@@ -127,3 +128,10 @@ if grep -q ' start celery_worker_archive\| up -d --remove-orphans' "${scratch}/d
 fi
 receipt="$(find "${scratch}/receipts" -type f | head -1)"
 [[ -n "${receipt}" && "$(/usr/bin/stat -c '%a' "${receipt}")" == 600 ]]
+
+: >"${scratch}/docker.log"
+PATH="${scratch}/bin:${PATH}" PROJECT_DIR="${scratch}" ENV_FILE="${scratch}/env" \
+  MOCK_DOCKER_LOG="${scratch}/docker.log" flock -x "${scratch}/env" \
+  bash "${scratch}/scripts/watchdog_prices.sh" >"${scratch}/out" 2>"${scratch}/err"
+grep -q 'deployment in progress' "${scratch}/out"
+[[ ! -s "${scratch}/docker.log" ]]
