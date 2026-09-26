@@ -7,7 +7,7 @@ import logging
 from decimal import Decimal
 
 from django.conf import settings
-from marketdata.currency import IRR_QUOTE_UNITS, FOREIGN_QUOTE_UNITS, canonical_symbol, to_toman
+from marketdata.currency import IRR_QUOTE_UNITS, USD_QUOTE_UNITS, canonical_symbol, to_toman
 from portfolio.live import find_symbol_record
 
 logger = logging.getLogger(__name__)
@@ -121,8 +121,9 @@ def _price_from_tsetmc_record(record):
 def _lookup_usdt_toman(lookup, usd_rate, history_payload=None):
     """Resolve USDT/IRT in Tomans.
 
-    Prefer the provider's IRR/Toman quote (history or live row). Only when the
-    feed quotes tether near 1 USD with no local unit do we scale by `usd_rate`.
+    Prefer the provider's IRR/Toman quote (history or live row). An explicitly
+    USD-quoted USDT price can use cash USD/Toman; an unlabelled or Tether-quoted
+    number cannot silently stand in for the local USDT/Toman market.
     """
     if history_payload:
         from_history = _usdt_toman_from_history(history_payload, usd_rate)
@@ -141,18 +142,17 @@ def _lookup_usdt_toman(lookup, usd_rate, history_payload=None):
         if price <= 0:
             continue
         unit = str(item.get("unit") or "").strip().casefold()
-        if unit in IRR_QUOTE_UNITS or (not unit and price >= 10):
+        if unit in IRR_QUOTE_UNITS:
             value = to_toman(
                 canonical_symbol(item.get("symbol") or symbol),
                 price,
-                unit or "تومان",
+                unit,
             )
             if value > 0:
                 return value.quantize(Decimal("1"))
-        if unit in FOREIGN_QUOTE_UNITS or price < 10:
+        if unit in USD_QUOTE_UNITS:
             if rate > 0:
                 return (price * rate).quantize(Decimal("1"))
-        return price.quantize(Decimal("1"))
     return Decimal("0")
 
 
@@ -172,6 +172,8 @@ def _usdt_toman_from_history(payload, usd_rate):
     if close is None:
         return Decimal("0")
     unit = str(payload.get("unit") or "").strip()
+    if unit.casefold() not in IRR_QUOTE_UNITS | USD_QUOTE_UNITS:
+        return Decimal("0")
     return to_toman(
         canonical_symbol(payload.get("symbol") or "USDT"),
         close,
@@ -180,7 +182,7 @@ def _usdt_toman_from_history(payload, usd_rate):
     ).quantize(Decimal("1"))
 
 
-def _lookup_toman(lookup, symbols, *, usd_rate=None):
+def _lookup_toman(lookup, symbols, *, usd_rate=None, usdt_rate=None):
     for symbol in symbols:
         item = lookup.get(str(symbol).strip().casefold())
         if not isinstance(item, dict):
@@ -190,6 +192,7 @@ def _lookup_toman(lookup, symbols, *, usd_rate=None):
             item.get("price"),
             item.get("unit", ""),
             usd_rate=usd_rate,
+            usdt_rate=usdt_rate,
         )
         if value > 0:
             return value.quantize(Decimal("1"))
@@ -283,7 +286,8 @@ def apply_instrument_prices(raw_data, instruments, prices):
             # answer for those without it rather than passing dollars off as
             # Toman. Without this a minted Bitcoin holding priced at ~64,500.
             value = _lookup_toman(
-                lookup, [brs_symbol], usd_rate=prices.get("usd_cash")
+                lookup, [brs_symbol], usd_rate=prices.get("usd_cash"),
+                usdt_rate=prices.get("usdt_irt"),
             )
             if value > 0:
                 prices[key] = value

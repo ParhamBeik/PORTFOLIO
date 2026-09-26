@@ -2415,13 +2415,17 @@ def test_a_live_only_class_is_priced_by_every_valuation_path(
         "%Y-%m-%d"
     )
     # The provider quotes crypto in Tether and the bar table has no unit column,
-    # so the unit comes off the snapshot payload and the rate off the USD close.
+    # so the unit comes off the snapshot payload and uses USDT/Toman.
     MarketSnapshot.objects.create(
         asset_class="crypto", symbol="BTC", observed_at=timezone.now(),
         last_price=Decimal("2"), provider_payload={"unit": "تتر"},
     )
     GoldCurrencyHistory.objects.create(
         symbol="USD", date=today_jalali, close_price=Decimal("100000"),
+        unit="تومان",
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USDT_IRT", date=today_jalali, close_price=Decimal("100000"),
         unit="تومان",
     )
     MarketDailyBar.objects.create(
@@ -2437,7 +2441,7 @@ def test_a_live_only_class_is_priced_by_every_valuation_path(
         account=account, asset=coin, quantity=Decimal("3")
     )
 
-    # 3 coins x 2 Tether x 100,000 Toman/dollar.
+    # 3 coins x 2 Tether x 100,000 Toman/Tether.
     expected = Decimal("600000")
     as_of = value_as_of(user, account, as_of=timezone.now())
     assert as_of["excluded"] == []
@@ -2496,6 +2500,9 @@ def test_point_in_time_brs_history_converts_foreign_quotes_to_toman(make_user):
     )
     GoldCurrencyHistory.objects.create(
         symbol="USD", date=today, close_price=Decimal("100000"), unit="تومان",
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USDT_IRT", date=today, close_price=Decimal("100000"), unit="تومان",
     )
     GoldCurrencyHistory.objects.create(
         symbol="BTC", date=today, close_price=Decimal("2"), unit="تتر",

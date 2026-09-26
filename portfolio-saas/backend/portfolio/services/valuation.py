@@ -13,7 +13,6 @@ from django.core.cache import cache
 from django.utils import timezone
 
 from marketdata.currency import (
-    FOREIGN_QUOTE_UNITS,
     holding_value_to_toman,
     is_tse_priced,
     to_toman,
@@ -47,9 +46,9 @@ from marketdata.provenance import (
     PRICE_SERIES_ENDPOINTS,
     STOCK_SERIES_ENDPOINTS,
     daily_bar_price,
-    rate_on,
     rejected_pairs,
-    toman_per_dollar,
+    toman_rate_kwargs,
+    toman_rate_tables,
 )
 
 logger = logging.getLogger(__name__)
@@ -1625,21 +1624,14 @@ def resolve_asset_point_in_time_price(
         )
         if hist:
             raw_price = Decimal(str(hist.close_price))
-            foreign_quote = (
-                asset.key in USD_QUOTED_KEYS
-                or str(hist.unit or "").strip().casefold() in FOREIGN_QUOTE_UNITS
-            )
-            usd_rate = None
-            if foreign_quote:
-                rates, dates = toman_per_dollar([hist.date])
-                usd_rate = rate_on(rates, dates, hist.date)
-            price = (
-                raw_price * Decimal(str(usd_rate))
-                if asset.key in USD_QUOTED_KEYS and usd_rate
-                else to_toman(
-                    hist.symbol, raw_price, hist.unit, usd_rate=usd_rate
+            if hist.unit or asset.key not in USD_QUOTED_KEYS:
+                cash_rates, tether_rates = toman_rate_tables([hist.unit], [hist.date])
+                price = to_toman(
+                    hist.symbol, raw_price, hist.unit,
+                    **toman_rate_kwargs(
+                        hist.unit, hist.date, cash_rates, tether_rates,
+                    ),
                 )
-            )
             source = "gold_currency_history"
             stale_sessions = sessions_between(
                 hist.date, as_of_jalali, market="gold_currency"

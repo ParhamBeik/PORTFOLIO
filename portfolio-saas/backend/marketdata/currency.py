@@ -76,9 +76,9 @@ RIAL_QUOTE_UNITS = frozenset({"ریال".casefold(), "rial", "irr"})
 #: Units that mean "this number is already Toman" -- returned as-is.
 TOMAN_QUOTE_UNITS = frozenset({"تومان".casefold(), "toman"})
 IRR_QUOTE_UNITS = RIAL_QUOTE_UNITS | TOMAN_QUOTE_UNITS
-FOREIGN_QUOTE_UNITS = frozenset({
-    "دلار".casefold(), "dollar", "usd", "تتر".casefold(), "tether", "usdt",
-})
+USD_QUOTE_UNITS = frozenset({"دلار".casefold(), "dollar", "usd"})
+TETHER_QUOTE_UNITS = frozenset({"تتر".casefold(), "tether", "usdt"})
+FOREIGN_QUOTE_UNITS = USD_QUOTE_UNITS | TETHER_QUOTE_UNITS
 
 
 def tse_unit_verified() -> bool:
@@ -147,16 +147,12 @@ def holding_value_to_toman(asset, value):
     return amount
 
 
-def to_toman(symbol, price, unit="", *, usd_rate=None):
+def to_toman(symbol, price, unit="", *, usd_rate=None, usdt_rate=None):
     """Convert a provider quote to Tomans using declared units, never magnitude.
 
-    A foreign-quoted value with no `usd_rate` returns 0 -- the "no price yet"
-    sentinel -- rather than the foreign number itself. It previously fell
-    through to `return value`, and because the dollar branch matched only the
-    ASCII "usd"/"dollar" while the provider says "دلار"/"تتر", a dollar quote
-    was handed back verbatim and stored as verified Toman: one Bitcoin valued
-    at ~64,500 Toman, one Tether at 1. Refusing to answer is the only safe
-    reading of "I know this is dollars and I have no rate".
+    Dollars use the cash-USD/Toman rate; Tether uses USDT/Toman. If the
+    corresponding rate is missing, return the existing "no price yet" sentinel
+    instead of substituting the other pair or treating a foreign price as Toman.
     """
     value = Decimal(str(price or 0))
     if value <= 0:
@@ -165,8 +161,10 @@ def to_toman(symbol, price, unit="", *, usd_rate=None):
     unit = str(unit or "").strip().casefold()
     if unit in RIAL_QUOTE_UNITS:
         return value / Decimal("10")
-    if unit in FOREIGN_QUOTE_UNITS:
+    if unit in USD_QUOTE_UNITS:
         return value * Decimal(str(usd_rate)) if usd_rate else Decimal("0")
+    if unit in TETHER_QUOTE_UNITS:
+        return value * Decimal(str(usdt_rate)) if usdt_rate else Decimal("0")
     return value
 
 

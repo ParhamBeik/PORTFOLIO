@@ -27,9 +27,9 @@ from marketdata.provenance import (
     BRS_SERIES_ENDPOINTS,
     STOCK_SERIES_ENDPOINTS,
     daily_bar_price,
-    rate_on,
     rejected_pairs,
-    toman_per_dollar,
+    toman_rate_kwargs,
+    toman_rate_tables,
 )
 
 
@@ -1322,12 +1322,17 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
             # Shared helper, not a fourth copy: this branch writes a durable
             # `LedgerEntry.price_tomans`, so a divergent answer here becomes
             # permanent rather than merely displayed.
-            converted = to_toman(
-                asset.brs_symbol,
-                history.close_price,
-                history.unit,
-                usd_rate=rate_on(*toman_per_dollar([history.date]), history.date),
-            )
+            converted = Decimal("0")
+            if history.unit or asset.asset_class != Asset.AssetClass.CRYPTO:
+                cash_rates, tether_rates = toman_rate_tables(
+                    [history.unit], [history.date],
+                )
+                converted = to_toman(
+                    asset.brs_symbol, history.close_price, history.unit,
+                    **toman_rate_kwargs(
+                        history.unit, history.date, cash_rates, tether_rates,
+                    ),
+                )
             if converted > 0:
                 return Decimal(str(converted))
         return _daily_bar_or_live_price(asset, j_date)

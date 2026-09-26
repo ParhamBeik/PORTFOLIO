@@ -36,7 +36,7 @@ from marketdata.models import (
     RejectedRecord,
     SymbolIntegrity,
 )
-from marketdata.provenance import daily_bar_price, rate_on, toman_per_dollar
+from marketdata.provenance import daily_bar_price, toman_rate_kwargs, toman_rate_tables
 
 
 class AccountPerformanceView(APIView):
@@ -540,7 +540,9 @@ def _brs_price_history(asset, since_jalali):
     ]
     if rows:
         from portfolio.services.returns import USD_QUOTED_KEYS
-        rates, rate_dates = toman_per_dollar([row["date"] for row in rows])
+        cash_rates, tether_rates = toman_rate_tables(
+            [row["unit"] for row in rows], [row["date"] for row in rows],
+        )
         points = []
         for row in rows:
             # An unlabelled row on a foreign-quoted asset is a refusal, not a
@@ -552,7 +554,9 @@ def _brs_price_history(asset, since_jalali):
                 asset.brs_symbol,
                 row["close_price"],
                 row["unit"],
-                usd_rate=rate_on(rates, rate_dates, row["date"]),
+                **toman_rate_kwargs(
+                    row["unit"], row["date"], cash_rates, tether_rates,
+                ),
             )
             if price > 0:
                 points.append({"date": row["date"], "price": float(price)})

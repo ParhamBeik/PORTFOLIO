@@ -128,7 +128,10 @@ def _price_version_fingerprint(asset_keys=None) -> str:
         rows = Asset.objects.filter(key__in=asset_keys).values_list(
             "tse_symbol", "brs_symbol"
         )
-        symbols = sorted({symbol for row in rows for symbol in row if symbol})
+        # Every panel appends cash USD, and Tether-quoted archive rows need
+        # USDT/IRT even when neither rate asset is in the requested universe.
+        symbols = sorted({symbol for row in rows for symbol in row if symbol}
+                         | {"USD", "USDT_IRT"})
 
     def _max_id(qs, *, symbol_keyed=True):
         if symbol_keyed and symbols is not None:
@@ -646,8 +649,6 @@ def _load_price_panel(
         # does -- but the unit was never actually lost: `ingest_market_snapshots`
         # stores the whole provider row, unit string included, and
         # `provenance.daily_bar_units` reads it back.
-        from marketdata.models import MarketDailyBar, MarketInstrument
-
         etf_symbols = list(
             MarketInstrument.objects.filter(
                 source=MarketInstrument.Source.TSETMC,
@@ -673,34 +674,55 @@ def _load_price_panel(
     # Bulk query GoldCurrencyHistory (BRS)
     brs_rows = []
     if brs_symbols:
+        from marketdata.currency import to_toman
+        from marketdata.provenance import (
+            daily_bar_price, toman_rate_kwargs, toman_rate_tables,
+        )
         qs_brs = GoldCurrencyHistory.objects.filter(
             symbol__in=brs_symbols,
             close_price__gt=0,
         )
         if as_of_jalali is not None:
             qs_brs = qs_brs.filter(date__lte=as_of_jalali)
-        brs_rows = list(qs_brs.order_by("symbol", "date").values_list("symbol", "date", "close_price"))
-        # Crypto and commodities have no provider history endpoint, so their
-        # only close series is MarketDailyBar. `provenance.daily_bar_price` is
-        # the one reader that class-guards, drops rejected rows and converts at
-        # each row's own dollar rate. Rows the gold/currency table already
-        # covers are skipped rather than appended: that table stores XAUUSD and
-        # BTC in their FOREIGN units deliberately, so letting list order decide
-        # would splice two unit conventions into one column and read the join
-        # as a real return.
-        from marketdata.provenance import daily_bar_price
+        raw_brs_rows = list(qs_brs.order_by("symbol", "date").values_list(
+            "symbol", "date", "close_price", "unit",
+        ))
+        cash_rates, tether_rates = toman_rate_tables(
+            [unit for _sym, _day, _close, unit in raw_brs_rows],
+            [day for _sym, day, _close, _unit in raw_brs_rows],
+        )
+        known_foreign_symbols = {
+            item["symbol"] for item in resolved_univ
+            if item["key"] in USD_QUOTED_KEYS
+            or getattr(item.get("asset"), "asset_class", None) == Asset.AssetClass.CRYPTO
+        }
+        known_foreign_symbols.update(
+            MarketInstrument.objects.filter(
+                source=MarketInstrument.Source.BRS,
+                symbol__in=brs_symbols,
+                category__in=(
+                    MarketInstrument.Category.CRYPTO,
+                    MarketInstrument.Category.COMMODITY,
+                ),
+            ).values_list("symbol", flat=True)
+        )
+        for symbol, day, close, unit in raw_brs_rows:
+            if not unit and symbol in known_foreign_symbols:
+                continue
+            value = to_toman(
+                symbol, close, unit,
+                **toman_rate_kwargs(unit, day, cash_rates, tether_rates),
+            )
+            if value > 0:
+                brs_rows.append((symbol, day, value))
+        # The live-only daily bars are already converted by their declared
+        # snapshot unit. Both sources now reach this panel in Toman, so the
+        # join cannot splice BTC Tether and Toman into one return series.
 
         covered = {(symbol, date) for symbol, date, _close in brs_rows}
-        # USD_QUOTED_KEYS are excluded: `_convert_usd_to_toman` multiplies those
-        # columns wholesale on the assumption they are dollars, and these rows
-        # are already Toman. Splicing them in would convert the bar days twice
-        # and put a ~100,000x step in the column at the join. Those keys have a
-        # gold/currency history series of their own, which is why they are on
-        # that list at all, so they lose nothing here.
         brs_assets = [
             item["asset"] for item in resolved_univ
             if item.get("asset") and item["source"] == "brs"
-            and item["key"] not in USD_QUOTED_KEYS
         ]
         brs_rows.extend(
             row for row in daily_bar_price(brs_assets, as_of=as_of_jalali)
@@ -730,7 +752,6 @@ def _load_price_panel(
     gate_excluded = []
     warnings: list[dict] = []
 
-    from portfolio.models import Asset
     from marketdata.calendars import market_for_asset, sessions_between
 
     univ_keys = [item["key"] for item in resolved_univ]
@@ -836,7 +857,11 @@ def _load_price_panel(
     # panel is legitimately daily and should keep its weekend observations.
     if tse_keys.intersection(panel.columns):
         panel = _align_to_trading_sessions(panel)
-    return _trim_to_contiguous(panel), gate_excluded, warnings
+    panel = _trim_to_contiguous(panel)
+    panel.attrs["toman_normalized_keys"] = frozenset(
+        key for key in warehouse_cols if key in USD_QUOTED_KEYS
+    )
+    return panel, gate_excluded, warnings
 
 
 def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys: list[str]) -> pd.DataFrame:
@@ -942,21 +967,24 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
 
 
 def _convert_usd_to_toman(panel: pd.DataFrame) -> pd.DataFrame:
-    """Multiply USD-quoted columns by the daily-last usd_cash price (in place).
+    """Convert fallback Price-table USD columns; archive columns are already Toman.
 
     `usd_cash` is Toman-denominated (`extract_standard_prices` resolves it via
     `to_toman()`), so the result is a Toman-denominated column for each
     USD-quoted asset — matching the rest of the panel.
 
-    Operates on the price panel BEFORE returns are taken, so the resulting
-    daily return correctly reflects both the USD move and the FX move. Forward-
-    fills usd_cash so a missing day still uses the most recent rate.
+    Operates before returns are taken, so the fallback series reflects both
+    the USD move and the FX move. Archive rows carry their own declared USD or
+    Tether unit and were converted during `_load_price_panel`; multiplying them
+    again here would create a large false return. Forward-fill is limited to
+    five dates for the fallback Price series.
     """
     if "usd_cash" not in panel.columns:
         return panel
     fx = panel["usd_cash"].ffill(limit=5)
+    normalized = panel.attrs.get("toman_normalized_keys", frozenset())
     for key in USD_QUOTED_KEYS:
-        if key in panel.columns:
+        if key in panel.columns and key not in normalized:
             panel[key] = panel[key] * fx
     return panel
 
@@ -1131,11 +1159,9 @@ def toman_price_panel(
     """Daily close panel in Toman. The supported reader for absolute prices.
 
     `_load_price_panel` is deliberately NOT that reader and must not be called
-    from outside this module. What it returns is ratio-safe, not money-safe:
-    the USD-quoted columns (`USD_QUOTED_KEYS`) are still dollars, and the
-    live-Price fallback column is Rial for a TSE symbol. Every consumer so far
-    took `pct_change()` immediately, where a constant factor cancels -- so the
-    mismatch was invisible until something printed a value instead of a ratio.
+    from outside this module. Archive rows are in Toman after unit-aware
+    conversion, but fallback Price rows for `USD_QUOTED_KEYS` are still in
+    dollars and fallback TSE quotes can still be Rial.
 
     This applies the dollar conversion, then hands back the same
     `(panel, excluded, warnings)` triple. Callers that need the forward-fill
@@ -1212,11 +1238,10 @@ def daily_returns_matrix(
             panel[col] = to_basis(panel[col], basis, usd_series=usd_series)
     elif basis == "usdt_denominated":
         usdt_series = panel.get("usdt_irt")
-        usd_series = panel.get("usd_cash")
-        series_to_use = usdt_series if (usdt_series is not None and not usdt_series.isna().all()) else usd_series
-        if series_to_use is not None:
-            for col in panel.columns:
-                panel[col] = to_basis(panel[col], basis, usd_series=series_to_use)
+        # A missing Tether series is a gap, never permission to substitute
+        # cash USD. `to_basis` loads USDT_IRT directly when it is absent here.
+        for col in panel.columns:
+            panel[col] = to_basis(panel[col], basis, usd_series=usdt_series)
     elif basis == "real_toman":
         for col in panel.columns:
             panel[col] = to_basis(panel[col], basis)

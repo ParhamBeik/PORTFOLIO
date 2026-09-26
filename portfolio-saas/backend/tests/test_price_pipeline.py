@@ -938,13 +938,16 @@ def test_price_history_converts_a_tether_quoted_series_to_toman(asset_catalog, m
     GoldCurrencyHistory.objects.create(
         symbol="USD", date=day, close_price=Decimal("90000"), unit="تومان",
     )
+    GoldCurrencyHistory.objects.create(
+        symbol="USDT_IRT", date=day, close_price=Decimal("91000"), unit="تومان",
+    )
 
     client = APIClient()
     client.force_authenticate(user=make_user())
     response = client.get(f"/api/prices/history/?asset={coin.key}&days=90")
 
     assert response.data["asset"]["unit"] == "Toman"
-    assert response.data["points"] == [{"date": day_iso, "price": 180000.0}]
+    assert response.data["points"] == [{"date": day_iso, "price": 182000.0}]
 
 
 def test_price_history_refuses_an_unlabelled_foreign_row(asset_catalog, make_user):
@@ -1211,7 +1214,7 @@ PARITY_KEYS = [
 ]
 
 
-def test_extract_matches_legacy_for_every_key(raw_market_sample, legacy_engine):
+def test_extract_matches_legacy_for_labeled_keys(raw_market_sample, legacy_engine):
     saas = extract_standard_prices(raw_market_sample)
     legacy = legacy_engine.extract_standard_prices(raw_market_sample, LEGACY_CONSTANTS)
 
@@ -1221,16 +1224,17 @@ def test_extract_matches_legacy_for_every_key(raw_market_sample, legacy_engine):
 
     mismatches = {
         k: (float(saas[k]), float(legacy[k]))
-        for k in PARITY_KEYS
+        for k in PARITY_KEYS if k != "usdt_irt"
         if float(saas[k]) != float(legacy[k])
     }
     assert not mismatches, f"price map diverged from legacy engine: {mismatches}"
+    assert saas["usdt_irt"] == 0  # The synthetic sample has no quote-unit label.
 
 
-def test_usdt_low_quote_is_converted_to_tomans(raw_market_sample):
-    """When only the ~1 USD peg quote exists, USDT falls back to USD Tomans."""
+def test_usdt_low_quote_requires_a_declared_unit(raw_market_sample):
+    """A near-one quote cannot reveal whether the provider meant USD or USDT."""
     prices = extract_standard_prices(raw_market_sample)
-    assert prices["usdt_irt"] == Decimal("63200")
+    assert prices["usdt_irt"] == Decimal("0")
     assert prices["usd_cash"] == Decimal("63200")
 
 

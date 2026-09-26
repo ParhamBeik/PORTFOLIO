@@ -561,6 +561,13 @@ def test_to_toman_applies_usd_rate_without_extra_conversion():
     assert to_toman("USDT_IRT", 1, "USD", usd_rate=632000) == Decimal("632000")
 
 
+def test_to_toman_keeps_cash_usd_and_tether_rate_boundaries_distinct():
+    assert to_toman("BTC", 2, "تتر", usd_rate=90000, usdt_rate=91000) == Decimal("182000")
+    assert to_toman("XAUUSD", 2, "دلار", usd_rate=90000, usdt_rate=91000) == Decimal("180000")
+    assert to_toman("BTC", 2, "تتر", usd_rate=90000) == Decimal("0")
+    assert to_toman("XAUUSD", 2, "دلار", usdt_rate=91000) == Decimal("0")
+
+
 def test_to_toman_zero_and_negative_input_is_zero():
     assert to_toman("کاما", 0, "Rial") == Decimal("0")
     assert to_toman("کاما", -100, "Rial") == Decimal("0")
