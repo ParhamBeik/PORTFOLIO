@@ -36,7 +36,7 @@ fi
 # A broker cutover cannot drain a queue whose old consumer is absent or paused.
 # Check before the backup/build, and especially before stopping the API: an
 # older Compose stack can have queued Codal jobs but no Codal worker at all.
-backend_cid="$("${compose[@]}" ps -q backend)"
+backend_cid="$("${compose[@]}" ps -q --all backend)"
 legacy_broker=0
 if [[ -n "${backend_cid}" ]] && docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${backend_cid}" \
   | grep -qx 'CELERY_BROKER_URL=redis://redis:6379/2'; then
@@ -74,11 +74,16 @@ if (( legacy_broker )); then
     exit 1
   }
   resume_legacy_services() {
+    local failed=0
     for service in backend celery_worker_live celery_worker_archive celery_worker_codal celery_beat; do
       if [[ -n "$("${compose[@]}" ps -q --all "${service}")" ]]; then
-        "${compose[@]}" start "${service}"
+        if ! "${compose[@]}" start "${service}"; then
+          echo "Could not restart legacy ${service}; manual recovery is required." >&2
+          failed=1
+        fi
       fi
     done
+    (( failed == 0 )) || echo "One or more legacy services did not restart." >&2
   }
   "${compose[@]}" stop celery_beat backend
   legacy_pending() {
