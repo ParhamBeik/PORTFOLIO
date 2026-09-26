@@ -297,7 +297,7 @@ def test_closed_tse_valuation_uses_latest_archive_close(asset_catalog, write_pri
         close_price=Decimal("200"),
     )
     monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
 
     assert get_latest_prices()["kama_stock"] == Decimal("200")
 
@@ -326,7 +326,7 @@ def test_live_only_asset_uses_market_daily_bar_when_closed(asset_catalog, write_
         close_price=Decimal("800"),
     )
     monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
 
     assert get_latest_prices()["kama_stock"] == Decimal("800")
 
@@ -348,7 +348,7 @@ def test_crypto_keeps_its_live_price_overnight(asset_catalog, write_prices, monk
         close_price=Decimal("800"),
     )
     monkeypatch.setattr("marketdata.market_state.market_state", lambda: "overnight")
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
 
     assert get_latest_prices()["bitcoin_usd"] == Decimal("900")
 
@@ -366,7 +366,7 @@ def test_live_bar_fallback_requires_matching_asset_class(asset_catalog, write_pr
         close_price=Decimal("800"),
     )
     monkeypatch.setattr("marketdata.market_state.market_state", lambda: "overnight")
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
 
     assert get_latest_prices().get("bitcoin_usd", Decimal("0")) == Decimal("0")
 
@@ -401,7 +401,7 @@ def test_closed_tse_keeps_todays_live_price_until_the_archive_catches_up(
         close_price=Decimal("5200"),
     )
     monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
 
     assert get_latest_prices()["kama_stock"] == Decimal("4890")
 
@@ -428,7 +428,7 @@ def test_closed_tse_prefers_the_archive_once_it_has_todays_close(
         close_price=Decimal("4910"),
     )
     monkeypatch.setattr("marketdata.market_state.market_state", lambda: "closed_daytime")
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
 
     assert get_latest_prices()["kama_stock"] == Decimal("4910")
 
@@ -636,7 +636,7 @@ def test_quality_status_stale_when_session_missed_without_quota_block(
 def test_latest_price_is_newest_per_asset(asset_catalog, write_prices):
     write_prices({"emami_coin": Decimal("400000000")})
     write_prices({"emami_coin": Decimal("480000000")})  # newer
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
 
     prices = get_latest_prices()
     assert prices["emami_coin"] == Decimal("480000000")
@@ -688,7 +688,7 @@ def test_inactive_assets_are_excluded(asset_catalog, write_prices):
 
     write_prices({"emami_coin": Decimal("480000000")})
     Asset.objects.filter(key="emami_coin").update(is_active=False)
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
     prices = get_latest_prices()
     assert "emami_coin" not in prices
 
@@ -704,7 +704,7 @@ def test_latest_price_uses_archive_when_latest_fetch_sharply_drops(asset_catalog
         date="1404-01-02",
         close_price=Decimal("479000000"),
     )
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
 
     prices = get_latest_prices()
     assert prices["emami_coin"] == Decimal("479000000")
@@ -2618,41 +2618,59 @@ def test_a_crypto_quote_is_dollars_even_with_no_unit_label(asset_catalog, make_u
 
 
 # ----------------------------------------------------------------------
-# The dollar-quoted keys reach the valuation on the Toman scale.
-#
-# `bitcoin_usd` and `gold_ounce_usd` are stored in dollars -- the provider
-# quotes them that way. Every consumer of `get_latest_prices()` multiplies the
-# price by a quantity and calls the product Toman, so two Bitcoin worth 11.4bn
-# valued at 190,000. This is the same defect 0e13739 fixed on the daily-bar
-# path, still live on the primary one.
-#
-# Unit test on the conversion rule, then one integration pass through the
-# valuation that actually consumed it.
+# Foreign-seed Price rows reach valuation only after provider-unit normalization.
 
 
-def test_a_dollar_quoted_price_is_brought_onto_the_toman_scale():
-    from portfolio.services.valuation import _dollar_quotes_to_toman
+def test_verified_toman_foreign_price_is_not_converted_twice(asset_catalog):
+    from portfolio.tasks import _write_prices
 
-    out = _dollar_quotes_to_toman({
-        "bitcoin_usd": Decimal("95000"),
-        "usd_cash": Decimal("60000"),
-        "emami_coin": Decimal("900000000"),
-    })
+    _write_prices(
+        {"bitcoin_usd": Decimal("5700000000"), "usd_cash": Decimal("60000")},
+        normalized_foreign_keys={"bitcoin_usd"},
+    )
+    cache.delete("prices:latest:verified-toman-v2")
 
-    assert out["bitcoin_usd"] == Decimal("5700000000")
-    # A dollar bill is USD too, and its price is already Toman per dollar.
-    assert out["usd_cash"] == Decimal("60000")
-    assert out["emami_coin"] == Decimal("900000000")
+    assert get_latest_prices()["bitcoin_usd"] == Decimal("5700000000")
 
 
-def test_a_dollar_quote_with_no_rate_is_zeroed_rather_than_left_in_dollars():
-    """Zero, not deleted: it is this map's "no live price" sentinel, so the key
-    stays present and the archive close -- already Toman -- can still fill it."""
-    from portfolio.services.valuation import _dollar_quotes_to_toman
+def test_old_unlabelled_foreign_price_is_unavailable(asset_catalog):
+    Price.objects.create(
+        asset=asset_catalog["bitcoin_usd"], price=Decimal("95000"), source="API",
+    )
+    Price.objects.create(
+        asset=asset_catalog["usd_cash"], price=Decimal("60000"), source="API",
+    )
+    cache.delete("prices:latest:verified-toman-v2")
 
-    out = _dollar_quotes_to_toman({"bitcoin_usd": Decimal("95000")})
+    assert get_latest_prices()["bitcoin_usd"] == Decimal("0")
 
-    assert out["bitcoin_usd"] == Decimal("0")
+
+def test_old_unlabelled_foreign_price_does_not_hide_a_declared_archive_close(
+    asset_catalog, make_user,
+):
+    from portfolio.services.returns import to_jalali_str
+    from portfolio.services.valuation import compute_dynamic_net_worth_series, value_as_of
+
+    coin = asset_catalog["bitcoin_usd"]
+    coin.brs_symbol = "BTC"
+    coin.save(update_fields=["brs_symbol"])
+    day = to_jalali_str(timezone.now())
+    GoldCurrencyHistory.objects.create(
+        symbol="BTC", date=day, close_price=Decimal("2"), unit="تتر",
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USDT_IRT", date=day, close_price=Decimal("100000"), unit="تومان",
+    )
+    Price.objects.create(asset=coin, price=Decimal("2"), source="API")
+    cache.delete("prices:latest:verified-toman-v2")
+
+    assert get_latest_prices()["bitcoin_usd"] == Decimal("200000")
+    user = make_user(email="archived-btc@test.test")
+    account = Account.objects.create(user=user, name="Crypto")
+    Holding.objects.create(account=account, asset=coin, quantity=Decimal("3"))
+    assert Decimal(value_as_of(user, account, as_of=timezone.now())["total"]) == Decimal("600000")
+    series = compute_dynamic_net_worth_series(user, account, days=2)
+    assert Decimal(series[-1]["total"]) == Decimal("600000")
 
 
 def test_a_bitcoin_holding_is_worth_billions_not_thousands(asset_catalog, make_user):
@@ -2662,12 +2680,10 @@ def test_a_bitcoin_holding_is_worth_billions_not_thousands(asset_catalog, make_u
         account=account, asset=asset_catalog["bitcoin_usd"], quantity=Decimal("2"),
     )
 
-    # The map the valuation receives has already been normalised.
-    from portfolio.services.valuation import _dollar_quotes_to_toman
-
-    result = value_account(account, prices=_dollar_quotes_to_toman({
-        "bitcoin_usd": Decimal("95000"), "usd_cash": Decimal("60000"),
-    }))
+    # The map the valuation receives has already been normalized to Toman.
+    result = value_account(account, prices={
+        "bitcoin_usd": Decimal("5700000000"), "usd_cash": Decimal("60000"),
+    })
 
     assert result["total"] == Decimal("11400000000")
 

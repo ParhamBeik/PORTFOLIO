@@ -2055,6 +2055,11 @@ def resample_weights(
     mean_w = matrix.mean(axis=0)
     p05 = np.percentile(matrix, 5, axis=0)
     p95 = np.percentile(matrix, 95, axis=0)
+    bands = {}
+    for i, key in enumerate(columns):
+        low = round(float(p05[i]), 6)
+        high = round(float(p95[i]), 6)
+        bands[key] = {"p05": low, "p95": high, "width": round(high - low, 6)}
 
     return {
         "n_draws": n_draws,
@@ -2064,17 +2069,10 @@ def resample_weights(
             k: round(float(mean_w[i]), 6)
             for i, k in enumerate(columns) if mean_w[i] > 1e-6
         },
-        "bands": {
-            k: {
-                "p05": round(float(p05[i]), 6),
-                "p95": round(float(p95[i]), 6),
-                "width": round(float(p95[i] - p05[i]), 6),
-            }
-            for i, k in enumerate(columns)
-        },
+        "bands": bands,
         # One number for "should I trust the point estimate at all?": the widest
         # band across assets. Above ~0.4 the allocation is mostly noise.
-        "max_band_width": round(float(np.max(p95 - p05)), 6),
+        "max_band_width": max(band["width"] for band in bands.values()),
     }
 
 

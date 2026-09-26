@@ -391,8 +391,10 @@ class Price(models.Model):
 
     `price_unit` / `price_unit_verified` mark provider unit confidence.
     TSE stock rows (`Asset.tse_symbol`) are stored as **Rial** (price_unit=IRR)
-    so qty×price matches the 1/10 broker-share convention. Gold/FX/manual rows
-    stay Toman (IRT). Analytics that need a pure-Toman TSE series still use
+    and valuation divides quantity×price by ten. Gold/FX/manual rows
+    stay Toman (IRT). Foreign-seed rows are normalized to Toman before new
+    writes; older UNKNOWN rows are not safe to convert from their asset key.
+    Analytics that need a pure-Toman TSE series still use
     `tse_close_to_toman()` on warehouse candles, not these rows.
     """
 

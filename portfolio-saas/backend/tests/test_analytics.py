@@ -1610,6 +1610,46 @@ def test_returns_panel_uses_each_archived_quote_currency(db):
     assert observed[ounce.key].tolist() == [300000.0, 315000.0]
 
 
+def test_price_fallback_excludes_unknown_foreign_ticks(db):
+    from portfolio.services.returns import _load_live_price_panel
+
+    coin = Asset.objects.create(
+        key="bitcoin_usd", name="Bitcoin", asset_class=Asset.AssetClass.CRYPTO,
+        is_active=True,
+    )
+    Price.objects.create(asset=coin, price=Decimal("2"), source="API")
+    Price.objects.create(
+        asset=coin, price=Decimal("200000"), source="API",
+        price_unit=Price.Unit.IRT, price_unit_verified=True,
+    )
+
+    panel = _load_live_price_panel(
+        timezone.now() - dt.timedelta(days=1), None, [coin.key],
+    )
+
+    assert panel[coin.key].tolist() == [200000.0]
+
+
+def test_tse_price_fallback_requires_rial_unit_and_converts_to_toman(db):
+    from portfolio.services.returns import _load_live_price_panel
+
+    stock = Asset.objects.create(
+        key="kama-stock-fallback", name="Kama", asset_class=Asset.AssetClass.STOCK,
+        tse_symbol="کاما", is_active=True,
+    )
+    Price.objects.create(asset=stock, price=Decimal("6000"), source="API")
+    Price.objects.create(
+        asset=stock, price=Decimal("5000"), source="API",
+        price_unit=Price.Unit.IRR, price_unit_verified=True,
+    )
+
+    panel = _load_live_price_panel(
+        timezone.now() - dt.timedelta(days=1), None, [stock.key],
+    )
+
+    assert panel[stock.key].tolist() == [500.0]
+
+
 @pytest.mark.django_db
 def test_resolve_universe_does_not_query_per_symbol(django_assert_num_queries):
     """The universe branch must batch its MarketInstrument lookups.

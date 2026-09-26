@@ -7,7 +7,7 @@ import logging
 from decimal import Decimal
 
 from django.conf import settings
-from marketdata.currency import IRR_QUOTE_UNITS, USD_QUOTE_UNITS, canonical_symbol, to_toman
+from marketdata.currency import FOREIGN_QUOTE_UNITS, IRR_QUOTE_UNITS, USD_QUOTE_UNITS, canonical_symbol, to_toman
 from portfolio.live import find_symbol_record
 
 logger = logging.getLogger(__name__)
@@ -40,30 +40,16 @@ def _build_lookup(brs_payload, direct_payload=None):
     the migration: as each origin comes online it silently takes over the
     symbols it covers, while anything it does not cover keeps its BrsApi price.
 
-    Preferring the direct row is safe because it is the same data. Compared
-    live on 2026-08-31, five of eight gold/FX assets matched BrsApi to the rial
-    and the other three differed only by one refresh interval -- BrsApi is
-    reselling TGJU. The direct row is simply the fresher copy of it.
+    Direct rows can use different quote units (for example, Wallex BTC/Toman
+    versus BrsApi BTC/Tether). Callers must normalize the selected row by its
+    declared unit. Gold/FX direct quotes were compared with BrsApi on
+    2026-08-31; five of eight matched to the rial and three differed by one
+    refresh interval.
     """
     lookup = {}
     _index_payload(brs_payload, lookup)
     _index_payload(direct_payload, lookup)
     return lookup
-
-
-def _lookup_price(lookup, symbols):
-    """Get the first positive price for the given symbol list."""
-    for symbol in symbols:
-        item = lookup.get(str(symbol).strip().casefold())
-        if not isinstance(item, dict):
-            continue
-        try:
-            price = Decimal(str(item.get("price") or 0))
-        except (ArithmeticError, ValueError):
-            continue
-        if price > 0:
-            return price
-    return Decimal("0")
 
 
 def _find_tsetmc_symbol(tsetmc_payload, name):
@@ -182,10 +168,14 @@ def _usdt_toman_from_history(payload, usd_rate):
     ).quantize(Decimal("1"))
 
 
-def _lookup_toman(lookup, symbols, *, usd_rate=None, usdt_rate=None):
+def _lookup_toman(lookup, symbols, *, usd_rate=None, usdt_rate=None, require_unit=False):
     for symbol in symbols:
         item = lookup.get(str(symbol).strip().casefold())
         if not isinstance(item, dict):
+            continue
+        if require_unit and str(item.get("unit") or "").strip().casefold() not in (
+            IRR_QUOTE_UNITS | FOREIGN_QUOTE_UNITS
+        ):
             continue
         value = to_toman(
             canonical_symbol(item.get("symbol") or symbol),
@@ -215,17 +205,23 @@ def extract_standard_prices(raw_data, last_prices=None):
     prices["quarter_coin"] = _lookup_toman(lookup, ["IR_COIN_QUARTER"])
     prices["gold_18k_gram"] = _lookup_toman(lookup, ["IR_GOLD_18K"])
     prices["usd_cash"] = _lookup_toman(lookup, ["USD"])
-    prices["bitcoin_usd"] = _lookup_price(
-        lookup, ["BTC", "BTCUSDT", "BITCOIN", "Bitcoin", "بیتکوین", "بیت کوین"]
-    )
     prices["usdt_irt"] = _lookup_usdt_toman(
         lookup,
         prices.get("usd_cash"),
         history_payload=raw_data.get("usdt_irt_quote"),
     )
     prices["euro_cash"] = _lookup_toman(lookup, ["EUR", "EURO", "Euro", "یورو"])
-    prices["gold_ounce_usd"] = _lookup_price(
-        lookup, ["XAUUSD", "XAU", "GOLD_OUNCE", "Gold Ounce (Global)", "اونس طلا", "انس طلا"]
+    # Seed keys retain their historic names, but the price map is in Toman.
+    # Wallex BTC/TMN is already Toman, BrsApi BTC is commonly Tether, and
+    # TGJU's global BTC and ounce rows are dollars. The provider's unit decides.
+    prices["bitcoin_usd"] = _lookup_toman(
+        lookup, ["BTC", "BTCUSDT", "BITCOIN", "Bitcoin", "بیتکوین", "بیت کوین"],
+        usd_rate=prices.get("usd_cash"), usdt_rate=prices.get("usdt_irt"),
+        require_unit=True,
+    )
+    prices["gold_ounce_usd"] = _lookup_toman(
+        lookup, ["XAUUSD", "XAU", "GOLD_OUNCE", "Gold Ounce (Global)", "اونس طلا", "انس طلا"],
+        usd_rate=prices.get("usd_cash"), require_unit=True,
     )
 
     # Swiss bars are manual (no reliable API). Coerced to Decimal once in settings.
@@ -287,7 +283,7 @@ def apply_instrument_prices(raw_data, instruments, prices):
             # Toman. Without this a minted Bitcoin holding priced at ~64,500.
             value = _lookup_toman(
                 lookup, [brs_symbol], usd_rate=prices.get("usd_cash"),
-                usdt_rate=prices.get("usdt_irt"),
+                usdt_rate=prices.get("usdt_irt"), require_unit=True,
             )
             if value > 0:
                 prices[key] = value

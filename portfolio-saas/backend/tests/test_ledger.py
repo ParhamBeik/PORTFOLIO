@@ -2217,14 +2217,8 @@ def test_declaring_a_holding_you_already_own_never_spends_cash(
     ).quantity == Decimal("3")
 
 
-def test_a_dollar_quoted_live_price_is_converted_before_it_becomes_a_ledger_price():
-    """Unit test: one conversion rule, checked where it turns into durable data.
-
-    `bitcoin_usd` is quoted and stored in DOLLARS (see `returns.USD_QUOTED_KEYS`).
-    With no daily bar to fall back on, the resolver reached the raw Price row and
-    wrote ~95,000 into `LedgerEntry.price_tomans` -- the same mistake
-    `currency.to_toman` exists to refuse, on a path that never calls it.
-    """
+def test_a_normalized_live_price_enters_the_ledger_once():
+    """The durable ledger price uses verified Toman without another FX step."""
     from portfolio.services.ledger import resolve_historical_price
 
     asset = Asset.objects.create(
@@ -2235,7 +2229,10 @@ def test_a_dollar_quoted_live_price_is_converted_before_it_becomes_a_ledger_pric
         key="usd_cash", name="US Dollar", is_active=True,
         asset_class=Asset.AssetClass.CASH,
     )
-    Price.objects.create(asset=asset, price=Decimal("95000"), source="API")
+    Price.objects.create(
+        asset=asset, price=Decimal("5700000000"), source="API",
+        price_unit=Price.Unit.IRT, price_unit_verified=True,
+    )
     Price.objects.create(asset=usd, price=Decimal("60000"), source="API")
 
     assert resolve_historical_price(asset, timezone.now()) == Decimal("5700000000")

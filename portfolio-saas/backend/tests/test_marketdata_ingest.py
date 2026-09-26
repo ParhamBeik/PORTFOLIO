@@ -840,14 +840,8 @@ def test_gold_ingest_still_accepts_declared_foreign_units():
     assert row.close_price == Decimal("4310") and row.unit == "دلار"
 
 
-def test_usd_quoted_keys_are_never_stamped_as_verified_toman():
-    """A USD-magnitude price must not be labelled IRT/verified.
-
-    extractor.py stores bitcoin_usd / gold_ounce_usd at their provider-native
-    USD magnitude. Stamping them Toman-verified would licence value_account to
-    add dollars straight into a Toman total; returns.py already special-cases
-    them via USD_QUOTED_KEYS, and valuation must not disagree.
-    """
+def test_foreign_seed_price_requires_verified_toman_source():
+    """An unknown old quote stays unknown; a normalized archive close is Toman."""
     from portfolio.models import Asset, Price
     from portfolio.services.returns import USD_QUOTED_KEYS
     from portfolio.tasks import _write_prices
@@ -871,6 +865,13 @@ def test_usd_quoted_keys_are_never_stamped_as_verified_toman():
     irt_row = Price.objects.filter(asset__key="toman_coin").latest("fetched_at")
     assert irt_row.price_unit == Price.Unit.IRT
     assert irt_row.price_unit_verified is True
+
+    _write_prices(
+        {usd_key: Decimal("6500000000")}, sources={usd_key: "ARCHIVE"},
+    )
+    archive_row = Price.objects.filter(asset__key=usd_key).latest("fetched_at")
+    assert archive_row.price_unit == Price.Unit.IRT
+    assert archive_row.price_unit_verified is True
 
 
 def test_rejection_backlog_groups_by_endpoint_and_reason(tmp_path):

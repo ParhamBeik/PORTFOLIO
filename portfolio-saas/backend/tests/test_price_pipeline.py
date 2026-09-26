@@ -604,6 +604,55 @@ def test_fetch_writes_prices_but_not_intraday_snapshots(asset_catalog, raw_marke
     assert snap.total_value_tomans == 0
 
 
+def test_fetch_stores_declared_foreign_seed_quotes_as_verified_toman(
+    asset_catalog, raw_market_sample, monkeypatch,
+):
+    from portfolio.services.valuation import get_latest_prices
+
+    Asset.objects.create(
+        key="gold_ounce_usd", name="Gold ounce", asset_class=Asset.AssetClass.GOLD,
+    )
+    raw = {
+        **raw_market_sample,
+        "direct": {"rows": [
+            {"symbol": "BTC", "price": 7000000000, "unit": "تومان"},
+            {"symbol": "XAUUSD", "price": 2400, "unit": "دلار"},
+        ]},
+    }
+    _patch_fetch(monkeypatch, raw)
+
+    call_command("fetch_prices", stdout=StringIO())
+
+    rows = {
+        row.asset.key: row
+        for row in Price.objects.select_related("asset").filter(
+            asset__key__in=("bitcoin_usd", "gold_ounce_usd")
+        )
+    }
+    assert rows["bitcoin_usd"].price == Decimal("7000000000")
+    assert rows["gold_ounce_usd"].price == Decimal("151680000")
+    assert all(row.price_unit == Price.Unit.IRT and row.price_unit_verified for row in rows.values())
+    cache.delete("prices:latest:verified-toman-v2")
+    latest = get_latest_prices()
+    assert latest["bitcoin_usd"] == Decimal("7000000000")
+    assert latest["gold_ounce_usd"] == Decimal("151680000")
+
+
+def test_archive_replacement_certifies_equal_legacy_foreign_number(asset_catalog):
+    from portfolio.tasks import _write_prices
+
+    coin = asset_catalog["bitcoin_usd"]
+    Price.objects.create(asset=coin, price=Decimal("200000"), source="API")
+
+    _write_prices({"bitcoin_usd": Decimal("200000")}, sources={"bitcoin_usd": "ARCHIVE"})
+
+    rows = list(Price.objects.filter(asset=coin).order_by("id"))
+    assert len(rows) == 2
+    assert rows[-1].source == "ARCHIVE"
+    assert rows[-1].price_unit == Price.Unit.IRT
+    assert rows[-1].price_unit_verified
+
+
 def test_fetch_dry_run_writes_nothing(asset_catalog, raw_market_sample, monkeypatch):
     _patch_fetch(monkeypatch, raw_market_sample)
 
@@ -621,7 +670,7 @@ def test_fetch_persists_archive_replacement_for_missing_live_price(asset_catalog
     stored session is the market having shut before the backfill ran, and taking
     it there walks the price backwards a session.
     """
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
     stock = asset_catalog["kama_stock"]
     stock.tse_symbol = "ARCHIVE_STOCK"
     stock.save(update_fields=["tse_symbol"])
@@ -1214,7 +1263,7 @@ PARITY_KEYS = [
 ]
 
 
-def test_extract_matches_legacy_for_labeled_keys(raw_market_sample, legacy_engine):
+def test_extract_matches_legacy_for_domestic_keys(raw_market_sample, legacy_engine):
     saas = extract_standard_prices(raw_market_sample)
     legacy = legacy_engine.extract_standard_prices(raw_market_sample, LEGACY_CONSTANTS)
 
@@ -1224,11 +1273,14 @@ def test_extract_matches_legacy_for_labeled_keys(raw_market_sample, legacy_engin
 
     mismatches = {
         k: (float(saas[k]), float(legacy[k]))
-        for k in PARITY_KEYS if k != "usdt_irt"
+        for k in PARITY_KEYS if k not in {"usdt_irt", "bitcoin_usd", "gold_ounce_usd"}
         if float(saas[k]) != float(legacy[k])
     }
     assert not mismatches, f"price map diverged from legacy engine: {mismatches}"
-    assert saas["usdt_irt"] == 0  # The synthetic sample has no quote-unit label.
+    # The synthetic sample has no quote-unit labels for these instruments.
+    assert saas["usdt_irt"] == 0
+    assert saas["bitcoin_usd"] == 0
+    assert saas["gold_ounce_usd"] == 0
 
 
 def test_usdt_low_quote_requires_a_declared_unit(raw_market_sample):
@@ -1253,10 +1305,34 @@ def test_usdt_history_irt_quote_differs_from_usd_pegged_feed(raw_market_sample):
     assert prices["usdt_irt"] == Decimal("188000")
 
 
-def test_btc_high_quote_is_left_in_usd(raw_market_sample):
-    """Above the conversion threshold the USD quote is passed through unchanged."""
+def test_unlabelled_btc_quote_is_unavailable(raw_market_sample):
+    """A number near 64,500 cannot reveal USD, Tether, or Toman."""
     prices = extract_standard_prices(raw_market_sample)
-    assert prices["bitcoin_usd"] == Decimal("64500")
+    assert prices["bitcoin_usd"] == Decimal("0")
+
+
+@pytest.mark.parametrize(
+    ("unit", "expected"),
+    [("تومان", "7000000000"), ("تتر", "4160000000"), ("دلار", "4044800000")],
+)
+def test_btc_seed_normalizes_the_providers_declared_unit(raw_market_sample, unit, expected):
+    raw = {
+        **raw_market_sample,
+        "direct": {"rows": [{"symbol": "BTC", "price": 64000 if unit != "تومان" else 7000000000, "unit": unit}]},
+        "usdt_irt_quote": {
+            "symbol": "USDT", "unit": "تومان",
+            "history_daily": [{"date": "1405-05-04", "close": 65000}],
+        },
+    }
+    assert extract_standard_prices(raw)["bitcoin_usd"] == Decimal(expected)
+
+
+def test_ounce_seed_uses_cash_dollar_rate(raw_market_sample):
+    raw = {
+        **raw_market_sample,
+        "direct": {"rows": [{"symbol": "XAUUSD", "price": 2400, "unit": "دلار"}]},
+    }
+    assert extract_standard_prices(raw)["gold_ounce_usd"] == Decimal("151680000")
 
 
 def test_kama_extracted_from_tsetmc_in_provider_rials(raw_market_sample):

@@ -16,12 +16,10 @@ tables), so both the 2-min fetch and the nightly sync auto-rotate the cache;
 writers also call `invalidate_returns_cache` for belt-and-braces.
 
 Two conventions matter here:
-  * USD-quoted assets (`bitcoin_usd`, `gold_ounce_usd`) come through quoted in
-    USD. Their Toman return is the USD return times the USD/Toman return, so we
-    convert the *price* series by the daily-last `usd_cash` price BEFORE taking
-    `pct_change()`. `usd_cash`, `usdt_irt` and `euro_cash` are already Tomans.
-    TSE warehouse closes are raw Rial and are divided through by
-    `tse_close_to_toman()` on load, so the whole panel is Toman.
+  * BRS history and verified foreign-seed Price rows enter in Toman after
+    declared-unit conversion. TSE warehouse and verified live closes enter as
+    Rial and are divided by `tse_close_to_toman()` on load. UNKNOWN-unit live
+    foreign/TSE rows are excluded.
   * Real estate (`is_house=True`) is excluded — it has no daily price series.
 """
 from __future__ import annotations
@@ -33,7 +31,7 @@ import jdatetime
 import numpy as np
 import pandas as pd
 from django.core.cache import cache
-from django.db.models import DecimalField, Max
+from django.db.models import DecimalField, Max, Q
 from django.db.models.functions import Coalesce
 
 from marketdata.currency import tse_close_to_toman
@@ -857,11 +855,7 @@ def _load_price_panel(
     # panel is legitimately daily and should keep its weekend observations.
     if tse_keys.intersection(panel.columns):
         panel = _align_to_trading_sessions(panel)
-    panel = _trim_to_contiguous(panel)
-    panel.attrs["toman_normalized_keys"] = frozenset(
-        key for key in warehouse_cols if key in USD_QUOTED_KEYS
-    )
-    return panel, gate_excluded, warnings
+    return _trim_to_contiguous(panel), gate_excluded, warnings
 
 
 def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys: list[str]) -> pd.DataFrame:
@@ -884,9 +878,15 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
     if not keys:
         return pd.DataFrame()
 
+    foreign_seed = Q(asset__key__in=USD_QUOTED_KEYS)
+    tse_asset = ~Q(asset__tse_symbol="")
     qs = Price.objects.filter(
         positive_price_q(), asset__is_active=True, asset__key__in=keys,
         fetched_at__gte=cutoff,
+    ).filter(
+        (~foreign_seed & ~tse_asset)
+        | (foreign_seed & Q(price_unit=Price.Unit.IRT, price_unit_verified=True))
+        | (~foreign_seed & tse_asset & Q(price_unit=Price.Unit.IRR, price_unit_verified=True)),
     ).exclude(asset__is_house=True)
 
     if as_of is not None:
@@ -909,7 +909,11 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
     # Exclude RejectedRecord matches
     from portfolio.models import Asset
 
-    assets = {a.key: (a.tse_symbol or a.brs_symbol or "") for a in Asset.objects.filter(key__in=keys)}
+    asset_rows = {a.key: a for a in Asset.objects.filter(key__in=keys)}
+    assets = {
+        key: asset.tse_symbol or asset.brs_symbol or ""
+        for key, asset in asset_rows.items()
+    }
     symbols = [s for s in assets.values() if s]
 
     rejections = rejected_pairs(
@@ -963,29 +967,9 @@ def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys:
         .apply(lambda ticks: ticks.tail(3).median())
     )
     panel = daily.unstack("asset__key")
-    return panel
-
-
-def _convert_usd_to_toman(panel: pd.DataFrame) -> pd.DataFrame:
-    """Convert fallback Price-table USD columns; archive columns are already Toman.
-
-    `usd_cash` is Toman-denominated (`extract_standard_prices` resolves it via
-    `to_toman()`), so the result is a Toman-denominated column for each
-    USD-quoted asset — matching the rest of the panel.
-
-    Operates before returns are taken, so the fallback series reflects both
-    the USD move and the FX move. Archive rows carry their own declared USD or
-    Tether unit and were converted during `_load_price_panel`; multiplying them
-    again here would create a large false return. Forward-fill is limited to
-    five dates for the fallback Price series.
-    """
-    if "usd_cash" not in panel.columns:
-        return panel
-    fx = panel["usd_cash"].ffill(limit=5)
-    normalized = panel.attrs.get("toman_normalized_keys", frozenset())
-    for key in USD_QUOTED_KEYS:
-        if key in panel.columns and key not in normalized:
-            panel[key] = panel[key] * fx
+    for key, asset in asset_rows.items():
+        if asset.tse_symbol and key not in USD_QUOTED_KEYS and key in panel.columns:
+            panel[key] = panel[key].map(lambda value: float(tse_close_to_toman(value)))
     return panel
 
 
@@ -1158,20 +1142,15 @@ def toman_price_panel(
 ) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Daily close panel in Toman. The supported reader for absolute prices.
 
-    `_load_price_panel` is deliberately NOT that reader and must not be called
-    from outside this module. Archive rows are in Toman after unit-aware
-    conversion, but fallback Price rows for `USD_QUOTED_KEYS` are still in
-    dollars and fallback TSE quotes can still be Rial.
-
-    This applies the dollar conversion, then hands back the same
-    `(panel, excluded, warnings)` triple. Callers that need the forward-fill
-    bound as well should read `excluded` for `price_gap_exceeded`, which is
-    decided in `_build_returns_matrix` against the same panel.
+    Archive rows are in Toman after unit-aware conversion. Live Price fallback
+    rows require a verified unit and TSE Rial quotes are divided by ten.
+    Callers that need the
+    forward-fill bound should read `excluded` for `price_gap_exceeded`, which
+    is decided in `_build_returns_matrix` against the same panel.
     """
     panel, excluded, warnings = _load_price_panel(
         history_days, as_of=as_of, universe=universe, held_keys=held_keys
     )
-    panel = _convert_usd_to_toman(panel)
     if gate:
         _, gate_excluded, gate_warnings = _build_returns_matrix(
             panel, held_keys, as_of=as_of

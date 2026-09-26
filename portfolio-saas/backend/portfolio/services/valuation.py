@@ -27,6 +27,7 @@ from portfolio.models import (
     LedgerEntry,
     Liability,
     Price,
+    USD_QUOTED_KEYS,
     positive_price_q,
 )
 from .timeline import cash_as_of, holdings_as_of, house_state_as_of, load_house_marks
@@ -53,8 +54,8 @@ from marketdata.provenance import (
 
 logger = logging.getLogger(__name__)
 
-_LATEST_PRICES_CACHE_KEY = "prices:latest"
-_LATEST_PRICES_STATE_KEY = "prices:latest:market-state"
+_LATEST_PRICES_CACHE_KEY = "prices:latest:verified-toman-v2"
+_LATEST_PRICES_STATE_KEY = "prices:latest:verified-toman-v2:market-state"
 _ARCHIVE_DROP_FLOOR = Decimal("0.50")
 _ARCHIVE_SPIKE_CEILING = Decimal("2.00")
 
@@ -120,46 +121,12 @@ def _q(value) -> Decimal:
         return Decimal("0")
 
 
-def _dollar_quotes_to_toman(prices: dict) -> dict:
-    """Bring the two dollar-quoted keys onto the Toman scale the map promises.
-
-    `bitcoin_usd` and `gold_ounce_usd` are stored in DOLLARS -- the provider
-    quotes them that way and `returns.USD_QUOTED_KEYS` is where that is
-    declared. Every consumer of this map is a money path that multiplies the
-    price by a quantity and calls the product Toman, so two Bitcoin genuinely
-    worth 11.4bn were valued at 190,000: the same 0e13739 fixed on the daily-bar
-    path ("Bitcoin came out at 79,606 Toman. It is 15.9 billion"), still live on
-    the primary one. The returns matrix is untouched by this -- it reads the
-    Price table directly and converts these columns itself.
-
-    Asset identity cannot answer this: `usd_cash` is a physical dollar but its
-    price is Toman per dollar, so treating it as USD-quoted would inflate cash.
-
-    Without a rate the price becomes 0 rather than staying in dollars -- passing
-    the foreign number through is the failure `currency.to_toman` refuses. Zero
-    and not deletion, because zero is this map's established "no live price"
-    sentinel: the key stays present, so `_archive_replacements` can still offer
-    the archive close, which is already Toman and needs no rate. Deleting it
-    would take that fallback away too, and a momentarily missing `usd_cash`
-    would drop the holding entirely rather than pricing it from history.
-    """
-    from .returns import USD_QUOTED_KEYS
-
-    quoted = [key for key in USD_QUOTED_KEYS if key in prices]
-    if not quoted:
-        return prices
-    rate = prices.get("usd_cash") or Decimal("0")
-    out = dict(prices)
-    for key in quoted:
-        out[key] = out[key] * rate if rate > 0 else Decimal("0")
-    return out
-
-
 def get_latest_prices() -> dict:
-    """Return cached provider-scale prices keyed by asset.
+    """Return cached portfolio prices keyed by asset.
 
-    TSE stock values are Rial under the legacy quantity convention; other
-    portfolio values are normally Toman.
+    TSE stock values are Rial and valuation divides their value by ten; other
+    admitted prices are Toman. Old foreign-seed ticks without a verified unit
+    become unavailable until a declared archive close or new live tick exists.
 
     Uses Postgres DISTINCT ON to fetch the newest price for every asset in a
     single query, so this is O(1) regardless of how many assets or users exist.
@@ -184,9 +151,21 @@ def get_latest_prices() -> dict:
         .distinct("asset_id")
     )
     latest = list(latest)
-    prices = {row.asset.key: _q(row.price) for row in latest}
-    fetched_at = {row.asset.key: row.fetched_at for row in latest}
-    prices = _dollar_quotes_to_toman(prices)
+    prices = {
+        row.asset.key: (
+            _q(row.price)
+            if row.asset.key not in USD_QUOTED_KEYS
+            or (row.price_unit == Price.Unit.IRT and row.price_unit_verified)
+            else Decimal("0")
+        )
+        for row in latest
+    }
+    fetched_at = {
+        row.asset.key: row.fetched_at
+        for row in latest
+        if row.asset.key not in USD_QUOTED_KEYS
+        or (row.price_unit == Price.Unit.IRT and row.price_unit_verified)
+    }
     # Replace only what is already priced. Filling assets that have no Price row
     # at all is the write path's job; doing it here would turn "unpriced" into a
     # silent archive value and hide the gap the valuation layer reports.
@@ -218,7 +197,12 @@ def guard_price_map(prices: dict, *, fill_missing=True, archive_replacements=Non
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
     )
-    prev_prices = {row.asset.key: (_q(row.price), row.fetched_at) for row in latest_db_rows}
+    prev_prices = {
+        row.asset.key: (_q(row.price), row.fetched_at)
+        for row in latest_db_rows
+        if row.asset.key not in USD_QUOTED_KEYS
+        or (row.price_unit == Price.Unit.IRT and row.price_unit_verified)
+    }
 
     # 1. The warehouse close is more authoritative than an older live row.
     replacements = (
@@ -281,6 +265,8 @@ def stored_price_sessions(keys) -> dict:
         .filter(positive_price_q(), asset__key__in=list(keys))
         .order_by("asset_id", "-fetched_at", "-id")
         .distinct("asset_id")
+        if row.asset.key not in USD_QUOTED_KEYS
+        or (row.price_unit == Price.Unit.IRT and row.price_unit_verified)
     }
 
 
@@ -320,8 +306,10 @@ def _daily_bar_as_of(asset, jalali_str) -> tuple[Decimal, int]:
     )
 
 
-def _newest_close_per_symbol(base_qs, symbols, rejections, *, date_field) -> dict:
-    """Newest NON-REJECTED close per symbol, as {symbol: (jalali_day, close)}.
+def _newest_close_per_symbol(
+    base_qs, symbols, rejections, *, date_field, include_unit=False,
+) -> dict:
+    """Newest non-rejected close per symbol, optionally retaining its unit.
 
     Postgres `DISTINCT ON` answers "newest row per symbol" in one index-ordered
     pass, which is the whole job in the overwhelming case. What it cannot
@@ -339,39 +327,85 @@ def _newest_close_per_symbol(base_qs, symbols, rejections, *, date_field) -> dic
     ordering = ("symbol", f"-{date_field}")
     resolved: dict = {}
     contested: list[str] = []
+    fields = ("symbol", date_field, "close_price", "unit") if include_unit else (
+        "symbol", date_field, "close_price"
+    )
     top = (
         base_qs.order_by(*ordering)
         .distinct("symbol")
-        .values("symbol", date_field, "close_price")
+        .values(*fields)
     )
     for row in top:
         day = str(row[date_field]).split()[0]
         if (row["symbol"], day) in rejections:
             contested.append(row["symbol"])
         else:
-            resolved[row["symbol"]] = (day, row["close_price"])
+            resolved[row["symbol"]] = (
+                (day, row["close_price"], row["unit"])
+                if include_unit else (day, row["close_price"])
+            )
     if contested:
         rest = (
             base_qs.filter(symbol__in=contested)
             .order_by(*ordering)
-            .values("symbol", date_field, "close_price")
+            .values(*fields)
         )
         for row in rest:
             if row["symbol"] in resolved:
                 continue
             day = str(row[date_field]).split()[0]
             if (row["symbol"], day) not in rejections:
-                resolved[row["symbol"]] = (day, row["close_price"])
+                resolved[row["symbol"]] = (
+                    (day, row["close_price"], row["unit"])
+                    if include_unit else (day, row["close_price"])
+                )
     return resolved
 
 
+def _foreign_brs_symbols(assets) -> set[str]:
+    """Symbols for which an unlabelled close cannot safely mean Toman."""
+    from marketdata.models import MarketInstrument
+
+    assets = list(assets)
+    symbols = {asset.brs_symbol for asset in assets if asset.brs_symbol}
+    foreign = {
+        asset.brs_symbol for asset in assets
+        if asset.brs_symbol and (
+            asset.key in USD_QUOTED_KEYS
+            or asset.asset_class == Asset.AssetClass.CRYPTO
+        )
+    }
+    foreign.update(
+        MarketInstrument.objects.filter(
+            source=MarketInstrument.Source.BRS,
+            symbol__in=symbols,
+            category__in=(
+                MarketInstrument.Category.CRYPTO,
+                MarketInstrument.Category.COMMODITY,
+            ),
+        ).values_list("symbol", flat=True)
+    )
+    return foreign
+
+
+def _brs_close_toman(symbol, day, close, unit, foreign_symbols, cash, tether):
+    if not unit and symbol in foreign_symbols:
+        return Decimal("0")
+    return to_toman(
+        symbol, close, unit,
+        **toman_rate_kwargs(unit, day, cash, tether),
+    )
+
+
 def _latest_archive_closes(assets) -> tuple[dict, dict]:
-    """Newest usable warehouse close per asset key, as (prices, jalali dates).
+    """Newest usable warehouse close per asset key, as (prices, Jalali dates).
 
     Three tables answer this depending on the feed -- adjusted candles for TSE
     symbols, gold/currency history for BRS symbols, and the distilled daily bar
     for the live-only classes that have no provider history endpoint at all.
-    Rows the warehouse recorded as rejected are excluded from all three.
+    BRS and daily-bar foreign quotes are converted at their own dated rate;
+    TSE candles remain Rial for the portfolio share convention. Rejected rows
+    are excluded from all three.
     """
 
     stock_symbols = {
@@ -406,12 +440,21 @@ def _latest_archive_closes(assets) -> tuple[dict, dict]:
 
     brs_newest = _newest_close_per_symbol(
         GoldCurrencyHistory.objects.filter(symbol__in=brs_symbols, close_price__gt=0),
-        brs_symbols, rejections, date_field="date",
+        brs_symbols, rejections, date_field="date", include_unit=True,
     )
-    for symbol, (day, close) in brs_newest.items():
+    cash_rates, tether_rates = toman_rate_tables(
+        [unit for _day, _close, unit in brs_newest.values()],
+        [day for day, _close, _unit in brs_newest.values()],
+    )
+    foreign_symbols = _foreign_brs_symbols(assets)
+    for symbol, (day, close, unit) in brs_newest.items():
         key = brs_symbols[symbol]
-        archive_prices.setdefault(key, _q(close))
-        archive_dates.setdefault(key, day)
+        price = _brs_close_toman(
+            symbol, day, close, unit, foreign_symbols, cash_rates, tether_rates,
+        )
+        if price > 0:
+            archive_prices.setdefault(key, price)
+            archive_dates.setdefault(key, day)
 
     # Live-only feeds converge into MarketDailyBar, which stores the provider's
     # number in whatever currency it was quoted and carries no unit column.
@@ -862,7 +905,13 @@ def value_account(
                 })
         else:
             value = asset_value(holding, unit_price)
-            if row and _q(row.price) == _q(unit_price):
+            row_unit_usable = (
+                row is not None and (
+                    holding.asset.key not in USD_QUOTED_KEYS
+                    or (row.price_unit == Price.Unit.IRT and row.price_unit_verified)
+                )
+            )
+            if row_unit_usable and _q(row.price) == _q(unit_price):
                 source = row.source
                 priced_at = row.fetched_at
                 age_seconds = max(0, int((now - row.fetched_at).total_seconds()))
@@ -1237,20 +1286,36 @@ def compute_dynamic_net_worth_series(
         brs_base = GoldCurrencyHistory.objects.filter(
             symbol__in=list(brs_symbols.keys()), close_price__gt=0
         )
-        g_rows = brs_base.filter(date__gte=window_start_jalali).values(
-            "symbol", "date", "close_price"
-        )
+        g_rows = list(brs_base.filter(date__gte=window_start_jalali).values(
+            "symbol", "date", "close_price", "unit"
+        ))
         primed = _newest_close_per_symbol(
             brs_base.filter(date__lte=window_start_jalali),
-            brs_symbols, brs_rejections, date_field="date",
+            brs_symbols, brs_rejections, date_field="date", include_unit=True,
         )
-        for symbol, (day, close) in primed.items():
-            gold_closes.setdefault(day, {})[brs_symbols[symbol]] = Decimal(str(close))
+        cash_rates, tether_rates = toman_rate_tables(
+            [row["unit"] for row in g_rows]
+            + [unit for _day, _close, unit in primed.values()],
+            [row["date"] for row in g_rows]
+            + [day for day, _close, _unit in primed.values()],
+        )
+        foreign_symbols = _foreign_brs_symbols(assets.values())
+        for symbol, (day, close, unit) in primed.items():
+            price = _brs_close_toman(
+                symbol, day, close, unit, foreign_symbols, cash_rates, tether_rates,
+            )
+            if price > 0:
+                gold_closes.setdefault(day, {})[brs_symbols[symbol]] = price
         for r in g_rows:
             if (r["symbol"], r["date"]) in brs_rejections:
                 continue
             key = brs_symbols[r["symbol"]]
-            gold_closes.setdefault(r["date"], {})[key] = Decimal(str(r["close_price"]))
+            price = _brs_close_toman(
+                r["symbol"], r["date"], r["close_price"], r["unit"],
+                foreign_symbols, cash_rates, tether_rates,
+            )
+            if price > 0:
+                gold_closes.setdefault(r["date"], {})[key] = price
 
     # Crypto and the other live-only classes have no provider history endpoint,
     # so neither query above can see them and they used to be pinned at today's
