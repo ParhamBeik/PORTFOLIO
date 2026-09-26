@@ -48,6 +48,15 @@ if [[ -n "${backend_cid}" ]] && docker inspect -f '{{range .Config.Env}}{{printl
       legacy_service_state["${service}"]="$(docker inspect -f '{{.State.Status}}' "${service_cid}")"
     fi
   done
+  if [[ "${legacy_service_state[celery_worker_archive]:-}" == "paused" ]]; then
+    echo "Legacy archive worker is intentionally paused; Compose would restart it and spend provider quota. Resolve its operating policy before deployment." >&2
+    exit 1
+  fi
+  codal_enabled="$(awk -F= '$1=="CODAL_ENABLED"{print $2; exit}' "${env_file}")"
+  if [[ "${codal_enabled:-1}" == "1" && -z "${legacy_service_state[celery_worker_codal]:-}" ]]; then
+    echo "Codal is enabled but the legacy worker is absent; validate artifact access and the corrected parser before starting a new worker." >&2
+    exit 1
+  fi
   for queue in live archive codal; do
     if ! depth="$("${compose[@]}" exec -T redis redis-cli -n 2 --raw LLEN "${queue}")" \
       || [[ ! "${depth}" =~ ^[0-9]+$ ]]; then
