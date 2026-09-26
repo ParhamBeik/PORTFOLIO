@@ -13,7 +13,7 @@ disk_used="$(df -P "${project_dir}" | awk 'NR==2 {gsub("%","",$5); print $5}')"
 ((disk_used < disk_limit)) || failures+=("disk usage ${disk_used}%")
 
 latest="$(find "${backup_dir}" -type f -name 'daily-*.dump.enc' -print0 2>/dev/null | xargs -0 ls -1t 2>/dev/null | head -1 || true)"
-if [[ -z "${latest}" ]] || (( $(date +%s) - $(stat -f %m "${latest}" 2>/dev/null || stat -c %Y "${latest}") > backup_age_hours * 3600 )); then
+if [[ -z "${latest}" ]] || (( $(date +%s) - $(stat -c %Y "${latest}" 2>/dev/null || stat -f %m "${latest}") > backup_age_hours * 3600 )); then
   failures+=("backup older than ${backup_age_hours}h")
 fi
 
