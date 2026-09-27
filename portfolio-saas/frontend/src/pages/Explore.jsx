@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { downloadArchivedFiling, exploreStocks, researchSettings, runResearch, stockDossier } from "../api.js";
+import { Link, useSearchParams } from "react-router-dom";
+import { downloadArchivedFiling, exploreStocks, researchRun, researchSettings, runResearch, stockDossier } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
 import { Async, Badge, Button, Card, Empty, Field, Input, PageHeader, Tabs, Textarea } from "../components/ui.jsx";
 import { date, num, rial } from "../format.js";
@@ -56,7 +56,54 @@ function ArchivedFiling({ symbol, point, days = 365 }) {
   </>;
 }
 
+function ResearchClaims({ claims, symbol }) {
+  return claims.map((claim) => (
+    <div key={claim.id} className="text-sm">
+      <p>{claim.statement}</p>
+      <ul className="mt-1 space-y-1 text-xs text-muted">
+        {claim.sources.map((source) => (
+          <li key={`${claim.id}-${source.extraction_id}`}>
+            {source.period_end_jalali} · {source.scope
+              ? source.statement_kind === "balance_sheet"
+                ? `${source.scope} balance cells assets ${source.source_coordinates.total_assets.address} / liabilities ${source.source_coordinates.total_liabilities.address} / equity ${source.source_coordinates.total_equity.address}`
+                : `${source.scope} income cells ${source.source_coordinates.revenue.address} / ${source.source_coordinates.net_profit.address}`
+              : `sales row ${source.source_coordinates.row ?? "?"}, column ${source.source_coordinates.column ?? "?"}`} · artifact {source.artifact_id}
+            {source.source_url && <> · <a href={source.source_url} target="_blank" rel="noopener noreferrer" className="text-accent underline">Codal filing</a></>}
+            {" "}<ArchivedFiling symbol={symbol} point={source} days={source.scope ? 3650 : 365} />
+          </li>
+        ))}
+      </ul>
+    </div>
+  ));
+}
+
+function SavedResearch({ symbol, runId }) {
+  const saved = useApi(() => researchRun(runId), [runId]);
+  return <Async {...saved} testId="explore-saved-research">
+    {(run) => run.symbol === symbol ? (
+      <div className="space-y-3 border-t border-border pt-3">
+        <p className="text-sm font-medium">Saved answer · {date(run.created_at)}</p>
+        <p className="text-sm text-muted">{run.question}</p>
+        {run.status === "answered" && (
+          <p role="status" className={`text-sm ${run.evidence_state === "current" ? "text-muted" : "text-[var(--c-critical-text)]"}`}>
+            {run.evidence_state === "current"
+              ? "Source selection and calculation still match the current warehouse. The archived file is checked when downloaded."
+              : "Historical answer: its source selection is changed or cannot be rechecked. Do not use it as a current figure."}
+          </p>
+        )}
+        {run.claims?.length > 0 && <ResearchClaims claims={run.claims} symbol={symbol} />}
+        {run.status !== "answered" && <p className="text-sm">No answer was issued: {RESEARCH_GAPS[run.failure_code] || run.failure_code || run.status}.</p>}
+        <p className="text-xs text-muted">{run.cost_usd == null
+          ? `Model cost unknown; $${run.reserved_usd} remains reserved (${run.cost_basis}).`
+          : `Recorded model cost: $${num(Number(run.cost_usd), 6)} (${run.cost_basis}).`}</p>
+      </div>
+    ) : <p role="alert" className="text-sm">This saved answer belongs to {run.symbol}, not {symbol}.</p>}
+  </Async>;
+}
+
 function ResearchPanel({ symbol }) {
+  const [params, setParams] = useSearchParams();
+  const runId = params.get("run");
   const settings = useApi(() => researchSettings(), []);
   const [question, setQuestion] = useState("");
   const [budget, setBudget] = useState("0.01");
@@ -70,6 +117,11 @@ function ResearchPanel({ symbol }) {
 
   async function submit(event) {
     event.preventDefault();
+    if (runId) setParams((previous) => {
+      const next = new URLSearchParams(previous);
+      next.delete("run");
+      return next;
+    });
     setWorking(true);
     setError("");
     setResult(null);
@@ -110,26 +162,13 @@ function ResearchPanel({ symbol }) {
               </div>
             </form>
             {error && <p role="alert" className="text-sm text-[var(--c-critical-text)]">{error}</p>}
+            {runId && (/^[1-9]\d*$/.test(runId)
+              ? <SavedResearch symbol={symbol} runId={runId} />
+              : <p role="alert" className="text-sm">Invalid saved answer link.</p>)}
             {result && (
               <div className="space-y-3 border-t border-border pt-3" data-testid="explore-research-result">
-                {result.claims?.length ? result.claims.map((claim) => (
-                  <div key={claim.id} className="text-sm">
-                    <p>{claim.statement}</p>
-                    <ul className="mt-1 space-y-1 text-xs text-muted">
-                      {claim.sources.map((source) => (
-                        <li key={`${claim.id}-${source.extraction_id}`}>
-                          {source.period_end_jalali} · {source.scope
-                            ? source.statement_kind === "balance_sheet"
-                              ? `${source.scope} balance cells assets ${source.source_coordinates.total_assets.address} / liabilities ${source.source_coordinates.total_liabilities.address} / equity ${source.source_coordinates.total_equity.address}`
-                              : `${source.scope} income cells ${source.source_coordinates.revenue.address} / ${source.source_coordinates.net_profit.address}`
-                            : `sales row ${source.source_coordinates.row ?? "?"}, column ${source.source_coordinates.column ?? "?"}`} · artifact {source.artifact_id}
-                          {source.source_url && <> · <a href={source.source_url} target="_blank" rel="noopener noreferrer" className="text-accent underline">Codal filing</a></>}
-                          {" "}<ArchivedFiling symbol={symbol} point={source} days={source.scope ? 3650 : 365} />
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )) : <p className="text-sm">{RESEARCH_GAPS[result.reason] || "The verified evidence cannot answer this question."}</p>}
+                {result.claims?.length ? <ResearchClaims claims={result.claims} symbol={symbol} /> : <p className="text-sm">{RESEARCH_GAPS[result.reason] || "The verified evidence cannot answer this question."}</p>}
+                {result.run_id && <Link to={`/explore?${new URLSearchParams({ symbol, run: String(result.run_id) })}`} onClick={() => setResult(null)} className="text-sm text-accent underline">Open saved answer with a fresh source check</Link>}
                 {result.coverage && <p className="text-xs text-muted">Coverage: sales {result.coverage.verified_periods} verified / {result.coverage.withheld_periods} withheld; income {result.coverage.income_verified_periods} verified / {result.coverage.income_withheld_periods} withheld; balance {result.coverage.balance_verified_periods} verified / {result.coverage.balance_withheld_periods} withheld latest filings.</p>}
                 <p className="text-xs text-muted">Model cost: ${num(Number(result.cost_usd), 6)} ({result.cost_basis}). Numeric claims come from stored calculations; the model selected which ones address your question.</p>
               </div>

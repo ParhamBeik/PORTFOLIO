@@ -8,6 +8,7 @@ import * as api from "../api.js";
 
 vi.mock("../api.js", () => ({
   downloadArchivedFiling: vi.fn(),
+  researchRun: vi.fn(),
   exploreStocks: vi.fn(),
   stockDossier: vi.fn(),
   researchSettings: vi.fn(),
@@ -71,7 +72,7 @@ describe("company research", () => {
 
   it("shows the selected cost ceiling and source-backed answer", async () => {
     api.runResearch.mockResolvedValue({
-      status: "answered", cost_usd: "0.000400", cost_basis: "provider_reported",
+      run_id: 17, status: "answered", cost_usd: "0.000400", cost_basis: "provider_reported",
       claims: [{ id: "highest", statement: "Highest among verified months: 1405-03-31 at 545,287,525 million Rial.", sources: [source] }],
       coverage: { verified_periods: 1, withheld_periods: 0, income_verified_periods: 1, income_withheld_periods: 0, balance_verified_periods: 1, balance_withheld_periods: 0 },
     });
@@ -87,6 +88,7 @@ describe("company research", () => {
     await waitFor(() => expect(api.runResearch).toHaveBeenCalledWith("فولاد", "Which month had the highest sales?", "0.02"));
     expect(await screen.findByText(/Highest among verified months/)).toBeInTheDocument();
     expect(screen.getByText(/Model cost: \$0\.0004/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Open saved answer/ })).toHaveAttribute("href", "/explore?symbol=%D9%81%D9%88%D9%84%D8%A7%D8%AF&run=17");
     expect(screen.getAllByRole("link", { name: /Codal filing/i })[0]).toHaveAttribute("href", source.source_url);
     expect(screen.getByTestId("explore-income-evidence")).toHaveTextContent(/revenue cell B4 · profit cell B21/i);
     expect(screen.getByTestId("explore-balance-evidence")).toHaveTextContent(/assets cell B22 · liabilities cell B53 · equity cell B35/i);
@@ -118,5 +120,18 @@ describe("company research", () => {
     expect(screen.getByTestId("explore-research-result")).toHaveTextContent(/balance cells assets B22 \/ liabilities B53 \/ equity B35/i);
     fireEvent.click(screen.getByTestId("explore-archive-4"));
     await waitFor(() => expect(api.downloadArchivedFiling).toHaveBeenCalledWith("فولاد", 4, 3650));
+  });
+
+  it("labels a saved answer whose source selection changed", async () => {
+    api.researchRun.mockResolvedValue({
+      run_id: 17, symbol: "فولاد", question: "Which month had highest sales?",
+      created_at: "2026-09-27T09:00:00Z", status: "answered", evidence_state: "changed",
+      claims: [{ id: "highest", statement: "Highest among verified months: 1405-03-31 at 545,287,525 million Rial.", sources: [source] }],
+      cost_usd: "0.0004", cost_basis: "provider_reported",
+    });
+    render(<MemoryRouter initialEntries={["/explore?symbol=فولاد&run=17"]}><Explore /></MemoryRouter>);
+    expect(await screen.findByText(/Historical answer: its source selection is changed/i)).toBeInTheDocument();
+    expect(screen.getByText(/Highest among verified months/)).toBeInTheDocument();
+    expect(api.researchRun).toHaveBeenCalledWith("17");
   });
 });

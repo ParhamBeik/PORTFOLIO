@@ -23,6 +23,8 @@ from marketdata.models import (
     MarketInstrument,
     StockSymbolMetadata,
 )
+from research.models import ResearchRun
+from research.observations import build_observations
 
 pytestmark = pytest.mark.django_db
 
@@ -159,8 +161,9 @@ def test_monthly_sales_requires_reconciled_latest_filing(make_user, monkeypatch)
         source_coordinates={"table": 1, "row": 15, "column": 6},
         verification_status=CodalVerification.RECONCILED,
     )
+    user = make_user()
     client = APIClient()
-    client.force_authenticate(user=make_user())
+    client.force_authenticate(user=user)
     monthly = client.get("/api/explore/stocks/کاما/").data["monthly_sales"]
     assert monthly["status"] == "verified"
     assert monthly["points"][0]["value"] == "123456.000000000000"
@@ -227,7 +230,17 @@ def test_monthly_sales_requires_reconciled_latest_filing(make_user, monkeypatch)
         assert monthly["points"] == []
     fact.source_coordinates = original_coordinates
     fact.save(update_fields=["source_coordinates"])
-    assert client.get("/api/explore/stocks/کاما/").data["monthly_sales"]["status"] == "verified"
+    monthly = client.get("/api/explore/stocks/کاما/").data["monthly_sales"]
+    assert monthly["status"] == "verified"
+    claim = build_observations(monthly)["latest"]
+    saved = ResearchRun.objects.create(
+        user=user, symbol="کاما", question="Latest verified sales?",
+        status=ResearchRun.Status.ANSWERED, max_cost_usd=Decimal("0.01"),
+        selected_observations=[{"id": "latest", **claim}],
+        evidence={"scope": "one_tse_company_sales_365_days_statements_3650_days"},
+    )
+    detail_url = f"/api/research/runs/{saved.pk}/"
+    assert client.get(detail_url).data["evidence_state"] == "current"
 
     corrected = CodalAnnouncement.objects.create(
         symbol="کاما", title=f"اصلاحیه گزارش فعالیت ماهانه دوره 1 ماهه منتهی به {period_end}", code="correction",
@@ -240,6 +253,7 @@ def test_monthly_sales_requires_reconciled_latest_filing(make_user, monkeypatch)
     assert monthly["verified_periods"] == 0
     assert monthly["withheld_periods"] == 1
     assert client.get(evidence_url).status_code == 404
+    assert client.get(detail_url).data["evidence_state"] == "changed"
 
     CodalReport.objects.create(
         announcement=corrected,

@@ -174,7 +174,17 @@ def test_model_selects_server_claim_and_usage_is_charged(make_user, monkeypatch,
     detail = client.get(f"/api/research/runs/{response.data['run_id']}/")
     assert detail.status_code == 200
     assert detail.data["claims"] == response.data["claims"]
+    assert detail.data["evidence_state"] == "current"
     assert detail.data["evidence"]["monthly_sales"]["points"][1]["artifact_sha256"] == "a" * 64
+    monkeypatch.setattr(views, "_monthly_sales", lambda *args: _monthly() | {"points": []})
+    changed = client.get(f"/api/research/runs/{response.data['run_id']}/")
+    assert changed.data["evidence_state"] == "changed"
+    assert changed.data["status"] == "answered"
+    assert changed.data["claims"] == response.data["claims"]  # immutable historical record
+    run = ResearchRun.objects.get(pk=response.data["run_id"])
+    run.evidence = {"scope": "unsupported_old_tool"}
+    run.save(update_fields=["evidence"])
+    assert client.get(f"/api/research/runs/{run.pk}/").data["evidence_state"] == "unverifiable"
     another = APIClient()
     another.force_authenticate(user=make_user(email="other@test.test"))
     assert another.get(f"/api/research/runs/{response.data['run_id']}/").status_code == 404

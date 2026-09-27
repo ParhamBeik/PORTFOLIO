@@ -72,6 +72,16 @@ def _abstain(user, symbol, question, ceiling, evidence, reason):
     })
 
 
+def _current_evidence(symbol):
+    today = timezone.localtime(timezone.now(), TEHRAN).date()
+    end = from_gregorian(today)
+    return (
+        _monthly_sales(symbol, from_gregorian(today - timedelta(days=365)), end),
+        _income_statements(symbol, from_gregorian(today - timedelta(days=3650)), end),
+        _balance_sheets(symbol, from_gregorian(today - timedelta(days=3650)), end),
+    )
+
+
 class ResearchSettingsView(APIView):
     def get(self, request):
         try:
@@ -113,16 +123,7 @@ class ResearchRunView(APIView):
                 or ceiling.as_tuple().exponent < -6):
             return Response({"max_cost_usd": "Choose a positive amount within the server limit, to six decimals."}, status=400)
 
-        today = timezone.localtime(timezone.now(), TEHRAN).date()
-        monthly = _monthly_sales(
-            symbol, from_gregorian(today - timedelta(days=365)), from_gregorian(today),
-        )
-        income = _income_statements(
-            symbol, from_gregorian(today - timedelta(days=3650)), from_gregorian(today),
-        )
-        balance = _balance_sheets(
-            symbol, from_gregorian(today - timedelta(days=3650)), from_gregorian(today),
-        )
+        monthly, income, balance = _current_evidence(symbol)
         observations = build_observations(monthly, income, balance)
         evidence = {
             "scope": "one_tse_company_sales_365_days_statements_3650_days",
@@ -214,12 +215,27 @@ class ResearchRunDetailView(APIView):
         run = ResearchRun.objects.filter(pk=run_id, user=request.user).first()
         if run is None:
             raise NotFound("Research run not found.")
+        evidence_state = "not_applicable"
+        if run.status == ResearchRun.Status.ANSWERED:
+            if (not isinstance(run.evidence, dict)
+                    or run.evidence.get("scope") != "one_tse_company_sales_365_days_statements_3650_days"
+                    or _instrument(run.symbol) is None):
+                evidence_state = "unverifiable"
+            else:
+                current = build_observations(*_current_evidence(run.symbol))
+                evidence_state = "current" if run.selected_observations and all(
+                    isinstance(claim, dict)
+                    and claim.get("statement") == current.get(claim.get("id"), {}).get("statement")
+                    and claim.get("sources") == current.get(claim.get("id"), {}).get("sources")
+                    for claim in run.selected_observations
+                ) else "changed"
         return Response({
             "run_id": run.pk,
             "created_at": run.created_at.isoformat(),
             "symbol": run.symbol,
             "question": run.question,
             "status": run.status,
+            "evidence_state": evidence_state,
             "claims": run.selected_observations,
             "evidence": run.evidence,
             "failure_code": run.failure_code,

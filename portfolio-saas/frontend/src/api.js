@@ -511,6 +511,7 @@ export const exploreStocks = (query = "") =>
 export const stockDossier = (symbol, days = 365) =>
   api(`/api/explore/stocks/${encodeURIComponent(symbol)}/?days=${days}`);
 export const researchSettings = () => api("/api/research/settings/");
+export const researchRun = (runId) => api(`/api/research/runs/${runId}/`);
 export const runResearch = (symbol, question, maxCostUsd) =>
   api("/api/research/runs/", {
     method: "POST", body: { symbol, question, max_cost_usd: maxCostUsd },
