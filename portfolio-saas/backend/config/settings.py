@@ -570,7 +570,8 @@ CODAL_WORKER_ENABLED = os.getenv("CODAL_WORKER_ENABLED", "1") == "1"
 # so "all history for all symbols" is ~32,000 requests -- more than three days of
 # the whole archive budget. Only page 1 was ever fetched, which stored 2% and
 # still reported verified. Bound the target to the newest N pages per symbol so
-# the state can honestly converge; raise it when the backlog is otherwise idle.
+# the state can honestly converge. Every refresh rereads all N pages to verify
+# that coverage; raising N increases both backfill and weekly refresh cost.
 MARKETDATA_CODAL_MAX_PAGES = int(os.getenv("MARKETDATA_CODAL_MAX_PAGES", "5"))
 # 20/day left 96.7% of the 76,868-row backlog (74,303 rows) never even attempted
 # -- at 20/day it clears in ~10 years. Raised alongside the beat schedule itself

@@ -33,6 +33,7 @@ from marketdata.management.commands.recover_rejected_records import classify
 from marketdata.models import (
     ApiRequestQuota,
     ArchiveFetchState,
+    CodalAnnouncement,
     DailyStockHistory,
     MarketInstrument,
     WorkflowRun,
@@ -91,6 +92,53 @@ Endpoint = ArchiveFetchState.Endpoint
 
 def _state(symbol, endpoint=Endpoint.STOCK_HISTORY_ADJUSTED, **kwargs):
     return ArchiveFetchState.objects.create(symbol=symbol, endpoint=endpoint, **kwargs)
+
+
+def test_codal_refresh_preserves_full_bounded_page_coverage(monkeypatch, settings):
+    settings.MARKETDATA_CODAL_MAX_PAGES = 3
+    calls = []
+    records = [
+        {
+            "l18": "AAA", "code": f"N-{index}", "title": "Monthly sales",
+            "date_publish": ("1405-06-28" if index < 20 else
+                             "1405-05-28" if index < 40 else "1405-04-28"),
+            "time_publish": "12:00:00",
+        }
+        for index in range(45)
+    ]
+    # A provider page can include another issuer with the same code/timestamp.
+    records[1]["l18"] = "BBB"
+    records[1]["code"] = records[0]["code"]
+
+    def fetch(_key, symbol, page):
+        assert symbol == "AAA"
+        calls.append(page)
+        return {"count_announcement": 45, "announcement": records[(page - 1) * 20:page * 20]}
+
+    def ingest(payload):
+        created = 0
+        for row in payload["announcement"]:
+            _, added = CodalAnnouncement.objects.get_or_create(
+                symbol=row["l18"], code=row["code"],
+                date_publish=row["date_publish"], time_publish=row["time_publish"],
+                defaults={"title": row["title"]},
+            )
+            created += added
+        return created, 0
+
+    monkeypatch.setattr("marketdata.archive.fetch_codal_announcements", fetch)
+    monkeypatch.setattr("marketdata.archive.ingest.ingest_codal", ingest)
+    state = _state("AAA", Endpoint.CODAL_ANNOUNCEMENTS)
+    for _ in range(2):
+        state = run_archive_state(state.pk)
+        assert state.verified_complete
+        assert (state.expected_rows, state.stored_rows, state.missing_rows) == (45, 45, 0)
+        assert (state.first_date, state.last_date) == ("1405-04-28", "1405-06-28")
+    assert calls == [1, 2, 3, 1, 2, 3]
+    records.pop()
+    state = run_archive_state(state.pk)
+    assert not state.verified_complete
+    assert "44 distinct announcements; expected 45" in state.last_error
 
 
 # Integration tests, not unit: the claim order is expressed as database
@@ -307,9 +355,13 @@ def test_codal_reverifies_weekly_not_daily(settings):
     settings.CODAL_ENABLED = True
     codal = _state("شیراز", endpoint=Endpoint.CODAL_ANNOUNCEMENTS)
     prices = _state("شیراز", endpoint=Endpoint.STOCK_HISTORY_UNADJUSTED)
-    complete = ((1, 0), {"a"}, {"a"})
 
-    with patch("marketdata.archive._fetch_and_ingest", return_value=complete):
+    def complete(state):
+        keys = ({("شیراز", "N-1", "1405-06-28", "12:00:00")}
+                if state.endpoint == Endpoint.CODAL_ANNOUNCEMENTS else {"1405-06-28"})
+        return (1, 0), keys, keys
+
+    with patch("marketdata.archive._fetch_and_ingest", side_effect=complete):
         run_archive_state(codal.pk)
         run_archive_state(prices.pk)
 

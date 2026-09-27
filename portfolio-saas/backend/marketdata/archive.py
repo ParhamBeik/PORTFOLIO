@@ -572,9 +572,22 @@ def _fetch_and_ingest(state):
 CODAL_PAGE_SIZE = 20
 
 
+def _codal_total(payload):
+    try:
+        value = payload["count_announcement"]
+        if isinstance(value, bool):
+            raise ValueError
+        total = int(value)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MarketDataFetchError("Codal page omitted a valid total count.") from exc
+    if total < 0:
+        raise MarketDataFetchError("Codal page reported a negative total count.")
+    return total
+
+
 def _codal_stored_keys(symbol):
     return {
-        f"{code}_{dp}_{tp}"
+        (symbol, code, dp, tp)
         for code, dp, tp in CodalAnnouncement.objects.filter(symbol=symbol).values_list(
             "code", "date_publish", "time_publish"
         )
@@ -582,14 +595,12 @@ def _codal_stored_keys(symbol):
 
 
 def _fetch_codal_pages(symbol):
-    """Walk the newest Codal pages for one symbol; returns (payload, result, expected, stored).
+    """Verify every page in the bounded Codal window against stored rows.
 
     Announcement.php pages 20 records at a time and reports `count_page`; a
-    mature symbol has ~50 pages. Only page 1 was ever requested, so 2% of the
-    history landed -- and it verified complete because the expected set was built
-    from that same page. Page 1 is always refreshed for new filings; the deeper
-    pages are only walked while the symbol sits below its target, so the first
-    pass costs MAX_PAGES requests per symbol and steady state costs one.
+    mature symbol has ~50 pages. A bounded refresh must reread every target page:
+    checking only page 1 on later runs shrank a previously verified five-page
+    state to 20 rows and silently stopped checking the other four pages.
 
     Provider symbols are canonical (`l18`), so a state keyed `سامان2` stores rows
     under `سامان`; read back by the keys the ingest actually wrote.
@@ -598,39 +609,33 @@ def _fetch_codal_pages(symbol):
     first = fetch_codal_announcements(key, symbol=symbol, page=1)
     created, skipped = ingest.ingest_codal(first)
     expected = _codal_keys(first)
-    total = 0
-    if isinstance(first, dict):
-        try:
-            total = int(first.get("count_announcement") or 0)
-        except (TypeError, ValueError):
-            total = 0
+    total = _codal_total(first)
     target = min(total, settings.MARKETDATA_CODAL_MAX_PAGES * CODAL_PAGE_SIZE)
 
-    written_symbols = {
-        rec.get("l18")
-        for rec in (first.get("announcement") or [] if isinstance(first, dict) else [])
-        if isinstance(rec, dict) and rec.get("l18")
-    } or {symbol}
-
-    def stored_now():
-        keys = set()
-        for sym in written_symbols:
-            keys |= _codal_stored_keys(sym)
-        return keys
-
-    have = stored_now()
     last_page = min(
         settings.MARKETDATA_CODAL_MAX_PAGES,
         -(-total // CODAL_PAGE_SIZE) if total else 1,
     )
-    if len(have) < target:
-        for page in range(2, last_page + 1):
-            payload = fetch_codal_announcements(key, symbol=symbol, page=page)
-            page_created, page_skipped = ingest.ingest_codal(payload)
-            created += page_created
-            skipped += page_skipped
-            expected |= _codal_keys(payload)
-        have = stored_now()
+    for page in range(2, last_page + 1):
+        payload = fetch_codal_announcements(key, symbol=symbol, page=page)
+        if _codal_total(payload) != total:
+            raise MarketDataFetchError("Codal pagination changed during the bounded scan.")
+        page_created, page_skipped = ingest.ingest_codal(payload)
+        created += page_created
+        skipped += page_skipped
+        expected |= _codal_keys(payload)
+    if len(expected) != target:
+        raise MarketDataFetchError(
+            f"Codal pages contained {len(expected)} distinct announcements; expected {target}."
+        )
+    for item in expected:
+        if jalali.to_gregorian(item[2]) is None:
+            raise MarketDataFetchError("Codal page contains an invalid publication date.")
+    # Include issuer identity. Code + timestamp is not globally unique across
+    # the provider's multi-issuer payloads.
+    have = set()
+    for written_symbol in {item[0] for item in expected}:
+        have |= _codal_stored_keys(written_symbol)
 
     return first, (created, skipped), expected, have & expected
 
@@ -826,9 +831,12 @@ def _codal_keys(payload):
     # Keys must be built the same way ingest_codal builds the stored row, digit
     # folding included, or every announcement reads back as missing.
     return {
-        f"{ingest.fold_digits(rec.get('code', ''))}"
-        f"_{ingest.normalize_jalali(rec.get('date_publish', ''))}"
-        f"_{ingest.fold_digits(rec.get('time_publish', ''))}"
+        (
+            str(rec.get("l18") or "").strip(),
+            ingest.fold_digits(rec.get("code", "")),
+            ingest.normalize_jalali(rec.get("date_publish", "")),
+            ingest.fold_digits(rec.get("time_publish", "")),
+        )
         for rec in records
         if isinstance(rec, dict)
     }
@@ -1068,7 +1076,7 @@ def run_archive_state(state_id):
     # Records the validator permanently rejects (bad OHLC, volume mismatch)
     # will never land in stored. Without this, the state re-fetches forever.
     # ponytail: DB query only runs when there are actual missing records.
-    if missing:
+    if missing and state.endpoint != ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS:
         rejected_dates = set(
             RejectedRecord.objects.filter(
                 endpoint__in=_REJECTION_LABELS.get(state.endpoint, (state.endpoint,)),
@@ -1087,8 +1095,13 @@ def run_archive_state(state_id):
     state.stored_rows = len(stored)
     state.missing_rows = len(missing)
     state.known_gap_rows = len(known_gaps)
-    state.first_date = min(expected) if expected else ""
-    state.last_date = max(expected) if expected else ""
+    if state.endpoint == ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS:
+        publish_dates = [item[2] for item in expected]
+        state.first_date = min(publish_dates) if publish_dates else ""
+        state.last_date = max(publish_dates) if publish_dates else ""
+    else:
+        state.first_date = min(expected) if expected else ""
+        state.last_date = max(expected) if expected else ""
     state.verified_complete = not missing
     state.last_attempt_at = now
     state.last_success_at = now
