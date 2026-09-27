@@ -1220,6 +1220,32 @@ function ResearchCoveragePanel({ coverage }) {
   );
 }
 
+function CodalHistoryPanel({ history }) {
+  if (!history) return null;
+  return (
+    <Card title="Historical announcement discovery" subtitle="Source-date windows; separate from verified financial figures." testId="ops-codal-history">
+      {history.leaf_windows ? (
+        <>
+          <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+            <div><strong>{num(history.symbols_started)}</strong> symbols with windows <span className="text-muted">· {num(history.catalog_stocks)} currently eligible stocks</span></div>
+            <div><strong>{num(history.verified_leaf_windows)}</strong> verified windows <span className="text-muted">of {num(history.leaf_windows)} leaf windows</span></div>
+            <div><strong>{num(history.open_leaf_windows)}</strong> open windows <span className="text-muted">({num(history.failed_leaf_windows)} failed)</span></div>
+            <div><strong>{num(history.stale_verified_leaf_windows)}</strong> verifications older than one year</div>
+          </div>
+          <p className="mt-3 text-xs text-muted">
+            Requested Jalali range {history.earliest_date} → {history.latest_date}; {num(history.split_parent_windows)} oversized windows split.
+            Last verified {history.last_verified_at ? dateTime(history.last_verified_at) : "never"}.
+          </p>
+        </>
+      ) : (
+        <p className="text-sm text-muted">No historical discovery windows have been created.</p>
+      )}
+      <p className="mt-3 text-xs text-muted">A verified window means its returned announcement keys were stored when checked. It does not certify complete issuer history, archived documents, or parsed financial statements.</p>
+      <a className="mt-2 inline-block text-sm text-link hover:underline" href="/admin/marketdata/codalhistorywindow/">Inspect source windows</a>
+    </Card>
+  );
+}
+
 function CodalPanel({ codal }) {
   if (!codal) return null;
   if (!codal.enabled) {
@@ -1227,12 +1253,12 @@ function CodalPanel({ codal }) {
       <div className="space-y-4" data-testid="ops-codal">
         <Card title="Codal is dormant" subtitle="The subsystem is switched off; nothing is running.">
           <p className="text-sm text-muted">
-            No worker, no schedule and no backfill states are active. Stored
-            announcements and {gb(codal.artifact_bytes)} of artifacts are kept
-            untouched. Re-enable with CODAL_ENABLED=1 once the origin is
-            reachable from the host.
+            No Codal extraction worker or schedule is active. Stored announcements
+            and {gb(codal.artifact_bytes)} of artifacts are kept untouched.
+            Re-enable with CODAL_ENABLED=1 once the origin is reachable from the host.
           </p>
         </Card>
+        <CodalHistoryPanel history={codal.history_discovery} />
         <ResearchCoveragePanel coverage={codal.research_coverage} />
       </div>
     );
@@ -1281,6 +1307,7 @@ function CodalPanel({ codal }) {
           </dl>
         </Card>
       </div>
+      <CodalHistoryPanel history={codal.history_discovery} />
       <ResearchCoveragePanel coverage={codal.research_coverage} />
     </div>
   );

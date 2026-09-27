@@ -4,9 +4,10 @@ from django.core.management import call_command
 from django.utils import timezone
 import pytest
 
+from marketdata.admin_telemetry import _codal_history_status, _codal_status
 from marketdata.codal_history import RequestBudget, scan_window
 from marketdata.fetchers import MarketDataFetchError
-from marketdata.models import CodalAnnouncement, CodalHistoryWindow
+from marketdata.models import CodalAnnouncement, CodalHistoryWindow, MarketInstrument
 from marketdata.quota import QuotaExhausted
 
 
@@ -146,3 +147,36 @@ def test_stale_completed_window_can_be_reverified(monkeypatch):
     window.refresh_from_db()
     assert window.verified_complete
     assert (window.expected_rows, window.stored_rows) == (2, 2)
+
+
+def test_ops_history_counts_only_leaf_windows_as_verifications(settings):
+    for symbol in ("فولاد", "فملی"):
+        MarketInstrument.objects.create(
+            source=MarketInstrument.Source.TSETMC,
+            category=MarketInstrument.Category.STOCK,
+            symbol=symbol,
+            eligible=True,
+        )
+    CodalHistoryWindow.objects.create(
+        symbol="فولاد", date_start="1402-01-01", date_end="1402-12-29", split=True
+    )
+    CodalHistoryWindow.objects.create(
+        symbol="فولاد", date_start="1402-01-01", date_end="1402-06-31",
+        verified_complete=True, last_success_at=timezone.now(),
+    )
+    CodalHistoryWindow.objects.create(
+        symbol="فولاد", date_start="1402-07-01", date_end="1402-12-29",
+        consecutive_failures=1,
+    )
+    CodalHistoryWindow.objects.create(
+        symbol="فملی", date_start="1403-01-01", date_end="1403-12-30",
+        verified_complete=True, last_success_at=timezone.now() - timedelta(days=400),
+    )
+    status = _codal_history_status()
+    assert status["catalog_stocks"] == status["symbols_started"] == 2
+    assert status["leaf_windows"] == 3
+    assert status["verified_leaf_windows"] == 2
+    assert status["open_leaf_windows"] == status["failed_leaf_windows"] == 1
+    assert status["split_parent_windows"] == status["stale_verified_leaf_windows"] == 1
+    settings.CODAL_ENABLED = False
+    assert _codal_status()["history_discovery"] == status

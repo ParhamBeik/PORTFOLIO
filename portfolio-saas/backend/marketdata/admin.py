@@ -14,6 +14,7 @@ from .models import (
     CodalCandidateFact,
     CodalExtraction,
     CodalFact,
+    CodalHistoryWindow,
     CodalReport,
     DailyStockHistory,
     GoldCurrencyHistory,
@@ -217,6 +218,19 @@ class ResearchCoverageSnapshotAdmin(StaffReadOnlyAdmin):
         "started_at", "finished_at", "window_days", "start_jalali", "end_jalali",
         "universe_size", "eligibility_version", "parser_versions", "summary", "symbols",
     )
+
+
+@admin.register(CodalHistoryWindow)
+class CodalHistoryWindowAdmin(StaffReadOnlyAdmin):
+    list_display = (
+        "symbol", "date_start", "date_end", "verified_complete", "split",
+        "expected_rows", "stored_rows", "consecutive_failures", "last_success_at",
+    )
+    list_filter = ("verified_complete", "split", "consecutive_failures")
+    search_fields = ("symbol",)
+    ordering = ("-date_start", "symbol")
+    readonly_fields = tuple(field.name for field in CodalHistoryWindow._meta.fields)
+    list_per_page = 50
 
 
 @admin.register(RejectedRecord)

@@ -33,6 +33,7 @@ from .models import (
     ArchiveFetchState,
     CodalAnnouncement,
     CodalArtifact,
+    CodalHistoryWindow,
     CodalReport,
     DailyStockHistory,
     GoldCurrencyHistory,
@@ -674,7 +675,39 @@ def _tick_coverage():
     }
 
 
+def _codal_history_status():
+    """Announcement-discovery checkpoints, never a claim about parsed facts."""
+    stale_before = timezone.now() - timedelta(days=365)
+    counts = CodalHistoryWindow.objects.aggregate(
+        symbols_started=Count("symbol", distinct=True),
+        leaf_windows=Count("id", filter=Q(split=False)),
+        verified_leaf_windows=Count("id", filter=Q(split=False, verified_complete=True)),
+        failed_leaf_windows=Count(
+            "id", filter=Q(split=False, verified_complete=False, consecutive_failures__gt=0)
+        ),
+        stale_verified_leaf_windows=Count(
+            "id", filter=Q(split=False, verified_complete=True, last_success_at__lt=stale_before)
+        ),
+        split_parent_windows=Count("id", filter=Q(split=True)),
+        earliest_date=Min("date_start"),
+        latest_date=Max("date_end"),
+        last_verified_at=Max("last_success_at", filter=Q(split=False, verified_complete=True)),
+    )
+    catalog_stocks = MarketInstrument.objects.filter(
+        source=MarketInstrument.Source.TSETMC,
+        category=MarketInstrument.Category.STOCK,
+        eligible=True,
+    ).count()
+    counts["catalog_stocks"] = catalog_stocks
+    counts["open_leaf_windows"] = (
+        counts["leaf_windows"] - counts["verified_leaf_windows"]
+    )
+    counts["last_verified_at"] = _iso(counts["last_verified_at"])
+    return counts
+
+
 def _codal_status():
+    history_discovery = _codal_history_status()
     coverage = ResearchCoverageSnapshot.objects.order_by("-finished_at").values(
         "started_at", "finished_at", "window_days", "start_jalali", "end_jalali",
         "universe_size", "eligibility_version", "parser_versions", "summary",
@@ -688,7 +721,8 @@ def _codal_status():
         # how much disk the dormant data still occupies, which is the one
         # number an operator wants while it is switched off.
         return {"enabled": False, "worker_enabled": False,
-                "artifact_bytes": _codal_volume_bytes(), "research_coverage": coverage}
+                "artifact_bytes": _codal_volume_bytes(), "research_coverage": coverage,
+                "history_discovery": history_discovery}
     counts = {
         row["status"]: row["c"]
         for row in CodalReport.objects.values("status").annotate(c=Count("id"))
@@ -716,6 +750,7 @@ def _codal_status():
         "blocked_network_rate_24h": round(blocked / recent_total, 4) if recent_total else 0,
         "artifact_bytes": _codal_volume_bytes(),
         "research_coverage": coverage,
+        "history_discovery": history_discovery,
     }
 
 
