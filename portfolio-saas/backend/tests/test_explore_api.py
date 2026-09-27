@@ -137,7 +137,8 @@ def test_monthly_sales_requires_reconciled_latest_filing(make_user):
     artifact = CodalArtifact.objects.create(
         report=report, kind=CodalArtifact.Kind.EXCEL,
         source_url="https://excel.codal.ir/report.xlsx",
-        checksum_sha256="a" * 64, fetch_status=CodalArtifact.FetchStatus.STORED,
+        checksum_sha256="a" * 64, s3_key=f"codal/sha256/aa/{'a' * 64}.xlsx",
+        fetch_status=CodalArtifact.FetchStatus.STORED,
     )
     extraction = CodalExtraction.objects.create(
         report=report, artifact=artifact,
@@ -180,6 +181,12 @@ def test_monthly_sales_requires_reconciled_latest_filing(make_user):
     assert client.get("/api/explore/stocks/کاما/").data["monthly_sales"]["points"] == []
     artifact.fetch_status = CodalArtifact.FetchStatus.STORED
     artifact.save(update_fields=["fetch_status"])
+    original_key = artifact.s3_key
+    artifact.s3_key = ""
+    artifact.save(update_fields=["s3_key"])
+    assert client.get("/api/explore/stocks/کاما/").data["monthly_sales"]["points"] == []
+    artifact.s3_key = original_key
+    artifact.save(update_fields=["s3_key"])
 
     original_coordinates = fact.source_coordinates
     for coordinates in ({}, {"table": 1, "row": 15}, {"row": 15, "column": 6}):

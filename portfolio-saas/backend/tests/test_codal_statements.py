@@ -15,7 +15,7 @@ from marketdata import codal_pipeline
 from marketdata.codal_statements import (
     balance_sheet_url, parse_balance_sheet, parse_income_statement,
 )
-from marketdata.models import CodalAnnouncement, CodalArtifact, CodalReport, MarketInstrument
+from marketdata.models import CodalAnnouncement, CodalArtifact, CodalCandidateFact, CodalReport, MarketInstrument
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codal"
@@ -225,7 +225,8 @@ def test_dossier_shows_income_evidence_and_withholds_older_filing_after_correcti
     checksum = hashlib.sha256(INTERIM).hexdigest()
     artifact = CodalArtifact.objects.create(
         report=report, kind=CodalArtifact.Kind.HTML, source_url=announcement.link,
-        checksum_sha256=checksum, fetch_status=CodalArtifact.FetchStatus.STORED,
+        checksum_sha256=checksum, s3_key=f"codal/sha256/{checksum[:2]}/{checksum}.html",
+        fetch_status=CodalArtifact.FetchStatus.STORED,
     )
     _persist_parsed(report, artifact, ParsedDocument(facts=_parse()))
     client = APIClient()
@@ -236,6 +237,20 @@ def test_dossier_shows_income_evidence_and_withholds_older_filing_after_correcti
     assert income["points"][0]["net_profit"] == "120356493.000000000000"
     assert income["points"][0]["artifact_sha256"] == checksum
     assert income["points"][0]["source_coordinates"]["net_profit"]["address"] == "B21"
+
+    artifact.fetch_status = CodalArtifact.FetchStatus.PENDING
+    artifact.save(update_fields=["fetch_status"])
+    assert client.get("/api/explore/stocks/فولاد/").data["financial_metrics"]["status"] == "unavailable_unverified"
+    artifact.fetch_status = CodalArtifact.FetchStatus.STORED
+    artifact.save(update_fields=["fetch_status"])
+    profit = CodalCandidateFact.objects.get(extraction__report=report, fact_code="income.net_profit")
+    original_coordinates = profit.source_coordinates
+    profit.source_coordinates = {"sheet_code": 1, "table_id": 3220}
+    profit.save(update_fields=["source_coordinates"])
+    assert client.get("/api/explore/stocks/فولاد/").data["financial_metrics"]["status"] == "unavailable_unverified"
+    profit.source_coordinates = original_coordinates
+    profit.save(update_fields=["source_coordinates"])
+    assert client.get("/api/explore/stocks/فولاد/").data["financial_metrics"]["status"] == "verified"
 
     corrected = CodalAnnouncement.objects.create(
         symbol="فولاد", company_name="فولاد مبارکه اصفهان",
@@ -273,10 +288,12 @@ def test_dossier_shows_balance_evidence_and_withholds_unverified_correction(make
         period_end="1405-03-31", is_audited=False,
         parser_version=settings.CODAL_STATEMENT_PARSER_VERSION,
     )
+    balance_checksum = hashlib.sha256(INTERIM_BALANCE).hexdigest()
     artifact = CodalArtifact.objects.create(
         report=report, kind=CodalArtifact.Kind.HTML,
         source_url=announcement.link + "&sheetId=0",
-        checksum_sha256=hashlib.sha256(INTERIM_BALANCE).hexdigest(),
+        checksum_sha256=balance_checksum,
+        s3_key=f"codal/sha256/{balance_checksum[:2]}/{balance_checksum}.html",
         fetch_status=CodalArtifact.FetchStatus.STORED,
     )
     _persist_parsed(report, artifact, ParsedDocument(facts=_parse_balance()))
@@ -288,6 +305,20 @@ def test_dossier_shows_balance_evidence_and_withholds_unverified_correction(make
     assert balance["points"][0]["values"]["total_liabilities"] == "2896232830.000000000000"
     assert balance["points"][0]["source_coordinates"]["total_assets"]["address"] == "B22"
     assert balance["points"][0]["source_url"].endswith("&sheetId=0")
+
+    artifact.fetch_status = CodalArtifact.FetchStatus.PENDING
+    artifact.save(update_fields=["fetch_status"])
+    assert client.get("/api/explore/stocks/فولاد/").data["balance_sheet"]["status"] == "unavailable_unverified"
+    artifact.fetch_status = CodalArtifact.FetchStatus.STORED
+    artifact.save(update_fields=["fetch_status"])
+    assets = CodalCandidateFact.objects.get(extraction__report=report, fact_code="balance.total_assets")
+    original_coordinates = assets.source_coordinates
+    assets.source_coordinates = {"sheet_code": 0, "table_id": 3223, "label_address": "A22"}
+    assets.save(update_fields=["source_coordinates"])
+    assert client.get("/api/explore/stocks/فولاد/").data["balance_sheet"]["status"] == "unavailable_unverified"
+    assets.source_coordinates = original_coordinates
+    assets.save(update_fields=["source_coordinates"])
+    assert client.get("/api/explore/stocks/فولاد/").data["balance_sheet"]["status"] == "verified"
 
     corrected = CodalAnnouncement.objects.create(
         symbol="فولاد", company_name="فولاد مبارکه اصفهان",

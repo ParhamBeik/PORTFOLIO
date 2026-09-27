@@ -47,6 +47,33 @@ def _safe_codal_link(url):
     return url if parsed.scheme == "https" and parsed.hostname in {"codal.ir", "www.codal.ir"} else None
 
 
+def _archived_fact(fact, report):
+    extraction = fact.extraction
+    artifact = extraction.artifact
+    return bool(
+        re.fullmatch(r"[0-9a-f]{64}", extraction.checksum_sha256)
+        and extraction.checksum_sha256 == artifact.checksum_sha256
+        and extraction.report_id == report.pk
+        and artifact.report_id == report.pk
+        and artifact.fetch_status == CodalArtifact.FetchStatus.STORED
+        and artifact.s3_key
+    )
+
+
+def _statement_cell(fact, sheet_code, table_id):
+    coordinates = fact.source_coordinates
+    if not isinstance(coordinates, dict):
+        return False
+    address = coordinates.get("address")
+    label = coordinates.get("label_address")
+    return bool(
+        coordinates.get("sheet_code") == sheet_code
+        and coordinates.get("table_id") == table_id
+        and isinstance(address, str) and re.fullmatch(r"B[1-9][0-9]*", address)
+        and isinstance(label, str) and label == "A" + address[1:]
+    )
+
+
 def _monthly_sales(symbol, start, end):
     """Latest filing for each month wins; an unverified correction hides prior totals."""
     announcements = CodalAnnouncement.objects.filter(symbol=symbol).select_related(
@@ -84,10 +111,7 @@ def _monthly_sales(symbol, start, end):
             and fact.period_end == period_end
             and fact.period_start == f"{period_end[:8]}01"
             and fact.dimensions.get("row_kind") == "total"
-            and re.fullmatch(r"[0-9a-f]{64}", fact.extraction.checksum_sha256)
-            and fact.extraction.checksum_sha256 == fact.extraction.artifact.checksum_sha256
-            and fact.extraction.artifact.report_id == report.pk
-            and fact.extraction.artifact.fetch_status == CodalArtifact.FetchStatus.STORED
+            and _archived_fact(fact, report)
             and isinstance(fact.source_coordinates, dict)
             and type(fact.source_coordinates.get("row")) is int
             and fact.source_coordinates["row"] > 0
@@ -195,13 +219,14 @@ def _income_statements(symbol, start, end):
             by_code = {fact.fact_code: fact for fact in facts}
             first = facts[0]
             scope = "consolidated" if consolidated else "standalone"
+            sheet_code, table_id = (13, 3227) if consolidated else (1, 3220)
             if (len(facts) != len(_INCOME_CODES) or set(by_code) != _INCOME_CODES
-                    or not re.fullmatch(r"[0-9a-f]{64}", first.extraction.checksum_sha256)
-                    or first.extraction.checksum_sha256 != first.extraction.artifact.checksum_sha256
+                    or not _archived_fact(first, report)
                     or any(fact.numeric_value is None or fact.period_end != period_end
                            or fact.period_start != first.period_start
                            or fact.dimensions.get("statement_scope") != scope
                            or fact.dimensions.get("audited") is not report.is_audited
+                           or not _statement_cell(fact, sheet_code, table_id)
                            for fact in facts)):
                 continue
             revenue = by_code["income.operating_revenue"].numeric_value
@@ -283,15 +308,13 @@ def _balance_sheets(symbol, start, end):
             scope = "consolidated" if consolidated else "standalone"
             sheet_code, table_id = (14, 3230) if consolidated else (0, 3223)
             if (len(facts) != len(_BALANCE_CODES) or set(by_code) != _BALANCE_CODES
-                    or not re.fullmatch(r"[0-9a-f]{64}", first.extraction.checksum_sha256)
-                    or first.extraction.checksum_sha256 != first.extraction.artifact.checksum_sha256
+                    or not _archived_fact(first, report)
                     or not first.extraction.artifact.source_url.endswith(f"sheetId={sheet_code}")
                     or any(fact.numeric_value is None or fact.period_end != period_end
                            or fact.period_start != ""
                            or fact.dimensions.get("statement_scope") != scope
                            or fact.dimensions.get("audited") is not report.is_audited
-                           or fact.source_coordinates.get("sheet_code") != sheet_code
-                           or fact.source_coordinates.get("table_id") != table_id
+                           or not _statement_cell(fact, sheet_code, table_id)
                            for fact in facts)):
                 continue
             values = {code: by_code[code].numeric_value for code in _BALANCE_CODES}
