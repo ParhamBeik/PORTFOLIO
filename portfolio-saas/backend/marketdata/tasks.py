@@ -59,6 +59,7 @@ from .models import (
     MarketInstrument,
     OperationalMetricSnapshot,
     RejectedRecord,
+    ResearchCoverageSnapshot,
     StockSymbolMetadata,
     SymbolIntegrity,
     WorkflowRun,
@@ -1007,6 +1008,29 @@ def capture_operational_metrics():
         metadata={"slot": slot.isoformat(), **_quota_attribution_drift()},
     )
     return snapshot.pk
+
+
+@shared_task(ignore_result=True)
+def capture_research_coverage():
+    """Scan the stock universe once daily without calling a paid provider."""
+    from .research_coverage import refresh_research_coverage
+
+    outcome = _ledgered(
+        "capture_research_coverage", source="",
+        destination_table="ResearchCoverageSnapshot",
+    )
+    try:
+        snapshot = refresh_research_coverage()
+        ResearchCoverageSnapshot.objects.filter(
+            finished_at__lt=timezone.now() - timedelta(days=90)
+        ).exclude(pk=snapshot.pk).delete()
+        invalidate_ops_cache()
+        _finish_ok(outcome, rows_accepted=snapshot.universe_size, rows_created=1,
+                   metadata={"snapshot_id": snapshot.pk, "window_days": snapshot.window_days})
+        return snapshot.pk
+    except Exception as err:
+        _finish_fail(outcome, err)
+        raise
 
 
 def _quota_attribution_drift():

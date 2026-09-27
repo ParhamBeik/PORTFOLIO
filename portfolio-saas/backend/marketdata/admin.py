@@ -22,6 +22,7 @@ from .models import (
     MarketInstrument,
     OperationalMetricSnapshot,
     RejectedRecord,
+    ResearchCoverageSnapshot,
     ShareholderRecord,
     StockSymbolMetadata,
     StockTransactionTick,
@@ -206,6 +207,16 @@ class OperationalMetricSnapshotAdmin(StaffReadOnlyAdmin):
     @admin.display(description="Tracked tables")
     def tracked_table_count(self, obj):
         return len(obj.database_counts)
+
+
+@admin.register(ResearchCoverageSnapshot)
+class ResearchCoverageSnapshotAdmin(StaffReadOnlyAdmin):
+    list_display = ("finished_at", "window_days", "universe_size", "eligibility_version")
+    ordering = ("-finished_at",)
+    readonly_fields = (
+        "started_at", "finished_at", "window_days", "start_jalali", "end_jalali",
+        "universe_size", "eligibility_version", "parser_versions", "summary", "symbols",
+    )
 
 
 @admin.register(RejectedRecord)

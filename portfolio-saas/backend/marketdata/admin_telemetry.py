@@ -40,6 +40,7 @@ from .models import (
     MarketInstrument,
     OperationalMetricSnapshot,
     RejectedRecord,
+    ResearchCoverageSnapshot,
     ShareholderRecord,
     StockTransactionTick,
     SymbolIntegrity,
@@ -674,12 +675,20 @@ def _tick_coverage():
 
 
 def _codal_status():
+    coverage = ResearchCoverageSnapshot.objects.order_by("-finished_at").values(
+        "started_at", "finished_at", "window_days", "start_jalali", "end_jalali",
+        "universe_size", "eligibility_version", "parser_versions", "summary",
+    ).first()
+    if coverage:
+        coverage["started_at"] = _iso(coverage["started_at"])
+        coverage["finished_at"] = _iso(coverage["finished_at"])
     if not settings.CODAL_ENABLED:
         # Skip the status/run aggregates: with the subsystem off they only ever
         # describe a frozen backlog. Artifact bytes stay -- the panel reports
         # how much disk the dormant data still occupies, which is the one
         # number an operator wants while it is switched off.
-        return {"enabled": False, "worker_enabled": False, "artifact_bytes": _codal_volume_bytes()}
+        return {"enabled": False, "worker_enabled": False,
+                "artifact_bytes": _codal_volume_bytes(), "research_coverage": coverage}
     counts = {
         row["status"]: row["c"]
         for row in CodalReport.objects.values("status").annotate(c=Count("id"))
@@ -706,6 +715,7 @@ def _codal_status():
         "extract_runs_24h": recent_total,
         "blocked_network_rate_24h": round(blocked / recent_total, 4) if recent_total else 0,
         "artifact_bytes": _codal_volume_bytes(),
+        "research_coverage": coverage,
     }
 
 

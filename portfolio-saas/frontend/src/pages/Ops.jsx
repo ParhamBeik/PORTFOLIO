@@ -1183,6 +1183,43 @@ function JobsHealthPanel({
   );
 }
 
+function ResearchCoveragePanel({ coverage }) {
+  if (!coverage) {
+    return (
+      <Card title="Research evidence coverage" testId="ops-research-coverage">
+        <p className="text-sm text-muted">No completed stock-universe scan yet.</p>
+      </Card>
+    );
+  }
+  const families = [
+    ["Monthly sales", "monthly_sales"],
+    ["Income", "income"],
+    ["Balance sheet", "balance_sheet"],
+  ];
+  const ageMs = Date.now() - Date.parse(coverage.finished_at);
+  const stale = Number.isFinite(ageMs) && ageMs > 36 * 60 * 60 * 1000;
+  return (
+    <Card title="Research evidence coverage" subtitle={`${num(coverage.window_days)}-day filing window · Jalali ${coverage.start_jalali} → ${coverage.end_jalali}`} testId="ops-research-coverage">
+      <p className="text-sm text-muted">Scanned {num(coverage.universe_size)} eligible TSE stocks from {dateTime(coverage.started_at)} to {dateTime(coverage.finished_at)}{stale ? " · stale scan" : ""}.</p>
+      <div className="mt-3 grid gap-3 md:grid-cols-3">
+        {families.map(([label, key]) => {
+          const counts = coverage.summary?.[key] || {};
+          return (
+            <div key={key} className="rounded-lg border border-border bg-panel-2 p-3 text-sm">
+              <h3 className="font-medium">{label}</h3>
+              <p className="mt-2">{num(counts.symbols_with_verified)} stocks with ≥1 verified period</p>
+              <p className="text-muted">{num(counts.symbols_fully_verified)} with every observed period verified</p>
+              <p className="text-muted">{num(counts.withheld_periods)} withheld filing periods</p>
+              <p className="text-muted">{num(counts.symbols_without_filing)} stocks with no qualifying period-end filing</p>
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-3 text-xs text-muted">This uses Explore eligibility at scan time. It does not re-read archived bytes or certify peer comparisons.</p>
+    </Card>
+  );
+}
+
 function CodalPanel({ codal }) {
   if (!codal) return null;
   if (!codal.enabled) {
@@ -1196,6 +1233,7 @@ function CodalPanel({ codal }) {
             reachable from the host.
           </p>
         </Card>
+        <ResearchCoveragePanel coverage={codal.research_coverage} />
       </div>
     );
   }
@@ -1243,6 +1281,7 @@ function CodalPanel({ codal }) {
           </dl>
         </Card>
       </div>
+      <ResearchCoveragePanel coverage={codal.research_coverage} />
     </div>
   );
 }

@@ -1064,6 +1064,24 @@ class OperationalMetricSnapshot(models.Model):
         ordering = ["-captured_at"]
 
 
+class ResearchCoverageSnapshot(models.Model):
+    """Completed stock-universe scan using the Explore answer eligibility rules."""
+
+    started_at = models.DateTimeField()
+    finished_at = models.DateTimeField(db_index=True)
+    window_days = models.PositiveSmallIntegerField()
+    start_jalali = models.CharField(max_length=10)
+    end_jalali = models.CharField(max_length=10)
+    universe_size = models.PositiveIntegerField()
+    eligibility_version = models.CharField(max_length=32)
+    parser_versions = models.JSONField(default=dict)
+    summary = models.JSONField(default=dict)
+    symbols = models.JSONField(default=list)
+
+    class Meta:
+        ordering = ["-finished_at"]
+
+
 class SymbolIntegrity(models.Model):
     """Integrity gate checks per symbol."""
     symbol = models.CharField(max_length=64, db_index=True, unique=True)
