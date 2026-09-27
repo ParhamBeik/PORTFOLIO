@@ -144,7 +144,7 @@ def test_monthly_sales_requires_reconciled_latest_filing(make_user):
         checksum_sha256=artifact.checksum_sha256,
         parser_version=settings.CODAL_PARSER_VERSION,
     )
-    CodalCandidateFact.objects.create(
+    fact = CodalCandidateFact.objects.create(
         extraction=extraction, fact_code="sales.revenue",
         numeric_value=Decimal("123456"), raw_value="123,456",
         unit="million_rial", currency="IRR",
@@ -159,6 +159,38 @@ def test_monthly_sales_requires_reconciled_latest_filing(make_user):
     assert monthly["status"] == "verified"
     assert monthly["points"][0]["value"] == "123456.000000000000"
     assert monthly["points"][0]["source_coordinates"] == {"table": 1, "row": 15, "column": 6}
+
+    # A reconciled label alone does not make an unsupported source trace safe.
+    original_hash = artifact.checksum_sha256
+    for invalid_hash in ("", "g" * 64):
+        artifact.checksum_sha256 = invalid_hash
+        artifact.save(update_fields=["checksum_sha256"])
+        extraction.checksum_sha256 = invalid_hash
+        extraction.save(update_fields=["checksum_sha256"])
+        monthly = client.get("/api/explore/stocks/کاما/").data["monthly_sales"]
+        assert monthly["status"] == "unavailable_unverified"
+        assert monthly["points"] == []
+    artifact.checksum_sha256 = original_hash
+    artifact.save(update_fields=["checksum_sha256"])
+    extraction.checksum_sha256 = original_hash
+    extraction.save(update_fields=["checksum_sha256"])
+
+    artifact.fetch_status = CodalArtifact.FetchStatus.PENDING
+    artifact.save(update_fields=["fetch_status"])
+    assert client.get("/api/explore/stocks/کاما/").data["monthly_sales"]["points"] == []
+    artifact.fetch_status = CodalArtifact.FetchStatus.STORED
+    artifact.save(update_fields=["fetch_status"])
+
+    original_coordinates = fact.source_coordinates
+    for coordinates in ({}, {"table": 1, "row": 15}, {"row": 15, "column": 6}):
+        fact.source_coordinates = coordinates
+        fact.save(update_fields=["source_coordinates"])
+        monthly = client.get("/api/explore/stocks/کاما/").data["monthly_sales"]
+        assert monthly["status"] == "unavailable_unverified"
+        assert monthly["points"] == []
+    fact.source_coordinates = original_coordinates
+    fact.save(update_fields=["source_coordinates"])
+    assert client.get("/api/explore/stocks/کاما/").data["monthly_sales"]["status"] == "verified"
 
     corrected = CodalAnnouncement.objects.create(
         symbol="کاما", title=f"اصلاحیه گزارش فعالیت ماهانه دوره 1 ماهه منتهی به {period_end}", code="correction",

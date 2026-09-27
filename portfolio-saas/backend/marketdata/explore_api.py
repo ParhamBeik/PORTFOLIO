@@ -23,6 +23,7 @@ from .codal_classification import classify_announcement
 from .models import (
     ArchiveFetchState,
     CodalAnnouncement,
+    CodalArtifact,
     CodalCandidateFact,
     CodalVerification,
     DailyStockHistory,
@@ -83,7 +84,18 @@ def _monthly_sales(symbol, start, end):
             and fact.period_end == period_end
             and fact.period_start == f"{period_end[:8]}01"
             and fact.dimensions.get("row_kind") == "total"
+            and re.fullmatch(r"[0-9a-f]{64}", fact.extraction.checksum_sha256)
             and fact.extraction.checksum_sha256 == fact.extraction.artifact.checksum_sha256
+            and fact.extraction.artifact.report_id == report.pk
+            and fact.extraction.artifact.fetch_status == CodalArtifact.FetchStatus.STORED
+            and isinstance(fact.source_coordinates, dict)
+            and type(fact.source_coordinates.get("row")) is int
+            and fact.source_coordinates["row"] > 0
+            and type(fact.source_coordinates.get("column")) is int
+            and fact.source_coordinates["column"] > 0
+            and any(fact.source_coordinates.get(key) is not None
+                    and fact.source_coordinates.get(key) != ""
+                    for key in ("css", "sheet", "table", "table_index"))
         )]
         # Distinct reconciled readings of the same filing need a human review.
         if not eligible or len({fact.numeric_value for fact in eligible}) != 1:
