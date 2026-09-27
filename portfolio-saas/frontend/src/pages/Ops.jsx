@@ -1228,19 +1228,19 @@ function CodalHistoryPanel({ history }) {
         <>
           <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
             <div><strong>{num(history.symbols_started)}</strong> symbols with windows <span className="text-muted">· {num(history.catalog_stocks)} currently eligible stocks</span></div>
-            <div><strong>{num(history.verified_leaf_windows)}</strong> verified windows <span className="text-muted">of {num(history.leaf_windows)} leaf windows</span></div>
+            <div><strong>{num(history.verified_leaf_windows)}</strong> source-reconciled windows <span className="text-muted">of {num(history.leaf_windows)} leaf windows</span></div>
             <div><strong>{num(history.open_leaf_windows)}</strong> open windows <span className="text-muted">({num(history.failed_leaf_windows)} failed)</span></div>
             <div><strong>{num(history.stale_verified_leaf_windows)}</strong> verifications older than one year</div>
           </div>
           <p className="mt-3 text-xs text-muted">
             Requested Jalali range {history.earliest_date} → {history.latest_date}; {num(history.split_parent_windows)} oversized windows split.
-            Last verified {history.last_verified_at ? dateTime(history.last_verified_at) : "never"}.
+            Last reconciled {history.last_verified_at ? dateTime(history.last_verified_at) : "never"}.
           </p>
         </>
       ) : (
         <p className="text-sm text-muted">No historical discovery windows have been created.</p>
       )}
-      <p className="mt-3 text-xs text-muted">A verified window means its returned announcement keys were stored when checked. It does not certify complete issuer history, archived documents, or parsed financial statements.</p>
+      <p className="mt-3 text-xs text-muted">A source-reconciled window means its returned announcement keys were stored when checked. It does not certify complete issuer history, archived documents, or parsed financial statements.</p>
       <a className="mt-2 inline-block text-sm text-link hover:underline" href="/admin/marketdata/codalhistorywindow/">Inspect source windows</a>
     </Card>
   );
