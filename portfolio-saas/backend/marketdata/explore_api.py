@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from django.conf import settings
 from django.db.models import Q
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
@@ -20,6 +21,7 @@ from rest_framework.views import APIView
 
 from . import jalali
 from .codal_classification import classify_announcement
+from .codal_storage import CodalBlockedStorage, load_artifact
 from .models import (
     ArchiveFetchState,
     CodalAnnouncement,
@@ -508,3 +510,55 @@ class StockDossierView(APIView):
             "balance_sheet": _balance_sheets(symbol, start, end_jalali),
             "monthly_sales": _monthly_sales(symbol, start, end_jalali),
         })
+
+
+class StockEvidenceView(APIView):
+    """Download only an archived filing still backing a visible, verified figure."""
+
+    def get(self, request, symbol, extraction_id):
+        if _instrument(symbol) is None:
+            raise NotFound("No eligible TSE stock with this symbol was found.")
+        try:
+            days = int(request.query_params.get("days", "365"))
+        except ValueError as exc:
+            raise ValidationError({"days": "Choose 90, 365, 1825, or 3650 days."}) from exc
+        if days not in StockDossierView.WINDOWS:
+            raise ValidationError({"days": "Choose 90, 365, 1825, or 3650 days."})
+
+        end = timezone.localtime(timezone.now(), jalali.TEHRAN).date()
+        start, end_jalali = (
+            jalali.from_gregorian(end - timedelta(days=days)),
+            jalali.from_gregorian(end),
+        )
+        visible = (
+            _monthly_sales(symbol, start, end_jalali)["points"]
+            + _income_statements(symbol, start, end_jalali)["points"]
+            + _balance_sheets(symbol, start, end_jalali)["points"]
+        )
+        point = next((row for row in visible if row["extraction_id"] == extraction_id), None)
+        if point is None:
+            raise NotFound("This extraction no longer backs a verified figure in this window.")
+        artifact = CodalArtifact.objects.filter(pk=point["artifact_id"]).first()
+        if artifact is None or artifact.checksum_sha256 != point["artifact_sha256"]:
+            raise NotFound("The archived source for this figure is unavailable.")
+        try:
+            content = load_artifact(artifact)
+        except CodalBlockedStorage:
+            return Response({"detail": "The archived filing could not pass its integrity check or is temporarily unavailable."}, status=503)
+
+        if content.startswith(b"%PDF-"):
+            extension, content_type = "pdf", "application/pdf"
+        elif content.startswith(b"PK\x03\x04"):
+            extension, content_type = "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        elif content.startswith(b"\xd0\xcf\x11\xe0"):
+            extension, content_type = "xls", "application/vnd.ms-excel"
+        elif content[:2048].lstrip().lower().startswith((b"<html", b"<!doctype html")):
+            extension, content_type = "html", "text/html; charset=utf-8"
+        else:
+            extension, content_type = "bin", "application/octet-stream"
+        response = HttpResponse(content, content_type=content_type)
+        response["Content-Disposition"] = f'attachment; filename="codal-artifact-{artifact.pk}.{extension}"'
+        response["Cache-Control"] = "private, no-store"
+        response["X-Content-Type-Options"] = "nosniff"
+        response["X-Archive-SHA256"] = artifact.checksum_sha256
+        return response

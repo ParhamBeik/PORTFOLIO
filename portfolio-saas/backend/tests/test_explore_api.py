@@ -2,6 +2,8 @@
 
 from datetime import timedelta
 from decimal import Decimal
+import hashlib
+import io
 
 import pytest
 from django.conf import settings
@@ -119,7 +121,7 @@ def test_explore_rejects_unbounded_windows_and_unsafe_disclosure_links(make_user
     assert response.data["disclosures"][0]["source_url"] is None
 
 
-def test_monthly_sales_requires_reconciled_latest_filing(make_user):
+def test_monthly_sales_requires_reconciled_latest_filing(make_user, monkeypatch):
     _stock()
     period_end = jalali.from_gregorian(
         timezone.localtime(timezone.now(), jalali.TEHRAN).date() - timedelta(days=60)
@@ -134,10 +136,13 @@ def test_monthly_sales_requires_reconciled_latest_filing(make_user):
         category=CodalAnnouncement.Category.PRODUCTION_SALES,
         period_end=period_end,
     )
+    archived_bytes = b"<html><body>Filed sales table</body></html>"
+    checksum = hashlib.sha256(archived_bytes).hexdigest()
     artifact = CodalArtifact.objects.create(
         report=report, kind=CodalArtifact.Kind.EXCEL,
         source_url="https://excel.codal.ir/report.xlsx",
-        checksum_sha256="a" * 64, s3_key=f"codal/sha256/aa/{'a' * 64}.xlsx",
+        checksum_sha256=checksum, s3_key=f"codal/sha256/{checksum[:2]}/{checksum}.xlsx",
+        size_bytes=len(archived_bytes),
         fetch_status=CodalArtifact.FetchStatus.STORED,
     )
     extraction = CodalExtraction.objects.create(
@@ -160,6 +165,31 @@ def test_monthly_sales_requires_reconciled_latest_filing(make_user):
     assert monthly["status"] == "verified"
     assert monthly["points"][0]["value"] == "123456.000000000000"
     assert monthly["points"][0]["source_coordinates"] == {"table": 1, "row": 15, "column": 6}
+
+    class ArchiveClient:
+        def __init__(self, content):
+            self.content = content
+
+        def get_object(self, **_kwargs):
+            return {"Body": io.BytesIO(self.content)}
+
+    from marketdata import codal_storage
+    archive_client = ArchiveClient(archived_bytes)
+    monkeypatch.setattr(codal_storage, "_client", lambda: archive_client)
+    evidence_url = f"/api/explore/stocks/کاما/evidence/{extraction.pk}/?days=365"
+    assert APIClient().get(evidence_url).status_code == 401
+    response = client.get(evidence_url)
+    assert response.status_code == 200
+    assert response.content == archived_bytes
+    assert response["X-Archive-SHA256"] == checksum
+    assert response["Content-Disposition"].endswith('.html"')
+    assert response["Cache-Control"] == "private, no-store"
+    assert client.get(evidence_url.replace("days=365", "days=100000")).status_code == 400
+    _stock(symbol="other")
+    assert client.get(evidence_url.replace("کاما", "other")).status_code == 404
+    archive_client.content = b"<html>tampered</html>"
+    assert client.get(evidence_url).status_code == 503
+    archive_client.content = archived_bytes
 
     # A reconciled label alone does not make an unsupported source trace safe.
     original_hash = artifact.checksum_sha256
@@ -209,6 +239,7 @@ def test_monthly_sales_requires_reconciled_latest_filing(make_user):
     assert monthly["status"] == "unavailable_unverified"
     assert monthly["verified_periods"] == 0
     assert monthly["withheld_periods"] == 1
+    assert client.get(evidence_url).status_code == 404
 
     CodalReport.objects.create(
         announcement=corrected,

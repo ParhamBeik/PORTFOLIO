@@ -7,6 +7,7 @@ import Explore from "./Explore.jsx";
 import * as api from "../api.js";
 
 vi.mock("../api.js", () => ({
+  downloadArchivedFiling: vi.fn(),
   exploreStocks: vi.fn(),
   stockDossier: vi.fn(),
   researchSettings: vi.fn(),
@@ -65,6 +66,7 @@ describe("company research", () => {
       provider_status: "ready", provider_model: "gemini-2.5-flash-lite",
       max_run_usd: "0.10", default_run_usd: "0.01",
     });
+    api.downloadArchivedFiling.mockResolvedValue(undefined);
   });
 
   it("shows the selected cost ceiling and source-backed answer", async () => {
@@ -89,6 +91,8 @@ describe("company research", () => {
     expect(screen.getByTestId("explore-income-evidence")).toHaveTextContent(/revenue cell B4 · profit cell B21/i);
     expect(screen.getByTestId("explore-balance-evidence")).toHaveTextContent(/assets cell B22 · liabilities cell B53 · equity cell B35/i);
     expect(screen.getByRole("link", { name: "Original Codal balance sheet" })).toHaveAttribute("href", `${source.source_url}&sheetId=0`);
+    fireEvent.click(screen.getAllByTestId("explore-archive-2")[0]);
+    await waitFor(() => expect(api.downloadArchivedFiling).toHaveBeenCalledWith("فولاد", 2, 365));
   });
 
   it("shows balance research cells from the archived sheet", async () => {
@@ -99,7 +103,7 @@ describe("company research", () => {
         statement: "Latest verified standalone balance sheet: total assets 6,278,290,305 million Rial.",
         sources: [{
           statement_kind: "balance_sheet", scope: "standalone", period_end_jalali: "1405-03-31",
-          artifact_id: 14170, source_url: `${source.source_url}&sheetId=0`,
+          extraction_id: 4, artifact_id: 14170, source_url: `${source.source_url}&sheetId=0`,
           source_coordinates: {
             total_assets: { address: "B22" }, total_liabilities: { address: "B53" },
             total_equity: { address: "B35" },
@@ -112,5 +116,7 @@ describe("company research", () => {
     fireEvent.click(screen.getByTestId("explore-research-submit"));
     expect(await screen.findByText(/total assets 6,278,290,305 million Rial/i)).toBeInTheDocument();
     expect(screen.getByTestId("explore-research-result")).toHaveTextContent(/balance cells assets B22 \/ liabilities B53 \/ equity B35/i);
+    fireEvent.click(screen.getByTestId("explore-archive-4"));
+    await waitFor(() => expect(api.downloadArchivedFiling).toHaveBeenCalledWith("فولاد", 4, 3650));
   });
 });

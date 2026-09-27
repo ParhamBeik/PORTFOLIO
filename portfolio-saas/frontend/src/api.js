@@ -261,6 +261,37 @@ export async function downloadExport() {
   link.remove();
   URL.revokeObjectURL(url);
 }
+
+export async function downloadArchivedFiling(symbol, extractionId, days = 365, _retried = false) {
+  const path = `/api/explore/stocks/${encodeURIComponent(symbol)}/evidence/${extractionId}/${qs({ days })}`;
+  const res = await fetch(`${API_BASE}${path}`, {
+    credentials: "include",
+    headers: auth.token ? { Authorization: `Bearer ${auth.token}` } : {},
+  });
+  if (res.status === 401 && !_retried && auth.token) {
+    const fresh = await refreshAccessToken();
+    if (fresh) return downloadArchivedFiling(symbol, extractionId, days, true);
+    expireSession();
+    throw apiError("Session expired", 401);
+  }
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw apiError(extractError(detail) || `Archived filing unavailable (${res.status}).`, res.status);
+  }
+  const type = res.headers.get("Content-Type") || "";
+  const extension = type.includes("text/html") ? "html"
+    : type.includes("spreadsheetml") ? "xlsx"
+    : type.includes("ms-excel") ? "xls"
+    : type.includes("application/pdf") ? "pdf" : "bin";
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `codal-extraction-${extractionId}.${extension}`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
 export const listAssets = () => api("/api/assets/");
 export const searchAssetCatalog = (assetClass, q = "") =>
   api(`/api/assets/catalog/${qs({ asset_class: assetClass, q })}`);

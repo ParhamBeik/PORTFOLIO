@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { exploreStocks, researchSettings, runResearch, stockDossier } from "../api.js";
+import { downloadArchivedFiling, exploreStocks, researchSettings, runResearch, stockDossier } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
 import { Async, Badge, Button, Card, Empty, Field, Input, PageHeader, Tabs, Textarea } from "../components/ui.jsx";
 import { date, num, rial } from "../format.js";
@@ -30,6 +30,30 @@ function reportedAmount(value) {
   if (!match) return "—";
   const fraction = (match[3] || "").replace(/0+$/, "");
   return `${match[1]}${match[2].replace(/\B(?=(\d{3})+(?!\d))/g, ",")}${fraction ? `.${fraction}` : ""}`;
+}
+
+function ArchivedFiling({ symbol, point, days = 365 }) {
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState("");
+  if (!point.extraction_id) return null;
+  async function download() {
+    setWorking(true);
+    setError("");
+    try {
+      await downloadArchivedFiling(symbol, point.extraction_id, days);
+    } catch (caught) {
+      setError(caught.message || "Archived filing unavailable.");
+    } finally {
+      setWorking(false);
+    }
+  }
+  return <>
+    <Button type="button" variant="ghost" onClick={download} disabled={working} className="text-xs" data-testid={`explore-archive-${point.extraction_id}`}>
+      {working ? "Checking archive…" : "Download archived filing"}
+    </Button>
+    {point.artifact_sha256 && <span className="block break-all text-xs text-muted">Archived SHA-256: {point.artifact_sha256}</span>}
+    {error && <span role="alert" className="block text-xs text-[var(--c-critical-text)]">{error}</span>}
+  </>;
 }
 
 function ResearchPanel({ symbol }) {
@@ -100,6 +124,7 @@ function ResearchPanel({ symbol }) {
                               : `${source.scope} income cells ${source.source_coordinates.revenue.address} / ${source.source_coordinates.net_profit.address}`
                             : `sales row ${source.source_coordinates.row ?? "?"}, column ${source.source_coordinates.column ?? "?"}`} · artifact {source.artifact_id}
                           {source.source_url && <> · <a href={source.source_url} target="_blank" rel="noopener noreferrer" className="text-accent underline">Codal filing</a></>}
+                          {" "}<ArchivedFiling symbol={symbol} point={source} days={source.scope ? 3650 : 365} />
                         </li>
                       ))}
                     </ul>
@@ -197,6 +222,7 @@ function Company({ symbol }) {
                         <span>{point.period_end_jalali}: {num(Number(point.value), 0)} million Rial</span>
                         <span className="block text-xs text-muted">Filed {point.published_jalali || "date unavailable"}{point.is_correction ? " · correction" : ""} · report {point.report_id} · {point.source_coordinates.css || point.source_coordinates.sheet || "table"}, row {point.source_coordinates.row ?? "?"}, column {point.source_coordinates.column ?? "?"}</span>
                         {point.source_url && <a className="text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">Original Codal filing</a>}
+                        {" "}<ArchivedFiling symbol={symbol} point={point} days={Number(days)} />
                       </li>
                     ))}
                   </ul>
@@ -217,6 +243,7 @@ function Company({ symbol }) {
                       <p>Revenue {reportedAmount(point.revenue)} · net profit {reportedAmount(point.net_profit)} million Rial · net margin {point.net_margin_pct}%</p>
                       <p className="text-xs text-muted">Filed {point.published_jalali || "date unavailable"}{point.is_correction ? " · correction" : ""} · artifact {point.artifact_id} · revenue cell {point.source_coordinates.revenue.address} · profit cell {point.source_coordinates.net_profit.address}</p>
                       {point.source_url && <a className="text-xs text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">Original Codal filing</a>}
+                      {" "}<ArchivedFiling symbol={symbol} point={point} days={Number(days)} />
                     </div>
                   ))}
                 </div>
@@ -238,6 +265,7 @@ function Company({ symbol }) {
                       <p>Cash {reportedAmount(point.values.cash)} · short-term borrowings {reportedAmount(point.values.short_term_borrowings)} · long-term borrowings {reportedAmount(point.values.long_term_borrowings)} million Rial</p>
                       <p className="text-xs text-muted">Filed {point.published_jalali || "date unavailable"}{point.is_correction ? " · correction" : ""} · artifact {point.artifact_id} · assets cell {point.source_coordinates.total_assets.address} · liabilities cell {point.source_coordinates.total_liabilities.address} · equity cell {point.source_coordinates.total_equity.address}</p>
                       {point.source_url && <a className="text-xs text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">Original Codal balance sheet</a>}
+                      {" "}<ArchivedFiling symbol={symbol} point={point} days={Number(days)} />
                     </div>
                   ))}
                 </div>
