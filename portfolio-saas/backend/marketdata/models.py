@@ -265,6 +265,37 @@ class ArchiveFetchState(models.Model):
         ]
 
 
+class CodalHistoryWindow(models.Model):
+    """Verified, inclusive publication-date window for historical Codal discovery."""
+
+    symbol = models.CharField(max_length=64)
+    date_start = models.CharField(max_length=10)
+    date_end = models.CharField(max_length=10)
+    expected_rows = models.PositiveIntegerField(default=0)
+    stored_rows = models.PositiveIntegerField(default=0)
+    verified_complete = models.BooleanField(default=False)
+    split = models.BooleanField(default=False)
+    consecutive_failures = models.PositiveIntegerField(default=0)
+    last_error = models.CharField(max_length=500, blank=True, default="")
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    next_attempt_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "date_start", "date_end"],
+                name="uniq_codal_history_window",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["verified_complete", "split", "next_attempt_at"],
+                name="codal_history_due_idx",
+            )
+        ]
+
+
 class StockSymbolMetadata(models.Model):
     """Detailed metadata and fundamental metrics for a TSE stock symbol."""
 
