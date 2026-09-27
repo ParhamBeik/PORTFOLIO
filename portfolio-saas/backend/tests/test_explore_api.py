@@ -161,11 +161,16 @@ def test_monthly_sales_requires_reconciled_latest_filing(make_user):
     assert monthly["points"][0]["source_coordinates"] == {"table": 1, "row": 15, "column": 6}
 
     corrected = CodalAnnouncement.objects.create(
-        symbol="کاما", title="Corrected monthly sales", code="correction",
+        symbol="کاما", title=f"اصلاحیه گزارش فعالیت ماهانه دوره 1 ماهه منتهی به {period_end}", code="correction",
         date_publish=jalali.from_gregorian(
             timezone.localtime(timezone.now(), jalali.TEHRAN).date() - timedelta(days=30)
         ),
     )
+    monthly = client.get("/api/explore/stocks/کاما/").data["monthly_sales"]
+    assert monthly["status"] == "unavailable_unverified"
+    assert monthly["verified_periods"] == 0
+    assert monthly["withheld_periods"] == 1
+
     CodalReport.objects.create(
         announcement=corrected,
         category=CodalAnnouncement.Category.PRODUCTION_SALES,

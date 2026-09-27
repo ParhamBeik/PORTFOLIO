@@ -24,7 +24,6 @@ from .models import (
     ArchiveFetchState,
     CodalAnnouncement,
     CodalCandidateFact,
-    CodalReport,
     CodalVerification,
     DailyStockHistory,
     MarketCandle,
@@ -49,19 +48,24 @@ def _safe_codal_link(url):
 
 def _monthly_sales(symbol, start, end):
     """Latest filing for each month wins; an unverified correction hides prior totals."""
-    reports = CodalReport.objects.filter(
-        announcement__symbol=symbol,
-        category=CodalAnnouncement.Category.PRODUCTION_SALES,
-        period_end__gte=start, period_end__lte=end,
-    ).select_related("announcement").order_by(
-        "-announcement__date_publish", "-announcement__time_publish", "-pk"
-    )
+    announcements = CodalAnnouncement.objects.filter(symbol=symbol).select_related(
+        "report"
+    ).order_by("-date_publish", "-time_publish", "-pk")
     latest = {}
-    for report in reports:
-        latest.setdefault(report.period_end, report)
+    for announcement in announcements:
+        classified = classify_announcement(announcement)
+        report = getattr(announcement, "report", None)
+        category = classified["category"] or (report.category if report else None)
+        period = classified["period_end"] or (report.period_end if report else "")
+        if (category != CodalAnnouncement.Category.PRODUCTION_SALES
+                or not period or not start <= period <= end or period in latest):
+            continue
+        latest[period] = report if (report
+                                    and report.category == category
+                                    and report.period_end == period) else None
     candidates = defaultdict(list)
     for fact in CodalCandidateFact.objects.filter(
-        extraction__report_id__in=[report.pk for report in latest.values()],
+        extraction__report_id__in=[report.pk for report in latest.values() if report],
         extraction__parser_version=settings.CODAL_PARSER_VERSION,
         verification_status=CodalVerification.RECONCILED,
         fact_code="sales.revenue",
@@ -71,6 +75,8 @@ def _monthly_sales(symbol, start, end):
 
     points = []
     for period_end, report in sorted(latest.items()):
+        if report is None:
+            continue
         eligible = [fact for fact in candidates[report.pk] if (
             fact.numeric_value is not None
             and fact.numeric_value >= 0
