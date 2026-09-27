@@ -1208,10 +1208,10 @@ function CodalPanel({ codal }) {
     <div className="space-y-4" data-testid="ops-codal">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatTile
-          label="Pipeline"
-          value={codal.enabled ? "Enabled" : "Disabled"}
-          sub={codal.enabled ? "Production extraction on" : "Local dev default"}
-          valueTone={codal.enabled ? "good" : "neutral"}
+          label="Codal worker"
+          value={codal.worker_enabled ? "Enabled" : "Paused"}
+          sub={codal.worker_enabled ? "Extraction consumer configured" : "Queued jobs retained; no extraction consumer"}
+          valueTone={codal.worker_enabled ? "good" : "warn"}
         />
         <StatTile label="Extract runs (24h)" value={num(codal.extract_runs_24h)} sub={`${num(codal.blocked_network_24h)} blocked network`} />
         <StatTile label="Blocked rate" value={`${blockedRate}%`} sub="Network blocks / runs" valueTone={blockedRate > 10 ? "warn" : "good"} />
@@ -1238,7 +1238,7 @@ function CodalPanel({ codal }) {
             </div>
             <div className="flex justify-between gap-3">
               <dt className="text-muted">Queue</dt>
-              <dd>Codal worker · concurrency 1</dd>
+              <dd>{codal.worker_enabled ? "Codal worker configured" : "Codal worker paused"}</dd>
             </div>
           </dl>
         </Card>

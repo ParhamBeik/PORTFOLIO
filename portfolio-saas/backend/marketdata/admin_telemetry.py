@@ -679,7 +679,7 @@ def _codal_status():
         # describe a frozen backlog. Artifact bytes stay -- the panel reports
         # how much disk the dormant data still occupies, which is the one
         # number an operator wants while it is switched off.
-        return {"enabled": False, "artifact_bytes": _codal_volume_bytes()}
+        return {"enabled": False, "worker_enabled": False, "artifact_bytes": _codal_volume_bytes()}
     counts = {
         row["status"]: row["c"]
         for row in CodalReport.objects.values("status").annotate(c=Count("id"))
@@ -699,6 +699,7 @@ def _codal_status():
     blocked = recent.filter(outcome=WorkflowRun.Outcome.BLOCKED_NETWORK).count()
     return {
         "enabled": True,
+        "worker_enabled": settings.CODAL_WORKER_ENABLED,
         "status_counts": counts,
         "last_success": _iso(last_success),
         "blocked_network_24h": blocked,

@@ -563,6 +563,9 @@ MARKETDATA_TICK_VOLUME_TOLERANCE = float(
 # connect that cannot succeed: ~20,000 no-op workflow runs and 583 connect
 # timeouts in one day. Turn back on once the network path exists.
 CODAL_ENABLED = os.getenv("CODAL_ENABLED", "1") == "1"
+# Deployment can retain Codal routing and queued jobs while scaling its paid
+# extraction consumer to zero during the broker handoff.
+CODAL_WORKER_ENABLED = os.getenv("CODAL_WORKER_ENABLED", "1") == "1"
 # Codal announcements are paged 20 per request and a mature symbol has ~50 pages,
 # so "all history for all symbols" is ~32,000 requests -- more than three days of
 # the whole archive budget. Only page 1 was ever fetched, which stored 2% and

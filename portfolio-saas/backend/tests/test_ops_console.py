@@ -89,6 +89,20 @@ def test_admin_overview_requires_staff(free_user, staff_user):
     assert all("rows_estimated" in row and "bytes" in row for row in inventory)
 
 
+def test_codal_overview_distinguishes_enabled_routing_from_paused_worker(staff_user):
+    client = _auth(APIClient(), staff_user)
+    with override_settings(CODAL_ENABLED=True, CODAL_WORKER_ENABLED=False):
+        codal = client.get("/api/admin/overview/?refresh=1").json()["codal"]
+    assert codal["enabled"] is True
+    assert codal["worker_enabled"] is False
+    assert "status_counts" in codal
+
+    with override_settings(CODAL_ENABLED=False, CODAL_WORKER_ENABLED=True):
+        codal = client.get("/api/admin/overview/?refresh=1").json()["codal"]
+    assert codal["enabled"] is False
+    assert codal["worker_enabled"] is False
+
+
 def test_ops_overview_says_when_password_reset_mail_cannot_be_sent(staff_user):
     """The one broken journey that is invisible from the outside.
 
