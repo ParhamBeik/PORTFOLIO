@@ -194,6 +194,10 @@ def test_usdt_denominated_current_value_matches_opening_denomination(make_user):
         date=to_jalali_str(timezone.now() - dt.timedelta(days=101)),
         close_price=Decimal("60000"),
     )
+    GoldCurrencyHistory.objects.create(
+        symbol="USDT_IRT", date=to_jalali_str(timezone.now()),
+        close_price=Decimal("60000"),
+    )
 
     result = account_performance(account, basis="usdt_denominated")
 
@@ -234,20 +238,32 @@ def test_usd_conversion_rate_is_read_as_of_the_date_it_is_given():
 
 
 @pytest.mark.django_db
-def test_usd_conversion_rate_falls_back_to_the_live_map_when_unwarehoused(monkeypatch):
-    """The live tick stays the last resort, which is where it was the only source.
-
-    Before the day's gold/currency row is ingested there is no row at or before
-    `as_of`, and `_current_value` still has to answer.
-    """
+def test_unwarehoused_conversion_rate_is_unavailable(monkeypatch):
+    """A live quote cannot stand in for dated evidence in performance."""
     from portfolio.services import performance as perf
 
     monkeypatch.setattr(perf, "get_latest_prices", lambda: {"usd_cash": "123456"})
 
-    assert perf._conversion_rate("usd_denominated", timezone.now()) == Decimal("123456")
-    # USDT is deliberately NOT given that fallback: it reports
-    # conversion_rate_unavailable rather than quoting a dollar rate as USDT.
+    assert perf._conversion_rate("usd_denominated", timezone.now()) is None
     assert perf._conversion_rate("usdt_denominated", timezone.now()) is None
+
+
+@pytest.mark.django_db
+def test_usdt_never_borrows_dollar_rate_and_stale_rate_is_unavailable():
+    from portfolio.services.performance import _conversion_rate
+    from portfolio.services.returns import to_jalali_str
+
+    observed = timezone.now() - dt.timedelta(days=8)
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date=to_jalali_str(timezone.now()),
+        close_price=Decimal("150000"),
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USDT_IRT", date=to_jalali_str(observed),
+        close_price=Decimal("149000"),
+    )
+    assert _conversion_rate("usdt_denominated", timezone.now()) is None
+    assert _conversion_rate("usd_denominated", timezone.now()) == Decimal("150000")
 
 
 @pytest.mark.django_db
@@ -438,6 +454,18 @@ def test_scoped_fingerprint_tracks_only_panel_sources(asset_catalog):
     assert _price_version_fingerprint([kama.key]) != before
 
 
+def test_scoped_fingerprint_includes_tether_conversion_rate(asset_catalog):
+    coin = asset_catalog["bitcoin_usd"]
+    coin.brs_symbol = "BTC"
+    coin.save(update_fields=["brs_symbol"])
+    before = _price_version_fingerprint([coin.key])
+    GoldCurrencyHistory.objects.create(
+        symbol="USDT_IRT", date="1404-01-01", close_price=Decimal("110000"),
+        unit="تومان",
+    )
+    assert _price_version_fingerprint([coin.key]) != before
+
+
 def test_returns_cache_isolated_by_history_window(monkeypatch):
     import pandas as pd
     from django.core.cache import cache
@@ -477,6 +505,37 @@ def test_basis_aliases_are_canonical_and_fx_never_backfills_from_the_future():
     assert pd.isna(converted.iloc[0])
     assert converted.iloc[1] == pytest.approx(11.0)
     assert converted.iloc[2] == pytest.approx(12.0)
+
+
+@pytest.mark.django_db
+def test_usdt_returns_do_not_borrow_cash_usd_when_tether_history_is_missing(monkeypatch):
+    import portfolio.services.returns as returns
+
+    index = pd.date_range("2026-01-01", periods=3, tz="UTC")
+    panel = pd.DataFrame(
+        {"asset": [100.0, 110.0, 120.0], "usd_cash": [10.0, 11.0, 12.0]},
+        index=index,
+    )
+    observed = {}
+
+    monkeypatch.setattr(returns, "_price_version_fingerprint", lambda _keys: "no-tether")
+    monkeypatch.setattr(returns, "toman_price_panel", lambda **_kwargs: (panel.copy(), [], []))
+    monkeypatch.setattr(
+        returns, "_build_returns_matrix",
+        lambda converted, *_args, **_kwargs: (
+            observed.setdefault("panel", converted).pct_change(fill_method=None), [], [],
+        ),
+    )
+    monkeypatch.setattr(returns, "resolve_universe", lambda *_args, **_kwargs: [
+        {"key": "asset"},
+    ])
+    cache.clear()
+
+    returns.daily_returns_matrix(
+        history_days=3, universe=["asset"], basis="usdt_denominated",
+    )
+
+    assert observed["panel"]["asset"].isna().all()
 
 
 def test_returns_exclude_prices_with_a_gap_longer_than_five_sessions():
@@ -1375,12 +1434,18 @@ def test_a_tether_quoted_bar_converts_at_the_rate_of_its_own_day(db):
             open_price=Decimal(close), high_price=Decimal(close),
             low_price=Decimal(close), close_price=Decimal(close),
         )
-    # The coin did not move; the dollar did.
+    # The coin did not move; the Tether/Toman quote did.
     GoldCurrencyHistory.objects.create(
         symbol="USD", date="1404-01-01", close_price=Decimal("50000"), unit="تومان",
     )
     GoldCurrencyHistory.objects.create(
         symbol="USD", date="1404-01-02", close_price=Decimal("60000"), unit="تومان",
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USDT_IRT", date="1404-01-01", close_price=Decimal("50000"), unit="تومان",
+    )
+    GoldCurrencyHistory.objects.create(
+        symbol="USDT_IRT", date="1404-01-02", close_price=Decimal("60000"), unit="تومان",
     )
 
     rows = dict(
@@ -1420,13 +1485,169 @@ def test_a_bar_with_no_dollar_rate_yet_yields_no_row(db):
             open_price=Decimal("10"), high_price=Decimal("10"),
             low_price=Decimal("10"), close_price=Decimal("10"),
         )
-    # The rate series starts after the first bar.
+    # The Tether/Toman series starts after the first bar.
     GoldCurrencyHistory.objects.create(
-        symbol="USD", date="1404-01-03", close_price=Decimal("50000"), unit="تومان",
+        symbol="USDT_IRT", date="1404-01-03", close_price=Decimal("50000"), unit="تومان",
     )
 
     rows = daily_bar_price([coin])
     assert [date for _symbol, date, _price in rows] == ["1404-01-05"]
+
+
+def test_long_flat_cash_usd_run_withholds_foreign_quoted_prices(db):
+    """A flat cash-USD run gates dollar assets, not Tether-priced crypto."""
+    from marketdata.models import MarketDailyBar, MarketSnapshot
+    from marketdata.provenance import daily_bar_price, rate_on, toman_per_dollar
+    from portfolio.models import Asset
+
+    coin = Asset.objects.create(
+        key="btc-flat-usd", name="Bitcoin", asset_class=Asset.AssetClass.CRYPTO,
+        brs_symbol="BTC", is_active=True,
+    )
+    ounce = Asset.objects.create(
+        key="ounce-flat-usd", name="Gold ounce", asset_class=Asset.AssetClass.GOLD,
+        brs_symbol="XAUUSD", is_active=True,
+    )
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.BRS, symbol="BTC", name="Bitcoin",
+        category=MarketInstrument.Category.CRYPTO, eligible=True,
+    )
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.BRS, symbol="XAUUSD", name="Gold ounce",
+        category=MarketInstrument.Category.COMMODITY, eligible=True,
+    )
+    MarketSnapshot.objects.create(
+        asset_class="crypto", symbol="BTC", observed_at=timezone.now(),
+        last_price=Decimal("10"), provider_payload={"unit": "تتر"},
+    )
+    MarketSnapshot.objects.create(
+        asset_class="commodity", symbol="XAUUSD", observed_at=timezone.now(),
+        last_price=Decimal("10"), provider_payload={"unit": "دلار"},
+    )
+    for day in range(20, 27):
+        GoldCurrencyHistory.objects.create(
+            symbol="USD", date=f"1404-09-{day:02d}",
+            close_price=Decimal("100000"), unit="تومان",
+        )
+    for day in range(1, 17):
+        GoldCurrencyHistory.objects.create(
+            symbol="USD", date=f"1404-10-{day:02d}",
+            close_price=Decimal("120000"), unit="تومان",
+        )
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date="1404-10-18", close_price=Decimal("130000"), unit="تومان",
+    )
+    for date in ("1404-09-20", "1404-10-01", "1404-10-16", "1404-10-18"):
+        GoldCurrencyHistory.objects.create(
+            symbol="USDT_IRT", date=date, close_price=Decimal("110000"), unit="تومان",
+        )
+    for day in ("1404-09-20", "1404-10-01", "1404-10-16", "1404-10-17", "1404-10-18"):
+        MarketDailyBar.objects.create(
+            asset_class=MarketDailyBar.AssetClass.CRYPTO, symbol="BTC", date=day,
+            open_price=Decimal("10"), high_price=Decimal("10"),
+            low_price=Decimal("10"), close_price=Decimal("10"),
+        )
+        MarketDailyBar.objects.create(
+            asset_class=MarketDailyBar.AssetClass.COMMODITY, symbol="XAUUSD", date=day,
+            open_price=Decimal("10"), high_price=Decimal("10"),
+            low_price=Decimal("10"), close_price=Decimal("10"),
+        )
+
+    assert rate_on(*toman_per_dollar(["1404-10-01"]), "1404-10-01") is None
+    assert rate_on(*toman_per_dollar(["1404-10-16"]), "1404-10-16") is None
+    assert rate_on(*toman_per_dollar(["1404-10-17"]), "1404-10-17") is None
+    assert {(date, price) for _symbol, date, price in daily_bar_price([coin])} == {
+        (date, Decimal("1100000"))
+        for date in ("1404-09-20", "1404-10-01", "1404-10-16", "1404-10-17", "1404-10-18")
+    }
+    assert {(date, price) for _symbol, date, price in daily_bar_price([ounce])} == {
+        ("1404-09-20", Decimal("1000000")),
+        ("1404-10-18", Decimal("1300000")),
+    }
+    RejectedRecord.objects.create(
+        endpoint="gold_daily", symbol="USD", date="1404-10-18",
+        reason="series_spike", payload={},
+    )
+    assert rate_on(*toman_per_dollar(["1404-10-19"]), "1404-10-19") is None
+    assert len(daily_bar_price([coin])) == 5  # A USD rejection does not poison USDT.
+    assert [(date, price) for _symbol, date, price in daily_bar_price([ounce])] == [
+        ("1404-09-20", Decimal("1000000")),
+    ]
+
+
+def test_returns_panel_uses_each_archived_quote_currency(db):
+    """BTC/USDT and XAU/USD must reach the same Toman panel without mixing bases."""
+    from portfolio.services.returns import toman_price_panel
+
+    coin = Asset.objects.create(
+        key="btc-quote-pair", name="Bitcoin", asset_class=Asset.AssetClass.CRYPTO,
+        brs_symbol="BTC", is_active=True,
+    )
+    ounce = Asset.objects.create(
+        key="ounce-quote-pair", name="Gold ounce", asset_class=Asset.AssetClass.GOLD,
+        brs_symbol="XAUUSD", is_active=True,
+    )
+    days = [timezone.now().date() - dt.timedelta(days=offset) for offset in (2, 1)]
+    jalali_days = [jdatetime.date.fromgregorian(date=day).strftime("%Y-%m-%d") for day in days]
+    for day, usd, tether in zip(jalali_days, (100000, 105000), (110000, 120000)):
+        for symbol, close, unit in (
+            ("USD", usd, "تومان"),
+            ("USDT_IRT", tether, "تومان"),
+            ("BTC", 2, "تتر"),
+            ("XAUUSD", 3, "دلار"),
+        ):
+            GoldCurrencyHistory.objects.create(
+                symbol=symbol, date=day, close_price=Decimal(close), unit=unit,
+            )
+
+    keys = frozenset({coin.key, ounce.key})
+    panel, _excluded, _warnings = toman_price_panel(
+        history_days=30, universe=sorted(keys), held_keys=keys,
+        as_of=timezone.now(),
+    )
+    observed = panel[[coin.key, ounce.key]].dropna()
+    assert observed[coin.key].tolist() == [220000.0, 240000.0]
+    assert observed[ounce.key].tolist() == [300000.0, 315000.0]
+
+
+def test_price_fallback_excludes_unknown_foreign_ticks(db):
+    from portfolio.services.returns import _load_live_price_panel
+
+    coin = Asset.objects.create(
+        key="bitcoin_usd", name="Bitcoin", asset_class=Asset.AssetClass.CRYPTO,
+        is_active=True,
+    )
+    Price.objects.create(asset=coin, price=Decimal("2"), source="API")
+    Price.objects.create(
+        asset=coin, price=Decimal("200000"), source="API",
+        price_unit=Price.Unit.IRT, price_unit_verified=True,
+    )
+
+    panel = _load_live_price_panel(
+        timezone.now() - dt.timedelta(days=1), None, [coin.key],
+    )
+
+    assert panel[coin.key].tolist() == [200000.0]
+
+
+def test_tse_price_fallback_requires_rial_unit_and_converts_to_toman(db):
+    from portfolio.services.returns import _load_live_price_panel
+
+    stock = Asset.objects.create(
+        key="kama-stock-fallback", name="Kama", asset_class=Asset.AssetClass.STOCK,
+        tse_symbol="کاما", is_active=True,
+    )
+    Price.objects.create(asset=stock, price=Decimal("6000"), source="API")
+    Price.objects.create(
+        asset=stock, price=Decimal("5000"), source="API",
+        price_unit=Price.Unit.IRR, price_unit_verified=True,
+    )
+
+    panel = _load_live_price_panel(
+        timezone.now() - dt.timedelta(days=1), None, [stock.key],
+    )
+
+    assert panel[stock.key].tolist() == [500.0]
 
 
 @pytest.mark.django_db

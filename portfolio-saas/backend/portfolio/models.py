@@ -164,9 +164,8 @@ class Asset(models.Model):
 
     @property
     def quote_unit(self) -> str:
-        # Provider-native foreign quotes keep their own precision.
-        if self.key in USD_QUOTED_KEYS:
-            return "usd"
+        # Portfolio prices are Toman after provider-unit normalization. The
+        # legacy foreign-key price column is only a precision/storage choice.
         return "rial" if self.tse_symbol else "toman"
 
     @property
@@ -245,11 +244,11 @@ def _to_atomic_quantity(value, asset: Asset) -> int | None:
 
 
 def _split_quote_price(value, asset: Asset | None):
-    """Whole Iranian money, provider-native precision for foreign quotes."""
+    """Whole-money or four-decimal storage, independent of quote currency."""
     if value is None:
         return None, None
     amount = Decimal(value)
-    if asset and asset.quote_unit == "usd":
+    if asset and asset.key in USD_QUOTED_KEYS:
         return None, amount
     return amount.quantize(Decimal("1"), rounding=ROUND_HALF_UP), None
 
@@ -384,15 +383,17 @@ def owner_display_names(accounts=None) -> dict[int, str]:
 
 
 class Price(models.Model):
-    """Global, append-only live price series in Toman (`price_unit=IRT`).
+    """Global, append-only live price series with explicit quote units.
 
     Written by the live fetch loop after each cycle. Read pattern: latest price
     per asset via DISTINCT ON (asset) ORDER BY fetched_at DESC.
 
     `price_unit` / `price_unit_verified` mark provider unit confidence.
     TSE stock rows (`Asset.tse_symbol`) are stored as **Rial** (price_unit=IRR)
-    so qty×price matches the 1/10 broker-share convention. Gold/FX/manual rows
-    stay Toman (IRT). Analytics that need a pure-Toman TSE series still use
+    and valuation divides quantity×price by ten. Gold/FX/manual rows
+    stay Toman (IRT). Foreign-seed rows are normalized to Toman before new
+    writes; older UNKNOWN rows are not safe to convert from their asset key.
+    Analytics that need a pure-Toman TSE series still use
     `tse_close_to_toman()` on warehouse candles, not these rows.
     """
 
@@ -403,6 +404,8 @@ class Price(models.Model):
 
     asset = models.ForeignKey(Asset, on_delete=models.CASCADE, related_name="prices")
     price_iranian = models.DecimalField(max_digits=20, decimal_places=0, null=True, blank=True)
+    # Legacy column name: these seed keys now store normalized Toman here so
+    # their four-decimal precision survives without a data migration.
     price_foreign = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
     fetched_at = models.DateTimeField(auto_now_add=True, db_index=True)
     source = models.CharField(max_length=16, default="API")
@@ -602,8 +605,8 @@ class LedgerEntry(models.Model):
     price_per_sqm_tomans = models.DecimalField(
         max_digits=24, decimal_places=0, null=True, blank=True
     )
-    # Provider-scale unit price at execution; 0 when the asset had no price yet.
-    # TSE uses the legacy Rial/one-tenth-share convention; other assets use Toman.
+    # Unit price at execution; 0 when the asset had no price yet. TSE rows are
+    # Rial per true share; other portfolio rows are Toman per unit.
     price_iranian = models.DecimalField(
         max_digits=20, decimal_places=0, null=True, blank=True
     )

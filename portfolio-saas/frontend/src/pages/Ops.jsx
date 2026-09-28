@@ -1183,6 +1183,69 @@ function JobsHealthPanel({
   );
 }
 
+function ResearchCoveragePanel({ coverage }) {
+  if (!coverage) {
+    return (
+      <Card title="Research evidence coverage" testId="ops-research-coverage">
+        <p className="text-sm text-muted">No completed stock-universe scan yet.</p>
+      </Card>
+    );
+  }
+  const families = [
+    ["Monthly sales", "monthly_sales"],
+    ["Income", "income"],
+    ["Balance sheet", "balance_sheet"],
+  ];
+  const ageMs = Date.now() - Date.parse(coverage.finished_at);
+  const stale = Number.isFinite(ageMs) && ageMs > 36 * 60 * 60 * 1000;
+  return (
+    <Card title="Research evidence coverage" subtitle={`${num(coverage.window_days)}-day filing window · Jalali ${coverage.start_jalali} → ${coverage.end_jalali}`} testId="ops-research-coverage">
+      <p className="text-sm text-muted">Scanned {num(coverage.universe_size)} eligible TSE stocks from {dateTime(coverage.started_at)} to {dateTime(coverage.finished_at)}{stale ? " · stale scan" : ""}.</p>
+      <div className="mt-3 grid gap-3 md:grid-cols-3">
+        {families.map(([label, key]) => {
+          const counts = coverage.summary?.[key] || {};
+          return (
+            <div key={key} className="rounded-lg border border-border bg-panel-2 p-3 text-sm">
+              <h3 className="font-medium">{label}</h3>
+              <p className="mt-2">{num(counts.symbols_with_verified)} stocks with ≥1 verified period</p>
+              <p className="text-muted">{num(counts.symbols_fully_verified)} with every observed period verified</p>
+              <p className="text-muted">{num(counts.withheld_periods)} withheld filing periods</p>
+              <p className="text-muted">{num(counts.symbols_without_filing)} stocks with no qualifying period-end filing</p>
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-3 text-xs text-muted">This uses Explore eligibility at scan time. It does not re-read archived bytes or certify peer comparisons.</p>
+    </Card>
+  );
+}
+
+function CodalHistoryPanel({ history }) {
+  if (!history) return null;
+  return (
+    <Card title="Historical announcement discovery" subtitle="Source-date windows; separate from verified financial figures." testId="ops-codal-history">
+      {history.leaf_windows ? (
+        <>
+          <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+            <div><strong>{num(history.symbols_started)}</strong> symbols with windows <span className="text-muted">· {num(history.catalog_stocks)} currently eligible stocks</span></div>
+            <div><strong>{num(history.verified_leaf_windows)}</strong> source-reconciled windows <span className="text-muted">of {num(history.leaf_windows)} leaf windows</span></div>
+            <div><strong>{num(history.open_leaf_windows)}</strong> open windows <span className="text-muted">({num(history.failed_leaf_windows)} failed)</span></div>
+            <div><strong>{num(history.stale_verified_leaf_windows)}</strong> verifications older than one year</div>
+          </div>
+          <p className="mt-3 text-xs text-muted">
+            Requested Jalali range {history.earliest_date} → {history.latest_date}; {num(history.split_parent_windows)} oversized windows split.
+            Last reconciled {history.last_verified_at ? dateTime(history.last_verified_at) : "never"}.
+          </p>
+        </>
+      ) : (
+        <p className="text-sm text-muted">No historical discovery windows have been created.</p>
+      )}
+      <p className="mt-3 text-xs text-muted">A source-reconciled window means its returned announcement keys were stored when checked. It does not certify complete issuer history, archived documents, or parsed financial statements.</p>
+      <a className="mt-2 inline-block text-sm text-link hover:underline" href="/admin/marketdata/codalhistorywindow/">Inspect source windows</a>
+    </Card>
+  );
+}
+
 function CodalPanel({ codal }) {
   if (!codal) return null;
   if (!codal.enabled) {
@@ -1190,12 +1253,13 @@ function CodalPanel({ codal }) {
       <div className="space-y-4" data-testid="ops-codal">
         <Card title="Codal is dormant" subtitle="The subsystem is switched off; nothing is running.">
           <p className="text-sm text-muted">
-            No worker, no schedule and no backfill states are active. Stored
-            announcements and {gb(codal.artifact_bytes)} of artifacts are kept
-            untouched. Re-enable with CODAL_ENABLED=1 once the origin is
-            reachable from the host.
+            No Codal extraction worker or schedule is active. Stored announcements
+            and {gb(codal.artifact_bytes)} of artifacts are kept untouched.
+            Re-enable with CODAL_ENABLED=1 once the origin is reachable from the host.
           </p>
         </Card>
+        <CodalHistoryPanel history={codal.history_discovery} />
+        <ResearchCoveragePanel coverage={codal.research_coverage} />
       </div>
     );
   }
@@ -1208,10 +1272,10 @@ function CodalPanel({ codal }) {
     <div className="space-y-4" data-testid="ops-codal">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatTile
-          label="Pipeline"
-          value={codal.enabled ? "Enabled" : "Disabled"}
-          sub={codal.enabled ? "Production extraction on" : "Local dev default"}
-          valueTone={codal.enabled ? "good" : "neutral"}
+          label="Codal worker"
+          value={codal.worker_enabled ? "Enabled" : "Paused"}
+          sub={codal.worker_enabled ? "Extraction consumer configured" : "Queued jobs retained; no extraction consumer"}
+          valueTone={codal.worker_enabled ? "good" : "warn"}
         />
         <StatTile label="Extract runs (24h)" value={num(codal.extract_runs_24h)} sub={`${num(codal.blocked_network_24h)} blocked network`} />
         <StatTile label="Blocked rate" value={`${blockedRate}%`} sub="Network blocks / runs" valueTone={blockedRate > 10 ? "warn" : "good"} />
@@ -1238,11 +1302,13 @@ function CodalPanel({ codal }) {
             </div>
             <div className="flex justify-between gap-3">
               <dt className="text-muted">Queue</dt>
-              <dd>Codal worker · concurrency 1</dd>
+              <dd>{codal.worker_enabled ? "Codal worker configured" : "Codal worker paused"}</dd>
             </div>
           </dl>
         </Card>
       </div>
+      <CodalHistoryPanel history={codal.history_discovery} />
+      <ResearchCoveragePanel coverage={codal.research_coverage} />
     </div>
   );
 }

@@ -145,27 +145,22 @@ describe("Page Rendering Tests", () => {
     });
     expect(screen.getByText(/Kama Stock/i)).toBeInTheDocument();
     const holdings = await screen.findByTestId("dashboard-holdings");
+    expect(screen.getByTestId("dashboard-trend")).toBeInTheDocument();
+    expect(screen.getByTestId("dashboard-allocation")).toBeInTheDocument();
+    expect(screen.getByTestId("dashboard-performance")).toBeInTheDocument();
     const quality = await screen.findByTestId("dashboard-quality");
-    const notes = await screen.findByTestId("dashboard-insights");
     const liabilities = await screen.findByTestId("dashboard-liabilities");
     expect(
       holdings.compareDocumentPosition(quality) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
     expect(
-      quality.compareDocumentPosition(notes) & Node.DOCUMENT_POSITION_FOLLOWING
+      quality.compareDocumentPosition(liabilities) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
-    expect(
-      notes.compareDocumentPosition(liabilities) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
-
-    const nextAnalytics = new Promise(() => {});
-    api.analytics.mockReturnValueOnce(nextAnalytics);
-    const window90 = screen.getByTestId("dashboard-risk-window-90");
-    await waitFor(() => expect(window90).toBeEnabled());
-    fireEvent.click(window90);
-    await waitFor(() => {
-      expect(screen.getByTestId("dashboard-risk-window-365")).toBeDisabled();
-    });
+    expect(screen.queryByTestId("dashboard-risk")).toBeNull();
+    expect(screen.queryByTestId("dashboard-insights")).toBeNull();
+    expect(api.analytics).not.toHaveBeenCalled();
+    expect(api.diversifiers).not.toHaveBeenCalled();
+    expect(api.insights).not.toHaveBeenCalled();
   });
 
   it("asks before selling all of an edited holding", async () => {

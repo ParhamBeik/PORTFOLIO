@@ -75,7 +75,7 @@ def asset_catalog(db):
 def write_prices(db):
     """Return a helper that writes Price rows and busts the latest-prices cache."""
     from django.core.cache import cache
-    from portfolio.models import Asset, Price
+    from portfolio.models import Asset, Price, USD_QUOTED_KEYS
 
     def _write(prices: dict) -> dict:
         for key, value in prices.items():
@@ -83,8 +83,15 @@ def write_prices(db):
                 key=key,
                 defaults={"name": key, "asset_class": "Gold"},
             )
-            Price.objects.create(asset=asset, price=value, source="TEST")
-        cache.delete("prices:latest")
+            Price.objects.create(
+                asset=asset, price=value, source="TEST",
+                price_unit=(
+                    Price.Unit.IRT if key in USD_QUOTED_KEYS else
+                    Price.Unit.IRR if asset.tse_symbol else Price.Unit.UNKNOWN
+                ),
+                price_unit_verified=key in USD_QUOTED_KEYS or bool(asset.tse_symbol),
+            )
+        cache.delete("prices:latest:verified-toman-v2")
         return prices
 
     return _write

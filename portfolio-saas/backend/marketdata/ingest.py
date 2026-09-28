@@ -526,6 +526,8 @@ def ingest_shareholders(symbol: str, payload, date: str = "") -> tuple[int, int]
 
 def ingest_codal(payload) -> tuple[int, int]:
     """Announcement.php payload -> CodalAnnouncement rows."""
+    from .codal_classification import classify
+
     records = (payload or {}).get("announcement") if isinstance(payload, dict) else None
     if not isinstance(records, list):
         return 0, 0 if payload is None else 1
@@ -554,6 +556,10 @@ def ingest_codal(payload) -> tuple[int, int]:
     for rec in accepted:
         try:
             cat_val = rec.get("category")
+            source_category = int(cat_val) if cat_val is not None else None
+            source_category_title = rec.get("category_title", "") or ""
+            source_is_audited = rec.get("is_audited") if isinstance(rec.get("is_audited"), bool) else None
+            classification = classify(rec["title"], source_category, source_category_title)
             rows.append(CodalAnnouncement(
                 # Strip: the provider pads some symbols with a trailing space
                 # ("زقیام " vs "زقیام"). Storing it verbatim silently broke every
@@ -564,9 +570,15 @@ def ingest_codal(payload) -> tuple[int, int]:
                 title=rec["title"],
                 # Already ASCII-folded above, before validation.
                 code=rec["code"],
-                category=int(cat_val) if cat_val is not None else None,
-                category_title=rec.get("category_title", "") or "",
-                is_audited=rec.get("is_audited") if isinstance(rec.get("is_audited"), bool) else None,
+                source_category=source_category,
+                source_category_title=source_category_title,
+                source_is_audited=source_is_audited,
+                category=source_category,
+                category_title=source_category_title,
+                doc_type=classification.doc_type,
+                tier=classification.tier,
+                classified_by=classification.classified_by,
+                is_audited=source_is_audited,
                 date_title=rec["date_title"],
                 date_send=rec["date_send"],
                 time_send=rec["time_send"],
@@ -691,7 +703,7 @@ def canonical_gold_symbol(payload, fallback: str = "") -> str:
     return canonical_symbol(raw)
 
 
-def ingest_gold_currency_history(payload) -> tuple[int, int]:
+def ingest_gold_currency_history(payload, *, origin=GoldCurrencyHistory.Origin.BRSAPI) -> tuple[int, int]:
     """Gold_Currency_Pro.php history=2 payload -> GoldCurrencyHistory rows.
 
     The payload carries symbol/name/unit at the top level and the day records
@@ -707,6 +719,8 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
     """
     if not isinstance(payload, dict) or not isinstance(payload.get("history_daily"), list):
         return 0, 0 if payload is None else 1
+    if origin not in (GoldCurrencyHistory.Origin.BRSAPI, GoldCurrencyHistory.Origin.TGJU):
+        raise ValueError("gold history origin must identify the source")
     symbol = canonical_gold_symbol(payload)
     name = payload.get("name", "") or ""
     raw_unit = payload.get("unit", "") or ""
@@ -806,6 +820,7 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
                 low_price=Decimal(str(l)) if l is not None else None,
                 close_price=Decimal(str(c)),
                 source=GoldCurrencyHistory.Source.PROVIDER,
+                origin=origin,
                 **_lineage(),
             ))
         except (KeyError, TypeError, ValueError) as exc:
@@ -823,7 +838,7 @@ def ingest_gold_currency_history(payload) -> tuple[int, int]:
         GoldCurrencyHistory, rows, scope={"symbol": symbol},
         update_fields=(
             "name", "unit", "open_price", "high_price", "low_price",
-            "close_price", "source", "ingested_at", "last_correlation_id",
+            "close_price", "source", "origin", "ingested_at", "last_correlation_id",
         ),
         unique_fields=("symbol", "date"),
         recent_field="date",
@@ -1025,8 +1040,8 @@ def aggregate_market_daily_bars(asset_class, jalali_date, *, symbols=None) -> tu
     return created, conflicts + skipped_closed
 
 
-def ingest_direct_crypto_history(symbol, unit, candles) -> tuple[int, int]:
-    """Wallex UDF candles -> GoldCurrencyHistory rows. Insert-only.
+def ingest_direct_crypto_history(symbol, unit, candles, *, repair_zero=False) -> tuple[int, int]:
+    """Wallex UDF candles -> GoldCurrencyHistory rows.
 
     Deliberately never overwrites an existing row, and the reason is the
     validation that justified this backfill at all. Wallex and the incumbent
@@ -1037,8 +1052,10 @@ def ingest_direct_crypto_history(symbol, unit, candles) -> tuple[int, int]:
     have -- rewriting them would stitch two venues into one series and put a
     small discontinuity at every join, in a table the returns matrix reads.
 
-    So this fills holes and leaves history alone. `bulk_create(ignore_conflicts)`
-    on the `(symbol, date)` unique constraint is exactly that behaviour.
+    So this fills holes and leaves valid history alone. An explicit repair pass
+    may replace a persisted zero for the same symbol, quote unit, and provider:
+    zero is not a valid price, and four-decimal storage truncated the entire
+    SHIB/USDT history to zero. The ordinary backfill remains insert-only.
 
     Unit is passed in rather than inferred, per the rule that a quote's currency
     is declared by whoever produced it. Wallex says `quoteAsset`, and the
@@ -1069,6 +1086,7 @@ def ingest_direct_crypto_history(symbol, unit, candles) -> tuple[int, int]:
                 low_price=candle.get("low"),
                 close_price=close,
                 source=GoldCurrencyHistory.Source.PROVIDER,
+                origin=GoldCurrencyHistory.Origin.WALLEX,
                 ingested_at=timezone.now(),
             )
         )
@@ -1076,4 +1094,24 @@ def ingest_direct_crypto_history(symbol, unit, candles) -> tuple[int, int]:
     created, conflicts = _bulk(
         GoldCurrencyHistory, rows, scope={"symbol": symbol}
     )
-    return created, conflicts + rejected
+    repaired = 0
+    if repair_zero and rows:
+        by_date = {row.date: row for row in rows}
+        damaged = GoldCurrencyHistory.objects.filter(
+            symbol=symbol, unit=unit, source=GoldCurrencyHistory.Source.PROVIDER,
+            date__in=by_date, close_price=0,
+        )
+        fixes = []
+        for stored in damaged:
+            incoming = by_date[stored.date]
+            for field in ("open_price", "high_price", "low_price", "close_price"):
+                setattr(stored, field, getattr(incoming, field))
+            stored.origin = GoldCurrencyHistory.Origin.WALLEX
+            fixes.append(stored)
+        if fixes:
+            GoldCurrencyHistory.objects.bulk_update(
+                fixes, ["open_price", "high_price", "low_price", "close_price", "origin"],
+                batch_size=200,
+            )
+            repaired = len(fixes)
+    return created, conflicts + rejected - repaired

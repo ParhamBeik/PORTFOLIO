@@ -30,9 +30,9 @@ def test_stock_quote_is_rial_but_portfolio_valuation_is_toman():
     assert "currency" not in payload
 
 
-def test_provider_native_crypto_quote_is_usd():
+def test_portfolio_crypto_quote_is_toman_after_provider_conversion():
     bitcoin = Asset(key="bitcoin_usd", asset_class=Asset.AssetClass.CRYPTO)
-    assert bitcoin.quote_unit == "usd"
+    assert bitcoin.quote_unit == "toman"
     assert bitcoin.valuation_unit == "toman"
 
 
@@ -114,6 +114,21 @@ def test_iranian_quotes_store_whole_money_and_foreign_quotes_keep_precision(make
     payload = LedgerEntrySerializer(trade).data
     assert payload["unit_price_tomans"] == "101"
     assert payload["quantity"] == "1"
+
+
+@pytest.mark.django_db
+def test_foreign_seed_storage_precision_does_not_label_portfolio_quote_usd():
+    bitcoin = Asset.objects.create(
+        key="bitcoin_usd", name="Bitcoin", asset_class=Asset.AssetClass.CRYPTO,
+    )
+    row = Price.objects.create(
+        asset=bitcoin, price=Decimal("5700000000.1234"),
+        price_unit=Price.Unit.IRT, price_unit_verified=True,
+    )
+
+    assert row.price_foreign == Decimal("5700000000.1234")
+    assert row.price_iranian is None
+    assert AssetSerializer(bitcoin).data["quote_unit"] == "toman"
 
 
 def test_ledger_admin_hides_padding_without_hiding_real_fraction():

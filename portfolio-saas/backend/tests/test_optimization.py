@@ -21,7 +21,7 @@ from rest_framework.test import APIClient
 
 from accounts.models import User
 from marketdata.models import GoldCurrencyHistory, MarketInstrument, SymbolIntegrity
-from portfolio.models import Account, Asset, Holding, Price
+from portfolio.models import Account, Asset, Holding, Price, USD_QUOTED_KEYS
 from portfolio.optimization_models import OptimizationSnapshot
 from portfolio.services import diagnostics as diag_mod
 from portfolio.tasks import SCENARIOS, WINDOWS_DAYS, run_best_overall_snapshots
@@ -77,8 +77,9 @@ pytestmark = pytest.mark.django_db
 # 
 # The synthetic_history fixture writes ~40 days of Price rows for 4 liquid assets
 # with KNOWN daily-return profiles (low-vol emami_coin, alternating bitcoin_usd,
-# flat usd_cash, drift kama_stock) plus usd_cash so the USD->Toman conversion
-# path is exercised. Tests then assert the engine recovers the known values and
+# flat usd_cash, drift kama_stock). All test prices are already in Toman;
+# foreign-seed Price rows carry the verified-unit marker the writer now sets.
+# Tests then assert the engine recovers the known values and
 # that the scenario optimizers produce well-formed, constraint-respecting
 # weights.
 # 
@@ -104,6 +105,18 @@ def _backfill_fetched_at(rows: list[Price], timestamps: list) -> None:
     Price.objects.update(fetched_at=Case(*when_cases, output_field=DateTimeField()))
 
 
+def _price_tick(asset, price, when):
+    foreign_seed = asset.key in USD_QUOTED_KEYS
+    return Price(
+        asset=asset, price=price, fetched_at=when, source="TEST",
+        price_unit=(
+            Price.Unit.IRT if foreign_seed else
+            Price.Unit.IRR if asset.tse_symbol else Price.Unit.UNKNOWN
+        ),
+        price_unit_verified=foreign_seed or bool(asset.tse_symbol),
+    )
+
+
 def _seed_panel(asset_catalog, price_specs: dict, *, days: int = 42, kama_days: int | None = None) -> None:
     """Write a panel of daily prices for the given asset -> (initial_price, factor) specs.
 
@@ -120,13 +133,13 @@ def _seed_panel(asset_catalog, price_specs: dict, *, days: int = 42, kama_days: 
             if key == "kama_stock" and kama_days is not None and d < days - kama_days:
                 continue
             ts = now - timedelta(days=days - 1 - d)
-            rows.append(Price(asset=asset_catalog[key], price=p, fetched_at=ts, source="TEST"))
+            rows.append(_price_tick(asset_catalog[key], p, ts))
             timestamps.append(ts)
             f = factor(d) if callable(factor) else factor
             p = (p * Decimal(str(f))).quantize(Decimal("0.0001"))
     Price.objects.bulk_create(rows)
     _backfill_fetched_at(rows, timestamps)
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
     invalidate_returns_cache()
 
 
@@ -208,11 +221,11 @@ def correlated_gold_panel(asset_catalog, db):
         prices["usd_cash"] = (prices["usd_cash"] * Decimal(str(1.0 + rng.normal(0, 0.0002)))).quantize(Decimal("0.0001"))
         prices["bitcoin_usd"] = (prices["bitcoin_usd"] * Decimal(str(1.0 + rng.normal(0, 0.02)))).quantize(Decimal("0.0001"))
         for key, p in prices.items():
-            rows.append(Price(asset=asset_catalog[key], price=p, fetched_at=ts, source="TEST"))
+            rows.append(_price_tick(asset_catalog[key], p, ts))
             timestamps.append(ts)
     Price.objects.bulk_create(rows)
     _backfill_fetched_at(rows, timestamps)
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
     invalidate_returns_cache()
     return asset_catalog
 
@@ -255,12 +268,10 @@ def test_daily_returns_known_values(synthetic_history):
     assert len(emami_rets) >= 30
     assert abs(emami_rets.mean() - 0.001) < 1e-3
 
-    # bitcoin_usd is USD-quoted; the engine converts via usd_cash before
-    # pct_change, so its TOMAN return = (1+usd_ret)(1+btc_usd_pure_ret) - 1.
-    # Recover the raw USD bitcoin return by re-deriving it from the stored prices.
+    # The test BTC ticks are verified Toman. A cash-USD move must not be
+    # applied to them a second time before taking returns.
     from portfolio.models import Asset, Price
     btc_asset = Asset.objects.get(key="bitcoin_usd")
-    usd_asset = Asset.objects.get(key="usd_cash")
     btc_raw = (
         pd.DataFrame.from_records(
             Price.objects.filter(asset=btc_asset).values("fetched_at", "price_foreign")
@@ -275,21 +286,7 @@ def test_daily_returns_known_values(synthetic_history):
         .astype(float)
         .pct_change()
     )
-    usd_raw = (
-        pd.DataFrame.from_records(
-            Price.objects.filter(asset=usd_asset).values("fetched_at", "price_iranian")
-        )
-        .rename(columns={"price_iranian": "price"})
-        .assign(fetched_at=lambda d: pd.to_datetime(d["fetched_at"], utc=True))
-        .set_index("fetched_at")
-        .sort_index()
-        .resample("1D")
-        .last()
-        ["price"]
-        .astype(float)
-        .pct_change()
-    )
-    expected = ((1 + usd_raw) * (1 + btc_raw) - 1)
+    expected = btc_raw
     btc_rets = df["bitcoin_usd"].dropna()
     aligned = pd.concat([btc_rets.rename("a"), expected.rename("b")], axis=1).dropna()
     assert np.allclose(aligned["a"], aligned["b"], atol=1e-6)
@@ -598,11 +595,11 @@ def test_correlation_cluster_cap_enforced(asset_catalog, db):
             * (Decimal("1.025") if d % 2 == 0 else (Decimal("1") / Decimal("1.02")))
         ).quantize(Decimal("0.0001"))
         for key, p in prices.items():
-            rows.append(Price(asset=asset_catalog[key], price=p, fetched_at=ts, source="TEST"))
+            rows.append(_price_tick(asset_catalog[key], p, ts))
             timestamps.append(ts)
     Price.objects.bulk_create(rows)
     _backfill_fetched_at(rows, timestamps)
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
     invalidate_returns_cache()
 
     universe = ["emami_coin", "usd_cash", "kama_stock", "bitcoin_usd"]
@@ -660,11 +657,11 @@ def test_hard_asset_sleeve_caps_uncorrelated_usd_and_gold(asset_catalog, db):
             prices["bitcoin_usd"] * Decimal(str(1.0 + float(btc_ret[d])))
         ).quantize(Decimal("0.0001"))
         for key, p in prices.items():
-            rows.append(Price(asset=asset_catalog[key], price=p, fetched_at=ts, source="TEST"))
+            rows.append(_price_tick(asset_catalog[key], p, ts))
             timestamps.append(ts)
     Price.objects.bulk_create(rows)
     _backfill_fetched_at(rows, timestamps)
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
     invalidate_returns_cache()
 
     universe = ["gold_18k_gram", "usd_cash", "kama_stock", "bitcoin_usd"]
@@ -744,7 +741,7 @@ def test_optimization_universe_too_small_503(make_user, asset_catalog):
         timestamps.append(ts)
     Price.objects.bulk_create(rows)
     _backfill_fetched_at(rows, timestamps)
-    cache.delete("prices:latest")
+    cache.delete("prices:latest:verified-toman-v2")
     invalidate_returns_cache()
     _make_portfolio(pro, asset_catalog, {"emami_coin": 1.0})
     resp = _client(pro).post(

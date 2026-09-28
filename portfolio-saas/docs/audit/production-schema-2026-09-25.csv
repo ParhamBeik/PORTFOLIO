@@ -1,0 +1,590 @@
+table_name,ordinal_position,column_name,data_type,udt_name,is_nullable
+accounts_user,1,id,bigint,int8,NO
+accounts_user,2,password,character varying,varchar,NO
+accounts_user,3,last_login,timestamp with time zone,timestamptz,YES
+accounts_user,4,is_superuser,boolean,bool,NO
+accounts_user,5,first_name,character varying,varchar,NO
+accounts_user,6,last_name,character varying,varchar,NO
+accounts_user,7,is_staff,boolean,bool,NO
+accounts_user,8,is_active,boolean,bool,NO
+accounts_user,9,date_joined,timestamp with time zone,timestamptz,NO
+accounts_user,10,email,character varying,varchar,NO
+accounts_user,11,customer_id,character varying,varchar,NO
+accounts_user,12,role,character varying,varchar,NO
+accounts_user,13,risk_profile,character varying,varchar,NO
+accounts_user_groups,1,id,bigint,int8,NO
+accounts_user_groups,2,user_id,bigint,int8,NO
+accounts_user_groups,3,group_id,integer,int4,NO
+accounts_user_user_permissions,1,id,bigint,int8,NO
+accounts_user_user_permissions,2,user_id,bigint,int8,NO
+accounts_user_user_permissions,3,permission_id,integer,int4,NO
+auth_group,1,id,integer,int4,NO
+auth_group,2,name,character varying,varchar,NO
+auth_group_permissions,1,id,bigint,int8,NO
+auth_group_permissions,2,group_id,integer,int4,NO
+auth_group_permissions,3,permission_id,integer,int4,NO
+auth_permission,1,id,integer,int4,NO
+auth_permission,2,name,character varying,varchar,NO
+auth_permission,3,content_type_id,integer,int4,NO
+auth_permission,4,codename,character varying,varchar,NO
+billing_payment,1,id,bigint,int8,NO
+billing_payment,2,authority,character varying,varchar,NO
+billing_payment,3,amount_rial,bigint,int8,NO
+billing_payment,4,status,character varying,varchar,NO
+billing_payment,5,ref_id,character varying,varchar,NO
+billing_payment,6,created_at,timestamp with time zone,timestamptz,NO
+billing_payment,7,verified_at,timestamp with time zone,timestamptz,YES
+billing_payment,8,user_id,bigint,int8,YES
+billing_payment,9,former_customer_id,uuid,uuid,YES
+django_admin_log,1,id,integer,int4,NO
+django_admin_log,2,action_time,timestamp with time zone,timestamptz,NO
+django_admin_log,3,object_id,text,text,YES
+django_admin_log,4,object_repr,character varying,varchar,NO
+django_admin_log,5,action_flag,smallint,int2,NO
+django_admin_log,6,change_message,text,text,NO
+django_admin_log,7,content_type_id,integer,int4,YES
+django_admin_log,8,user_id,bigint,int8,NO
+django_content_type,1,id,integer,int4,NO
+django_content_type,2,app_label,character varying,varchar,NO
+django_content_type,3,model,character varying,varchar,NO
+django_migrations,1,id,bigint,int8,NO
+django_migrations,2,app,character varying,varchar,NO
+django_migrations,3,name,character varying,varchar,NO
+django_migrations,4,applied,timestamp with time zone,timestamptz,NO
+django_session,1,session_key,character varying,varchar,NO
+django_session,2,session_data,text,text,NO
+django_session,3,expire_date,timestamp with time zone,timestamptz,NO
+marketdata_apirequestquota,1,id,bigint,int8,NO
+marketdata_apirequestquota,2,day,date,date,NO
+marketdata_apirequestquota,3,limit,integer,int4,NO
+marketdata_apirequestquota,4,used,integer,int4,NO
+marketdata_apirequestquota,5,archive_used,integer,int4,NO
+marketdata_apirequestquota,6,live_used,integer,int4,NO
+marketdata_apirequestquota,7,other_used,integer,int4,NO
+marketdata_apirequestquota,8,updated_at,timestamp with time zone,timestamptz,NO
+marketdata_apirequestquota,9,plan,character varying,varchar,NO
+marketdata_apirequestquota,10,local_attempts,integer,int4,NO
+marketdata_apirequestquota,11,successful_requests,integer,int4,NO
+marketdata_apirequestquota,12,provider_used,integer,int4,YES
+marketdata_apirequestquota,13,provider_observed_at,timestamp with time zone,timestamptz,YES
+marketdata_apirequestquota,14,provider_observation_source,character varying,varchar,NO
+marketdata_apirequestquota,15,provider_baseline_used,integer,int4,YES
+marketdata_archivefetchstate,1,id,bigint,int8,NO
+marketdata_archivefetchstate,2,endpoint,character varying,varchar,NO
+marketdata_archivefetchstate,3,symbol,character varying,varchar,NO
+marketdata_archivefetchstate,4,expected_rows,integer,int4,NO
+marketdata_archivefetchstate,5,stored_rows,integer,int4,NO
+marketdata_archivefetchstate,6,missing_rows,integer,int4,NO
+marketdata_archivefetchstate,7,first_date,character varying,varchar,NO
+marketdata_archivefetchstate,8,last_date,character varying,varchar,NO
+marketdata_archivefetchstate,9,verified_complete,boolean,bool,NO
+marketdata_archivefetchstate,10,consecutive_failures,integer,int4,NO
+marketdata_archivefetchstate,11,last_error,character varying,varchar,NO
+marketdata_archivefetchstate,12,last_attempt_at,timestamp with time zone,timestamptz,YES
+marketdata_archivefetchstate,13,last_success_at,timestamp with time zone,timestamptz,YES
+marketdata_archivefetchstate,14,next_attempt_at,timestamp with time zone,timestamptz,YES
+marketdata_archivefetchstate,15,known_gap_rows,integer,int4,NO
+marketdata_archivefetchstate,16,archive_cursor,integer,int4,NO
+marketdata_archivefetchstate,17,target_window_days,smallint,int2,NO
+marketdata_archivefetchstate,18,blacklisted,boolean,bool,NO
+marketdata_archivefetchstate,19,last_probe_at,timestamp with time zone,timestamptz,YES
+marketdata_archivefetchstate,20,suspended_at,timestamp with time zone,timestamptz,YES
+marketdata_archivefetchstate,21,suspension_evidence,jsonb,jsonb,NO
+marketdata_archivefetchstate,22,suspension_reason,character varying,varchar,NO
+marketdata_assetmetricsnapshot,1,id,bigint,int8,NO
+marketdata_assetmetricsnapshot,2,symbol,character varying,varchar,NO
+marketdata_assetmetricsnapshot,3,asset_class,character varying,varchar,NO
+marketdata_assetmetricsnapshot,4,as_of,character varying,varchar,NO
+marketdata_assetmetricsnapshot,5,window_days,smallint,int2,NO
+marketdata_assetmetricsnapshot,6,total_return,double precision,float8,NO
+marketdata_assetmetricsnapshot,7,annualized_volatility,double precision,float8,NO
+marketdata_assetmetricsnapshot,8,sharpe,double precision,float8,NO
+marketdata_assetmetricsnapshot,9,sortino,double precision,float8,NO
+marketdata_assetmetricsnapshot,10,max_drawdown,double precision,float8,NO
+marketdata_assetmetricsnapshot,11,beta,double precision,float8,YES
+marketdata_assetmetricsnapshot,12,correlation,double precision,float8,YES
+marketdata_assetsignalsnapshot,1,id,bigint,int8,NO
+marketdata_assetsignalsnapshot,2,symbol,character varying,varchar,NO
+marketdata_assetsignalsnapshot,3,asset_class,character varying,varchar,NO
+marketdata_assetsignalsnapshot,4,as_of,character varying,varchar,NO
+marketdata_assetsignalsnapshot,5,window_days,smallint,int2,NO
+marketdata_assetsignalsnapshot,6,rsi,double precision,float8,YES
+marketdata_assetsignalsnapshot,7,macd_histogram,double precision,float8,YES
+marketdata_assetsignalsnapshot,8,above_trend,boolean,bool,NO
+marketdata_assetsignalsnapshot,9,trend_window,smallint,int2,NO
+marketdata_assetsignalsnapshot,10,overbought,boolean,bool,NO
+marketdata_assetsignalsnapshot,11,oversold,boolean,bool,NO
+marketdata_assetsignalsnapshot,12,stance,character varying,varchar,NO
+marketdata_assetsignalsnapshot,13,observations,integer,int4,NO
+marketdata_assetsignalsnapshot,14,passes_integrity,boolean,bool,NO
+marketdata_codalannouncement,1,id,bigint,int8,NO
+marketdata_codalannouncement,2,symbol,character varying,varchar,NO
+marketdata_codalannouncement,3,company_name,character varying,varchar,NO
+marketdata_codalannouncement,4,title,text,text,NO
+marketdata_codalannouncement,5,code,character varying,varchar,NO
+marketdata_codalannouncement,6,date_title,character varying,varchar,NO
+marketdata_codalannouncement,7,date_send,character varying,varchar,NO
+marketdata_codalannouncement,8,time_send,character varying,varchar,NO
+marketdata_codalannouncement,9,date_publish,character varying,varchar,NO
+marketdata_codalannouncement,10,time_publish,character varying,varchar,NO
+marketdata_codalannouncement,11,link,character varying,varchar,NO
+marketdata_codalannouncement,12,link_pdf,character varying,varchar,NO
+marketdata_codalannouncement,13,link_excel,character varying,varchar,NO
+marketdata_codalannouncement,14,link_attachment,character varying,varchar,NO
+marketdata_codalannouncement,15,category,integer,int4,YES
+marketdata_codalannouncement,16,category_title,character varying,varchar,NO
+marketdata_codalannouncement,17,is_audited,boolean,bool,YES
+marketdata_codalannouncement,18,classified_by,character varying,varchar,NO
+marketdata_codalannouncement,19,doc_type,character varying,varchar,NO
+marketdata_codalannouncement,20,tier,smallint,int2,YES
+marketdata_codalartifact,1,id,bigint,int8,NO
+marketdata_codalartifact,2,source_url,character varying,varchar,NO
+marketdata_codalartifact,3,kind,character varying,varchar,NO
+marketdata_codalartifact,4,s3_key,character varying,varchar,NO
+marketdata_codalartifact,5,checksum_sha256,character varying,varchar,NO
+marketdata_codalartifact,6,content_type,character varying,varchar,NO
+marketdata_codalartifact,7,size_bytes,bigint,int8,NO
+marketdata_codalartifact,8,fetch_status,character varying,varchar,NO
+marketdata_codalartifact,9,error_code,character varying,varchar,NO
+marketdata_codalartifact,10,created_at,timestamp with time zone,timestamptz,NO
+marketdata_codalartifact,11,report_id,bigint,int8,NO
+marketdata_codalfact,1,id,bigint,int8,NO
+marketdata_codalfact,2,fact_code,character varying,varchar,NO
+marketdata_codalfact,3,numeric_value,numeric,numeric,YES
+marketdata_codalfact,4,text_value,text,text,NO
+marketdata_codalfact,5,unit,character varying,varchar,NO
+marketdata_codalfact,6,currency,character varying,varchar,NO
+marketdata_codalfact,7,period_start,character varying,varchar,NO
+marketdata_codalfact,8,period_end,character varying,varchar,NO
+marketdata_codalfact,9,dimensions,jsonb,jsonb,NO
+marketdata_codalfact,10,confidence,numeric,numeric,NO
+marketdata_codalfact,11,quality,character varying,varchar,NO
+marketdata_codalfact,12,parser_version,character varying,varchar,NO
+marketdata_codalfact,13,source_coordinates,jsonb,jsonb,NO
+marketdata_codalfact,14,table_id,bigint,int8,YES
+marketdata_codalfact,15,report_id,bigint,int8,NO
+marketdata_codalfact,16,section_id,bigint,int8,YES
+marketdata_codalparsedtable,1,id,bigint,int8,NO
+marketdata_codalparsedtable,2,name,character varying,varchar,NO
+marketdata_codalparsedtable,3,sheet_name,character varying,varchar,NO
+marketdata_codalparsedtable,4,table_index,integer,int4,NO
+marketdata_codalparsedtable,5,headers,jsonb,jsonb,NO
+marketdata_codalparsedtable,6,rows,jsonb,jsonb,NO
+marketdata_codalparsedtable,7,source_coordinates,jsonb,jsonb,NO
+marketdata_codalparsedtable,8,parser_version,character varying,varchar,NO
+marketdata_codalparsedtable,9,artifact_id,bigint,int8,YES
+marketdata_codalparsedtable,10,report_id,bigint,int8,NO
+marketdata_codalreport,1,id,bigint,int8,NO
+marketdata_codalreport,2,category,integer,int4,YES
+marketdata_codalreport,3,report_type,character varying,varchar,NO
+marketdata_codalreport,4,letter_type,character varying,varchar,NO
+marketdata_codalreport,5,period_start,character varying,varchar,NO
+marketdata_codalreport,6,period_end,character varying,varchar,NO
+marketdata_codalreport,7,is_audited,boolean,bool,YES
+marketdata_codalreport,8,is_consolidated,boolean,bool,NO
+marketdata_codalreport,9,is_correction,boolean,bool,NO
+marketdata_codalreport,10,parser_version,character varying,varchar,NO
+marketdata_codalreport,11,status,character varying,varchar,NO
+marketdata_codalreport,12,quality,character varying,varchar,NO
+marketdata_codalreport,13,error_code,character varying,varchar,NO
+marketdata_codalreport,14,extracted_at,timestamp with time zone,timestamptz,YES
+marketdata_codalreport,15,created_at,timestamp with time zone,timestamptz,NO
+marketdata_codalreport,16,updated_at,timestamp with time zone,timestamptz,NO
+marketdata_codalreport,17,announcement_id,bigint,int8,NO
+marketdata_codalreport,18,revision_of_id,bigint,int8,YES
+marketdata_codalsection,1,id,bigint,int8,NO
+marketdata_codalsection,2,heading,character varying,varchar,NO
+marketdata_codalsection,3,body,text,text,NO
+marketdata_codalsection,4,section_index,integer,int4,NO
+marketdata_codalsection,5,source_coordinates,jsonb,jsonb,NO
+marketdata_codalsection,6,confidence,numeric,numeric,NO
+marketdata_codalsection,7,artifact_id,bigint,int8,YES
+marketdata_codalsection,8,report_id,bigint,int8,NO
+marketdata_corporateaction,1,id,bigint,int8,NO
+marketdata_corporateaction,2,symbol,character varying,varchar,NO
+marketdata_corporateaction,3,date,character varying,varchar,NO
+marketdata_corporateaction,4,factor,numeric,numeric,NO
+marketdata_corporateaction,5,kind,character varying,varchar,NO
+marketdata_corporateaction,6,source,character varying,varchar,NO
+marketdata_dailystockhistory,1,id,bigint,int8,NO
+marketdata_dailystockhistory,2,symbol,character varying,varchar,NO
+marketdata_dailystockhistory,3,date,character varying,varchar,NO
+marketdata_dailystockhistory,4,time,character varying,varchar,NO
+marketdata_dailystockhistory,5,tno,integer,int4,NO
+marketdata_dailystockhistory,6,tvol,bigint,int8,NO
+marketdata_dailystockhistory,7,tval,bigint,int8,NO
+marketdata_dailystockhistory,8,pmin,numeric,numeric,YES
+marketdata_dailystockhistory,9,pmax,numeric,numeric,YES
+marketdata_dailystockhistory,10,py,numeric,numeric,NO
+marketdata_dailystockhistory,11,pf,numeric,numeric,YES
+marketdata_dailystockhistory,12,pl,numeric,numeric,NO
+marketdata_dailystockhistory,13,plc,numeric,numeric,NO
+marketdata_dailystockhistory,14,plp,double precision,float8,NO
+marketdata_dailystockhistory,15,pc,numeric,numeric,NO
+marketdata_dailystockhistory,16,pcc,numeric,numeric,NO
+marketdata_dailystockhistory,17,pcp,double precision,float8,NO
+marketdata_dailystockhistory,18,buy_count_i,integer,int4,YES
+marketdata_dailystockhistory,19,buy_count_n,integer,int4,YES
+marketdata_dailystockhistory,20,sell_count_i,integer,int4,YES
+marketdata_dailystockhistory,21,sell_count_n,integer,int4,YES
+marketdata_dailystockhistory,22,buy_i_volume,bigint,int8,YES
+marketdata_dailystockhistory,23,buy_n_volume,bigint,int8,YES
+marketdata_dailystockhistory,24,sell_i_volume,bigint,int8,YES
+marketdata_dailystockhistory,25,sell_n_volume,bigint,int8,YES
+marketdata_dailystockhistory,26,buy_i_value,bigint,int8,YES
+marketdata_dailystockhistory,27,buy_n_value,bigint,int8,YES
+marketdata_dailystockhistory,28,sell_i_value,bigint,int8,YES
+marketdata_dailystockhistory,29,sell_n_value,bigint,int8,YES
+marketdata_dailystockhistory,30,ingested_at,timestamp with time zone,timestamptz,YES
+marketdata_dailystockhistory,31,last_correlation_id,character varying,varchar,NO
+marketdata_dailystockhistory,32,ts,timestamp with time zone,timestamptz,NO
+marketdata_derivativecontract,1,id,bigint,int8,NO
+marketdata_derivativecontract,2,kind,character varying,varchar,NO
+marketdata_derivativecontract,3,contract_code,character varying,varchar,NO
+marketdata_derivativecontract,4,underlying_code,character varying,varchar,NO
+marketdata_derivativecontract,5,expiry_date,character varying,varchar,NO
+marketdata_derivativecontract,6,contract_size,numeric,numeric,YES
+marketdata_derivativecontract,7,active,boolean,bool,NO
+marketdata_derivativecontract,8,provider_payload,jsonb,jsonb,NO
+marketdata_derivativecontract,9,updated_at,timestamp with time zone,timestamptz,NO
+marketdata_derivativesnapshot,1,id,bigint,int8,NO
+marketdata_derivativesnapshot,2,observed_at,timestamp with time zone,timestamptz,NO
+marketdata_derivativesnapshot,3,last_price,numeric,numeric,YES
+marketdata_derivativesnapshot,4,bid_price,numeric,numeric,YES
+marketdata_derivativesnapshot,5,ask_price,numeric,numeric,YES
+marketdata_derivativesnapshot,6,volume,bigint,int8,YES
+marketdata_derivativesnapshot,7,open_interest,bigint,int8,YES
+marketdata_derivativesnapshot,8,provider_payload,jsonb,jsonb,NO
+marketdata_derivativesnapshot,9,contract_id,bigint,int8,NO
+marketdata_goldcurrencyhistory,1,id,bigint,int8,NO
+marketdata_goldcurrencyhistory,2,symbol,character varying,varchar,NO
+marketdata_goldcurrencyhistory,3,name,character varying,varchar,NO
+marketdata_goldcurrencyhistory,4,unit,character varying,varchar,NO
+marketdata_goldcurrencyhistory,5,date,character varying,varchar,NO
+marketdata_goldcurrencyhistory,6,open_price,numeric,numeric,YES
+marketdata_goldcurrencyhistory,7,high_price,numeric,numeric,YES
+marketdata_goldcurrencyhistory,8,low_price,numeric,numeric,YES
+marketdata_goldcurrencyhistory,9,close_price,numeric,numeric,NO
+marketdata_goldcurrencyhistory,10,source,character varying,varchar,NO
+marketdata_goldcurrencyhistory,11,ingested_at,timestamp with time zone,timestamptz,YES
+marketdata_goldcurrencyhistory,12,last_correlation_id,character varying,varchar,NO
+marketdata_instrumentlistinghistory,1,id,bigint,int8,NO
+marketdata_instrumentlistinghistory,2,symbol,character varying,varchar,NO
+marketdata_instrumentlistinghistory,3,first_seen,character varying,varchar,NO
+marketdata_instrumentlistinghistory,4,last_seen,character varying,varchar,NO
+marketdata_instrumentlistinghistory,5,eligible_from,character varying,varchar,YES
+marketdata_instrumentlistinghistory,6,eligible_to,character varying,varchar,YES
+marketdata_livefetchstate,1,id,bigint,int8,NO
+marketdata_livefetchstate,2,endpoint_key,character varying,varchar,NO
+marketdata_livefetchstate,3,scope,character varying,varchar,NO
+marketdata_livefetchstate,4,cadence_seconds,integer,int4,NO
+marketdata_livefetchstate,5,session_only,boolean,bool,NO
+marketdata_livefetchstate,6,enabled,boolean,bool,NO
+marketdata_livefetchstate,7,last_attempt_at,timestamp with time zone,timestamptz,YES
+marketdata_livefetchstate,8,last_success_at,timestamp with time zone,timestamptz,YES
+marketdata_livefetchstate,9,next_attempt_at,timestamp with time zone,timestamptz,YES
+marketdata_livefetchstate,10,consecutive_failures,integer,int4,NO
+marketdata_livefetchstate,11,last_error,character varying,varchar,NO
+marketdata_marketcandle,1,id,bigint,int8,NO
+marketdata_marketcandle,2,symbol,character varying,varchar,NO
+marketdata_marketcandle,3,timeframe,character varying,varchar,NO
+marketdata_marketcandle,4,date_time,character varying,varchar,NO
+marketdata_marketcandle,5,open_price,numeric,numeric,YES
+marketdata_marketcandle,6,high_price,numeric,numeric,YES
+marketdata_marketcandle,7,low_price,numeric,numeric,YES
+marketdata_marketcandle,8,close_price,numeric,numeric,NO
+marketdata_marketcandle,9,volume,bigint,int8,NO
+marketdata_marketcandle,10,ingested_at,timestamp with time zone,timestamptz,YES
+marketdata_marketcandle,11,last_correlation_id,character varying,varchar,NO
+marketdata_marketcandle,12,ts,timestamp with time zone,timestamptz,NO
+marketdata_marketdailybar,1,id,bigint,int8,NO
+marketdata_marketdailybar,2,asset_class,character varying,varchar,NO
+marketdata_marketdailybar,3,symbol,character varying,varchar,NO
+marketdata_marketdailybar,4,date,character varying,varchar,NO
+marketdata_marketdailybar,5,open_price,numeric,numeric,YES
+marketdata_marketdailybar,6,high_price,numeric,numeric,YES
+marketdata_marketdailybar,7,low_price,numeric,numeric,YES
+marketdata_marketdailybar,8,close_price,numeric,numeric,YES
+marketdata_marketdailybar,9,volume,bigint,int8,YES
+marketdata_marketdailybar,10,open_interest,bigint,int8,YES
+marketdata_marketdailybar,11,sample_count,integer,int4,NO
+marketdata_marketindexdata,1,id,bigint,int8,NO
+marketdata_marketindexdata,2,date,character varying,varchar,NO
+marketdata_marketindexdata,3,time,character varying,varchar,NO
+marketdata_marketindexdata,4,state,character varying,varchar,NO
+marketdata_marketindexdata,5,index_overall,double precision,float8,NO
+marketdata_marketindexdata,6,index_overall_change,double precision,float8,NO
+marketdata_marketindexdata,7,index_equal_weight,double precision,float8,NO
+marketdata_marketindexdata,8,index_equal_weight_change,double precision,float8,NO
+marketdata_marketindexdata,9,market_value,bigint,int8,NO
+marketdata_marketindexdata,10,trade_number,integer,int4,NO
+marketdata_marketindexdata,11,trade_value,bigint,int8,NO
+marketdata_marketindexdata,12,trade_volume,bigint,int8,NO
+marketdata_marketinstrument,1,id,bigint,int8,NO
+marketdata_marketinstrument,2,source,character varying,varchar,NO
+marketdata_marketinstrument,3,symbol,character varying,varchar,NO
+marketdata_marketinstrument,4,name,character varying,varchar,NO
+marketdata_marketinstrument,5,category,character varying,varchar,NO
+marketdata_marketinstrument,6,provider_group,character varying,varchar,NO
+marketdata_marketinstrument,7,isin,character varying,varchar,NO
+marketdata_marketinstrument,8,eligible,boolean,bool,NO
+marketdata_marketinstrument,9,updated_at,timestamp with time zone,timestamptz,NO
+marketdata_marketsnapshot,1,id,bigint,int8,NO
+marketdata_marketsnapshot,2,asset_class,character varying,varchar,NO
+marketdata_marketsnapshot,3,symbol,character varying,varchar,NO
+marketdata_marketsnapshot,4,observed_at,timestamp with time zone,timestamptz,NO
+marketdata_marketsnapshot,5,last_price,numeric,numeric,YES
+marketdata_marketsnapshot,6,bid_price,numeric,numeric,YES
+marketdata_marketsnapshot,7,ask_price,numeric,numeric,YES
+marketdata_marketsnapshot,8,volume,bigint,int8,YES
+marketdata_marketsnapshot,9,provider_payload,jsonb,jsonb,NO
+marketdata_operationalmetricsnapshot,1,id,bigint,int8,NO
+marketdata_operationalmetricsnapshot,2,captured_at,timestamp with time zone,timestamptz,NO
+marketdata_operationalmetricsnapshot,3,database_counts,jsonb,jsonb,NO
+marketdata_operationalmetricsnapshot,4,table_bytes,jsonb,jsonb,NO
+marketdata_operationalmetricsnapshot,5,archive,jsonb,jsonb,NO
+marketdata_operationalmetricsnapshot,6,quota,jsonb,jsonb,NO
+marketdata_operationalmetricsnapshot,7,queues,jsonb,jsonb,NO
+marketdata_operationalmetricsnapshot,8,codal_status,jsonb,jsonb,NO
+marketdata_operationalmetricsnapshot,9,workflow_15m,jsonb,jsonb,NO
+marketdata_operationalmetricsnapshot,10,workers,jsonb,jsonb,NO
+marketdata_operationalmetricsnapshot,11,disk,jsonb,jsonb,NO
+marketdata_reallegalhistory,1,id,bigint,int8,NO
+marketdata_reallegalhistory,2,symbol,character varying,varchar,NO
+marketdata_reallegalhistory,3,date,character varying,varchar,NO
+marketdata_reallegalhistory,4,buy_count_i,integer,int4,YES
+marketdata_reallegalhistory,5,buy_count_n,integer,int4,YES
+marketdata_reallegalhistory,6,sell_count_i,integer,int4,YES
+marketdata_reallegalhistory,7,sell_count_n,integer,int4,YES
+marketdata_reallegalhistory,8,buy_i_volume,bigint,int8,YES
+marketdata_reallegalhistory,9,buy_n_volume,bigint,int8,YES
+marketdata_reallegalhistory,10,sell_i_volume,bigint,int8,YES
+marketdata_reallegalhistory,11,sell_n_volume,bigint,int8,YES
+marketdata_reallegalhistory,12,buy_i_value,bigint,int8,YES
+marketdata_reallegalhistory,13,buy_n_value,bigint,int8,YES
+marketdata_reallegalhistory,14,sell_i_value,bigint,int8,YES
+marketdata_reallegalhistory,15,sell_n_value,bigint,int8,YES
+marketdata_reallegalhistory,16,quality,character varying,varchar,NO
+marketdata_reallegalhistory,17,reconciliation_error,numeric,numeric,YES
+marketdata_rejectedrecord,1,id,bigint,int8,NO
+marketdata_rejectedrecord,2,endpoint,character varying,varchar,NO
+marketdata_rejectedrecord,3,symbol,character varying,varchar,NO
+marketdata_rejectedrecord,4,date,character varying,varchar,NO
+marketdata_rejectedrecord,5,reason,character varying,varchar,NO
+marketdata_rejectedrecord,6,payload,jsonb,jsonb,NO
+marketdata_rejectedrecord,7,occurrences,integer,int4,NO
+marketdata_rejectedrecord,8,first_seen,timestamp with time zone,timestamptz,NO
+marketdata_rejectedrecord,9,last_seen,timestamp with time zone,timestamptz,NO
+marketdata_rejectedrecord,10,destination_reference,character varying,varchar,NO
+marketdata_rejectedrecord,11,disposition,character varying,varchar,NO
+marketdata_rejectedrecord,12,recovered_at,timestamp with time zone,timestamptz,YES
+marketdata_shareholderrecord,1,id,bigint,int8,NO
+marketdata_shareholderrecord,2,symbol,character varying,varchar,NO
+marketdata_shareholderrecord,3,date,character varying,varchar,NO
+marketdata_shareholderrecord,4,shareholder_id,bigint,int8,NO
+marketdata_shareholderrecord,5,name,character varying,varchar,NO
+marketdata_shareholderrecord,6,volume,bigint,int8,NO
+marketdata_shareholderrecord,7,percent,double precision,float8,NO
+marketdata_shareholderrecord,8,change,numeric,numeric,NO
+marketdata_stocksymbolmetadata,1,id,bigint,int8,NO
+marketdata_stocksymbolmetadata,2,ins_code,bigint,int8,NO
+marketdata_stocksymbolmetadata,3,l18,character varying,varchar,NO
+marketdata_stocksymbolmetadata,4,l30,character varying,varchar,NO
+marketdata_stocksymbolmetadata,5,l30_en,character varying,varchar,NO
+marketdata_stocksymbolmetadata,6,isin,character varying,varchar,NO
+marketdata_stocksymbolmetadata,7,code_12,character varying,varchar,NO
+marketdata_stocksymbolmetadata,8,code_5,character varying,varchar,NO
+marketdata_stocksymbolmetadata,9,code_4,character varying,varchar,NO
+marketdata_stocksymbolmetadata,10,market,character varying,varchar,NO
+marketdata_stocksymbolmetadata,11,market_board,character varying,varchar,NO
+marketdata_stocksymbolmetadata,12,sector,character varying,varchar,NO
+marketdata_stocksymbolmetadata,13,sector_sub,character varying,varchar,NO
+marketdata_stocksymbolmetadata,14,shares_count,bigint,int8,NO
+marketdata_stocksymbolmetadata,15,base_volume,bigint,int8,NO
+marketdata_stocksymbolmetadata,16,market_cap,bigint,int8,NO
+marketdata_stocksymbolmetadata,17,eps,numeric,numeric,YES
+marketdata_stocksymbolmetadata,18,pe,numeric,numeric,YES
+marketdata_stocksymbolmetadata,19,g_pe,numeric,numeric,YES
+marketdata_stocksymbolmetadata,20,ps,numeric,numeric,YES
+marketdata_stocksymbolmetadata,21,free_float,numeric,numeric,YES
+marketdata_stocksymbolmetadata,22,state,character varying,varchar,NO
+marketdata_stocksymbolmetadata,23,updated_at,timestamp with time zone,timestamptz,NO
+marketdata_stocktransactiontick,1,id,bigint,int8,NO
+marketdata_stocktransactiontick,2,symbol,character varying,varchar,NO
+marketdata_stocktransactiontick,3,date,character varying,varchar,NO
+marketdata_stocktransactiontick,4,time,character varying,varchar,NO
+marketdata_stocktransactiontick,5,row,integer,int4,NO
+marketdata_stocktransactiontick,6,price,numeric,numeric,NO
+marketdata_stocktransactiontick,7,volume,bigint,int8,NO
+marketdata_stocktransactiontick,8,canceled,boolean,bool,NO
+marketdata_stocktransactiontick,9,ts,timestamp with time zone,timestamptz,NO
+marketdata_symbolintegrity,1,id,bigint,int8,NO
+marketdata_symbolintegrity,2,symbol,character varying,varchar,NO
+marketdata_symbolintegrity,3,source,character varying,varchar,NO
+marketdata_symbolintegrity,4,coverage_ratio,double precision,float8,NO
+marketdata_symbolintegrity,5,max_gap_days,integer,int4,NO
+marketdata_symbolintegrity,6,rejected_count,integer,int4,NO
+marketdata_symbolintegrity,7,passes_gate,boolean,bool,NO
+marketdata_symbolintegrity,8,reason,character varying,varchar,NO
+marketdata_symbolintegrity,9,computed_at,timestamp with time zone,timestamptz,NO
+marketdata_systemlogevent,1,id,bigint,int8,NO
+marketdata_systemlogevent,2,timestamp,timestamp with time zone,timestamptz,NO
+marketdata_systemlogevent,3,level,character varying,varchar,NO
+marketdata_systemlogevent,4,category,character varying,varchar,NO
+marketdata_systemlogevent,5,logger_name,character varying,varchar,NO
+marketdata_systemlogevent,6,message,text,text,NO
+marketdata_systemlogevent,7,service,character varying,varchar,NO
+marketdata_workflowrun,1,id,bigint,int8,NO
+marketdata_workflowrun,2,created_at,timestamp with time zone,timestamptz,NO
+marketdata_workflowrun,3,workflow,character varying,varchar,NO
+marketdata_workflowrun,4,task_id,character varying,varchar,NO
+marketdata_workflowrun,5,correlation_id,character varying,varchar,NO
+marketdata_workflowrun,6,endpoint,character varying,varchar,NO
+marketdata_workflowrun,7,symbol,character varying,varchar,NO
+marketdata_workflowrun,8,outcome,character varying,varchar,NO
+marketdata_workflowrun,9,source,character varying,varchar,NO
+marketdata_workflowrun,10,destination_table,character varying,varchar,NO
+marketdata_workflowrun,11,rows_received,integer,int4,NO
+marketdata_workflowrun,12,rows_accepted,integer,int4,NO
+marketdata_workflowrun,13,rows_created,integer,int4,NO
+marketdata_workflowrun,14,rows_updated,integer,int4,NO
+marketdata_workflowrun,15,rows_rejected,integer,int4,NO
+marketdata_workflowrun,16,http_attempts,smallint,int2,NO
+marketdata_workflowrun,17,quota_attempts,smallint,int2,NO
+marketdata_workflowrun,18,duration_ms,integer,int4,NO
+marketdata_workflowrun,19,error_code,character varying,varchar,NO
+marketdata_workflowrun,20,metadata,jsonb,jsonb,NO
+portfolio_account,1,id,bigint,int8,NO
+portfolio_account,2,name,character varying,varchar,NO
+portfolio_account,3,broker,character varying,varchar,NO
+portfolio_account,4,created_at,timestamp with time zone,timestamptz,NO
+portfolio_account,5,updated_at,timestamp with time zone,timestamptz,NO
+portfolio_account,6,user_id,bigint,int8,NO
+portfolio_account,7,goal,character varying,varchar,NO
+portfolio_account,8,cash_balance_tomans,numeric,numeric,NO
+portfolio_account,9,ledger_complete,boolean,bool,NO
+portfolio_account,10,tracking_started_at,timestamp with time zone,timestamptz,YES
+portfolio_account,11,track_cash,boolean,bool,NO
+portfolio_asset,1,id,bigint,int8,NO
+portfolio_asset,2,key,character varying,varchar,NO
+portfolio_asset,3,name,character varying,varchar,NO
+portfolio_asset,4,name_fa,character varying,varchar,NO
+portfolio_asset,5,asset_class,character varying,varchar,NO
+portfolio_asset,7,is_manual,boolean,bool,NO
+portfolio_asset,8,is_house,boolean,bool,NO
+portfolio_asset,9,is_active,boolean,bool,NO
+portfolio_asset,10,tse_symbol,character varying,varchar,NO
+portfolio_asset,11,brs_symbol,character varying,varchar,NO
+portfolio_asset,12,created_at,timestamp with time zone,timestamptz,NO
+portfolio_asset,13,proxy_key,character varying,varchar,NO
+portfolio_asset,14,owner_id,bigint,int8,YES
+portfolio_dailypriceaverage,1,id,bigint,int8,NO
+portfolio_dailypriceaverage,2,date,character varying,varchar,NO
+portfolio_dailypriceaverage,4,sample_count,integer,int4,NO
+portfolio_dailypriceaverage,5,updated_at,timestamp with time zone,timestamptz,NO
+portfolio_dailypriceaverage,6,asset_id,bigint,int8,NO
+portfolio_dailypriceaverage,7,avg_price_iranian,numeric,numeric,YES
+portfolio_dailypriceaverage,8,avg_price_foreign,numeric,numeric,YES
+portfolio_holding,1,id,bigint,int8,NO
+portfolio_holding,3,created_at,timestamp with time zone,timestamptz,NO
+portfolio_holding,4,updated_at,timestamp with time zone,timestamptz,NO
+portfolio_holding,5,account_id,bigint,int8,NO
+portfolio_holding,6,asset_id,bigint,int8,NO
+portfolio_holding,7,area_sqm,numeric,numeric,NO
+portfolio_holding,8,mortgage_deduction_tomans,numeric,numeric,NO
+portfolio_holding,9,display_name,character varying,varchar,NO
+portfolio_holding,10,is_hidden,boolean,bool,NO
+portfolio_holding,11,quantity_atomic,bigint,int8,YES
+portfolio_holding,12,price_per_sqm_tomans,numeric,numeric,YES
+portfolio_importbatch,1,id,bigint,int8,NO
+portfolio_importbatch,2,file_hash,character varying,varchar,NO
+portfolio_importbatch,3,row_count,integer,int4,NO
+portfolio_importbatch,4,created_at,timestamp with time zone,timestamptz,NO
+portfolio_importbatch,5,account_id,bigint,int8,NO
+portfolio_ledgerentry,1,id,bigint,int8,NO
+portfolio_ledgerentry,2,kind,character varying,varchar,NO
+portfolio_ledgerentry,5,note,character varying,varchar,NO
+portfolio_ledgerentry,6,timestamp,timestamp with time zone,timestamptz,NO
+portfolio_ledgerentry,7,account_id,bigint,int8,NO
+portfolio_ledgerentry,8,asset_id,bigint,int8,YES
+portfolio_ledgerentry,9,created_at,timestamp with time zone,timestamptz,NO
+portfolio_ledgerentry,10,source,character varying,varchar,NO
+portfolio_ledgerentry,11,amount_tomans,numeric,numeric,YES
+portfolio_ledgerentry,12,external_id,character varying,varchar,NO
+portfolio_ledgerentry,13,import_batch_id,bigint,int8,YES
+portfolio_ledgerentry,14,reversal_of_id,bigint,int8,YES
+portfolio_ledgerentry,15,area_sqm,numeric,numeric,YES
+portfolio_ledgerentry,16,mortgage_deduction_tomans,numeric,numeric,YES
+portfolio_ledgerentry,17,cost_basis_tomans,numeric,numeric,YES
+portfolio_ledgerentry,18,updated_at,timestamp with time zone,timestamptz,NO
+portfolio_ledgerentry,19,quantity_atomic,bigint,int8,YES
+portfolio_ledgerentry,20,price_per_sqm_tomans,numeric,numeric,YES
+portfolio_ledgerentry,21,price_iranian,numeric,numeric,YES
+portfolio_ledgerentry,22,price_foreign,numeric,numeric,YES
+portfolio_liability,1,id,bigint,int8,NO
+portfolio_liability,2,label,character varying,varchar,NO
+portfolio_liability,3,amount_tomans,numeric,numeric,NO
+portfolio_liability,4,created_at,timestamp with time zone,timestamptz,NO
+portfolio_liability,5,updated_at,timestamp with time zone,timestamptz,NO
+portfolio_liability,6,account_id,bigint,int8,NO
+portfolio_liability,7,asset_id,bigint,int8,YES
+portfolio_liability,8,kind,character varying,varchar,NO
+portfolio_liability,9,lender,character varying,varchar,NO
+portfolio_liability,10,principal_tomans,numeric,numeric,YES
+portfolio_liability,11,annual_rate_pct,numeric,numeric,YES
+portfolio_liability,12,term_months,integer,int4,YES
+portfolio_liability,13,monthly_installment_tomans,numeric,numeric,YES
+portfolio_liability,14,started_on,date,date,YES
+portfolio_liability,15,derived,boolean,bool,NO
+portfolio_monetaryroundingaudit,1,id,bigint,int8,NO
+portfolio_monetaryroundingaudit,2,source_table,character varying,varchar,NO
+portfolio_monetaryroundingaudit,3,source_id,bigint,int8,NO
+portfolio_monetaryroundingaudit,4,field_name,character varying,varchar,NO
+portfolio_monetaryroundingaudit,5,before_value,numeric,numeric,NO
+portfolio_monetaryroundingaudit,6,after_value,numeric,numeric,NO
+portfolio_monetaryroundingaudit,7,delta,numeric,numeric,NO
+portfolio_optimizationsnapshot,1,id,integer,int4,NO
+portfolio_optimizationsnapshot,2,scenario,character varying,varchar,NO
+portfolio_optimizationsnapshot,3,payload,jsonb,jsonb,NO
+portfolio_optimizationsnapshot,4,price_version,character varying,varchar,NO
+portfolio_optimizationsnapshot,5,as_of,timestamp with time zone,timestamptz,YES
+portfolio_optimizationsnapshot,6,created_at,timestamp with time zone,timestamptz,NO
+portfolio_optimizationsnapshot,7,account_id,bigint,int8,YES
+portfolio_optimizationsnapshot,8,created_by_id,bigint,int8,YES
+portfolio_optimizationsnapshot,9,window_days,integer,int4,NO
+portfolio_optimizationsnapshot,10,basis,character varying,varchar,NO
+portfolio_price,1,id,bigint,int8,NO
+portfolio_price,3,fetched_at,timestamp with time zone,timestamptz,NO
+portfolio_price,4,source,character varying,varchar,NO
+portfolio_price,5,asset_id,bigint,int8,NO
+portfolio_price,6,price_unit,character varying,varchar,NO
+portfolio_price,7,price_unit_verified,boolean,bool,NO
+portfolio_price,8,price_iranian,numeric,numeric,YES
+portfolio_price,9,price_foreign,numeric,numeric,YES
+portfolio_quantityconversionaudit,1,id,bigint,int8,NO
+portfolio_quantityconversionaudit,2,source_table,character varying,varchar,NO
+portfolio_quantityconversionaudit,3,source_id,bigint,int8,NO
+portfolio_quantityconversionaudit,4,asset_id,bigint,int8,NO
+portfolio_quantityconversionaudit,5,before_quantity,numeric,numeric,NO
+portfolio_quantityconversionaudit,6,after_quantity_atomic,bigint,int8,YES
+portfolio_quantityconversionaudit,7,after_price_per_sqm_tomans,numeric,numeric,YES
+portfolio_quantityconversionaudit,8,quantity_scale,integer,int4,NO
+portfolio_snapshot,1,id,bigint,int8,NO
+portfolio_snapshot,2,total_value_tomans,numeric,numeric,NO
+portfolio_snapshot,3,timestamp,timestamp with time zone,timestamptz,NO
+portfolio_snapshot,4,account_id,bigint,int8,YES
+portfolio_snapshot,5,user_id,bigint,int8,NO
+portfolio_snapshot,6,is_estimated,boolean,bool,NO
+portfolio_snapshot,7,is_session_close,boolean,bool,NO
+portfolio_snapshot,8,day,date,date,NO
+portfolio_snapshot_pre_netting_backup,1,snapshot_id,bigint,int8,NO
+portfolio_snapshot_pre_netting_backup,2,total_value_tomans,numeric,numeric,NO
+token_blacklist_blacklistedtoken,1,id,bigint,int8,NO
+token_blacklist_blacklistedtoken,2,blacklisted_at,timestamp with time zone,timestamptz,NO
+token_blacklist_blacklistedtoken,3,token_id,bigint,int8,NO
+token_blacklist_outstandingtoken,1,id,bigint,int8,NO
+token_blacklist_outstandingtoken,2,token,text,text,NO
+token_blacklist_outstandingtoken,3,created_at,timestamp with time zone,timestamptz,YES
+token_blacklist_outstandingtoken,4,expires_at,timestamp with time zone,timestamptz,NO
+token_blacklist_outstandingtoken,5,user_id,bigint,int8,YES
+token_blacklist_outstandingtoken,6,jti,character varying,varchar,NO

@@ -38,5 +38,6 @@ test.describe("ops center", () => {
     await expect(page.getByTestId("ops-asset-class-all")).toBeVisible();
     await page.getByTestId("ops-tabs-codal").click();
     await expect(page.getByTestId("ops-codal")).toBeVisible();
+    await expect(page.getByTestId("ops-research-coverage")).toBeVisible();
   });
 });

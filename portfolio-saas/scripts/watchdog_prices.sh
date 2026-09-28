@@ -24,6 +24,15 @@ cooldown_seconds="${WATCHDOG_COOLDOWN_SECONDS:-900}"
 
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') watchdog_prices: $*"; }
 
+# Deploy holds an exclusive lock on the stable production env inode while
+# freezing old Celery queues. A cron tick must not restart its stopped worker
+# or Beat in the middle of that copy. Keep this shared lock until exit.
+exec {watchdog_lock_fd}<"${env_file}"
+if ! flock -n -s "${watchdog_lock_fd}"; then
+    log "deployment in progress; skipping restart"
+    exit 0
+fi
+
 # /api/health/prices/ (config/health.py) 503s when the newest Price row is older
 # than 15 minutes. As of 2026-09-04 that applies around the clock: the
 # gold/currency job lost its 23:00-07:00 gate, so `expects_live_prices()` is

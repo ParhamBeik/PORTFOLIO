@@ -1,6 +1,6 @@
 # Production stack: Postgres, Redis, Django API (ASGI/gunicorn), separate live
 # archive/Codal Celery workers, Celery Beat, and the built SPA behind nginx.
-# Dedicated 16 GB RAM / 250 GB disk VPS. Do not colocate other stacks on 16 GB.
+# Current shared VPS: about 8 GiB RAM and 100 GB root disk (2026-09 audit).
 # Application state stays on the private network; only frontend joins vps-edge.
 #
 #   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
@@ -23,7 +23,8 @@ x-backend-env: &backend-env
   # long-lived workers from accumulating idle PostgreSQL sessions.
   DB_CONN_MAX_AGE: "0"
   REDIS_URL: redis://redis:6379/1            # cache (DB 1)
-  CELERY_BROKER_URL: redis://redis:6379/2    # broker/result (DB 2)
+  CELERY_BROKER_URL: redis://broker:6379/0   # durable, non-evicting queue
+  CELERY_RESULT_BACKEND: redis://redis:6379/2 # disposable task results
   CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS}
   BRS_API_KEY: ${BRS_API_KEY:-}
   BRSAPI_ACCOUNT_PHONE: ${BRSAPI_ACCOUNT_PHONE:-}
@@ -38,6 +39,10 @@ x-backend-env: &backend-env
   CODAL_S3_REGION: ${CODAL_S3_REGION:-us-east-1}
   CODAL_HTTP_PROXY: ${CODAL_HTTP_PROXY:-}
   CODAL_ENABLED: ${CODAL_ENABLED:-1}
+  CODAL_WORKER_ENABLED: ${CODAL_WORKER_ENABLED:-1}
+  GAPGPT_CONFIG_FILE: /run/secrets/gapgpt.env
+  RESEARCH_MAX_RUN_USD: ${RESEARCH_MAX_RUN_USD:-0.10}
+  RESEARCH_DAILY_BUDGET_USD: ${RESEARCH_DAILY_BUDGET_USD:-1.00}
   MARKETDATA_LIVE_INTERVAL_OPEN: ${MARKETDATA_LIVE_INTERVAL_OPEN:-20}
   SNAPSHOT_PRUNE_ENABLED: "1"
   PRICE_PRUNE_ENABLED: "1"
@@ -113,7 +118,7 @@ services:
     # Any parallel plan over the big tables hits the same wall.
     shm_size: 1gb
     # The image ships the compiled-in defaults (shared_buffers 128 MB), which is
-    # what this 16 GB database had been running on. Values below are sized for
+    # what the database had been running on. Values below are sized for
     # the 6 GB limit set at the foot of this block, not for the host's 16 GB:
     # shared_buffers ~25% of the container, and work_mem kept modest because it
     # is per sort/hash node and multiplies by max_connections (150).
@@ -168,6 +173,24 @@ services:
           cpus: "0.5"
           memory: 512m
 
+  broker:
+    image: redis:7.2-alpine
+    restart: unless-stopped
+    logging: *logging
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", "60", "1", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--loglevel", "warning"]
+    volumes:
+      - brokerdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384m
+
   minio:
     image: minio/minio:RELEASE.2024-10-13T13-34-11Z
     restart: unless-stopped
@@ -199,10 +222,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      broker:
+        condition: service_healthy
     environment: *backend-env
     volumes:
       - staticfiles:/app/staticfiles
-    command: sh -c "python manage.py migrate --noinput && python manage.py seed_assets && python manage.py collectstatic --noinput"
+    command: sh -c "python manage.py migrate --noinput && python manage.py classify_codal_announcements && python manage.py seed_assets && python manage.py collectstatic --noinput"
 
   backend:
     build: ./backend
@@ -213,9 +238,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      broker:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     environment: *backend-env
+    volumes:
+      - ${GAPGPT_CONFIG_HOST_FILE:-./deploy/gapgpt-disabled.env}:/run/secrets/gapgpt.env:ro
     expose: ["8000"]
     ulimits: *no-core
     healthcheck:
@@ -241,6 +270,8 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      broker:
         condition: service_healthy
     environment: *backend-env
     command: celery -A config worker -l info --concurrency=2 -Q live -n live@%h
@@ -268,6 +299,8 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      broker:
         condition: service_healthy
       minio:
         condition: service_healthy
@@ -309,6 +342,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      broker:
+        condition: service_healthy
       minio:
         condition: service_healthy
     environment: *backend-env
@@ -332,8 +367,6 @@ services:
     entrypoint: []
     depends_on:
       celery_worker_live:
-        condition: service_healthy
-      celery_worker_archive:
         condition: service_healthy
     environment: *backend-env
     command: celery -A config beat -l info
@@ -368,6 +401,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+  brokerdata:
   codaldata:
   staticfiles:
 

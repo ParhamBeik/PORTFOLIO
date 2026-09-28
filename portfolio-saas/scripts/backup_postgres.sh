@@ -76,25 +76,38 @@ if [[ -f "${destination}" ]]; then
     printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" \
       | publish "${destination}.sha256"
   fi
-  echo "Created ${destination}"
-  exit 0
+  echo "Revalidated ${destination}"
+else
+  # A fresh dump needs room to finish without starving Redis and Postgres.
+  # Keep at least 6 GiB free, or twice the last daily dump if that is larger.
+  min_free_kb="${BACKUP_MIN_FREE_KB:-6291456}"
+  [[ "${min_free_kb}" =~ ^[0-9]+$ ]] || { echo "BACKUP_MIN_FREE_KB must be a nonnegative integer" >&2; exit 1; }
+  last_daily="$(find "${backup_dir}" -maxdepth 1 -type f -name 'daily-*.dump.enc' -print | sort -r | head -n 1)"
+  if [[ -n "${last_daily}" ]]; then
+    last_kb="$(du -k "${last_daily}" | awk '{print $1}')"
+    (( last_kb * 2 > min_free_kb )) && min_free_kb=$((last_kb * 2))
+  fi
+  avail_kb="$(df -Pk "${backup_dir}" | awk 'NR==2 {print $4}')"
+  if (( avail_kb < min_free_kb )); then
+    echo "Refusing backup: only ${avail_kb} KiB free under ${backup_dir}, need ${min_free_kb} KiB" >&2
+    exit 75
+  fi
+  "${compose[@]}" exec -T db sh -c \
+    'exec pg_dump --format=custom --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 310000 \
+        -pass "file:${passphrase_file}" -out "${partial}"
+  mv "${partial}" "${destination}"
+
+  # Generate SQL to /dev/null so pg_restore drains and validates the whole archive.
+  # Listing the table of contents only validates the header and can accept a dump
+  # truncated after the TOC; pipefail also makes a decrypt failure fatal.
+  verify_backup "${destination}" || {
+    echo "Backup verification failed: ${destination} did not decrypt into a readable archive." >&2
+    exit 1
+  }
+  checksum="$(checksum_file "${destination}")"
+  printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" | publish "${destination}.sha256"
 fi
-
-"${compose[@]}" exec -T db sh -c \
-  'exec pg_dump --format=custom --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
-  | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 310000 \
-      -pass "file:${passphrase_file}" -out "${partial}"
-mv "${partial}" "${destination}"
-
-# Generate SQL to /dev/null so pg_restore drains and validates the whole archive.
-# Listing the table of contents only validates the header and can accept a dump
-# truncated after the TOC; pipefail also makes a decrypt failure fatal.
-verify_backup "${destination}" || {
-  echo "Backup verification failed: ${destination} did not decrypt into a readable archive." >&2
-  exit 1
-}
-checksum="$(checksum_file "${destination}")"
-printf '%s  %s\n' "${checksum}" "$(basename "${destination}")" | publish "${destination}.sha256"
 
 # Off-host copy. Everything above this line still leaves the only copy of the
 # database on the same host as the database, so a host loss takes both.
@@ -121,14 +134,39 @@ if [[ -n "${RCLONE_REMOTE:-}" ]]; then
            "expected exactly 1 object at ${remote_path}, rclone reported '${remote_count}'." >&2
       exit 1
     }
+    # A single object of the right size may still contain wrong bytes. Read
+    # the remote object back and compare its digest before claiming recovery.
+    remote_checksum="$(rclone cat "${remote_path}" | sha256sum | awk '{print $1}')"
+    local_checksum="$(checksum_file "${artifact}")"
+    [[ "${remote_checksum}" == "${local_checksum}" ]] || {
+      echo "Off-host checksum mismatch: ${remote_path}" >&2
+      exit 1
+    }
   done
   upload_verified=true
 fi
 
 evidence="${backup_dir}/backup-evidence-${stamp}.json"
-printf '{"created_at":"%s","database_artifact":"%s","database_sha256":"%s","decrypt_verified":true,"off_host_verified":%s}\n' \
-  "$(date -u +%FT%TZ)" "$(basename "${destination}")" "${checksum}" \
-  "${upload_verified}" | publish "${evidence}"
+if [[ "${upload_verified}" == true ]] || [[ ! -f "${evidence}" ]] || \
+  ! python3 - "${evidence}" "$(basename "${destination}")" "${checksum}" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        evidence = json.load(source)
+    valid = (evidence.get("database_artifact") == sys.argv[2]
+             and evidence.get("database_sha256") == sys.argv[3]
+             and evidence.get("decrypt_verified") is True
+             and evidence.get("off_host_verified") is True)
+except (OSError, ValueError):
+    valid = False
+sys.exit(0 if valid else 1)
+PY
+then
+  printf '{"created_at":"%s","database_artifact":"%s","database_sha256":"%s","decrypt_verified":true,"off_host_verified":%s}\n' \
+    "$(date -u +%FT%TZ)" "$(basename "${destination}")" "${checksum}" \
+    "${upload_verified}" | publish "${evidence}"
+fi
 
 if [[ "$(TZ="${BACKUP_TIMEZONE:-Asia/Tehran}" date +%u)" == "7" ]]; then
   # `cp` truncates an existing destination in place, so it carries the same
@@ -139,12 +177,16 @@ fi
 
 prune() {
   local keep="$1" pattern="$2" files
-  mapfile -t files < <(find "${backup_dir}" -maxdepth 1 -type f -name "${pattern}" -print | sort -r)
+  files=()
+  while IFS= read -r file; do files+=("${file}"); done \
+    < <(find "${backup_dir}" -maxdepth 1 -type f -name "${pattern}" -print | sort -r)
   if ((${#files[@]} > keep)); then
     for file in "${files[@]:keep}"; do rm -f -- "${file}" "${file}.sha256"; done
   fi
 }
 
-prune 7 'daily-*.dump.enc'
-prune 4 'weekly-*.dump.enc'
+# The production host has limited free space; longer retention belongs on the
+# verified off-host destination, not beside the live database.
+prune 2 'daily-*.dump.enc'
+prune 1 'weekly-*.dump.enc'
 echo "Created ${destination}"
