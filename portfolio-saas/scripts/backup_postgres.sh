@@ -78,6 +78,20 @@ if [[ -f "${destination}" ]]; then
   fi
   echo "Revalidated ${destination}"
 else
+  # A fresh dump needs room to finish without starving Redis and Postgres.
+  # Keep at least 6 GiB free, or twice the last daily dump if that is larger.
+  min_free_kb="${BACKUP_MIN_FREE_KB:-6291456}"
+  [[ "${min_free_kb}" =~ ^[0-9]+$ ]] || { echo "BACKUP_MIN_FREE_KB must be a nonnegative integer" >&2; exit 1; }
+  last_daily="$(find "${backup_dir}" -maxdepth 1 -type f -name 'daily-*.dump.enc' -print | sort -r | head -n 1)"
+  if [[ -n "${last_daily}" ]]; then
+    last_kb="$(du -k "${last_daily}" | awk '{print $1}')"
+    (( last_kb * 2 > min_free_kb )) && min_free_kb=$((last_kb * 2))
+  fi
+  avail_kb="$(df -Pk "${backup_dir}" | awk 'NR==2 {print $4}')"
+  if (( avail_kb < min_free_kb )); then
+    echo "Refusing backup: only ${avail_kb} KiB free under ${backup_dir}, need ${min_free_kb} KiB" >&2
+    exit 75
+  fi
   "${compose[@]}" exec -T db sh -c \
     'exec pg_dump --format=custom --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
     | openssl enc -aes-256-cbc -salt -pbkdf2 -iter 310000 \

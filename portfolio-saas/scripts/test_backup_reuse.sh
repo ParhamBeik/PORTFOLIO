@@ -56,3 +56,15 @@ with open(sys.argv[1], encoding="utf-8") as file:
 assert evidence["decrypt_verified"] is True
 assert evidence["off_host_verified"] is True
 PY
+
+rm -f "${artifact}" "${artifact}.sha256"
+if PATH="${scratch}/bin:${PATH}" \
+  PROJECT_DIR="${project_dir}" ENV_FILE="${scratch}/.env.production" \
+  BACKUP_DIR="${scratch}/backups" BACKUP_PASSPHRASE_FILE="${scratch}/passphrase" \
+  BACKUP_MIN_FREE_KB=999999999999 \
+  "${project_dir}/scripts/backup_postgres.sh" >"${scratch}/guard.log" 2>&1; then
+  echo "Backup ignored the free-space guard" >&2
+  exit 1
+fi
+grep -q 'Refusing backup:' "${scratch}/guard.log"
+test ! -e "${artifact}"
