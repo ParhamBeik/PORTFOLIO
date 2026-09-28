@@ -141,7 +141,17 @@ if (( legacy_broker )); then
   }
   if [[ "${handoff_mode}" == "copy" ]]; then
     "${compose[@]}" up -d --no-deps broker
-    "${compose[@]}" exec -T broker redis-cli ping | grep -qx PONG || {
+    # Compose starts the container before Redis accepts connections. The first
+    # production cutover hit this gap and aborted with the old stack untouched.
+    broker_ready=0
+    for ((attempt = 1; attempt <= 30; attempt++)); do
+      if "${compose[@]}" exec -T broker redis-cli ping 2>/dev/null | grep -qx PONG; then
+        broker_ready=1
+        break
+      fi
+      sleep 1
+    done
+    (( broker_ready )) || {
       echo "New broker is not ready; legacy services are untouched." >&2
       exit 1
     }
