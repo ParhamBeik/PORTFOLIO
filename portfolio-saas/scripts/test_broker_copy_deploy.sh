@@ -63,7 +63,14 @@ if [[ " $* " == *" redis-cli -n 2 --raw LLEN "* ]]; then
   [[ "${*: -1}" == "live" ]] && printf '0\n' || printf '1\n'
   exit 0
 fi
-if [[ " $* " == *" exec -T broker redis-cli ping "* ]]; then printf 'PONG\n'; exit 0; fi
+if [[ " $* " == *" exec -T broker redis-cli ping "* ]]; then
+  if [[ "${MOCK_BROKER_PING_FAIL_ONCE:-0}" == "1" ]] \
+      && [[ "$(grep -c 'exec -T broker redis-cli ping' "${MOCK_DOCKER_LOG}")" == "1" ]]; then
+    exit 1
+  fi
+  printf 'PONG\n'
+  exit 0
+fi
 if [[ " $* " == *"/tmp/copy_celery_queues.py"* ]]; then
   if [[ " $* " == *" --copy "* ]]; then
     if [[ "${MOCK_COPY_FAIL:-0}" == "1" ]]; then exit 1; fi
@@ -123,6 +130,14 @@ if grep -q ' build\| stop' "${scratch}/docker.log"; then
   echo "Unknown broker passed the preflight" >&2
   exit 1
 fi
+
+: >"${scratch}/docker.log"
+if MOCK_BROKER_PING_FAIL_ONCE=1 run_deploy >"${scratch}/out" 2>"${scratch}/err"; then
+  echo "Migration stub should have stopped the cutover" >&2
+  exit 1
+fi
+[[ "$(grep -c 'exec -T broker redis-cli ping' "${scratch}/docker.log")" == "2" ]]
+grep -q 'copy_celery_queues.py' "${scratch}/docker.log"
 
 : >"${scratch}/docker.log"
 if MOCK_COPY_FAIL=1 run_deploy >"${scratch}/out" 2>"${scratch}/err"; then
