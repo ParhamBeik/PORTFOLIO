@@ -155,6 +155,8 @@ jobs:
           java-version: '21'
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Assemble Android debug APK
         working-directory: portfolio-saas/frontend/android
         run: |
