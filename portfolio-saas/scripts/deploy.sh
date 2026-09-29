@@ -41,9 +41,7 @@ if [[ -z "${mail_host}" || "${mail_host}" == "localhost" || "${mail_host}" == "1
   echo "WARNING: EMAIL_HOST is '${mail_host:-<empty>}'. Self-service password reset cannot send mail; use the superuser recovery link until a relay is configured." >&2
 fi
 
-# Enough room to finish. A deploy writes a ~1.7 GB encrypted dump and then
-# builds images, and running out midway is the worst moment to do it: the dump
-# lands truncated over the day's restore point and Postgres shares the device.
+# Enough room to build images while PostgreSQL shares the device.
 #
 # The box is not ours alone -- three other stacks live on it and the largest
 # single consumer is a neighbour's 34 GB media volume -- so free space moves for
@@ -60,7 +58,7 @@ elif (( free_gb < 15 )); then
 fi
 
 # A broker cutover cannot drain a queue whose old consumer is absent or paused.
-# Check before the backup/build, and especially before stopping the API: an
+# Check before the build, and especially before stopping the API: an
 # older Compose stack can have queued Codal jobs but no Codal worker at all.
 backend_cid="$("${compose[@]}" ps -q --all backend)"
 legacy_broker=0
@@ -112,9 +110,6 @@ if (( legacy_broker )); then
   done
 fi
 
-if [[ -n "$("${compose[@]}" ps -q db)" ]] && "${compose[@]}" exec -T db pg_isready >/dev/null 2>&1; then
-  "${project_dir}/scripts/backup_postgres.sh"
-fi
 "${compose[@]}" build
 # The first broker cutover cannot abandon work in Redis DB 2. Drain active
 # consumers or explicitly copy quiesced lists to the durable broker. Results
@@ -171,7 +166,7 @@ if (( legacy_broker )); then
         fi
       fi
     done
-    receipt_dir="${BACKUP_DIR:-/var/backups/portfolio}"
+    receipt_dir="${RECEIPT_DIR:-${project_dir}/var/receipts}"
     mkdir -p "${receipt_dir}"
     receipt_home="$(mktemp -d "${receipt_dir}/broker-handoff-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
     receipt="$(mktemp "${receipt_home}/receipt.XXXXXX")"

@@ -3,52 +3,12 @@ set -Eeuo pipefail
 
 project_dir="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 env_file="${ENV_FILE:-${project_dir}/.env.production}"
-backup_dir="${BACKUP_DIR:-/var/backups/portfolio}"
 disk_limit="${DISK_USAGE_THRESHOLD_PERCENT:-85}"
-backup_age_hours="${BACKUP_FRESHNESS_THRESHOLD_HOURS:-26}"
 compose=(docker compose -f "${project_dir}/docker-compose.prod.yml" --env-file "${env_file}")
 failures=()
 
 disk_used="$(df -P "${project_dir}" | awk 'NR==2 {gsub("%","",$5); print $5}')"
 ((disk_used < disk_limit)) || failures+=("disk usage ${disk_used}%")
-
-latest="$(find "${backup_dir}" -type f -name 'daily-*.dump.enc' -print0 2>/dev/null | xargs -0 ls -1t 2>/dev/null | head -1 || true)"
-if [[ -z "${latest}" ]] || (( $(date +%s) - $(stat -c %Y "${latest}" 2>/dev/null || stat -f %m "${latest}") > backup_age_hours * 3600 )); then
-  failures+=("backup older than ${backup_age_hours}h")
-fi
-
-# A fresh dump on the database host is not a recoverable backup after host
-# loss. A VPS upload or the Mac pull records true only after checking off-host
-# bytes; require the receipt to match the latest artifact and checksum.
-if [[ -n "${latest}" ]]; then
-  stamp="$(basename "${latest}" | sed -n 's/^daily-\(.*\)\.dump\.enc$/\1/p')"
-  evidence="${backup_dir}/backup-evidence-${stamp}.json"
-  if [[ ! -r "${evidence}" || ! -r "${latest}.sha256" ]] || ! python3 - "${evidence}" "$(basename "${latest}")" "${latest}.sha256" <<'PY'
-import json
-import re
-import sys
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as source:
-        record = json.load(source)
-    with open(sys.argv[3], encoding="utf-8") as source:
-        digest, filename = source.read().split()
-    valid = (
-        bool(re.fullmatch(r"[0-9a-f]{64}", digest))
-        and filename == sys.argv[2]
-        and record.get("database_artifact") == sys.argv[2]
-        and record.get("database_sha256") == digest
-        and record.get("decrypt_verified") is True
-        and record.get("off_host_verified") is True
-    )
-except (OSError, ValueError):
-    valid = False
-sys.exit(0 if valid else 1)
-PY
-  then
-    failures+=("latest database backup has no verified off-host copy")
-  fi
-fi
 
 # Every long-running service in docker-compose.prod.yml, i.e. the ones carrying
 # `restart: unless-stopped`. `migrate` is deliberately absent: it is `restart:

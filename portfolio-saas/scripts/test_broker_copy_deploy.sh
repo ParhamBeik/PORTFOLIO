@@ -89,7 +89,7 @@ chmod +x "${scratch}/bin/df" "${scratch}/bin/stat" "${scratch}/bin/docker"
 
 run_deploy() {
   PATH="${scratch}/bin:${PATH}" PROJECT_DIR="${scratch}" ENV_FILE="${scratch}/env" \
-    BACKUP_DIR="${scratch}/receipts" BROKER_HANDOFF_MODE=copy \
+    RECEIPT_DIR="${scratch}/receipts" BROKER_HANDOFF_MODE=copy \
     LEGACY_WATCHDOG_PATH="${scratch}/legacy_watchdog" \
     MOCK_DOCKER_LOG="${scratch}/docker.log" "${scratch}/scripts/deploy.sh"
 }
@@ -181,7 +181,7 @@ fi
 printf 'BROKER_HANDOFF_MODE=copy\n' >>"${scratch}/env"
 : >"${scratch}/docker.log"
 if PATH="${scratch}/bin:${PATH}" PROJECT_DIR="${scratch}" ENV_FILE="${scratch}/env" \
-    BACKUP_DIR="${scratch}/receipts" LEGACY_WATCHDOG_PATH="${scratch}/legacy_watchdog" \
+    RECEIPT_DIR="${scratch}/receipts" LEGACY_WATCHDOG_PATH="${scratch}/legacy_watchdog" \
     MOCK_DOCKER_LOG="${scratch}/docker.log" "${scratch}/scripts/deploy.sh" \
     >"${scratch}/out" 2>"${scratch}/err"; then
   echo "Migration stub should have stopped env-selected copy mode" >&2

@@ -166,11 +166,9 @@ cp .env.production.example .env.production
 chmod 600 .env.production
 
 # The reverse proxy must already be running (docker network vps-edge).
-BACKUP_PASSPHRASE_FILE=/root/secrets/portfolio-backup-passphrase scripts/deploy.sh
+scripts/deploy.sh
 docker compose -f docker-compose.prod.yml exec backend python manage.py seed_assets
 curl https://portfolio.example.com/api/health/            # -> ok
 ```
 
-The passphrase file must live outside the repository with mode `400` or `600`.
-The first deployment skips the pre-deploy backup because no database exists yet;
-later deploys refuse to continue unless the encrypted backup succeeds.
+The storage baseline keeps the live PostgreSQL and MinIO data on the VPS. Backup production is paused until a new backup design is approved.
