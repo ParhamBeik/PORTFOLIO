@@ -192,8 +192,33 @@ jobs:
             echo "::notice::VPS secrets are not set; skipping deploy."
           fi
 
-  deploy:
+  # The VPS cannot download wheels (files.pythonhosted.org hangs from Iran), so
+  # the backend image is built here and pulled by the deploy. Tagged by commit,
+  # so what deploys is exactly what this run built.
+  backend-image:
     needs: [backend, frontend, deploy-configured]
+    if: >-
+      github.ref == 'refs/heads/main'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && needs.deploy-configured.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and push the backend image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/portfolio-backend:${GITHUB_SHA}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -t "$image" portfolio-saas/backend
+          docker push "$image"
+
+  deploy:
+    needs: [backend, frontend, deploy-configured, backend-image]
     if: >-
       github.ref == 'refs/heads/main'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -202,7 +227,18 @@ jobs:
     # A GitHub Environment gives this job its own secrets and an optional
     # manual approval gate; add reviewers there if a deploy should ever pause.
     environment: production
+    permissions:
+      contents: read
+      packages: read
     steps:
+      # The job token expires with the run; the logout step below removes it so
+      # no stale ghcr.io login outlives the deploy (a stale one made every
+      # pull fail with "denied" on 2026-09-29).
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
       - name: Deploy origin/main to the VPS
         run: |
           set -Eeuo pipefail
@@ -220,7 +256,12 @@ jobs:
           #
           # Missing or unreachable mail is reported as degraded. The superuser
           # recovery link keeps accounts recoverable until a relay is configured.
-          ./scripts/deploy.sh
+          BACKEND_IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/portfolio-backend:${GITHUB_SHA}" \
+            ./scripts/deploy.sh
+
+      - name: Log out of ghcr.io
+        if: always()
+        run: docker logout ghcr.io || true
 
       # `if: success()`, never `always()`. With `always()` this step ran after a
       # failed deploy and printed "Deployed <sha> to production." directly under
