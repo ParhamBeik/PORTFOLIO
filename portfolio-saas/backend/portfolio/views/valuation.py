@@ -27,16 +27,82 @@ from ..services.deflator import cpi_for_date, normalize_basis
 from ..services.performance import account_performance
 from ._common import _express_real_toman, _express_usd_real, _fx_rate, _int_param, _scope, _with_usd
 from marketdata import jalali
-from marketdata.currency import is_tse_priced, to_toman
+from marketdata.currency import TOMAN_QUOTE_UNITS, is_tse_priced, to_toman
 from marketdata.integrity import compute_symbol_integrity
-from marketdata.jalali import from_gregorian
+from marketdata.jalali import from_gregorian, to_gregorian
 from marketdata.models import (
+    ArchiveFetchState,
     GoldCurrencyHistory,
     MarketCandle,
     RejectedRecord,
     SymbolIntegrity,
 )
-from marketdata.provenance import daily_bar_price, toman_rate_kwargs, toman_rate_tables
+from marketdata.provenance import BRS_SERIES_ENDPOINTS, daily_bar_price, rejected_pairs, toman_rate_kwargs, toman_rate_tables
+
+
+def _dated_fx_rates(days, symbols):
+    """Accepted provider rates for chart days, carried at most five calendar days.
+
+    One warehouse read per symbol avoids a query for every point of a full-history
+    chart. Unknown-origin legacy rows cannot establish a verified USD value.
+    """
+    if not days:
+        return {}
+    first = from_gregorian(min(days) - timedelta(days=5))
+    last = from_gregorian(max(days))
+    rejected = rejected_pairs(symbols, BRS_SERIES_ENDPOINTS, since=first)
+    rows = GoldCurrencyHistory.objects.filter(
+        symbol__in=symbols, date__gte=first, date__lte=last,
+        close_price__gt=0, source=GoldCurrencyHistory.Source.PROVIDER,
+    ).exclude(origin=GoldCurrencyHistory.Origin.UNKNOWN).order_by("date")
+    by_symbol = {symbol: [] for symbol in symbols}
+    for row in rows:
+        if (row.symbol, row.date) in rejected:
+            continue
+        if str(row.unit or "").strip().casefold() not in TOMAN_QUOTE_UNITS:
+            continue
+        observed = to_gregorian(row.date)
+        if observed is not None:
+            by_symbol[row.symbol].append((observed, Decimal(row.close_price)))
+    rates = {}
+    for symbol, observations in by_symbol.items():
+        cursor = 0
+        latest = None
+        for day in sorted(days):
+            while cursor < len(observations) and observations[cursor][0] <= day:
+                latest = observations[cursor]
+                cursor += 1
+            rates[(symbol, day)] = (
+                latest[1] if latest and (day - latest[0]).days <= 5 else None
+            )
+    return rates
+
+
+def _invalid_snapshot_days(rows, accounts):
+    """A close is stale if a later ledger edit affects a date on or before it."""
+    if not rows or not accounts:
+        return set()
+    changes = sorted(
+        (
+            timezone.localtime(entry["timestamp"], ZoneInfo("Asia/Tehran")).date(),
+            entry["updated_at"]
+        )
+        for entry in LedgerEntry.objects.filter(account__in=accounts).values("timestamp", "updated_at")
+    )
+    stale = set()
+    cursor = 0
+    latest_change = None
+    for row in rows:
+        day = row["day"]
+        while cursor < len(changes) and changes[cursor][0] <= day:
+            changed_at = changes[cursor][1]
+            if latest_change is None or changed_at > latest_change:
+                latest_change = changed_at
+            cursor += 1
+        computed_at = row.get("computed_at") or row.get("timestamp")
+        if latest_change and computed_at and latest_change > computed_at:
+            stale.add(day)
+    return stale
 
 
 class AccountPerformanceView(APIView):
@@ -63,8 +129,13 @@ class AccountDataQualityView(APIView):
         account = request.user.accounts.filter(pk=account_id).first()
         if account is None:
             raise NotFound("Account not found.")
+        holdings = list(account.holdings.filter(is_hidden=False).select_related("asset"))
+        symbols = [h.asset.tse_symbol or h.asset.brs_symbol for h in holdings]
+        states = {
+            (row.symbol, row.endpoint): row for row in ArchiveFetchState.objects.filter(symbol__in=symbols)
+        }
         assets = []
-        for holding in account.holdings.filter(is_hidden=False).select_related("asset"):
+        for holding in holdings:
             asset = holding.asset
             symbol = asset.tse_symbol or asset.brs_symbol
             if asset.is_house or asset.is_manual or not symbol:
@@ -84,7 +155,24 @@ class AccountDataQualityView(APIView):
                 )
             except (TypeError, ValueError) as exc:
                 return Response({"detail": str(exc)}, status=400)
-            assets.append({"asset_key": asset.key, **result})
+            endpoint = (
+                ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED if asset.tse_symbol else
+                ArchiveFetchState.Endpoint.CRYPTO_DAILY if asset.asset_class == "Crypto" else
+                ArchiveFetchState.Endpoint.GOLD_DAILY
+            )
+            state = states.get((symbol, endpoint))
+            repair_state = (
+                "not_scheduled" if state is None else
+                "blocked" if state.blacklisted or state.suspended_at else
+                "verified" if state.verified_complete and not result["missing_count"] else
+                "retrying" if state.consecutive_failures else "pending"
+            )
+            assets.append({
+                "asset_key": asset.key, **result,
+                "repair_state": repair_state,
+                "next_repair_at": state.next_attempt_at.isoformat() if state and state.next_attempt_at else None,
+                "archive_last_success_at": state.last_success_at.isoformat() if state and state.last_success_at else None,
+            })
 
         assessed = [item for item in assets if item["passes_gate"] is not None]
         payload = {
@@ -309,6 +397,53 @@ class SnapshotListView(APIView):
         today = timezone.localtime(now, ZoneInfo("Asia/Tehran")).date()
         account = _scope(request)
         basis = request.query_params.get("basis") or "nominal_toman"
+        if request.query_params.get("view") == "return":
+            # The replay computes same-quantity day pairs; a stored value-only
+            # snapshot cannot distinguish a price gain from a new contribution.
+            from portfolio.services.comparison import BENCHMARK_MAX_DAYS
+
+            requested_days = days if days is not None else BENCHMARK_MAX_DAYS
+            replay_days = min(requested_days, BENCHMARK_MAX_DAYS)
+            dynamic = compute_dynamic_net_worth_series(
+                request.user, account=account, days=replay_days,
+                max_days=BENCHMARK_MAX_DAYS,
+            )
+            level = Decimal("100")
+            started = False
+            broken = False
+            return_series = []
+            for row in dynamic:
+                reason = None
+                if row.get("unpriced_assets"):
+                    reason = "missing_asset_price"
+                elif row.get("approximated"):
+                    reason = "unverified_asset_price"
+                elif broken:
+                    reason = "earlier_history_gap"
+                else:
+                    total = Decimal(row["total"])
+                    if not started and total > 0:
+                        started = True
+                    elif started:
+                        flow = Decimal(row["total_ex_flows"])
+                        base = Decimal(row["total_ex_flows_base"])
+                        if base <= 0 or flow < 0:
+                            reason = "unreconstructable_return"
+                        else:
+                            level *= flow / base
+                if reason:
+                    broken = True
+                return_series.append({
+                    "date": row["date"],
+                    "index": float(level) if started and not broken else None,
+                    "gap_reason": reason,
+                })
+            return Response({
+                "series": return_series,
+                "basis": "return_index",
+                "window_truncated": show_all or requested_days > replay_days,
+                "days_replayed": replay_days,
+            })
         snapshots = Snapshot.objects.filter(user=request.user, day__lt=today)
         if not show_all:
             snapshots = snapshots.filter(day__gte=today - timedelta(days=days - 1))
@@ -317,10 +452,10 @@ class SnapshotListView(APIView):
         else:
             snapshots = snapshots.filter(account=None)
         prices = get_latest_prices()
-        usd_rate = Decimal(prices.get("usd_cash", 0) or 0)
+        usd_rate, _ = _fx_rate(prices, "usd_denominated")
 
         daily = list(snapshots.values(
-            "day", "total_value_tomans", "is_estimated", "is_session_close"
+            "day", "timestamp", "computed_at", "total_value_tomans", "is_estimated", "is_session_close"
         ).order_by("day"))
 
         accounts = [account] if account is not None else list(request.user.accounts.all())
@@ -329,6 +464,7 @@ class SnapshotListView(APIView):
             kind__in=[LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL],
         ).exists()
         has_holdings = Holding.objects.filter(account__in=accounts).exists() if accounts else False
+        stale_days = _invalid_snapshot_days(daily, accounts)
 
         short_window = not show_all and days <= SYNTHETIC_HISTORY_MAX_DAYS
         # Only synthesise when there is genuinely nothing recorded to draw.
@@ -348,18 +484,21 @@ class SnapshotListView(APIView):
                 {
                     "timestamp": row["date"],
                     "date": row["date"],
-                    "total": row["total"],
+                    "total": None if row.get("unpriced_assets") else row["total"],
                     "total_usd": row["total_usd"],
                     "is_estimated": True,
                     "is_session_close": False,
+                    "cache_status": "price_gap" if row.get("unpriced_assets") else "estimated",
                 }
                 for row in dynamic
             ]
         else:
-            current_total = (
-                value_account(account, include_hidden=True)["total"]
-                if account else value_user(request.user, include_hidden=True)["total"]
+            current_valuation = (
+                value_account(account, include_hidden=True)
+                if account else value_user(request.user, include_hidden=True)
             )
+            current_total = current_valuation["total"]
+            current_incomplete = bool(current_valuation.get("excluded"))
             daily.append({
                 "day": today, "total_value_tomans": current_total,
                 "is_estimated": False, "is_session_close": False,
@@ -376,17 +515,72 @@ class SnapshotListView(APIView):
                     "total_usd": None,
                     "is_estimated": bool(row["is_estimated"]),
                     "is_session_close": bool(row["is_session_close"]),
+                    "cache_status": "stale" if row["day"] in stale_days else "ledger_checked",
                 })
             # Snapshots record everything owned, so anything switched off has to
             # come back out here -- across the whole window, not from today
             # forward, or the chart would step down on the day the box was
             # unticked. USD is derived after the subtraction for the same reason.
             _subtract_hidden_holdings(request.user, account, series, now)
+            if current_incomplete:
+                series[-1]["total"] = None
+                series[-1]["cache_status"] = "price_gap"
+            if stale_days:
+                from portfolio.services.comparison import BENCHMARK_MAX_DAYS
 
-        for row in series:
+                replay_days = min(BENCHMARK_MAX_DAYS, (today - min(stale_days)).days + 1)
+                rebuilt = {
+                    row["date"]: row for row in compute_dynamic_net_worth_series(
+                        request.user, account=account, days=replay_days,
+                        max_days=BENCHMARK_MAX_DAYS,
+                    )
+                }
+                stale_day_strings = {day.isoformat() for day in stale_days}
+                for row in series:
+                    if row["date"] not in stale_day_strings:
+                        continue
+                    replacement = rebuilt.get(row["date"])
+                    if replacement and not replacement.get("approximated") and not replacement.get("unpriced_assets"):
+                        row["total"] = replacement["total"]
+                        row["cache_status"] = "rebuilt_from_ledger"
+                        row["is_estimated"] = True
+                    else:
+                        row["total"] = None
+                        row["cache_status"] = "rebuild_gap"
+
+            # The writer is scheduled daily. A missing stored day is an
+            # unobserved value, not permission to connect the neighbouring
+            # closes with a smooth line. Keep that date in the response so the
+            # chart breaks and the repair state remains visible.
+            if series:
+                known = {row["date"]: row for row in series}
+                first_day = datetime.strptime(series[0]["date"], "%Y-%m-%d").date()
+                series = []
+                day = first_day
+                while day <= today:
+                    day_str = day.isoformat()
+                    series.append(known.get(day_str, {
+                        "date": day_str, "timestamp": day_str,
+                        "total": None, "total_usd": None,
+                        "is_estimated": False, "is_session_close": False,
+                        "cache_status": "missing_snapshot",
+                    }))
+                    day += timedelta(days=1)
+
+        chart_days = [datetime.strptime(row["date"], "%Y-%m-%d").date() for row in series]
+        historic_days = {day for day in chart_days if day < today}
+        symbols = ("USD", "USDT_IRT") if basis == "usdt_denominated" else ("USD",)
+        historic_rates = _dated_fx_rates(historic_days, symbols)
+        for row, day in zip(series, chart_days):
+            if row["total"] is None:
+                row["total_usd"] = None
+                row["usd_rate_status"] = "gap"
+                continue
             total = Decimal(str(row["total"])).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
             row["total"] = str(total)
-            row["total_usd"] = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
+            cash_rate = usd_rate if day == today else historic_rates.get(("USD", day))
+            row["total_usd"] = str(round(total / cash_rate, 2)) if cash_rate and cash_rate > 0 else None
+            row["usd_rate_status"] = "verified_current_quote" if day == today and cash_rate else "verified_history" if cash_rate else "gap"
 
         trades = (
             Transaction.objects.filter(
@@ -404,6 +598,7 @@ class SnapshotListView(APIView):
         markers = [
             {
                 "timestamp": t.timestamp.isoformat(),
+                "date": timezone.localtime(t.timestamp, ZoneInfo("Asia/Tehran")).date().isoformat(),
                 "side": t.side,
                 "asset_key": t.asset.key,
                 "asset_name": t.asset.name,
@@ -412,12 +607,15 @@ class SnapshotListView(APIView):
             }
             for t in trades
         ]
-        # A denominated basis divides every point by one live rate; `real_toman`
-        # divides each point by the CPI *of its own day*, which is the whole
-        # point of a real series -- hence a per-row divisor rather than one.
+        # Every denominated point uses its own day's accepted rate. Missing FX
+        # stays a gap, never a Toman value labelled as dollars.
         if basis in ("usd_denominated", "usdt_denominated"):
-            fx_rate, _source = _fx_rate(prices, normalize_basis(basis))
-            divisor = (lambda row: fx_rate) if fx_rate > 0 else None
+            symbol = "USD" if basis == "usd_denominated" else "USDT_IRT"
+            live_rate, _source = _fx_rate(prices, normalize_basis(basis))
+            divisor = lambda row: (
+                live_rate if row["date"] == today.isoformat()
+                else historic_rates.get((symbol, datetime.strptime(row["date"], "%Y-%m-%d").date()))
+            )
         elif basis == "real_toman":
             divisor = lambda row: Decimal(  # noqa: E731
                 str(cpi_for_date(row.get("date") or row.get("timestamp")))
@@ -426,9 +624,16 @@ class SnapshotListView(APIView):
             divisor = None
         if divisor:
             for row in series:
-                for field in ("total", "total_usd"):
-                    if row.get(field) is not None:
-                        row[field] = float(Decimal(str(row[field])) / divisor(row))
+                rate = divisor(row)
+                if not rate or rate <= 0:
+                    row["total"] = None
+                    row["total_usd"] = None
+                    row["fx_gap"] = True
+                else:
+                    if row["total"] is not None:
+                        row["total"] = float(Decimal(str(row["total"])) / rate)
+                    # total_usd always denotes the date's cash USD equivalent,
+                    # regardless of the selected chart basis.
         # The basis these points are actually IN, which is not always the one that
         # was asked for: with no FX rate available `divisor` is None and the series
         # stays in Toman, and the chart would have gone on labelling it dollars.
@@ -440,6 +645,8 @@ class SnapshotListView(APIView):
             "series": series,
             "trades": markers,
             "basis": applied_basis,
+            "history_repair_state": "partial" if any(row.get("cache_status") in {"rebuild_gap", "missing_snapshot", "price_gap"} for row in series)
+                else "rebuilt" if stale_days else "ledger_checked",
         }
         if applied_basis == "real_toman":
             payload["cpi"] = _cpi_window_provenance(series)

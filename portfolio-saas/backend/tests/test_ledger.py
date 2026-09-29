@@ -2458,6 +2458,31 @@ def test_an_opening_with_a_declared_price_has_a_known_cost_basis(
     assert Decimal(row["unrealized_pnl_tomans"]) == Decimal("400000000")
 
 
+def test_stock_total_pnl_counts_recorded_income_and_fees_in_tomans(
+    asset_catalog, write_prices, make_user,
+):
+    from portfolio.services.performance import _position_metrics
+    from portfolio.services.ledger import create_ledger_entry
+
+    asset = asset_catalog["kama_stock"]
+    write_prices({asset.key: Decimal("1200")})  # Rial per true share
+    account = Account.objects.create(user=make_user(email="total-pnl@test.test"), name="Stock")
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.BUY, asset=asset,
+                        quantity=Decimal("100"), unit_price_tomans=Decimal("1000"))
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DIVIDEND, asset=asset,
+                        amount_tomans=Decimal("500"))
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.FEE, asset=asset,
+                        amount_tomans=Decimal("100"))
+
+    row = _position_metrics(account)[asset.key]
+    assert Decimal(row["unrealized_pnl_tomans"]) == Decimal("2000")
+    assert Decimal(row["recorded_income_tomans"]) == Decimal("500")
+    assert Decimal(row["fees_tomans"]) == Decimal("100")
+    assert Decimal(row["paid_in_cost_tomans"]) == Decimal("10100")
+    assert Decimal(row["total_pnl_tomans"]) == Decimal("2400")
+    assert Decimal(row["total_pnl_pct"]) == Decimal("2400") / Decimal("10100")
+
+
 def test_an_opening_without_a_declared_price_is_still_basis_unknown(
     asset_catalog, write_prices, make_user
 ):

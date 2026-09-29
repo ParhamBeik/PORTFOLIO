@@ -845,6 +845,9 @@ class Snapshot(models.Model):
     )
     total_value_tomans = models.DecimalField(max_digits=24, decimal_places=0, default=0)
     timestamp = models.DateTimeField(db_index=True, default=timezone.now)
+    # The close's market timestamp differs from when its cached value was
+    # computed. Null legacy rows conservatively use timestamp for validation.
+    computed_at = models.DateTimeField(null=True, blank=True)
     day = models.DateField(db_index=True)
     is_estimated = models.BooleanField(
         default=False,
@@ -877,9 +880,11 @@ class Snapshot(models.Model):
         ]
 
     def save(self, *args, **kwargs):
+        if self.computed_at is None and self._state.adding:
+            self.computed_at = timezone.now()
         self.day = timezone.localtime(self.timestamp, ZoneInfo("Asia/Tehran")).date()
         if kwargs.get("update_fields") is not None:
-            kwargs["update_fields"] = set(kwargs["update_fields"]) | {"day"}
+            kwargs["update_fields"] = set(kwargs["update_fields"]) | {"day", "computed_at"}
         return super().save(*args, **kwargs)
 
 

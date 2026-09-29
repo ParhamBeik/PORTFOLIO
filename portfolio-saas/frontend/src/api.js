@@ -493,10 +493,11 @@ export const valuation = (account = null, basis = null) => {
 };
 // Net-worth history for the trend chart. account=None -> aggregate series;
 // an account id -> that portfolio's per-account snapshot series.
-export const snapshots = (days = 30, account = null, basis = null) => {
+export const snapshots = (days = 30, account = null, basis = null, view = null) => {
   let url = `/api/snapshots/?days=${days}`;
   if (account) url += `&${accountParam(account)}`;
   if (basis) url += `&basis=${basis}`;
+  if (view) url += `&view=${view}`;
   return api(url);
 };
 
@@ -508,8 +509,13 @@ export const priceHistory = (assetKey, days = 365) =>
 
 export const exploreStocks = (query = "") =>
   api(`/api/explore/stocks/?q=${encodeURIComponent(query)}`);
+export const exploreCatalog = (query = "", sector = "", page = 1) =>
+  api(`/api/explore/stocks/?catalog=1&q=${encodeURIComponent(query)}&sector=${encodeURIComponent(sector)}&page=${page}`);
 export const stockDossier = (symbol, days = 365) =>
   api(`/api/explore/stocks/${encodeURIComponent(symbol)}/?days=${days}`);
+export const publicStockDossier = (symbol) =>
+  api(`/api/public/research/stocks/${encodeURIComponent(symbol)}/`);
+export const publicResearchCatalog = () => api("/api/public/research/stocks/");
 export const researchSettings = () => api("/api/research/settings/");
 export const researchRun = (runId) => api(`/api/research/runs/${runId}/`);
 export const runResearch = (symbol, question, maxCostUsd) =>

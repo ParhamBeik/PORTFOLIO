@@ -17,6 +17,7 @@ import {
 import {
   ago,
   area,
+  dateTime,
   holdingLabel,
   humanize,
   indexPoint,
@@ -54,6 +55,7 @@ import {
 } from "../components/ui.jsx";
 
 const RANGES = [
+  { value: "7", label: "7d" },
   { value: "30", label: "30d" },
   { value: "90", label: "90d" },
   { value: "365", label: "1y" },
@@ -62,6 +64,7 @@ const RANGES = [
 
 const INFLATION_VIEWS = [
   { value: "nominal", label: "Nominal" },
+  { value: "return", label: "Return" },
   { value: "real", label: "vs inflation" },
   { value: "benchmarks", label: "vs gold, USD & market" },
 ];
@@ -93,9 +96,8 @@ function PerformanceUnavailable({ detail }) {
       <span>{detail || PERF_UNLOCK_HINT}</span>
       <span className="mt-2 block text-xs text-muted">
         This is the return on the money you put in, which needs a tracked opening
-        balance. Price-based returns for the same holdings are already available
-        on <Link to="/optimal" className="underline hover:text-text">My Optimal</Link>{" "}
-        and <Link to="/comparison" className="underline hover:text-text">Comparison</Link>.
+        balance. <Link to="/compare" className="underline hover:text-text">Compare</Link>{" "}
+        can replay your contributions into another asset.
       </span>
     </Empty>
   );
@@ -144,6 +146,23 @@ function HeroRow({ state, basis: selected }) {
           basis === "nominal_toman" &&
           data.total_usd !== undefined &&
           data.total_usd !== null;
+        const quality = !data.total_assets ? "No holdings priced"
+          : data.quality_status === "complete" ? "All holdings have current quotes"
+          : data.quality_status === "manual" ? "Includes manual values; these are not live quotes"
+          : data.quality_status === "unavailable" ? "Prices unavailable"
+          : "Includes stale, fallback, or missing prices";
+        const sources = [...new Set((data.items || []).map((item) => item.source).filter(Boolean))];
+        const oldestQuote = (data.items || []).map((item) => item.priced_at).filter(Boolean).sort()[0];
+        const provenance = [
+          quality,
+          sources.length ? `Sources: ${sources.slice(0, 3).join(", ")}${sources.length > 3 ? ` +${sources.length - 3}` : ""}` : null,
+          oldestQuote ? `Oldest displayed mark: ${dateTime(oldestQuote)}` : null,
+          basis === "nominal_toman" && data.total_usd_status === "unavailable_unverified_rate"
+            ? "USD equivalent unavailable: current exchange quote is unverified or stale" : null,
+          basis === "usdt_denominated" && data.conversion_source === "USD"
+            ? "Converted with verified cash USD fallback; USDT quote unavailable" : null,
+          basis === "real_toman" ? REAL_BASIS_NOTE : null,
+        ].filter(Boolean).join(" · ");
         return (
           // The "priced holdings N/N" tile was removed: it read "14/14 Manual"
           // on a fully priced book, and the pricing story is already told where
@@ -155,7 +174,7 @@ function HeroRow({ state, basis: selected }) {
                 label="Total value"
                 value={money(Number(data.total), basis)}
                 size="lg"
-                sub={basis === "real_toman" ? REAL_BASIS_NOTE : undefined}
+                sub={provenance}
                 testId="dashboard-total"
               />
             </div>
@@ -237,8 +256,8 @@ function TrendCard({ activeId, basis }) {
   // it. In that mode both lines are asked for in Toman and the caption says so.
   const trendBasis = mode === "real" ? "nominal_toman" : basis;
   const state = useApi(
-    () => snapshots(days, activeId, trendBasis),
-    [days, activeId, trendBasis]
+    () => snapshots(days, activeId, trendBasis, mode === "return" ? "return" : null),
+    [days, activeId, trendBasis, mode]
   );
   // The same net worth measured in constant Tomans. Fetched only when asked,
   // because it needs a CPI figure for every Jalali year the window spans and
@@ -265,7 +284,7 @@ function TrendCard({ activeId, basis }) {
             options={INFLATION_VIEWS}
             value={mode}
             onChange={setMode}
-            label="Comparison"
+            label="Chart view"
             testId="dashboard-trend-basis"
           />
           <Tabs
@@ -326,7 +345,29 @@ function TrendCard({ activeId, basis }) {
             );
           }
 
-          const points = (data.series || []).map((s) => ({ x: s.date, y: Number(s.total) }));
+          if (mode === "return") {
+            const rows = (data.series || []).map((point) => ({ x: point.date, index: point.index }));
+            const gaps = (data.series || []).filter((point) => point.gap_reason).length;
+            return <>
+              <MultiLineTrend
+                series={[{ key: "index", name: "Cash-flow-adjusted return" }]}
+                data={rows}
+                longTicks={effectiveRange === "365" || effectiveRange === "all"}
+                formatValue={indexPoint}
+                formatAxis={indexPoint}
+                label="Portfolio return indexed to 100, with contributions removed"
+              />
+              <p className="mt-2 text-xs text-muted">Starts at 100 when the portfolio first has value. Trades and deposits do not count as gains.</p>
+              {gaps > 0 && <p className="mt-1 text-xs text-muted">{gaps} dates have missing or unverified prices. Returns after the first gap are withheld.</p>}
+              {data.window_truncated && <p className="mt-1 text-xs text-muted">Return replay is bounded to the latest {data.days_replayed} days. The value chart retains older recorded history.</p>}
+            </>;
+          }
+
+          const points = (data.series || []).map((s) => ({ x: s.date, y: s.total == null ? null : Number(s.total) }));
+          const fxGaps = (data.series || []).filter((s) => s.fx_gap).length;
+          const rebuildGaps = (data.series || []).filter((s) => s.cache_status === "rebuild_gap").length;
+          const missingSnapshots = (data.series || []).filter((s) => s.cache_status === "missing_snapshot").length;
+          const priceGaps = (data.series || []).filter((s) => s.cache_status === "price_gap").length;
           // Counted, not just detected. "Some points are estimated" reads like a
           // footnote when 47 of 66 points are reconstructed rather than recorded,
           // which is a different chart from the one that phrasing implies.
@@ -340,7 +381,7 @@ function TrendCard({ activeId, basis }) {
 
           if (mode === "real" && realState.data?.series?.length) {
             const real = new Map(
-              realState.data.series.map((s) => [s.date, Number(s.total)])
+              realState.data.series.map((s) => [s.date, s.total == null ? null : Number(s.total)])
             );
             const merged = points.map((p) => ({ x: p.x, nominal: p.y, real: real.get(p.x) ?? null }));
             const first = merged.find((m) => m.real != null);
@@ -382,9 +423,25 @@ function TrendCard({ activeId, basis }) {
                   and the numbers describing the same currency. */}
               <AreaTrend
                 data={points}
+                markers={data.trades || []}
                 longTicks={longTicks}
                 basis={data.basis || basis}
               />
+              {(data.trades || []).length > 0 && <p className="mt-2 text-xs text-muted">
+                Triangles mark buys and diamonds mark sells. Activity lists the dated transactions.
+              </p>}
+              {fxGaps > 0 && <p className="mt-2 text-xs text-muted" data-testid="dashboard-fx-gap">
+                {fxGaps} chart {fxGaps === 1 ? "day has" : "days have"} no verified historical exchange rate. Those values are left as gaps.
+              </p>}
+              {rebuildGaps > 0 && <p className="mt-2 text-xs text-muted" data-testid="dashboard-history-gap">
+                {rebuildGaps} older {rebuildGaps === 1 ? "close needs" : "closes need"} a verified ledger and price rebuild. Values are withheld until repair.
+              </p>}
+              {missingSnapshots > 0 && <p className="mt-2 text-xs text-muted" data-testid="dashboard-missing-snapshots">
+                {missingSnapshots} {missingSnapshots === 1 ? "day has" : "days have"} no recorded close. The chart leaves those dates blank pending repair.
+              </p>}
+              {priceGaps > 0 && <p className="mt-2 text-xs text-muted" data-testid="dashboard-price-gaps">
+                {priceGaps} {priceGaps === 1 ? "day has" : "days have"} an unpriced holding. The portfolio total for those dates is withheld.
+              </p>}
               {mode === "real" && realState.error && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-real-error">
                   No inflation-adjusted series for this window: {realState.error.message}
@@ -501,6 +558,8 @@ function PositionsTable({ rows, showAccount }) {
           ? area(r.quantity)
           : quantity(r.quantity, r.quantity_step),
     },
+    { key: "total_pnl", header: "Total P&L", align: "right", render: (r) => r.total_pnl_tomans == null ? "—" : <Delta value={r.total_pnl_tomans} format={signedToman} /> },
+    { key: "total_pct", header: "On paid-in cost", align: "right", render: (r) => r.total_pnl_pct == null ? "—" : <Delta value={r.total_pnl_pct} format={pct} /> },
     // Named in the currency it was paid in. A stock's average cost is a Rial
     // figure sitting one column away from Toman cost basis; an unlabelled
     // number there reads as ten times what was paid. A property's is per
@@ -519,6 +578,8 @@ function PositionsTable({ rows, showAccount }) {
     { key: "value", header: "Current value", align: "right", render: (r) => r.current_value_tomans == null ? "—" : toman(r.current_value_tomans) },
     { key: "realized", header: "Realized P&L", align: "right", render: (r) => r.realized_pnl_tomans == null ? "—" : <Delta value={r.realized_pnl_tomans} format={signedToman} /> },
     { key: "unrealized", header: "Unrealized P&L", align: "right", render: (r) => r.unrealized_pnl_tomans == null ? "—" : <Delta value={r.unrealized_pnl_tomans} format={signedToman} /> },
+    { key: "income", header: "Recorded income", align: "right", render: (r) => r.recorded_income_tomans == null ? "—" : toman(r.recorded_income_tomans) },
+    { key: "fees", header: "Fees", align: "right", render: (r) => r.fees_tomans == null ? "—" : toman(r.fees_tomans) },
   ];
   if (showAccount) {
     columns.splice(1, 0, { key: "portfolio", header: "Portfolio", render: (r) => r.account_name || "—" });
@@ -540,9 +601,8 @@ function PerformanceLockedNote({ detail }) {
   return (
     <p className="mb-3 text-xs text-muted" data-testid="dashboard-performance-locked-note">
       {detail || PERF_UNLOCK_HINT} Until then, what you paid and what it is worth
-      now are shown below — those need no tracking history. Price-based returns
-      are on <Link to="/optimal" className="underline hover:text-text">My Optimal</Link>{" "}
-      and <Link to="/comparison" className="underline hover:text-text">Comparison</Link>.
+      now are shown below — those need no tracking history. <Link to="/compare" className="underline hover:text-text">Compare</Link>{" "}
+      can replay your contributions into another asset.
     </p>
   );
 }
@@ -1117,7 +1177,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
               ),
             },
             { key: "source", header: "Source", render: (r) => r.source || "—" },
-            { key: "priced_at", header: "As of", render: (r) => r.priced_at ? ago(r.age_seconds) : (r.archive_record?.date || "—") },
+            { key: "priced_at", header: "As of", render: (r) => r.priced_at ? `${dateTime(r.priced_at)} · ${ago(r.age_seconds)}` : (r.archive_record?.date ? `Archive ${r.archive_record.date}` : "—") },
           ];
 
           if (activeId == null) {
@@ -1313,45 +1373,62 @@ function WhyDrawer({ assetKey, onClose }) {
 }
 
 
-function HistoryQualityCard({ activeId }) {
+function HistoryQualityCard({ activeId, accounts }) {
+  const targets = activeId == null ? accounts : accounts.filter((a) => a.id === activeId);
+  const targetKey = targets.map((a) => a.id).join(",");
   const state = useApi(
-    () => accountDataQuality(activeId),
-    [activeId],
-    { enabled: Boolean(activeId) }
+    async () => Promise.all(targets.map(async (account) => ({
+      name: account.name, ...(await accountDataQuality(account.id)),
+    }))),
+    [targetKey],
+    { enabled: targets.length > 0 }
   );
-  if (!activeId) {
-    return (
-      <p className="text-sm text-muted" data-testid="dashboard-quality-all">
-        Select one portfolio to see whether its price history is complete enough to trust.
-      </p>
-    );
-  }
+  if (!targets.length) return null;
   return (
     <Card title="History quality" testId="dashboard-quality">
       <Async {...state} testId="dashboard-quality-body" empty="No history-quality data yet.">
-        {(data) => {
-          const failing = (data.assets || []).filter((a) => a.passes_gate === false);
+        {(reports) => {
+          const assessed = reports.reduce((sum, report) => sum + report.assessed_assets, 0);
+          const passing = reports.reduce((sum, report) => sum + report.passing_assets, 0);
+          const failing = reports.flatMap((report) => (report.assets || [])
+            .filter((asset) => asset.passes_gate === false)
+            .map((asset) => ({ ...asset, portfolio: report.name })));
+          const assessedAssets = reports.flatMap((report) => (report.assets || [])
+            .filter((asset) => asset.passes_gate !== null)
+            .map((asset) => ({ ...asset, portfolio: report.name })));
           const tone =
-            data.quality_status === "complete" ? "good"
-            : data.quality_status === "partial" ? "warn"
+            assessed && passing === assessed ? "good"
+            : assessed ? "warn"
             : "neutral";
           return (
             <div className="space-y-2 text-sm">
               <p>
-                <Badge variant={tone}>{humanize(data.quality_status)}</Badge>
+                <Badge variant={tone}>{tone === "good" ? "Complete" : tone === "warn" ? "Partial" : "Unavailable"}</Badge>
                 {" "}
-                {data.passing_assets} of {data.assessed_assets} priced holdings pass the integrity gate.
+                {passing} of {assessed} priced holdings pass the integrity gate
+                {activeId == null ? ` across ${reports.length} portfolios.` : "."}
               </p>
               {failing.length > 0 && (
                 <ul className="list-disc pl-5 text-muted">
                   {failing.map((a) => (
-                    <li key={a.asset_key}>
+                    <li key={`${a.portfolio}:${a.asset_key}`}>
+                      {activeId == null ? `${a.portfolio}: ` : ""}
                       {a.symbol || a.asset_key}
                       {a.reason_codes?.length ? ` — ${a.reason_codes.map(humanize).join(", ")}` : ""}
+                      {a.last_valid_date ? ` · last verified ${a.last_valid_date}` : " · no verified date"}
+                      {a.repair_state ? ` · repair ${humanize(a.repair_state)}` : ""}
                     </li>
                   ))}
                 </ul>
               )}
+              {assessedAssets.length > 0 && <Disclosure summary="Verified dates and repair status" testId="dashboard-quality-detail">
+                <ul className="space-y-1 text-xs text-muted">
+                  {assessedAssets.map((asset) => <li key={`${asset.portfolio}:${asset.asset_key}`}>
+                    {activeId == null ? `${asset.portfolio} · ` : ""}{asset.symbol || asset.asset_key} · last verified {asset.last_valid_date || "none"} · repair {humanize(asset.repair_state || "not_scheduled")}
+                    {asset.next_repair_at ? ` · next attempt ${asset.next_repair_at}` : ""}
+                  </li>)}
+                </ul>
+              </Disclosure>}
               <p className="text-xs text-muted">
                 Live quotes on the holdings table are a different question. This card is about the warehouse history behind returns and P/L.
               </p>
@@ -1374,7 +1451,21 @@ export default function Dashboard({ user }) {
     <div>
       <PageHeader title="Portfolio" subtitle="Your holdings, net worth, allocation, and performance in the selected valuation basis." />
       <div className="space-y-6">
+        {!portfolio.loading && !portfolio.accounts.some((a) => (a.holdings || []).length > 0) && (
+          <Card title="Start your portfolio" testId="dashboard-first-run">
+            <p className="text-sm text-muted">Record a holding or a dated trade to begin tracking value and performance. You can browse company research at any time.</p>
+            <div className="mt-3 flex gap-4 text-sm"><Link to="/onboarding" className="text-accent underline">Add your first holding</Link><Link to="/explore" className="text-accent underline">Browse research</Link></div>
+          </Card>
+        )}
         <HeroRow state={valuationState} basis={basis} />
+        {activeId == null && <Async {...valuationState} testId="dashboard-portfolios">
+          {(data) => data.accounts?.length > 0 && <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="dashboard-portfolio-summaries">
+            {data.accounts.map((account) => <Card key={account.id} title={account.name}>
+              <p className="text-2xl font-semibold">{money(Number(account.total), data.basis || basis)}</p>
+              <p className="mt-1 text-xs text-muted">{account.items?.length || 0} priced holdings · {account.broker || "Portfolio"}</p>
+            </Card>)}
+          </div>}
+        </Async>}
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
           <div className="lg:col-span-2">
             <TrendCard activeId={activeId} basis={basis} />
@@ -1382,7 +1473,7 @@ export default function Dashboard({ user }) {
           <AllocationCard state={valuationState} />
         </div>
         <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} admin={user?.role === "admin"} />
-        <HistoryQualityCard activeId={activeId} />
+        <HistoryQualityCard activeId={activeId} accounts={portfolio.accounts} />
         <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} />
         <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
         <ExcludedDisclosure valuationState={valuationState} />

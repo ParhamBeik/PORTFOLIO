@@ -224,6 +224,14 @@ GAPGPT_CONFIG_FILE = os.getenv("GAPGPT_CONFIG_FILE", "/run/secrets/gapgpt.env")
 RESEARCH_MAX_RUN_USD = Decimal(os.getenv("RESEARCH_MAX_RUN_USD", "0.10"))
 RESEARCH_DAILY_BUDGET_USD = Decimal(os.getenv("RESEARCH_DAILY_BUDGET_USD", "1.00"))
 RESEARCH_MAX_OUTPUT_TOKENS = int(os.getenv("RESEARCH_MAX_OUTPUT_TOKENS", "160"))
+# Public filing display stays closed until source and redistribution review.
+# An explicit symbol list then limits publication to approved dossiers.
+PUBLIC_DOSSIERS_ENABLED = os.getenv("PUBLIC_DOSSIERS_ENABLED", "0") == "1"
+PUBLIC_DOSSIER_SYMBOLS = frozenset(
+    symbol.strip() for symbol in os.getenv("PUBLIC_DOSSIER_SYMBOLS", "").split(",") if symbol.strip()
+)
+# Model calls are withheld until source, payment, and reconciliation gates pass.
+PAID_AI_ENABLED = False
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),

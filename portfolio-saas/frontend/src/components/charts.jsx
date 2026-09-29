@@ -211,8 +211,10 @@ function shareTrendDomain(data, seriesKeys) {
 
   let reach = 0;
   for (const row of data) {
+    if (seriesKeys.some((key) => row[key] == null)) continue;
     let cum = 0;
     for (let i = 0; i < seriesKeys.length - 1; i += 1) {
+      if (row[seriesKeys[i]] == null) continue;
       const v = Number(row[seriesKeys[i]]);
       if (Number.isFinite(v)) cum += v;
       reach = Math.max(reach, Math.abs(cum - 0.5));
@@ -267,6 +269,7 @@ function seriesExtent(data, keys) {
   let hi = -Infinity;
   for (const row of data || []) {
     for (const key of keys) {
+      if (row[key] == null) continue;
       const v = Number(row[key]);
       if (!Number.isFinite(v)) continue;
       lo = Math.min(lo, v);
@@ -372,13 +375,15 @@ function header(label, t) {
  * converts the points and used to leave the label behind, so a portfolio
  * switched to USD drew dollars against a Toman axis under a "T" tooltip.
  */
-export function AreaTrend({ data, height = 260, label = "Portfolio value over time", longTicks, basis = "nominal_toman" }) {
+export function AreaTrend({ data, markers = [], height = 260, label = "Portfolio value over time", longTicks, basis = "nominal_toman" }) {
   const t = useChartTokens();
   const option = useMemo(() => {
     if (!t) return null;
     const c = chrome(t);
     const [lo, hi] = extent(data);
     const { min, max, interval } = niceAxis(...moneyTrendDomain(lo, hi));
+    const valuesByDay = new Map((data || []).map((point) => [point.x, point.y]));
+    const trades = markers.filter((marker) => valuesByDay.get(marker.date) != null);
     return {
       ...c,
       grid: { ...c.grid, top: 12, right: 12 },
@@ -406,7 +411,8 @@ export function AreaTrend({ data, height = 260, label = "Portfolio value over ti
         smooth: true,
         showSymbol: false,
         symbolSize: 8,
-        data: (data || []).map((d) => Number(d.y)),
+        data: (data || []).map((d) => d.y == null ? null : Number(d.y)),
+        connectNulls: false,
         lineStyle: { width: 2, color: t.series[0] },
         itemStyle: { color: t.series[0], borderColor: t.surface, borderWidth: 2 },
         areaStyle: {
@@ -415,10 +421,21 @@ export function AreaTrend({ data, height = 260, label = "Portfolio value over ti
             { offset: 1, color: t.series[0] + "00" },
           ]),
         },
-      }],
+      }, ...["buy", "sell"].map((side) => ({
+        type: "scatter",
+        name: side === "buy" ? "Buy" : "Sell",
+        symbol: side === "buy" ? "triangle" : "diamond",
+        symbolSize: 11,
+        data: trades.filter((trade) => trade.side === side).map((trade) => {
+          const day = trade.date;
+          return [day, Number(valuesByDay.get(day))];
+        }),
+        itemStyle: { color: side === "buy" ? t.good : t.critical },
+        z: 5,
+      }))],
       animation: false,
     };
-  }, [data, t, longTicks, basis]);
+  }, [data, markers, t, longTicks, basis]);
 
   return <EChart option={option} height={height} label={label} />;
 }
@@ -477,9 +494,11 @@ export function MultiLineTrend({
         showSymbol: false,
         symbolSize: 8,
         data: (data || []).map((d) => {
+          if (d[s.key] == null) return null;
           const v = Number(d[s.key]);
           return Number.isFinite(v) ? v : null;
         }),
+        connectNulls: false,
         lineStyle: { width: 2, color: t.series[i % t.series.length] },
         itemStyle: { color: t.series[i % t.series.length], borderColor: t.surface, borderWidth: 2 },
       })),
@@ -537,9 +556,11 @@ export function StackedShareTrend({
         showSymbol: false,
         symbolSize: 8,
         data: (data || []).map((d) => {
+          if (d[s.key] == null) return null;
           const v = Number(d[s.key]);
           return Number.isFinite(v) ? v : null;
         }),
+        connectNulls: false,
         lineStyle: { width: 2, color: t.series[i % t.series.length] },
         itemStyle: { color: t.series[i % t.series.length] },
         areaStyle: { color: t.series[i % t.series.length], opacity: 0.55 },

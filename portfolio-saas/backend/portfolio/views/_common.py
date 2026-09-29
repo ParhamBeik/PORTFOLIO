@@ -11,7 +11,26 @@ from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 from ..services.deflator import cpi_for_date, normalize_basis
-from ..services.valuation import LIABILITY_MONEY_FIELDS
+from ..models import Price
+from ..services.valuation import LIABILITY_MONEY_FIELDS, _live_quality_status, current_market_state
+
+
+def _verified_current_rate(prices, key):
+    """Use the displayed FX rate only when its current quote is unit-verified."""
+    rate = Decimal(prices.get(key, 0) or 0)
+    if rate <= 0:
+        return Decimal("0")
+    row = (Price.objects.select_related("asset").filter(asset__key=key, asset__is_active=True)
+           .order_by("-fetched_at", "-id").first())
+    if (row is None or row.price_unit != Price.Unit.IRT
+            or not row.price_unit_verified or row.source.upper() in {"ARCHIVE", "MANUAL"}
+            or Decimal(str(row.price)) != rate):
+        return Decimal("0")
+    now = timezone.now()
+    age = max(0, int((now - row.fetched_at).total_seconds()))
+    if _live_quality_status(row.asset, age, current_market_state(), fetched_at=row.fetched_at, now=now) != "live":
+        return Decimal("0")
+    return rate
 
 
 def concurrency_cap(view_func):
@@ -122,9 +141,13 @@ def _with_usd(valuation: dict) -> dict:
     indistinguishable from 'we know the rate and it is zero'.
     """
     prices = valuation.get("prices", {})
-    usd_rate = Decimal(prices.get("usd_cash", 0) or 0)
+    usd_rate = _verified_current_rate(prices, "usd_cash")
     if usd_rate:
         valuation["total_usd"] = valuation["total"] / usd_rate
+        valuation["total_usd_status"] = "verified_current_quote"
+    else:
+        valuation.pop("total_usd", None)
+        valuation["total_usd_status"] = "unavailable_unverified_rate"
     return valuation
 
 
@@ -160,10 +183,10 @@ def _fx_rate(prices, basis):
     more than the request failing.
     """
     if basis == "usdt_denominated":
-        rate = Decimal(prices.get("usdt_irt", 0) or 0)
+        rate = _verified_current_rate(prices, "usdt_irt")
         if rate > 0:
             return rate, "USDT"
-    return Decimal(prices.get("usd_cash", 0) or 0), "USD"
+    return _verified_current_rate(prices, "usd_cash"), "USD"
 
 
 def _rescale(valuation, factor, *, to_foreign_currency=False):

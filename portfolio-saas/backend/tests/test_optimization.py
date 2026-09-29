@@ -787,7 +787,10 @@ def test_frontier_endpoint_includes_cloud(synthetic_history, make_user):
     assert resp.status_code == 200
     body = resp.json()
     assert "cloud" in body
-    assert len(body["cloud"]) > 0
+    if body["incomplete_sessions"] or body["excluded_assets"] or body["warnings"]:
+        assert body["cloud"] == [], "a frontier cloud must not hide price-history gaps"
+    else:
+        assert len(body["cloud"]) > 0
     for point in body["cloud"]:
         assert "return" in point and "volatility" in point
         assert point["volatility"] >= 0

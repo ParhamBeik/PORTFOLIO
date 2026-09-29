@@ -84,6 +84,16 @@ def _current_evidence(symbol):
 
 class ResearchSettingsView(APIView):
     def get(self, request):
+        if not settings.PAID_AI_ENABLED:
+            return Response({
+                "provider_status": "release_gated",
+                "provider_model": None,
+                "max_run_usd": "0",
+                "daily_budget_usd": "0",
+                "default_run_usd": "0",
+                "supported_evidence": [],
+                "reason": "Paid AI awaits whole-industry certified data, provider and gateway verification, and wallet reconciliation.",
+            })
         try:
             provider = load_config()
             state = "ready" if provider else "not_configured"
@@ -108,6 +118,8 @@ class ResearchRunView(APIView):
     throttle_scope = "research"
 
     def post(self, request):
+        if not settings.PAID_AI_ENABLED:
+            return Response({"detail": "Paid AI is not released; no model call or charge was made."}, status=503)
         symbol = str(request.data.get("symbol", "")).strip()
         question = str(request.data.get("question", "")).strip()
         if not symbol or len(symbol) > 64 or _instrument(symbol) is None:

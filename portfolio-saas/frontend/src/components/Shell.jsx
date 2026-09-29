@@ -10,6 +10,7 @@ const APP_NAME = "Holdings";
 const PAGES = [
   { to: "/", label: "Portfolio", end: true },
   { to: "/activity", label: "Activity" },
+  { to: "/compare", label: "Compare" },
   { to: "/explore", label: "Explore" },
   { to: "/markets", label: "Markets" },
 ];

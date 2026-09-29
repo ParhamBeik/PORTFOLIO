@@ -10,6 +10,7 @@ vi.mock("../api.js", () => ({
   downloadArchivedFiling: vi.fn(),
   researchRun: vi.fn(),
   exploreStocks: vi.fn(),
+  exploreCatalog: vi.fn(),
   stockDossier: vi.fn(),
   researchSettings: vi.fn(),
   runResearch: vi.fn(),
@@ -31,6 +32,7 @@ describe("company research", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.exploreStocks.mockResolvedValue([{ symbol: "فولاد", name: "Foolad" }]);
+    api.exploreCatalog.mockResolvedValue({ count: 1, page: 1, next_page: null, results: [{ symbol: "فولاد", name: "Foolad", sector: "Steel" }] });
     api.stockDossier.mockResolvedValue({
       company: { name: "Foolad", symbol: "فولاد", sector: "Steel" },
       price: { points: [], paired_candle_days: 0, candle_disagreements_over_1pct: 0, source: "TSETMC" },

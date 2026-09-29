@@ -6,6 +6,7 @@ import Onboarding from "./Onboarding.jsx";
 import AssetHistory from "./AssetHistory.jsx";
 import Comparison from "./Comparison.jsx";
 import Guidance from "./Guidance.jsx";
+import Risk from "./Risk.jsx";
 import { Tabs } from "../components/ui.jsx";
 
 function Destination({ choices, initial, testId, user }) {
@@ -32,6 +33,7 @@ export function PortfolioDestination({ user }) {
   const choices = [
     { value: "summary", label: "Summary", component: Dashboard },
     { value: "breakdown", label: "Breakdown", component: Family },
+    { value: "risk", label: "Risk", component: Risk },
   ];
   return <Destination choices={choices} initial="summary" testId="portfolio-section" user={user} />;
 }

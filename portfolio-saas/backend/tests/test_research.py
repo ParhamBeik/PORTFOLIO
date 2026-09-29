@@ -19,6 +19,12 @@ from research import provider, views
 pytestmark = pytest.mark.django_db
 
 
+@pytest.fixture(autouse=True)
+def legacy_router_test_gate(settings):
+    # Existing provider behavior remains covered even though release keeps it off.
+    settings.PAID_AI_ENABLED = True
+
+
 def _client(make_user):
     MarketInstrument.objects.create(
         source=MarketInstrument.Source.TSETMC,
@@ -122,6 +128,20 @@ def test_research_requires_login_and_keeps_provider_secret_off_settings(make_use
     assert response.data["provider_status"] == "ready"
     assert response.data["provider_model"] == "gemini-2.5-flash-lite"
     assert "test-secret" not in str(response.data)
+
+
+def test_unreleased_ai_cannot_call_provider_or_charge_user(make_user, monkeypatch):
+    client = _client(make_user)
+    monkeypatch.setattr(provider.requests, "post", lambda *args, **kwargs: pytest.fail("provider called"))
+    with override_settings(PAID_AI_ENABLED=False):
+        settings_response = client.get("/api/research/settings/")
+        response = client.post("/api/research/runs/", {
+            "symbol": "فولاد", "question": "How did profit change?", "max_cost_usd": "0.01",
+        }, format="json")
+    assert settings_response.data["provider_status"] == "release_gated"
+    assert response.status_code == 503
+    assert ResearchRun.objects.count() == 0
+    assert ResearchBudgetDay.objects.count() == 0
 
 
 def test_unsupported_question_abstains_without_provider_call(make_user, monkeypatch, tmp_path):

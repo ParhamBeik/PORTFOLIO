@@ -67,33 +67,38 @@ async function fetchPortfolioHistory(accounts, days, basis) {
   return { ...mergeHistory(replies), basis: applied };
 }
 
-function mergeHistory(rows) {
+export function mergeHistory(rows) {
   const dates = new Set();
   for (const row of rows) {
     for (const pt of row.points) dates.add(pt.date);
   }
   const sortedDates = [...dates].sort();
-  const last = Object.fromEntries(rows.map((r) => [r.id, 0]));
+  const byAccount = rows.map((row) => ({
+    id: row.id,
+    points: new Map(row.points.map((point) => [point.date, point.total])),
+  }));
 
   const values = sortedDates.map((date) => {
     const point = { x: date };
     let total = 0;
-    for (const row of rows) {
-      const hit = row.points.find((p) => p.date === date);
-      if (hit) last[row.id] = Number(hit.total);
-      point[String(row.id)] = last[row.id];
-      total += last[row.id];
+    let complete = true;
+    for (const row of byAccount) {
+      const value = row.points.get(date);
+      const amount = value == null ? null : Number(value);
+      point[String(row.id)] = amount;
+      if (amount == null || !Number.isFinite(amount)) complete = false;
+      else total += amount;
     }
-    point._total = total;
+    point._total = complete ? total : null;
     return point;
   });
 
   const shares = values.map((row) => {
     const out = { x: row.x };
-    const total = row._total || 0;
+    const total = row._total;
     for (const rowMeta of rows) {
       const key = String(rowMeta.id);
-      out[key] = total > 0 ? (row[key] || 0) / total : 0;
+      out[key] = total > 0 ? row[key] / total : null;
     }
     return out;
   });
@@ -116,10 +121,11 @@ function collapseForChart(seriesMeta, values, shares) {
     let otherSum = 0;
     for (const s of seriesMeta) {
       if (s.key === "other") continue;
-      next[s.key] = row[s.key] ?? 0;
+      next[s.key] = row[s.key];
     }
     for (const id of other.otherIds) {
-      otherSum += row[String(id)] ?? 0;
+      if (row[String(id)] == null) otherSum = null;
+      else if (otherSum != null) otherSum += row[String(id)];
     }
     next.other = otherSum;
     return next;
@@ -130,10 +136,11 @@ function collapseForChart(seriesMeta, values, shares) {
     let otherSum = 0;
     for (const s of seriesMeta) {
       if (s.key === "other") continue;
-      next[s.key] = row[s.key] ?? 0;
+      next[s.key] = row[s.key];
     }
     for (const id of other.otherIds) {
-      otherSum += row[String(id)] ?? 0;
+      if (row[String(id)] == null) otherSum = null;
+      else if (otherSum != null) otherSum += row[String(id)];
     }
     next.other = otherSum;
     return next;
@@ -266,10 +273,8 @@ function PerformanceTable({ accounts, basis }) {
           {rows.some((r) => !r.performance_available) && (
             <p className="mt-3 text-xs text-muted" data-testid="breakdown-performance-note">
               These measure the return on the money put in, which needs a tracked
-              opening balance. Price-based returns for the same holdings are
-              already available on{" "}
-              <Link to="/optimal" className="underline hover:text-text">My Optimal</Link>{" "}
-              and <Link to="/comparison" className="underline hover:text-text">Comparison</Link>.
+              opening balance. <Link to="/compare" className="underline hover:text-text">Compare</Link>{" "}
+              can replay your contributions into another asset.
             </p>
           )}
           </>

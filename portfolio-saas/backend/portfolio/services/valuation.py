@@ -1472,6 +1472,7 @@ def compute_dynamic_net_worth_series(
         # price had to stand in. A property is never approximate: its worth on a
         # date is the mark that was in force, not a market print.
         approximated = False
+        unpriced_keys: set[str] = set()
 
         day_end = day_ends[days - 1 - i]
         house_areas = {}
@@ -1550,6 +1551,8 @@ def compute_dynamic_net_worth_series(
                             calendar=calendars[market_for_asset(asset)],
                         )
                         if stale > MAX_FORWARD_FILL_SESSIONS:
+                            if qty > 0:
+                                unpriced_keys.add(key)
                             continue  # gap exceeded: don't invent a price
                     else:
                         # No real close anywhere means an asset the provider has
@@ -1557,6 +1560,10 @@ def compute_dynamic_net_worth_series(
                         # available, and only for a position we actually hold.
                         approximated = approximated or qty > 0
                     p = last_known_prices[key]
+                if p <= 0:
+                    if qty > 0:
+                        unpriced_keys.add(key)
+                    continue
                 total += holding_value_to_toman(asset, qty * p)
                 # Both sides of the day's ratio, over the SAME asset at the SAME
                 # quantity -- only the price differs. An asset priced today but
@@ -1623,6 +1630,7 @@ def compute_dynamic_net_worth_series(
             "total_usd": val_usd,
             "is_estimated": True,
             "approximated": approximated,
+            "unpriced_assets": sorted(unpriced_keys),
         })
         prev_day_holdings = day_holdings
         prev_day_prices = day_prices
@@ -1720,6 +1728,7 @@ def conversion_rate_as_of(basis: str, as_of) -> Decimal | None:
     """Use the requested currency's own accepted rate within five calendar days."""
     from .returns import to_jalali_str
     import jdatetime
+    from marketdata.currency import TOMAN_QUOTE_UNITS
 
     symbol = {
         "usd_denominated": "USD",
@@ -1729,14 +1738,17 @@ def conversion_rate_as_of(basis: str, as_of) -> Decimal | None:
         return None
     jalali = to_jalali_str(as_of)
     rejected = rejected_pairs([symbol], BRS_SERIES_ENDPOINTS)
-    row = (
+    candidates = (
         GoldCurrencyHistory.objects.filter(
-            symbol=symbol, date__lte=jalali, close_price__gt=0
+            symbol=symbol, date__lte=jalali, close_price__gt=0,
+            source=GoldCurrencyHistory.Source.PROVIDER,
         )
+        .exclude(origin=GoldCurrencyHistory.Origin.UNKNOWN)
         .exclude(date__in=[day for sym, day in rejected if sym == symbol])
-        .order_by("-date")
-        .first()
+        .order_by("-date")[:8]
     )
+    row = next((candidate for candidate in candidates
+                if str(candidate.unit or "").strip().casefold() in TOMAN_QUOTE_UNITS), None)
     if row is None:
         return None
     try:

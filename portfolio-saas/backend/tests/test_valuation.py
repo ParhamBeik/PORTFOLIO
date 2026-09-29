@@ -6,6 +6,8 @@ Merged from 8 files; each section keeps its original banner.
 from datetime import timedelta
 import datetime as dt
 from decimal import Decimal
+from zoneinfo import ZoneInfo
+from unittest.mock import patch
 
 from django.core.cache import cache
 from django.test import override_settings
@@ -15,6 +17,7 @@ from rest_framework.test import APIClient
 
 from config.settings import CpiUnavailable, cpi_for
 from marketdata.models import GoldCurrencyHistory, MarketDailyBar
+from marketdata.jalali import from_gregorian
 from portfolio.models import Account
 from portfolio.models import Asset, Holding, LedgerEntry
 from portfolio.models import Snapshot
@@ -964,6 +967,113 @@ def test_same_day_snapshots_use_latest_live_point(make_user):
     assert Snapshot.objects.filter(user=user, account=account).count() == 1
 
 
+def test_snapshot_usd_uses_dated_verified_rate_and_leaves_missing_rate_gap(make_user, write_prices):
+    user = make_user("dated-usd-chart@example.com")
+    account = Account.objects.create(user=user, name="Dated FX")
+    today = timezone.localtime(timezone.now(), ZoneInfo("Asia/Tehran")).date()
+    old_day = today - timedelta(days=10)
+    gap_day = today - timedelta(days=1)
+    for day in (old_day, gap_day):
+        Snapshot.objects.create(
+            user=user, account=account, total_value_tomans=Decimal("100000"),
+            timestamp=timezone.make_aware(dt.datetime.combine(day, dt.time(12)), ZoneInfo("Asia/Tehran")),
+        )
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date=from_gregorian(old_day), close_price=Decimal("1000"),
+        origin=GoldCurrencyHistory.Origin.BRSAPI, unit="تومان",
+    )
+    write_prices({"usd_cash": Decimal("2000")})
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    response = client.get(f"/api/snapshots/?days=30&account={account.id}&basis=usd_denominated")
+    assert response.status_code == 200
+    rows = {row["date"]: row for row in response.json()["series"]}
+    assert rows[old_day.isoformat()]["total"] == 100
+    assert rows[old_day.isoformat()]["total_usd"] == "100.00"
+    assert rows[gap_day.isoformat()]["total"] is None
+    assert rows[gap_day.isoformat()]["fx_gap"] is True
+    assert rows[gap_day.isoformat()]["total_usd"] is None
+
+
+def test_current_usd_view_withholds_unverified_fx_quote(make_user, asset_catalog, write_prices):
+    user = make_user("unverified-current-fx@example.com")
+    account = Account.objects.create(user=user, name="FX check")
+    Holding.objects.create(account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("1"))
+    write_prices({"emami_coin": Decimal("100000"), "usd_cash": Decimal("1000")})
+    client = APIClient()
+    client.force_authenticate(user=user)
+    assert client.get("/api/valuation/").json()["total_usd_status"] == "verified_current_quote"
+
+    Price.objects.filter(asset__key="usd_cash").update(price_unit_verified=False)
+    nominal = client.get("/api/valuation/").json()
+    foreign = client.get("/api/valuation/?basis=usd_denominated").json()
+    chart = client.get("/api/snapshots/?days=7&basis=usd_denominated").json()
+    assert nominal["total_usd_status"] == "unavailable_unverified_rate"
+    assert "total_usd" not in nominal
+    assert foreign["basis"] == "nominal_toman"
+    assert chart["series"][-1]["total"] is None
+    assert chart["series"][-1]["usd_rate_status"] == "gap"
+
+
+def test_current_chart_withholds_partial_portfolio_total(make_user, asset_catalog):
+    user = make_user("unpriced-current-chart@example.com")
+    account = Account.objects.create(user=user, name="Missing quote")
+    Holding.objects.create(account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("1"))
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    payload = client.get(f"/api/snapshots/?days=7&account={account.id}").json()
+    assert payload["series"][-1]["total"] is None
+    assert payload["series"][-1]["cache_status"] == "price_gap"
+    assert payload["history_repair_state"] == "partial"
+
+
+def test_snapshot_return_replay_excludes_contributions_and_withholds_after_price_gap(make_user):
+    user = make_user("flow-adjusted-chart@example.com")
+    client = APIClient()
+    client.force_authenticate(user=user)
+    replay = [
+        {"date": "2026-09-01", "total": "100", "total_ex_flows": "0", "total_ex_flows_base": "0"},
+        # New money raises actual value to 210, but the unchanged book gained 10%.
+        {"date": "2026-09-02", "total": "210", "total_ex_flows": "110", "total_ex_flows_base": "100"},
+        {"date": "2026-09-03", "total": "220", "total_ex_flows": "220", "total_ex_flows_base": "210", "unpriced_assets": ["missing_stock"]},
+        {"date": "2026-09-04", "total": "225", "total_ex_flows": "225", "total_ex_flows_base": "220"},
+    ]
+    with patch("portfolio.views.valuation.compute_dynamic_net_worth_series", return_value=replay):
+        response = client.get("/api/snapshots/?days=7&view=return")
+    assert response.status_code == 200
+    assert [row["index"] for row in response.json()["series"]] == [100.0, 110.0, None, None]
+    assert response.json()["series"][2]["gap_reason"] == "missing_asset_price"
+    assert response.json()["series"][3]["gap_reason"] == "earlier_history_gap"
+
+
+def test_backdated_trade_invalidates_old_snapshot_and_rebuilds_its_value(make_user):
+    user = make_user("backdated-rebuild@example.com")
+    account = Account.objects.create(user=user, name="Old history")
+    asset = Asset.objects.create(key="rebuild_gold", name="Gold", asset_class=Asset.AssetClass.GOLD)
+    day = timezone.localtime(timezone.now(), ZoneInfo("Asia/Tehran")).date() - timedelta(days=2)
+    close_time = timezone.make_aware(dt.datetime.combine(day, dt.time(17)), ZoneInfo("Asia/Tehran"))
+    Snapshot.objects.create(user=user, account=account, timestamp=close_time,
+                            total_value_tomans=Decimal("100000"))
+    LedgerEntry.objects.create(account=account, asset=asset, kind=LedgerEntry.Kind.BUY,
+                               quantity=Decimal("1"), price_tomans=Decimal("100000"),
+                               amount_tomans=Decimal("100000"), timestamp=close_time)
+    client = APIClient()
+    client.force_authenticate(user=user)
+    replay = [{"date": day.isoformat(), "total": "120000", "approximated": False,
+               "unpriced_assets": []}]
+    with patch("portfolio.views.valuation.compute_dynamic_net_worth_series", return_value=replay):
+        response = client.get(f"/api/snapshots/?days=7&account={account.id}")
+    assert response.status_code == 200
+    old = response.json()["series"][0]
+    assert old["total"] == "120000"
+    assert old["cache_status"] == "rebuilt_from_ledger"
+    assert response.json()["history_repair_state"] == "partial"
+    assert response.json()["series"][1]["cache_status"] == "missing_snapshot"
+    assert response.json()["series"][1]["total"] is None
+
+
 @pytest.mark.django_db
 def test_day_avg_prefers_live_over_estimated_gap_fills(make_user):
     """A completed close is retained; the live point is derived, never stored."""
@@ -1042,8 +1152,9 @@ def test_days_all_returns_history_beyond_one_year(make_user):
     assert capped[0]["date"] == (timezone.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     full = client.get(f"/api/snapshots/?days=all&account={account.id}").json()["series"]
-    assert len(full) == 3
+    assert len(full) == (dt.date.fromisoformat(full[-1]["date"]) - dt.date.fromisoformat(full[0]["date"])).days + 1
     assert full[0]["date"] == old_snapshot_time.strftime("%Y-%m-%d")
+    assert any(row["cache_status"] == "missing_snapshot" and row["total"] is None for row in full)
 
 
 @pytest.mark.django_db
@@ -2083,9 +2194,11 @@ def test_history_older_than_the_recompute_bound_is_still_netted(
 
     assert resp.status_code == 200, resp.data
     series = resp.data["series"]
-    assert len(series) == 3
+    observed = [point for point in series if point["total"] is not None]
+    assert len(observed) == 3
+    assert any(point["cache_status"] == "missing_snapshot" for point in series)
     # Both stored points and today's derived point are netted.
-    assert all(Decimal(str(p["total"])) == Decimal("200") for p in series), series
+    assert all(Decimal(str(p["total"])) == Decimal("200") for p in observed), series
     # And the out-of-reach one is honest about being an estimate.
     assert series[0]["approximated"] is True
 

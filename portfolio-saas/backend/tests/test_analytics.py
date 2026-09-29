@@ -193,10 +193,12 @@ def test_usdt_denominated_current_value_matches_opening_denomination(make_user):
         symbol="USDT_IRT",
         date=to_jalali_str(timezone.now() - dt.timedelta(days=101)),
         close_price=Decimal("60000"),
+        origin=GoldCurrencyHistory.Origin.BRSAPI, unit="تومان",
     )
     GoldCurrencyHistory.objects.create(
         symbol="USDT_IRT", date=to_jalali_str(timezone.now()),
         close_price=Decimal("60000"),
+        origin=GoldCurrencyHistory.Origin.BRSAPI, unit="تومان",
     )
 
     result = account_performance(account, basis="usdt_denominated")
@@ -225,10 +227,12 @@ def test_usd_conversion_rate_is_read_as_of_the_date_it_is_given():
 
     then = timezone.now() - dt.timedelta(days=400)
     GoldCurrencyHistory.objects.create(
-        symbol="USD", date=to_jalali_str(then), close_price=Decimal("50000")
+        symbol="USD", date=to_jalali_str(then), close_price=Decimal("50000"),
+        origin=GoldCurrencyHistory.Origin.BRSAPI, unit="تومان",
     )
     GoldCurrencyHistory.objects.create(
-        symbol="USD", date=to_jalali_str(timezone.now()), close_price=Decimal("150000")
+        symbol="USD", date=to_jalali_str(timezone.now()), close_price=Decimal("150000"),
+        origin=GoldCurrencyHistory.Origin.BRSAPI, unit="تومان",
     )
 
     assert _conversion_rate("usd_denominated", then) == Decimal("50000")
@@ -249,6 +253,25 @@ def test_unwarehoused_conversion_rate_is_unavailable(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_conversion_rate_rejects_unknown_origin_or_unit():
+    from portfolio.services.performance import _conversion_rate
+    from portfolio.services.returns import to_jalali_str
+
+    day = to_jalali_str(timezone.now())
+    row = GoldCurrencyHistory.objects.create(
+        symbol="USD", date=day, close_price=Decimal("150000"), unit="تومان",
+    )
+    assert _conversion_rate("usd_denominated", timezone.now()) is None
+    row.origin = GoldCurrencyHistory.Origin.BRSAPI
+    row.unit = "ریال"
+    row.save(update_fields=["origin", "unit"])
+    assert _conversion_rate("usd_denominated", timezone.now()) is None
+    row.unit = "تومان"
+    row.save(update_fields=["unit"])
+    assert _conversion_rate("usd_denominated", timezone.now()) == Decimal("150000")
+
+
+@pytest.mark.django_db
 def test_usdt_never_borrows_dollar_rate_and_stale_rate_is_unavailable():
     from portfolio.services.performance import _conversion_rate
     from portfolio.services.returns import to_jalali_str
@@ -257,10 +280,12 @@ def test_usdt_never_borrows_dollar_rate_and_stale_rate_is_unavailable():
     GoldCurrencyHistory.objects.create(
         symbol="USD", date=to_jalali_str(timezone.now()),
         close_price=Decimal("150000"),
+        origin=GoldCurrencyHistory.Origin.BRSAPI, unit="تومان",
     )
     GoldCurrencyHistory.objects.create(
         symbol="USDT_IRT", date=to_jalali_str(observed),
         close_price=Decimal("149000"),
+        origin=GoldCurrencyHistory.Origin.BRSAPI, unit="تومان",
     )
     assert _conversion_rate("usdt_denominated", timezone.now()) is None
     assert _conversion_rate("usd_denominated", timezone.now()) == Decimal("150000")

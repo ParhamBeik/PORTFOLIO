@@ -305,7 +305,8 @@ def _write_snapshots(prices: dict, *, day, session_close_keys: set[str]) -> int:
             Snapshot.objects.update_or_create(
                 user=user, account=account, day=day,
                 defaults={
-                    "timestamp": close_at, "total_value_tomans": account_total,
+                    "timestamp": close_at, "computed_at": timezone.now(),
+                    "total_value_tomans": account_total,
                     "is_estimated": False, "is_session_close": is_close,
                 },
             )
@@ -313,7 +314,8 @@ def _write_snapshots(prices: dict, *, day, session_close_keys: set[str]) -> int:
         Snapshot.objects.update_or_create(
             user=user, account=None, day=day,
             defaults={
-                "timestamp": close_at, "total_value_tomans": user_total,
+                "timestamp": close_at, "computed_at": timezone.now(),
+                "total_value_tomans": user_total,
                 "is_estimated": False,
                 "is_session_close": bool(account_close_flags) and all(account_close_flags),
             },

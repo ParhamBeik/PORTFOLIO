@@ -117,6 +117,24 @@ def _house_position(asset, entries, valuation_items, label=None) -> dict:
     }
 
 
+def _with_total_pnl(row, *, income=Decimal("0"), fees=Decimal("0"), paid_in=None):
+    """Attach lifetime asset P&L with its recorded income and cash cost basis."""
+    realized = row.get("realized_pnl_tomans")
+    unrealized = row.get("unrealized_pnl_tomans")
+    total = (
+        Decimal(realized) + Decimal(unrealized) + income - fees
+        if realized is not None and unrealized is not None else None
+    )
+    row.update({
+        "recorded_income_tomans": str(income),
+        "fees_tomans": str(fees),
+        "paid_in_cost_tomans": str(paid_in) if paid_in is not None else None,
+        "total_pnl_tomans": str(total) if total is not None else None,
+        "total_pnl_pct": str(total / paid_in) if total is not None and paid_in and paid_in > 0 else None,
+    })
+    return row
+
+
 def _position_metrics(account) -> dict:
     from .visibility import hidden_asset_ids
 
@@ -172,13 +190,27 @@ def _position_metrics(account) -> dict:
             # marked three times reported a quantity of 119 and a current price
             # of zero (real estate has no feed to look one up in). It gets its
             # own arithmetic.
-            result[asset.key] = _house_position(
+            house_row = _house_position(
                 asset, entries, valuation_items, labels.get(asset.id)
+            )
+            house_reversed = {entry.reversal_of_id for entry in entries if entry.reversal_of_id}
+            house_live = [entry for entry in entries if not entry.reversal_of_id and entry.pk not in house_reversed]
+            house_income = sum((Decimal(entry.amount_tomans or 0) for entry in house_live
+                                if entry.kind == LedgerEntry.Kind.DIVIDEND), Decimal("0"))
+            house_fees = sum((Decimal(entry.amount_tomans or 0) for entry in house_live
+                              if entry.kind == LedgerEntry.Kind.FEE), Decimal("0"))
+            result[asset.key] = _with_total_pnl(
+                house_row, income=house_income, fees=house_fees,
+                paid_in=Decimal(house_row["total_cost_basis_tomans"]) + house_fees
+                if house_row["total_cost_basis_tomans"] is not None else None,
             )
             continue
         quantity = Decimal("0")
         average_cost = Decimal("0")
         realized = Decimal("0")
+        income = Decimal("0")
+        fees = Decimal("0")
+        paid_in = Decimal("0")
         unknown_basis = False
         # A reversal pair nets to nothing: skip the reversal row AND the row it
         # reverses, or the cost basis keeps an event the holdings no longer have.
@@ -211,6 +243,7 @@ def _position_metrics(account) -> dict:
                 # which is what every opening used to mean, unconditionally.
                 declared = Decimal(entry.cost_basis_tomans or 0)
                 if declared > 0 and not unknown_basis:
+                    paid_in += holding_value_to_toman(asset, declared * qty)
                     if quantity + qty > 0:
                         average_cost = (
                             average_cost * quantity + declared * qty
@@ -234,6 +267,8 @@ def _position_metrics(account) -> dict:
                     # price recorded yet" (see LedgerEntry docstring), not a
                     # free buy — treat cost basis as unknown from here on.
                     unknown_basis = True
+                else:
+                    paid_in += holding_value_to_toman(asset, price * qty)
                 known_quantity = Decimal("0") if unknown_basis else quantity
                 if not unknown_basis and quantity + qty > 0:
                     average_cost = (average_cost * known_quantity + price * qty) / (quantity + qty)
@@ -244,6 +279,12 @@ def _position_metrics(account) -> dict:
                 if not unknown_basis:
                     realized += qty * (price - average_cost)
                 quantity -= qty
+            elif entry.kind == LedgerEntry.Kind.DIVIDEND:
+                income += Decimal(entry.amount_tomans or 0)
+            elif entry.kind == LedgerEntry.Kind.FEE:
+                fee = Decimal(entry.amount_tomans or 0)
+                fees += fee
+                paid_in += fee
         current_price = Decimal(str(prices.get(asset.key, 0) or 0))
         # `average_cost` is a UNIT price and stays in the asset's own quote unit
         # (Rial for TSE), matching what the UI shows next to the live price.
@@ -281,7 +322,7 @@ def _position_metrics(account) -> dict:
             ) if not unknown_basis else None,
             "unrealized_pnl_tomans": str(
                 holding_value_to_toman(asset, (current_price - average_cost) * quantity)
-            ) if not unknown_basis else None,
+            ) if not unknown_basis and (quantity <= 0 or valuation_items.get(asset.key, {}).get("value") is not None) else None,
             "current_value_tomans": (
                 str(valuation_items[asset.key]["value"])
                 if asset.key in valuation_items
@@ -289,6 +330,10 @@ def _position_metrics(account) -> dict:
                 else None
             ),
         }
+        _with_total_pnl(
+            result[asset.key], income=income, fees=fees,
+            paid_in=paid_in if not unknown_basis else None,
+        )
     for holding in account.holdings.select_related("asset").filter(is_hidden=False):
         asset = holding.asset
         if asset.key in result:
@@ -301,6 +346,7 @@ def _position_metrics(account) -> dict:
                 asset, [], valuation_items, holding.label
             )
             result[asset.key]["quantity"] = str(holding.area_sqm)
+            _with_total_pnl(result[asset.key])
             continue
         result[asset.key] = {
             "asset_key": asset.key,
@@ -321,6 +367,7 @@ def _position_metrics(account) -> dict:
                 else None
             ),
         }
+        _with_total_pnl(result[asset.key])
     cache.set(cache_key, result, timeout=3600)
     return result
 

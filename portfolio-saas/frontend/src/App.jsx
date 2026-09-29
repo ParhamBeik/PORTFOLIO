@@ -12,10 +12,12 @@ import { Loading } from "./components/ui.jsx";
 const Onboarding = lazy(() => import("./pages/Onboarding.jsx"));
 const Ops = lazy(() => import("./pages/Ops.jsx"));
 const Explore = lazy(() => import("./pages/Explore.jsx"));
+const Comparison = lazy(() => import("./pages/Comparison.jsx"));
+const PublicResearch = lazy(() => import("./pages/PublicResearch.jsx"));
+const PublicDossier = lazy(() => import("./pages/PublicDossier.jsx"));
 const PortfolioDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.PortfolioDestination })));
 const ActivityDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.ActivityDestination })));
 const MarketsDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.MarketsDestination })));
-const GuidanceDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.GuidanceDestination })));
 
 const PAGE_TITLES = {
   "/": "Portfolio",
@@ -27,6 +29,7 @@ const PAGE_TITLES = {
   "/family": "Breakdown",
   "/breakdown": "Breakdown",
   "/comparison": "Comparison",
+  "/compare": "Compare",
   "/prices": "Price history",
   "/optimal": "My Optimal",
   "/universe": "Best Overall",
@@ -102,7 +105,9 @@ function RouteTitle({ signedIn = false }) {
   const { pathname } = useLocation();
 
   useEffect(() => {
-    const page = PAGE_TITLES[pathname] || (signedIn ? "Portfolio" : "Sign in");
+    const page = pathname.startsWith("/research/stocks/") ? "Company research"
+      : pathname === "/" && !signedIn ? "Research"
+      : PAGE_TITLES[pathname] || (signedIn ? "Portfolio" : "Sign in");
     document.title = `${page} — Holdings`;
   }, [pathname, signedIn]);
 
@@ -157,7 +162,7 @@ export default function App() {
             {notice}
           </p>
         )}
-        <Routes>
+        <Suspense fallback={<Loading testId="route-loading" />}><Routes>
           {/* A privacy policy nobody can read without an account is not a
               privacy policy. The signed-out tree was a single catch-all, so
               /privacy and /terms both answered with the sign-in form -- which
@@ -177,8 +182,10 @@ export default function App() {
             path="/signup"
             element={<AuthRoute mode="signup" onAuthed={onAuthed} />}
           />
+          <Route path="/" element={<PublicResearch />} />
+          <Route path="/research/stocks/:symbol" element={<PublicDossier />} />
           <Route path="*" element={<LoginRedirect />} />
-        </Routes>
+        </Routes></Suspense>
       </BrowserRouter>
     );
   }
@@ -209,19 +216,21 @@ export default function App() {
               <Route path="/privacy" element={<Legal kind="privacy" authed />} />
               <Route path="/terms" element={<Legal kind="terms" authed />} />
               <Route path="/explore" element={<Explore />} />
+              <Route path="/research/stocks/:symbol" element={<PublicDossier />} />
               <Route element={<HoldingsGate user={user} />}>
                 <Route index element={<PortfolioDestination user={user} />} />
                 <Route path="/activity" element={<ActivityDestination />} />
+                <Route path="/compare" element={<Comparison />} />
                 <Route path="/markets" element={<MarketsDestination />} />
-                <Route path="/guidance" element={<GuidanceDestination user={user} onUserChange={setUser} />} />
-                <Route path="/optimal" element={<LegacyRedirect to="/guidance?view=personal" />} />
-                <Route path="/universe" element={<LegacyRedirect to="/guidance?view=benchmark" />} />
-                <Route path="/best-overall" element={<LegacyRedirect to="/guidance?view=benchmark" />} />
+                <Route path="/guidance" element={<LegacyRedirect to="/?view=risk" />} />
+                <Route path="/optimal" element={<LegacyRedirect to="/?view=risk" />} />
+                <Route path="/universe" element={<LegacyRedirect to="/?view=risk" />} />
+                <Route path="/best-overall" element={<LegacyRedirect to="/?view=risk" />} />
                 <Route path="/onboarding" element={<Onboarding />} />
                 <Route path="/ledger" element={<LegacyRedirect to="/activity" />} />
                 <Route path="/family" element={<LegacyRedirect to="/?view=breakdown" />} />
                 <Route path="/breakdown" element={<LegacyRedirect to="/?view=breakdown" />} />
-                <Route path="/comparison" element={<LegacyRedirect to="/markets?view=comparison" />} />
+                <Route path="/comparison" element={<LegacyRedirect to="/compare" />} />
                 <Route path="/prices" element={<LegacyRedirect to="/markets?view=prices" />} />
                 <Route path="/ops" element={<Ops user={user} />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
@@ -236,10 +245,8 @@ export default function App() {
 
 export { hasAnyHoldings } from "./holdingsGate.js";
 
-// One gate for both directions: empty accounts belong on onboarding, and an
-// account that already has holdings should not sit on "Add your first holding"
-// because they bookmarked the URL or signed in from a deep link. The old guard
-// lived only on `/`, so signing in at `/ledger` skipped onboarding entirely.
+// Keep completed accounts out of first-run setup. Empty accounts may browse
+// their home, activity, comparison, and research while they prepare holdings.
 function HoldingsGate({ user }) {
   const { pathname } = useLocation();
   const { accounts, loading, error } = usePortfolio();
@@ -254,9 +261,6 @@ function HoldingsGate({ user }) {
   const hasHoldings = hasAnyHoldings(accounts);
 
   if (!error) {
-    if (!hasHoldings && !onOnboarding) {
-      return <Navigate to="/onboarding" replace />;
-    }
     if (hasHoldings && onOnboarding) {
       return <Navigate to="/" replace />;
     }

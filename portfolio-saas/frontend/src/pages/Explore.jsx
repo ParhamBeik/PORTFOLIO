@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { downloadArchivedFiling, exploreStocks, researchRun, researchSettings, runResearch, stockDossier } from "../api.js";
+import { downloadArchivedFiling, exploreCatalog, exploreStocks, researchRun, researchSettings, runResearch, stockDossier } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
-import { Async, Badge, Button, Card, Empty, Field, Input, PageHeader, Tabs, Textarea } from "../components/ui.jsx";
+import { Async, Badge, Button, Card, Empty, Field, Input, PageHeader, Table, Tabs, Textarea } from "../components/ui.jsx";
 import { date, num, rial } from "../format.js";
 import { useApi } from "../useApi.js";
 
@@ -146,7 +146,9 @@ function ResearchPanel({ symbol }) {
             <p className="text-xs text-muted">
               {config.provider_status === "ready"
                 ? `Model: ${config.provider_model}. Your question goes to GapGPT; portfolio holdings do not. Choose a per-run cost ceiling; the server also enforces a daily research ceiling.`
-                : "GapGPT is not yet connected to the News project's server-side settings. Verified charts above remain available."}
+                : config.provider_status === "release_gated"
+                  ? "AI research is paused until filing coverage, payment, provider, and answer-quality release checks pass. Filing-backed data above remains available."
+                  : "AI research is unavailable. Filing-backed data above remains available."}
             </p>
             <form className="space-y-3" onSubmit={submit}>
               <Field label="Your question" hint="For example: Which verified month had the highest sales?">
@@ -362,14 +364,19 @@ export default function Explore() {
   const symbol = params.get("symbol") || "";
   const [draft, setDraft] = useState("");
   const [query, setQuery] = useState("");
+  const [sectorDraft, setSectorDraft] = useState("");
+  const [sector, setSector] = useState("");
+  const [page, setPage] = useState(1);
   const results = useApi(() => exploreStocks(query), [query]);
+  const catalog = useApi(() => exploreCatalog(query, sector, page), [query, sector, page]);
 
   return (
     <div className="space-y-5">
       <PageHeader title="Explore companies" subtitle="Find a TSE company and inspect prices, coverage, and the original disclosures behind future research." />
       <Card title="Find a company" testId="explore-search">
-        <form className="flex flex-wrap gap-2" onSubmit={(event) => { event.preventDefault(); setQuery(draft.trim()); }}>
+        <form className="flex flex-wrap gap-2" onSubmit={(event) => { event.preventDefault(); setQuery(draft.trim()); setSector(sectorDraft.trim()); setPage(1); }}>
           <Input label="Search by TSE symbol or company name" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Symbol or company name" maxLength={100} className="min-w-52 flex-1" data-testid="explore-query" />
+          <Input label="Filter by sector" value={sectorDraft} onChange={(event) => setSectorDraft(event.target.value)} placeholder="Sector" maxLength={100} className="min-w-36" data-testid="explore-sector" />
           <Button type="submit" variant="ghost" data-testid="explore-submit">Search</Button>
         </form>
         <Async {...results} testId="explore-results" empty="No stocks match this search.">
@@ -388,6 +395,25 @@ export default function Explore() {
               ))}
             </div>
           ) : <Empty testId="explore-no-results">No eligible TSE stock matches.</Empty>}
+        </Async>
+      </Card>
+      <Card title="Eligible stock listings" subtitle="Browse the full provider catalog, 50 at a time. Issuer identity and filing coverage remain unverified until the source audit is complete." testId="explore-catalog">
+        <Async {...catalog} testId="explore-catalog-body">
+          {(data) => <div className="space-y-3">
+            <p className="text-xs text-muted">{data.count} eligible listings · page {data.page} · financial and total investor return fields are withheld pending certification.</p>
+            <Table caption="Eligible stock listings" mobileCards rows={data.results || []} rowKey={(row) => row.symbol} columns={[
+              { key: "symbol", header: "Symbol", render: (row) => <Button variant="ghost" onClick={() => setParams({ symbol: row.symbol })}>{row.symbol}</Button> },
+              { key: "name", header: "Company", render: (row) => row.name },
+              { key: "sector", header: "Sector", render: (row) => row.sector || "Unverified" },
+              { key: "filings", header: "Financials", render: () => "Certification pending" },
+              { key: "returns", header: "Total return", render: () => "Corporate actions pending" },
+            ]} />
+            <div className="flex items-center gap-3 text-sm">
+              <Button disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>Previous</Button>
+              <span>Page {page}</span>
+              <Button disabled={!data.next_page} onClick={() => setPage(data.next_page)}>Next</Button>
+            </div>
+          </div>}
         </Async>
       </Card>
       {symbol ? <Company key={symbol} symbol={symbol} /> : (

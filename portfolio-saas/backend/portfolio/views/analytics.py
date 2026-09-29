@@ -236,9 +236,24 @@ class FrontierView(APIView):
         # Inject the current portfolio point, on the SAME panel and the SAME
         # annualization the frontier used -- a default-window, whole-catalog
         # matrix put the user's dot on a chart built from different data.
-        returns, _ = daily_returns_matrix(
+        returns, excluded = daily_returns_matrix(
             history_days=window, universe=universe, held_keys=held_keys
         )
+        warnings = returns.attrs.get("warnings", [])
+        eligible_keys = set(returns.columns) - {
+            row.get("key") for row in [*excluded, *warnings]
+        }
+        covered_share = sum(
+            (weight for key, weight in weights.items() if key in eligible_keys), 0.0
+        )
+        excluded_assets = [
+            {"key": key, "reason": next(
+                (row.get("reason") for row in [*excluded, *warnings] if row.get("key") == key),
+                "missing_history",
+            )}
+            for key in weights if key not in eligible_keys
+        ]
+        incomplete_sessions = int(returns[list(eligible_keys)].isna().any(axis=1).sum()) if eligible_keys else 0
         frequency = float(
             frontier.get("periods_per_year")
             or returns.attrs.get("periods_per_year")
@@ -247,13 +262,14 @@ class FrontierView(APIView):
         current_point = None
         cloud = []
         if weights and not returns.empty:
-            cols = [k for k in weights if k in returns.columns]
+            cols = [k for k in weights if k in eligible_keys]
             if cols:
-                sub = returns[cols].fillna(0.0).to_numpy()
+                complete_returns = returns[cols].dropna()
+                sub = complete_returns.to_numpy()
                 w = np.array([weights[k] for k in cols], dtype=float)
-                if w.sum() > 0:
+                if w.sum() > 0 and len(complete_returns) >= 30 and covered_share >= 0.999 and not incomplete_sessions:
                     w = w / w.sum()
-                    port = pd.Series(sub @ w, index=returns.index)
+                    port = pd.Series(sub @ w, index=complete_returns.index)
                     if port.std(ddof=1) > 0:
                         ann_ret = float(port.mean() * frequency)
                         ann_vol = float(port.std(ddof=1) * np.sqrt(frequency))
@@ -266,7 +282,7 @@ class FrontierView(APIView):
                 # what varying the user's own mix (not the whole market) could do.
                 # Pure numpy, no solver: 400 Dirichlet draws mapped through the
                 # same covariance the frontier line already used.
-                if len(cols) >= 2:
+                if len(cols) >= 2 and len(complete_returns) >= 30 and not excluded_assets and not incomplete_sessions:
                     rng = np.random.default_rng()
                     draws = rng.dirichlet(np.ones(len(cols)), size=400)
                     port_returns = sub @ draws.T
@@ -283,6 +299,11 @@ class FrontierView(APIView):
             "min_volatility": frontier["min_volatility"],
             "current": current_point,
             "cloud": cloud,
+            "covered_share": round(covered_share, 6),
+            "excluded_assets": excluded_assets,
+            "history_observations": len(returns.index),
+            "incomplete_sessions": incomplete_sessions,
+            "warnings": warnings,
         })
 
 

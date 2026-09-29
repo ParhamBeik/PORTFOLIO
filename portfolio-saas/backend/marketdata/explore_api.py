@@ -16,6 +16,7 @@ from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -370,11 +371,62 @@ def _balance_sheets(symbol, start, end):
     }
 
 
+class PublicResearchCatalogView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        if not settings.PUBLIC_DOSSIERS_ENABLED or not settings.PUBLIC_DOSSIER_SYMBOLS:
+            return Response({"results": [], "status": "awaiting_certification"})
+        instruments = MarketInstrument.objects.filter(
+            source=MarketInstrument.Source.TSETMC,
+            category=MarketInstrument.Category.STOCK,
+            eligible=True,
+            symbol__in=settings.PUBLIC_DOSSIER_SYMBOLS,
+        ).order_by("symbol")
+        return Response({
+            "results": [{"symbol": item.symbol, "name": item.name,
+                         "sector": item.provider_group} for item in instruments],
+            "status": "approved_filings_only",
+        })
+
+
+class PublicStockDossierView(APIView):
+    """Approved filing-only projection; never includes provider price or FX data."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, symbol):
+        if (not settings.PUBLIC_DOSSIERS_ENABLED
+                or symbol not in settings.PUBLIC_DOSSIER_SYMBOLS):
+            raise NotFound("This public dossier has not been approved.")
+        instrument = _instrument(symbol)
+        if instrument is None:
+            raise NotFound("No eligible TSE stock with this symbol was found.")
+        metadata = StockSymbolMetadata.objects.filter(l18=symbol).order_by("-updated_at").first()
+        today = timezone.localtime(timezone.now(), jalali.TEHRAN).date()
+        end = jalali.from_gregorian(today)
+        return Response({
+            "company": {
+                "symbol": symbol,
+                "name": metadata.l30 if metadata else instrument.name,
+                "sector": metadata.sector if metadata else instrument.provider_group,
+                "isin": metadata.isin if metadata else instrument.isin,
+            },
+            "monthly_sales": _monthly_sales(symbol, jalali.from_gregorian(today - timedelta(days=365)), end),
+            "financial_metrics": _income_statements(symbol, jalali.from_gregorian(today - timedelta(days=3650)), end),
+            "balance_sheet": _balance_sheets(symbol, jalali.from_gregorian(today - timedelta(days=3650)), end),
+            "price_status": "withheld_pending_redistribution_rights",
+        })
+
+
 class StockSearchView(APIView):
     def get(self, request):
         query = request.query_params.get("q", "").strip()
         if len(query) > 100:
             raise ValidationError({"q": "Search must be 100 characters or fewer."})
+        sector = request.query_params.get("sector", "").strip()
+        if len(sector) > 100:
+            raise ValidationError({"sector": "Sector filter must be 100 characters or fewer."})
         rows = MarketInstrument.objects.filter(
             source=MarketInstrument.Source.TSETMC,
             category=MarketInstrument.Category.STOCK,
@@ -382,6 +434,40 @@ class StockSearchView(APIView):
         )
         if query:
             rows = rows.filter(Q(symbol__icontains=query) | Q(name__icontains=query))
+        if request.query_params.get("catalog") == "1":
+            try:
+                page = int(request.query_params.get("page", "1"))
+            except ValueError as exc:
+                raise ValidationError({"page": "Page must be a positive integer."}) from exc
+            if page < 1 or page > 100000:
+                raise ValidationError({"page": "Page must be a positive integer."})
+            if sector:
+                matching = StockSymbolMetadata.objects.filter(
+                    Q(sector__icontains=sector) | Q(sector_sub__icontains=sector)
+                ).values_list("l18", flat=True)
+                rows = rows.filter(symbol__in=matching)
+            count = rows.count()
+            size = 50
+            listing = list(rows.order_by("symbol")[(page - 1) * size:page * size])
+            metadata = {}
+            for item in StockSymbolMetadata.objects.filter(l18__in=[row.symbol for row in listing]).order_by("-updated_at"):
+                metadata.setdefault(item.l18, item)
+            return Response({
+                "count": count,
+                "page": page,
+                "page_size": size,
+                "next_page": page + 1 if page * size < count else None,
+                "issuer_identity_status": "unverified",
+                "results": [{
+                    "symbol": row.symbol,
+                    "name": metadata[row.symbol].l30 if row.symbol in metadata else row.name,
+                    "isin": row.isin,
+                    "sector": metadata[row.symbol].sector if row.symbol in metadata else row.provider_group,
+                    "sector_source": "symbol_metadata" if row.symbol in metadata else "instrument_catalog",
+                    "financial_status": "issuer_filing_certification_pending",
+                    "total_return_status": "corporate_action_chain_pending",
+                } for row in listing],
+            })
         return Response([
             {"symbol": row.symbol, "name": row.name, "isin": row.isin}
             for row in rows.order_by("symbol")[:30]

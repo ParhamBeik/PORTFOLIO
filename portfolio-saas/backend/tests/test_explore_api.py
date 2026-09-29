@@ -7,6 +7,7 @@ import io
 
 import pytest
 from django.conf import settings
+from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -47,6 +48,52 @@ def test_explore_requires_authentication_and_eligible_catalog_symbol(make_user):
     client.force_authenticate(user=make_user())
     assert client.get("/api/explore/stocks/?q=کاما").data == []
     assert client.get("/api/explore/stocks/کاما/").status_code == 404
+
+
+def test_catalog_pages_every_eligible_listing_and_filters_sector(make_user):
+    for number in range(55):
+        _stock(symbol=f"STK{number:03d}")
+    _stock(symbol="HIDDEN", eligible=False)
+    StockSymbolMetadata.objects.create(
+        ins_code=4242, l18="STK050", l30="Fifty", sector="Metals",
+    )
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+
+    first = client.get("/api/explore/stocks/?catalog=1&page=1").data
+    second = client.get("/api/explore/stocks/?catalog=1&page=2").data
+    assert first["count"] == 55
+    assert len(first["results"]) == 50
+    assert len(second["results"]) == 5
+    assert first["next_page"] == 2
+    assert second["next_page"] is None
+    assert {row["symbol"] for row in first["results"] + second["results"]} == {
+        f"STK{number:03d}" for number in range(55)
+    }
+    filtered = client.get("/api/explore/stocks/?catalog=1&sector=Metals").data
+    assert [row["symbol"] for row in filtered["results"]] == ["STK050"]
+    assert filtered["results"][0]["financial_status"] == "issuer_filing_certification_pending"
+
+
+def test_public_dossier_requires_explicit_approval_and_omits_provider_prices():
+    _stock()
+    _stock(symbol="OTHER")
+    anonymous = APIClient()
+    url = "/api/public/research/stocks/کاما/"
+    assert anonymous.get(url).status_code == 404
+    assert anonymous.get("/api/public/research/stocks/").data["results"] == []
+    with override_settings(PUBLIC_DOSSIERS_ENABLED=True, PUBLIC_DOSSIER_SYMBOLS=frozenset()):
+        assert anonymous.get(url).status_code == 404
+    with override_settings(PUBLIC_DOSSIERS_ENABLED=True, PUBLIC_DOSSIER_SYMBOLS=frozenset({"کاما"})):
+        response = anonymous.get(url)
+    assert response.status_code == 200
+    assert response.data["company"]["symbol"] == "کاما"
+    assert response.data["price_status"] == "withheld_pending_redistribution_rights"
+    assert "price" not in response.data
+    assert "portfolio" not in response.data
+    with override_settings(PUBLIC_DOSSIERS_ENABLED=True, PUBLIC_DOSSIER_SYMBOLS=frozenset({"کاما"})):
+        catalog = anonymous.get("/api/public/research/stocks/").data
+    assert [row["symbol"] for row in catalog["results"]] == ["کاما"]
 
 
 def test_company_dossier_exposes_price_conflict_but_no_unverified_metrics(make_user):
