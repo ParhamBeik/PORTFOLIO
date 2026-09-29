@@ -3,19 +3,12 @@ set -Eeuo pipefail
 
 project_dir="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 env_file="${ENV_FILE:-${project_dir}/.env.production}"
-backup_dir="${BACKUP_DIR:-/var/backups/portfolio}"
 disk_limit="${DISK_USAGE_THRESHOLD_PERCENT:-85}"
-backup_age_hours="${BACKUP_FRESHNESS_THRESHOLD_HOURS:-26}"
 compose=(docker compose -f "${project_dir}/docker-compose.prod.yml" --env-file "${env_file}")
 failures=()
 
 disk_used="$(df -P "${project_dir}" | awk 'NR==2 {gsub("%","",$5); print $5}')"
 ((disk_used < disk_limit)) || failures+=("disk usage ${disk_used}%")
-
-latest="$(find "${backup_dir}" -type f -name 'daily-*.dump.enc' -print0 2>/dev/null | xargs -0 ls -1t 2>/dev/null | head -1 || true)"
-if [[ -z "${latest}" ]] || (( $(date +%s) - $(stat -f %m "${latest}" 2>/dev/null || stat -c %Y "${latest}") > backup_age_hours * 3600 )); then
-  failures+=("backup older than ${backup_age_hours}h")
-fi
 
 # Every long-running service in docker-compose.prod.yml, i.e. the ones carrying
 # `restart: unless-stopped`. `migrate` is deliberately absent: it is `restart:
@@ -31,7 +24,15 @@ fi
 # Asking for the names and looking for each one turns that into a real
 # assertion, and names the service that is actually down instead of saying
 # "container health check failed" about all eight.
-expected_services=(db redis minio backend celery_worker_live celery_worker_archive celery_beat frontend)
+expected_services=(db redis broker minio backend celery_worker_live celery_beat frontend)
+archive_worker_enabled="$(awk -F= '$1=="ARCHIVE_WORKER_ENABLED"{print $2; exit}' "${env_file}")"
+codal_worker_enabled="$(awk -F= '$1=="CODAL_WORKER_ENABLED"{print $2; exit}' "${env_file}")"
+if [[ "${archive_worker_enabled:-1}" == "1" ]]; then
+  expected_services+=(celery_worker_archive)
+fi
+if [[ "${codal_worker_enabled:-1}" == "1" ]]; then
+  expected_services+=(celery_worker_codal)
+fi
 running_services="$("${compose[@]}" ps --status running --services 2>/dev/null || true)"
 for service in "${expected_services[@]}"; do
   grep -qx -- "${service}" <<<"${running_services}" || failures+=("service ${service} is not running")

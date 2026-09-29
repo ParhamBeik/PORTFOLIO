@@ -11,6 +11,8 @@ direction: reading portfolio.models here would invert portfolio->marketdata, so
 the Asset lookups are lazy imports kept inside functions and treated as
 configuration reads, not domain coupling.
 """
+import base64
+import json
 import logging
 import os
 import re
@@ -57,6 +59,7 @@ from .models import (
     MarketInstrument,
     OperationalMetricSnapshot,
     RejectedRecord,
+    ResearchCoverageSnapshot,
     StockSymbolMetadata,
     SymbolIntegrity,
     WorkflowRun,
@@ -307,6 +310,12 @@ def queue_codal_extractions():
             metadata={"reason": "queue_full", "queue_depth": depth},
         )
         return 0
+    try:
+        pending_ids = _pending_codal_ids() if depth else set()
+    except (ValueError, KeyError, TypeError, UnicodeError):
+        logger.exception("Could not decode pending Codal tasks; refusing to add duplicates.")
+        outcome.finish(WorkflowRun.Outcome.SKIPPED, error_code="queue_unreadable")
+        return 0
 
     has_artifact = (
         Q(link_excel__gt="")
@@ -330,6 +339,7 @@ def queue_codal_extractions():
     ids = list(
         CodalAnnouncement.objects.filter(has_artifact)
         .filter(Q(report__isnull=True) | retryable)
+        .exclude(pk__in=pending_ids)
         .order_by("-date_publish", "-time_publish")
         .values_list("id", flat=True)[:limit]
     )
@@ -569,6 +579,24 @@ def _queue_slots(queue, limit):
         logger.exception("Could not inspect Celery queue %s.", queue)
         return 0, None
     return max(0, limit - depth), depth
+
+
+def _pending_codal_ids():
+    """Read the bounded pending queue so a stranded filing is not re-enqueued."""
+    from redis import Redis
+
+    ids = set()
+    for raw in Redis.from_url(settings.CELERY_BROKER_URL).lrange("codal", 0, -1):
+        envelope = json.loads(raw)
+        if envelope["headers"]["task"] != "marketdata.tasks.extract_codal_report":
+            continue
+        if envelope["properties"]["body_encoding"] != "base64":
+            raise ValueError("Unsupported Codal task encoding")
+        args = json.loads(base64.b64decode(envelope["body"], validate=True))[0]
+        if len(args) != 1 or type(args[0]) is not int:
+            raise ValueError("Unexpected Codal task arguments")
+        ids.add(args[0])
+    return ids
 
 
 def _dispatch_codal_ids(ids, *, slots=None):
@@ -980,6 +1008,29 @@ def capture_operational_metrics():
         metadata={"slot": slot.isoformat(), **_quota_attribution_drift()},
     )
     return snapshot.pk
+
+
+@shared_task(ignore_result=True)
+def capture_research_coverage():
+    """Scan the stock universe once daily without calling a paid provider."""
+    from .research_coverage import refresh_research_coverage
+
+    outcome = _ledgered(
+        "capture_research_coverage", source="",
+        destination_table="ResearchCoverageSnapshot",
+    )
+    try:
+        snapshot = refresh_research_coverage()
+        ResearchCoverageSnapshot.objects.filter(
+            finished_at__lt=timezone.now() - timedelta(days=90)
+        ).exclude(pk=snapshot.pk).delete()
+        invalidate_ops_cache()
+        _finish_ok(outcome, rows_accepted=snapshot.universe_size, rows_created=1,
+                   metadata={"snapshot_id": snapshot.pk, "window_days": snapshot.window_days})
+        return snapshot.pk
+    except Exception as err:
+        _finish_fail(outcome, err)
+        raise
 
 
 def _quota_attribution_drift():

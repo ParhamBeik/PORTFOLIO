@@ -27,9 +27,9 @@ from marketdata.provenance import (
     BRS_SERIES_ENDPOINTS,
     STOCK_SERIES_ENDPOINTS,
     daily_bar_price,
-    rate_on,
     rejected_pairs,
-    toman_per_dollar,
+    toman_rate_kwargs,
+    toman_rate_tables,
 )
 
 
@@ -1104,20 +1104,10 @@ def _jalali_date(when) -> str:
 def _latest_live_price(asset: Asset) -> Decimal | None:
     """Newest live row for `asset`, in the unit a ledger entry stores.
 
-    Every caller writes the answer to `LedgerEntry.price_tomans`, so the one
-    conversion the Price table needs has to happen here. `bitcoin_usd` and
-    `gold_ounce_usd` are quoted in DOLLARS by the provider and stored that way
-    (`returns.USD_QUOTED_KEYS` is where that convention is declared, and the
-    returns panel converts them by hand for the same reason). Returned verbatim,
-    a Bitcoin buy saved with the price field blank persisted about 95,000 as a
-    Toman price -- the identical mistake `currency.to_toman` was written to stop
-    ("one Bitcoin valued at ~64,500 Toman"), reached by a path that never calls
-    it. TSE rows are deliberately NOT converted: a stock's stored price is Rial
-    on purpose and `holding_value_to_toman` divides the product instead.
-
-    With no rate to convert by, this answers None rather than the dollar figure.
-    Refusing is the only safe reading of "I know this is dollars and I have no
-    rate"; the caller already raises a clear PriceResolutionError from None.
+    New foreign-seed ticks are converted from their declared provider unit
+    before storage. Older rows marked UNKNOWN may be Tether, dollars, or even
+    Toman from Wallex; refuse them rather than applying an assumed cash-USD
+    rate. TSE rows remain Rial and valuation divides their value by ten.
     """
 
     from .returns import USD_QUOTED_KEYS
@@ -1127,8 +1117,7 @@ def _latest_live_price(asset: Asset) -> Decimal | None:
         return None
     price = Decimal(str(row.price))
     if asset.key in USD_QUOTED_KEYS:
-        rate = _latest_usd_toman_rate()
-        return price * rate if rate else None
+        return price if row.price_unit == Price.Unit.IRT and row.price_unit_verified else None
     return price
 
 
@@ -1149,17 +1138,6 @@ def _live_price_fetched_today(asset: Asset) -> Decimal | None:
     if row is None or _jalali_date(row.fetched_at) != _jalali_date(timezone.now()):
         return None
     return _latest_live_price(asset)
-
-
-def _latest_usd_toman_rate() -> Decimal | None:
-    """Live Toman-per-dollar, from the same `usd_cash` row the panel uses."""
-
-    row = (
-        Price.objects.filter(positive_price_q(), asset__key="usd_cash")
-        .order_by("-fetched_at")
-        .first()
-    )
-    return Decimal(str(row.price)) if row else None
 
 
 def _daily_bar_or_live_price(asset: Asset, j_date: str) -> Decimal:
@@ -1322,12 +1300,17 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
             # Shared helper, not a fourth copy: this branch writes a durable
             # `LedgerEntry.price_tomans`, so a divergent answer here becomes
             # permanent rather than merely displayed.
-            converted = to_toman(
-                asset.brs_symbol,
-                history.close_price,
-                history.unit,
-                usd_rate=rate_on(*toman_per_dollar([history.date]), history.date),
-            )
+            converted = Decimal("0")
+            if history.unit or asset.asset_class != Asset.AssetClass.CRYPTO:
+                cash_rates, tether_rates = toman_rate_tables(
+                    [history.unit], [history.date],
+                )
+                converted = to_toman(
+                    asset.brs_symbol, history.close_price, history.unit,
+                    **toman_rate_kwargs(
+                        history.unit, history.date, cash_rates, tether_rates,
+                    ),
+                )
             if converted > 0:
                 return Decimal(str(converted))
         return _daily_bar_or_live_price(asset, j_date)

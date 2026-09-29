@@ -50,7 +50,11 @@ app.conf.update(
         # Not the archive queue: this is what tells the archive how much it may
         # spend, and it is useless if it queues behind the backlog it governs.
         "marketdata.tasks.reconcile_quota_meters": {"queue": "live"},
+        # A paused archive worker must not silence the check that reports its
+        # backlog and other operational failures.
+        "marketdata.tasks.operational_health_check": {"queue": "live"},
         "marketdata.tasks.capture_operational_metrics": {"queue": "live"},
+        "marketdata.tasks.capture_research_coverage": {"queue": "live"},
         "marketdata.tasks.capture_derivative_snapshots": {"queue": "live"},
         "marketdata.tasks.capture_market_snapshots": {"queue": "live"},
         # Routed unconditionally, and that is deliberate: dropping these entries
@@ -163,6 +167,10 @@ app.conf.beat_schedule = {
     "capture-operational-metrics-every-15-minutes": {
         "task": "marketdata.tasks.capture_operational_metrics",
         "schedule": crontab(minute="*/15"),
+    },
+    "capture-research-coverage-daily": {
+        "task": "marketdata.tasks.capture_research_coverage",
+        "schedule": crontab(hour=4, minute=30),
     },
     # The workflow ledger enforces its own 30-day window. Without this it grows
     # forever, which is the exact failure it was built to replace.

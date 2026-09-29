@@ -25,24 +25,29 @@ reads to decide what to requeue:
 """
 from decimal import Decimal, InvalidOperation
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from .codal_classification import classify_announcement
-from .codal_parsers import category_reconciles, extract_typed_facts, parse_artifact
+from .codal_parsers import (
+    category_reconciles, extract_typed_facts, parse_artifact, reconcile_monthly_sales,
+)
 from .codal_storage import (
     CodalArtifactRejected,
     CodalBlockedNetwork,
     CodalBlockedStorage,
     _absolute_url,
     download_artifact,
+    load_artifact,
     store_artifact,
 )
+from .codal_statements import parse_income_statement
 from .models import (
     CodalArtifact,
-    CodalFact,
-    CodalParsedTable,
+    CodalCandidateFact,
+    CodalExtraction,
     CodalReport,
-    CodalSection,
+    CodalVerification,
 )
 
 
@@ -68,80 +73,79 @@ def _artifact_states(report):
 
 
 def _find_revision(report):
-    if not report.is_correction:
+    if not report.is_correction or not report.period_end or not report.announcement.date_publish:
         return None
+    published = report.announcement
+    earlier = Q(announcement__date_publish__lt=published.date_publish)
+    if published.time_publish:
+        earlier |= Q(
+            announcement__date_publish=published.date_publish,
+            announcement__time_publish__lt=published.time_publish,
+        )
     return (
         CodalReport.objects.filter(
-            announcement__symbol=report.announcement.symbol,
+            announcement__symbol=published.symbol,
             report_type=report.report_type,
             period_end=report.period_end,
+            is_consolidated=report.is_consolidated,
         )
+        .filter(earlier)
         .exclude(pk=report.pk)
-        .order_by("-announcement__date_publish", "-announcement__time_publish")
+        .order_by("-announcement__date_publish", "-announcement__time_publish", "-pk")
         .first()
     )
 
 
 def _persist_parsed(report, artifact, parsed):
-    # Re-running a report replaces its extraction wholesale, which is right
-    # when the new parse is at least as good. It is not right when the new
-    # parse yields nothing: that would silently destroy a previous run's good
-    # facts and leave no reason behind. A worse result does not get to
-    # overwrite a better one.
-    if not parsed.facts and report.facts.exists():
+    # Old extractions remain evidence, including the legacy tables and facts.
+    # A new parser version creates a new run; retrying the same exact bytes and
+    # version reuses that run instead of replacing its facts.
+    if not parsed.facts and (report.extractions.exists() or report.facts.exists()):
         raise CodalExtractionRegressed(
-            f"parse produced 0 facts but {report.facts.count()} are already stored"
+            "parse produced 0 facts despite an earlier extraction"
         )
     with transaction.atomic():
-        report.parsed_tables.all().delete()
-        report.sections.all().delete()
-        report.facts.all().delete()
-        tables = []
-        for index, table in enumerate(parsed.tables):
-            tables.append(CodalParsedTable.objects.create(
-                report=report,
-                artifact=artifact,
-                name=table["name"][:255],
-                sheet_name=table["sheet_name"][:255],
-                table_index=index,
-                headers=table["headers"],
-                rows=table["rows"],
-                source_coordinates=table["source_coordinates"],
-                parser_version=report.parser_version,
-            ))
-        sections = [
-            CodalSection.objects.create(
-                report=report,
-                artifact=artifact,
-                heading=section["heading"][:255],
-                body=section["body"],
-                section_index=index,
-                source_coordinates=section["source_coordinates"],
-                confidence=parsed.confidence,
-            )
-            for index, section in enumerate(parsed.sections)
-        ]
+        extraction, created = CodalExtraction.objects.get_or_create(
+            report=report, artifact=artifact,
+            checksum_sha256=artifact.checksum_sha256,
+            parser_version=report.parser_version,
+            defaults={
+                "table_count": len(parsed.tables),
+                "section_count": len(parsed.sections),
+                "fact_count": len(parsed.facts),
+            },
+        )
+        if not created:
+            return extraction
         _max_dec = Decimal("1e26")
+        reconciled_total = reconcile_monthly_sales(parsed.facts) if report.category == 3 else None
+        candidates = []
         for fact in parsed.facts:
-            coordinates = fact["source_coordinates"]
-            table = tables[coordinates["table_index"]] if "table_index" in coordinates else None
-            section = sections[0] if not table and sections else None
             num_val = fact.get("numeric_value")
             if num_val is not None:
                 try:
                     if abs(Decimal(str(num_val))) >= _max_dec:
-                        fact["numeric_value"] = None
-                        if not fact.get("text_value"):
-                            fact["text_value"] = str(num_val)
+                        num_val = None
                 except (InvalidOperation, TypeError):
-                    fact["numeric_value"] = None
-            CodalFact.objects.create(
-                report=report,
-                table=table,
-                section=section,
-                parser_version=report.parser_version,
-                **fact,
-            )
+                    num_val = None
+            candidates.append(CodalCandidateFact(
+                extraction=extraction,
+                fact_code=fact["fact_code"],
+                raw_value=fact["raw_value"],
+                numeric_value=num_val,
+                unit=fact.get("unit", ""),
+                currency=fact.get("currency", ""),
+                period_start=fact.get("period_start", ""),
+                period_end=fact.get("period_end", ""),
+                dimensions=fact.get("dimensions", {}),
+                source_coordinates=fact["source_coordinates"],
+                verification_status=(
+                    CodalVerification.RECONCILED if fact is reconciled_total or fact.get("verification_status") == CodalVerification.RECONCILED
+                    else CodalVerification.EXTRACTED
+                ),
+            ))
+        CodalCandidateFact.objects.bulk_create(candidates, batch_size=1000)
+        return extraction
 
 
 def extract_report(announcement_id):
@@ -155,7 +159,10 @@ def extract_report(announcement_id):
     initial = classify_announcement(announcement)
     for field, value in initial.items():
         setattr(report, field, value)
-    report.parser_version = settings.CODAL_PARSER_VERSION
+    report.parser_version = (
+        settings.CODAL_STATEMENT_PARSER_VERSION
+        if report.category == 2 else settings.CODAL_PARSER_VERSION
+    )
     report.status = CodalReport.Status.FETCHING
     report.save()
 
@@ -167,6 +174,10 @@ def extract_report(announcement_id):
             report=report, kind=kind, source_url=_absolute_url(source_url)
         )
         try:
+            if artifact.fetch_status == CodalArtifact.FetchStatus.STORED and artifact.s3_key:
+                content = load_artifact(artifact)
+                downloaded.append((kind, artifact, content))
+                continue
             # No quota reservation. These bytes come from codal.ir, not from the
             # metered provider -- charging them to the BrsApi archive budget spent
             # ~1,000 requests/day of somebody else's allowance and, on a day when
@@ -232,6 +243,8 @@ def extract_report(announcement_id):
 
     parsed = None
     chosen = None
+    chosen_income = []
+    first_generic = None
     parse_errors = []
     for kind, artifact, content in downloaded:
         if kind == CodalArtifact.Kind.ATTACHMENT:
@@ -241,9 +254,24 @@ def extract_report(announcement_id):
         except Exception as exc:
             parse_errors.append(type(exc).__name__)
             continue
-        if candidate.tables or candidate.sections or candidate.text:
-            parsed, chosen = candidate, artifact
+        if not (candidate.tables or candidate.sections or candidate.text):
+            continue
+        if first_generic is None:
+            first_generic = (candidate, artifact)
+        if report.category == 2:
+            income = parse_income_statement(
+                content, symbol=announcement.symbol, company_name=announcement.company_name,
+                title=announcement.title, period_end=report.period_end,
+                is_consolidated=report.is_consolidated, is_audited=report.is_audited,
+            ) if kind in (CodalArtifact.Kind.EXCEL, CodalArtifact.Kind.HTML) else []
+            if not income:
+                continue
+            parsed, chosen, chosen_income = candidate, artifact, income
             break
+        parsed, chosen = candidate, artifact
+        break
+    if parsed is None and first_generic is not None:
+        parsed, chosen = first_generic
     if parsed is None:
         # Downloaded fine, but nothing usable came out of any of them --
         # a template problem, not a network one. Not retried.
@@ -256,8 +284,19 @@ def extract_report(announcement_id):
     for field, value in metadata.items():
         setattr(report, field, value)
     extract_typed_facts(parsed, report.category, report.period_end)
-    reconciled = category_reconciles(parsed, report.category)
-    _persist_parsed(report, chosen, parsed)
+    parsed.facts.extend(chosen_income)
+    reconciled = bool(chosen_income) or category_reconciles(parsed, report.category)
+    try:
+        _persist_parsed(report, chosen, parsed)
+    except CodalExtractionRegressed:
+        report.status = CodalReport.Status.NEEDS_REVIEW
+        report.quality = CodalReport.Quality.REVIEW
+        report.verification_status = CodalVerification.QUARANTINED
+        report.error_code = "extraction_regressed"
+        report.save(update_fields=[
+            "status", "quality", "verification_status", "error_code", "updated_at",
+        ])
+        return report, {"error_code": report.error_code, "artifacts": _artifact_states(report)}
     report.revision_of = _find_revision(report)
     if not report.category:
         report.status = CodalReport.Status.UNSUPPORTED
@@ -269,14 +308,14 @@ def extract_report(announcement_id):
         report.error_code = f"no_typed_facts:category={report.category}"
     else:
         report.status = CodalReport.Status.PARSED
-        report.quality = CodalReport.Quality.VALIDATED
+        report.quality = CodalReport.Quality.DEGRADED
         report.error_code = ""
+    report.verification_status = CodalVerification.EXTRACTED
     report.extracted_at = timezone.now()
     report.save()
-    announcement.category = report.category
-    announcement.category_title = report.report_type
-    announcement.is_audited = report.is_audited
-    announcement.save(update_fields=["category", "category_title", "is_audited"])
+    # Report category/audit flags are interpretations. Never write them over
+    # the announcement's source fields: a subsequent classifier would treat an
+    # inferred category as a provider-confirmed fact.
     return report, {
         "artifact_count": len(downloaded),
         "parsed_from": chosen.kind if chosen else "",

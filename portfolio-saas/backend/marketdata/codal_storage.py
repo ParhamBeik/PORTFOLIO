@@ -300,6 +300,30 @@ def store_artifact(content, content_type, kind):
     return key, checksum
 
 
+def load_artifact(artifact):
+    """Read archived bytes with the same size and digest checks used at ingest."""
+    if not artifact.s3_key or not artifact.checksum_sha256:
+        raise CodalBlockedStorage("missing_archive_reference")
+    try:
+        response = _client().get_object(
+            Bucket=settings.CODAL_S3_BUCKET, Key=artifact.s3_key
+        )
+        body = response["Body"]
+        try:
+            content = body.read(settings.CODAL_MAX_ARTIFACT_BYTES + 1)
+        finally:
+            body.close()
+    except Exception as exc:
+        raise CodalBlockedStorage(type(exc).__name__) from exc
+    if (
+        len(content) > settings.CODAL_MAX_ARTIFACT_BYTES
+        or len(content) != artifact.size_bytes
+        or hashlib.sha256(content).hexdigest() != artifact.checksum_sha256
+    ):
+        raise CodalBlockedStorage("archive_integrity_mismatch")
+    return content
+
+
 def artifact_download_url(artifact, expires_in=3600):
     """A short-lived presigned URL for one stored artifact, or None if unstored."""
     from .models import CodalArtifact

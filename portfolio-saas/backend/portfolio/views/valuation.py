@@ -14,7 +14,7 @@ from rest_framework.exceptions import NotFound
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from ..models import Holding, LedgerEntry, Price, Snapshot, Transaction
+from ..models import Holding, LedgerEntry, Price, Snapshot, Transaction, USD_QUOTED_KEYS
 from ..services import get_latest_prices, value_account, value_user
 from ..services.catalog import resolve_asset_key
 from ..services.valuation import (
@@ -36,7 +36,7 @@ from marketdata.models import (
     RejectedRecord,
     SymbolIntegrity,
 )
-from marketdata.provenance import daily_bar_price, rate_on, toman_per_dollar
+from marketdata.provenance import daily_bar_price, toman_rate_kwargs, toman_rate_tables
 
 
 class AccountPerformanceView(APIView):
@@ -522,7 +522,7 @@ def _brs_price_history(asset, since_jalali):
 
     The warehouse stores this table provider-verbatim: IRR-quoted symbols were
     converted on ingest, but XAUUSD stays in dollars and BTC in Tether, each
-    row carrying its own declared `unit`. Convert at the dollar rate of the
+    row carrying its own declared `unit`. Convert at the matching rate of the
     row's OWN date and refuse a row whose unit will not resolve — a foreign
     number drawn on a Toman axis is off by five orders of magnitude, and the
     unit is declared precisely so it never has to be guessed.
@@ -539,8 +539,9 @@ def _brs_price_history(asset, since_jalali):
         if row["date"] not in rejected
     ]
     if rows:
-        from portfolio.services.returns import USD_QUOTED_KEYS
-        rates, rate_dates = toman_per_dollar([row["date"] for row in rows])
+        cash_rates, tether_rates = toman_rate_tables(
+            [row["unit"] for row in rows], [row["date"] for row in rows],
+        )
         points = []
         for row in rows:
             # An unlabelled row on a foreign-quoted asset is a refusal, not a
@@ -552,7 +553,9 @@ def _brs_price_history(asset, since_jalali):
                 asset.brs_symbol,
                 row["close_price"],
                 row["unit"],
-                usd_rate=rate_on(rates, rate_dates, row["date"]),
+                **toman_rate_kwargs(
+                    row["unit"], row["date"], cash_rates, tether_rates,
+                ),
             )
             if price > 0:
                 points.append({"date": row["date"], "price": float(price)})
@@ -581,13 +584,17 @@ def _live_price_history(asset, since):
     restate the branch above rather than add anything. Manual marks stay in --
     for a manually valued asset they ARE the series, and nothing else has one.
     """
+    ticks = Price.objects.filter(asset=asset, fetched_at__gte=since).exclude(
+        source="ARCHIVE"
+    )
+    if asset.key in USD_QUOTED_KEYS:
+        ticks = ticks.filter(price_unit=Price.Unit.IRT, price_unit_verified=True)
     rows = (
-        Price.objects.filter(asset=asset, fetched_at__gte=since)
-        .exclude(source="ARCHIVE")
+        ticks
         .annotate(day=TruncDate("fetched_at"))
         .values("day")
         .annotate(avg_price=Avg(
-            "price_foreign" if asset.quote_unit == "usd" else "price_iranian"
+            "price_foreign" if asset.key in USD_QUOTED_KEYS else "price_iranian"
         ))
         .order_by("day")
     )

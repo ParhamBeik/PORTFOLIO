@@ -126,8 +126,8 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
             </label>
             <p className="text-xs text-muted">
               Required columns: external_id, occurred_at, kind, asset_key, quantity,
-              unit_price_tomans, amount_tomans, note. Dates must be ISO-8601; stock prices
-              stay in Rial exactly as exported.
+              unit_price_tomans, amount_tomans, note. Dates must be ISO-8601; TSE stock
+              unit prices stay in Rial, and all other unit prices use Toman.
             </p>
             <Button
               variant="secondary"
@@ -607,6 +607,8 @@ export default function Ledger() {
               <>
                 <Table
                   testId="ledger-table"
+                  caption="Transaction history"
+                  mobileCards
                   rowKey={(r) => r.id}
                   rows={rows.slice((current - 1) * size, current * size)}
                   columns={columns}

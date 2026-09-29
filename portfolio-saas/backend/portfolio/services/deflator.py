@@ -77,9 +77,9 @@ def to_basis(
 ) -> pd.Series:
     """Convert a price series to nominal Toman or USD-denominated values.
 
-    `nominal` and `usd_real` remain temporary aliases. USD conversion only uses
-    rates already known at each timestamp and carries them for at most five
-    sessions; unavailable rates remain unavailable.
+    `nominal` and `usd_real` remain temporary aliases. Currency conversion
+    uses its own observed series and carries a rate for at most five calendar
+    days; unavailable rates remain unavailable.
     Index of the series is assumed to be DatetimeIndex.
     """
     basis = normalize_basis(basis)
@@ -95,48 +95,21 @@ def to_basis(
     if basis in ("usd_denominated", "usdt_denominated"):
         if usd_series is None:
             from marketdata.models import GoldCurrencyHistory
+            from marketdata.provenance import BRS_SERIES_ENDPOINTS, rejected_pairs
 
             symbol = "USDT_IRT" if basis == "usdt_denominated" else "USD"
-            rows = []
-            if symbol == "USDT_IRT":
-                if not series.index.empty:
-                    max_gregorian_date = series.index.max()
-                    jdate = jdatetime.date.fromgregorian(date=max_gregorian_date.date())
-                    max_jalali_str = f"{jdate.year:04d}-{jdate.month:02d}-{jdate.day:02d}"
-                    rows = list(
-                        GoldCurrencyHistory.objects
-                        .filter(symbol="USDT_IRT", date__lte=max_jalali_str)
-                        .order_by("date")
-                        .values_list("date", "close_price")
-                    )
-                else:
-                    rows = list(
-                        GoldCurrencyHistory.objects
-                        .filter(symbol="USDT_IRT")
-                        .order_by("date")
-                        .values_list("date", "close_price")
-                    )
-                if not rows:
-                    symbol = "USD"
-
-            if not rows and symbol == "USD":
-                if not series.index.empty:
-                    max_gregorian_date = series.index.max()
-                    jdate = jdatetime.date.fromgregorian(date=max_gregorian_date.date())
-                    max_jalali_str = f"{jdate.year:04d}-{jdate.month:02d}-{jdate.day:02d}"
-                    rows = list(
-                        GoldCurrencyHistory.objects
-                        .filter(symbol="USD", date__lte=max_jalali_str)
-                        .order_by("date")
-                        .values_list("date", "close_price")
-                    )
-                else:
-                    rows = list(
-                        GoldCurrencyHistory.objects
-                        .filter(symbol="USD")
-                        .order_by("date")
-                        .values_list("date", "close_price")
-                    )
+            rates = GoldCurrencyHistory.objects.filter(symbol=symbol, close_price__gt=0)
+            if not series.index.empty:
+                jdate = jdatetime.date.fromgregorian(date=series.index.max().date())
+                rates = rates.filter(
+                    date__lte=f"{jdate.year:04d}-{jdate.month:02d}-{jdate.day:02d}"
+                )
+            rejected = rejected_pairs([symbol], BRS_SERIES_ENDPOINTS)
+            rows = list(
+                rates.exclude(date__in=[day for sym, day in rejected if sym == symbol])
+                .order_by("date")
+                .values_list("date", "close_price")
+            )
 
             if not rows:
                 return series * float("nan")
@@ -150,6 +123,21 @@ def to_basis(
             usd_series = usd_series[usd_series > 0]
             usd_series = usd_series.groupby(usd_series.index).last()
 
-        usd_aligned = usd_series.reindex(series.index).ffill(limit=5)
+        # Reindexing to only the requested dates makes `ffill(limit=5)` count
+        # observations, not days: five sparse points can span years. Retain the
+        # observation date and enforce a real elapsed-time bound instead.
+        target = pd.DataFrame({
+            "when": pd.to_datetime(series.index, utc=True),
+            "position": range(len(series)),
+        }).sort_values("when")
+        rates = pd.DataFrame({
+            "when": pd.to_datetime(usd_series.index, utc=True),
+            "rate": usd_series.to_numpy(),
+        }).sort_values("when")
+        aligned = pd.merge_asof(
+            target, rates, on="when", direction="backward",
+            tolerance=pd.Timedelta(days=5),
+        ).sort_values("position")
+        usd_aligned = pd.Series(aligned["rate"].to_numpy(), index=series.index)
         usd_aligned = usd_aligned.where(usd_aligned > 0)
         return series / usd_aligned

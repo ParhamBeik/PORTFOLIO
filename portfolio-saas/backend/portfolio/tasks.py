@@ -25,6 +25,7 @@ from .models import (
     LedgerEntry,
     Price,
     Snapshot,
+    USD_QUOTED_KEYS,
     positive_price_q,
 )
 from portfolio.services import asset_value, get_latest_prices, invalidate_prices_cache
@@ -165,7 +166,10 @@ def run_price_fetch(*, dry_run=False):
         written = False
         if priced and not dry_run:
             with transaction.atomic():
-                _write_prices(priced, sources=sources)
+                _write_prices(
+                    priced, sources=sources,
+                    normalized_foreign_keys=set(priced) & set(USD_QUOTED_KEYS),
+                )
             invalidate_prices_cache()
 
             # LAZY import: avoids a circular `portfolio.tasks -> portfolio.services.returns ->
@@ -186,8 +190,12 @@ def run_price_fetch(*, dry_run=False):
             )
 
 
-def _write_prices(priced: dict, *, sources: dict | None = None) -> None:
+def _write_prices(
+    priced: dict, *, sources: dict | None = None,
+    normalized_foreign_keys: set[str] | None = None,
+) -> None:
     sources = sources or {}
+    normalized_foreign_keys = normalized_foreign_keys or set()
     assets = {
         a.key: a
         for a in Asset.objects.filter(key__in=priced.keys(), is_active=True)
@@ -221,16 +229,25 @@ def _write_prices(priced: dict, *, sources: dict | None = None) -> None:
         # age column mean "when we last looped" rather than "when this price last
         # moved" -- which is the whole question the freshness panel asks.
         if source in ("ARCHIVE", "MANUAL") and latest_prices.get(key) == value:
-            continue
+            previous = latest_rows.get(key)
+            if not (
+                source == "ARCHIVE"
+                and key in USD_QUOTED_KEYS
+                and previous is not None
+                and not (
+                    previous.price_unit == Price.Unit.IRT
+                    and previous.price_unit_verified
+                )
+            ):
+                continue
         asset = assets[key]
         # BRS gold/FX and manuals are Toman. TSE stocks are stored as **Rial**
-        # (see extractor._price_from_tsetmc_record) so qty×price matches the
-        # 1/10-share broker hack. USD-quoted keys stay provider-native.
-        from portfolio.services.returns import USD_QUOTED_KEYS
-
+        # (see extractor._price_from_tsetmc_record); valuation divides the
+        # quantity-times-price product by ten. Seed foreign keys are Toman only when
+        # the fetch path explicitly normalized their declared provider unit.
         if key in USD_QUOTED_KEYS:
-            unit = Price.Unit.UNKNOWN
-            verified = False
+            verified = source == "ARCHIVE" or key in normalized_foreign_keys
+            unit = Price.Unit.IRT if verified else Price.Unit.UNKNOWN
         elif asset.tse_symbol:
             unit = Price.Unit.IRR
             verified = True
@@ -420,10 +437,11 @@ def aggregate_daily_price_averages(date_str: str | None = None):
 
     written = 0
     for asset in Asset.objects.filter(is_active=True, is_house=False):
-        stats = Price.objects.filter(
-            asset=asset, source="API", fetched_at__gte=since,
-        ).aggregate(
-            avg=Avg("price_foreign" if asset.quote_unit == "usd" else "price_iranian"),
+        ticks = Price.objects.filter(asset=asset, source="API", fetched_at__gte=since)
+        if asset.key in USD_QUOTED_KEYS:
+            ticks = ticks.filter(price_unit=Price.Unit.IRT, price_unit_verified=True)
+        stats = ticks.aggregate(
+            avg=Avg("price_foreign" if asset.key in USD_QUOTED_KEYS else "price_iranian"),
             n=Count("id"),
         )
         if not stats["n"]:

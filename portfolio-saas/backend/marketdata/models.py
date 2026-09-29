@@ -265,6 +265,37 @@ class ArchiveFetchState(models.Model):
         ]
 
 
+class CodalHistoryWindow(models.Model):
+    """Verified, inclusive publication-date window for historical Codal discovery."""
+
+    symbol = models.CharField(max_length=64)
+    date_start = models.CharField(max_length=10)
+    date_end = models.CharField(max_length=10)
+    expected_rows = models.PositiveIntegerField(default=0)
+    stored_rows = models.PositiveIntegerField(default=0)
+    verified_complete = models.BooleanField(default=False)
+    split = models.BooleanField(default=False)
+    consecutive_failures = models.PositiveIntegerField(default=0)
+    last_error = models.CharField(max_length=500, blank=True, default="")
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    next_attempt_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["symbol", "date_start", "date_end"],
+                name="uniq_codal_history_window",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["verified_complete", "split", "next_attempt_at"],
+                name="codal_history_due_idx",
+            )
+        ]
+
+
 class StockSymbolMetadata(models.Model):
     """Detailed metadata and fundamental metrics for a TSE stock symbol."""
 
@@ -553,6 +584,12 @@ class CodalAnnouncement(models.Model):
     company_name = models.CharField(max_length=255, blank=True, default="")
     title = models.TextField()
     code = models.CharField(max_length=64, blank=True, default="")
+    # These fields contain only the provider's value at ingest. Historic
+    # `category` was also overwritten by document extraction, so it cannot be
+    # used as proof of provider classification for existing rows.
+    source_category = models.IntegerField(choices=Category.choices, null=True, blank=True)
+    source_category_title = models.CharField(max_length=120, blank=True, default="")
+    source_is_audited = models.BooleanField(null=True, blank=True)
     category = models.IntegerField(choices=Category.choices, null=True, blank=True, db_index=True)
     category_title = models.CharField(max_length=120, blank=True, default="")
     is_audited = models.BooleanField(null=True, blank=True)
@@ -633,6 +670,13 @@ class DerivativeSnapshot(models.Model):
         indexes = [models.Index(fields=["contract", "-observed_at"], name="marketdata__contrac_1eb881_idx")]
 
 
+class CodalVerification(models.TextChoices):
+    LEGACY_UNVERIFIED = "legacy_unverified", "Legacy, unverified"
+    EXTRACTED = "extracted", "Extracted, unverified"
+    RECONCILED = "reconciled", "Source reconciled"
+    QUARANTINED = "quarantined", "Quarantined"
+
+
 class CodalReport(models.Model):
     """Versioned extraction state for one immutable Codal announcement."""
 
@@ -674,6 +718,10 @@ class CodalReport(models.Model):
     )
     quality = models.CharField(
         max_length=24, choices=Quality.choices, default=Quality.UNKNOWN, db_index=True
+    )
+    verification_status = models.CharField(
+        max_length=24, choices=CodalVerification.choices,
+        default=CodalVerification.LEGACY_UNVERIFIED,
     )
     error_code = models.CharField(max_length=64, blank=True, default="")
     extracted_at = models.DateTimeField(null=True, blank=True)
@@ -779,11 +827,63 @@ class CodalFact(models.Model):
     dimensions = models.JSONField(default=dict)
     confidence = models.DecimalField(max_digits=5, decimal_places=4, default=1)
     quality = models.CharField(max_length=24, default="validated", db_index=True)
+    verification_status = models.CharField(
+        max_length=24, choices=CodalVerification.choices,
+        default=CodalVerification.LEGACY_UNVERIFIED,
+    )
     parser_version = models.CharField(max_length=32, default="1")
     source_coordinates = models.JSONField(default=dict)
 
     class Meta:
         indexes = [models.Index(fields=["fact_code", "period_end", "quality"])]
+
+
+class CodalExtraction(models.Model):
+    """One immutable parser run against exact archived Codal bytes."""
+
+    report = models.ForeignKey(
+        CodalReport, on_delete=models.PROTECT, related_name="extractions"
+    )
+    artifact = models.ForeignKey(
+        CodalArtifact, on_delete=models.PROTECT, related_name="extractions"
+    )
+    checksum_sha256 = models.CharField(max_length=64)
+    parser_version = models.CharField(max_length=32)
+    parsed_at = models.DateTimeField(auto_now_add=True)
+    table_count = models.PositiveIntegerField(default=0)
+    section_count = models.PositiveIntegerField(default=0)
+    fact_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["report", "artifact", "checksum_sha256", "parser_version"],
+                name="uniq_codal_extraction_bytes_parser",
+            )
+        ]
+
+
+class CodalCandidateFact(models.Model):
+    """Unverified reading of a source cell; raw artifact retains the evidence."""
+
+    extraction = models.ForeignKey(
+        CodalExtraction, on_delete=models.PROTECT, related_name="candidates"
+    )
+    fact_code = models.CharField(max_length=160)
+    raw_value = models.TextField(blank=True, default="")
+    numeric_value = models.DecimalField(
+        max_digits=38, decimal_places=12, null=True, blank=True
+    )
+    unit = models.CharField(max_length=64, blank=True, default="")
+    currency = models.CharField(max_length=16, blank=True, default="")
+    period_start = models.CharField(max_length=10, blank=True, default="")
+    period_end = models.CharField(max_length=10, blank=True, default="")
+    dimensions = models.JSONField(default=dict)
+    source_coordinates = models.JSONField(default=dict)
+    verification_status = models.CharField(
+        max_length=24, choices=CodalVerification.choices,
+        default=CodalVerification.EXTRACTED,
+    )
 
 
 class CorporateAction(models.Model):
@@ -818,7 +918,12 @@ class CorporateAction(models.Model):
 
 
 class GoldCurrencyHistory(models.Model):
-    """Gold, Fiat Currency, and Crypto daily price history, purely provider-sourced."""
+    """Gold, Fiat Currency, and Crypto daily price history, purely provider-sourced.
+
+    Twelve fractional places are needed for low-priced USDT-quoted coins.
+    Four places rounded every historical SHIB/USDT close to zero; using the
+    same precision for all OHLC fields prevents an impossible candle.
+    """
 
     class Source(models.TextChoices):
         PROVIDER = "provider", "Provider"
@@ -828,17 +933,24 @@ class GoldCurrencyHistory(models.Model):
         # AGGREGATE-tagged row remains valid until the retirement data migration.
         AGGREGATE = "aggregate", "Live-price aggregate (retired)"
 
+    class Origin(models.TextChoices):
+        UNKNOWN = "unknown", "Historic source unknown"
+        BRSAPI = "brsapi", "BrsApi"
+        TGJU = "tgju", "TGJU"
+        WALLEX = "wallex", "Wallex"
+
     symbol = models.CharField(max_length=64, db_index=True)
     name = models.CharField(max_length=120, blank=True, default="")
     unit = models.CharField(max_length=32, blank=True, default="")
     date = models.CharField(max_length=10, db_index=True)
-    open_price = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
-    high_price = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
-    low_price = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
-    close_price = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    open_price = models.DecimalField(max_digits=30, decimal_places=12, null=True, blank=True)
+    high_price = models.DecimalField(max_digits=30, decimal_places=12, null=True, blank=True)
+    low_price = models.DecimalField(max_digits=30, decimal_places=12, null=True, blank=True)
+    close_price = models.DecimalField(max_digits=30, decimal_places=12, default=0)
     source = models.CharField(
         max_length=16, choices=Source.choices, default=Source.PROVIDER
     )
+    origin = models.CharField(max_length=16, choices=Origin.choices, default=Origin.UNKNOWN)
     ingested_at = models.DateTimeField(null=True, blank=True)
     last_correlation_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
 
@@ -981,6 +1093,24 @@ class OperationalMetricSnapshot(models.Model):
 
     class Meta:
         ordering = ["-captured_at"]
+
+
+class ResearchCoverageSnapshot(models.Model):
+    """Completed stock-universe scan using the Explore answer eligibility rules."""
+
+    started_at = models.DateTimeField()
+    finished_at = models.DateTimeField(db_index=True)
+    window_days = models.PositiveSmallIntegerField()
+    start_jalali = models.CharField(max_length=10)
+    end_jalali = models.CharField(max_length=10)
+    universe_size = models.PositiveIntegerField()
+    eligibility_version = models.CharField(max_length=32)
+    parser_versions = models.JSONField(default=dict)
+    summary = models.JSONField(default=dict)
+    symbols = models.JSONField(default=list)
+
+    class Meta:
+        ordering = ["-finished_at"]
 
 
 class SymbolIntegrity(models.Model):

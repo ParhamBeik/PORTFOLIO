@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     "corsheaders",
     "accounts",
     "portfolio",
+    "research",
 ]
 
 MIDDLEWARE = [
@@ -194,6 +195,7 @@ REST_FRAMEWORK = {
         "anon": os.getenv("ANON_THROTTLE", "30/min"),
         "user": os.getenv("USER_THROTTLE", "120/min"),
         "analytics": os.getenv("ANALYTICS_THROTTLE", "60/min"),
+        "research": os.getenv("RESEARCH_THROTTLE", "10/hour"),
         # Tight on purpose: this endpoint sends mail. The anon bucket is 30/min
         # and would let a bot empty an SMTP quota. Tests clear the cache.
         "password_reset": os.getenv("PASSWORD_RESET_THROTTLE", "5/hour"),
@@ -218,6 +220,14 @@ REST_FRAMEWORK = {
 # can raise them the same way it raises the throttles.
 ANALYTICS_MAX_CONCURRENT_PER_USER = int(os.getenv("ANALYTICS_MAX_CONCURRENT_PER_USER", "2"))
 ANALYTICS_MAX_CONCURRENT_GLOBAL = int(os.getenv("ANALYTICS_MAX_CONCURRENT_GLOBAL", "5"))
+
+# GapGPT credentials are projected from the News deployment into one read-only
+# file on the portfolio backend. No provider secret is stored in a model or sent
+# to the browser. A run chooses its own smaller cap in the research UI.
+GAPGPT_CONFIG_FILE = os.getenv("GAPGPT_CONFIG_FILE", "/run/secrets/gapgpt.env")
+RESEARCH_MAX_RUN_USD = Decimal(os.getenv("RESEARCH_MAX_RUN_USD", "0.10"))
+RESEARCH_DAILY_BUDGET_USD = Decimal(os.getenv("RESEARCH_DAILY_BUDGET_USD", "1.00"))
+RESEARCH_MAX_OUTPUT_TOKENS = int(os.getenv("RESEARCH_MAX_OUTPUT_TOKENS", "160"))
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
@@ -557,11 +567,15 @@ MARKETDATA_TICK_VOLUME_TOLERANCE = float(
 # connect that cannot succeed: ~20,000 no-op workflow runs and 583 connect
 # timeouts in one day. Turn back on once the network path exists.
 CODAL_ENABLED = os.getenv("CODAL_ENABLED", "1") == "1"
+# Deployment can retain Codal routing and queued jobs while scaling its paid
+# extraction consumer to zero during the broker handoff.
+CODAL_WORKER_ENABLED = os.getenv("CODAL_WORKER_ENABLED", "1") == "1"
 # Codal announcements are paged 20 per request and a mature symbol has ~50 pages,
 # so "all history for all symbols" is ~32,000 requests -- more than three days of
 # the whole archive budget. Only page 1 was ever fetched, which stored 2% and
 # still reported verified. Bound the target to the newest N pages per symbol so
-# the state can honestly converge; raise it when the backlog is otherwise idle.
+# the state can honestly converge. Every refresh rereads all N pages to verify
+# that coverage; raising N increases both backfill and weekly refresh cost.
 MARKETDATA_CODAL_MAX_PAGES = int(os.getenv("MARKETDATA_CODAL_MAX_PAGES", "5"))
 # 20/day left 96.7% of the 76,868-row backlog (74,303 rows) never even attempted
 # -- at 20/day it clears in ~10 years. Raised alongside the beat schedule itself
@@ -598,7 +612,8 @@ CODAL_S3_REGION = os.getenv("CODAL_S3_REGION", "us-east-1")
 # Bump to force every report through a fresh extract_report() pass regardless
 # of its current status -- not wired to any auto-reprocessing yet, just the
 # version stamp CodalReport/CodalParsedTable/CodalFact rows carry.
-CODAL_PARSER_VERSION = os.getenv("CODAL_PARSER_VERSION", "2")
+CODAL_PARSER_VERSION = os.getenv("CODAL_PARSER_VERSION", "4")
+CODAL_STATEMENT_PARSER_VERSION = os.getenv("CODAL_STATEMENT_PARSER_VERSION", "5")
 
 # 14, not 30. At 30 the nightly prune had never deleted a row -- the ledger was
 # only 20 days old -- while the table grew to 877 MB on 845k rows, because

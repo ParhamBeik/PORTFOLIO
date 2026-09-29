@@ -26,7 +26,7 @@ from portfolio.serializers import TradeInputSerializer
 from portfolio.services.deflator import CpiUnavailable, cpi_for_date
 from portfolio.services.ledger import create_ledger_entry
 from portfolio.services.returns import _price_version_fingerprint, daily_returns_matrix
-from portfolio.services.timeline import holdings_as_of
+from portfolio.services.timeline import cash_as_of, holdings_as_of
 from portfolio.services.trades import (
     InsufficientHolding,
     ManualAssetTrade,
@@ -124,6 +124,31 @@ def test_buy_funds_itself_when_the_portfolio_does_not_track_cash(
     assert Holding.objects.get(
         account=ledger_account, asset=asset_catalog["emami_coin"]
     ).quantity == Decimal("1")
+
+
+def test_cashless_purchase_never_creates_historical_cash(
+    ledger_account, asset_catalog
+):
+    bought_at = timezone.now() - datetime.timedelta(days=3)
+    create_ledger_entry(
+        account=ledger_account, kind=LedgerEntry.Kind.BUY,
+        asset=asset_catalog["emami_coin"], quantity="2",
+        unit_price_tomans="100", occurred_at=bought_at,
+    )
+    ledger_account.refresh_from_db()
+    assert ledger_account.track_cash is False
+    assert cash_as_of(ledger_account.user, ledger_account, bought_at) == 0
+    assert cash_as_of(
+        ledger_account.user, ledger_account, bought_at - datetime.timedelta(seconds=1)
+    ) == 0
+
+    deposited_at = bought_at + datetime.timedelta(days=1)
+    create_ledger_entry(
+        account=ledger_account, kind=LedgerEntry.Kind.DEPOSIT,
+        amount_tomans="300", occurred_at=deposited_at,
+    )
+    assert cash_as_of(ledger_account.user, ledger_account, bought_at) == 0
+    assert cash_as_of(ledger_account.user, ledger_account, deposited_at) == 300
 
 
 def test_buy_cannot_make_cash_negative_once_cash_is_tracked(
@@ -2047,6 +2072,58 @@ def test_a_rights_issue_dilutes_cost_basis_instead_of_voiding_it(
     assert Decimal(metrics["total_cost_basis_tomans"]) == Decimal("400000")
 
 
+def test_rights_issue_changes_historical_and_batched_quantities(
+    ledger_account, asset_catalog
+):
+    from portfolio.services.valuation import _walked_quantities
+
+    asset = asset_catalog["kama_stock"]
+    bought_at = timezone.now() - datetime.timedelta(days=3)
+    issued_at = bought_at + datetime.timedelta(days=1)
+    create_ledger_entry(
+        account=ledger_account, kind=LedgerEntry.Kind.BUY, asset=asset,
+        quantity="1000", unit_price_tomans="4000", occurred_at=bought_at,
+    )
+    create_ledger_entry(
+        account=ledger_account, kind=LedgerEntry.Kind.RIGHTS_ISSUE,
+        asset=asset, quantity="500", occurred_at=issued_at,
+    )
+    before = issued_at - datetime.timedelta(microseconds=1)
+    after = issued_at + datetime.timedelta(microseconds=1)
+    expected = {before: Decimal("1000"), after: Decimal("1500")}
+    walked = _walked_quantities([ledger_account], [before, after])
+    for point, quantity in expected.items():
+        assert holdings_as_of(ledger_account.user, ledger_account, point) == {
+            "kama_stock": quantity
+        }
+        assert walked[point]["kama_stock"] == quantity
+
+
+def test_reversed_trade_disappears_from_corrected_history(
+    ledger_account, asset_catalog
+):
+    from portfolio.services.ledger import reverse_ledger_entry
+
+    bought_at = timezone.now() - datetime.timedelta(days=2)
+    trade = create_ledger_entry(
+        account=ledger_account, kind=LedgerEntry.Kind.BUY,
+        asset=asset_catalog["emami_coin"], quantity="2",
+        unit_price_tomans="100", occurred_at=bought_at,
+    )
+    reverse_ledger_entry(
+        user=ledger_account.user, account_id=ledger_account.id,
+        entry_id=trade.id,
+    )
+    assert holdings_as_of(
+        ledger_account.user, ledger_account,
+        bought_at + datetime.timedelta(seconds=1),
+    ) == {}
+    assert cash_as_of(
+        ledger_account.user, ledger_account,
+        bought_at + datetime.timedelta(seconds=1),
+    ) == 0
+
+
 def test_adding_an_owned_asset_after_the_baseline_is_not_refused(
     ledger_account, asset_catalog, write_prices
 ):
@@ -2140,14 +2217,8 @@ def test_declaring_a_holding_you_already_own_never_spends_cash(
     ).quantity == Decimal("3")
 
 
-def test_a_dollar_quoted_live_price_is_converted_before_it_becomes_a_ledger_price():
-    """Unit test: one conversion rule, checked where it turns into durable data.
-
-    `bitcoin_usd` is quoted and stored in DOLLARS (see `returns.USD_QUOTED_KEYS`).
-    With no daily bar to fall back on, the resolver reached the raw Price row and
-    wrote ~95,000 into `LedgerEntry.price_tomans` -- the same mistake
-    `currency.to_toman` exists to refuse, on a path that never calls it.
-    """
+def test_a_normalized_live_price_enters_the_ledger_once():
+    """The durable ledger price uses verified Toman without another FX step."""
     from portfolio.services.ledger import resolve_historical_price
 
     asset = Asset.objects.create(
@@ -2158,10 +2229,42 @@ def test_a_dollar_quoted_live_price_is_converted_before_it_becomes_a_ledger_pric
         key="usd_cash", name="US Dollar", is_active=True,
         asset_class=Asset.AssetClass.CASH,
     )
-    Price.objects.create(asset=asset, price=Decimal("95000"), source="API")
+    Price.objects.create(
+        asset=asset, price=Decimal("5700000000"), source="API",
+        price_unit=Price.Unit.IRT, price_unit_verified=True,
+    )
     Price.objects.create(asset=usd, price=Decimal("60000"), source="API")
 
     assert resolve_historical_price(asset, timezone.now()) == Decimal("5700000000")
+
+
+def test_bitcoin_trade_uses_toman_price_and_reports_toman_unit(make_user):
+    from portfolio.serializers import LedgerEntrySerializer
+
+    user = make_user()
+    account = Account.objects.create(user=user, name="Crypto")
+    coin = Asset.objects.create(
+        key="bitcoin_usd", name="Bitcoin", is_active=True,
+        asset_class=Asset.AssetClass.CRYPTO,
+    )
+    Price.objects.create(
+        asset=coin, price=Decimal("5700000000"), source="API",
+        price_unit=Price.Unit.IRT, price_unit_verified=True,
+    )
+    create_ledger_entry(
+        account=account, kind=LedgerEntry.Kind.OPENING_CASH,
+        amount_tomans=Decimal("20000000000"),
+    )
+
+    trade = create_ledger_entry(
+        account=account, kind=LedgerEntry.Kind.BUY, asset=coin,
+        quantity=Decimal("2"),
+    )
+
+    assert trade.price_tomans == Decimal("5700000000")
+    assert trade.price_foreign == Decimal("5700000000")
+    assert trade.amount_tomans == Decimal("11400000000")
+    assert LedgerEntrySerializer(trade).data["unit_price_currency"] == "toman"
 
 
 def test_a_dollar_quote_with_no_rate_refuses_rather_than_storing_dollars():
@@ -2509,6 +2612,29 @@ def test_correcting_a_purchase_price_is_visible_immediately(
     assert Decimal(
         _position_metrics(account)["gold_18k_gram"]["average_cost_tomans"]
     ) == Decimal("10000000")
+
+
+def test_position_gain_updates_when_market_price_changes(
+    asset_catalog, write_prices, make_user
+):
+    from portfolio.services.ledger import record_existing_position
+    from portfolio.services.performance import _position_metrics
+
+    asset = asset_catalog["gold_18k_gram"]
+    write_prices({asset.key: Decimal("12000000")})
+    account = Account.objects.create(
+        user=make_user(email="market-reprice@test.test"), name="Gold"
+    )
+    record_existing_position(
+        account=account, asset=asset, quantity=Decimal("1"),
+        cost_basis_tomans=Decimal("10000000"),
+    )
+    first = _position_metrics(account)[asset.key]
+    assert Decimal(first["unrealized_pnl_tomans"]) == 2000000
+
+    write_prices({asset.key: Decimal("14000000")})
+    second = _position_metrics(account)[asset.key]
+    assert Decimal(second["unrealized_pnl_tomans"]) == 4000000
 
 
 def test_a_secured_debt_must_name_what_secures_it(asset_catalog, make_user):

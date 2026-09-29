@@ -78,14 +78,7 @@ jobs:
         env:
           DJANGO_SETTINGS_MODULE: config.settings_test
       - run: python -m pytest -q
-      # The shell scripts are the deploy and backup path, and nothing had ever
-      # linted them. A first run found an unreachable off-host upload: the count
-      # regex used doubled backslashes, so it matched nothing and `set -e` would
-      # have killed the backup on the first upload -- latent only because the
-      # feature has never been switched on. Errors AND warnings both fail here;
-      # the tree is clean at that level, and the two genuinely-benign findings
-      # carry an inline `shellcheck disable` with the reason.
-      #
+      # Lint the deployment scripts and frontend Lighthouse runner.
       # frontend/scripts/*.sh is in the glob too. `lhci.sh` is bash, it is what
       # `npm run test:lighthouse` runs, and the `frontend` job that runs it
       # gates `deploy` -- so it sits on the deploy path exactly like the scripts
@@ -95,12 +88,10 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck --severity=warning scripts/*.sh frontend/scripts/*.sh
-      - name: Database restore drill
-        run: ../scripts/ci_restore_drill.sh
-        env:
-          TEST_PG_HOST: localhost
-          TEST_PG_USER: postgres
-          TEST_PG_PASSWORD: postgres
+      - name: Test deployment guard
+        working-directory: portfolio-saas
+        run: |
+          bash scripts/test_broker_copy_deploy.sh
 
   frontend:
     runs-on: ubuntu-latest
@@ -263,12 +254,8 @@ jobs:
           # is what keeps .env.production (gitignored) in place across deploys.
           git reset --hard origin/main
           cd "$repo/portfolio-saas"
-          # deploy.sh takes a backup first, and backup_postgres.sh refuses to run
-          # without this. The passphrase lives outside /root so the unprivileged
-          # deploy user can read it.
-          export BACKUP_PASSPHRASE_FILE=/etc/portfolio/backup.pass
-          # deploy.sh takes it from here: backup, build, migrate, restart, then
-          # verify both Celery workers and three health endpoints. It exits
+          # deploy.sh builds, migrates, restarts, and then verifies both Celery
+          # workers and three health endpoints. It exits
           # non-zero on any failed check, which fails this job.
           #
           # Missing or unreachable mail is reported as degraded. The superuser

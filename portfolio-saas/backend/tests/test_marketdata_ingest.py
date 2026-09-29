@@ -149,8 +149,28 @@ def test_ingest_codal_idempotent():
     assert created == 1
     ann = CodalAnnouncement.objects.get()
     assert ann.symbol == "وبملت" and ann.date_publish == "1403-10-30"
+    assert ann.doc_type == "interim_financials"
+    assert ann.classified_by == "title"
     created, skipped = ingest.ingest_codal(CODAL_PAYLOAD)
     assert created == 0 and skipped == 1
+
+
+@pytest.mark.django_db
+def test_ingest_codal_preserves_provider_category_separately():
+    payload = {"announcement": [{
+        **CODAL_PAYLOAD["announcement"][0],
+        "category": 2,
+        "category_title": "Periodic Financial Statements",
+        "is_audited": False,
+    }]}
+    created, _ = ingest.ingest_codal(payload)
+    assert created == 1
+    row = CodalAnnouncement.objects.get()
+    assert row.source_category == 2
+    assert row.source_category_title == "Periodic Financial Statements"
+    assert row.source_is_audited is False
+    assert row.doc_type == "financial_statements"
+    assert row.classified_by == "category"
 
 
 @pytest.mark.django_db
@@ -160,8 +180,13 @@ def test_ingest_gold_currency_history_idempotent():
     row = GoldCurrencyHistory.objects.get(symbol="IR_COIN_EMAMI", date="1404-03-21")
     # Raw-storage policy: the provider's declared-Toman value is stored verbatim.
     assert row.close_price == 73385000
+    assert row.origin == GoldCurrencyHistory.Origin.BRSAPI
     created, skipped = ingest.ingest_gold_currency_history(GOLD_PAYLOAD)
     assert created == 0 and skipped == 2
+
+    ingest.ingest_gold_currency_history(GOLD_PAYLOAD, origin=GoldCurrencyHistory.Origin.TGJU)
+    row.refresh_from_db()
+    assert row.origin == GoldCurrencyHistory.Origin.TGJU
 
 
 @pytest.mark.django_db
@@ -536,6 +561,13 @@ def test_to_toman_applies_usd_rate_without_extra_conversion():
     assert to_toman("USDT_IRT", 1, "USD", usd_rate=632000) == Decimal("632000")
 
 
+def test_to_toman_keeps_cash_usd_and_tether_rate_boundaries_distinct():
+    assert to_toman("BTC", 2, "تتر", usd_rate=90000, usdt_rate=91000) == Decimal("182000")
+    assert to_toman("XAUUSD", 2, "دلار", usd_rate=90000, usdt_rate=91000) == Decimal("180000")
+    assert to_toman("BTC", 2, "تتر", usd_rate=90000) == Decimal("0")
+    assert to_toman("XAUUSD", 2, "دلار", usdt_rate=91000) == Decimal("0")
+
+
 def test_to_toman_zero_and_negative_input_is_zero():
     assert to_toman("کاما", 0, "Rial") == Decimal("0")
     assert to_toman("کاما", -100, "Rial") == Decimal("0")
@@ -808,14 +840,8 @@ def test_gold_ingest_still_accepts_declared_foreign_units():
     assert row.close_price == Decimal("4310") and row.unit == "دلار"
 
 
-def test_usd_quoted_keys_are_never_stamped_as_verified_toman():
-    """A USD-magnitude price must not be labelled IRT/verified.
-
-    extractor.py stores bitcoin_usd / gold_ounce_usd at their provider-native
-    USD magnitude. Stamping them Toman-verified would licence value_account to
-    add dollars straight into a Toman total; returns.py already special-cases
-    them via USD_QUOTED_KEYS, and valuation must not disagree.
-    """
+def test_foreign_seed_price_requires_verified_toman_source():
+    """An unknown old quote stays unknown; a normalized archive close is Toman."""
     from portfolio.models import Asset, Price
     from portfolio.services.returns import USD_QUOTED_KEYS
     from portfolio.tasks import _write_prices
@@ -839,6 +865,13 @@ def test_usd_quoted_keys_are_never_stamped_as_verified_toman():
     irt_row = Price.objects.filter(asset__key="toman_coin").latest("fetched_at")
     assert irt_row.price_unit == Price.Unit.IRT
     assert irt_row.price_unit_verified is True
+
+    _write_prices(
+        {usd_key: Decimal("6500000000")}, sources={usd_key: "ARCHIVE"},
+    )
+    archive_row = Price.objects.filter(asset__key=usd_key).latest("fetched_at")
+    assert archive_row.price_unit == Price.Unit.IRT
+    assert archive_row.price_unit_verified is True
 
 
 def test_rejection_backlog_groups_by_endpoint_and_reason(tmp_path):

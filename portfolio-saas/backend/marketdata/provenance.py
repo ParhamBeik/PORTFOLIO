@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import bisect
+from itertools import groupby
 
 from .calendars import candle_close_qs
+from .currency import TETHER_QUOTE_UNITS, USD_QUOTE_UNITS
 from .models import (
     ArchiveFetchState,
     GoldCurrencyHistory,
@@ -148,32 +150,74 @@ def latest_market_daily_bar(asset, *, as_of: str | None = None):
     return queryset.order_by("-date", "-id").first()
 
 
-def toman_per_dollar(dates=None) -> tuple[dict, list]:
-    """Toman-per-dollar by Jalali date, plus a sorted key list for bisecting.
+def _toman_per_quote(symbol, dates=None) -> tuple[dict, list]:
+    """One Toman-denominated FX series, with rejection and stale-run gaps.
 
     Returns `(rates, sorted_dates)`. Callers convert a row dated D at the newest
-    rate on or before D -- never at today's. A foreign series flattened by one
-    fixed rate is a different asset's returns: it erases every move the rial
-    itself made, which for a 90-day window of a depreciating rial restates the
-    whole history by the drift.
+    rate on or before D -- never at today's. Rejected rows and eight
+    consecutive stored observations with an identical close are review gaps,
+    represented by None so as-of lookup cannot carry a preceding quote across
+    them. A flat run is a conservative gate, not a claim about its cause.
     """
     from .models import GoldCurrencyHistory
 
-    queryset = GoldCurrencyHistory.objects.filter(symbol="USD", close_price__gt=0)
+    queryset = GoldCurrencyHistory.objects.filter(symbol=symbol, close_price__gt=0)
     if dates:
-        # Bounded BOTH ways. Only the rates spanning the rows being converted
-        # are needed, plus the one immediately before the earliest (which is
-        # what a row on a non-quoting day resolves to). Without the lower bound
-        # a 90-day panel materialised years of USD history to answer 90 lookups.
-        floor = (
-            queryset.filter(date__lte=min(dates)).order_by("-date")
-            .values_list("date", flat=True).first()
-        )
-        queryset = queryset.filter(date__lte=max(dates))
-        if floor is not None:
-            queryset = queryset.filter(date__gte=floor)
-    rates = dict(queryset.order_by("date").values_list("date", "close_price"))
+        # Eight neighbours on either side identify an eight-row flat run even
+        # when the requested date is a non-quoting day just after it. This keeps
+        # a 90-day panel bounded instead of materialising years of FX.
+        first, last = min(dates), max(dates)
+        before = list(queryset.filter(date__lt=first).order_by("-date")
+                      .values_list("date", "close_price")[:8])
+        middle = list(queryset.filter(date__gte=first, date__lte=last)
+                      .order_by("date").values_list("date", "close_price"))
+        after = list(queryset.filter(date__gt=last).order_by("date")
+                     .values_list("date", "close_price")[:8])
+        rows = sorted((*before, *middle, *after))
+    else:
+        rows = list(queryset.order_by("date").values_list("date", "close_price"))
+    rates = dict(rows)
+    for _price, group in groupby(rows, key=lambda row: row[1]):
+        run = list(group)
+        if len(run) >= 8:
+            for day, _ in run:
+                rates[day] = None
+    if rows:
+        rejected = RejectedRecord.objects.filter(
+            symbol=symbol, endpoint=ArchiveFetchState.Endpoint.GOLD_DAILY,
+            date__gte=rows[0][0], date__lte=rows[-1][0],
+        ).values_list("date", flat=True)
+        for day in rejected:
+            rates[day] = None
     return rates, sorted(rates)
+
+
+def toman_per_dollar(dates=None) -> tuple[dict, list]:
+    """Cash USD/Toman, never a substitute for Tether/Toman."""
+    return _toman_per_quote("USD", dates)
+
+
+def toman_per_tether(dates=None) -> tuple[dict, list]:
+    """USDT/Toman for Tether-quoted archive prices."""
+    return _toman_per_quote("USDT_IRT", dates)
+
+
+def toman_rate_tables(units, dates):
+    """Load only the FX series required by declared foreign quote units."""
+    folded = {str(unit or "").strip().casefold() for unit in units}
+    cash = toman_per_dollar(dates) if folded & USD_QUOTE_UNITS else ({}, [])
+    tether = toman_per_tether(dates) if folded & TETHER_QUOTE_UNITS else ({}, [])
+    return cash, tether
+
+
+def toman_rate_kwargs(unit, date, cash, tether):
+    """Pass the matching quote rate to `to_toman`, or no rate for unknown units."""
+    folded = str(unit or "").strip().casefold()
+    if folded in USD_QUOTE_UNITS:
+        return {"usd_rate": rate_on(*cash, date)}
+    if folded in TETHER_QUOTE_UNITS:
+        return {"usdt_rate": rate_on(*tether, date)}
+    return {}
 
 
 def rate_on(rates, sorted_dates, date):
@@ -263,7 +307,9 @@ def daily_bar_price(assets, *, since=None, as_of=None, latest_only=False) -> lis
         [(cls, symbol) for symbol, classes in classes_by_symbol.items()
          for cls in classes]
     )
-    rates, rate_dates = toman_per_dollar([row["date"] for row in rows])
+    cash_rates, tether_rates = toman_rate_tables(
+        units.values(), [row["date"] for row in rows],
+    )
     out = []
     for row in rows:
         symbol = row["symbol"]
@@ -278,7 +324,7 @@ def daily_bar_price(assets, *, since=None, as_of=None, latest_only=False) -> lis
             continue
         price = to_toman(
             symbol, row["close_price"], unit,
-            usd_rate=rate_on(rates, rate_dates, row["date"]),
+            **toman_rate_kwargs(unit, row["date"], cash_rates, tether_rates),
         )
         if price > 0:
             out.append((symbol, row["date"], price))
