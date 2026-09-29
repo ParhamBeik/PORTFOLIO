@@ -1106,6 +1106,11 @@ PUBLIC_ROUTES = {
     "api/auth/csrf/",
     # Credentials in, tokens out -- the caller has no token yet by definition.
     "api/auth/login/",
+    # Capacitor uses body refresh tokens; the native origin is checked separately.
+    "api/auth/mobile/login/",
+    "api/auth/mobile/register/",
+    "api/auth/mobile/refresh/",
+    "api/auth/mobile/logout/",
     # Authenticates on the httpOnly refresh cookie plus CSRF, not on a bearer.
     "api/auth/logout/",
     "api/token/refresh/",

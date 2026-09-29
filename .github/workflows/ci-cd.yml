@@ -131,6 +131,48 @@ jobs:
       - name: Lighthouse + response-header assertions
         run: npm run test:lighthouse
 
+  # Capacitor sync + Android debug APK. Keeps the native projects from bit-rotting
+  # when plugins or webDir change. Does not gate deploy: production remains the
+  # website until mobile auth and store signing are live; a red mobile build still
+  # fails the PR so the branch cannot silently diverge.
+  mobile:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: portfolio-saas/frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: portfolio-saas/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build:mobile
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Assemble Android debug APK
+        working-directory: portfolio-saas/frontend/android
+        run: |
+          set -euo pipefail
+          if ! sdkmanager "platforms;android-36" "build-tools;35.0.0" >/tmp/sdkmanager.log 2>&1; then
+            cat /tmp/sdkmanager.log
+            exit 1
+          fi
+          ./gradlew :app:assembleDebug --no-daemon
+      - name: Confirm package id
+        working-directory: portfolio-saas/frontend/android
+        run: |
+          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt | sort -V | tail -1)
+          "$AAPT" dump badging app/build/outputs/apk/debug/app-debug.apk \
+            | grep -F "name='ir.parhambm.holdings'"
+
   # Deliberately NOT in `deploy`'s `needs`. Everything else here tests code we
   # wrote, so red means "do not ship this". This job tests the world outside the
   # repo: a CVE published overnight in a transitive dependency has nothing to do

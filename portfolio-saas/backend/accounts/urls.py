@@ -10,6 +10,12 @@ from .views import (
     LogoutAllView,
     LogoutView,
     MeView,
+    MobileChangePasswordView,
+    MobileLogoutView,
+    MobileLogoutAllView,
+    MobileRegisterView,
+    MobileTokenObtainPairView,
+    MobileTokenRefreshView,
     PasswordResetConfirmView,
     PasswordResetRequestView,
     RegisterView,
@@ -17,6 +23,12 @@ from .views import (
 )
 
 urlpatterns = [
+    path("mobile/register/", MobileRegisterView.as_view(), name="mobile-register"),
+    path("mobile/login/", MobileTokenObtainPairView.as_view(), name="mobile-login"),
+    path("mobile/refresh/", MobileTokenRefreshView.as_view(), name="mobile-refresh"),
+    path("mobile/logout/", MobileLogoutView.as_view(), name="mobile-logout"),
+    path("mobile/logout-all/", MobileLogoutAllView.as_view(), name="mobile-logout-all"),
+    path("mobile/change-password/", MobileChangePasswordView.as_view(), name="mobile-change-password"),
     path("register/", RegisterView.as_view(), name="register"),
     path("registration/", RegistrationStatusView.as_view(), name="registration-status"),
     path("export/", ExportView.as_view(), name="export"),

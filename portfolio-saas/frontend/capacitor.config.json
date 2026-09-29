@@ -1,0 +1,9 @@
+{
+  "appId": "ir.parhambm.holdings",
+  "appName": "Holdings",
+  "webDir": "dist",
+  "server": {
+    "iosScheme": "capacitor",
+    "androidScheme": "http"
+  }
+}

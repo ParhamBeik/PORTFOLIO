@@ -33,11 +33,15 @@ if not DEBUG:
 ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,backend").split(",")
 
 # Frontend origin(s) for CORS. Comma-separated in dev (Vite on 5173).
-CORS_ALLOWED_ORIGINS = [
+WEB_CORS_ALLOWED_ORIGINS = [
     o for o in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
     if o
 ]
-CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
+# Capacitor serves bundled assets from these fixed local origins. Native API
+# requests use bearer tokens and never send the web refresh/CSRF cookies.
+MOBILE_CORS_ALLOWED_ORIGINS = ["capacitor://localhost", "http://localhost"]
+CORS_ALLOWED_ORIGINS = WEB_CORS_ALLOWED_ORIGINS + MOBILE_CORS_ALLOWED_ORIGINS
+CSRF_TRUSTED_ORIGINS = WEB_CORS_ALLOWED_ORIGINS
 
 INSTALLED_APPS = [
     "marketdata",
@@ -791,7 +795,7 @@ if ENVIRONMENT != "dev" or not DEBUG:
     CSRF_COOKIE_SECURE = True
     SECURE_REFERRER_POLICY = "same-origin"
     # M8: a non-debug server must not trust a localhost/loopback CORS origin.
-    if any("localhost" in o or "127.0.0.1" in o for o in CORS_ALLOWED_ORIGINS):
+    if any("localhost" in o or "127.0.0.1" in o for o in WEB_CORS_ALLOWED_ORIGINS):
         raise ImproperlyConfigured(
             "Refusing to start: CORS_ALLOWED_ORIGINS contains localhost with DEBUG=False."
         )

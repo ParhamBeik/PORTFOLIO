@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Holdings</string>
+    <string name="title_activity_main">Holdings</string>
+    <string name="package_name">ir.parhambm.holdings</string>
+    <string name="custom_url_scheme">ir.parhambm.holdings</string>
+</resources>

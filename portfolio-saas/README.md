@@ -51,6 +51,10 @@ Both linters run in CI and are correctness-only — no style rules. Their config
 (`backend/ruff.toml`, `frontend/eslint.config.js`) explain which rules are on
 and, more usefully, which are deliberately off.
 
+iOS and Android builds share this frontend through Capacitor. See
+[`docs/MOBILE.md`](docs/MOBILE.md) for setup, private distribution, offline
+behavior, and the release gate.
+
 ## Layout
 
 ```

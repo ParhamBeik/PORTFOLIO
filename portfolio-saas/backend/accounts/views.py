@@ -21,6 +21,7 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.views.decorators.csrf import csrf_protect
 from rest_framework import generics, status
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .permissions import IsRoleAdmin
 from rest_framework.response import Response
@@ -125,6 +126,30 @@ class CookieTokenObtainPairView(TokenObtainPairView):
         return _set_refresh_cookie(response, request, refresh)
 
 
+class MobileOriginMixin:
+    """Do not return a refresh token to JavaScript on the ordinary web origin."""
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if request.headers.get("Origin") not in settings.MOBILE_CORS_ALLOWED_ORIGINS:
+            raise PermissionDenied("Mobile origin required.")
+
+
+class MobileTokenObtainPairView(MobileOriginMixin, TokenObtainPairView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        user_id = RefreshToken(response.data["refresh"])[settings.SIMPLE_JWT["USER_ID_CLAIM"]]
+        user = User.objects.get(pk=user_id)
+        user.last_login = timezone.now()
+        user.save(update_fields=["last_login"])
+        response.data["user"] = UserSerializer(user).data
+        response.data["session_expires_at"] = _session_expires_at()
+        return response
+
+
 def _rotation_replay_key(refresh: str) -> str:
     """Cache key for the response a given refresh token already produced.
 
@@ -169,6 +194,24 @@ def _replayable(payload: dict) -> bool:
     return not BlacklistedToken.objects.filter(token__jti=jti).exists()
 
 
+def _rotate_refresh(refresh: str) -> dict:
+    """Share rotation and lost-response replay across cookie and mobile clients."""
+    key = _rotation_replay_key(refresh)
+    cached = cache.get(key)
+    if cached is None and not cache.add(f"{key}:lock", 1, ROTATION_LOCK_SECONDS):
+        cached = _await_replay(key)
+    if cached and _replayable(cached):
+        return dict(cached)
+    serializer = PasswordAwareTokenRefreshSerializer(data={"refresh": refresh})
+    serializer.is_valid(raise_exception=True)
+    payload = dict(serializer.validated_data)
+    payload["refresh"] = payload.get("refresh", refresh)
+    payload["session_expires_at"] = _session_expires_at()
+    if payload["refresh"] != refresh:
+        cache.set(key, payload, ROTATION_GRACE_SECONDS)
+    return payload
+
+
 @method_decorator(csrf_protect, name="dispatch")
 class CookieTokenRefreshView(APIView):
     permission_classes = [AllowAny]
@@ -194,25 +237,23 @@ class CookieTokenRefreshView(APIView):
         if not refresh:
             return Response({"detail": "Refresh session is missing."}, status=401)
 
-        key = _rotation_replay_key(refresh)
-        cached = cache.get(key)
-        # Only one request may rotate a given token; the rest replay its answer.
-        # `add` is the atomic claim (SETNX on Redis), and its short TTL means a
-        # request that dies mid-rotation costs the next one a wait, not a wedge.
-        if cached is None and not cache.add(f"{key}:lock", 1, ROTATION_LOCK_SECONDS):
-            cached = _await_replay(key)
-        if cached and _replayable(cached):
-            replay = dict(cached)
-            return _set_refresh_cookie(Response(replay), request, replay.pop("refresh"))
-
-        serializer = PasswordAwareTokenRefreshSerializer(data={"refresh": refresh})
-        serializer.is_valid(raise_exception=True)
-        payload = dict(serializer.validated_data)
-        rotated = payload.pop("refresh", refresh)
-        payload["session_expires_at"] = _session_expires_at()
-        if rotated != refresh:
-            cache.set(key, {**payload, "refresh": rotated}, ROTATION_GRACE_SECONDS)
+        payload = _rotate_refresh(refresh)
+        rotated = payload.pop("refresh")
         return _set_refresh_cookie(Response(payload), request, rotated)
+
+
+class MobileTokenRefreshView(MobileOriginMixin, APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        refresh = request.data.get("refresh")
+        if not isinstance(refresh, str) or not refresh:
+            return Response({"detail": "Refresh session is missing."}, status=401)
+        try:
+            return Response(_rotate_refresh(refresh))
+        except AuthenticationFailed:
+            return Response({"detail": "Refresh session is invalid."}, status=401)
 
 
 class CsrfView(APIView):
@@ -243,6 +284,20 @@ class LogoutView(APIView):
         return _clear_refresh_cookie(Response(status=204))
 
 
+class MobileLogoutView(MobileOriginMixin, APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        refresh = request.data.get("refresh")
+        if isinstance(refresh, str) and refresh:
+            try:
+                RefreshToken(refresh).blacklist()
+            except TokenError:
+                pass
+        return Response(status=204)
+
+
 @method_decorator(csrf_protect, name="dispatch")
 class LogoutAllView(APIView):
     permission_classes = [IsAuthenticated]
@@ -250,6 +305,14 @@ class LogoutAllView(APIView):
     def post(self, request):
         _revoke_all(request.user)
         return _clear_refresh_cookie(Response(status=204))
+
+
+class MobileLogoutAllView(MobileOriginMixin, APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        _revoke_all(request.user)
+        return Response(status=204)
 
 
 class RegisterView(generics.CreateAPIView):
@@ -278,6 +341,22 @@ class RegisterView(generics.CreateAPIView):
             status=status.HTTP_201_CREATED,
         )
         return _set_refresh_cookie(response, request, refresh)
+
+
+class MobileRegisterView(MobileOriginMixin, RegisterView):
+    def create(self, request, *args, **kwargs):
+        if not settings.REGISTRATION_OPEN:
+            return Response({"detail": "New memberships are currently closed."}, status=403)
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        access, refresh = _tokens(user)
+        return Response({
+            "user": UserSerializer(user).data,
+            "access": access,
+            "refresh": refresh,
+            "session_expires_at": _session_expires_at(),
+        }, status=201)
 
 
 class RegistrationStatusView(APIView):
@@ -339,6 +418,21 @@ class ChangePasswordView(APIView):
         return _set_refresh_cookie(Response({
             "detail": "Password updated successfully.", "access": access,
         }), request, refresh)
+
+
+class MobileChangePasswordView(MobileOriginMixin, ChangePasswordView):
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        _revoke_all(user)
+        access, refresh = _tokens(user)
+        return Response({
+            "detail": "Password updated successfully.",
+            "access": access,
+            "refresh": refresh,
+            "session_expires_at": _session_expires_at(),
+        })
 
 
 def _user_from_uid(uid: str) -> User | None:
