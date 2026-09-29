@@ -1122,6 +1122,9 @@ PUBLIC_ROUTES = {
     "api/health/",
     "api/health/prices/",
     "api/health/ready/",
+    # Server-to-server feed for the News Intelligence app, which has no user JWT.
+    # Gated by a constant-time X-News-Service-Key check; 403 when the key is unset.
+    "api/marketdata/shared-series/",
 }
 
 

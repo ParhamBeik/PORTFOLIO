@@ -13,6 +13,7 @@ from pathlib import Path
 from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+NEWS_MARKET_SERVICE_KEY = os.getenv("NEWS_MARKET_SERVICE_KEY", "")
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-insecure-change-me-must-be-at-least-32-bytes-long-for-jwt-hs256!")
 DEBUG = os.getenv("DJANGO_DEBUG", "0") == "1"
