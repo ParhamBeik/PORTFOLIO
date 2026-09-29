@@ -248,7 +248,11 @@ jobs:
           # --hard, not merge: the server mirrors origin/main exactly and has no
           # local commits worth keeping. Untracked files are left alone, which
           # is what keeps .env.production (gitignored) in place across deploys.
-          git reset --hard origin/main
+          # The exact commit this run tested and built the backend image from --
+          # not origin/main, which may have moved on while the image built.
+          # (A merge during a deploy once paired a newer checkout with an older
+          # image.) Runs are serialized, so the next run brings the newer commit.
+          git reset --hard "${GITHUB_SHA}"
           cd "$repo/portfolio-saas"
           # deploy.sh builds, migrates, restarts, and then verifies both Celery
           # workers and three health endpoints. It exits
