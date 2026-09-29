@@ -214,6 +214,7 @@ services:
 
   migrate:
     build: ./backend
+    image: portfolio-saas-backend:latest
     restart: "no"
     logging: *logging
     entrypoint: []
@@ -231,6 +232,7 @@ services:
 
   backend:
     build: ./backend
+    image: portfolio-saas-backend:latest
     restart: unless-stopped
     logging: *logging
     depends_on:
@@ -261,6 +263,7 @@ services:
 
   celery_worker_live:
     build: ./backend
+    image: portfolio-saas-backend:latest
     restart: unless-stopped
     logging: *logging
     entrypoint: []            # skip migrate/seed; the backend service owns DB setup
@@ -290,6 +293,7 @@ services:
 
   celery_worker_archive:
     build: ./backend
+    image: portfolio-saas-backend:latest
     restart: unless-stopped
     logging: *logging
     entrypoint: []
@@ -332,6 +336,7 @@ services:
   # creates the worker that would consume the queue.
   celery_worker_codal:
     build: ./backend
+    image: portfolio-saas-backend:latest
     restart: unless-stopped
     logging: *logging
     entrypoint: []
@@ -362,6 +367,7 @@ services:
 
   celery_beat:
     build: ./backend
+    image: portfolio-saas-backend:latest
     restart: unless-stopped
     logging: *logging
     entrypoint: []

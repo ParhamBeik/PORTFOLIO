@@ -110,7 +110,18 @@ if (( legacy_broker )); then
   done
 fi
 
-"${compose[@]}" build
+# files.pythonhosted.org hangs from this (Iranian) host while pypi.org answers,
+# so pip inside an on-box backend build fails every time. CI builds the backend
+# image instead and passes BACKEND_IMAGE; tagging it with the compose name keeps
+# a later manual `compose up` on the same image rather than a stale local build.
+# Without BACKEND_IMAGE (manual deploys) everything still builds here.
+if [[ -n "${BACKEND_IMAGE:-}" ]]; then
+  docker pull "${BACKEND_IMAGE}"
+  docker tag "${BACKEND_IMAGE}" portfolio-saas-backend:latest
+  "${compose[@]}" build frontend
+else
+  "${compose[@]}" build
+fi
 # The first broker cutover cannot abandon work in Redis DB 2. Drain active
 # consumers or explicitly copy quiesced lists to the durable broker. Results
 # remain on DB 2 and do not count as outstanding work.

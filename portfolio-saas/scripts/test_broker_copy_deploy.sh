@@ -189,6 +189,17 @@ if PATH="${scratch}/bin:${PATH}" PROJECT_DIR="${scratch}" ENV_FILE="${scratch}/e
 fi
 grep -q 'copy_celery_queues.py' "${scratch}/docker.log"
 
+# A CI-built backend image is pulled and tagged; only the frontend builds on the box.
+: >"${scratch}/docker.log"
+BACKEND_IMAGE=ghcr.io/example/portfolio-backend:abc run_deploy >"${scratch}/out" 2>"${scratch}/err" || true
+grep -qx 'pull ghcr.io/example/portfolio-backend:abc' "${scratch}/docker.log"
+grep -qx 'tag ghcr.io/example/portfolio-backend:abc portfolio-saas-backend:latest' "${scratch}/docker.log"
+grep -q ' build frontend$' "${scratch}/docker.log"
+if grep -q ' build$' "${scratch}/docker.log"; then
+  echo "Backend was rebuilt on the box despite BACKEND_IMAGE" >&2
+  exit 1
+fi
+
 : >"${scratch}/docker.log"
 PATH="${scratch}/bin:${PATH}" PROJECT_DIR="${scratch}" ENV_FILE="${scratch}/env" \
   MOCK_DOCKER_LOG="${scratch}/docker.log" flock -x "${scratch}/env" \
