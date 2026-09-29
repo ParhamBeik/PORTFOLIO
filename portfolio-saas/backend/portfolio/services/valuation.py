@@ -988,9 +988,17 @@ def value_account(
         items.append(item)
     total_assets = len(items)
     quality_status = _quality_rollup(items, excluded, total_assets, priced_assets)
+    # Cash is net worth. It lives on the account (rebuilt from the ledger), not
+    # in `items`, because items feed risk weights and per-asset performance,
+    # which have no meaning for a toman balance. Performance used to add it on
+    # its own while Home and the snapshot history did not, so the two disagreed
+    # by exactly the cash balance.
+    cash = (account.cash_balance_tomans or Decimal("0")) if account.pk else Decimal("0")
+    total += cash
     total -= total_liabilities
     return {
         "total": total,
+        "cash_tomans": cash,
         "items": items,
         "hidden_items": hidden_items,
         "priced_assets": priced_assets,
@@ -1024,6 +1032,7 @@ def value_user(user, *, include_hidden: bool = False) -> dict:
             "name": account.name,
             "broker": account.broker,
             "total": valuation["total"],
+            "cash_tomans": valuation["cash_tomans"],
             "items": valuation["items"],
             "hidden_items": valuation["hidden_items"],
             "liabilities": valuation.get("liabilities", []),
@@ -1047,6 +1056,7 @@ def value_user(user, *, include_hidden: bool = False) -> dict:
     quality_status = _quality_rollup(items, excluded, total_assets, priced_assets)
     return {
         "total": total,
+        "cash_tomans": sum((a["cash_tomans"] for a in accounts), Decimal("0")),
         "accounts": accounts,
         "items": items,
         "hidden_items": hidden_items,

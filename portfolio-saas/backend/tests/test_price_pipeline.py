@@ -2122,3 +2122,30 @@ def test_the_settings_default_still_prices_a_bar_nobody_has_marked(db):
     )
 
     assert Price.objects.get(asset=asset).price == Decimal("61610000")
+
+
+def test_cash_counts_once_on_home_in_history_and_in_performance(asset_catalog, make_user):
+    """Home, the sealed history and performance all see the same net worth.
+
+    Performance used to add the cash balance on its own while value_account and
+    the nightly snapshot left it out, so the screens disagreed by exactly the
+    cash. Now it is counted once, in value_account, and nowhere else.
+    """
+    from portfolio.services.performance import _current_value
+
+    user = make_user()
+    account = Account.objects.create(
+        user=user, name="Cash", cash_balance_tomans=Decimal("1000000"), track_cash=True,
+    )
+    asset = asset_catalog["emami_coin"]
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("1"))
+    Price.objects.create(asset=asset, price=Decimal("480000"), source="API")
+
+    valuation = value_account(account)
+    assert valuation["cash_tomans"] == Decimal("1000000")
+    assert valuation["total"] == Decimal("1480000")
+    assert _current_value(account, "nominal_toman") == Decimal("1480000")
+
+    _seal_test_day()
+    assert Snapshot.objects.get(user=user, account=account).total_value_tomans == Decimal("1480000")
+    assert Snapshot.objects.get(user=user, account=None).total_value_tomans == Decimal("1480000")

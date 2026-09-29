@@ -24,7 +24,7 @@ def _conversion_rate(basis: str, as_of) -> Decimal | None:
 
 
 def _current_value(account, basis: str) -> Decimal | None:
-    total = Decimal(value_account(account)["total"]) + account.cash_balance_tomans
+    total = Decimal(value_account(account)["total"])  # includes cash
     if basis in ("usd_denominated", "usdt_denominated"):
         rate = _conversion_rate(basis, timezone.now())
         return total / rate if rate else None
@@ -439,7 +439,7 @@ def account_performance(account, *, basis=None) -> dict:
         "tracking_started_at": start.isoformat(),
         "days_tracked": days_tracked,
         "current_value_tomans": str(
-            Decimal(value_account(account)["total"]) + account.cash_balance_tomans
+            Decimal(value_account(account)["total"])  # includes cash
         ),
         "current_value": str(current_value),
         "external_flow_count": len(flows),

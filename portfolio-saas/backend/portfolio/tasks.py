@@ -298,6 +298,8 @@ def _write_snapshots(prices: dict, *, day, session_close_keys: set[str]) -> int:
                 account_close_flags.append(is_close)
             for holding in account.holdings.all():
                 account_total += asset_value(holding, prices.get(holding.asset.key))
+            # Same net worth as value_account: holdings + cash - debt.
+            account_total += account.cash_balance_tomans or Decimal("0")
             for liability in account.liabilities.all():
                 account_total -= liability.outstanding_tomans()
             account_total = account_total.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
@@ -515,7 +517,14 @@ def run_global_optimization_snapshot(payload: dict | None = None):
         for account in accounts_qs.iterator():
             try:
                 valuation = value_account(account, prices=prices)
-                total = valuation.get("total") or Decimal("0")
+                # Weights are shares of what is invested, not of net worth:
+                # `total` also carries cash and debt, which the optimizer
+                # does not hold as assets.
+                total = sum(
+                    (Decimal(str(i["value"])) for i in valuation.get("items", [])
+                     if i.get("value") is not None),
+                    Decimal("0"),
+                )
                 if total <= 0:
                     logger.debug("Skipping optimization for account %s: total value = %s", account.id, str(total))
                     continue
