@@ -219,6 +219,8 @@ def _rescale(valuation, factor, *, to_foreign_currency=False):
                     row[field] = float(Decimal(str(row[field])) / factor)
 
     valuation["total"] = Decimal(str(valuation.get("total", 0) or 0)) / factor
+    if valuation.get("cash_tomans") is not None:
+        valuation["cash_tomans"] = Decimal(str(valuation["cash_tomans"])) / factor
     if valuation.get("total_usd") is not None:
         valuation["total_usd"] = Decimal(str(valuation["total_usd"])) / factor
     # Debt is money. It is already netted out of `total`, so leaving it in Toman
@@ -237,6 +239,8 @@ def _rescale(valuation, factor, *, to_foreign_currency=False):
     for account in valuation.get("accounts") or []:
         if account.get("total") is not None:
             account["total"] = Decimal(str(account["total"])) / factor
+        if account.get("cash_tomans") is not None:
+            account["cash_tomans"] = Decimal(str(account["cash_tomans"])) / factor
         # `value_user` puts a `total_liabilities` on every account as well as on
         # the root, so converting only the root left the aggregate debt in
         # dollars beside each account's debt in Toman, in one payload.
