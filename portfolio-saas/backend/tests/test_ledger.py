@@ -2908,3 +2908,102 @@ def test_a_fully_reversed_position_is_not_a_row_that_cost_nothing(
     Holding.objects.filter(account=account, asset=asset_catalog["emami_coin"]).delete()
 
     assert "emami_coin" not in _position_metrics(account)
+
+
+# ----------------------------------------------------------------------
+# Capital increases detected by the warehouse, offered as ledger entries.
+
+
+def _held_kama(asset_catalog, make_user, quantity="1000"):
+    from marketdata import jalali
+    from portfolio.models import Account, LedgerEntry
+    from portfolio.services.ledger import create_ledger_entry
+
+    user = make_user()
+    account = Account.objects.create(user=user, name="TSE")
+    create_ledger_entry(
+        account=account, kind=LedgerEntry.Kind.OPENING_POSITION,
+        asset=asset_catalog["kama_stock"], quantity=quantity,
+        occurred_at=jalali.to_datetime("1405-02-01"),
+    )
+    return user, account
+
+
+def _action(date="1405-03-03", factor="1.29", kind="capital_increase"):
+    from marketdata.models import CorporateAction
+
+    return CorporateAction.objects.create(
+        symbol="کاما", date=date, factor=Decimal(factor), kind=kind,
+        source=CorporateAction.Source.CODAL,
+    )
+
+
+def test_a_capital_increase_is_suggested_with_the_factors_new_shares(asset_catalog, make_user):
+    from portfolio.services.corporate_actions import pending_suggestions
+
+    user, account = _held_kama(asset_catalog, make_user)
+    _action()
+    _action(date="1405-04-17", factor="1.0268", kind="dividend")  # not free shares
+    _action(date="1405-01-10", factor="2")  # before the position existed
+
+    [row] = pending_suggestions(user)
+    assert (row["account_id"], row["symbol"], row["date"]) == (account.id, "کاما", "1405-03-03")
+    assert row["held_quantity"] == "1000"
+    assert row["suggested_quantity"] == "290"
+
+
+def test_accepting_books_the_shares_once(asset_catalog, make_user):
+    from rest_framework.test import APIClient
+    from portfolio.models import Holding
+    from portfolio.services.corporate_actions import pending_suggestions
+
+    user, account = _held_kama(asset_catalog, make_user)
+    _action()
+    client = APIClient()
+    client.force_authenticate(user=user)
+    url = f"/api/accounts/{account.id}/corporate-actions/accept/"
+
+    first = client.post(url, {"symbol": "کاما", "date": "1405-03-03"}, format="json")
+    assert first.status_code == 201, first.data
+    assert Holding.objects.get(account=account).quantity == Decimal("1290")
+    assert pending_suggestions(user) == []
+    again = client.post(url, {"symbol": "کاما", "date": "1405-03-03"}, format="json")
+    assert again.status_code == 400
+    assert Holding.objects.get(account=account).quantity == Decimal("1290")
+
+
+def test_the_user_can_correct_the_quantity_or_dismiss(asset_catalog, make_user):
+    from rest_framework.test import APIClient
+    from portfolio.models import Holding
+    from portfolio.services.corporate_actions import pending_suggestions
+
+    user, account = _held_kama(asset_catalog, make_user)
+    _action()
+    _action(date="1405-05-20", factor="1.5")
+    client = APIClient()
+    client.force_authenticate(user=user)
+    base = f"/api/accounts/{account.id}/corporate-actions"
+
+    assert client.post(f"{base}/accept/", {"symbol": "کاما", "date": "1405-03-03", "quantity": "250"},
+                       format="json").status_code == 201
+    assert client.post(f"{base}/dismiss/", {"symbol": "کاما", "date": "1405-05-20"},
+                       format="json").status_code == 204
+    assert Holding.objects.get(account=account).quantity == Decimal("1250")
+    assert pending_suggestions(user) == []
+    assert client.get("/api/corporate-actions/").data == {"results": []}
+
+
+def test_a_hand_entered_bonus_suppresses_the_suggestion(asset_catalog, make_user):
+    from marketdata import jalali
+    from portfolio.models import LedgerEntry
+    from portfolio.services.corporate_actions import pending_suggestions
+    from portfolio.services.ledger import create_ledger_entry
+
+    user, account = _held_kama(asset_catalog, make_user)
+    _action()
+    create_ledger_entry(
+        account=account, kind=LedgerEntry.Kind.RIGHTS_ISSUE,
+        asset=asset_catalog["kama_stock"], quantity="290",
+        occurred_at=jalali.to_datetime("1405-04-10"),
+    )
+    assert pending_suggestions(user) == []

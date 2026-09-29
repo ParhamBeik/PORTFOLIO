@@ -1229,6 +1229,10 @@ ACCOUNT_SCOPED_CREATES = [
     ("/api/accounts/{account}/liabilities/", {"label": "L", "amount_tomans": "1"}),
     ("/api/accounts/{account}/trades/",
      {"asset_key": "emami_coin", "side": "buy", "quantity": "1"}),
+    ("/api/accounts/{account}/corporate-actions/accept/",
+     {"symbol": "کاما", "date": "1405-03-03", "quantity": "1"}),
+    ("/api/accounts/{account}/corporate-actions/dismiss/",
+     {"symbol": "کاما", "date": "1405-03-03"}),
 ]
 
 
