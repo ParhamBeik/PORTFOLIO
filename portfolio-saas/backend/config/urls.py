@@ -3,6 +3,7 @@ from django.contrib import admin
 from django.urls import include, path
 from accounts.views import CookieTokenRefreshView
 from marketdata.explore_api import StockDossierView, StockEvidenceView, StockSearchView
+from marketdata.shared_series import SharedMarketSeriesView
 from research.views import ResearchRunDetailView, ResearchRunView, ResearchSettingsView
 from portfolio.views.admin_ops import AdminCleanPricesExecuteView, AdminCleanPricesScanView
 from .health import HealthView, PriceFeedView, ReadyView
@@ -25,6 +26,7 @@ def custom_admin_index(request, extra_context=None):
 admin.site.index = custom_admin_index
 
 urlpatterns = [
+    path("api/marketdata/shared-series/", SharedMarketSeriesView.as_view(), name="shared-market-series"),
     path("admin/", admin.site.urls),
     path("api/health/", HealthView.as_view(), name="health"),
     path("api/health/ready/", ReadyView.as_view(), name="health-ready"),
