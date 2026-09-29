@@ -1343,8 +1343,11 @@ def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
             for date in sorted(unadjusted.keys() & adjusted.keys())
         ]
 
+        confirmed_dates = set()
         for action in detect_factor_ratio_actions(paired):
             confirmed, action_kind, ann = check_codal_confirmation(symbol, action["date"])
+            if confirmed:
+                confirmed_dates.add(action["date"])
             
             status = "confirmed" if confirmed else "unconfirmed"
             ann_title = f" (Codal: {ann.title} on {ann.date_publish})" if ann else ""
@@ -1373,6 +1376,16 @@ def nightly_series_validation(dry_run=False, symbols=None, gold_symbols=None):
                 )
                 actions_created_count += int(created)
 
+        # The table is derived from the candles, so it must also forget. Rows
+        # were only ever upserted: an ingest that once mixed Rial and Toman
+        # between the two timeframes left x10 / x0.1 "capital increases" that
+        # the corrected candles no longer show (12 of 15 rows on one held
+        # stock, 2026-09-29), and each one exempted a real spike from the
+        # screen below.
+        if not dry_run:
+            CorporateAction.objects.filter(symbol=symbol).exclude(
+                date__in=confirmed_dates
+            ).delete()
         action_dates = set(CorporateAction.objects.filter(symbol=symbol).values_list("date", flat=True))
         
         for timeframe in (MarketCandle.UNADJUSTED, MarketCandle.ADJUSTED):

@@ -1630,6 +1630,39 @@ def test_duplicate_actions_prevented(db):
     assert CorporateAction.objects.filter(symbol=symbol).count() == 1
 
 
+def test_actions_the_candles_no_longer_show_are_forgotten(db):
+    """A stored action must not outlive the price evidence that produced it.
+
+    A Rial/Toman mix between the two timeframes once minted x10 and x0.1
+    "capital increases" that stayed after the candles were corrected.
+    """
+    symbol = "TEST_STALE"
+    CorporateAction.objects.create(
+        symbol=symbol, date="1404-07-26", factor=Decimal("10"),
+        kind=CorporateAction.Kind.CAPITAL_INCREASE, source=CorporateAction.Source.CODAL,
+    )
+    CorporateAction.objects.create(
+        symbol="OTHER", date="1404-07-26", factor=Decimal("10"),
+        kind=CorporateAction.Kind.CAPITAL_INCREASE, source=CorporateAction.Source.CODAL,
+    )
+    MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.UNADJUSTED, date_time="1405-01-01", close_price=Decimal("200"))
+    MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.ADJUSTED, date_time="1405-01-01", close_price=Decimal("100"))
+    MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.UNADJUSTED, date_time="1405-01-02", close_price=Decimal("100"))
+    MarketCandle.objects.create(symbol=symbol, timeframe=MarketCandle.ADJUSTED, date_time="1405-01-02", close_price=Decimal("100"))
+    CodalAnnouncement.objects.create(
+        symbol=symbol, date_publish="1405-01-02",
+        category=CodalAnnouncement.Category.CAPITAL_INCREASE, title="Capital increase",
+    )
+
+    nightly_series_validation(dry_run=True, symbols=[symbol], gold_symbols=[])
+    assert CorporateAction.objects.filter(symbol=symbol, date="1404-07-26").exists()
+
+    nightly_series_validation(dry_run=False, symbols=[symbol], gold_symbols=[])
+    assert list(CorporateAction.objects.filter(symbol=symbol).values_list("date", flat=True)) == ["1405-01-02"]
+    # Only the scanned symbol is reconciled.
+    assert CorporateAction.objects.filter(symbol="OTHER").exists()
+
+
 def test_confirmation_behavior():
     """Verify that the Codal announcement confirmation logic correctly classifies the action source."""
     symbol = "TEST_CONF"
