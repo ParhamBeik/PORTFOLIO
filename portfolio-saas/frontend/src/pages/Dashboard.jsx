@@ -155,7 +155,15 @@ function HeroRow({ state, basis: selected }) {
                 label="Total value"
                 value={money(Number(data.total), basis)}
                 size="lg"
-                sub={basis === "real_toman" ? REAL_BASIS_NOTE : undefined}
+                sub={
+                  basis === "real_toman"
+                    ? REAL_BASIS_NOTE
+                    // Cash is part of the total but has no holding row, so say
+                    // so rather than leave a gap between the rows and the sum.
+                    : Number(data.cash_tomans)
+                      ? `Includes ${money(Number(data.cash_tomans), basis)} cash`
+                      : undefined
+                }
                 testId="dashboard-total"
               />
             </div>
