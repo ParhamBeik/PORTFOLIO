@@ -116,7 +116,16 @@ fi
 # a later manual `compose up` on the same image rather than a stale local build.
 # Without BACKEND_IMAGE (manual deploys) everything still builds here.
 if [[ -n "${BACKEND_IMAGE:-}" ]]; then
-  docker pull "${BACKEND_IMAGE}"
+  # Layers come from GitHub's blob CDN, and one read from this host can stall
+  # (a single "timeout awaiting response headers" failed a whole deploy on
+  # 2026-09-29). Nothing is stopped yet, so retrying is safe.
+  pulled=0
+  for attempt in 1 2 3 4; do
+    if docker pull "${BACKEND_IMAGE}"; then pulled=1; break; fi
+    echo "Image pull attempt ${attempt} failed; retrying." >&2
+    sleep $(( attempt * 15 ))
+  done
+  (( pulled )) || { echo "Could not pull ${BACKEND_IMAGE}; nothing was stopped." >&2; exit 1; }
   docker tag "${BACKEND_IMAGE}" portfolio-saas-backend:latest
   "${compose[@]}" build frontend
 else
