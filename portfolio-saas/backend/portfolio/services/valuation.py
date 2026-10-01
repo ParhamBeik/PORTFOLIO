@@ -1005,10 +1005,58 @@ def value_account(
         "total_assets": total_assets,
         "quality_status": quality_status,
         "tse_unit_policy": TSE_PRICE_UNIT,
+        "markets": market_clocks(items),
         "excluded": excluded,
         "liabilities": [_liability_row(l) for l in liabilities_qs],
         "total_liabilities": float(total_liabilities),
     }
+
+
+#: Home's per-market clocks, in display order: (group, label, member classes).
+MARKET_GROUPS = (
+    ("stocks", "Stocks", {Asset.AssetClass.STOCK}),
+    ("gold_fx", "Gold & FX", {Asset.AssetClass.GOLD, Asset.AssetClass.CASH}),
+    ("crypto", "Crypto", {Asset.AssetClass.CRYPTO}),
+)
+
+
+def market_clocks(items) -> list[dict]:
+    """One clock per market the user actually holds.
+
+    The total mixes markets that keep different hours: at 20:00 the stock part
+    is Wednesday's close while dollars and coins moved an hour ago. Without
+    saying so per market, a flat stock line next to a live total reads as a
+    frozen feed. `open` uses the same rule as `_asset_market_is_open`, and
+    `last_priced_at` is the newest price behind that market's holdings.
+    """
+    state = current_market_state()
+    is_open = {
+        "stocks": state == OPEN,
+        "gold_fx": state in (OPEN, CLOSED_DAYTIME),
+        "crypto": True,
+    }
+    def group_of(item):
+        if item.get("symbol") or item.get("class") == Asset.AssetClass.STOCK:
+            return "stocks"
+        for group, _label, classes in MARKET_GROUPS[1:]:
+            if item.get("class") in classes:
+                return group
+        return None  # houses and manual assets keep no market hours
+
+    clocks = []
+    for group, label, _classes in MARKET_GROUPS:
+        members = [item for item in items if not item.get("is_house") and group_of(item) == group]
+        if not members:
+            continue
+        stamps = [item["priced_at"] for item in members if item.get("priced_at")]
+        clocks.append({
+            "market": group,
+            "label": label,
+            "open": is_open[group],
+            "last_priced_at": max(stamps) if stamps else None,
+            "holdings": len(members),
+        })
+    return clocks
 
 
 def value_user(user, *, include_hidden: bool = False) -> dict:
@@ -1064,6 +1112,7 @@ def value_user(user, *, include_hidden: bool = False) -> dict:
         "priced_assets": priced_assets,
         "total_assets": total_assets,
         "quality_status": quality_status,
+        "markets": market_clocks(items),
         "excluded": excluded,
         "liabilities": all_liabilities,
         "total_liabilities": float(total_liabilities),

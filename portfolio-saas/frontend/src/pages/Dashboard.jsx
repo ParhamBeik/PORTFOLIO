@@ -64,7 +64,7 @@ const RANGES = [
 const INFLATION_VIEWS = [
   { value: "nominal", label: "Nominal" },
   { value: "real", label: "vs inflation" },
-  { value: "benchmarks", label: "vs gold, USD & market" },
+  { value: "benchmarks", label: "vs coin, USD & TEDPIX" },
 ];
 
 // ponytail: the CPI table is `base 1398=100` (config/settings.py), and a rebase
@@ -119,6 +119,39 @@ function groupByClass(items) {
   if (groups.length <= 8) return groups;
   const rest = groups.slice(7).reduce((s, g) => s + g.value, 0);
   return [...groups.slice(0, 7), { name: "Other", value: rest }];
+}
+
+/**
+ * One chip per market the portfolio holds: open or closed, and how old its
+ * newest price is. The total blends a stock market that closed at 12:30 with
+ * dollars and coins that are still moving, and a flat stock line beside a
+ * live total otherwise reads as a frozen feed. The row keeps its height while
+ * loading so nothing below it moves.
+ */
+function MarketClocks({ data }) {
+  const markets = data?.markets || [];
+  return (
+    <div className="flex min-h-[28px] flex-wrap gap-2" data-testid="dashboard-market-clocks">
+      {markets.map((m) => {
+        const age = m.last_priced_at ? (Date.now() - Date.parse(m.last_priced_at)) / 1000 : null;
+        return (
+          <span
+            key={m.market}
+            data-testid={`dashboard-market-${m.market}`}
+            className="inline-flex items-center gap-1.5 rounded-full border border-border bg-panel-2 px-2.5 py-1 text-xs text-muted"
+          >
+            <span
+              aria-hidden="true"
+              className={`size-1.5 rounded-full ${m.open ? "bg-[var(--c-good)]" : "bg-[var(--c-muted)]"}`}
+            />
+            <span className="font-medium text-text">{m.label}</span>
+            <span>{m.open ? "open" : "closed"}</span>
+            {age != null && <span>· last price {ago(age)}</span>}
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 function HeroRow({ state, basis: selected }) {
@@ -1384,6 +1417,7 @@ export default function Dashboard({ user }) {
       <PageHeader title="Portfolio" subtitle="Your holdings, net worth, allocation, and performance in the selected valuation basis." />
       <div className="space-y-6">
         <HeroRow state={valuationState} basis={basis} />
+        <MarketClocks data={valuationState.data} />
         <CorporateActionsCard
           onBooked={() => {
             valuationState.reload();

@@ -1057,8 +1057,11 @@ class BenchmarkSeriesView(APIView):
 
     permission_classes = [IsAuthenticated]
 
-    # Asset keys standing in for "what else could I have held".
-    BENCHMARKS = (("gold_18k_gram", "Gold (18k gram)"), ("usd_cash", "US dollar"))
+    # Asset keys standing in for "what else could I have held". The Emami coin,
+    # not the 18k gram: it is the gold an Iranian household actually buys and
+    # the one quoted on every evening's news, so it is the yardstick people
+    # already measure themselves against.
+    BENCHMARKS = (("emami_coin", "Emami coin"), ("usd_cash", "US dollar"))
 
     # The market itself. Kept separate from BENCHMARKS because it is not an
     # asset key -- it has no row in the returns matrix and is loaded from
