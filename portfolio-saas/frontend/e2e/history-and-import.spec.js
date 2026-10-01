@@ -10,7 +10,7 @@ test.describe("history and import surfaces", () => {
   });
 
   test("shows a single-asset history answer", async ({ page }) => {
-    await page.getByTestId("nav-markets").click();
+    await page.goto("/research?view=prices");
     await expect(page.getByTestId("asset-history-card")).toBeVisible({ timeout: 20000 });
     await expect(
       page.getByTestId("asset-history-result").or(page.getByTestId("asset-history-empty")).first()
