@@ -844,7 +844,17 @@ def test_account_data_quality_is_windowed_and_account_scoped(
     assert asset_quality["leading_gap_sessions"] == 4
     assert asset_quality["history_start"] == today.isoformat()
     assert asset_quality["reason_codes"] == []
+    # No backfill job exists for this symbol yet, and the page says so.
+    assert asset_quality["repair_state"] == "not_scheduled"
     assert denied.status_code == 404
+
+    from marketdata.models import ArchiveFetchState
+
+    ArchiveFetchState.objects.create(symbol="EMAMI", endpoint=ArchiveFetchState.Endpoint.GOLD_DAILY,
+                                     consecutive_failures=2)
+    client.force_authenticate(user=owner)
+    again = client.get(f"/api/accounts/{account.id}/data-quality/").data["assets"][0]
+    assert again["repair_state"] == "failed"
 
 
 # ----------------------------------------------------------------------

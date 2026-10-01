@@ -63,8 +63,20 @@ class AccountDataQualityView(APIView):
         account = request.user.accounts.filter(pk=account_id).first()
         if account is None:
             raise NotFound("Account not found.")
+        from marketdata.coverage_report import classify_archive_state
+        from marketdata.models import ArchiveFetchState
+
+        holdings = list(account.holdings.filter(is_hidden=False).select_related("asset"))
+        # The backfill job behind each holding's history, so a gap is shown with
+        # what is being done about it rather than as a bare failure.
+        states = {
+            (row.symbol, row.endpoint): row
+            for row in ArchiveFetchState.objects.filter(
+                symbol__in={h.asset.tse_symbol or h.asset.brs_symbol for h in holdings} - {""}
+            )
+        }
         assets = []
-        for holding in account.holdings.filter(is_hidden=False).select_related("asset"):
+        for holding in holdings:
             asset = holding.asset
             symbol = asset.tse_symbol or asset.brs_symbol
             if asset.is_house or asset.is_manual or not symbol:
@@ -84,7 +96,19 @@ class AccountDataQualityView(APIView):
                 )
             except (TypeError, ValueError) as exc:
                 return Response({"detail": str(exc)}, status=400)
-            assets.append({"asset_key": asset.key, **result})
+            endpoint = (
+                ArchiveFetchState.Endpoint.STOCK_CANDLE_ADJUSTED if asset.tse_symbol
+                else ArchiveFetchState.Endpoint.CRYPTO_DAILY if asset.asset_class == "Crypto"
+                else ArchiveFetchState.Endpoint.GOLD_DAILY
+            )
+            state = states.get((symbol, endpoint))
+            assets.append({
+                "asset_key": asset.key,
+                **result,
+                "repair_state": classify_archive_state(state) if state else "not_scheduled",
+                "next_repair_at": state.next_attempt_at.isoformat() if state and state.next_attempt_at else None,
+                "last_repaired_at": state.last_success_at.isoformat() if state and state.last_success_at else None,
+            })
 
         assessed = [item for item in assets if item["passes_gate"] is not None]
         payload = {
