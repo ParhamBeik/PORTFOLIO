@@ -8,6 +8,7 @@ import * as api from "../api.js";
 
 vi.mock("../api.js", () => ({
   downloadArchivedFiling: vi.fn(),
+  watch: vi.fn(),
   researchRun: vi.fn(),
   exploreStocks: vi.fn(),
   stockDossier: vi.fn(),

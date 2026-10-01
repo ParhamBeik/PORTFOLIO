@@ -1203,3 +1203,24 @@ def _on_holding_changed(sender, instance, **kwargs):
             debounce_my_optimal_refresh(instance.account_id)
         except Exception:
             pass
+
+
+class WatchlistItem(models.Model):
+    """A company the user follows without owning it.
+
+    Keyed by TSE symbol, not an `Asset` row: research covers every listed
+    issuer, and most of them have no catalog asset because nobody holds them.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="watchlist"
+    )
+    symbol = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-id"]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "symbol"], name="uniq_watchlist_user_symbol"),
+        ]
+

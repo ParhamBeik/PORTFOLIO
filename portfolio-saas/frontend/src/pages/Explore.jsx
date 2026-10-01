@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { downloadArchivedFiling, exploreStocks, researchRun, researchSettings, runResearch, stockDossier } from "../api.js";
+import { downloadArchivedFiling, exploreStocks, researchRun, researchSettings, runResearch, stockDossier, watch } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
 import { Async, Badge, Button, Card, Empty, Field, Input, PageHeader, Tabs, Textarea } from "../components/ui.jsx";
 import { date, num, rial } from "../format.js";
@@ -180,6 +180,26 @@ function ResearchPanel({ symbol }) {
   );
 }
 
+/** Follow this company from its research page; the list lives under Research → Watchlist. */
+function WatchButton({ symbol }) {
+  const [state, setState] = useState("idle");
+  const add = async () => {
+    setState("busy");
+    try {
+      await watch(symbol);
+      setState("done");
+    } catch {
+      setState("error");
+    }
+  };
+  if (state === "done") return <span className="text-sm text-muted" data-testid="explore-watched">On your watchlist</span>;
+  return (
+    <Button variant="ghost" onClick={add} disabled={state === "busy"} data-testid="explore-watch">
+      {state === "error" ? "Could not add — retry" : "Watch"}
+    </Button>
+  );
+}
+
 function Company({ symbol }) {
   const [days, setDays] = useState("365");
   const dossier = useApi(() => stockDossier(symbol, Number(days)), [symbol, days]);
@@ -199,7 +219,7 @@ function Company({ symbol }) {
               title={`${data.company.name || symbol} · ${symbol}`}
               subtitle={[data.company.sector, data.company.subsector, data.company.isin].filter(Boolean).join(" · ")}
               testId="explore-identity"
-              actions={<Badge variant={sales.points.length || income?.points?.length || balance?.points?.length ? "good" : "warn"}>{sales.points.length || income?.points?.length || balance?.points?.length ? "Source-checked figures" : "Financial metrics unverified"}</Badge>}
+              actions={<div className="flex flex-wrap items-center gap-2"><WatchButton symbol={symbol} /><Badge variant={sales.points.length || income?.points?.length || balance?.points?.length ? "good" : "warn"}>{sales.points.length || income?.points?.length || balance?.points?.length ? "Source-checked figures" : "Financial metrics unverified"}</Badge></div>}
             >
               <p className="text-sm text-muted">
                 {data.company.sector ? (

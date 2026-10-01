@@ -351,3 +351,73 @@ class LiabilityDetailView(generics.RetrieveUpdateDestroyAPIView):
             account__user=self.request.user,
             account_id=self.kwargs["account_id"],
         ).select_related("asset")
+
+
+#: Enough sessions back to find a last close through a long holiday, while
+#: still bounding the hypertable scan (see `calendars.candle_close_qs`).
+WATCHLIST_CLOSE_LOOKBACK_DAYS = 30
+
+
+def _watchlist_rows(user):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from marketdata.calendars import candle_close_qs
+    from marketdata.jalali import from_gregorian
+
+    items = list(user.watchlist.all())
+    if not items:
+        return []
+    since = from_gregorian((timezone.now() - timedelta(days=WATCHLIST_CLOSE_LOOKBACK_DAYS)).date())
+    last = {}
+    for row in (
+        candle_close_qs([item.symbol for item in items], since=since)
+        .order_by("symbol", "-date_time")
+        .values("symbol", "date_time", "close_price")
+    ):
+        last.setdefault(row["symbol"], row)
+    return [
+        {
+            "symbol": item.symbol,
+            "added_at": item.created_at.isoformat(),
+            # Rial, as the exchange quotes it; the client labels it so.
+            "last_close_rial": str(last[item.symbol]["close_price"]) if item.symbol in last else None,
+            "last_close_date": last[item.symbol]["date_time"][:10] if item.symbol in last else None,
+        }
+        for item in items
+    ]
+
+
+class WatchlistView(APIView):
+    """Companies the user follows without holding them."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({"results": _watchlist_rows(request.user)})
+
+    def post(self, request):
+        from marketdata.models import ArchiveFetchState
+
+        from ..models import WatchlistItem
+
+        symbol = str(request.data.get("symbol") or "").strip()
+        if not symbol:
+            raise ValidationError({"symbol": "Required."})
+        # Only symbols the warehouse tracks: a typo would otherwise sit on the
+        # list forever with no price and no filings to show.
+        if not ArchiveFetchState.objects.filter(symbol=symbol).exists():
+            raise ValidationError({"symbol": "Not a symbol this app tracks."})
+        _item, created = WatchlistItem.objects.get_or_create(user=request.user, symbol=symbol)
+        return Response({"results": _watchlist_rows(request.user)}, status=201 if created else 200)
+
+
+class WatchlistItemView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, symbol):
+        deleted, _ = request.user.watchlist.filter(symbol=symbol).delete()
+        if not deleted:
+            raise NotFound("Not on your watchlist.")
+        return Response(status=204)

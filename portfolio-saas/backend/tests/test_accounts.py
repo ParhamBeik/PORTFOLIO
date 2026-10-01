@@ -1717,3 +1717,34 @@ def test_password_reset_sends_nothing_when_mail_is_not_deliverable(make_user, mo
     assert known.json()["detail"] == unknown.json()["detail"]
     assert attempted == []
     assert mail.outbox == []
+
+
+@pytest.mark.django_db
+def test_watchlist_is_private_tracked_symbols_only_and_shows_last_close(make_user):
+    from datetime import timedelta
+
+    from django.utils import timezone
+    from rest_framework.test import APIClient
+
+    from marketdata.jalali import from_gregorian
+    from marketdata.models import ArchiveFetchState, MarketCandle
+
+    ArchiveFetchState.objects.create(symbol="فولاد", endpoint="stock_candle_adjusted")
+    MarketCandle.objects.create(symbol="فولاد", timeframe=MarketCandle.ADJUSTED, close_price=5000,
+                                date_time=from_gregorian((timezone.now() - timedelta(days=2)).date()))
+    owner, other = make_user(email="w1@test.test"), make_user(email="w2@test.test")
+    client, peer = APIClient(), APIClient()
+    client.force_authenticate(owner)
+    peer.force_authenticate(other)
+
+    assert client.post("/api/watchlist/", {"symbol": "نامعلوم"}).status_code == 400
+    added = client.post("/api/watchlist/", {"symbol": "فولاد"})
+    assert added.status_code == 201
+    assert client.post("/api/watchlist/", {"symbol": "فولاد"}).status_code == 200  # idempotent
+    row = client.get("/api/watchlist/").json()["results"][0]
+    assert row["symbol"] == "فولاد" and row["last_close_rial"] == "5000.0000"
+
+    assert peer.get("/api/watchlist/").json()["results"] == []
+    assert peer.delete("/api/watchlist/فولاد/").status_code == 404
+    assert client.delete("/api/watchlist/فولاد/").status_code == 204
+    assert client.get("/api/watchlist/").json()["results"] == []
