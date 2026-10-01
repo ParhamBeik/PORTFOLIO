@@ -406,7 +406,8 @@ export function AreaTrend({ data, height = 260, label = "Portfolio value over ti
         smooth: true,
         showSymbol: false,
         symbolSize: 8,
-        data: (data || []).map((d) => Number(d.y)),
+        // A day with no value is a break in the line, never a dive to zero.
+        data: (data || []).map((d) => (d.y == null ? null : Number(d.y))),
         lineStyle: { width: 2, color: t.series[0] },
         itemStyle: { color: t.series[0], borderColor: t.surface, borderWidth: 2 },
         areaStyle: {

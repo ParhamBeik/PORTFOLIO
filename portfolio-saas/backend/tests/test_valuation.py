@@ -2926,3 +2926,38 @@ def test_valuation_nets_what_is_owed_today_not_what_was_borrowed(
     assert row["amount_tomans"] == pytest.approx(float(owed))
     assert row["declared_amount_tomans"] == 600000000.0
     assert row["balance_basis"] == "amortized"
+
+
+@pytest.mark.django_db
+def test_past_snapshot_dollars_use_that_days_rate_not_todays(make_user, monkeypatch):
+    """A close divided by today's dollar is not what it was worth in dollars then."""
+    from marketdata.models import GoldCurrencyHistory
+    from portfolio.services.returns import to_jalali_str
+    from portfolio.views import valuation as views
+
+    user = make_user("chart_dated_usd@example.com")
+    client = APIClient()
+    client.force_authenticate(user=user)
+    account = Account.objects.create(user=user, name="Test Account")
+    asset = Asset.objects.create(key="test_gold_usd", name="Gold", asset_class=Asset.AssetClass.GOLD, is_active=True)
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("1"))
+    _mark_traded(account, asset)
+
+    now = timezone.now()
+    three_ago, twenty_ago = now - timedelta(days=3), now - timedelta(days=20)
+    for when in (three_ago, twenty_ago):
+        Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("1000000"),
+                                timestamp=when, is_session_close=True)
+    GoldCurrencyHistory.objects.create(symbol="USD", date=to_jalali_str(three_ago), close_price=Decimal("50000"))
+    monkeypatch.setattr(views, "get_latest_prices", lambda: {"usd_cash": Decimal("100000")})
+
+    rows = {r["date"]: r for r in client.get(f"/api/snapshots/?days=30&account={account.id}").json()["series"]}
+    assert Decimal(rows[three_ago.strftime("%Y-%m-%d")]["total_usd"]) == Decimal("20")
+    # No accepted rate within the carry window: a gap, never today's rate.
+    assert rows[twenty_ago.strftime("%Y-%m-%d")]["total_usd"] is None
+
+    usd = client.get(f"/api/snapshots/?days=30&account={account.id}&basis=usd_denominated").json()
+    dated = {r["date"]: r for r in usd["series"]}
+    assert usd["basis"] == "usd_denominated"
+    assert dated[three_ago.strftime("%Y-%m-%d")]["total"] == 20.0
+    assert dated[twenty_ago.strftime("%Y-%m-%d")]["total"] is None
