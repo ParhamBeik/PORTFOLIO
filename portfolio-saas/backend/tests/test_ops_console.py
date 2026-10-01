@@ -1853,3 +1853,18 @@ def test_operational_health_check_alerts_on_a_nearly_full_device(monkeypatch):
     result = tasks.operational_health_check()
 
     assert "disk-projection" in result["alerts"]
+
+
+@override_settings(
+    ALERT_WEBHOOK_URL="",
+    ALERT_TELEGRAM_BOT_TOKEN="bot-token",
+    ALERT_TELEGRAM_CHAT_ID="12345",
+    ALERT_TELEGRAM_API_BASE="https://tapi.bale.ai/",
+)
+def test_alert_bot_api_base_is_configurable_for_bale():
+    """Telegram is blocked from the VPS; Bale speaks the same Bot API."""
+    from config.observability import notify
+
+    with mock.patch("config.observability.requests.post") as post:
+        assert notify("bale-alert", {"k": "v"}, dedupe_seconds=60) is True
+    assert post.call_args.args[0] == "https://tapi.bale.ai/botbot-token/sendMessage"

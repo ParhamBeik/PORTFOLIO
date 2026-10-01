@@ -735,6 +735,9 @@ ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 # channel alone is enough to stop `notify` logging `undelivered=1`.
 ALERT_TELEGRAM_BOT_TOKEN = os.getenv("ALERT_TELEGRAM_BOT_TOKEN", "")
 ALERT_TELEGRAM_CHAT_ID = os.getenv("ALERT_TELEGRAM_CHAT_ID", "")
+# Any Telegram-compatible Bot API. Telegram itself is blocked from the Iranian
+# VPS; Bale (https://tapi.bale.ai) speaks the same sendMessage contract.
+ALERT_TELEGRAM_API_BASE = os.getenv("ALERT_TELEGRAM_API_BASE", "https://api.telegram.org")
 QUEUE_BACKLOG_THRESHOLD = int(os.getenv("QUEUE_BACKLOG_THRESHOLD", "100"))
 APPLICATION_ERROR_THRESHOLD = int(os.getenv("APPLICATION_ERROR_THRESHOLD", "20"))
 WORKFLOW_FAILURE_RATE_THRESHOLD = float(os.getenv("WORKFLOW_FAILURE_RATE_THRESHOLD", "0.10"))
