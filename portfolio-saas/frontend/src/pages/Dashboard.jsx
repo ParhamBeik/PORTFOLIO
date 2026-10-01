@@ -31,6 +31,7 @@ import {
   signedToman,
   toman,
   unitPrice,
+  isolate,
 } from "../format.js";
 import {
   AreaTrend,
@@ -821,13 +822,13 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
     if (!row.is_house && isWholeUnit(row.quantity_step) && !Number.isInteger(Number(qty))) {
       setActionError(
         new Error(
-          `${holdingLabel(row)} is counted in whole units — enter a whole number.`
+          `${isolate(holdingLabel(row))} is counted in whole units — enter a whole number.`
         )
       );
       return;
     }
     if (!row.is_house && Number(qty) === 0 && !window.confirm(
-      `Sell all of ${holdingLabel(row)}? This records a sale in your ledger and removes it from holdings.`
+      `Sell all of ${isolate(holdingLabel(row))}? This records a sale in your ledger and removes it from holdings.`
     )) {
       return;
     }
@@ -935,7 +936,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                     type="checkbox"
                     checked={!r.is_hidden}
                     disabled={savingKey === holdingsRowKey(r)}
-                    aria-label={`Count ${holdingLabel(r)} in this portfolio`}
+                    aria-label={`Count ${isolate(holdingLabel(r))} in this portfolio`}
                     title={
                       r.is_hidden
                         ? "Switched off — not counted anywhere. Tick to include it again."
@@ -962,7 +963,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                       // The name it falls back to when cleared — the ticker for
                       // a stock, the catalog name otherwise.
                       placeholder={r.symbol || r.name_fa || r.asset}
-                      aria-label={`Name for ${holdingLabel(r)}`}
+                      aria-label={`Name for ${isolate(holdingLabel(r))}`}
                       data-testid="dashboard-holdings-edit-name"
                       disabled={savingKey === holdingsRowKey(r)}
                       onBlur={(e) => {
@@ -977,7 +978,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                 // A stock reads as its ticker (`Holding.label`); the registered
                 // company name is long enough to break the row and is not how
                 // anyone refers to it, so it lives in the tooltip.
-                return <span title={r.name_fa || r.asset}>{holdingLabel(r)}</span>;
+                return <bdi title={r.name_fa || r.asset}>{holdingLabel(r)}</bdi>;
               },
             },
             { key: "class", header: "Class", render: (r) => humanize(r.class) },
@@ -999,7 +1000,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                       step="any"
                       className={inlineInputClass}
                       value={draft.area}
-                      aria-label={`Size in square meters for ${holdingLabel(r)}`}
+                      aria-label={`Size in square meters for ${isolate(holdingLabel(r))}`}
                       data-testid="dashboard-holdings-edit-area"
                       disabled={savingKey === rk}
                       onChange={(e) => setDraftField(r, "area", e.target.value)}
@@ -1021,7 +1022,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                       min="0"
                       className={inlineInputClass}
                       value={draft.qty}
-                      aria-label={`Quantity for ${holdingLabel(r)}`}
+                      aria-label={`Quantity for ${isolate(holdingLabel(r))}`}
                       title={
                         isWholeUnit(step)
                           ? "Counted in whole units"
@@ -1053,7 +1054,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                       step="any"
                       className={inlineInputClass}
                       value={draft.qty}
-                      aria-label={`Price per square meter, in millions, for ${holdingLabel(r)}`}
+                      aria-label={`Price per square meter, in millions, for ${isolate(holdingLabel(r))}`}
                       title="Millions of Toman per square meter"
                       data-testid="dashboard-holdings-edit-price-per-sqm"
                       disabled={savingKey === rk}
@@ -1070,7 +1071,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                       step="any"
                       className={inlineInputClass}
                       value={draft.price}
-                      aria-label={`Unit price for ${holdingLabel(r)}`}
+                      aria-label={`Unit price for ${isolate(holdingLabel(r))}`}
                       data-testid="dashboard-holdings-edit-price"
                       disabled={savingKey === rk}
                       onChange={(e) => setDraftField(r, "price", e.target.value)}

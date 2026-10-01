@@ -194,7 +194,7 @@ describe("Page Rendering Tests", () => {
     fireEvent.click(screen.getByTestId("dashboard-holdings-save"));
 
     expect(confirm).toHaveBeenCalledWith(
-      "Sell all of Kama Stock? This records a sale in your ledger and removes it from holdings."
+      "Sell all of \u2068Kama Stock\u2069? This records a sale in your ledger and removes it from holdings."
     );
     expect(api.updateHolding).not.toHaveBeenCalled();
 

@@ -37,6 +37,7 @@ import {
   signedToman,
   toman,
   unitPrice,
+  isolate,
 } from "../format.js";
 import { useApi } from "../useApi.js";
 import { quantityError, validQuantity } from "../quantity.js";
@@ -272,7 +273,7 @@ function EditEntryDialog({ row, onClose, onSaved }) {
 
   return (
     <Modal
-      title={`Edit ${holdingLabel(row)}`}
+      title={`Edit ${isolate(holdingLabel(row))}`}
       subtitle={`${jalaliDate(row.occurred_at)} · ${dateTime(row.occurred_at)}`}
       onClose={onClose}
       testId="ledger-edit-dialog"
@@ -442,7 +443,7 @@ export default function Ledger() {
       // name; the full name stays reachable on hover.
       render: (r) =>
         r.asset_key ? (
-          <span title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</span>
+          <bdi title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</bdi>
         ) : (
           "—"
         ),
