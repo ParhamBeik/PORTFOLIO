@@ -335,3 +335,41 @@ class TransactionDestroyView(APIView):
         except TradeError as exc:
             return Response({"detail": str(exc)}, status=400)
         return Response({"detail": "Transaction undone successfully."})
+
+
+class CorporateActionSuggestionListView(APIView):
+    """Detected capital increases on the user's TSE holdings, awaiting a yes/no."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from ..services.corporate_actions import pending_suggestions
+
+        return Response({"results": pending_suggestions(request.user)})
+
+
+class CorporateActionDecisionView(APIView):
+    permission_classes = [IsAuthenticated]
+    decision = ""
+
+    def post(self, request, account_id):
+        from ..services.corporate_actions import accept_suggestion, dismiss_suggestion
+
+        account = request.user.accounts.filter(pk=account_id).first()
+        if account is None:
+            raise NotFound("Account not found.")
+        symbol = str(request.data.get("symbol") or "")
+        date = str(request.data.get("date") or "")
+        if not symbol or not date:
+            return Response({"detail": "symbol and date are required."}, status=400)
+        try:
+            if self.decision == "accept":
+                entry = accept_suggestion(
+                    user=request.user, account=account, symbol=symbol, date=date,
+                    quantity=request.data.get("quantity"),
+                )
+                return Response(LedgerEntrySerializer(entry).data, status=201)
+            dismiss_suggestion(user=request.user, account=account, symbol=symbol, date=date)
+        except LedgerError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(status=204)

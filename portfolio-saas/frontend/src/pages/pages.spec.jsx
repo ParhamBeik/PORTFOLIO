@@ -30,6 +30,9 @@ vi.mock("../api.js", () => ({
   updateHolding: vi.fn(),
   removeHolding: vi.fn(),
   comparison: vi.fn(),
+  corporateActionSuggestions: vi.fn(() => Promise.resolve({ results: [] })),
+  acceptCorporateAction: vi.fn(),
+  dismissCorporateAction: vi.fn(),
 }));
 
 // Mock charts component to avoid canvas context dependencies in jsdom

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import AddTransactionDialog from "../components/AddTransactionDialog.jsx";
 import LiabilitiesCard from "../components/Liabilities.jsx";
+import CorporateActionsCard from "../components/CorporateActions.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { useApi } from "../useApi.js";
 import {
@@ -1383,6 +1384,12 @@ export default function Dashboard({ user }) {
       <PageHeader title="Portfolio" subtitle="Your holdings, net worth, allocation, and performance in the selected valuation basis." />
       <div className="space-y-6">
         <HeroRow state={valuationState} basis={basis} />
+        <CorporateActionsCard
+          onBooked={() => {
+            valuationState.reload();
+            portfolio.reload();
+          }}
+        />
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
           <div className="lg:col-span-2">
             <TrendCard activeId={activeId} basis={basis} />

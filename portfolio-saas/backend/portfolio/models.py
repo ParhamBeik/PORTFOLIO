@@ -834,6 +834,31 @@ class LedgerEntry(models.Model):
 Transaction = LedgerEntry
 
 
+class CorporateActionDismissal(models.Model):
+    """A detected capital increase the user said does not apply to them.
+
+    Suggestions themselves are computed on read from `marketdata.CorporateAction`
+    and the ledger, so they follow the warehouse when it corrects itself; only
+    the user's "no" needs storing. Keyed by symbol and Jalali date rather than a
+    foreign key, because the warehouse row may be deleted and re-detected.
+    """
+
+    account = models.ForeignKey(
+        Account, on_delete=models.CASCADE, related_name="corporate_action_dismissals"
+    )
+    symbol = models.CharField(max_length=64)
+    date = models.CharField(max_length=10)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["account", "symbol", "date"],
+                name="uniq_corporate_action_dismissal",
+            )
+        ]
+
+
 class Snapshot(models.Model):
     """One authoritative Tehran-day close per user and optional account."""
 
