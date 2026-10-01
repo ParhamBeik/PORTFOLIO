@@ -2149,3 +2149,38 @@ def test_cash_counts_once_on_home_in_history_and_in_performance(asset_catalog, m
     _seal_test_day()
     assert Snapshot.objects.get(user=user, account=account).total_value_tomans == Decimal("1480000")
     assert Snapshot.objects.get(user=user, account=None).total_value_tomans == Decimal("1480000")
+
+
+def test_missed_nightly_closes_are_rebuilt_from_the_ledger(make_user):
+    """A day the 00:01 sealer never wrote is rebuilt, estimated; sealed days are kept."""
+    from zoneinfo import ZoneInfo
+    from portfolio.services.ledger import create_ledger_entry
+    from portfolio.models import LedgerEntry
+    from portfolio.tasks import backfill_missing_snapshots
+
+    user = make_user()
+    account = Account.objects.create(user=user, name="Cash")
+    started = timezone.now() - timedelta(days=10)
+    Account.objects.filter(pk=account.pk).update(created_at=started)
+    account.refresh_from_db()
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                        amount_tomans=Decimal("1000000"), occurred_at=started)
+
+    yesterday = timezone.localtime(timezone.now(), ZoneInfo("Asia/Tehran")).date() - timedelta(days=1)
+    missed = yesterday - timedelta(days=3)
+    sealed = yesterday - timedelta(days=1)
+    for scope in (account, None):
+        Snapshot.objects.create(user=user, account=scope, day=sealed, total_value_tomans=Decimal("999"),
+                                timestamp=dt.datetime.combine(sealed, dt.time(12), tzinfo=ZoneInfo("Asia/Tehran")))
+
+    assert backfill_missing_snapshots(yesterday) > 0
+    row = Snapshot.objects.get(user=user, account=None, day=missed)
+    assert row.is_estimated is True
+    assert row.total_value_tomans == Decimal("1000000")
+    assert Snapshot.objects.get(user=user, account=account, day=missed).total_value_tomans == Decimal("1000000")
+    # A sealed close is never overwritten by a rebuild.
+    assert Snapshot.objects.get(user=user, account=None, day=sealed).total_value_tomans == Decimal("999")
+    # Nothing is invented before the portfolio existed.
+    assert not Snapshot.objects.filter(user=user, day__lt=timezone.localtime(started, ZoneInfo("Asia/Tehran")).date()).exists()
+    # Idempotent.
+    assert backfill_missing_snapshots(yesterday) == 0

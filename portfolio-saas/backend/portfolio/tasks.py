@@ -341,7 +341,75 @@ def write_daily_net_worth_snapshot():
     prices = guard_price_map(latest, archive_replacements=replacements)
     count = _write_snapshots(prices, day=day, session_close_keys=verified_close_keys)
     logger.info("Sealed %d net-worth snapshots for Tehran day %s.", count, day)
-    return {"day": day.isoformat(), "rows": count}
+    repaired = backfill_missing_snapshots(day)
+    return {"day": day.isoformat(), "rows": count, "backfilled": repaired}
+
+
+#: How far back a missed close is rebuilt. The sealer runs nightly, so a gap is a
+#: worker outage; two weeks covers every outage this deployment has had.
+SNAPSHOT_BACKFILL_DAYS = 14
+
+
+def backfill_missing_snapshots(last_day, *, lookback=SNAPSHOT_BACKFILL_DAYS) -> int:
+    """Rebuild days the nightly sealer never wrote, from the ledger and dated prices.
+
+    A day the 00:01 job missed (worker down, queue paused) used to stay missing
+    forever, so the chart either broke there or drew a straight line across it.
+    The rebuild uses `value_as_of` -- each day's own prices and the holdings the
+    ledger says were held -- and is stamped `is_estimated`. A day with any asset
+    it cannot price is left missing: a partial total would draw a fake dip.
+    """
+    from zoneinfo import ZoneInfo
+
+    from .services.valuation import value_as_of
+
+    tehran = ZoneInfo("Asia/Tehran")
+    first_day = last_day - dt.timedelta(days=lookback - 1)
+    written = 0
+    users = User.objects.filter(accounts__isnull=False).distinct()
+    for user in users.iterator(chunk_size=200):
+        accounts = list(user.accounts.all())
+        started = min(a.created_at for a in accounts).astimezone(tehran).date()
+        have = set(Snapshot.objects.filter(
+            user=user, account=None, day__gte=first_day, day__lte=last_day,
+        ).values_list("day", flat=True))
+        day = max(first_day, started)
+        while day <= last_day:
+            if day not in have:
+                written += _rebuild_snapshot_day(user, accounts, day, value_as_of)
+            day += dt.timedelta(days=1)
+    if written:
+        logger.info("Rebuilt %d missed net-worth snapshots.", written)
+    return written
+
+
+def _rebuild_snapshot_day(user, accounts, day, value_as_of) -> int:
+    from zoneinfo import ZoneInfo
+
+    close_at = dt.datetime.combine(day, dt.time.max, tzinfo=ZoneInfo("Asia/Tehran"))
+    rows = []
+    for account in accounts:
+        if account.created_at.astimezone(close_at.tzinfo).date() > day:
+            continue
+        result = value_as_of(user, account=account, as_of=close_at, include_hidden=True)
+        if result["excluded"]:
+            return 0
+        rows.append((account, Decimal(str(result["total"]))))
+    if not rows:
+        return 0
+    stamp = close_at.astimezone(dt.timezone.utc)
+    defaults = {"timestamp": stamp, "is_estimated": True, "is_session_close": False}
+    for account, total in rows:
+        Snapshot.objects.get_or_create(
+            user=user, account=account, day=day,
+            defaults={**defaults, "total_value_tomans": total.quantize(Decimal("1"), rounding=ROUND_HALF_UP)},
+        )
+    user_total = sum((total for _, total in rows), Decimal("0"))
+    Snapshot.objects.get_or_create(
+        user=user, account=None, day=day,
+        defaults={**defaults, "total_value_tomans": user_total.quantize(Decimal("1"), rounding=ROUND_HALF_UP)},
+    )
+    return len(rows) + 1
 
 
 
