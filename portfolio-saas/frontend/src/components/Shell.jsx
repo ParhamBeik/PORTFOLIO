@@ -3,6 +3,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import AccountMenu from "./AccountMenu.jsx";
 import Logo from "./Logo.jsx";
 import { usePortfolio } from "./PortfolioContext.jsx";
+import { setLang, useLang, useT } from "../i18n.js";
 import { Button, ErrorState, Select } from "./ui.jsx";
 
 const APP_NAME = "Holdings";
@@ -36,6 +37,7 @@ function MenuIcon({ open }) {
 }
 
 function NavItem({ to, end, testId, children, onClick }) {
+  const t = useT();
   return (
     <NavLink
       to={to}
@@ -44,7 +46,7 @@ function NavItem({ to, end, testId, children, onClick }) {
       onClick={onClick}
       className={({ isActive }) => `app-nav-link${isActive ? " is-active" : ""}`}
     >
-      {children}
+      {t(children)}
     </NavLink>
   );
 }
@@ -170,27 +172,46 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
 const TABS = PAGES.filter((p) => p.to !== "/risk");
 
 function BottomTabs() {
+  const t = useT();
   return (
     <nav aria-label="Quick" className="app-bottom-tabs" data-testid="nav-bottom">
       {TABS.slice(0, 2).map((p) => (
         <NavLink key={p.to} to={p.to} end={p.end} data-testid={`tab-${p.label.toLowerCase()}`}
           className={({ isActive }) => `app-bottom-tab${isActive ? " is-active" : ""}`}>
-          {p.label}
+          {t(p.label)}
         </NavLink>
       ))}
-      <NavLink to="/activity?add=trade" aria-label="Record a trade" data-testid="tab-add-trade"
+      <NavLink to="/activity?add=trade" aria-label={t("Record a trade")} data-testid="tab-add-trade"
         className="app-bottom-add">+</NavLink>
       {TABS.slice(2).map((p) => (
         <NavLink key={p.to} to={p.to} data-testid={`tab-${p.label.toLowerCase()}`}
           className={({ isActive }) => `app-bottom-tab${isActive ? " is-active" : ""}`}>
-          {p.label}
+          {t(p.label)}
         </NavLink>
       ))}
     </nav>
   );
 }
 
+/** فا / EN. Persian flips the whole document to right-to-left. */
+function LanguageToggle() {
+  const lang = useLang();
+  const next = lang === "fa" ? "en" : "fa";
+  return (
+    <button
+      type="button"
+      onClick={() => setLang(next)}
+      data-testid="lang-toggle"
+      aria-label={next === "fa" ? "نمایش به فارسی" : "Show in English"}
+      className="app-header-btn inline-flex items-center justify-center rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-sm font-medium text-text"
+    >
+      {next === "fa" ? "فا" : "EN"}
+    </button>
+  );
+}
+
 export default function Shell({ user, onLogout, onUserChange }) {
+  const t = useT();
   const { accounts, activeId, setActive, basis, setBasis, error, reload } = usePortfolio();
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -227,7 +248,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
               <span className="text-sm font-semibold tracking-tight text-text lg:text-base">{APP_NAME}</span>
               {/* Below lg the header is fighting for every pixel of height and
                   the strapline is the one thing on it that says nothing. */}
-              <span className="hidden text-[11px] text-muted lg:block">Portfolio tracker</span>
+              <span className="hidden text-[11px] text-muted lg:block">{t("Portfolio tracker")}</span>
             </span>
           </NavLink>
 
@@ -242,7 +263,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
             data-testid="header-toolbar"
           >
             <label className="app-toolbar-label">
-              <span className="app-toolbar-caption">Portfolio</span>
+              <span className="app-toolbar-caption">{t("Portfolio")}</span>
               <Select
                 label="Active portfolio"
                 data-testid="scope-account"
@@ -250,7 +271,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
                 value={activeId ?? ""}
                 onChange={(e) => setActive(e.target.value === "" ? null : Number(e.target.value))}
               >
-                <option value="">All portfolios</option>
+                <option value="">{t("All portfolios")}</option>
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.name}
@@ -261,7 +282,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
             </label>
             <span className="app-toolbar-divider" aria-hidden="true" />
             <label className="app-toolbar-label">
-              <span className="app-toolbar-caption">Basis</span>
+              <span className="app-toolbar-caption">{t("Basis")}</span>
               <Select
                 label="Valuation basis"
                 data-testid="scope-basis"
@@ -270,7 +291,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
                 onChange={(e) => setBasis(e.target.value)}
               >
                 {BASES.map(([v, l]) => (
-                  <option key={v} value={v}>{l}</option>
+                  <option key={v} value={v}>{t(l)}</option>
                 ))}
               </Select>
             </label>
@@ -293,6 +314,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
           <div className="order-2 ml-auto flex items-center gap-2 sm:gap-3 lg:order-4 lg:ml-0">
             {/* Log out lives INSIDE this menu, next to the rest of the account
                 actions it belongs with — it was the only one that had a home. */}
+            <LanguageToggle />
             <AccountMenu user={user} onLogout={onLogout} onUserChange={onUserChange} />
 
             <button
@@ -342,11 +364,11 @@ export default function Shell({ user, onLogout, onUserChange }) {
       <BottomTabs />
 
       <footer className="border-t border-border px-4 py-3 text-center text-xs text-muted lg:px-6">
-        <NavLink to="/privacy" className="hover:text-text">Privacy</NavLink>
+        <NavLink to="/privacy" className="hover:text-text">{t("Privacy")}</NavLink>
         <span className="mx-2">·</span>
-        <NavLink to="/terms" className="hover:text-text">Terms</NavLink>
+        <NavLink to="/terms" className="hover:text-text">{t("Terms")}</NavLink>
         <span className="mx-2">·</span>
-        <span>Informational use only. Not investment advice.</span>
+        <span>{t("Informational use only. Not investment advice.")}</span>
       </footer>
     </div>
   );
