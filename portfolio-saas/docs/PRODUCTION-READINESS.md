@@ -89,8 +89,8 @@ Two entries in the old baseline were wrong, and both understated the tree:
   `requirements.txt`, and runs `pip-audit`, plus `npm audit --omit=dev
   --audit-level=moderate`. It runs on push, PR and a Monday cron, and is
   deliberately outside `deploy`'s `needs`.
-- **The restore drill IS in CI.** `backend` job step "Database restore drill"
-  runs `scripts/ci_restore_drill.sh` against the Postgres service.
+- **No backups or restore drill.** Backup production was removed for the VPS
+  storage baseline; the database lives only in the `pgdata` volume.
 
 The remaining launch gap is SMTP — and it is BOTH deployment configuration and
 code: the `EMAIL_*` block that reads that configuration is still uncommitted, so
