@@ -2184,3 +2184,37 @@ def test_missed_nightly_closes_are_rebuilt_from_the_ledger(make_user):
     assert not Snapshot.objects.filter(user=user, day__lt=timezone.localtime(started, ZoneInfo("Asia/Tehran")).date()).exists()
     # Idempotent.
     assert backfill_missing_snapshots(yesterday) == 0
+
+
+def test_unpriced_day_is_interpolated_between_real_prices(make_user, asset_catalog, monkeypatch):
+    """A rebuilt day whose holding has no price is drawn between the real prices either side."""
+    from zoneinfo import ZoneInfo
+    from portfolio.models import LedgerEntry
+    from portfolio.services import valuation
+    from portfolio.services.returns import to_jalali_str
+    from portfolio.tasks import backfill_missing_snapshots
+
+    tehran = ZoneInfo("Asia/Tehran")
+    user = make_user()
+    account = Account.objects.create(user=user, name="Coins")
+    started = timezone.now() - timedelta(days=10)
+    Account.objects.filter(pk=account.pk).update(created_at=started)
+    LedgerEntry.objects.create(account=account, asset=asset_catalog["emami_coin"], kind=LedgerEntry.Kind.BUY,
+                               quantity=Decimal("2"), price_tomans=None, amount_tomans=Decimal("0"), timestamp=started)
+    Holding.objects.create(account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("2"))
+
+    yesterday = timezone.localtime(timezone.now(), tehran).date() - timedelta(days=1)
+    known = {yesterday - timedelta(days=6): Decimal("100"), yesterday - timedelta(days=2): Decimal("140")}
+    by_jalali = {to_jalali_str(dt.datetime.combine(d, dt.time(12))): p for d, p in known.items()}
+    monkeypatch.setattr(valuation, "resolve_asset_point_in_time_price",
+                        lambda asset, jalali, **_: (by_jalali[jalali], 0, "test") if jalali in by_jalali
+                        else (None, 9, "price_gap_exceeded"))
+
+    backfill_missing_snapshots(yesterday)
+
+    # Four days between 100 and 140; the middle one sits halfway, x2 coins.
+    middle = Snapshot.objects.get(user=user, account=None, day=yesterday - timedelta(days=4))
+    assert middle.is_estimated is True
+    assert middle.total_value_tomans == Decimal("240")
+    # After the last real price there is only one side: left missing, not guessed.
+    assert not Snapshot.objects.filter(user=user, account=None, day=yesterday).exists()
