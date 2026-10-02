@@ -1809,8 +1809,12 @@ def conversion_rate_as_of(basis: str, as_of) -> Decimal | None:
     return Decimal(str(row.close_price))
 
 
-def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
-    """Compute valuation of portfolio assets as of a specific date and basis."""
+def value_as_of(user, account=None, as_of=None, basis="nominal", *, include_hidden=False) -> dict:
+    """Compute valuation of portfolio assets as of a specific date and basis.
+
+    `include_hidden` counts switched-off holdings too, the way a stored
+    `Snapshot` does (the snapshot reader subtracts them on the way out).
+    """
     from django.utils import timezone
     from portfolio.services.deflator import cpi_for_date, normalize_basis
     from portfolio.services.returns import normalize_as_of, to_jalali_str
@@ -1864,7 +1868,7 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
     for acc, acc_holdings in per_account:
         # Per account, not per user: the same asset may be counted in one
         # portfolio and switched off in another.
-        acc_hidden = hidden_keys(user, account=acc)
+        acc_hidden = set() if include_hidden else hidden_keys(user, account=acc)
         for key, qty in acc_holdings.items():
             if qty <= 0 or key in acc_hidden:
                 continue
@@ -1936,9 +1940,9 @@ def value_as_of(user, account=None, as_of=None, basis="nominal") -> dict:
             cash = cash / cpi * Decimal("100")
         total += cash
 
-    liabilities = Liability.objects.filter(account__in=accounts).exclude(
-        asset_id__in=hidden_asset_ids(list(accounts))
-    )
+    liabilities = Liability.objects.filter(account__in=accounts)
+    if not include_hidden:
+        liabilities = liabilities.exclude(asset_id__in=hidden_asset_ids(list(accounts)))
     # As of the date being valued, not as of today: this feeds the TWR cash-flow
     # boundaries, and charging a two-year-old boundary with today's smaller
     # balance books the whole repayment as investment performance.

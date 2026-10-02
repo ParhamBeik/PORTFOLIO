@@ -341,7 +341,133 @@ def write_daily_net_worth_snapshot():
     prices = guard_price_map(latest, archive_replacements=replacements)
     count = _write_snapshots(prices, day=day, session_close_keys=verified_close_keys)
     logger.info("Sealed %d net-worth snapshots for Tehran day %s.", count, day)
-    return {"day": day.isoformat(), "rows": count}
+    repaired = backfill_missing_snapshots(day)
+    return {"day": day.isoformat(), "rows": count, "backfilled": repaired}
+
+
+#: How far back a missed close is rebuilt. The sealer runs nightly, so a gap is a
+#: worker outage; two weeks covers every outage this deployment has had.
+SNAPSHOT_BACKFILL_DAYS = 14
+
+
+def backfill_missing_snapshots(last_day, *, lookback=SNAPSHOT_BACKFILL_DAYS) -> int:
+    """Rebuild days the nightly sealer never wrote, from the ledger and dated prices.
+
+    A day the 00:01 job missed (worker down, queue paused) used to stay missing
+    forever, so the chart either broke there or drew a straight line across it.
+    The rebuild uses `value_as_of` -- each day's own prices and the holdings the
+    ledger says were held -- and is stamped `is_estimated`. A holding with no
+    price that day is drawn on a straight line between its nearest real prices
+    either side (`_interpolated_value`); one with no real price on BOTH sides
+    leaves the day missing, because a partial total would draw a fake dip.
+    """
+    from zoneinfo import ZoneInfo
+
+    from .services.valuation import value_as_of
+
+    tehran = ZoneInfo("Asia/Tehran")
+    first_day = last_day - dt.timedelta(days=lookback - 1)
+    written = 0
+    users = User.objects.filter(accounts__isnull=False).distinct()
+    for user in users.iterator(chunk_size=200):
+        accounts = list(user.accounts.all())
+        started = min(a.created_at for a in accounts).astimezone(tehran).date()
+        have = set(Snapshot.objects.filter(
+            user=user, account=None, day__gte=first_day, day__lte=last_day,
+        ).values_list("day", flat=True))
+        day = max(first_day, started)
+        while day <= last_day:
+            if day not in have:
+                written += _rebuild_snapshot_day(user, accounts, day, value_as_of)
+            day += dt.timedelta(days=1)
+    if written:
+        logger.info("Rebuilt %d missed net-worth snapshots.", written)
+    return written
+
+
+def _rebuild_snapshot_day(user, accounts, day, value_as_of) -> int:
+    from zoneinfo import ZoneInfo
+
+    close_at = dt.datetime.combine(day, dt.time.max, tzinfo=ZoneInfo("Asia/Tehran"))
+    rows = []
+    for account in accounts:
+        if account.created_at.astimezone(close_at.tzinfo).date() > day:
+            continue
+        result = value_as_of(user, account=account, as_of=close_at, include_hidden=True)
+        total = Decimal(str(result["total"]))
+        if result["excluded"]:
+            filled = _interpolated_value(user, account, close_at, result["excluded"])
+            if filled is None:
+                return 0
+            total += filled
+        rows.append((account, total))
+    if not rows:
+        return 0
+    stamp = close_at.astimezone(dt.timezone.utc)
+    defaults = {"timestamp": stamp, "is_estimated": True, "is_session_close": False}
+    for account, total in rows:
+        Snapshot.objects.get_or_create(
+            user=user, account=account, day=day,
+            defaults={**defaults, "total_value_tomans": total.quantize(Decimal("1"), rounding=ROUND_HALF_UP)},
+        )
+    user_total = sum((total for _, total in rows), Decimal("0"))
+    Snapshot.objects.get_or_create(
+        user=user, account=None, day=day,
+        defaults={**defaults, "total_value_tomans": user_total.quantize(Decimal("1"), rounding=ROUND_HALF_UP)},
+    )
+    return len(rows) + 1
+
+
+#: How far either side of a missing day to look for a real price to draw from.
+INTERPOLATION_REACH_DAYS = 30
+
+
+def _interpolated_value(user, account, close_at, excluded) -> Decimal | None:
+    """Toman value of the holdings `value_as_of` could not price on this day.
+
+    Each one is priced on a straight line between its nearest priced day before
+    and after, by calendar day -- the user asked for gaps to be bridged by the
+    real points around them rather than left empty. Both ends come from
+    `resolve_asset_point_in_time_price` under its normal forward-fill bound, so
+    units, rejections and the session guard are the ones every other reader
+    uses. None when any holding lacks a real price on either side (newly
+    listed, delisted, a house with no terms): one real point is a guess, not an
+    interpolation.
+    """
+    from .services.returns import to_jalali_str
+    from .services.timeline import holdings_as_of
+    from .services import valuation
+    from marketdata.currency import holding_value_to_toman
+
+    day = close_at.date()
+
+    def priced(asset, offset):
+        point = dt.datetime.combine(day + dt.timedelta(days=offset), dt.time.max, tzinfo=close_at.tzinfo)
+        price, _stale, _reason = valuation.resolve_asset_point_in_time_price(asset, to_jalali_str(point))
+        return price
+
+    def nearest(asset, step):
+        for distance in range(1, INTERPOLATION_REACH_DAYS + 1):
+            price = priced(asset, step * distance)
+            if price is not None:
+                return distance, price
+        return None
+
+    holdings = holdings_as_of(user, account, close_at)
+    assets = {a.key: a for a in Asset.objects.filter(key__in=[e.get("asset_key") for e in excluded])}
+    today = timezone.localdate()
+    filled = Decimal("0")
+    for entry in excluded:
+        asset = assets.get(entry.get("asset_key"))
+        if asset is None or asset.is_house:
+            return None
+        before, after = nearest(asset, -1), nearest(asset, 1)
+        if before is None or after is None or day + dt.timedelta(days=after[0]) > today:
+            return None
+        (back, p0), (ahead, p1) = before, after
+        price = p0 + (p1 - p0) * Decimal(back) / Decimal(back + ahead)
+        filled += holding_value_to_toman(asset, holdings.get(asset.key, Decimal("0")) * price)
+    return filled
 
 
 
