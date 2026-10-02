@@ -100,7 +100,7 @@ Postgres, Redis, the API and Vite to the host, and Compose merges `ports` by
 concatenation with no way for an override to drop an inherited binding. Layering
 the two would publish the database on a VPS shared with three other stacks. The
 duplication between the files is the price of that guarantee — see
-`REFACTOR_REPORT.md`.
+[`docs/history/REFACTOR_REPORT.md`](docs/history/REFACTOR_REPORT.md).
 
 **5. The frontend has one of everything.** Pages compose `ui.jsx` primitives and
 write no bespoke panel/loading/error markup; charts go through `charts.jsx`

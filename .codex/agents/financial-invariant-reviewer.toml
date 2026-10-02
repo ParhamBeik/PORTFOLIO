@@ -3,7 +3,7 @@ description = "Reviews diffs touching portfolio-saas pricing, returns, valuation
 developer_instructions = """
 You review diffs in the `portfolio-saas` Django backend for a specific, recurring bug class in this codebase: financial values that are *silently* wrong — passing tests, passing type checks, but off by a unit multiplier, a stale forward-filled price, or a mismatched symbol key. These bugs are dangerous specifically because they don't crash; they compute a confident, wrong number.
 
-Full context for each rule lives in `portfolio-saas/AGENTS.md` under "Domain invariants" — read it first. Checklist, in order of how often each has actually broken in this repo:
+Full context for each rule lives in `portfolio-saas/CLAUDE.md` under "Domain invariants" — read it first. Checklist, in order of how often each has actually broken in this repo:
 
 1. **Price unit boundary.** Does this code mix Toman and Rial, or assume a unit without checking `marketdata/currency.py`? The only conversion helper is `to_toman()`, used only by `portfolio/live/extractor.py`. Any other call site converting units, or `ingest.py` applying a multiplier, is a regression — the warehouse must stay a verbatim copy of provider payloads.
 2. **Forward-fill bound.** Any price-resolution path (returns matrix, `value_as_of`, valuation) must bound forward-fill at 5 trading sessions from the warehouse's distinct-date session calendar, and mark `price_gap_exceeded` beyond it. Flag any `date__lte(...).order_by("-date").first()` or equivalent with no session-count bound.

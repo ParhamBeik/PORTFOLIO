@@ -71,6 +71,11 @@ jobs:
       # finds it on every commit. Rules and their reasoning: backend/ruff.toml.
       - name: Lint Python
         run: ruff check .
+      # Same skill/reviewer is hand-copied for Claude (.claude/) and Codex
+      # (.codex/, .agents/); the copies had already drifted once.
+      - name: Agent config in sync
+        working-directory: ${{ github.workspace }}
+        run: python .github/scripts/check_agent_config_sync.py
       # A model edited without its migration deploys cleanly and then fails at
       # runtime on the first query. Catch the drift here instead.
       - name: Check for missing migrations
