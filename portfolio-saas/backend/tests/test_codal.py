@@ -1007,3 +1007,48 @@ def test_parse_excel_handles_html_workbook():
     assert len(parsed.tables) == 1
     assert parsed.tables[0]["headers"] == ["مبلغ"]
     assert parsed.tables[0]["rows"] == [["1000"]]
+
+
+def test_recompress_rewrites_only_verified_objects(monkeypatch):
+    """docs/STORAGE-POLICY.md: recompression re-puts identical bytes, never altered ones."""
+    import hashlib
+    import json
+
+    from marketdata.management.commands import recompress_codal_objects as cmd
+
+    good, bad = b"<html>ok</html>", b"<html>changed</html>"
+    store = {"k/good": good, "k/bad": bad}
+    puts = []
+
+    class NoSuchKey(Exception):
+        pass
+
+    class FakeClient:
+        exceptions = type("E", (), {"NoSuchKey": NoSuchKey})
+
+        def get_object(self, Bucket, Key):
+            if Key not in store:
+                raise NoSuchKey(Key)
+            return {"Body": type("B", (), {"read": lambda _self: store[Key]})()}
+
+        def put_object(self, Bucket, Key, Body, ContentType):
+            puts.append((Key, Body))
+
+    monkeypatch.setattr(cmd, "_client", FakeClient)
+    report = CodalReport.objects.create(
+        announcement=_announcement(title="x"),
+        category=CodalAnnouncement.Category.PRODUCTION_SALES, parser_version="3")
+    for key, checksum in (("k/good", hashlib.sha256(good).hexdigest()),
+                          ("k/bad", hashlib.sha256(good).hexdigest()),
+                          ("k/gone", "c" * 64)):
+        CodalArtifact.objects.create(
+            report=report, kind=CodalArtifact.Kind.HTML, source_url="https://codal.ir/x",
+            s3_key=key, checksum_sha256=checksum, content_type="text/html",
+            fetch_status=CodalArtifact.FetchStatus.STORED)
+
+    out = StringIO()
+    call_command("recompress_codal_objects", stdout=out)
+
+    result = json.loads(out.getvalue().strip().splitlines()[-1])
+    assert (result["rewritten"], result["checksum_mismatch"], result["missing"]) == (1, 1, 1)
+    assert puts == [("k/good", good)]
