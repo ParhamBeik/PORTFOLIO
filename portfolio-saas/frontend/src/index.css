@@ -508,3 +508,10 @@ body:has(.app-bottom-tabs) {
     padding-bottom: 0;
   }
 }
+
+/* Persian. System UI fonts render Persian unevenly on Windows; Tahoma is
+   on every Windows and macOS install and is the conventional fallback. Numbers
+   stay tabular so columns still line up when the script flips. */
+:root[dir="rtl"] body {
+  font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
+}

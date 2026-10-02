@@ -6,6 +6,7 @@
 // hyphenated, e.g. "dashboard-total", "optimal-window-tabs".
 
 import { useEffect, useRef, useState } from "react";
+import { useT } from "../i18n.js";
 
 import {
   JALALI_MONTHS,
@@ -45,6 +46,7 @@ export const Delta = ({ value, format }) => (
 /* ---------------------------------------------------------------- surfaces */
 
 export function Card({ title, subtitle, actions, children, testId, className = "" }) {
+  const t = useT();
   return (
     <section
       data-testid={testId}
@@ -53,8 +55,8 @@ export function Card({ title, subtitle, actions, children, testId, className = "
       {(title || actions) && (
         <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
           <div>
-            {title && <h2 className="text-base font-semibold">{title}</h2>}
-            {subtitle && <p className="mt-1 max-w-prose text-sm text-muted">{subtitle}</p>}
+            {title && <h2 className="text-base font-semibold">{t(title)}</h2>}
+            {subtitle && <p className="mt-1 max-w-prose text-sm text-muted">{t(subtitle)}</p>}
           </div>
           {actions}
         </header>
@@ -66,16 +68,17 @@ export function Card({ title, subtitle, actions, children, testId, className = "
 
 /** `size="lg"` gives one hero number more visual weight — same tokens, bigger type. */
 export function StatTile({ label, value, sub, valueTone = "neutral", size = "md", testId }) {
+  const t = useT();
   return (
     <div
       data-testid={testId}
       className={`rounded-lg border border-border bg-panel-2 px-4 ${size === "lg" ? "py-4" : "py-3"}`}
     >
-      <div className="text-xs font-medium tracking-wide text-muted uppercase">{label}</div>
+      <div className="text-xs font-medium tracking-wide text-muted uppercase">{t(label)}</div>
       <div className={`mt-1 font-semibold ${size === "lg" ? "text-4xl" : "text-2xl"} ${tone[valueTone]}`}>
-        {value}
+        {t(value)}
       </div>
-      {sub && <div className="mt-0.5 text-xs text-muted">{sub}</div>}
+      {sub && <div className="mt-0.5 text-xs text-muted">{t(sub)}</div>}
     </div>
   );
 }
@@ -136,7 +139,8 @@ export function Badge({ children, variant = "neutral", title, testId }) {
  */
 const DISABLED_DIM = "disabled:cursor-not-allowed disabled:opacity-60";
 
-export function Button({ variant = "ghost", className = "", ...props }) {
+export function Button({ variant = "ghost", className = "", children, ...props }) {
+  const t = useT();
   // `-fill` on the two solid variants: white on the display accent is 3.64:1 and
   // white on the display green is 3.35:1, and this is the primary call to action
   // on every screen including the sign-in page.
@@ -152,7 +156,9 @@ export function Button({ variant = "ghost", className = "", ...props }) {
       type="button"
       className={`rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${DISABLED_DIM} ${styles[variant]} ${className}`}
       {...props}
-    />
+    >
+      {t(children)}
+    </button>
   );
 }
 
@@ -310,6 +316,7 @@ export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" 
 
 /** Segmented control. `options` is [{ value, label, disabled }]. */
 export function Tabs({ options, value, onChange, label, testId }) {
+  const t = useT();
   return (
     <div
       role="group"
@@ -329,7 +336,7 @@ export function Tabs({ options, value, onChange, label, testId }) {
             value === o.value ? "bg-[var(--c-accent-fill)] text-white" : "text-muted hover:text-text"
           }`}
         >
-          {o.label}
+          {t(o.label)}
         </button>
       ))}
     </div>
@@ -347,6 +354,7 @@ export function Tabs({ options, value, onChange, label, testId }) {
  * between columns.
  */
 export function Table({ columns, rows, rowKey, empty = "No rows.", testId, caption, rowClass, mobileCards = false }) {
+  const t = useT();
   if (!rows?.length) return <Empty testId={testId ? `${testId}-empty` : undefined}>{empty}</Empty>;
   return (
     <div className={mobileCards ? "sm:overflow-x-auto" : "overflow-x-auto"}>
@@ -363,7 +371,7 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
                   c.align === "right" ? "text-right" : ""
                 }`}
               >
-                {c.header}
+                {t(c.header)}
               </th>
             ))}
           </tr>
@@ -382,7 +390,7 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
                   key={c.key}
                   className={`px-3 py-2 ${mobileCards ? "flex items-start justify-between gap-3 sm:table-cell" : ""} ${c.align === "right" ? "text-right" : ""}`}
                 >
-                  {mobileCards && c.header && <span className="shrink-0 text-xs font-medium uppercase text-muted sm:hidden">{c.header}</span>}
+                  {mobileCards && c.header && <span className="shrink-0 text-xs font-medium uppercase text-muted sm:hidden">{t(c.header)}</span>}
                   {mobileCards ? (
                     <span className="min-w-0 text-right sm:contents">
                       {c.render ? c.render(row) : row[c.key]}
@@ -593,13 +601,16 @@ export const Disclosure = ({ summary, children, testId, open = false }) => (
   </details>
 );
 
-export const PageHeader = ({ title, subtitle, actions, meta }) => (
-  <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
-    <div>
-      <h1 className="text-xl font-semibold">{title}</h1>
-      {subtitle && <p className="mt-1 max-w-prose text-sm text-muted">{subtitle}</p>}
-      {meta}
+export function PageHeader({ title, subtitle, actions, meta }) {
+  const t = useT();
+  return (
+    <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h1 className="text-xl font-semibold">{t(title)}</h1>
+        {subtitle && <p className="mt-1 max-w-prose text-sm text-muted">{t(subtitle)}</p>}
+        {meta}
+      </div>
+      {actions}
     </div>
-    {actions}
-  </div>
-);
+  );
+}
