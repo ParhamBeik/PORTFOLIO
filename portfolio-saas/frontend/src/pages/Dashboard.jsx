@@ -335,7 +335,7 @@ function TrendCard({ activeId, basis }) {
             );
           }
 
-          const points = (data.series || []).map((s) => ({ x: s.date, y: Number(s.total) }));
+          const points = (data.series || []).map((s) => ({ x: s.date, y: s.total == null ? null : Number(s.total) }));
           // Counted, not just detected. "Some points are estimated" reads like a
           // footnote when 47 of 66 points are reconstructed rather than recorded,
           // which is a different chart from the one that phrasing implies.

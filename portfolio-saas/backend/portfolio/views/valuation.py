@@ -2,6 +2,7 @@
 
 Live valuation, the net-worth series, the price screen and performance.
 All of it reads; none of it writes."""
+import bisect
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
@@ -36,7 +37,35 @@ from marketdata.models import (
     RejectedRecord,
     SymbolIntegrity,
 )
-from marketdata.provenance import daily_bar_price, toman_rate_kwargs, toman_rate_tables
+from marketdata.provenance import (
+    daily_bar_price, toman_per_dollar, toman_per_tether, toman_rate_kwargs, toman_rate_tables,
+)
+
+
+#: How far a dated FX close may be carried forward to a chart day, matching
+#: `conversion_rate_as_of`. Beyond it the day has no dollar value, not today's.
+FX_CARRY_DAYS = 5
+
+
+def _dated_fx_rates(days, symbol):
+    """{gregorian day: Toman per unit or None} at each day's OWN accepted close.
+
+    A past close divided by today's dollar rate is a different number from what
+    the portfolio was worth in dollars that day -- the snapshot chart did exactly
+    that for every point. One warehouse read covers the whole window.
+    """
+    if not days:
+        return {}
+    loader = toman_per_tether if symbol == "USDT_IRT" else toman_per_dollar
+    rates, sorted_dates = loader([from_gregorian(day) for day in days])
+    result = {}
+    for day in days:
+        index = bisect.bisect_right(sorted_dates, from_gregorian(day)) - 1
+        source = sorted_dates[index] if index >= 0 else None
+        seen = jalali.to_gregorian(source) if source else None
+        rate = rates.get(source) if seen and (day - seen).days <= FX_CARRY_DAYS else None
+        result[day] = Decimal(rate) if rate else None
+    return result
 
 
 class AccountPerformanceView(APIView):
@@ -383,10 +412,15 @@ class SnapshotListView(APIView):
             # unticked. USD is derived after the subtraction for the same reason.
             _subtract_hidden_holdings(request.user, account, series, now)
 
-        for row in series:
+        # Today divides by the live quote; every earlier day by its own close.
+        chart_days = [datetime.strptime(row["date"], "%Y-%m-%d").date() for row in series]
+        past_days = sorted({day for day in chart_days if day < today})
+        usd_by_day = _dated_fx_rates(past_days, "USD")
+        for row, day in zip(series, chart_days):
             total = Decimal(str(row["total"])).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
             row["total"] = str(total)
-            row["total_usd"] = str(round(total / usd_rate, 2)) if usd_rate > 0 else None
+            rate = usd_rate if day >= today else usd_by_day.get(day)
+            row["total_usd"] = str(round(total / rate, 2)) if rate and rate > 0 else None
 
         trades = (
             Transaction.objects.filter(
@@ -416,8 +450,14 @@ class SnapshotListView(APIView):
         # divides each point by the CPI *of its own day*, which is the whole
         # point of a real series -- hence a per-row divisor rather than one.
         if basis in ("usd_denominated", "usdt_denominated"):
-            fx_rate, _source = _fx_rate(prices, normalize_basis(basis))
-            divisor = (lambda row: fx_rate) if fx_rate > 0 else None
+            fx_rate, source = _fx_rate(prices, normalize_basis(basis))
+            dated = usd_by_day if source == "USD" else _dated_fx_rates(past_days, "USDT_IRT")
+            # A past day with no accepted rate has no dollar value: it becomes a
+            # gap in the chart rather than a Toman figure divided by today's rate.
+            divisor = (lambda row: (  # noqa: E731
+                fx_rate if row["date"] >= today.isoformat()
+                else dated.get(datetime.strptime(row["date"], "%Y-%m-%d").date())
+            )) if fx_rate > 0 else None
         elif basis == "real_toman":
             divisor = lambda row: Decimal(  # noqa: E731
                 str(cpi_for_date(row.get("date") or row.get("timestamp")))
@@ -426,9 +466,10 @@ class SnapshotListView(APIView):
             divisor = None
         if divisor:
             for row in series:
+                rate = divisor(row)
                 for field in ("total", "total_usd"):
                     if row.get(field) is not None:
-                        row[field] = float(Decimal(str(row[field])) / divisor(row))
+                        row[field] = float(Decimal(str(row[field])) / rate) if rate else None
         # The basis these points are actually IN, which is not always the one that
         # was asked for: with no FX rate available `divisor` is None and the series
         # stays in Toman, and the chart would have gone on labelling it dollars.
