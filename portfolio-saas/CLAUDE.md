@@ -1,3 +1,5 @@
+**Storage:** before changing anything that stores data, read and follow [docs/STORAGE-POLICY.md](docs/STORAGE-POLICY.md). No backups, 100 GB disk shared by four apps; Portfolio history is kept in full and compressed losslessly.
+
 # portfolio-saas
 
 Real-time portfolio tracker for the Iranian market (BRS gold/currency/crypto + TSETMC stocks).

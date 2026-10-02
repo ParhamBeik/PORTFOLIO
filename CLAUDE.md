@@ -1,5 +1,7 @@
 # PORTFOLIO
 
+@AGENTS.md
+
 The app lives in `portfolio-saas/`. Its rules load from there:
 
 @portfolio-saas/CLAUDE.md
