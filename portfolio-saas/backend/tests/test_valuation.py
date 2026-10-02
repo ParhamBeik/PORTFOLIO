@@ -2929,6 +2929,27 @@ def test_valuation_nets_what_is_owed_today_not_what_was_borrowed(
 
 
 @pytest.mark.django_db
+def test_home_names_each_held_market_and_whether_it_is_open(make_user, monkeypatch):
+    """Stocks closed while coins trade: the total mixes both, so say so per market."""
+    from portfolio.services import valuation
+    from marketdata.market_state import CLOSED_DAYTIME
+
+    monkeypatch.setattr(valuation, "current_market_state", lambda: CLOSED_DAYTIME)
+    items = [
+        {"class": "Stock", "symbol": "فولاد", "priced_at": "2026-09-30T09:00:00+00:00"},
+        {"class": "Gold", "symbol": "", "priced_at": "2026-10-01T14:00:00+00:00"},
+        {"class": "Gold", "symbol": "", "priced_at": "2026-10-01T14:05:00+00:00"},
+        {"class": "Gold", "symbol": "", "is_house": True, "priced_at": None},
+    ]
+    clocks = {c["market"]: c for c in valuation.market_clocks(items)}
+    assert set(clocks) == {"stocks", "gold_fx"}
+    assert clocks["stocks"]["open"] is False
+    assert clocks["gold_fx"]["open"] is True
+    assert clocks["gold_fx"]["last_priced_at"] == "2026-10-01T14:05:00+00:00"
+    assert clocks["gold_fx"]["holdings"] == 2
+
+
+@pytest.mark.django_db
 def test_past_snapshot_dollars_use_that_days_rate_not_todays(make_user, monkeypatch):
     """A close divided by today's dollar is not what it was worth in dollars then."""
     from marketdata.models import GoldCurrencyHistory
