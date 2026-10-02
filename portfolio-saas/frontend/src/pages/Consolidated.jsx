@@ -1,5 +1,6 @@
 import { useSearchParams } from "react-router-dom";
 import Dashboard from "./Dashboard.jsx";
+import DataHealth from "./DataHealth.jsx";
 import Family from "./Family.jsx";
 import Ledger from "./Ledger.jsx";
 import Onboarding from "./Onboarding.jsx";
@@ -32,6 +33,7 @@ export function PortfolioDestination({ user }) {
   const choices = [
     { value: "summary", label: "Summary", component: Dashboard },
     { value: "breakdown", label: "Breakdown", component: Family },
+    { value: "health", label: "Data health", component: DataHealth },
   ];
   return <Destination choices={choices} initial="summary" testId="portfolio-section" user={user} />;
 }
