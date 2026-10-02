@@ -29,7 +29,7 @@ test.describe("dashboard", () => {
       test.skip(true, "account has no holdings (onboarding)");
     }
 
-    await page.getByTestId("nav-portfolio").click();
+    await page.getByTestId("nav-home").click();
     // `.first()`: both testids are present once the hero renders, and an `.or()`
     // that matches two elements is a strict-mode violation, not a pass.
     await expect
@@ -45,7 +45,7 @@ test.describe("dashboard", () => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }
-    await page.getByTestId("nav-portfolio").click();
+    await page.getByTestId("nav-home").click();
     await expect(page.getByTestId("dashboard-trend-tabs")).toBeVisible({ timeout: 20000 });
 
     for (const value of ["30", "90", "365", "all"]) {
@@ -58,7 +58,7 @@ test.describe("dashboard", () => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }
-    await page.getByTestId("nav-portfolio").click();
+    await page.getByTestId("nav-home").click();
     await expect(page.getByTestId("dashboard-trend-basis")).toBeVisible({ timeout: 20000 });
     await clickTab(page, "dashboard-trend-basis", "benchmarks");
     await expect(page.getByTestId("dashboard-trend-tabs")).toBeVisible();
@@ -79,7 +79,7 @@ test.describe("dashboard", () => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }
-    await page.getByTestId("nav-portfolio").click();
+    await page.getByTestId("nav-home").click();
     await expect(page.getByTestId("dashboard-trend-basis")).toBeVisible({ timeout: 20000 });
 
     // Wait on the response, not on the DOM. `useApi` keeps the previous data
@@ -119,7 +119,7 @@ test.describe("dashboard", () => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }
-    await page.getByTestId("nav-portfolio").click();
+    await page.getByTestId("nav-home").click();
     const scope = page.getByTestId("scope-account");
     await expect(scope).toBeVisible({ timeout: 15000 });
     await scope.selectOption("");
@@ -156,7 +156,7 @@ test.describe("dashboard", () => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }
-    await page.getByTestId("nav-portfolio").click();
+    await page.getByTestId("nav-home").click();
     const scope = page.getByTestId("scope-account");
     const options = await scope.locator("option").all();
     // option[0] is "All portfolios"; need a real account id

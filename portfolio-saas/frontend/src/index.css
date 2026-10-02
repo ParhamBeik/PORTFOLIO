@@ -452,3 +452,59 @@ table,
   transform: translateY(-1px);
   box-shadow: 0 3px 8px color-mix(in srgb, var(--c-bg) 35%, transparent);
 }
+
+/* Phone bottom tab bar. Same rule as `.app-nav-rail`: the breakpoint lives
+   here, because a component class that sets `display` cannot be hidden by a
+   `lg:hidden` utility imported before it. */
+.app-bottom-tabs {
+  position: fixed;
+  inset: auto 0 0 0;
+  z-index: 30;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  align-items: center;
+  padding: 0.25rem 0.5rem calc(0.25rem + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--c-border);
+  background: color-mix(in srgb, var(--c-panel) 94%, transparent);
+  backdrop-filter: blur(12px);
+}
+.app-bottom-tab {
+  display: flex;
+  justify-content: center;
+  padding: 0.625rem 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--c-muted);
+  border-radius: 0.5rem;
+}
+.app-bottom-tab.is-active {
+  color: var(--c-text);
+  background: var(--c-panel-2);
+}
+.app-bottom-add {
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 3rem;
+  height: 3rem;
+  margin-top: -1.25rem;
+  border-radius: 9999px;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: #fff;
+  background: var(--c-accent-fill);
+  box-shadow: 0 6px 16px rgb(0 0 0 / 0.35);
+}
+/* Keep the last row of content and the footer clear of the fixed bar. */
+body:has(.app-bottom-tabs) {
+  padding-bottom: 4.5rem;
+}
+@media (min-width: 1024px) {
+  .app-bottom-tabs {
+    display: none;
+  }
+  body:has(.app-bottom-tabs) {
+    padding-bottom: 0;
+  }
+}

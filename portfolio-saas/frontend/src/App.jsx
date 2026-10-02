@@ -14,18 +14,18 @@ import { Loading } from "./components/ui.jsx";
 
 const Onboarding = lazy(() => import("./pages/Onboarding.jsx"));
 const Ops = lazy(() => import("./pages/Ops.jsx"));
-const Explore = lazy(() => import("./pages/Explore.jsx"));
 const PortfolioDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.PortfolioDestination })));
 const ActivityDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.ActivityDestination })));
-const MarketsDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.MarketsDestination })));
+const ResearchDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.ResearchDestination })));
+const CompareDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.CompareDestination })));
 const GuidanceDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.GuidanceDestination })));
 
 const PAGE_TITLES = {
   "/": "Portfolio",
   "/activity": "Activity",
-  "/markets": "Markets",
-  "/explore": "Explore",
-  "/guidance": "Guidance",
+  "/research": "Research",
+  "/compare": "Compare",
+  "/risk": "Risk",
   "/ledger": "Ledger",
   "/family": "Breakdown",
   "/breakdown": "Breakdown",
@@ -71,6 +71,14 @@ function LoginRedirect() {
       }
     />
   );
+}
+
+// Markets was two unrelated tools under one tab; they now live where the plan
+// puts them -- price history under Research, comparison as its own tab.
+function MarketsRedirect() {
+  const { search } = useLocation();
+  const view = new URLSearchParams(search).get("view");
+  return <Navigate to={view === "comparison" ? "/compare" : "/research?view=prices"} replace />;
 }
 
 function LegacyRedirect({ to }) {
@@ -259,21 +267,24 @@ export default function App() {
                   onto a bare page whose only way out said "Back to sign in". */}
               <Route path="/privacy" element={<Legal kind="privacy" authed />} />
               <Route path="/terms" element={<Legal kind="terms" authed />} />
-              <Route path="/explore" element={<Explore />} />
+              <Route path="/research" element={<ResearchDestination />} />
+              <Route path="/explore" element={<LegacyRedirect to="/research?view=companies" />} />
               <Route element={<HoldingsGate user={user} />}>
                 <Route index element={<PortfolioDestination user={user} />} />
                 <Route path="/activity" element={<ActivityDestination />} />
-                <Route path="/markets" element={<MarketsDestination />} />
-                <Route path="/guidance" element={<GuidanceDestination user={user} onUserChange={setUser} />} />
-                <Route path="/optimal" element={<LegacyRedirect to="/guidance?view=personal" />} />
-                <Route path="/universe" element={<LegacyRedirect to="/guidance?view=benchmark" />} />
-                <Route path="/best-overall" element={<LegacyRedirect to="/guidance?view=benchmark" />} />
+                <Route path="/compare" element={<CompareDestination />} />
+                <Route path="/risk" element={<GuidanceDestination user={user} onUserChange={setUser} />} />
+                <Route path="/markets" element={<MarketsRedirect />} />
+                <Route path="/guidance" element={<LegacyRedirect to="/risk" />} />
+                <Route path="/optimal" element={<LegacyRedirect to="/risk?view=personal" />} />
+                <Route path="/universe" element={<LegacyRedirect to="/risk?view=benchmark" />} />
+                <Route path="/best-overall" element={<LegacyRedirect to="/risk?view=benchmark" />} />
                 <Route path="/onboarding" element={<Onboarding />} />
                 <Route path="/ledger" element={<LegacyRedirect to="/activity" />} />
                 <Route path="/family" element={<LegacyRedirect to="/?view=breakdown" />} />
                 <Route path="/breakdown" element={<LegacyRedirect to="/?view=breakdown" />} />
-                <Route path="/comparison" element={<LegacyRedirect to="/markets?view=comparison" />} />
-                <Route path="/prices" element={<LegacyRedirect to="/markets?view=prices" />} />
+                <Route path="/comparison" element={<LegacyRedirect to="/compare" />} />
+                <Route path="/prices" element={<LegacyRedirect to="/research?view=prices" />} />
                 <Route path="/ops" element={<Ops user={user} />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>

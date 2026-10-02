@@ -62,6 +62,9 @@ export function PortfolioProvider({ children, enabled }) {
     const saved = localStorage.getItem("lattice_basis");
     if (saved === "usd_real") return "usd_denominated";
     if (saved === "nominal") return "nominal_toman";
+    // Real Toman and USDT left the picker; a saved choice of either falls back
+    // rather than silently pricing every screen in a basis nobody can see.
+    if (saved === "real_toman" || saved === "usdt_denominated") return "nominal_toman";
     return saved || "nominal_toman";
   });
 

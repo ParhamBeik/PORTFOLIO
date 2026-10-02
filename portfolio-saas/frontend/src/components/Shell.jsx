@@ -8,17 +8,19 @@ import { Button, ErrorState, Select } from "./ui.jsx";
 const APP_NAME = "Holdings";
 
 const PAGES = [
-  { to: "/", label: "Portfolio", end: true },
+  { to: "/", label: "Home", end: true },
   { to: "/activity", label: "Activity" },
-  { to: "/explore", label: "Explore" },
-  { to: "/markets", label: "Markets" },
+  { to: "/research", label: "Research" },
+  { to: "/compare", label: "Compare" },
+  { to: "/risk", label: "Risk" },
 ];
 
-const BASES = [
-  ["nominal_toman", "Nominal Toman"],
-  ["real_toman", "Real Toman"],
+// Nominal Toman and verified USD only. Real Toman (CPI) and USDT read as two
+// more currencies to choose between, and neither answers a question the other
+// two do not; the server still accepts both for old links.
+export const BASES = [
+  ["nominal_toman", "Toman"],
   ["usd_denominated", "USD"],
-  ["usdt_denominated", "USDT"],
 ];
 
 function MenuIcon({ open }) {
@@ -160,6 +162,34 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
   );
 }
 
+/**
+ * Phone navigation: the four destinations a thumb reaches for, plus a raised
+ * "+ trade" button -- recording a trade right after the broker fills it is the
+ * one task that has to take seconds. The drawer still holds everything else.
+ */
+const TABS = PAGES.filter((p) => p.to !== "/risk");
+
+function BottomTabs() {
+  return (
+    <nav aria-label="Quick" className="app-bottom-tabs" data-testid="nav-bottom">
+      {TABS.slice(0, 2).map((p) => (
+        <NavLink key={p.to} to={p.to} end={p.end} data-testid={`tab-${p.label.toLowerCase()}`}
+          className={({ isActive }) => `app-bottom-tab${isActive ? " is-active" : ""}`}>
+          {p.label}
+        </NavLink>
+      ))}
+      <NavLink to="/activity?add=trade" aria-label="Record a trade" data-testid="tab-add-trade"
+        className="app-bottom-add">+</NavLink>
+      {TABS.slice(2).map((p) => (
+        <NavLink key={p.to} to={p.to} data-testid={`tab-${p.label.toLowerCase()}`}
+          className={({ isActive }) => `app-bottom-tab${isActive ? " is-active" : ""}`}>
+          {p.label}
+        </NavLink>
+      ))}
+    </nav>
+  );
+}
+
 export default function Shell({ user, onLogout, onUserChange }) {
   const { accounts, activeId, setActive, basis, setBasis, error, reload } = usePortfolio();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -236,7 +266,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
                 label="Valuation basis"
                 data-testid="scope-basis"
                 className="app-toolbar-select"
-                value={basis}
+                value={BASES.some(([v]) => v === basis) ? basis : "nominal_toman"}
                 onChange={(e) => setBasis(e.target.value)}
               >
                 {BASES.map(([v, l]) => (
@@ -308,6 +338,8 @@ export default function Shell({ user, onLogout, onUserChange }) {
         )}
         <Outlet />
       </main>
+
+      <BottomTabs />
 
       <footer className="border-t border-border px-4 py-3 text-center text-xs text-muted lg:px-6">
         <NavLink to="/privacy" className="hover:text-text">Privacy</NavLink>

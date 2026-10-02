@@ -113,7 +113,7 @@ describe("Shell drawer", () => {
     fireEvent.click(screen.getByTestId("nav-toggle"));
 
     // A keyboard user, three links into the menu.
-    const target = screen.getByTestId("nav-explore-mobile");
+    const target = screen.getByTestId("nav-research-mobile");
     target.focus();
     expect(document.activeElement).toBe(target);
 

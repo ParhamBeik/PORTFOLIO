@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   commitLedgerImport,
   deleteLedgerEntry,
@@ -354,6 +355,16 @@ export default function Ledger() {
   });
 
   const [adding, setAdding] = useState(false);
+  // The phone tab bar's "+" lands here with ?add=trade: open the dialog once,
+  // then drop the flag so a refresh or back-navigation does not reopen it.
+  const [params, setParams] = useSearchParams();
+  useEffect(() => {
+    if (params.get("add") !== "trade") return;
+    setAdding(true);
+    const next = new URLSearchParams(params);
+    next.delete("add");
+    setParams(next, { replace: true });
+  }, [params, setParams]);
   const [importing, setImporting] = useState(false);
   const [editing, setEditing] = useState(null);
   const [page, setPage] = useState(1);

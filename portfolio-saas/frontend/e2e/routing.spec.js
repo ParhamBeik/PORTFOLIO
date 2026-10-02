@@ -14,9 +14,9 @@ test.describe("routing aliases", () => {
     await page.waitForURL("**/?account=1&view=breakdown#allocation");
     expect(page.url()).toContain("/?account=1&view=breakdown#allocation");
 
-    // Legacy market optimization opens the Guidance benchmark section.
+    // Legacy market optimization opens the Risk benchmark section.
     await page.goto("/best-overall");
-    await page.waitForURL("**/guidance?view=benchmark");
-    expect(page.url()).toContain("/guidance?view=benchmark");
+    await page.waitForURL("**/risk?view=benchmark");
+    expect(page.url()).toContain("/risk?view=benchmark");
   });
 });

@@ -32,7 +32,7 @@ test("ordinary users are redirected away from Operations and legacy routes resol
   await page.goto("/ledger");
   await expect(page).toHaveURL(/\/activity$/);
   await page.goto("/comparison");
-  await expect(page).toHaveURL(/\/markets\?view=comparison$/);
+  await expect(page).toHaveURL(/\/compare$/);
 });
 
 for (const width of [390, 768, 1366]) {
@@ -41,7 +41,7 @@ for (const width of [390, 768, 1366]) {
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.setViewportSize({ width, height: 850 });
     await fixtureApi(page);
-    for (const path of ["/", "/activity", "/markets", "/guidance", "/ops", "/onboarding"]) {
+    for (const path of ["/", "/activity", "/research", "/compare", "/risk", "/ops", "/onboarding"]) {
       await page.goto(path);
       await expect(page.getByTestId("app-brand")).toBeVisible();
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
