@@ -64,7 +64,7 @@ export default function AssetHistory() {
                 <option value="">Choose…</option>
                 {choices.map((asset) => (
                   <option key={asset.key} value={asset.key}>
-                    {catalogLabel(asset)}
+                    <bdi>{catalogLabel(asset)}</bdi>
                   </option>
                 ))}
               </Select>

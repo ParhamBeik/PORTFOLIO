@@ -10,8 +10,7 @@ test.describe("comparison", () => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }
-    await page.getByTestId("nav-markets").click();
-    await page.getByTestId("markets-section-comparison").click();
+    await page.getByTestId("nav-compare").click();
     await expect(page.getByTestId("comparison-panel")).toBeVisible({ timeout: 20000 });
 
     const subject = page.getByTestId("comparison-subject");
@@ -47,8 +46,7 @@ test.describe("comparison", () => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }
-    await page.getByTestId("nav-markets").click();
-    await page.getByTestId("markets-section-comparison").click();
+    await page.getByTestId("nav-compare").click();
     await expect(page.getByTestId("comparison-panel")).toBeVisible({ timeout: 20000 });
 
     for (const mode of ["counterfactual", "holdings", "benchmark", "lump_sum"]) {
@@ -83,8 +81,7 @@ test.describe("comparison", () => {
     if (await page.getByTestId("onboarding-card").isVisible().catch(() => false)) {
       test.skip(true, "account has no holdings (onboarding)");
     }
-    await page.getByTestId("nav-markets").click();
-    await page.getByTestId("markets-section-comparison").click();
+    await page.getByTestId("nav-compare").click();
     await expect(page.getByTestId("comparison-panel")).toBeVisible({ timeout: 20000 });
     if (await page.getByTestId("comparison-no-holdings").isVisible().catch(() => false)) {
       test.skip(true, "portfolio has no priced positions to compare");

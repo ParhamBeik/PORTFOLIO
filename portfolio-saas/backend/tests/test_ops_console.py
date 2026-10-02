@@ -844,7 +844,17 @@ def test_account_data_quality_is_windowed_and_account_scoped(
     assert asset_quality["leading_gap_sessions"] == 4
     assert asset_quality["history_start"] == today.isoformat()
     assert asset_quality["reason_codes"] == []
+    # No backfill job exists for this symbol yet, and the page says so.
+    assert asset_quality["repair_state"] == "not_scheduled"
     assert denied.status_code == 404
+
+    from marketdata.models import ArchiveFetchState
+
+    ArchiveFetchState.objects.create(symbol="EMAMI", endpoint=ArchiveFetchState.Endpoint.GOLD_DAILY,
+                                     consecutive_failures=2)
+    client.force_authenticate(user=owner)
+    again = client.get(f"/api/accounts/{account.id}/data-quality/").data["assets"][0]
+    assert again["repair_state"] == "failed"
 
 
 # ----------------------------------------------------------------------
@@ -898,7 +908,8 @@ def test_alert_telegram_sends_plain_text_and_does_not_parse_markup():
         ok = notify("telegram-alert", {"symbol": "FOOLAD_x"}, dedupe_seconds=60)
 
     assert ok is True
-    assert post.call_args.args[0] == "https://api.telegram.org/botbot-token/sendMessage"
+    # Bale by default: Telegram is unreachable from the production VPS.
+    assert post.call_args.args[0] == "https://tapi.bale.ai/botbot-token/sendMessage"
     payload = post.call_args.kwargs["json"]
     assert payload["chat_id"] == "12345"
     assert "parse_mode" not in payload
@@ -1853,3 +1864,18 @@ def test_operational_health_check_alerts_on_a_nearly_full_device(monkeypatch):
     result = tasks.operational_health_check()
 
     assert "disk-projection" in result["alerts"]
+
+
+@override_settings(
+    ALERT_WEBHOOK_URL="",
+    ALERT_TELEGRAM_BOT_TOKEN="bot-token",
+    ALERT_TELEGRAM_CHAT_ID="12345",
+    ALERT_TELEGRAM_API_BASE="https://tapi.bale.ai/",
+)
+def test_alert_bot_api_base_is_configurable_for_bale():
+    """Telegram is blocked from the VPS; Bale speaks the same Bot API."""
+    from config.observability import notify
+
+    with mock.patch("config.observability.requests.post") as post:
+        assert notify("bale-alert", {"k": "v"}, dedupe_seconds=60) is True
+    assert post.call_args.args[0] == "https://tapi.bale.ai/botbot-token/sendMessage"

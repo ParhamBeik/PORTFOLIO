@@ -1,11 +1,13 @@
 import { useSearchParams } from "react-router-dom";
 import Dashboard from "./Dashboard.jsx";
+import DataHealth from "./DataHealth.jsx";
 import Family from "./Family.jsx";
 import Ledger from "./Ledger.jsx";
 import Onboarding from "./Onboarding.jsx";
 import AssetHistory from "./AssetHistory.jsx";
 import Comparison from "./Comparison.jsx";
 import Guidance from "./Guidance.jsx";
+import Explore from "./Explore.jsx";
 import { Tabs } from "../components/ui.jsx";
 
 function Destination({ choices, initial, testId, user }) {
@@ -32,6 +34,7 @@ export function PortfolioDestination({ user }) {
   const choices = [
     { value: "summary", label: "Summary", component: Dashboard },
     { value: "breakdown", label: "Breakdown", component: Family },
+    { value: "health", label: "Data health", component: DataHealth },
   ];
   return <Destination choices={choices} initial="summary" testId="portfolio-section" user={user} />;
 }
@@ -44,12 +47,16 @@ export function ActivityDestination() {
   return <Destination choices={choices} initial="transactions" testId="activity-section" />;
 }
 
-export function MarketsDestination() {
+export function ResearchDestination() {
   const choices = [
+    { value: "companies", label: "Companies", component: Explore },
     { value: "prices", label: "Price history", component: AssetHistory },
-    { value: "comparison", label: "Comparison", component: Comparison },
   ];
-  return <Destination choices={choices} initial="prices" testId="markets-section" />;
+  return <Destination choices={choices} initial="companies" testId="research-section" />;
+}
+
+export function CompareDestination() {
+  return <Comparison />;
 }
 
 export function GuidanceDestination({ user, onUserChange }) {

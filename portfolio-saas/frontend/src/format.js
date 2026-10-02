@@ -251,6 +251,16 @@ export const nativeName = (a) => {
  * always did. Rows arrive from three shapes — valuation items, ledger entries
  * and the asset catalog — hence the spread of key names.
  */
+/**
+ * Wrap a name in Unicode first-strong isolates before it goes into a sentence.
+ *
+ * A Persian ticker inside an English sentence ("Sell all of خگستر 2?") takes the
+ * neighbouring digits and punctuation with it under the bidi algorithm, so the
+ * sentence renders scrambled. FSI…PDI makes the name its own direction island.
+ * Plain strings only -- confirm(), aria-label, title -- where `<bdi>` cannot go.
+ */
+export const isolate = (text) => `\u2068${text}\u2069`;
+
 export const holdingLabel = (row) =>
   row?.label || row?.name_fa || row?.asset_name_fa || row?.asset ||
   row?.name || row?.asset_name || row?.key || row?.asset_key || "—";

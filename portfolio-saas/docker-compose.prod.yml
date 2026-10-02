@@ -58,6 +58,7 @@ x-backend-env: &backend-env
   ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
   ALERT_TELEGRAM_BOT_TOKEN: ${ALERT_TELEGRAM_BOT_TOKEN:-}
   ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID:-}
+  ALERT_TELEGRAM_API_BASE: ${ALERT_TELEGRAM_API_BASE:-https://tapi.bale.ai}
   # Iranian hop for tsetmc/codal. Empty until setup_iran_egress.sh is live;
   # TSETMC_DIRECT_ENABLED must stay 0 until check_egress --verify-tsetmc passes.
   IRAN_EGRESS_PROXY: ${IRAN_EGRESS_PROXY:-}
@@ -199,6 +200,11 @@ services:
     environment:
       MINIO_ROOT_USER: ${CODAL_S3_ACCESS_KEY:?set CODAL_S3_ACCESS_KEY}
       MINIO_ROOT_PASSWORD: ${CODAL_S3_SECRET_KEY:?set CODAL_S3_SECRET_KEY}
+      # Lossless, transparent to readers (docs/STORAGE-POLICY.md). Applies on write;
+      # `manage.py recompress_codal_objects` rewrites objects stored before this.
+      MINIO_COMPRESSION_ENABLE: "on"
+      MINIO_COMPRESSION_EXTENSIONS: ".html,.htm,.xls,.xlsx,.pdf,.json,.txt,.csv,.xml"
+      MINIO_COMPRESSION_MIME_TYPES: "text/*,application/json,application/xml,application/pdf,application/ms-excel,application/vnd.ms-excel"
     volumes:
       - codaldata:/data
     healthcheck:

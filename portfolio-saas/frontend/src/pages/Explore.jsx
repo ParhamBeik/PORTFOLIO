@@ -168,7 +168,7 @@ function ResearchPanel({ symbol }) {
             {result && (
               <div className="space-y-3 border-t border-border pt-3" data-testid="explore-research-result">
                 {result.claims?.length ? <ResearchClaims claims={result.claims} symbol={symbol} /> : <p className="text-sm">{RESEARCH_GAPS[result.reason] || "The verified evidence cannot answer this question."}</p>}
-                {result.run_id && <Link to={`/explore?${new URLSearchParams({ symbol, run: String(result.run_id) })}`} onClick={() => setResult(null)} className="text-sm text-accent underline">Open saved answer with a fresh source check</Link>}
+                {result.run_id && <Link to={`/research?${new URLSearchParams({ view: "companies", symbol, run: String(result.run_id) })}`} onClick={() => setResult(null)} className="text-sm text-accent underline">Open saved answer with a fresh source check</Link>}
                 {result.coverage && <p className="text-xs text-muted">Coverage: sales {result.coverage.verified_periods} verified / {result.coverage.withheld_periods} withheld; income {result.coverage.income_verified_periods} verified / {result.coverage.income_withheld_periods} withheld; balance {result.coverage.balance_verified_periods} verified / {result.coverage.balance_withheld_periods} withheld latest filings.</p>}
                 <p className="text-xs text-muted">Model cost: ${num(Number(result.cost_usd), 6)} ({result.cost_basis}). Numeric claims come from stored calculations; the model selected which ones address your question.</p>
               </div>

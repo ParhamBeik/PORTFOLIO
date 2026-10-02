@@ -14,7 +14,7 @@ test.describe("risk", () => {
       test.skip(true, "account has no holdings (onboarding)");
     }
 
-    await page.getByTestId("nav-portfolio").click();
+    await page.getByTestId("nav-home").click();
     await expect(page.getByTestId("dashboard-risk")).toBeVisible({ timeout: 20000 });
 
     // Not `dashboard-risk-body`: `Async` renders that testId only on its
@@ -44,7 +44,7 @@ test.describe("risk", () => {
       test.skip(true, "account has no holdings (onboarding)");
     }
 
-    await page.getByTestId("nav-portfolio").click();
+    await page.getByTestId("nav-home").click();
     await expect(page.getByTestId("dashboard-risk-window")).toBeVisible({ timeout: 20000 });
     await page.getByTestId("dashboard-risk-window-90").click();
     await expect(page.getByTestId("dashboard-risk-window-90")).toHaveAttribute("aria-pressed", "true");
@@ -57,7 +57,7 @@ test.describe("risk", () => {
       test.skip(true, "account has no holdings (onboarding)");
     }
 
-    await page.getByTestId("nav-portfolio").click();
+    await page.getByTestId("nav-home").click();
     await expect(page.getByTestId("dashboard-risk")).toBeVisible({ timeout: 20000 });
 
     // The window buttons ask for 90/180/365 days and the panel starts after the

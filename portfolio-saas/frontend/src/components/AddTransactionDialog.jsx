@@ -32,7 +32,7 @@ import {
   Modal,
   Select,
 } from "./ui.jsx";
-import { area, catalogLabel, isWholeUnit, nativeName, perSqm, toman } from "../format.js";
+import { area, catalogLabel, isolate, isWholeUnit, nativeName, perSqm, toman } from "../format.js";
 import { jalaliLabel, toJalali } from "../jalali.js";
 import { QUANTITY_MIN, positive, quantityError, validQuantity } from "../quantity.js";
 
@@ -324,7 +324,7 @@ export default function AddTransactionDialog({
     // is printed back on the calendar it was picked on, not the browser's.
     const when = form.when ? jalaliLabel(toJalali(new Date(form.when))) : "now";
     // Named exactly as the tile the user just clicked, coin included.
-    const name = newProperty ? form.name || "the property" : catalogLabel(asset || {});
+    const name = newProperty ? form.name || "the property" : isolate(catalogLabel(asset || {}));
     if (isCashMove) {
       const verb = action === "deposit" ? "Add" : action === "fee" ? "Pay" : "Take out";
       return `${verb} ${toman(form.amount)} — ${when}.`;

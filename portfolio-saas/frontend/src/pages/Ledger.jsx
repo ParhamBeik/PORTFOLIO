@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   commitLedgerImport,
   deleteLedgerEntry,
@@ -37,6 +38,7 @@ import {
   signedToman,
   toman,
   unitPrice,
+  isolate,
 } from "../format.js";
 import { useApi } from "../useApi.js";
 import { quantityError, validQuantity } from "../quantity.js";
@@ -272,7 +274,7 @@ function EditEntryDialog({ row, onClose, onSaved }) {
 
   return (
     <Modal
-      title={`Edit ${holdingLabel(row)}`}
+      title={`Edit ${isolate(holdingLabel(row))}`}
       subtitle={`${jalaliDate(row.occurred_at)} · ${dateTime(row.occurred_at)}`}
       onClose={onClose}
       testId="ledger-edit-dialog"
@@ -353,6 +355,16 @@ export default function Ledger() {
   });
 
   const [adding, setAdding] = useState(false);
+  // The phone tab bar's "+" lands here with ?add=trade: open the dialog once,
+  // then drop the flag so a refresh or back-navigation does not reopen it.
+  const [params, setParams] = useSearchParams();
+  useEffect(() => {
+    if (params.get("add") !== "trade") return;
+    setAdding(true);
+    const next = new URLSearchParams(params);
+    next.delete("add");
+    setParams(next, { replace: true });
+  }, [params, setParams]);
   const [importing, setImporting] = useState(false);
   const [editing, setEditing] = useState(null);
   const [page, setPage] = useState(1);
@@ -442,7 +454,7 @@ export default function Ledger() {
       // name; the full name stays reachable on hover.
       render: (r) =>
         r.asset_key ? (
-          <span title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</span>
+          <bdi title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</bdi>
         ) : (
           "—"
         ),

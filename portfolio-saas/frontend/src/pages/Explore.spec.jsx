@@ -88,7 +88,7 @@ describe("company research", () => {
     await waitFor(() => expect(api.runResearch).toHaveBeenCalledWith("فولاد", "Which month had the highest sales?", "0.02"));
     expect(await screen.findByText(/Highest among verified months/)).toBeInTheDocument();
     expect(screen.getByText(/Model cost: \$0\.0004/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Open saved answer/ })).toHaveAttribute("href", "/explore?symbol=%D9%81%D9%88%D9%84%D8%A7%D8%AF&run=17");
+    expect(screen.getByRole("link", { name: /Open saved answer/ })).toHaveAttribute("href", "/research?view=companies&symbol=%D9%81%D9%88%D9%84%D8%A7%D8%AF&run=17");
     expect(screen.getAllByRole("link", { name: /Codal filing/i })[0]).toHaveAttribute("href", source.source_url);
     expect(screen.getByTestId("explore-income-evidence")).toHaveTextContent(/revenue cell B4 · profit cell B21/i);
     expect(screen.getByTestId("explore-balance-evidence")).toHaveTextContent(/assets cell B22 · liabilities cell B53 · equity cell B35/i);

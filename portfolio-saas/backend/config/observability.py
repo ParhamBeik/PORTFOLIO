@@ -87,6 +87,16 @@ def _telegram_target():
     return (token, chat_id) if token and chat_id else None
 
 
+def _telegram_api_base():
+    """Telegram-compatible Bot API root.
+
+    api.telegram.org is unreachable from the Iranian VPS, so every alert failed
+    with ConnectionError and none was ever delivered. Bale serves the same
+    sendMessage contract at https://tapi.bale.ai -- point this there.
+    """
+    return (getattr(settings, "ALERT_TELEGRAM_API_BASE", "") or "https://tapi.bale.ai").rstrip("/")
+
+
 def _send_telegram(token, chat_id, event, safe_details):
     # `text` rather than a parse_mode: alert payloads carry Persian symbol names
     # and JSON punctuation, and Markdown/HTML parsing would make Telegram reject
@@ -95,7 +105,7 @@ def _send_telegram(token, chat_id, event, safe_details):
     # available here.
     body = json.dumps(safe_details, sort_keys=True, default=str, ensure_ascii=False)
     requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
+        f"{_telegram_api_base()}/bot{token}/sendMessage",
         json={
             "chat_id": chat_id,
             "text": f"[{event}] {get_request_id()}\n{body}"[:4096],
