@@ -1042,7 +1042,7 @@ def test_recompress_rewrites_only_verified_objects(monkeypatch):
                           ("k/bad", hashlib.sha256(good).hexdigest()),
                           ("k/gone", "c" * 64)):
         CodalArtifact.objects.create(
-            report=report, kind=CodalArtifact.Kind.HTML, source_url="https://codal.ir/x",
+            report=report, kind=CodalArtifact.Kind.HTML, source_url=f"https://codal.ir/{key}",
             s3_key=key, checksum_sha256=checksum, content_type="text/html",
             fetch_status=CodalArtifact.FetchStatus.STORED)
 
