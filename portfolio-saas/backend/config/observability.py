@@ -94,7 +94,7 @@ def _telegram_api_base():
     with ConnectionError and none was ever delivered. Bale serves the same
     sendMessage contract at https://tapi.bale.ai -- point this there.
     """
-    return (getattr(settings, "ALERT_TELEGRAM_API_BASE", "") or "https://api.telegram.org").rstrip("/")
+    return (getattr(settings, "ALERT_TELEGRAM_API_BASE", "") or "https://tapi.bale.ai").rstrip("/")
 
 
 def _send_telegram(token, chat_id, event, safe_details):

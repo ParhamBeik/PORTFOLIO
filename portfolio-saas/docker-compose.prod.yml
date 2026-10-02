@@ -58,7 +58,7 @@ x-backend-env: &backend-env
   ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
   ALERT_TELEGRAM_BOT_TOKEN: ${ALERT_TELEGRAM_BOT_TOKEN:-}
   ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID:-}
-  ALERT_TELEGRAM_API_BASE: ${ALERT_TELEGRAM_API_BASE:-https://api.telegram.org}
+  ALERT_TELEGRAM_API_BASE: ${ALERT_TELEGRAM_API_BASE:-https://tapi.bale.ai}
   # Iranian hop for tsetmc/codal. Empty until setup_iran_egress.sh is live;
   # TSETMC_DIRECT_ENABLED must stay 0 until check_egress --verify-tsetmc passes.
   IRAN_EGRESS_PROXY: ${IRAN_EGRESS_PROXY:-}

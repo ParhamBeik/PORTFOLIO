@@ -898,7 +898,8 @@ def test_alert_telegram_sends_plain_text_and_does_not_parse_markup():
         ok = notify("telegram-alert", {"symbol": "FOOLAD_x"}, dedupe_seconds=60)
 
     assert ok is True
-    assert post.call_args.args[0] == "https://api.telegram.org/botbot-token/sendMessage"
+    # Bale by default: Telegram is unreachable from the production VPS.
+    assert post.call_args.args[0] == "https://tapi.bale.ai/botbot-token/sendMessage"
     payload = post.call_args.kwargs["json"]
     assert payload["chat_id"] == "12345"
     assert "parse_mode" not in payload
