@@ -199,6 +199,11 @@ services:
     environment:
       MINIO_ROOT_USER: ${CODAL_S3_ACCESS_KEY:?set CODAL_S3_ACCESS_KEY}
       MINIO_ROOT_PASSWORD: ${CODAL_S3_SECRET_KEY:?set CODAL_S3_SECRET_KEY}
+      # Lossless, transparent to readers (docs/STORAGE-POLICY.md). Applies on write;
+      # `manage.py recompress_codal_objects` rewrites objects stored before this.
+      MINIO_COMPRESSION_ENABLE: "on"
+      MINIO_COMPRESSION_EXTENSIONS: ".html,.htm,.xls,.xlsx,.pdf,.json,.txt,.csv,.xml"
+      MINIO_COMPRESSION_MIME_TYPES: "text/*,application/json,application/xml,application/pdf,application/ms-excel,application/vnd.ms-excel"
     volumes:
       - codaldata:/data
     healthcheck:
