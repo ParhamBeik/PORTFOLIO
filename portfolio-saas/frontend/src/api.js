@@ -471,6 +471,10 @@ export const updateLedgerEntry = (accountId, entryId, body) =>
 export const deleteLedgerEntry = (accountId, entryId) =>
   api(`/api/accounts/${accountId}/ledger/${entryId}/`, { method: "DELETE" });
 // Capital increases the warehouse detected on the user's TSE holdings.
+export const watchlist = () => api("/api/watchlist/");
+export const watch = (symbol) => api("/api/watchlist/", { method: "POST", body: { symbol } });
+export const unwatch = (symbol) =>
+  api(`/api/watchlist/${encodeURIComponent(symbol)}/`, { method: "DELETE" });
 export const corporateActionSuggestions = () => api("/api/corporate-actions/");
 export const acceptCorporateAction = (accountId, { symbol, date, quantity }) =>
   api(`/api/accounts/${accountId}/corporate-actions/accept/`, {

@@ -33,6 +33,8 @@ from .views.catalog import (
     HoldingListCreateView,
     LiabilityDetailView,
     LiabilityListCreateView,
+    WatchlistItemView,
+    WatchlistView,
 )
 from .views.ledger import (
     LedgerEntryDetailView,
@@ -93,6 +95,8 @@ urlpatterns = [
     path("accounts/<int:account_id>/data-quality/",
          AccountDataQualityView.as_view(), name="account-data-quality"),
     path("accounts/<int:account_id>/trades/", TradeView.as_view(), name="trade-create"),
+    path("watchlist/", WatchlistView.as_view(), name="watchlist"),
+    path("watchlist/<str:symbol>/", WatchlistItemView.as_view(), name="watchlist-item"),
     path("corporate-actions/", CorporateActionSuggestionListView.as_view(),
          name="corporate-action-list"),
     path("accounts/<int:account_id>/corporate-actions/accept/",
