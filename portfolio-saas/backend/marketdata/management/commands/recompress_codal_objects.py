@@ -19,6 +19,8 @@ from django.core.management.base import BaseCommand
 from marketdata.codal_storage import _client
 from marketdata.models import CodalArtifact
 
+_BATCH = 500
+
 
 class Command(BaseCommand):
     help = "Re-put stored Codal objects so MinIO compression applies to them."
@@ -29,20 +31,33 @@ class Command(BaseCommand):
 
     def handle(self, *args, after_id: int = 0, limit: int | None = None, **options):
         client = _client()
-        rows = (CodalArtifact.objects.filter(pk__gt=after_id).exclude(s3_key="")
-                .order_by("pk").values_list("pk", "s3_key", "checksum_sha256", "content_type"))
         counts = {"rewritten": 0, "missing": 0, "checksum_mismatch": 0, "last_id": after_id}
-        for pk, key, checksum, content_type in (rows[:limit] if limit else rows).iterator():
-            counts["last_id"] = pk
-            try:
-                body = client.get_object(Bucket=settings.CODAL_S3_BUCKET, Key=key)["Body"].read()
-            except client.exceptions.NoSuchKey:
-                counts["missing"] += 1
-                continue
-            if checksum and hashlib.sha256(body).hexdigest() != checksum:
-                counts["checksum_mismatch"] += 1
-                continue
-            client.put_object(Bucket=settings.CODAL_S3_BUCKET, Key=key, Body=body,
-                              ContentType=content_type or "application/octet-stream")
-            counts["rewritten"] += 1
-        self.stdout.write(json.dumps(counts))
+        done = 0
+        while limit is None or done < limit:
+            # Short queries, not one long cursor: S3 calls between rows can outlast
+            # Postgres' idle_session_timeout and kill a held-open iterator.
+            batch = list(
+                CodalArtifact.objects.filter(pk__gt=counts["last_id"], fetch_status="stored")
+                .exclude(s3_key="").order_by("pk")
+                .values_list("pk", "s3_key", "checksum_sha256", "content_type")[:_BATCH])
+            if not batch:
+                break
+            for pk, key, checksum, content_type in batch[: (limit - done) if limit else None]:
+                done += 1
+                counts["last_id"] = pk
+                self._rewrite(client, key, checksum, content_type, counts)
+            self.stdout.write(json.dumps(counts))
+            self.stdout.flush()
+
+    def _rewrite(self, client, key, checksum, content_type, counts):
+        try:
+            body = client.get_object(Bucket=settings.CODAL_S3_BUCKET, Key=key)["Body"].read()
+        except client.exceptions.NoSuchKey:
+            counts["missing"] += 1
+            return
+        if checksum and hashlib.sha256(body).hexdigest() != checksum:
+            counts["checksum_mismatch"] += 1
+            return
+        client.put_object(Bucket=settings.CODAL_S3_BUCKET, Key=key, Body=body,
+                          ContentType=content_type or "application/octet-stream")
+        counts["rewritten"] += 1
