@@ -3239,3 +3239,110 @@ def test_undo_does_not_revert_a_rename_of_a_holding_that_survived(ledger_account
     Holding.objects.filter(account=ledger_account, asset=first.asset).update(display_name='Renamed')
     assert client.post(url, {}, format='json').status_code == 200
     assert Holding.objects.get(account=ledger_account, asset=first.asset).display_name == 'Renamed'
+
+
+def _house_series(account, house, t0, mortgage='0'):
+    opening = create_ledger_entry(account=account, asset=house, kind='opening_position', quantity='50', area_sqm='100', mortgage_deduction_tomans=mortgage, occurred_at=t0)
+    mark = create_ledger_entry(account=account, asset=house, kind='valuation_mark', quantity='60', occurred_at=t0 + datetime.timedelta(days=10))
+    return opening, mark
+
+
+def test_undo_of_a_property_mark_after_the_property_moved_is_refused(ledger_account, asset_catalog):
+    house = asset_catalog['house_asset']
+    other = Account.objects.create(user=ledger_account.user, name='Other')
+    client = _client(ledger_account.user)
+    opening, mark = _house_series(ledger_account, house, timezone.now() - datetime.timedelta(days=20))
+    mark_url = f'/api/accounts/{ledger_account.pk}/ledger/{mark.pk}/'
+    assert client.delete(mark_url).status_code == 204
+    assert client.patch(f'/api/accounts/{ledger_account.pk}/ledger/{opening.pk}/', {'target_account_id': other.pk}, format='json').status_code == 200
+    assert client.post(mark_url, {}, format='json').status_code == 400
+    assert list(Holding.objects.filter(asset=house).values_list('account_id', flat=True)) == [other.pk]
+
+
+def test_restoring_an_opening_off_the_current_baseline_is_refused(ledger_account, asset_catalog):
+    t0 = timezone.now() - datetime.timedelta(days=20)
+    o1 = create_ledger_entry(account=ledger_account, kind='opening_cash', amount_tomans='1000', occurred_at=t0)
+    o2 = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='opening_position', quantity='1', occurred_at=t0)
+    client = _client(ledger_account.user)
+    o1_url = f'/api/accounts/{ledger_account.pk}/ledger/{o1.pk}/'
+    assert client.delete(o1_url).status_code == 204
+    moved = (t0 - datetime.timedelta(days=5)).isoformat()
+    assert client.patch(f'/api/accounts/{ledger_account.pk}/ledger/{o2.pk}/', {'occurred_at': moved}, format='json').status_code == 200
+    assert client.post(o1_url, {}, format='json').status_code == 400
+    # The surviving opening is still editable: the openings never diverged.
+    assert client.patch(f'/api/accounts/{ledger_account.pk}/ledger/{o2.pk}/', {'note': 'ok'}, format='json').status_code == 200
+
+
+def test_a_typed_mortgage_moves_with_its_property(ledger_account, asset_catalog):
+    house = asset_catalog['house_asset']
+    other = Account.objects.create(user=ledger_account.user, name='Other')
+    opening, _ = _house_series(ledger_account, house, timezone.now() - datetime.timedelta(days=20))
+    typed = Liability.objects.create(account=ledger_account, asset=house, label='Bank loan', kind=Liability.Kind.SECURED_DEBT, amount_tomans=500000000)
+    assert _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{opening.pk}/', {'target_account_id': other.pk}, format='json').status_code == 200
+    typed.refresh_from_db()
+    assert typed.account_id == other.pk
+
+
+def test_undo_of_a_removed_orphan_property_keeps_its_mortgage(ledger_account, asset_catalog):
+    ledger_account.tracking_started_at = timezone.now() - datetime.timedelta(days=5)
+    ledger_account.save()
+    house = asset_catalog['house_asset']
+    holding = Holding.objects.create(account=ledger_account, asset=house, quantity='50', area_sqm='100', mortgage_deduction_tomans='1000000')
+    client = _client(ledger_account.user)
+    removed = client.delete(f'/api/accounts/{ledger_account.pk}/ledger/holdings/{holding.pk}/')
+    assert removed.status_code == 200, removed.data
+    assert client.post(f'/api/accounts/{ledger_account.pk}/ledger/{removed.data["id"]}/', {}, format='json').status_code == 200
+    assert Holding.objects.get(account=ledger_account, asset=house).mortgage_deduction_tomans == 1000000
+
+
+def test_a_cash_amount_that_rounds_to_nothing_is_a_400(ledger_account):
+    entry = create_ledger_entry(account=ledger_account, kind='deposit', amount_tomans='1000')
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'amount_tomans': '0.4'}, format='json')
+    assert response.status_code == 400
+    with pytest.raises(LedgerError):
+        create_ledger_entry(account=ledger_account, kind='deposit', amount_tomans='0.4')
+
+
+@pytest.mark.django_db(transaction=True)
+def test_opposite_moves_at_once_do_not_deadlock(asset_catalog, make_user, monkeypatch):
+    # The entry lookup joins the account for the ownership check; locking that
+    # joined row too put each account lock ahead of the pk-ordered one.
+    import threading
+    from django.db import connections
+    from portfolio.services.ledger import update_ledger_entry
+
+    user = make_user(email='opposite-moves@test.test')
+    a = Account.objects.create(user=user, name='A')
+    b = Account.objects.create(user=user, name='B')
+    at = timezone.now() - datetime.timedelta(days=2)
+    ea = create_ledger_entry(account=a, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', occurred_at=at)
+    eb = create_ledger_entry(account=b, asset=asset_catalog['half_coin'], kind='buy', quantity='1', unit_price_tomans='100', occurred_at=at)
+    barrier = threading.Barrier(2, timeout=10)
+    real_filter = Account.objects.filter
+    local = threading.local()
+
+    def filt(*args, **kwargs):
+        # Both threads hold their entry lock before either locks accounts.
+        if 'user' in kwargs and 'pk' in kwargs and not getattr(local, 'done', False):
+            local.done = True
+            barrier.wait()
+        return real_filter(*args, **kwargs)
+
+    monkeypatch.setattr(Account.objects, 'filter', filt)
+    results = {}
+
+    def run(name, src, entry, dst):
+        try:
+            update_ledger_entry(user=user, account_id=src.pk, entry_id=entry.pk, target_account_id=dst.pk)
+            results[name] = 'ok'
+        except Exception as exc:  # noqa: BLE001
+            results[name] = f'{type(exc).__name__}: {exc}'
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=run, args=('a->b', a, ea, b)), threading.Thread(target=run, args=('b->a', b, eb, a))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert results == {'a->b': 'ok', 'b->a': 'ok'}, results
