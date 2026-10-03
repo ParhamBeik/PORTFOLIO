@@ -269,6 +269,16 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
   };
   const qtyMessage = quantityError(quantity, qtyOpts);
 
+  // An opening's unit price is what it is worth now; a trade's is what was
+  // paid. Switching between them carries the PAID price across, or saving
+  // would book today's value as the purchase price (and debit that cash).
+  const isTrade = (k) => k === "buy" || k === "sell";
+  const changeKind = (next) => {
+    if (isTrade(next) && !isTrade(kind)) setPrice(costBasis);
+    if (!isTrade(next) && isTrade(kind) && costBasis === "") setCostBasis(price);
+    setKind(next);
+  };
+
   const save = async () => {
     setBusy(true);
     setError("");
@@ -324,7 +334,7 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
           <Field label="Portfolio"><Select label="Portfolio" value={targetAccount} onChange={(e) => setTargetAccount(e.target.value)} data-testid="ledger-edit-account" className="w-full">
             {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
           </Select></Field>
-          <Field label="Type"><Select label="Type" value={kind} onChange={(e) => setKind(e.target.value)} data-testid="ledger-edit-kind" className="w-full">
+          <Field label="Type"><Select label="Type" value={kind} onChange={(e) => changeKind(e.target.value)} data-testid="ledger-edit-kind" className="w-full">
             {kindOptions.map((k) => <option key={k} value={k}>{KIND_LABEL[k] || humanize(k)}</option>)}
           </Select></Field>
           {/* Clearing the picker reads "Today" but the save sends no date, so the

@@ -222,6 +222,12 @@ def create_ledger_entry(
         mortgage = mortgage or Decimal("0")
 
     account = Account.objects.select_for_update().get(pk=account.pk)
+    # `all_objects`: a removed row keeps its external_id so Undo can restore it,
+    # and the unique constraint counts it -- check here or the insert 500s.
+    if external_id and LedgerEntry.all_objects.filter(
+        account=account, external_id=external_id[:120]
+    ).exists():
+        raise LedgerError("external_id already exists.")
     if kind in {LedgerEntry.Kind.OPENING_CASH, LedgerEntry.Kind.OPENING_POSITION}:
         if account.tracking_started_at and account.tracking_started_at != occurred_at:
             raise LedgerError("Opening entries must share the tracking start timestamp.")
@@ -394,6 +400,20 @@ def update_ledger_entry(
             raise LedgerError("This type is not valid for this entry.")
         if kind == LedgerEntry.Kind.RIGHTS_ISSUE and entry.asset.asset_class != Asset.AssetClass.STOCK:
             raise LedgerError("Extra shares require a stock.")
+        # An opening's `price_tomans` is what it is worth NOW and its
+        # `cost_basis_tomans` what was paid; a trade's `price_tomans` is what
+        # was paid. Carry the paid price across, or a re-kind silently re-prices
+        # the position and moves cash nobody moved.
+        trade_kinds = {LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL}
+        if kind in trade_kinds and entry.kind not in trade_kinds and unit_price_tomans is None:
+            if entry.cost_basis_tomans is None:
+                raise LedgerError("Enter the price paid to record this as a trade.")
+            entry.price_tomans = entry.cost_basis_tomans
+        if (
+            kind in COST_BASIS_KINDS and entry.kind in trade_kinds
+            and cost_basis_tomans is None and entry.cost_basis_tomans is None
+        ):
+            entry.cost_basis_tomans = entry.price_tomans
         entry.kind = kind
         if kind not in COST_BASIS_KINDS:
             entry.cost_basis_tomans = None
@@ -465,8 +485,9 @@ def delete_ledger_entry(*, user, account_id: int, entry_id: int) -> None:
     Account.objects.select_for_update().get(pk=entry.account_id)
     holding = Holding.objects.filter(account=entry.account, asset_id=entry.asset_id).first()
     metadata = {field: getattr(holding, field) for field in ["display_name", "is_hidden"]} if holding else {}
-    entry.revisions = [*entry.revisions, {"removed_at": timezone.now().isoformat(), "holding_metadata": metadata}]
     entry.removed_at = timezone.now()
+    revision = {"removed_at": entry.removed_at.isoformat()}
+    entry.revisions = [*entry.revisions, revision]
     entry.save(update_fields=["removed_at", "revisions", "updated_at"])
     _commit_projections(entry.account)
     # Replay only clears holdings of assets the visible ledger still governs, so
@@ -475,6 +496,11 @@ def delete_ledger_entry(*, user, account_id: int, entry_id: int) -> None:
         account=entry.account, asset_id=entry.asset_id
     ).exists():
         Holding.objects.filter(account=entry.account, asset_id=entry.asset_id).delete()
+        # Kept only when the holding went with the row: a holding that survives
+        # keeps its own name, and restoring a snapshot would undo a later rename.
+        if metadata:
+            revision["holding_metadata"] = metadata
+            entry.save(update_fields=["revisions"])
 
 
 @transaction.atomic
@@ -487,7 +513,8 @@ def restore_ledger_entry(*, user, account_id: int, entry_id: int) -> LedgerEntry
         entry.removed_at = None
         entry.save(update_fields=["removed_at", "updated_at"])
         _commit_projections(entry.account)
-        metadata = next((rev["holding_metadata"] for rev in reversed(entry.revisions) if "holding_metadata" in rev), {})
+        last = entry.revisions[-1] if entry.revisions else {}
+        metadata = last.get("holding_metadata", {}) if "removed_at" in last else {}
         if metadata:
             Holding.objects.filter(account=entry.account, asset_id=entry.asset_id).update(**metadata)
     return entry
@@ -567,12 +594,17 @@ def adjust_holding_quantity(*, user, account_id: int, holding_id: int, quantity,
 
 
 @transaction.atomic
-def delete_orphan_holding(*, user, account_id: int, holding_id: int) -> LedgerEntry:
+def delete_orphan_holding(*, user, account_id: int, holding_id: int) -> LedgerEntry | None:
     holding = Holding.objects.select_for_update().get(
         pk=holding_id, account_id=account_id, account__user=user
     )
     if LedgerEntry.objects.filter(account_id=account_id, asset_id=holding.asset_id).exists():
         raise LedgerError("This holding has ledger history; remove a ledger row instead.")
+    if not holding.quantity:
+        # Nothing is owned, so there is no position to keep; an opening of zero
+        # would be a row the ledger's own rules forbid.
+        holding.delete()
+        return None
     entry = LedgerEntry.objects.create(
         account=holding.account, asset=holding.asset,
         kind=LedgerEntry.Kind.OPENING_POSITION,

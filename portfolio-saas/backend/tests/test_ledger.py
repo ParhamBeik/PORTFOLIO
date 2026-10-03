@@ -24,7 +24,7 @@ from portfolio.models import Snapshot
 from portfolio.models import Liability
 from portfolio.serializers import TradeInputSerializer
 from portfolio.services.deflator import CpiUnavailable, cpi_for_date
-from portfolio.services.ledger import create_ledger_entry
+from portfolio.services.ledger import LedgerError, create_ledger_entry
 from portfolio.services.returns import _price_version_fingerprint, daily_returns_matrix
 from portfolio.services.timeline import cash_as_of, holdings_as_of
 from portfolio.services.trades import (
@@ -3113,3 +3113,59 @@ def test_moving_an_entry_onto_a_taken_external_id_is_refused(ledger_account, ass
     assert response.status_code == 400
     entry.refresh_from_db()
     assert entry.account_id == ledger_account.pk
+
+
+def test_rekinding_an_opening_to_a_buy_books_the_price_paid_not_todays(ledger_account, asset_catalog):
+    from portfolio.services.ledger import record_existing_position
+    entry = record_existing_position(account=ledger_account, asset=asset_catalog['emami_coin'], quantity='10', unit_price_tomans='5000000', cost_basis_tomans='2000000')
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'kind': 'buy'}, format='json')
+    assert response.status_code == 200, response.data
+    entry.refresh_from_db()
+    assert entry.price_tomans == 2000000
+    assert entry.amount_tomans == 20000000
+
+
+def test_rekinding_an_opening_without_a_known_basis_needs_a_price(ledger_account, asset_catalog):
+    from portfolio.services.ledger import record_existing_position
+    entry = record_existing_position(account=ledger_account, asset=asset_catalog['emami_coin'], quantity='10', unit_price_tomans='5000000')
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'kind': 'buy'}, format='json')
+    assert response.status_code == 400
+    entry.refresh_from_db()
+    assert entry.kind == 'opening_position'
+
+
+def test_rekinding_a_buy_to_an_opening_keeps_what_was_paid_as_basis(ledger_account, asset_catalog):
+    at = timezone.now() - datetime.timedelta(days=2)
+    entry = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='2', unit_price_tomans='100', occurred_at=at)
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'kind': 'opening_position'}, format='json')
+    assert response.status_code == 200, response.data
+    entry.refresh_from_db()
+    assert entry.cost_basis_tomans == 100
+
+
+def test_a_removed_rows_external_id_is_refused_cleanly(ledger_account, asset_catalog):
+    client = _client(ledger_account.user)
+    entry = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', external_id='broker-9')
+    assert client.delete(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/').status_code == 204
+    with pytest.raises(LedgerError):
+        create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', external_id='broker-9')
+
+
+def test_removing_a_zero_orphan_holding_writes_no_event(ledger_account, asset_catalog):
+    holding = Holding.objects.create(account=ledger_account, asset=asset_catalog['emami_coin'], quantity='0')
+    response = _client(ledger_account.user).delete(f'/api/accounts/{ledger_account.pk}/ledger/holdings/{holding.pk}/')
+    assert response.status_code == 204
+    assert not LedgerEntry.all_objects.filter(account=ledger_account).exists()
+    assert not Holding.objects.filter(pk=holding.pk).exists()
+
+
+def test_undo_does_not_revert_a_rename_of_a_holding_that_survived(ledger_account, asset_catalog):
+    client = _client(ledger_account.user)
+    at = timezone.now() - datetime.timedelta(days=3)
+    first = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', occurred_at=at)
+    create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', occurred_at=at + datetime.timedelta(days=1))
+    url = f'/api/accounts/{ledger_account.pk}/ledger/{first.pk}/'
+    assert client.delete(url).status_code == 204
+    Holding.objects.filter(account=ledger_account, asset=first.asset).update(display_name='Renamed')
+    assert client.post(url, {}, format='json').status_code == 200
+    assert Holding.objects.get(account=ledger_account, asset=first.asset).display_name == 'Renamed'
