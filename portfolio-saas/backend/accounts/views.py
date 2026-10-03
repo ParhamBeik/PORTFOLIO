@@ -613,12 +613,12 @@ class ExportView(APIView):
                 ),
             ),
             "ledger.csv": _csv_bytes(
-                ["id", "account_id", "kind", "asset_id", "quantity", "price_tomans", "amount_tomans", "timestamp", "source", "external_id"],
+                ["id", "account_id", "kind", "asset_id", "quantity", "price_tomans", "amount_tomans", "timestamp", "source", "external_id", "removed_at"],
                 (
                     (entry.id, entry.account_id, entry.kind, entry.asset_id,
                      entry.quantity, entry.price_tomans, entry.amount_tomans,
-                     entry.timestamp, entry.source, entry.external_id)
-                    for entry in LedgerEntry.objects.filter(account_id__in=account_ids)
+                     entry.timestamp, entry.source, entry.external_id, entry.removed_at)
+                    for entry in LedgerEntry.all_objects.filter(account_id__in=account_ids)
                     .select_related("asset")
                 ),
             ),

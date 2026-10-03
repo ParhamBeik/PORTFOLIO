@@ -76,8 +76,7 @@ function actionsFor(asset, isNewProperty) {
   // endpoint, and selling one means removing the holding, which is a Holdings
   // action. Offering "I sold it" here would open a path that cannot complete.
   if (asset?.is_house) return ["valuation_mark"];
-  if (asset?.is_manual) return ["buy", "sell", "opening_position", "dividend", "rights_issue"];
-  return ["buy", "sell", "opening_position", "dividend", "rights_issue"];
+  return ["buy", "sell", "opening_position", ...(asset?.asset_class === "Stock" ? ["dividend", "rights_issue"] : [])];
 }
 
 // Which screens this particular entry needs. A cash movement has no asset to
@@ -160,7 +159,11 @@ export default function AddTransactionDialog({
     note: "",
   });
   const [ownPrice, setOwnPrice] = useState(false);
-  const [formAccount, setFormAccount] = useState("");
+  // With one portfolio there is nothing to choose; asking anyway left Save
+  // disabled for a reason the user could not see.
+  const [formAccount, setFormAccount] = useState(() =>
+    accounts.length === 1 ? String(accounts[0].id) : ""
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState("");
@@ -298,8 +301,9 @@ export default function AddTransactionDialog({
   };
 
   const canContinue = () => {
+    if (!targetAccountId) return false;
     if (current === "asset") return !!assetKey || newProperty;
-    if (current === "action") return !!action;
+    if (current === "action") return !!action && (action !== "sell" || Number(holding?.quantity || 0) > 0);
     if (current === "amount") {
       if (isCashMove) return positive(form.amount);
       if (action === "dividend" || action === "fee") return positive(form.amount);
@@ -307,7 +311,7 @@ export default function AddTransactionDialog({
         return !!form.name.trim() && positive(form.areaSqm) && positive(form.pricePerSqm);
       }
       if (asset?.is_house) return positive(form.pricePerSqm);
-      return validQuantity(form.quantity, { step: asset?.quantity_step });
+      return validQuantity(form.quantity, { step: asset?.quantity_step }) && (action !== "sell" || Number(form.quantity) <= Number(holding?.quantity || 0));
     }
     return true;
   };
@@ -508,6 +512,10 @@ export default function AddTransactionDialog({
           </Select>
         )}
 
+        {!targetAccountId && <p role="status" className="text-sm text-muted">Choose a portfolio before continuing.</p>}
+        {targetAccount && <p className="text-sm text-muted" data-testid="add-transaction-portfolio">Portfolio: {targetAccount.name}</p>}
+        {!isCashMove && assetKey && <p className="text-sm text-muted" data-testid="add-transaction-owned">You hold {Number(holding?.quantity || 0).toLocaleString()} in this portfolio.</p>}
+        {action === "sell" && Number(form.quantity) > Number(holding?.quantity || 0) && <p role="alert">You cannot sell more than you hold.</p>}
         {current === "category" && (
           <Step n={stepNumber} of={totalSteps} title="What kind of thing is it?">
             <div className="grid gap-2 sm:grid-cols-2">
@@ -604,7 +612,8 @@ export default function AddTransactionDialog({
                   label={ACTIONS[k].label}
                   hint={ACTIONS[k].hint}
                   selected={action === k}
-                  onClick={() => setAction(k)}
+                  onClick={() => { setError(null); setAction(k); }}
+                  disabled={k === "sell" && Number(holding?.quantity || 0) <= 0}
                   testId={`add-transaction-action-${k}`}
                 />
               ))}

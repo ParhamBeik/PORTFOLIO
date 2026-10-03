@@ -316,6 +316,8 @@ def reverse_ledger_entry(*, user, account_id: int, entry_id: int) -> LedgerEntry
         LedgerEntry.objects.select_for_update()
         .get(pk=entry_id, account_id=account_id, account__user=user)
     )
+    if entry.removed_at is not None:
+        raise LedgerError("Restore this entry before reversing it.")
     if LedgerEntry.objects.filter(reversal_of=entry).exists():
         raise LedgerError("Ledger entry has already been reversed.")
     account = Account.objects.select_for_update().get(pk=entry.account_id)
@@ -343,17 +345,49 @@ def update_ledger_entry(
     *, user, account_id: int, entry_id: int, quantity=None,
     unit_price_tomans=None, amount_tomans=None, area_sqm=None,
     cost_basis_tomans=None, occurred_at=None,
-    note=None,
+    note=None, kind=None, target_account_id=None,
 ) -> LedgerEntry:
     """Mutate a ledger row in place, then rebuild holdings/cash from the timeline."""
     entry = (
         LedgerEntry.objects.select_for_update()
         .get(pk=entry_id, account_id=account_id, account__user=user)
     )
+    if entry.removed_at is not None:
+        raise LedgerError("Restore this entry before editing it.")
+    previous = {
+        field.attname: (value.isoformat() if hasattr(value, "isoformat") else str(value) if isinstance(value, Decimal) else value)
+        for field in entry._meta.concrete_fields
+        if field.name != "revisions"
+        for value in [getattr(entry, field.attname)]
+    }
+    old_account = entry.account
+    destination = old_account
+    if target_account_id is not None:
+        destination = Account.objects.filter(pk=target_account_id, user=user).first()
+        if destination is None:
+            raise LedgerError("Portfolio not found.")
+    list(Account.objects.select_for_update().filter(pk__in=[old_account.pk, destination.pk]).order_by("pk"))
     if entry.reversal_of_id:
         raise LedgerError("Cannot edit a reversal.")
     if LedgerEntry.objects.filter(reversal_of=entry).exists():
         raise LedgerError("Cannot edit an entry that has already been reversed.")
+    if kind is not None and kind != entry.kind:
+        # Keep corrections within the same shape; changing cash into a position
+        # would require an asset and is a new event rather than a correction.
+        allowed = HOUSE_MARK_KINDS if entry.asset and entry.asset.is_house else (
+            {LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL, LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.RIGHTS_ISSUE}
+            if entry.asset_id and entry.kind not in CASH_KINDS else CASH_KINDS
+        )
+        if kind not in allowed:
+            raise LedgerError("This type is not valid for this entry.")
+        if kind == LedgerEntry.Kind.RIGHTS_ISSUE and entry.asset.asset_class != Asset.AssetClass.STOCK:
+            raise LedgerError("Extra shares require a stock.")
+        entry.kind = kind
+        if kind not in COST_BASIS_KINDS:
+            entry.cost_basis_tomans = None
+        if kind not in {LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL} and kind not in CASH_KINDS:
+            entry.amount_tomans = None
+    entry.account = destination
     if occurred_at is not None:
         if occurred_at > timezone.now():
             raise LedgerError("occurred_at cannot be in the future.")
@@ -390,27 +424,61 @@ def update_ledger_entry(
         entry.amount_tomans = holding_value_to_toman(
             entry.asset, qty * price
         ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    if entry.kind in {LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.OPENING_CASH}:
+        other_openings = active_entries(destination, kinds=[LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.OPENING_CASH])
+        if any(e.pk != entry.pk and e.timestamp != entry.timestamp for e in other_openings):
+            raise LedgerError("Opening entries must share the tracking start timestamp.")
+        destination.tracking_started_at = entry.timestamp
+        destination.save(update_fields=["tracking_started_at", "updated_at"])
+    entry.revisions = [*entry.revisions, previous]
     entry.save()
-    _commit_projections(entry.account)
+    _commit_projections(old_account)
+    if destination.pk != old_account.pk:
+        if entry.asset_id and not LedgerEntry.objects.filter(account=old_account, asset_id=entry.asset_id).exists():
+            Holding.objects.filter(account=old_account, asset_id=entry.asset_id).delete()
+        _commit_projections(destination)
     return entry
 
 
 @transaction.atomic
 def delete_ledger_entry(*, user, account_id: int, entry_id: int) -> None:
-    """Remove a ledger row (and its reversal, if any), then rebuild projections."""
-    entry = (
-        LedgerEntry.objects.select_for_update()
-        .get(pk=entry_id, account_id=account_id, account__user=user)
+    """Retain the event, excluding it from corrected projections."""
+    entry = LedgerEntry.all_objects.select_for_update().get(
+        pk=entry_id, account_id=account_id, account__user=user
     )
-    account = Account.objects.select_for_update().get(pk=entry.account_id)
-    asset_id = entry.asset_id
-    LedgerEntry.objects.filter(reversal_of=entry).delete()
-    entry.delete()
-    _commit_projections(account)
-    if asset_id and not LedgerEntry.objects.filter(
-        account=account, asset_id=asset_id
+    if entry.reversal_of_id or hasattr(entry, "reversed_by"):
+        raise LedgerError("Cannot remove a reversal pair.")
+    if entry.removed_at is not None:
+        return
+    Account.objects.select_for_update().get(pk=entry.account_id)
+    holding = Holding.objects.filter(account=entry.account, asset_id=entry.asset_id).first()
+    metadata = {field: getattr(holding, field) for field in ["display_name", "is_hidden"]} if holding else {}
+    entry.revisions = [*entry.revisions, {"removed_at": timezone.now().isoformat(), "holding_metadata": metadata}]
+    entry.removed_at = timezone.now()
+    entry.save(update_fields=["removed_at", "revisions", "updated_at"])
+    _commit_projections(entry.account)
+    # Replay only clears holdings of assets the visible ledger still governs, so
+    # the last visible row's holding goes here. Undo rebuilds it from the row.
+    if entry.asset_id and not LedgerEntry.objects.filter(
+        account=entry.account, asset_id=entry.asset_id
     ).exists():
-        Holding.objects.filter(account=account, asset_id=asset_id).delete()
+        Holding.objects.filter(account=entry.account, asset_id=entry.asset_id).delete()
+
+
+@transaction.atomic
+def restore_ledger_entry(*, user, account_id: int, entry_id: int) -> LedgerEntry:
+    entry = LedgerEntry.all_objects.select_for_update().get(
+        pk=entry_id, account_id=account_id, account__user=user
+    )
+    Account.objects.select_for_update().get(pk=entry.account_id)
+    if entry.removed_at is not None:
+        entry.removed_at = None
+        entry.save(update_fields=["removed_at", "updated_at"])
+        _commit_projections(entry.account)
+        metadata = next((rev["holding_metadata"] for rev in reversed(entry.revisions) if "holding_metadata" in rev), {})
+        if metadata:
+            Holding.objects.filter(account=entry.account, asset_id=entry.asset_id).update(**metadata)
+    return entry
 
 
 @transaction.atomic
@@ -487,13 +555,21 @@ def adjust_holding_quantity(*, user, account_id: int, holding_id: int, quantity,
 
 
 @transaction.atomic
-def delete_orphan_holding(*, user, account_id: int, holding_id: int) -> None:
+def delete_orphan_holding(*, user, account_id: int, holding_id: int) -> LedgerEntry:
     holding = Holding.objects.select_for_update().get(
         pk=holding_id, account_id=account_id, account__user=user
     )
     if LedgerEntry.objects.filter(account_id=account_id, asset_id=holding.asset_id).exists():
-        raise LedgerError("This holding has ledger history; delete a buy/sell row instead.")
-    holding.delete()
+        raise LedgerError("This holding has ledger history; remove a ledger row instead.")
+    entry = LedgerEntry.objects.create(
+        account=holding.account, asset=holding.asset,
+        kind=LedgerEntry.Kind.OPENING_POSITION,
+        quantity=holding.quantity, area_sqm=holding.area_sqm if holding.asset.is_house else None,
+        timestamp=holding.account.tracking_started_at or holding.created_at,
+        source="system", note="Existing position preserved before removal",
+    )
+    delete_ledger_entry(user=user, account_id=account_id, entry_id=entry.pk)
+    return entry
 
 
 def ledger_label(asset, nickname: str = "") -> str:
@@ -566,7 +642,7 @@ def synthetic_position_rows(accounts, ledger_rows, prices: dict | None = None) -
     }
     rows = []
     holdings = (
-        Holding.objects.filter(account__in=accounts)
+        Holding.objects.filter(account__in=accounts).exclude(quantity_atomic=0)
         .select_related("asset", "account")
     )
     for holding in holdings:

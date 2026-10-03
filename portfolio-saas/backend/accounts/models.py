@@ -142,7 +142,7 @@ class User(AbstractUser):
         from portfolio.models import Holding, LedgerEntry, Liability
 
         accounts = self.accounts.all()
-        LedgerEntry.objects.filter(account__in=accounts).delete()
+        LedgerEntry.all_objects.filter(account__in=accounts).delete()
         Holding.objects.filter(account__in=accounts).delete()
         Liability.objects.filter(account__in=accounts).delete()
         accounts.delete()

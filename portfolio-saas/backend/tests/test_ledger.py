@@ -611,7 +611,7 @@ def test_delete_buy_removes_holding(ledger_account, asset_catalog):
         f"/api/accounts/{ledger_account.id}/ledger/{buy.data['id']}/"
     )
     assert response.status_code == 204
-    assert not LedgerEntry.objects.filter(pk=buy.data["id"]).exists()
+    assert LedgerEntry.all_objects.get(pk=buy.data["id"]).removed_at is not None
     assert not Holding.objects.filter(
         account=ledger_account, asset=asset_catalog["emami_coin"]
     ).exists()
@@ -3007,3 +3007,89 @@ def test_a_hand_entered_bonus_suppresses_the_suggestion(asset_catalog, make_user
         occurred_at=jalali.to_datetime("1405-04-10"),
     )
     assert pending_suggestions(user) == []
+
+
+def test_remove_undo_retains_identity_cash_metadata_and_corrected_history(ledger_account, asset_catalog, write_prices):
+    client = _client(ledger_account.user)
+    at = timezone.now() - datetime.timedelta(days=2)
+    entry = create_ledger_entry(account=ledger_account, asset=asset_catalog['kama_stock'], kind='buy', quantity='20', unit_price_tomans='1000', occurred_at=at)
+    holding = Holding.objects.get(account=ledger_account, asset=entry.asset)
+    holding.display_name = 'My shares'
+    holding.is_hidden = True
+    holding.save()
+    write_prices({'kama_stock': 1200})
+    url = f'/api/accounts/{ledger_account.id}/ledger/{entry.pk}/'
+    assert client.delete(url).status_code == 204
+    entry.refresh_from_db()
+    assert entry.removed_at is not None
+    assert holdings_as_of(ledger_account.user, ledger_account, at) == {}
+    assert client.get(f'/api/accounts/{ledger_account.pk}/ledger/').data == []
+    restored = client.post(url, {}, format='json')
+    assert restored.status_code == 200, restored.data
+    assert restored.data['id'] == entry.pk
+    assert restored.data['occurred_at'] == at.isoformat().replace('+00:00', 'Z')
+    holding = Holding.objects.get(account=ledger_account, asset=entry.asset)
+    assert holding.quantity == 20
+    assert holding.display_name == 'My shares'
+    assert holding.is_hidden is True
+    assert holdings_as_of(ledger_account.user, ledger_account, at)['kama_stock'] == 20
+    assert LedgerEntry.objects.count() == 1
+
+
+def test_remove_required_purchase_rolls_back_when_later_sale_depends_on_it(ledger_account, asset_catalog):
+    client = _client(ledger_account.user)
+    at = timezone.now() - datetime.timedelta(days=2)
+    entry = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='2', unit_price_tomans='100', occurred_at=at)
+    create_ledger_entry(account=ledger_account, asset=entry.asset, kind='sell', quantity='1', unit_price_tomans='110', occurred_at=at + datetime.timedelta(days=1))
+    response = client.delete(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/')
+    assert response.status_code == 400
+    entry.refresh_from_db()
+    assert entry.removed_at is None
+    assert entry.revisions == []
+
+
+def test_edit_price_type_and_portfolio_replays_both_books_and_keeps_revision(ledger_account, asset_catalog):
+    other = Account.objects.create(user=ledger_account.user, name='Other')
+    entry = create_ledger_entry(account=ledger_account, asset=asset_catalog['kama_stock'], kind='opening_position', quantity='10', occurred_at=timezone.now() - datetime.timedelta(days=2))
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'kind':'buy', 'target_account_id':other.pk, 'unit_price_tomans':'1000'}, format='json')
+    assert response.status_code == 200, response.data
+    entry.refresh_from_db()
+    assert entry.account_id == other.pk
+    assert entry.amount_tomans == 1000  # 10 true shares x 1000 Rial / 10
+    assert entry.revisions[0]['kind'] == 'opening_position'
+    assert entry.revisions[0]['account_id'] == ledger_account.pk
+    assert not Holding.objects.filter(account=ledger_account, asset=entry.asset).exists()
+    assert Holding.objects.get(account=other, asset=entry.asset).quantity == 10
+
+
+def test_remove_and_restore_enforce_owner(ledger_account, asset_catalog, make_user):
+    entry = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='2', unit_price_tomans='100')
+    stranger = _client(make_user(email='stranger-undo@test.test'))
+    url = f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/'
+    assert stranger.delete(url).status_code == 404
+    assert stranger.post(url, {}, format='json').status_code == 404
+    assert stranger.patch(url, {'quantity':'3'}, format='json').status_code == 404
+
+
+def test_synthetic_removal_is_preserved_as_a_restorable_event(ledger_account, asset_catalog):
+    holding = Holding.objects.create(account=ledger_account, asset=asset_catalog['emami_coin'], quantity='2')
+    client = _client(ledger_account.user)
+    response = client.delete(f'/api/accounts/{ledger_account.pk}/ledger/holdings/{holding.pk}/')
+    assert response.status_code == 200, response.data
+    event = LedgerEntry.all_objects.get(pk=response.data['id'])
+    assert event.removed_at is not None
+    assert event.quantity == 2
+    assert not Holding.objects.filter(pk=holding.pk).exists()
+    restored = client.post(f'/api/accounts/{ledger_account.pk}/ledger/{event.pk}/', {}, format='json')
+    assert restored.status_code == 200, restored.data
+    assert Holding.objects.get(account=ledger_account, asset=holding.asset).quantity == 2
+
+
+def test_removed_rows_are_hidden_by_default_but_never_lost(ledger_account, asset_catalog):
+    # The default manager is the one filter every reader shares; a removed buy
+    # that leaked back into `account.transactions` would re-enter net worth.
+    entry = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='2', unit_price_tomans='100', external_id='broker-1')
+    assert _client(ledger_account.user).delete(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/').status_code == 204
+    assert not ledger_account.transactions.exists()
+    assert not LedgerEntry.objects.filter(pk=entry.pk).exists()
+    assert LedgerEntry.all_objects.get(pk=entry.pk).removed_at is not None
