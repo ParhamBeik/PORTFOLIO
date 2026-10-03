@@ -468,6 +468,8 @@ export const createLedgerEntry = (accountId, entry) =>
   api(`/api/accounts/${accountId}/ledger/`, { method: "POST", body: entry });
 export const updateLedgerEntry = (accountId, entryId, body) =>
   api(`/api/accounts/${accountId}/ledger/${entryId}/`, { method: "PATCH", body });
+export const restoreLedgerEntry = (accountId, entryId) =>
+  api(`/api/accounts/${accountId}/ledger/${entryId}/`, { method: "POST" });
 export const deleteLedgerEntry = (accountId, entryId) =>
   api(`/api/accounts/${accountId}/ledger/${entryId}/`, { method: "DELETE" });
 // Capital increases the warehouse detected on the user's TSE holdings.

@@ -29,6 +29,7 @@ from ..services.ledger import (
     entry_pnl_map,
     record_existing_position,
     reverse_ledger_entry,
+    restore_ledger_entry,
     set_orphan_holding,
     synthetic_position_rows,
     update_ledger_entry,
@@ -170,6 +171,15 @@ class LedgerIndexView(APIView):
 class LedgerEntryDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
+    def post(self, request, account_id, entry_id):
+        try:
+            entry = restore_ledger_entry(user=request.user, account_id=account_id, entry_id=entry_id)
+        except LedgerEntry.DoesNotExist:
+            return Response({"detail": "Ledger entry not found."}, status=404)
+        except LedgerError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(LedgerEntrySerializer(entry).data)
+
     def patch(self, request, account_id, entry_id):
         form = LedgerEntryPatchSerializer(data=request.data)
         form.is_valid(raise_exception=True)
@@ -215,14 +225,14 @@ class LedgerPositionView(APIView):
 
     def delete(self, request, account_id, holding_id):
         try:
-            delete_orphan_holding(
+            entry = delete_orphan_holding(
                 user=request.user, account_id=account_id, holding_id=holding_id
             )
         except Holding.DoesNotExist:
             return Response({"detail": "Holding not found."}, status=404)
         except LedgerError as exc:
             return Response({"detail": str(exc)}, status=400)
-        return Response(status=204)
+        return Response(LedgerEntrySerializer(entry).data)
 
 
 class LedgerImportView(APIView):

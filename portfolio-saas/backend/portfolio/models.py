@@ -541,6 +541,21 @@ class ImportBatch(models.Model):
         ]
 
 
+class ActiveLedgerManager(models.Manager):
+    """Default manager: rows a user removed are kept but never counted.
+
+    Removal sets ``removed_at`` instead of deleting (STORAGE-POLICY: history is
+    kept in full). Filtering here rather than at each call site is the point:
+    valuation, analytics, tasks and imports all read ``LedgerEntry.objects`` or
+    ``account.transactions``, and one missed filter would put a removed buy back
+    into net worth. Use ``all_objects`` only where a removed row must be seen:
+    restoring it, the external_id uniqueness check, export and account deletion.
+    """
+
+    def get_queryset(self):
+        return super().get_queryset().filter(removed_at__isnull=True)
+
+
 class LedgerEntry(models.Model):
     """Immutable account event and source of truth for positions and cash.
 
@@ -553,8 +568,8 @@ class LedgerEntry(models.Model):
 
     `price_tomans` is the unit price captured at execution (the latest Price at
     the time of the trade), so historical valuation of the event never depends
-    on today's price map. Rows are never updated; the latest trade for an asset
-    may be deleted explicitly to correct an input mistake.
+    on today's price map. A correction records the prior values in `revisions`;
+    a removal sets `removed_at` and the row stays on disk so Undo can restore it.
     """
 
     class Side(models.TextChoices):
@@ -676,6 +691,13 @@ class LedgerEntry(models.Model):
         null=True,
         blank=True,
     )
+
+    removed_at = models.DateTimeField(null=True, blank=True)
+    # Original field values survive corrections; removal never purges history.
+    revisions = models.JSONField(default=list, blank=True)
+
+    objects = ActiveLedgerManager()
+    all_objects = models.Manager()
 
     class Meta:
         ordering = ["-timestamp"]

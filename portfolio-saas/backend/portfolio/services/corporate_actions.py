@@ -53,7 +53,7 @@ def pending_suggestions(user) -> list[dict]:
             account.corporate_action_dismissals.values_list("symbol", "date")
         )
         booked = set(
-            account.transactions.exclude(external_id="").values_list("external_id", flat=True)
+            LedgerEntry.all_objects.filter(account=account).exclude(external_id="").values_list("external_id", flat=True)
         )
         manual_issues = [
             e for e in active_entries(account, kinds=[LedgerEntry.Kind.RIGHTS_ISSUE])

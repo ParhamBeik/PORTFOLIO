@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   commitLedgerImport,
   deleteLedgerEntry,
   deleteLedgerHolding,
   listLedger,
-  reverseLedgerEntry,
+  restoreLedgerEntry,
   previewLedgerImport,
   updateLedgerEntry,
   updateLedgerHolding,
@@ -22,6 +22,8 @@ import {
   ErrorState,
   Input,
   Loading,
+  Field,
+  JalaliDateField,
   Modal,
   PageHeader,
   Pager,
@@ -227,7 +229,20 @@ function priceCell(row) {
  * button beside it, which made saved rows look like unsaved drafts — the single
  * loudest complaint about this page. Editing is now something you ask for.
  */
-function EditEntryDialog({ row, onClose, onSaved }) {
+function EditEntryDialog({ row, accounts, onClose, onSaved }) {
+  const [kind, setKind] = useState(row.kind);
+  const [targetAccount, setTargetAccount] = useState(String(row.account_id));
+  const [when, setWhen] = useState(row.occurred_at || "");
+  const [price, setPrice] = useState(row.unit_price_tomans ?? "");
+  const [costBasis, setCostBasis] = useState(row.cost_basis_tomans ?? "");
+  const [amount, setAmount] = useState(row.amount_tomans ?? "");
+  const cash = ["opening_cash", "deposit", "withdrawal", "dividend", "fee"].includes(kind);
+  const tradeKind = kind === "buy" || kind === "sell";
+  const declaresBasis = kind === "opening_position" || kind === "valuation_mark";
+  const kindOptions = row.is_house ? ["opening_position", "valuation_mark"] :
+    ["opening_cash", "deposit", "withdrawal", "dividend", "fee"].includes(row.kind) ?
+      ["opening_cash", "deposit", "withdrawal", ...(row.asset_key ? ["dividend"] : []), "fee"] :
+      ["opening_position", "buy", "sell", ...(row.kind === "rights_issue" ? ["rights_issue"] : [])];
   const [quantity, setQuantity] = useState(String(Number(row.quantity ?? 0)));
   // A property is described by two numbers and this dialog only ever offered
   // one, so its size was the one thing about it nobody could correct.
@@ -258,7 +273,14 @@ function EditEntryDialog({ row, onClose, onSaved }) {
         await updateLedgerHolding(row.account_id, row.holding_id, quantity);
       } else {
         await updateLedgerEntry(row.account_id, row.id, {
-          quantity,
+          ...(!cash ? { quantity } : { amount_tomans: amount }),
+          // Send only what changed: the date picker yields midnight, so echoing
+          // an untouched date would move the trade's time and reorder its day.
+          ...(kind !== row.kind ? { kind } : {}),
+          ...(Number(targetAccount) !== row.account_id ? { target_account_id: Number(targetAccount) } : {}),
+          ...(when && when !== row.occurred_at ? { occurred_at: when } : {}),
+          ...(tradeKind ? { unit_price_tomans: price } : {}),
+          ...(declaresBasis && costBasis !== "" ? { cost_basis_tomans: costBasis } : {}),
           note,
           ...(row.is_house && areaSqm.trim() ? { area_sqm: areaSqm } : {}),
         });
@@ -283,7 +305,7 @@ function EditEntryDialog({ row, onClose, onSaved }) {
           <Button onClick={onClose} disabled={busy}>Cancel</Button>
           <Button
             variant="primary"
-            disabled={busy || !validQuantity(quantity, qtyOpts)}
+            disabled={busy || (cash ? !(Number(amount) > 0) : !validQuantity(quantity, qtyOpts)) || (tradeKind && !(Number(price) > 0))}
             onClick={save}
             data-testid="ledger-edit-save"
           >
@@ -294,6 +316,23 @@ function EditEntryDialog({ row, onClose, onSaved }) {
     >
       <div className="space-y-3">
         {error && <p role="alert" className="text-sm text-[var(--c-critical-text)]">{error}</p>}
+        {!row.is_synthetic && <>
+          <Field label="Portfolio"><Select label="Portfolio" value={targetAccount} onChange={(e) => setTargetAccount(e.target.value)} data-testid="ledger-edit-account" className="w-full">
+            {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </Select></Field>
+          <Field label="Type"><Select label="Type" value={kind} onChange={(e) => setKind(e.target.value)} data-testid="ledger-edit-kind" className="w-full">
+            {kindOptions.map((k) => <option key={k} value={k}>{KIND_LABEL[k] || humanize(k)}</option>)}
+          </Select></Field>
+          <Field label="When"><JalaliDateField value={when} onChange={setWhen} testId="ledger-edit-when" /></Field>
+          {cash && <Field label="Amount (Toman)"><Input label="Amount" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} data-testid="ledger-edit-amount" /></Field>}
+          {tradeKind && <Field label={`Price for one (${row.unit_price_currency === "rial" ? "Rial" : row.unit_price_currency === "usd" ? "USD" : "Toman"})`}>
+            <Input label="Unit price" type="number" step="any" value={price} onChange={(e) => setPrice(e.target.value)} data-testid="ledger-edit-price" />
+          </Field>}
+          {declaresBasis && <Field label={row.is_house ? "What did you pay per square meter? (millions of Toman)" : `What did you pay for one? (${row.unit_price_currency === "rial" ? "Rial" : "Toman"})`}>
+            <Input label="Purchase price" type="number" step="any" value={costBasis} onChange={(e) => setCostBasis(e.target.value)} data-testid="ledger-edit-cost-basis" />
+          </Field>}
+        </>}
+        {!cash && <>
         <div>
           <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">
             {row.is_house ? "Price per square meter (millions of Toman)" : "How many"}
@@ -313,6 +352,7 @@ function EditEntryDialog({ row, onClose, onSaved }) {
             </span>
           )}
         </div>
+        </>}
         {row.is_house && !row.is_synthetic && (
           <div>
             <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">
@@ -381,17 +421,26 @@ export default function Ledger() {
     (a.holdings || []).map((h) => ({ ...h, account_id: a.id }))
   );
 
-  const reverseRow = async (row) => {
-    if (busy || row.is_synthetic) return;
-    if (!window.confirm(
-      `Reverse this ${(KIND_LABEL[row.kind] || row.kind).toLowerCase()} entry? Holdings update, and this row leaves the History list. The correction stays on the books.`
-    )) {
-      return;
-    }
+  const [removing, setRemoving] = useState(null);
+  const [undo, setUndo] = useState(null);
+  const undoTimer = useRef(null);
+  useEffect(() => () => clearTimeout(undoTimer.current), []);
+
+  const removeRow = async (row) => {
+    if (busy) return;
     setBusy(true);
     setError("");
     try {
-      await reverseLedgerEntry(row.account_id, row.id);
+      let removed = row;
+      if (row.is_synthetic) {
+        removed = await deleteLedgerHolding(row.account_id, row.holding_id);
+      } else {
+        await deleteLedgerEntry(row.account_id, row.id);
+      }
+      setRemoving(null);
+      setUndo(removed);
+      clearTimeout(undoTimer.current);
+      undoTimer.current = setTimeout(() => setUndo(null), 8000);
       await refresh();
     } catch (err) {
       setError(err.message || String(err));
@@ -399,20 +448,15 @@ export default function Ledger() {
       setBusy(false);
     }
   };
-
-  const removeRow = async (row) => {
-    if (busy) return;
-    if (!window.confirm(`Delete this ${(KIND_LABEL[row.kind] || row.kind).toLowerCase()} entry?`)) {
-      return;
-    }
+  const undoRemoval = async () => {
+    if (busy || !undo) return;
+    clearTimeout(undoTimer.current);
     setBusy(true);
-    setError("");
     try {
-      if (row.is_synthetic) {
-        await deleteLedgerHolding(row.account_id, row.holding_id);
-      } else {
-        await deleteLedgerEntry(row.account_id, row.id);
-      }
+      // A synthetic row's removal returns the event it was preserved as, so
+      // both kinds restore through the same endpoint.
+      await restoreLedgerEntry(undo.account_id, undo.id);
+      setUndo(null);
       await refresh();
     } catch (err) {
       setError(err.message || String(err));
@@ -425,7 +469,7 @@ export default function Ledger() {
   // so this must wait for `loading` to clear before deciding there really is
   // no portfolio -- otherwise every navigation here flashes the wrong empty
   // state for however long the account list takes to arrive.
-  if (accountsLoading) {
+  if (accountsLoading && !accounts.length) {
     return <Loading testId="ledger-loading" />;
   }
   if (!accounts.length) {
@@ -488,24 +532,7 @@ export default function Ledger() {
               Edit
             </Button>
           )}
-          {!r.is_synthetic && (
-            <Button
-              variant="ghost"
-              disabled={busy}
-              onClick={() => reverseRow(r)}
-              data-testid="ledger-reverse"
-            >
-              Reverse
-            </Button>
-          )}
-          <Button
-            variant="danger"
-            disabled={busy}
-            onClick={() => removeRow(r)}
-            data-testid="ledger-delete"
-          >
-            Delete
-          </Button>
+          <Button variant="danger" disabled={busy || !!undo} onClick={() => setRemoving(r)} data-testid="ledger-remove">Remove</Button>
         </div>
       ),
     },
@@ -555,6 +582,17 @@ export default function Ledger() {
         <p role="alert" className="mb-3 text-sm text-[var(--c-critical-text)]">{error}</p>
       )}
 
+      {removing && <Modal title="Remove transaction?" onClose={() => !busy && setRemoving(null)} testId="ledger-remove-dialog" footer={<>
+        <Button disabled={busy} onClick={() => setRemoving(null)}>Cancel</Button>
+        <Button variant="danger" disabled={busy} onClick={() => removeRow(removing)} data-testid="ledger-remove-confirm">{busy ? "Removing…" : "Remove"}</Button>
+      </>}>
+        <p>{jalaliDate(removing.occurred_at)} · {holdingLabel(removing)} · {KIND_LABEL[removing.kind] || humanize(removing.kind)}</p>
+        <p>{removing.account_name} · {quantityCell(removing)} · {toman(removing.value_tomans ?? removing.amount_tomans)}</p>
+        <p className="mt-3 text-sm text-muted">Holdings and cash will update. You can undo for 8 seconds. Your financial history is retained.</p>
+      </Modal>}
+      {undo && <div role="status" className="fixed bottom-24 inset-x-4 z-40 mx-auto flex max-w-md items-center justify-between gap-3 rounded-lg border border-border bg-panel p-3 shadow-xl" data-testid="ledger-undo-toast">
+        <span>Transaction removed.</span><Button disabled={busy} onClick={undoRemoval} data-testid="ledger-undo">Undo</Button>
+      </div>}
       {adding && (
         <AddTransactionDialog
           accountId={accountId}
@@ -575,6 +613,7 @@ export default function Ledger() {
       {editing && (
         <EditEntryDialog
           row={editing}
+          accounts={accounts}
           onClose={() => setEditing(null)}
           onSaved={refresh}
         />

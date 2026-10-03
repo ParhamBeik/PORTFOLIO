@@ -301,6 +301,8 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
 
 
 class LedgerEntryPatchSerializer(serializers.Serializer):
+    kind = serializers.ChoiceField(choices=LedgerEntry.Kind.choices, required=False)
+    target_account_id = serializers.IntegerField(min_value=1, required=False)
     quantity = serializers.DecimalField(
         max_digits=20, decimal_places=6, min_value=Decimal("0.000001"), required=False
     )
