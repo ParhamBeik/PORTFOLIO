@@ -3093,3 +3093,23 @@ def test_removed_rows_are_hidden_by_default_but_never_lost(ledger_account, asset
     assert not ledger_account.transactions.exists()
     assert not LedgerEntry.objects.filter(pk=entry.pk).exists()
     assert LedgerEntry.all_objects.get(pk=entry.pk).removed_at is not None
+
+
+def test_edit_cannot_turn_a_deposit_into_a_dividend(ledger_account):
+    # A dividend needs an asset (`ledger_dividend_asset`); a deposit has none,
+    # so this used to reach the database and 500 on the check constraint.
+    entry = create_ledger_entry(account=ledger_account, kind='deposit', amount_tomans='1000')
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'kind': 'dividend'}, format='json')
+    assert response.status_code == 400
+    entry.refresh_from_db()
+    assert entry.kind == 'deposit'
+
+
+def test_moving_an_entry_onto_a_taken_external_id_is_refused(ledger_account, asset_catalog):
+    other = Account.objects.create(user=ledger_account.user, name='Other')
+    entry = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', external_id='broker-7')
+    create_ledger_entry(account=other, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', external_id='broker-7')
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'target_account_id': other.pk}, format='json')
+    assert response.status_code == 400
+    entry.refresh_from_db()
+    assert entry.account_id == ledger_account.pk

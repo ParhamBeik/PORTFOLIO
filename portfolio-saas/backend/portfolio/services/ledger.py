@@ -366,6 +366,14 @@ def update_ledger_entry(
         destination = Account.objects.filter(pk=target_account_id, user=user).first()
         if destination is None:
             raise LedgerError("Portfolio not found.")
+        if (
+            destination.pk != entry.account_id
+            and entry.external_id
+            and LedgerEntry.all_objects.filter(
+                account=destination, external_id=entry.external_id
+            ).exists()
+        ):
+            raise LedgerError("That portfolio already has an entry with this external_id.")
     list(Account.objects.select_for_update().filter(pk__in=[old_account.pk, destination.pk]).order_by("pk"))
     if entry.reversal_of_id:
         raise LedgerError("Cannot edit a reversal.")
@@ -378,6 +386,10 @@ def update_ledger_entry(
             {LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL, LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.RIGHTS_ISSUE}
             if entry.asset_id and entry.kind not in CASH_KINDS else CASH_KINDS
         )
+        # A dividend is the one cash kind tied to an asset (the
+        # `ledger_dividend_asset` constraint): it cannot gain or lose one here.
+        if (kind == LedgerEntry.Kind.DIVIDEND) != (entry.kind == LedgerEntry.Kind.DIVIDEND):
+            allowed = set()
         if kind not in allowed:
             raise LedgerError("This type is not valid for this entry.")
         if kind == LedgerEntry.Kind.RIGHTS_ISSUE and entry.asset.asset_class != Asset.AssetClass.STOCK:
