@@ -76,7 +76,7 @@ def _create_rows(account, rows: list[dict], *, batch=None) -> None:
 
     for row_number, row, occurred_at in numbered:
         external_id = (row.get("external_id") or "").strip()
-        if external_id and LedgerEntry.all_objects.filter(
+        if external_id and LedgerEntry.objects.filter(
             account=account, external_id=external_id
         ).exists():
             raise LedgerImportError("external_id already exists.", row=row_number)
