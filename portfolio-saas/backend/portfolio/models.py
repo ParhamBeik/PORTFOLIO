@@ -549,7 +549,7 @@ class ActiveLedgerManager(models.Manager):
     valuation, analytics, tasks and imports all read ``LedgerEntry.objects`` or
     ``account.transactions``, and one missed filter would put a removed buy back
     into net worth. Use ``all_objects`` only where a removed row must be seen:
-    restoring it, the external_id uniqueness check, export and account deletion.
+    restoring it, export and account deletion.
     """
 
     def get_queryset(self):
@@ -749,9 +749,11 @@ class LedgerEntry(models.Model):
                 ),
                 name="ledger_cash_event_amount",
             ),
+            # Live rows only: removing an entry frees its id for a corrected
+            # re-import; restore refuses if the id was reused meanwhile.
             models.UniqueConstraint(
                 fields=["account", "external_id"],
-                condition=~models.Q(external_id=""),
+                condition=~models.Q(external_id="") & models.Q(removed_at__isnull=True),
                 name="uniq_ledger_external_id_per_account",
             ),
         ]

@@ -232,6 +232,8 @@ class LedgerPositionView(APIView):
             return Response({"detail": "Holding not found."}, status=404)
         except LedgerError as exc:
             return Response({"detail": str(exc)}, status=400)
+        if entry is None:
+            return Response(status=204)
         return Response(LedgerEntrySerializer(entry).data)
 
 

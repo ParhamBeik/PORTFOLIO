@@ -24,7 +24,7 @@ from portfolio.models import Snapshot
 from portfolio.models import Liability
 from portfolio.serializers import TradeInputSerializer
 from portfolio.services.deflator import CpiUnavailable, cpi_for_date
-from portfolio.services.ledger import create_ledger_entry
+from portfolio.services.ledger import LedgerError, create_ledger_entry
 from portfolio.services.returns import _price_version_fingerprint, daily_returns_matrix
 from portfolio.services.timeline import cash_as_of, holdings_as_of
 from portfolio.services.trades import (
@@ -3072,6 +3072,9 @@ def test_remove_and_restore_enforce_owner(ledger_account, asset_catalog, make_us
 
 
 def test_synthetic_removal_is_preserved_as_a_restorable_event(ledger_account, asset_catalog):
+    # The preserved opening is dated at the baseline, so there must be one.
+    ledger_account.tracking_started_at = timezone.now() - datetime.timedelta(days=5)
+    ledger_account.save()
     holding = Holding.objects.create(account=ledger_account, asset=asset_catalog['emami_coin'], quantity='2')
     client = _client(ledger_account.user)
     response = client.delete(f'/api/accounts/{ledger_account.pk}/ledger/holdings/{holding.pk}/')
@@ -3093,3 +3096,253 @@ def test_removed_rows_are_hidden_by_default_but_never_lost(ledger_account, asset
     assert not ledger_account.transactions.exists()
     assert not LedgerEntry.objects.filter(pk=entry.pk).exists()
     assert LedgerEntry.all_objects.get(pk=entry.pk).removed_at is not None
+
+
+def test_edit_cannot_turn_a_deposit_into_a_dividend(ledger_account):
+    # A dividend needs an asset (`ledger_dividend_asset`); a deposit has none,
+    # so this used to reach the database and 500 on the check constraint.
+    entry = create_ledger_entry(account=ledger_account, kind='deposit', amount_tomans='1000')
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'kind': 'dividend'}, format='json')
+    assert response.status_code == 400
+    entry.refresh_from_db()
+    assert entry.kind == 'deposit'
+
+
+def test_moving_an_entry_onto_a_taken_external_id_is_refused(ledger_account, asset_catalog):
+    other = Account.objects.create(user=ledger_account.user, name='Other')
+    entry = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', external_id='broker-7')
+    create_ledger_entry(account=other, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', external_id='broker-7')
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'target_account_id': other.pk}, format='json')
+    assert response.status_code == 400
+    entry.refresh_from_db()
+    assert entry.account_id == ledger_account.pk
+
+
+def test_rekinding_an_opening_to_a_buy_books_the_price_paid_not_todays(ledger_account, asset_catalog):
+    from portfolio.services.ledger import record_existing_position
+    entry = record_existing_position(account=ledger_account, asset=asset_catalog['emami_coin'], quantity='10', unit_price_tomans='5000000', cost_basis_tomans='2000000')
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'kind': 'buy'}, format='json')
+    assert response.status_code == 200, response.data
+    entry.refresh_from_db()
+    assert entry.price_tomans == 2000000
+    assert entry.amount_tomans == 20000000
+
+
+def test_rekinding_an_opening_without_a_known_basis_needs_a_price(ledger_account, asset_catalog):
+    from portfolio.services.ledger import record_existing_position
+    entry = record_existing_position(account=ledger_account, asset=asset_catalog['emami_coin'], quantity='10', unit_price_tomans='5000000')
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'kind': 'buy'}, format='json')
+    assert response.status_code == 400
+    entry.refresh_from_db()
+    assert entry.kind == 'opening_position'
+
+
+def test_rekinding_a_buy_to_an_opening_keeps_what_was_paid_as_basis(ledger_account, asset_catalog):
+    at = timezone.now() - datetime.timedelta(days=2)
+    entry = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='2', unit_price_tomans='100', occurred_at=at)
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'kind': 'opening_position'}, format='json')
+    assert response.status_code == 200, response.data
+    entry.refresh_from_db()
+    assert entry.cost_basis_tomans == 100
+
+
+def test_removal_frees_the_external_id_and_restore_refuses_a_reuse(ledger_account, asset_catalog):
+    client = _client(ledger_account.user)
+    entry = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', external_id='broker-9')
+    url = f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/'
+    assert client.delete(url).status_code == 204
+    # A corrected re-import may use the id again ...
+    create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='2', unit_price_tomans='100', external_id='broker-9')
+    with pytest.raises(LedgerError):
+        create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='3', unit_price_tomans='100', external_id='broker-9')
+    # ... and the removed original then cannot come back over it.
+    response = client.post(url, {}, format='json')
+    assert response.status_code == 400
+    entry.refresh_from_db()
+    assert entry.removed_at is not None
+
+
+def test_removing_an_orphan_without_a_baseline_is_final(ledger_account, asset_catalog):
+    assert ledger_account.tracking_started_at is None
+    holding = Holding.objects.create(account=ledger_account, asset=asset_catalog['emami_coin'], quantity='2')
+    response = _client(ledger_account.user).delete(f'/api/accounts/{ledger_account.pk}/ledger/holdings/{holding.pk}/')
+    assert response.status_code == 204
+    assert not LedgerEntry.all_objects.filter(account=ledger_account).exists()
+    assert not Holding.objects.filter(pk=holding.pk).exists()
+
+
+def test_moving_one_property_mark_moves_the_whole_series(ledger_account, asset_catalog):
+    house = asset_catalog['house_asset']
+    other = Account.objects.create(user=ledger_account.user, name='Other')
+    t0 = timezone.now() - datetime.timedelta(days=20)
+    opening = create_ledger_entry(account=ledger_account, asset=house, kind='opening_position', quantity='50', area_sqm='100', mortgage_deduction_tomans='1000000', occurred_at=t0)
+    mark = create_ledger_entry(account=ledger_account, asset=house, kind='valuation_mark', quantity='60', occurred_at=t0 + datetime.timedelta(days=10))
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{opening.pk}/', {'target_account_id': other.pk}, format='json')
+    assert response.status_code == 200, response.data
+    mark.refresh_from_db()
+    assert mark.account_id == other.pk
+    assert list(Holding.objects.filter(asset=house).values_list('account_id', flat=True)) == [other.pk]
+    assert not Liability.objects.filter(account=ledger_account).exists()
+    assert Liability.objects.filter(account=other).count() <= 1
+
+
+def test_moving_a_property_into_a_portfolio_that_holds_it_is_refused(ledger_account, asset_catalog):
+    house = asset_catalog['house_asset']
+    other = Account.objects.create(user=ledger_account.user, name='Other')
+    t0 = timezone.now() - datetime.timedelta(days=20)
+    opening = create_ledger_entry(account=ledger_account, asset=house, kind='opening_position', quantity='50', area_sqm='100', occurred_at=t0)
+    create_ledger_entry(account=other, asset=house, kind='opening_position', quantity='70', area_sqm='90', occurred_at=t0)
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{opening.pk}/', {'target_account_id': other.pk}, format='json')
+    assert response.status_code == 400
+    opening.refresh_from_db()
+    assert opening.account_id == ledger_account.pk
+
+
+def test_edit_cannot_move_the_baseline_by_making_a_new_opening(ledger_account, asset_catalog):
+    t0 = timezone.now() - datetime.timedelta(days=20)
+    first = create_ledger_entry(account=ledger_account, kind='opening_cash', amount_tomans='1000', occurred_at=t0)
+    buy = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', occurred_at=t0 + datetime.timedelta(days=5))
+    client = _client(ledger_account.user)
+    # The only opening is gone, but the baseline it set still stands.
+    assert client.delete(f'/api/accounts/{ledger_account.pk}/ledger/{first.pk}/').status_code == 204
+    response = client.patch(f'/api/accounts/{ledger_account.pk}/ledger/{buy.pk}/', {'kind': 'opening_position', 'cost_basis_tomans': '100'}, format='json')
+    assert response.status_code == 400
+    ledger_account.refresh_from_db()
+    assert ledger_account.tracking_started_at == t0
+
+
+def test_correcting_the_only_openings_date_moves_the_baseline(ledger_account):
+    t0 = timezone.now() - datetime.timedelta(days=20)
+    entry = create_ledger_entry(account=ledger_account, kind='opening_cash', amount_tomans='1000', occurred_at=t0)
+    corrected = t0 - datetime.timedelta(days=3)
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'occurred_at': corrected.isoformat()}, format='json')
+    assert response.status_code == 200, response.data
+    ledger_account.refresh_from_db()
+    assert ledger_account.tracking_started_at == corrected
+
+
+def test_removing_a_zero_orphan_holding_writes_no_event(ledger_account, asset_catalog):
+    holding = Holding.objects.create(account=ledger_account, asset=asset_catalog['emami_coin'], quantity='0')
+    response = _client(ledger_account.user).delete(f'/api/accounts/{ledger_account.pk}/ledger/holdings/{holding.pk}/')
+    assert response.status_code == 204
+    assert not LedgerEntry.all_objects.filter(account=ledger_account).exists()
+    assert not Holding.objects.filter(pk=holding.pk).exists()
+
+
+def test_undo_does_not_revert_a_rename_of_a_holding_that_survived(ledger_account, asset_catalog):
+    client = _client(ledger_account.user)
+    at = timezone.now() - datetime.timedelta(days=3)
+    first = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', occurred_at=at)
+    create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', occurred_at=at + datetime.timedelta(days=1))
+    url = f'/api/accounts/{ledger_account.pk}/ledger/{first.pk}/'
+    assert client.delete(url).status_code == 204
+    Holding.objects.filter(account=ledger_account, asset=first.asset).update(display_name='Renamed')
+    assert client.post(url, {}, format='json').status_code == 200
+    assert Holding.objects.get(account=ledger_account, asset=first.asset).display_name == 'Renamed'
+
+
+def _house_series(account, house, t0, mortgage='0'):
+    opening = create_ledger_entry(account=account, asset=house, kind='opening_position', quantity='50', area_sqm='100', mortgage_deduction_tomans=mortgage, occurred_at=t0)
+    mark = create_ledger_entry(account=account, asset=house, kind='valuation_mark', quantity='60', occurred_at=t0 + datetime.timedelta(days=10))
+    return opening, mark
+
+
+def test_undo_of_a_property_mark_after_the_property_moved_is_refused(ledger_account, asset_catalog):
+    house = asset_catalog['house_asset']
+    other = Account.objects.create(user=ledger_account.user, name='Other')
+    client = _client(ledger_account.user)
+    opening, mark = _house_series(ledger_account, house, timezone.now() - datetime.timedelta(days=20))
+    mark_url = f'/api/accounts/{ledger_account.pk}/ledger/{mark.pk}/'
+    assert client.delete(mark_url).status_code == 204
+    assert client.patch(f'/api/accounts/{ledger_account.pk}/ledger/{opening.pk}/', {'target_account_id': other.pk}, format='json').status_code == 200
+    assert client.post(mark_url, {}, format='json').status_code == 400
+    assert list(Holding.objects.filter(asset=house).values_list('account_id', flat=True)) == [other.pk]
+
+
+def test_restoring_an_opening_off_the_current_baseline_is_refused(ledger_account, asset_catalog):
+    t0 = timezone.now() - datetime.timedelta(days=20)
+    o1 = create_ledger_entry(account=ledger_account, kind='opening_cash', amount_tomans='1000', occurred_at=t0)
+    o2 = create_ledger_entry(account=ledger_account, asset=asset_catalog['emami_coin'], kind='opening_position', quantity='1', occurred_at=t0)
+    client = _client(ledger_account.user)
+    o1_url = f'/api/accounts/{ledger_account.pk}/ledger/{o1.pk}/'
+    assert client.delete(o1_url).status_code == 204
+    moved = (t0 - datetime.timedelta(days=5)).isoformat()
+    assert client.patch(f'/api/accounts/{ledger_account.pk}/ledger/{o2.pk}/', {'occurred_at': moved}, format='json').status_code == 200
+    assert client.post(o1_url, {}, format='json').status_code == 400
+    # The surviving opening is still editable: the openings never diverged.
+    assert client.patch(f'/api/accounts/{ledger_account.pk}/ledger/{o2.pk}/', {'note': 'ok'}, format='json').status_code == 200
+
+
+def test_a_typed_mortgage_moves_with_its_property(ledger_account, asset_catalog):
+    house = asset_catalog['house_asset']
+    other = Account.objects.create(user=ledger_account.user, name='Other')
+    opening, _ = _house_series(ledger_account, house, timezone.now() - datetime.timedelta(days=20))
+    typed = Liability.objects.create(account=ledger_account, asset=house, label='Bank loan', kind=Liability.Kind.SECURED_DEBT, amount_tomans=500000000)
+    assert _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{opening.pk}/', {'target_account_id': other.pk}, format='json').status_code == 200
+    typed.refresh_from_db()
+    assert typed.account_id == other.pk
+
+
+def test_undo_of_a_removed_orphan_property_keeps_its_mortgage(ledger_account, asset_catalog):
+    ledger_account.tracking_started_at = timezone.now() - datetime.timedelta(days=5)
+    ledger_account.save()
+    house = asset_catalog['house_asset']
+    holding = Holding.objects.create(account=ledger_account, asset=house, quantity='50', area_sqm='100', mortgage_deduction_tomans='1000000')
+    client = _client(ledger_account.user)
+    removed = client.delete(f'/api/accounts/{ledger_account.pk}/ledger/holdings/{holding.pk}/')
+    assert removed.status_code == 200, removed.data
+    assert client.post(f'/api/accounts/{ledger_account.pk}/ledger/{removed.data["id"]}/', {}, format='json').status_code == 200
+    assert Holding.objects.get(account=ledger_account, asset=house).mortgage_deduction_tomans == 1000000
+
+
+def test_a_cash_amount_that_rounds_to_nothing_is_a_400(ledger_account):
+    entry = create_ledger_entry(account=ledger_account, kind='deposit', amount_tomans='1000')
+    response = _client(ledger_account.user).patch(f'/api/accounts/{ledger_account.pk}/ledger/{entry.pk}/', {'amount_tomans': '0.4'}, format='json')
+    assert response.status_code == 400
+    with pytest.raises(LedgerError):
+        create_ledger_entry(account=ledger_account, kind='deposit', amount_tomans='0.4')
+
+
+@pytest.mark.django_db(transaction=True)
+def test_opposite_moves_at_once_do_not_deadlock(asset_catalog, make_user, monkeypatch):
+    # The entry lookup joins the account for the ownership check; locking that
+    # joined row too put each account lock ahead of the pk-ordered one.
+    import threading
+    from django.db import connections
+    from portfolio.services.ledger import update_ledger_entry
+
+    user = make_user(email='opposite-moves@test.test')
+    a = Account.objects.create(user=user, name='A')
+    b = Account.objects.create(user=user, name='B')
+    at = timezone.now() - datetime.timedelta(days=2)
+    ea = create_ledger_entry(account=a, asset=asset_catalog['emami_coin'], kind='buy', quantity='1', unit_price_tomans='100', occurred_at=at)
+    eb = create_ledger_entry(account=b, asset=asset_catalog['half_coin'], kind='buy', quantity='1', unit_price_tomans='100', occurred_at=at)
+    barrier = threading.Barrier(2, timeout=10)
+    real_filter = Account.objects.filter
+    local = threading.local()
+
+    def filt(*args, **kwargs):
+        # Both threads hold their entry lock before either locks accounts.
+        if 'user' in kwargs and 'pk' in kwargs and not getattr(local, 'done', False):
+            local.done = True
+            barrier.wait()
+        return real_filter(*args, **kwargs)
+
+    monkeypatch.setattr(Account.objects, 'filter', filt)
+    results = {}
+
+    def run(name, src, entry, dst):
+        try:
+            update_ledger_entry(user=user, account_id=src.pk, entry_id=entry.pk, target_account_id=dst.pk)
+            results[name] = 'ok'
+        except Exception as exc:  # noqa: BLE001
+            results[name] = f'{type(exc).__name__}: {exc}'
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=run, args=('a->b', a, ea, b)), threading.Thread(target=run, args=('b->a', b, eb, a))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert results == {'a->b': 'ok', 'b->a': 'ok'}, results

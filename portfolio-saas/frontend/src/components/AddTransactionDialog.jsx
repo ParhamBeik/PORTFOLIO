@@ -514,8 +514,8 @@ export default function AddTransactionDialog({
 
         {!targetAccountId && <p role="status" className="text-sm text-muted">Choose a portfolio before continuing.</p>}
         {targetAccount && <p className="text-sm text-muted" data-testid="add-transaction-portfolio">Portfolio: {targetAccount.name}</p>}
-        {!isCashMove && assetKey && <p className="text-sm text-muted" data-testid="add-transaction-owned">You hold {Number(holding?.quantity || 0).toLocaleString()} in this portfolio.</p>}
-        {action === "sell" && Number(form.quantity) > Number(holding?.quantity || 0) && <p role="alert">You cannot sell more than you hold.</p>}
+        {!isCashMove && assetKey && !asset?.is_house && <p className="text-sm text-muted" data-testid="add-transaction-owned">You hold {Number(holding?.quantity || 0).toLocaleString()} in this portfolio.</p>}
+        {action === "sell" && Number(form.quantity) > Number(holding?.quantity || 0) && <p role="alert" className="text-sm text-[var(--c-critical-text)]" data-testid="add-transaction-oversell">You cannot sell more than you hold.</p>}
         {current === "category" && (
           <Step n={stepNumber} of={totalSteps} title="What kind of thing is it?">
             <div className="grid gap-2 sm:grid-cols-2">

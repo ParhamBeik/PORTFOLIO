@@ -229,6 +229,8 @@ function priceCell(row) {
  * button beside it, which made saved rows look like unsaved drafts — the single
  * loudest complaint about this page. Editing is now something you ask for.
  */
+const CASH_KINDS = ["opening_cash", "deposit", "withdrawal", "dividend", "fee"];
+
 function EditEntryDialog({ row, accounts, onClose, onSaved }) {
   const [kind, setKind] = useState(row.kind);
   const [targetAccount, setTargetAccount] = useState(String(row.account_id));
@@ -236,12 +238,14 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
   const [price, setPrice] = useState(row.unit_price_tomans ?? "");
   const [costBasis, setCostBasis] = useState(row.cost_basis_tomans ?? "");
   const [amount, setAmount] = useState(row.amount_tomans ?? "");
-  const cash = ["opening_cash", "deposit", "withdrawal", "dividend", "fee"].includes(kind);
+  const cash = CASH_KINDS.includes(kind);
   const tradeKind = kind === "buy" || kind === "sell";
   const declaresBasis = kind === "opening_position" || kind === "valuation_mark";
   const kindOptions = row.is_house ? ["opening_position", "valuation_mark"] :
-    ["opening_cash", "deposit", "withdrawal", "dividend", "fee"].includes(row.kind) ?
-      ["opening_cash", "deposit", "withdrawal", ...(row.asset_key ? ["dividend"] : []), "fee"] :
+    // A dividend is the one cash kind tied to an asset; the server refuses to
+    // turn it into a plain deposit or the reverse.
+    row.kind === "dividend" ? ["dividend"] :
+    CASH_KINDS.includes(row.kind) ? ["opening_cash", "deposit", "withdrawal", "fee"] :
       ["opening_position", "buy", "sell", ...(row.kind === "rights_issue" ? ["rights_issue"] : [])];
   const [quantity, setQuantity] = useState(String(Number(row.quantity ?? 0)));
   // A property is described by two numbers and this dialog only ever offered
@@ -264,6 +268,16 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
     step: row.is_house ? "any" : row.quantity_step,
   };
   const qtyMessage = quantityError(quantity, qtyOpts);
+
+  // An opening's unit price is what it is worth now; a trade's is what was
+  // paid. Switching between them carries the PAID price across, or saving
+  // would book today's value as the purchase price (and debit that cash).
+  const isTrade = (k) => k === "buy" || k === "sell";
+  const changeKind = (next) => {
+    if (isTrade(next) && !isTrade(kind)) setPrice(costBasis);
+    if (!isTrade(next) && isTrade(kind) && costBasis === "") setCostBasis(price);
+    setKind(next);
+  };
 
   const save = async () => {
     setBusy(true);
@@ -320,10 +334,12 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
           <Field label="Portfolio"><Select label="Portfolio" value={targetAccount} onChange={(e) => setTargetAccount(e.target.value)} data-testid="ledger-edit-account" className="w-full">
             {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
           </Select></Field>
-          <Field label="Type"><Select label="Type" value={kind} onChange={(e) => setKind(e.target.value)} data-testid="ledger-edit-kind" className="w-full">
+          <Field label="Type"><Select label="Type" value={kind} onChange={(e) => changeKind(e.target.value)} data-testid="ledger-edit-kind" className="w-full">
             {kindOptions.map((k) => <option key={k} value={k}>{KIND_LABEL[k] || humanize(k)}</option>)}
           </Select></Field>
-          <Field label="When"><JalaliDateField value={when} onChange={setWhen} testId="ledger-edit-when" /></Field>
+          {/* Clearing the picker reads "Today" but the save sends no date, so the
+              entry would keep its old one: clearing restores the saved date. */}
+          <Field label="When"><JalaliDateField value={when} onChange={(v) => setWhen(v || row.occurred_at || "")} testId="ledger-edit-when" /></Field>
           {cash && <Field label="Amount (Toman)"><Input label="Amount" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} data-testid="ledger-edit-amount" /></Field>}
           {tradeKind && <Field label={`Price for one (${row.unit_price_currency === "rial" ? "Rial" : row.unit_price_currency === "usd" ? "USD" : "Toman"})`}>
             <Input label="Unit price" type="number" step="any" value={price} onChange={(e) => setPrice(e.target.value)} data-testid="ledger-edit-price" />
@@ -423,6 +439,9 @@ export default function Ledger() {
 
   const [removing, setRemoving] = useState(null);
   const [undo, setUndo] = useState(null);
+  // The confirm dialog covers the page-level alert, so a refused removal
+  // reports inside the dialog or the click looks like it did nothing.
+  const [removeError, setRemoveError] = useState("");
   const undoTimer = useRef(null);
   useEffect(() => () => clearTimeout(undoTimer.current), []);
 
@@ -430,6 +449,7 @@ export default function Ledger() {
     if (busy) return;
     setBusy(true);
     setError("");
+    setRemoveError("");
     try {
       let removed = row;
       if (row.is_synthetic) {
@@ -443,7 +463,7 @@ export default function Ledger() {
       undoTimer.current = setTimeout(() => setUndo(null), 8000);
       await refresh();
     } catch (err) {
-      setError(err.message || String(err));
+      setRemoveError(err.message || String(err));
     } finally {
       setBusy(false);
     }
@@ -452,6 +472,7 @@ export default function Ledger() {
     if (busy || !undo) return;
     clearTimeout(undoTimer.current);
     setBusy(true);
+    setError("");
     try {
       // A synthetic row's removal returns the event it was preserved as, so
       // both kinds restore through the same endpoint.
@@ -459,6 +480,10 @@ export default function Ledger() {
       setUndo(null);
       await refresh();
     } catch (err) {
+      // Drop the toast either way: it disables every Remove button, and a
+      // refused restore (a later sale now depends on the shares) will not
+      // succeed on a second click.
+      setUndo(null);
       setError(err.message || String(err));
     } finally {
       setBusy(false);
@@ -522,7 +547,7 @@ export default function Ledger() {
       align: "right",
       render: (r) => (
         <div className="flex justify-end gap-2">
-          {r.quantity != null && (
+          {(r.quantity != null || CASH_KINDS.includes(r.kind)) && (
             <Button
               variant="ghost"
               disabled={busy}
@@ -582,13 +607,14 @@ export default function Ledger() {
         <p role="alert" className="mb-3 text-sm text-[var(--c-critical-text)]">{error}</p>
       )}
 
-      {removing && <Modal title="Remove transaction?" onClose={() => !busy && setRemoving(null)} testId="ledger-remove-dialog" footer={<>
-        <Button disabled={busy} onClick={() => setRemoving(null)}>Cancel</Button>
+      {removing && <Modal title="Remove transaction?" onClose={() => { if (!busy) { setRemoving(null); setRemoveError(""); } }} testId="ledger-remove-dialog" footer={<>
+        <Button disabled={busy} onClick={() => { setRemoving(null); setRemoveError(""); }} data-testid="ledger-remove-cancel">Cancel</Button>
         <Button variant="danger" disabled={busy} onClick={() => removeRow(removing)} data-testid="ledger-remove-confirm">{busy ? "Removing…" : "Remove"}</Button>
       </>}>
+        {removeError && <p role="alert" className="mb-2 text-sm text-[var(--c-critical-text)]" data-testid="ledger-remove-error">{removeError}</p>}
         <p>{jalaliDate(removing.occurred_at)} · {holdingLabel(removing)} · {KIND_LABEL[removing.kind] || humanize(removing.kind)}</p>
         <p>{removing.account_name} · {quantityCell(removing)} · {toman(removing.value_tomans ?? removing.amount_tomans)}</p>
-        <p className="mt-3 text-sm text-muted">Holdings and cash will update. You can undo for 8 seconds. Your financial history is retained.</p>
+        <p className="mt-3 text-sm text-muted">Holdings and cash will update. {removing.is_synthetic ? "If this can be undone, an Undo button appears for 8 seconds." : "You can undo for 8 seconds. Your financial history is retained."}</p>
       </Modal>}
       {undo && <div role="status" className="fixed bottom-24 inset-x-4 z-40 mx-auto flex max-w-md items-center justify-between gap-3 rounded-lg border border-border bg-panel p-3 shadow-xl" data-testid="ledger-undo-toast">
         <span>Transaction removed.</span><Button disabled={busy} onClick={undoRemoval} data-testid="ledger-undo">Undo</Button>

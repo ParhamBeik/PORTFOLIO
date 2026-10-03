@@ -53,11 +53,15 @@ class PriceAdmin(admin.ModelAdmin):
 
 @admin.register(LedgerEntry)
 class LedgerEntryAdmin(admin.ModelAdmin):
-    list_display = ("timestamp", "account", "asset", "kind", "quantity_display", "amount_display")
-    list_filter = ("kind", "asset__asset_class")
+    list_display = ("timestamp", "account", "asset", "kind", "quantity_display", "amount_display", "removed_at")
+    list_filter = ("kind", "asset__asset_class", ("removed_at", admin.EmptyFieldListFilter))
     search_fields = ("account__name", "asset__key", "account__user__email")
     date_hierarchy = "timestamp"
     list_select_related = ("asset", "account")
+
+    def get_queryset(self, request):
+        # Operators must see removed rows; the default manager hides them.
+        return LedgerEntry.all_objects.select_related(*self.list_select_related)
 
     @admin.display(description="Quantity")
     def quantity_display(self, obj):

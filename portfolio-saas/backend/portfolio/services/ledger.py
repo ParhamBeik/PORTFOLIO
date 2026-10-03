@@ -166,6 +166,8 @@ def create_ledger_entry(
         },
     )
     amount = _whole_toman(amount)
+    if amount is not None and amount <= 0 and kind in CASH_KINDS:
+        raise LedgerError("amount_tomans must be at least 1 Toman.")
     area = _decimal(area_sqm, "area_sqm")
     mortgage = _decimal(
         mortgage_deduction_tomans, "mortgage_deduction_tomans", allow_zero=True
@@ -222,6 +224,12 @@ def create_ledger_entry(
         mortgage = mortgage or Decimal("0")
 
     account = Account.objects.select_for_update().get(pk=account.pk)
+    # Checked here so a clash is a 400, not an IntegrityError 500. Only live
+    # rows hold an id; a removed one gave it up (migration 0048).
+    if external_id and LedgerEntry.objects.filter(
+        account=account, external_id=external_id[:120]
+    ).exists():
+        raise LedgerError("external_id already exists.")
     if kind in {LedgerEntry.Kind.OPENING_CASH, LedgerEntry.Kind.OPENING_POSITION}:
         if account.tracking_started_at and account.tracking_started_at != occurred_at:
             raise LedgerError("Opening entries must share the tracking start timestamp.")
@@ -313,7 +321,10 @@ def record_existing_position(
 @transaction.atomic
 def reverse_ledger_entry(*, user, account_id: int, entry_id: int) -> LedgerEntry:
     entry = (
-        LedgerEntry.objects.select_for_update()
+        # `of=("self",)`: the user join would otherwise lock the account row
+        # too, ahead of the pk-ordered account lock, and two opposite moves
+        # would deadlock.
+        LedgerEntry.objects.select_for_update(of=("self",))
         .get(pk=entry_id, account_id=account_id, account__user=user)
     )
     if entry.removed_at is not None:
@@ -349,7 +360,10 @@ def update_ledger_entry(
 ) -> LedgerEntry:
     """Mutate a ledger row in place, then rebuild holdings/cash from the timeline."""
     entry = (
-        LedgerEntry.objects.select_for_update()
+        # `of=("self",)`: the user join would otherwise lock the account row
+        # too, ahead of the pk-ordered account lock, and two opposite moves
+        # would deadlock.
+        LedgerEntry.objects.select_for_update(of=("self",))
         .get(pk=entry_id, account_id=account_id, account__user=user)
     )
     if entry.removed_at is not None:
@@ -366,7 +380,33 @@ def update_ledger_entry(
         destination = Account.objects.filter(pk=target_account_id, user=user).first()
         if destination is None:
             raise LedgerError("Portfolio not found.")
-    list(Account.objects.select_for_update().filter(pk__in=[old_account.pk, destination.pk]).order_by("pk"))
+    locked = {
+        a.pk: a for a in
+        Account.objects.select_for_update().filter(pk__in=[old_account.pk, destination.pk]).order_by("pk")
+    }
+    old_account, destination = locked[old_account.pk], locked[destination.pk]
+    moving = destination.pk != old_account.pk
+    # A property is a series of marks that REPLACE each other per account, so
+    # moving one mark alone leaves a holding (and its derived mortgage) in both
+    # portfolios. Its whole live series moves together.
+    series = []
+    if moving and entry.asset_id and entry.asset.is_house:
+        if (
+            LedgerEntry.objects.filter(account=destination, asset_id=entry.asset_id).exists()
+            or Holding.objects.filter(account=destination, asset_id=entry.asset_id).exists()
+        ):
+            raise LedgerError("That portfolio already holds this property.")
+        series = list(
+            LedgerEntry.objects.select_for_update()
+            .filter(account=old_account, asset_id=entry.asset_id)
+            .exclude(pk=entry.pk)
+        )
+    if moving:
+        taken = [e.external_id for e in [entry, *series] if e.external_id]
+        if taken and LedgerEntry.objects.filter(
+            account=destination, external_id__in=taken
+        ).exists():
+            raise LedgerError("That portfolio already has an entry with this external_id.")
     if entry.reversal_of_id:
         raise LedgerError("Cannot edit a reversal.")
     if LedgerEntry.objects.filter(reversal_of=entry).exists():
@@ -378,10 +418,28 @@ def update_ledger_entry(
             {LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL, LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.RIGHTS_ISSUE}
             if entry.asset_id and entry.kind not in CASH_KINDS else CASH_KINDS
         )
+        # A dividend is the one cash kind tied to an asset (the
+        # `ledger_dividend_asset` constraint): it cannot gain or lose one here.
+        if (kind == LedgerEntry.Kind.DIVIDEND) != (entry.kind == LedgerEntry.Kind.DIVIDEND):
+            allowed = set()
         if kind not in allowed:
             raise LedgerError("This type is not valid for this entry.")
         if kind == LedgerEntry.Kind.RIGHTS_ISSUE and entry.asset.asset_class != Asset.AssetClass.STOCK:
             raise LedgerError("Extra shares require a stock.")
+        # An opening's `price_tomans` is what it is worth NOW and its
+        # `cost_basis_tomans` what was paid; a trade's `price_tomans` is what
+        # was paid. Carry the paid price across, or a re-kind silently re-prices
+        # the position and moves cash nobody moved.
+        trade_kinds = {LedgerEntry.Kind.BUY, LedgerEntry.Kind.SELL}
+        if kind in trade_kinds and entry.kind not in trade_kinds and unit_price_tomans is None:
+            if entry.cost_basis_tomans is None:
+                raise LedgerError("Enter the price paid to record this as a trade.")
+            entry.price_tomans = entry.cost_basis_tomans
+        if (
+            kind in COST_BASIS_KINDS and entry.kind in trade_kinds
+            and cost_basis_tomans is None and entry.cost_basis_tomans is None
+        ):
+            entry.cost_basis_tomans = entry.price_tomans
         entry.kind = kind
         if kind not in COST_BASIS_KINDS:
             entry.cost_basis_tomans = None
@@ -400,6 +458,8 @@ def update_ledger_entry(
         entry.price_tomans = _decimal(unit_price_tomans, "unit_price_tomans", required=True)
     if amount_tomans is not None:
         entry.amount_tomans = _whole_toman(_decimal(amount_tomans, "amount_tomans", required=True))
+        if entry.amount_tomans <= 0:
+            raise LedgerError("amount_tomans must be at least 1 Toman.")
     if area_sqm is not None:
         # Same rule create_ledger_entry applies: only a house mark carries a size.
         if not (entry.asset and entry.asset.is_house) or entry.kind not in HOUSE_MARK_KINDS:
@@ -424,16 +484,49 @@ def update_ledger_entry(
         entry.amount_tomans = holding_value_to_toman(
             entry.asset, qty * price
         ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-    if entry.kind in {LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.OPENING_CASH}:
-        other_openings = active_entries(destination, kinds=[LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.OPENING_CASH])
-        if any(e.pk != entry.pk and e.timestamp != entry.timestamp for e in other_openings):
+    opening_kinds = [LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.OPENING_CASH]
+    # Reversal pairs net to nothing (see `active_entries`), so neither half of
+    # one is an opening that has to sit at the baseline.
+    reversed_pks = set(
+        LedgerEntry.objects.filter(reversal_of__in=series).values_list("reversal_of_id", flat=True)
+    )
+    arriving = [
+        e for e in [entry, *series]
+        if e.kind in opening_kinds and e.reversal_of_id is None and e.pk not in reversed_pks
+    ]
+    if arriving:
+        moved_pks = {e.pk for e in [entry, *series]}
+        resident = [e for e in active_entries(destination, kinds=opening_kinds) if e.pk not in moved_pks]
+        stamps = {e.timestamp for e in [*arriving, *resident]}
+        if len(stamps) > 1:
             raise LedgerError("Opening entries must share the tracking start timestamp.")
-        destination.tracking_started_at = entry.timestamp
+        # The same rule create_ledger_entry applies: an opening sits AT the
+        # baseline, it does not move it -- TWR is measured from there. The one
+        # exception is correcting the date of the portfolio's only opening,
+        # which is what the baseline was taken from.
+        correcting_sole_opening = (
+            not moving and not resident and previous["kind"] in opening_kinds
+        )
+        baseline = destination.tracking_started_at
+        stamp = next(iter(stamps))
+        if baseline is not None and stamp != baseline and not correcting_sole_opening:
+            raise LedgerError("An opening must be dated at this portfolio's tracking start.")
+        destination.tracking_started_at = stamp
         destination.save(update_fields=["tracking_started_at", "updated_at"])
     entry.revisions = [*entry.revisions, previous]
     entry.save()
+    for row in series:
+        row.revisions = [*row.revisions, {"account_id": old_account.pk, "moved_with": entry.pk}]
+        row.account = destination
+        row.save(update_fields=["account", "revisions", "updated_at"])
+    if moving and entry.asset_id and entry.asset.is_house:
+        # Derived mortgages are rebuilt by the replay; one the user typed is
+        # not, and a secured debt goes where the asset it is secured on goes.
+        Liability.objects.filter(
+            account=old_account, asset_id=entry.asset_id, derived=False
+        ).update(account=destination)
     _commit_projections(old_account)
-    if destination.pk != old_account.pk:
+    if moving:
         if entry.asset_id and not LedgerEntry.objects.filter(account=old_account, asset_id=entry.asset_id).exists():
             Holding.objects.filter(account=old_account, asset_id=entry.asset_id).delete()
         _commit_projections(destination)
@@ -443,7 +536,7 @@ def update_ledger_entry(
 @transaction.atomic
 def delete_ledger_entry(*, user, account_id: int, entry_id: int) -> None:
     """Retain the event, excluding it from corrected projections."""
-    entry = LedgerEntry.all_objects.select_for_update().get(
+    entry = LedgerEntry.all_objects.select_for_update(of=("self",)).get(
         pk=entry_id, account_id=account_id, account__user=user
     )
     if entry.reversal_of_id or hasattr(entry, "reversed_by"):
@@ -453,8 +546,9 @@ def delete_ledger_entry(*, user, account_id: int, entry_id: int) -> None:
     Account.objects.select_for_update().get(pk=entry.account_id)
     holding = Holding.objects.filter(account=entry.account, asset_id=entry.asset_id).first()
     metadata = {field: getattr(holding, field) for field in ["display_name", "is_hidden"]} if holding else {}
-    entry.revisions = [*entry.revisions, {"removed_at": timezone.now().isoformat(), "holding_metadata": metadata}]
     entry.removed_at = timezone.now()
+    revision = {"removed_at": entry.removed_at.isoformat()}
+    entry.revisions = [*entry.revisions, revision]
     entry.save(update_fields=["removed_at", "revisions", "updated_at"])
     _commit_projections(entry.account)
     # Replay only clears holdings of assets the visible ledger still governs, so
@@ -463,19 +557,44 @@ def delete_ledger_entry(*, user, account_id: int, entry_id: int) -> None:
         account=entry.account, asset_id=entry.asset_id
     ).exists():
         Holding.objects.filter(account=entry.account, asset_id=entry.asset_id).delete()
+        # Kept only when the holding went with the row: a holding that survives
+        # keeps its own name, and restoring a snapshot would undo a later rename.
+        if metadata:
+            revision["holding_metadata"] = metadata
+            entry.save(update_fields=["revisions"])
 
 
 @transaction.atomic
 def restore_ledger_entry(*, user, account_id: int, entry_id: int) -> LedgerEntry:
-    entry = LedgerEntry.all_objects.select_for_update().get(
+    entry = LedgerEntry.all_objects.select_for_update(of=("self",)).get(
         pk=entry_id, account_id=account_id, account__user=user
     )
     Account.objects.select_for_update().get(pk=entry.account_id)
     if entry.removed_at is not None:
+        if entry.external_id and LedgerEntry.objects.filter(
+            account_id=entry.account_id, external_id=entry.external_id
+        ).exists():
+            raise LedgerError("Another entry now uses this external_id; remove it before restoring this one.")
+        if entry.asset_id and entry.asset.is_house and (
+            LedgerEntry.objects.filter(asset_id=entry.asset_id, account__user=user)
+            .exclude(account_id=entry.account_id).exists()
+            or Holding.objects.filter(asset_id=entry.asset_id, account__user=user)
+            .exclude(account_id=entry.account_id).exists()
+        ):
+            # The property moved on after this mark was removed; bringing the
+            # mark back here would hold the same house in two portfolios.
+            raise LedgerError("This property is now in another portfolio.")
+        baseline = entry.account.tracking_started_at
+        if (
+            entry.kind in {LedgerEntry.Kind.OPENING_POSITION, LedgerEntry.Kind.OPENING_CASH}
+            and baseline is not None and entry.timestamp != baseline
+        ):
+            raise LedgerError("The tracking start has changed since this opening was removed.")
         entry.removed_at = None
         entry.save(update_fields=["removed_at", "updated_at"])
         _commit_projections(entry.account)
-        metadata = next((rev["holding_metadata"] for rev in reversed(entry.revisions) if "holding_metadata" in rev), {})
+        last = entry.revisions[-1] if entry.revisions else {}
+        metadata = last.get("holding_metadata", {}) if "removed_at" in last else {}
         if metadata:
             Holding.objects.filter(account=entry.account, asset_id=entry.asset_id).update(**metadata)
     return entry
@@ -555,17 +674,24 @@ def adjust_holding_quantity(*, user, account_id: int, holding_id: int, quantity,
 
 
 @transaction.atomic
-def delete_orphan_holding(*, user, account_id: int, holding_id: int) -> LedgerEntry:
+def delete_orphan_holding(*, user, account_id: int, holding_id: int) -> LedgerEntry | None:
     holding = Holding.objects.select_for_update().get(
         pk=holding_id, account_id=account_id, account__user=user
     )
     if LedgerEntry.objects.filter(account_id=account_id, asset_id=holding.asset_id).exists():
         raise LedgerError("This holding has ledger history; remove a ledger row instead.")
+    if not holding.quantity or holding.account.tracking_started_at is None:
+        # Nothing is owned, or there is no baseline to date a preserved opening
+        # at -- stamping one anywhere else would later restore as a second,
+        # differently-dated opening and break TWR. Delete outright; no Undo.
+        holding.delete()
+        return None
     entry = LedgerEntry.objects.create(
         account=holding.account, asset=holding.asset,
         kind=LedgerEntry.Kind.OPENING_POSITION,
         quantity=holding.quantity, area_sqm=holding.area_sqm if holding.asset.is_house else None,
-        timestamp=holding.account.tracking_started_at or holding.created_at,
+        mortgage_deduction_tomans=holding.mortgage_deduction_tomans if holding.asset.is_house else None,
+        timestamp=holding.account.tracking_started_at,
         source="system", note="Existing position preserved before removal",
     )
     delete_ledger_entry(user=user, account_id=account_id, entry_id=entry.pk)
@@ -939,7 +1065,10 @@ def replace_ledger_entry(
     area_sqm=None, mortgage_deduction_tomans=None, cost_basis_tomans=None
 ) -> LedgerEntry:
     original = (
-        LedgerEntry.objects.select_for_update()
+        # `of=("self",)`: the user join would otherwise lock the account row
+        # too, ahead of the pk-ordered account lock, and two opposite moves
+        # would deadlock.
+        LedgerEntry.objects.select_for_update(of=("self",))
         .get(pk=entry_id, account_id=account_id, account__user=user)
     )
     if original.kind != LedgerEntry.Kind.OPENING_POSITION:
