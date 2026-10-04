@@ -1229,6 +1229,20 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
             });
           }
 
+          // Phone card roles (see Table in ui.jsx): "title" and "value" share the
+          // first line, "meta" columns join into one small line under it, and
+          // any column left out waits behind the card's "More" button.
+          // Column keys: include, actions, portfolio, asset, class, qty, price,
+          // value, weight, status, source, priced_at, why.
+          // Two lines at a glance: what it is and what it's worth, then where it
+          // sits, how much, and whether its price is live. Edit/Delete mode's
+          // buttons stay visible; everything else waits behind "More".
+          const MOBILE_ROLES = {
+            asset: "title", value: "value",
+            portfolio: "meta", qty: "meta", status: "meta", actions: "meta",
+          };
+          columns.forEach((c) => { if (MOBILE_ROLES[c.key]) c.mobile = MOBILE_ROLES[c.key]; });
+
           return (
             <>
               {showStaleBanner && (

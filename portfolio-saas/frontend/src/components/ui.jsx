@@ -346,16 +346,53 @@ export function Tabs({ options, value, onChange, label, testId }) {
 /* ------------------------------------------------------------------ tables */
 
 /**
- * `columns` is [{ key, header, align?, render?(row), width? }].
+ * `columns` is [{ key, header, align?, render?(row), width?, mobile? }].
  * Numeric columns should pass align:"right" so the tabular figures line up.
  *
  * `rowClass(row)` styles a whole row by its state — dimming one that has been
  * switched off, say. Per row rather than per cell so the treatment cannot drift
  * between columns.
+ *
+ * `mobileCards` turns each row into a card below the `sm` breakpoint. With no
+ * `mobile` roles every column is a labelled line, which made a holding 12 lines
+ * tall and 15 holdings ~7,500px of scrolling. Give columns a role instead:
+ *   "title"  — first line, left (the asset)
+ *   "value"  — first line, right (the amount that matters)
+ *   "meta"   — one small muted line under it, joined with "·"
+ *   omitted  — hidden until the card is expanded, then a labelled line
+ * Expanding is a real button (aria-expanded), so it works without a pointer.
  */
+const MOBILE_SHOWN = new Set(["title", "value", "meta"]);
+
 export function Table({ columns, rows, rowKey, empty = "No rows.", testId, caption, rowClass, mobileCards = false }) {
   const t = useT();
+  const [open, setOpen] = useState(() => new Set());
   if (!rows?.length) return <Empty testId={testId ? `${testId}-empty` : undefined}>{empty}</Empty>;
+  const compact = mobileCards && columns.some((c) => c.mobile);
+  const hasDetail = compact && columns.some((c) => !MOBILE_SHOWN.has(c.mobile));
+  const toggle = (key) => setOpen((cur) => {
+    const next = new Set(cur);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+
+  // Phone-only styling is all `max-sm:` so the desktop table renders exactly
+  // as it did before roles existed.
+  const metaKeys = columns.filter((c) => c.mobile === "meta").map((c) => c.key);
+  const cellClass = (c, expanded) => {
+    const align = c.align === "right" ? "text-right" : "";
+    if (!mobileCards) return `px-3 py-2 ${align}`;
+    if (!compact) return `px-3 py-2 flex items-start justify-between gap-3 sm:table-cell ${align}`;
+    const base = `px-3 py-2 sm:table-cell ${align}`;
+    if (c.mobile === "title") return `${base} max-sm:order-1 max-sm:min-w-0 max-sm:flex-1 max-sm:px-1 max-sm:py-1 max-sm:font-medium`;
+    if (c.mobile === "value") return `${base} max-sm:order-2 max-sm:px-1 max-sm:py-1 max-sm:text-right max-sm:font-medium max-sm:tabular-nums`;
+    if (c.mobile === "meta") {
+      const sep = metaKeys.indexOf(c.key) > 0 ? "max-sm:before:me-1 max-sm:before:content-['·']" : "";
+      return `${base} max-sm:order-4 max-sm:py-0 max-sm:pe-1 max-sm:ps-1 max-sm:text-xs max-sm:text-muted ${sep}`;
+    }
+    return `${base} ${expanded ? "max-sm:order-6 max-sm:flex max-sm:basis-full max-sm:items-start max-sm:justify-between max-sm:gap-3 max-sm:px-1 max-sm:py-1" : "max-sm:hidden"}`;
+  };
+
   return (
     <div className={mobileCards ? "sm:overflow-x-auto" : "overflow-x-auto"}>
       <table data-testid={testId} className={`w-full text-sm ${mobileCards ? "block sm:table" : ""}`}>
@@ -374,32 +411,56 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
                 {t(c.header)}
               </th>
             ))}
+            {hasDetail && <th className="sm:hidden"><span className="sr-only">{t("Details")}</span></th>}
           </tr>
         </thead>
         <tbody className={mobileCards ? "block sm:table-row-group" : ""}>
-          {rows.map((row, i) => (
-            <tr
-              key={rowKey ? rowKey(row) : i}
-              data-testid={testId ? `${testId}-row` : undefined}
-              className={`border-b border-border/60 last:border-0 hover:bg-panel-2 ${mobileCards ? "mb-3 block rounded-lg border border-border/60 p-2 last:mb-0 sm:mb-0 sm:table-row sm:rounded-none sm:border-x-0 sm:border-t-0 sm:p-0" : ""} ${
-                rowClass?.(row) || ""
-              }`}
-            >
-              {columns.map((c) => (
-                <td
-                  key={c.key}
-                  className={`px-3 py-2 ${mobileCards ? "flex items-start justify-between gap-3 sm:table-cell" : ""} ${c.align === "right" ? "text-right" : ""}`}
-                >
-                  {mobileCards && c.header && <span className="shrink-0 text-xs font-medium uppercase text-muted sm:hidden">{t(c.header)}</span>}
-                  {mobileCards ? (
-                    <span className="min-w-0 text-right sm:contents">
-                      {c.render ? c.render(row) : row[c.key]}
-                    </span>
-                  ) : (c.render ? c.render(row) : row[c.key])}
-                </td>
-              ))}
-            </tr>
-          ))}
+          {rows.map((row, i) => {
+            const key = rowKey ? rowKey(row) : i;
+            const expanded = open.has(key);
+            const card = compact
+              ? "mb-2 flex flex-wrap items-baseline rounded-lg border border-border/60 px-2 py-1.5 last:mb-0 sm:mb-0 sm:table-row sm:rounded-none sm:border-x-0 sm:border-t-0 sm:p-0"
+              : "mb-3 block rounded-lg border border-border/60 p-2 last:mb-0 sm:mb-0 sm:table-row sm:rounded-none sm:border-x-0 sm:border-t-0 sm:p-0";
+            return (
+              <tr
+                key={key}
+                data-testid={testId ? `${testId}-row` : undefined}
+                className={`border-b border-border/60 last:border-0 hover:bg-panel-2 ${mobileCards ? card : ""} ${
+                  rowClass?.(row) || ""
+                }`}
+              >
+                {columns.map((c) => {
+                  const content = c.render ? c.render(row) : row[c.key];
+                  const labelled = mobileCards && c.header && (!compact || !MOBILE_SHOWN.has(c.mobile));
+                  return (
+                    <td key={c.key} data-meta={c.mobile === "meta" ? "" : undefined} className={cellClass(c, expanded)}>
+                      {labelled && <span className="shrink-0 text-xs font-medium uppercase text-muted sm:hidden">{t(c.header)}</span>}
+                      {labelled ? (
+                        <span className="min-w-0 text-right sm:contents">{content}</span>
+                      ) : content}
+                    </td>
+                  );
+                })}
+                {hasDetail && (
+                  <>
+                    {/* Ends the first line so the meta cells start a new one. */}
+                    <td aria-hidden="true" className="order-3 basis-full sm:hidden" />
+                    <td className="order-5 ms-auto sm:hidden">
+                      <button
+                        type="button"
+                        aria-expanded={expanded}
+                        onClick={() => toggle(key)}
+                        data-testid={testId ? `${testId}-expand` : undefined}
+                        className="inline-flex min-h-9 items-center rounded px-2 text-xs text-muted hover:text-text"
+                      >
+                        {t(expanded ? "Less" : "More")}
+                      </button>
+                    </td>
+                  </>
+                )}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

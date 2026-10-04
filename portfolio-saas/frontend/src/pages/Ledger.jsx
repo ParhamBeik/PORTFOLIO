@@ -507,6 +507,7 @@ export default function Ledger() {
     {
       key: "when",
       header: "When",
+      mobile: "meta",
       // Dated on a Persian calendar when it was recorded, so read back on one.
       // The Gregorian date and the time of day stay on the hover.
       render: (r) => (
@@ -515,10 +516,11 @@ export default function Ledger() {
         </span>
       ),
     },
-    { key: "kind", header: "What", render: kindBadge },
+    { key: "kind", header: "What", mobile: "meta", render: kindBadge },
     {
       key: "asset",
       header: "Asset",
+      mobile: "title",
       // The label is the ticker a share is recognized by, not the company's full
       // name; the full name stays reachable on hover.
       render: (r) =>
@@ -528,9 +530,9 @@ export default function Ledger() {
           "—"
         ),
     },
-    { key: "qty", header: "Amount", align: "right", render: quantityCell },
+    { key: "qty", header: "Amount", align: "right", mobile: "meta", render: quantityCell },
     { key: "price", header: "Price", align: "right", render: priceCell },
-    { key: "amt", header: "Value", align: "right", render: (r) => toman(r.value_tomans) },
+    { key: "amt", header: "Value", align: "right", mobile: "value", render: (r) => toman(r.value_tomans) },
     {
       key: "pnl",
       header: "P/L",
@@ -567,6 +569,7 @@ export default function Ledger() {
     columns.splice(2, 0, {
       key: "portfolio",
       header: "Portfolio",
+      mobile: "meta",
       render: (r) => r.account_name || "—",
     });
   }
