@@ -252,7 +252,13 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    environment: *backend-env
+    environment:
+      <<: *backend-env
+      # Pooled connections for the API only (see DB_POOL_MAX_SIZE in
+      # config/settings.py). 3 gunicorn workers x 8 = at most 24 of the 150
+      # max_connections, leaving the Celery workers their usual headroom.
+      DB_POOL_MAX_SIZE: "8"
+      DB_POOL_MIN_SIZE: "2"
     volumes:
       - ${GAPGPT_CONFIG_HOST_FILE:-./deploy/gapgpt-disabled.env}:/run/secrets/gapgpt.env:ro
     expose: ["8000"]

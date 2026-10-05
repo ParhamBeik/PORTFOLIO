@@ -353,36 +353,81 @@ def _diversification_ratio(
     return _finite(diversification.diversification_ratio(weights, cov), 1.0)
 
 
+# Calendar-day pad before the first requested day. Only needs to reach the
+# previous trading day so the first in-window return is defined; the loader
+# also extends to the last row before the pad, so a long closure cannot NaN it.
+_INDEX_WINDOW_PAD_DAYS = 45
+_INDEX_CLOSES_CACHE_TTL = 3600
+
+
+def _index_daily_closes(since_jalali: str | None, as_of_jalali: str | None) -> pd.Series | None:
+    """Last TEDPIX value of each day in [since, as_of], Gregorian-indexed.
+
+    Cached under the table's newest id. Both writers (`ingest_market_index`,
+    `ingest_tedpix_history`) only insert -- conflicts are skipped, never
+    updated -- so a new max id is exactly "the table changed" and the cache
+    can never serve a stale series. Called once per metrics series (portfolio,
+    every holding, every class), it used to read and convert the whole table
+    each time: ~25 full loads per Risk request, hundreds per MyOptimal.
+    """
+    from django.core.cache import cache
+    from django.db.models import Max
+    from marketdata.models import MarketIndexData
+    import jdatetime
+
+    version = MarketIndexData.objects.aggregate(v=Max("id"))["v"]
+    if version is None:
+        return None
+    key = f"diag:index-closes:v1:{since_jalali or '-'}:{as_of_jalali or '-'}:{version}"
+    cached = cache.get(key)
+    if cached is not None:
+        return cached if len(cached) else None
+
+    qs = MarketIndexData.objects.all()
+    if as_of_jalali is not None:
+        qs = qs.filter(date__lte=as_of_jalali)
+    if since_jalali is not None:
+        previous = (
+            qs.filter(date__lt=since_jalali).order_by("-date").values_list("date", flat=True).first()
+        )
+        qs = qs.filter(date__gte=previous or since_jalali)
+
+    # Ordered by (date, time): the last row of a day overwrites the earlier
+    # ones, so each date maps to its final value -- as the full load did.
+    last_by_date: dict[str, float] = {}
+    for date, value in qs.order_by("date", "time").values_list("date", "index_overall"):
+        last_by_date[date] = value
+
+    records: dict[dt.date, float] = {}
+    for date, value in last_by_date.items():
+        try:
+            parts = [int(p) for p in date.split("-")]
+            records[jdatetime.date(parts[0], parts[1], parts[2]).togregorian()] = float(value)
+        except Exception:
+            continue
+    series = pd.Series(records, dtype=float).sort_index()
+    cache.set(key, series, timeout=_INDEX_CLOSES_CACHE_TTL)
+    return series if len(series) else None
+
+
 def _load_index_returns(target_index: pd.Index, as_of: dt.datetime | None = None) -> pd.Series | None:
     """Load index return series from MarketIndexData, aligned with target_index."""
     from django.conf import settings
     if not getattr(settings, "HISTORICAL_BENCHMARK_ENABLED", False):
         return None
-    from marketdata.models import MarketIndexData
-    import jdatetime
     from portfolio.services.returns import to_jalali_str
 
-    qs = MarketIndexData.objects.order_by("date", "time")
-    if as_of is not None:
-        as_of_jalali = to_jalali_str(as_of)
-        qs = qs.filter(date__lte=as_of_jalali)
+    as_of_jalali = to_jalali_str(as_of) if as_of is not None else None
+    since_jalali = None
+    if len(target_index):
+        first = pd.Timestamp(target_index.min())
+        if not pd.isna(first):
+            since_jalali = to_jalali_str(first.date() - dt.timedelta(days=_INDEX_WINDOW_PAD_DAYS))
 
-    if not qs.exists():
+    s = _index_daily_closes(since_jalali, as_of_jalali)
+    if s is None or len(s) < 2:
         return None
 
-    records: dict[dt.date, float] = {}
-    for row in qs:
-        try:
-            parts = [int(p) for p in row.date.split("-")]
-            greg_date = jdatetime.date(parts[0], parts[1], parts[2]).togregorian()
-            records[greg_date] = float(row.index_overall)
-        except Exception:
-            continue
-
-    if len(records) < 2:
-        return None
-
-    s = pd.Series(records).sort_index()
     s_returns = s.pct_change(fill_method=None)
     s_returns.index = pd.to_datetime(s_returns.index, utc=True).normalize()
     return s_returns.reindex(target_index)

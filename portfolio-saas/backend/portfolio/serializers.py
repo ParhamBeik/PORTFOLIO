@@ -384,6 +384,11 @@ class TransactionSerializer(serializers.ModelSerializer):
                   "price_tomans", "note", "timestamp", "is_latest_for_asset")
 
     def get_is_latest_for_asset(self, obj) -> bool:
+        # A list view precomputes every (account, asset) answer in one query
+        # (`latest_transaction_ids`); a lone serializer still asks directly.
+        latest_ids = self.context.get("latest_transaction_ids")
+        if latest_ids is not None:
+            return obj.pk in latest_ids
         latest_id = (
             Transaction.objects.filter(
                 account=obj.account, asset=obj.asset,
@@ -394,6 +399,22 @@ class TransactionSerializer(serializers.ModelSerializer):
             .first()
         )
         return latest_id == obj.pk
+
+
+def latest_transaction_ids(accounts) -> set[int]:
+    """Ids of the newest live transaction per (account, asset), in one query.
+
+    Same filter and ordering as `get_is_latest_for_asset`'s per-row query,
+    which a list of N transactions otherwise ran N times.
+    """
+    return set(
+        Transaction.objects.filter(
+            account__in=accounts, reversal_of__isnull=True, reversed_by__isnull=True,
+        )
+        .order_by("account_id", "asset_id", "-timestamp", "-pk")
+        .distinct("account_id", "asset_id")
+        .values_list("pk", flat=True)
+    )
 
 
 class LiabilitySerializer(serializers.ModelSerializer):

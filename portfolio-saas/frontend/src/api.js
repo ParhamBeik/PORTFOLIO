@@ -117,12 +117,21 @@ async function refreshAccessToken() {
     })().finally(() => { refreshPromise = null; });
     return refreshPromise;
   }
-  refreshPromise = csrfToken().then((csrf) => fetch(`${API_BASE}/api/token/refresh/`, {
+  const post = (csrf) => fetch(`${API_BASE}/api/token/refresh/`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json", ...(csrf ? { "X-CSRFToken": csrf } : {}) },
     body: "{}",
-  }))
+  });
+  refreshPromise = csrfToken().then(async (csrf) => {
+    const res = await post(csrf);
+    // A 429 is "slow down", not "signed out": `!res.ok -> null` below would
+    // otherwise drop a valid session to the login screen. Retry once.
+    if (res.status !== 429) return res;
+    const wait = Math.min(Number(res.headers.get("Retry-After")) || 1, 5);
+    await new Promise((resolve) => setTimeout(resolve, wait * 1000));
+    return post(csrf);
+  })
     .then(async (res) => {
       if (!res.ok) return null;
       const data = await res.json();
@@ -194,7 +203,26 @@ function apiError(message, status) {
   return error;
 }
 
-export async function api(path, { method = "GET", body, _retried = false } = {}) {
+// Identical GETs already in flight share one request. Pages mount several
+// components that ask for the same thing at once (valuation, accounts, the asset
+// catalog), and each used to cost the server a full computation. Only the
+// in-flight window is shared -- nothing is cached after it settles -- and every
+// caller after the first gets its own deep copy, so a component that sorts or
+// edits its data in place cannot change another's.
+const inflightGets = new Map();
+
+export function api(path, options = {}) {
+  const { method = "GET", body } = options;
+  if (method !== "GET" || body !== undefined || options._retried) return request(path, options);
+  const key = `${auth.token || ""} ${path}`;
+  const shared = inflightGets.get(key);
+  if (shared) return shared.then((data) => (data == null ? data : structuredClone(data)));
+  const pending = request(path, options).finally(() => inflightGets.delete(key));
+  inflightGets.set(key, pending);
+  return pending;
+}
+
+async function request(path, { method = "GET", body, _retried = false } = {}) {
   // A FormData body reaches fetch untouched: stringifying it would send the
   // literal "[object FormData]", and declaring Content-Type ourselves would
   // strip the multipart boundary only the browser can generate. Uploads go

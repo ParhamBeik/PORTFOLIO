@@ -59,6 +59,8 @@ portfolio-saas/
 │   │   ├── archive.py+quota.py gap-driven backfill under a request budget
 │   │   ├── calendars.py        which days a market was actually open
 │   │   └── admin_api.py        staff-only /api/admin/* Ops console backend
+│   ├── perf/                   request/page latency rollups (middleware, client beacon,
+│   │                           hourly table, `perf_report`); see docs/PERFORMANCE.md
 │   └── tests/                  thematic suites, one per bounded concern
 └── frontend/src/               pages/ · components/ui.jsx + charts.jsx
                                 api.js + useApi.js (the one fetch pattern)

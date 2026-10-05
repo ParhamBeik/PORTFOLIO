@@ -28,7 +28,12 @@ from .models import (
     USD_QUOTED_KEYS,
     positive_price_q,
 )
-from portfolio.services import asset_value, get_latest_prices, invalidate_prices_cache
+from portfolio.services import (
+    asset_value,
+    get_latest_prices,
+    invalidate_prices_cache,
+    refresh_prices_cache,
+)
 from portfolio.services.valuation import (
     _archive_replacements,
     current_market_state,
@@ -170,7 +175,13 @@ def run_price_fetch(*, dry_run=False):
                     priced, sources=sources,
                     normalized_foreign_keys=set(priced) & set(USD_QUOTED_KEYS),
                 )
-            invalidate_prices_cache()
+            # Overwrite, don't delete: readers keep hitting a warm entry instead
+            # of each rebuilding it the moment after every write.
+            try:
+                refresh_prices_cache()
+            except Exception:
+                logger.exception("price cache refresh failed; falling back to invalidation")
+                invalidate_prices_cache()
 
             # LAZY import: avoids a circular `portfolio.tasks -> portfolio.services.returns ->
             # portfolio.models` chain at module load. Outside the transaction on

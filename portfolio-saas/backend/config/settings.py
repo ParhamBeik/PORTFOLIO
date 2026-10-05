@@ -137,6 +137,31 @@ if _database_url:
         "OPTIONS": {"sslmode": os.getenv("PG_SSLMODE", "prefer")},
     }
 
+# Connection pool, opt-in per process with DB_POOL_MAX_SIZE > 0. Only the API
+# service sets it (docker-compose.prod.yml): Celery workers keep their own
+# short-lived connections so the pools of a dozen worker processes cannot
+# multiply into max_connections. Without it, DB_CONN_MAX_AGE=0 -- the only safe
+# setting under ASGI, where every request runs in a fresh thread -- paid a full
+# TCP + SCRAM handshake and a Postgres backend fork on every request, against
+# a database that is CPU-capped and busy with archive ingest.
+#
+# max_idle stays under the server's idle_session_timeout (300s) so the pool
+# retires an idle connection before Postgres kills it; CONN_HEALTH_CHECKS makes
+# Django hand psycopg_pool its `check` callback, so a connection that died
+# anyway is replaced at checkout instead of failing the request.
+_db_pool_max = int(os.getenv("DB_POOL_MAX_SIZE", "0"))
+if _db_pool_max > 0:
+    DATABASES["default"]["CONN_MAX_AGE"] = 0  # Django refuses a pool otherwise
+    DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
+    DATABASES["default"].setdefault("OPTIONS", {})["pool"] = {
+        "min_size": int(os.getenv("DB_POOL_MIN_SIZE", "2")),
+        "max_size": _db_pool_max,
+        # Seconds a request waits for a free connection before failing.
+        "timeout": float(os.getenv("DB_POOL_TIMEOUT", "10")),
+        "max_idle": 120,
+        "max_lifetime": 1800,
+    }
+
 # Redis caches the global price map and per-user valuations so reads stay cheap
 # under load. Falls back to local-memory if REDIS_URL is unset (e.g. quick tests).
 if os.getenv("REDIS_URL"):
@@ -216,6 +241,13 @@ REST_FRAMEWORK = {
         # Authorization header), so per IP. A tab flushes about four times a
         # minute; this leaves room for a full office behind one NAT.
         "perf_client": os.getenv("PERF_CLIENT_THROTTLE", "240/min"),
+        # Token refresh and the CSRF bootstrap. Every page load and every
+        # 30-minute access-token expiry refreshes, unauthenticated by design
+        # (the refresh cookie is the credential), so on the 30/min anon bucket
+        # a handful of people behind one office or carrier NAT exhausted it by
+        # using the app -- and a 429 here reads as "signed out" in the client.
+        # Guessing a refresh token is not a threat this rate needs to slow.
+        "session": os.getenv("SESSION_THROTTLE", "300/min"),
     },
     # M5: render Decimal as a string so large Toman values stay exact on the wire.
     "DEFAULT_RENDERER_CLASSES": ("config.api.DecimalStringJSONRenderer",),

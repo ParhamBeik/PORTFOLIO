@@ -1698,3 +1698,62 @@ def test_asset_class_map_does_not_query_per_symbol(django_assert_num_queries):
         mapping = asset_class_map(symbols)
 
     assert set(mapping) == set(symbols)
+
+
+def _reference_index_returns(target_index, as_of=None):
+    """The pre-bounding loader, kept verbatim as the oracle for the bounded one."""
+    from portfolio.services.returns import to_jalali_str
+
+    qs = MarketIndexData.objects.order_by("date", "time")
+    if as_of is not None:
+        qs = qs.filter(date__lte=to_jalali_str(as_of))
+    records = {}
+    for row in qs:
+        parts = [int(p) for p in row.date.split("-")]
+        records[jdatetime.date(parts[0], parts[1], parts[2]).togregorian()] = float(row.index_overall)
+    s = pd.Series(records).sort_index()
+    s_returns = s.pct_change(fill_method=None)
+    s_returns.index = pd.to_datetime(s_returns.index, utc=True).normalize()
+    return s_returns.reindex(target_index)
+
+
+@pytest.mark.django_db
+@override_settings(HISTORICAL_BENCHMARK_ENABLED=True)
+def test_bounded_index_loader_matches_full_table_load():
+    from django.core.cache import cache
+
+    cache.clear()
+    start = dt.date(2025, 1, 1)
+    rows = []
+    for offset in range(500):
+        day = start + dt.timedelta(days=offset)
+        # A 60-day closure, longer than the window pad, right before the window.
+        if dt.date(2026, 2, 1) <= day < dt.date(2026, 4, 2):
+            continue
+        jday = jdatetime.date.fromgregorian(date=day)
+        date = f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}"
+        rows.append(MarketIndexData(date=date, time="00:00:00", index_overall=1000 + offset))
+        # Intraday ticks: the day's last one must win.
+        rows.append(MarketIndexData(date=date, time="10:00:00", index_overall=1000 + offset * 1.01))
+        rows.append(MarketIndexData(date=date, time="12:30:00", index_overall=1000 + offset * 1.02))
+    MarketIndexData.objects.bulk_create(rows)
+
+    as_of = dt.datetime(2026, 5, 10, tzinfo=dt.timezone.utc)
+    for first, periods in (("2026-04-02", 30), ("2025-06-01", 200), ("2025-01-01", 90)):
+        target = pd.date_range(first, periods=periods, tz="UTC")
+        got = _load_index_returns(target, as_of=as_of)
+        want = _reference_index_returns(target, as_of=as_of)
+        pd.testing.assert_series_equal(got, want, check_names=False, check_freq=False)
+        # The first in-window day after the closure still has its return.
+        assert got.notna().any()
+
+    # Cached on the newest id: a new row is visible immediately.
+    target = pd.date_range("2026-05-07", periods=10, tz="UTC")  # through 2026-05-16
+    before = _load_index_returns(target)
+    jday = jdatetime.date.fromgregorian(date=dt.date(2026, 5, 16))
+    MarketIndexData.objects.create(
+        date=f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}", time="00:00:00", index_overall=5000,
+    )
+    after = _load_index_returns(target)
+    assert pd.isna(before.loc[target[-1]])
+    assert after.loc[target[-1]] == pytest.approx(5000 / (1000 + 499 * 1.02) - 1)
