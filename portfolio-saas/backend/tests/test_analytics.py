@@ -466,6 +466,58 @@ def test_scoped_fingerprint_includes_tether_conversion_rate(asset_catalog):
     assert _price_version_fingerprint([coin.key]) != before
 
 
+def test_returns_cache_survives_ticks_it_does_not_read(asset_catalog, write_prices, monkeypatch):
+    """A live tick rotates the matrix only for assets priced from live ticks.
+
+    kama has a warehouse series, so its live Price ticks never enter the
+    matrix; emami has none and falls back to the live table. Before, every
+    tick of either rebuilt the whole matrix.
+    """
+    from django.core.cache import cache
+    import portfolio.services.returns as returns
+
+    kama = asset_catalog["kama_stock"]
+    kama.tse_symbol = "کاما"
+    kama.save(update_fields=["tse_symbol"])
+    _seed_warehouse_days("کاما", MIN_DAILY_RETURNS + 10)
+    write_prices({"emami_coin": 50_000_000})
+
+    real = returns._load_price_panel
+    builds = []
+
+    def counting(*args, **kwargs):
+        builds.append(1)
+        return real(*args, **kwargs)
+
+    cache.clear()
+    monkeypatch.setattr(returns, "_load_price_panel", counting)
+    first, _ = daily_returns_matrix()
+    # The first build records which assets it read live; the next one versions
+    # on exactly those, then the cache holds.
+    daily_returns_matrix()
+    daily_returns_matrix()
+    assert len(builds) == 2
+
+    Price.objects.create(asset=kama, price=1, source="TEST")
+    again, _ = daily_returns_matrix()
+    assert len(builds) == 2
+    pd.testing.assert_frame_equal(again, first)
+
+    write_prices({"emami_coin": 51_000_000})
+    daily_returns_matrix()
+    assert len(builds) == 3
+
+    # A new warehouse row the matrix does read still rotates it.
+    jday = jdatetime.date.fromgregorian(date=dt.date.today())
+    MarketCandle.objects.create(
+        symbol="کاما", timeframe="1d_adj",
+        date_time=f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}",
+        open_price=9000, high_price=9000, low_price=9000, close_price=9000, volume=1000,
+    )
+    daily_returns_matrix()
+    assert len(builds) == 4
+
+
 def test_returns_cache_isolated_by_history_window(monkeypatch):
     import pandas as pd
     from django.core.cache import cache
@@ -518,7 +570,7 @@ def test_usdt_returns_do_not_borrow_cash_usd_when_tether_history_is_missing(monk
     )
     observed = {}
 
-    monkeypatch.setattr(returns, "_price_version_fingerprint", lambda _keys: "no-tether")
+    monkeypatch.setattr(returns, "_price_version_fingerprint", lambda _keys, **_kw: "no-tether")
     monkeypatch.setattr(returns, "toman_price_panel", lambda **_kwargs: (panel.copy(), [], []))
     monkeypatch.setattr(
         returns, "_build_returns_matrix",

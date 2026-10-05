@@ -57,8 +57,6 @@ from portfolio.services.optimization import (
     summarize_optimizer_inputs,
 )
 from portfolio.services.returns import (
-    DEFAULT_HISTORY_DAYS,
-    _price_version_fingerprint,
     daily_returns_matrix,
     invalidate_returns_cache,
 )
@@ -509,23 +507,32 @@ def test_diagnostics_metrics_finite(synthetic_history):
 
 
 def test_returns_cache_invalidates_on_write(synthetic_history, asset_catalog):
-    from portfolio.services.returns import _returns_cache_key
+    """Every asset here is priced from live ticks, so a new tick must rebuild."""
+    import portfolio.services.returns as returns
+
     df1, _ = daily_returns_matrix()
     assert not df1.empty
-    v1 = _price_version_fingerprint()
-    assert cache.get(_returns_cache_key(DEFAULT_HISTORY_DAYS, None, None, "nominal", v1)) is not None
+    daily_returns_matrix()  # second build versions on the assets read live
+    real = returns._load_price_panel
+    builds = []
 
-    Price.objects.create(
-        asset=asset_catalog["emami_coin"],
-        price=Decimal("500000000"),
-        source="TEST",
-    )
-    invalidate_returns_cache()
-    v2 = _price_version_fingerprint()
-    assert v2 != v1
-    # Old key gone after invalidate; new computation produces a fresh entry.
-    df2, _ = daily_returns_matrix()
-    assert cache.get(_returns_cache_key(DEFAULT_HISTORY_DAYS, None, None, "nominal", v2)) is not None
+    def counting(*args, **kwargs):
+        builds.append(1)
+        return real(*args, **kwargs)
+
+    returns._load_price_panel = counting
+    try:
+        daily_returns_matrix()
+        assert builds == []
+        Price.objects.create(
+            asset=asset_catalog["emami_coin"],
+            price=Decimal("500000000"),
+            source="TEST",
+        )
+        daily_returns_matrix()
+        assert builds == [1]
+    finally:
+        returns._load_price_panel = real
 
 
 # ---------- 12. optimization cached -----------------------------------------

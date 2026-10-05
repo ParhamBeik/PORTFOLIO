@@ -56,14 +56,15 @@ The same data as JSON for staff: `GET /api/perf/report/?days=7&source=api`
 | Transaction list builds `is_latest_for_asset` in one query; valuation fetches liabilities with their asset | Both ran one query per row |
 | Every page is its own lazy chunk | All pages and echarts (634 kB) loaded on every signed-in route, including the ledger |
 | Identical in-flight GETs share one request; polls never stack; a 429 on refresh retries once | Duplicate valuation and asset calls per page; slow responses piled up behind the 60 s poll |
+| The returns matrix is versioned on the rows it actually reads (`_returns_version`) | Every live tick of any held stock rebuilt every risk, frontier and optimization matrix from the full history, even though a stock with a warehouse series takes no input from live ticks |
 
 ## Known, not yet changed
 
-- **Analytics cache key rotates every price tick.** `_price_version_fingerprint`
-  includes the latest `Price` id, so the returns matrix, `optimize()` and
-  MyOptimal caches almost never hit while a market is open. Changing it touches
-  the "every table feeding the returns matrix is in the fingerprint" rule in
-  CLAUDE.md, so it needs a deliberate decision.
+- **`optimize()` and MyOptimal still rotate on every tick of a held asset.**
+  This is deliberate, because their output includes current weights at live
+  prices. Since 2026-10-05 the returns matrix underneath them is cached exactly:
+  `_returns_version` only rotates on rows the matrix actually reads. So a tick
+  now costs a solve, not a rebuild of years of history.
 - `_load_price_panel` loads each symbol's whole candle history and trims it in
   pandas. Bounding the query also changes `first_observed`, which
   `_gap_profile` uses for eligibility, so the bound has to keep that output the

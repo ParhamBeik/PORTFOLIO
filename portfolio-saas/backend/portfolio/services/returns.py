@@ -46,6 +46,7 @@ from .deflator import normalize_basis, to_basis
 from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
+from zoneinfo import ZoneInfo
 from marketdata.calendars import candle_close_qs, market_closure_days
 from marketdata.models import (
     DailyStockHistory,
@@ -70,6 +71,7 @@ TRADING_DAYS_PER_YEAR = 252
 # Cache key template — versioned by max(Price.id) so it auto-rotates on writes.
 RETURNS_CACHE_KEY = "returns:daily:{history_days}d:v{version}"
 RETURNS_CACHE_TTL = 600
+_TEHRAN = ZoneInfo("Asia/Tehran")
 # Asset keys whose raw price is in USD; multiply through by usd_cash to Toman.
 # Extra days we fetch upstream of the window so resampling keeps the first row.
 _HISTORY_BUFFER_DAYS = 7
@@ -84,7 +86,7 @@ def _returns_asset_keys(universe, held_keys=frozenset()):
     return set(universe) | set(held_keys) if universe is not None else None
 
 
-def _price_version_fingerprint(asset_keys=None) -> str:
+def _price_version_fingerprint(asset_keys=None, *, include_price=True) -> str:
     """Monotonic fingerprint of the sources feeding one returns panel.
 
     Warehouse tables are symbol-keyed while the live fallback is asset-keyed.
@@ -150,7 +152,7 @@ def _price_version_fingerprint(asset_keys=None) -> str:
         price_rows = price_rows.filter(asset__key__in=asset_keys)
 
     return "{}:{}:{}:{}:{}:{}:{}:{}".format(
-        hex(_max_id(price_rows, symbol_keyed=False))[2:],
+        hex(_max_id(price_rows, symbol_keyed=False))[2:] if include_price else "-",
         hex(_max_id(DailyStockHistory.objects))[2:],
         hex(_max_id(GoldCurrencyHistory.objects))[2:],
         hex(_max_id(MarketCandle.objects))[2:],
@@ -519,6 +521,46 @@ def get_universe_by_mode(mode: str, user=None, account=None) -> list[str] | None
     return None
 
 
+def _live_keys_memo_key(history_days, as_of_dt, universe, basis, held_keys) -> str:
+    # Per Tehran day: the window slides daily, and with it which assets have
+    # enough warehouse history to skip the live fallback.
+    day = timezone.now().astimezone(_TEHRAN).date().isoformat()
+    base = _returns_cache_key(history_days, as_of_dt, universe, basis, "-", held_keys)
+    return f"returns:live-keys:v1:{day}:{base}"
+
+
+def _returns_version(asset_keys, live_keys) -> str:
+    """Cache version for one returns matrix: exactly the rows it reads.
+
+    The warehouse half is `_price_version_fingerprint` without its `Price`
+    component. `Price` -- the live 20-second ticks -- only enters a matrix for
+    the assets `_load_price_panel` sends to the live fallback (no or too little
+    warehouse history), so it is versioned over THOSE assets alone, as recorded
+    by the previous build of the same matrix (`live_keys`). Versioning it over
+    every asset in the panel, as before, rotated the key on every tick of every
+    held stock while the market was open, although for a stock with a warehouse
+    series no tick changes a single number in the matrix; every risk, frontier
+    and optimization request rebuilt years of history from scratch for nothing.
+
+    With no record yet (first build of the day, or evicted) the whole panel's
+    `Price` rows are versioned, as before -- the conservative answer.
+    """
+    warehouse = _price_version_fingerprint(asset_keys, include_price=False)
+    if live_keys is None:
+        price_rows = Price.objects
+        if asset_keys is not None:
+            price_rows = price_rows.filter(asset__key__in=asset_keys)
+        tag = "a"
+    else:
+        price_rows = Price.objects.filter(asset__key__in=live_keys)
+        tag = "l"
+    latest = (
+        price_rows.aggregate(version=Max("id"))["version"] or 0
+        if live_keys is None or live_keys else 0
+    )
+    return f"{tag}{latest:x}:{warehouse}"
+
+
 def _returns_cache_key(
     history_days: int,
     as_of: dt.datetime | None,
@@ -855,7 +897,11 @@ def _load_price_panel(
     # panel is legitimately daily and should keep its weekend observations.
     if tse_keys.intersection(panel.columns):
         panel = _align_to_trading_sessions(panel)
-    return _trim_to_contiguous(panel), gate_excluded, warnings
+    panel = _trim_to_contiguous(panel)
+    # Which assets this panel read from the live Price table (whether or not it
+    # found usable rows there): `_returns_version` keys the cache on exactly these.
+    panel.attrs["live_fallback_keys"] = sorted(fallback_keys)
+    return panel, gate_excluded, warnings
 
 
 def _load_live_price_panel(cutoff: dt.datetime, as_of: dt.datetime | None, keys: list[str]) -> pd.DataFrame:
@@ -1187,7 +1233,10 @@ def daily_returns_matrix(
     as_of_dt = normalize_as_of(as_of)
     basis = normalize_basis(basis)
     held_keys = frozenset(held_keys)
-    version = _price_version_fingerprint(_returns_asset_keys(universe, held_keys))
+    asset_keys = _returns_asset_keys(universe, held_keys)
+    live_memo_key = _live_keys_memo_key(history_days, as_of_dt, universe, basis, held_keys)
+    live_keys = cache.get(live_memo_key)
+    version = _returns_version(asset_keys, live_keys)
     key = _returns_cache_key(history_days, as_of_dt, universe, basis, version, held_keys)
     cached = cache.get(key)
     if cached is not None:
@@ -1206,6 +1255,9 @@ def daily_returns_matrix(
         history_days=history_days, as_of=as_of_dt, universe=universe,
         held_keys=held_keys,
     )
+    # Union, never replace: a key that left the fallback since an earlier build
+    # stays versioned, which can only cost a spare rebuild, never a stale hit.
+    read_live = sorted(set(live_keys or ()) | set(panel.attrs.get("live_fallback_keys", ())))
 
     # Apply basis conversion. real_toman raises deflator.CpiUnavailable (see
     # config/settings.py) when the window reaches a Jalali year with no
@@ -1260,16 +1312,18 @@ def daily_returns_matrix(
         }
     returns.attrs["warnings"] = warnings
     returns.attrs["periods_per_year"] = frequency
-    cache.set(
-        key,
-        {
-            **payload,
-            "excluded": excluded,
-            "warnings": warnings,
-            "periods_per_year": frequency,
-        },
-        timeout=RETURNS_CACHE_TTL,
-    )
+    entry = {
+        **payload,
+        "excluded": excluded,
+        "warnings": warnings,
+        "periods_per_year": frequency,
+    }
+    cache.set(key, entry, timeout=RETURNS_CACHE_TTL)
+    # The next build of this matrix versions on the assets this one read live.
+    # (It costs one rebuild after the first build of a day; filing this result
+    # under that next version too is not exact -- that version is read after
+    # the build, so a tick landing mid-build would be filed as already seen.)
+    cache.set(live_memo_key, read_live, timeout=24 * 3600)
     return returns, excluded
 
 
