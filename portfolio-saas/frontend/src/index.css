@@ -507,6 +507,18 @@ body:has(.app-bottom-tabs) {
   font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
 }
 
+/* In Persian the layout runs right to left, but a run of text should take
+   its direction from its own first letter. Untranslated English inherited
+   RTL and was reordered by the bidi algorithm: "9 of 10 prices aren't live"
+   printed as "of 10 prices aren't live ... 9".
+   Sentence containers only: on table cells and flex items it also moved the
+   alignment, and Persian names left their column edge. A bare amount like
+   "T 4,361,200,000" is already in correct RTL reading order. `direction`,
+   and so the flex/grid order, stays RTL. */
+:root[dir="rtl"] :where(p, li, label, summary, option, [role="status"], [role="alert"]) {
+  unicode-bidi: plaintext;
+}
+
 /* A sideways-scrolling control row that does not draw a scrollbar under it. */
 .no-scrollbar {
   scrollbar-width: none;

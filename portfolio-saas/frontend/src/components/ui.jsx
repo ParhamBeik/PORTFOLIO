@@ -592,16 +592,21 @@ export const Loading = ({ children = "Loading…", testId, minHeight }) => (
   </p>
 );
 
-export const Empty = ({ children, action, testId, minHeight }) => (
-  <div
-    data-testid={testId}
-    className="flex flex-col items-center justify-center py-8 text-center text-sm text-muted"
-    style={minHeight ? { minHeight } : undefined}
-  >
-    <p>{children}</p>
-    {action && <div className="mt-3">{action}</div>}
-  </div>
-);
+export function Empty({ children, action, testId, minHeight }) {
+  const t = useT();
+  return (
+    <div
+      data-testid={testId}
+      className="flex flex-col items-center justify-center py-8 text-center text-sm text-muted"
+      style={minHeight ? { minHeight } : undefined}
+    >
+      {/* A plain sentence is looked up like every other label; anything
+          composed is the caller's to translate. */}
+      <p>{typeof children === "string" ? t(children) : children}</p>
+      {action && <div className="mt-3">{action}</div>}
+    </div>
+  );
+}
 
 export const ErrorState = ({ error, onRetry, testId }) => (
   <div

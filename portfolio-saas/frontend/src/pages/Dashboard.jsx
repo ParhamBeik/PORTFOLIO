@@ -639,10 +639,11 @@ function hasCostData(rows) {
 }
 
 function NoCostYet() {
+  const t = useT();
   return (
     <Empty
       testId="dashboard-performance-no-cost"
-      action={<Link to="/activity" className="inline-flex min-h-10 items-center rounded-md border border-border bg-panel-2 px-3 text-sm font-medium text-text hover:bg-border sm:min-h-8">Record purchases</Link>}
+      action={<Link to="/activity" className="inline-flex min-h-10 items-center rounded-md border border-border bg-panel-2 px-3 text-sm font-medium text-text hover:bg-border sm:min-h-8">{t("Record purchases")}</Link>}
     >
       Record what you paid to see profit and loss.
     </Empty>
@@ -1230,7 +1231,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
               header: "Portfolio",
               // Cut to one line: a long portfolio name doubled every phone card.
               render: (r) => (
-                <span className="inline-block max-w-[11rem] truncate align-bottom" title={r.account_name || ""}>
+                <span dir="auto" className="inline-block max-w-[11rem] truncate align-bottom" title={r.account_name || ""}>
                   {r.account_name || "—"}
                 </span>
               ),
@@ -1435,6 +1436,7 @@ function WhyDrawer({ assetKey, onClose }) {
 
 
 export default function Dashboard({ user }) {
+  const t = useT();
   const portfolio = usePortfolio();
   const { activeId, basis } = portfolio;
   const valuationState = useApi(() => valuation(activeId, basis), [activeId, basis], { pollMs: 60000 });
@@ -1461,7 +1463,7 @@ export default function Dashboard({ user }) {
                 data-testid="dashboard-empty-add"
                 className="inline-flex min-h-10 items-center rounded-md bg-[var(--c-accent-fill)] px-4 text-sm font-medium text-white hover:opacity-90"
               >
-                Add the first asset
+                {t("Add the first asset")}
               </Link>
             }
           >

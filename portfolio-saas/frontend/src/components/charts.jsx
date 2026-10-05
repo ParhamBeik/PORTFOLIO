@@ -15,6 +15,7 @@ import {
   VisualMapComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
+import { useT } from "../i18n.js";
 import { compactAxisDigits, date, dateTime, dateTick, money, moneyCompact, pct, toman, tomanCompact, trendAxisTick } from "../format.js";
 
 registerEcharts([
@@ -642,6 +643,9 @@ export function GroupedBar({ data, labels, height = 300, label = "Comparison", t
  */
 export function Donut({ data, height = 260, label = "Allocation breakdown", valueFormat = toman, testId }) {
   const t = useChartTokens();
+  // Class names ("Gold", "Cash") have Persian entries; a user's own portfolio
+  // or holding name has none and comes back unchanged.
+  const tr = useT();
   const chart = useRef(null);
   const [active, setActive] = useState(null);
   const rows = data || [];
@@ -698,7 +702,7 @@ export function Donut({ data, height = 260, label = "Allocation breakdown", valu
           aria-live="polite"
           data-testid={testId ? `${testId}-readout` : undefined}
         >
-          <span className="max-w-full truncate text-xs text-muted">{shown ? shown.name : "Total"}</span>
+          <span className="max-w-full truncate text-xs text-muted">{shown ? tr(shown.name) : tr("Total")}</span>
           <span className="tabular max-w-full truncate text-sm font-semibold text-text">
             {valueFormat(shown ? Number(shown.value) : rows.reduce((s, d) => s + Number(d.value || 0), 0))}
           </span>
@@ -724,7 +728,7 @@ export function Donut({ data, height = 260, label = "Allocation breakdown", valu
                 className="size-2.5 shrink-0 rounded-full"
                 style={{ background: SERIES[(d.slot ?? i) % SERIES.length] }}
               />
-              <span className="min-w-0 flex-1 truncate text-text">{d.name}</span>
+              <span className="min-w-0 flex-1 truncate text-text">{tr(d.name)}</span>
               <span className="tabular text-muted">{pct(Number(d.value) / total)}</span>
             </button>
           </li>
