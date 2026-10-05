@@ -1,0 +1,138 @@
+name: Deploy
+
+# Same shape in all four repositories on this VPS:
+#   CI green on a push to main -> images built HERE, on GitHub's machines -> GHCR :<sha>
+#   -> the VPS's own runner checks out <sha>, pulls those images, runs the release script.
+#
+# Images are built on GitHub because the VPS (Iran) cannot reach files.pythonhosted.org,
+# so `pip install` inside an on-box build fails. The deploy runs on a self-hosted runner
+# because GitHub's machines cannot open a connection INTO the VPS; the runner dials out.
+#
+# workflow_run is the only trigger that waits for CI to finish, and GitHub always reads
+# this file from the default branch.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Commit SHA already built (the rollback path)."
+        required: true
+
+concurrency:
+  # Never cancel a deploy halfway; queue the next one instead.
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # A manual dispatch is always allowed: it is the rollback path, and rollback matters most
+    # when CI is red. Otherwise only a green CI on a push to this repository may ship.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.tag.outputs.value }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # backend, migrate, beat and the three Celery workers all run this image.
+          - name: backend
+            context: portfolio-saas/backend
+            file: portfolio-saas/backend/Dockerfile
+            build-args: ""
+          - name: frontend
+            context: portfolio-saas/frontend
+            file: portfolio-saas/frontend/Dockerfile.prod
+            build-args: ""
+    steps:
+      # The commit CI tested, not whatever main points at by now.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - id: tag
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            [[ "$REQUESTED_TAG" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::tag must be a full commit SHA"; exit 1; }
+            echo "value=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$TESTED_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A rollback reuses the image already in GHCR; rebuilding old source would not be one.
+      - if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          build-args: ${{ matrix.build-args }}
+          push: true
+          tags: |
+            ghcr.io/parhambeik/portfolio-${{ matrix.name }}:${{ steps.tag.outputs.value }}
+            ghcr.io/parhambeik/portfolio-${{ matrix.name }}:latest
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          provenance: false
+
+  deploy:
+    needs: build
+    runs-on: [self-hosted, vps]
+    environment: production
+    env:
+      APP: portfolio
+      TAG: ${{ needs.build.outputs.tag }}
+      PUBLIC_URL: https://portfolio.parhambm.ir
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # Recorded before anything changes: after the fact it would be the broken version.
+      - name: Record the version currently serving
+        id: record
+        run: echo "previous=$(cat /opt/apps/portfolio-repo/.release 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+
+      # The runner user has no Docker access. Its one sudo right is this root-owned
+      # wrapper: refuse a SHA not on main, check it out, run portfolio-saas/scripts/deploy.sh
+      # with IMAGE_TAG=<sha>, record it. Source: /usr/local/sbin/app-release.
+      - name: Pull images and restart
+        run: printf '%s\n' "$GHCR_TOKEN" | sudo -n /usr/local/sbin/app-release "$APP" "$TAG" "${{ github.actor }}"
+
+      - name: Smoke-test through the public edge
+        run: |
+          for attempt in $(seq 1 20); do
+            # deploy.sh already checks readiness, workers, beat and the edge headers;
+            # this is the same view a user gets.
+            if curl -fsS -o /dev/null --max-time 10 "$PUBLIC_URL/" &&
+               curl -fsS -o /dev/null --max-time 10 "$PUBLIC_URL/api/health/ready/"; then
+              echo "serving after ${attempt} attempt(s)"; exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::$PUBLIC_URL did not answer after deploy"; exit 1
+
+      - name: Roll back to the previous release
+        if: failure() && steps.record.outputs.previous != '' && steps.record.outputs.previous != env.TAG
+        env:
+          PREVIOUS: ${{ steps.record.outputs.previous }}
+        run: |
+          echo "::warning::deploy failed - redeploying $PREVIOUS"
+          printf '%s\n' "$GHCR_TOKEN" | sudo -n /usr/local/sbin/app-release "$APP" "$PREVIOUS" "${{ github.actor }}"
+          echo "::notice::rolled back to $PREVIOUS; this run stays red"
