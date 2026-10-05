@@ -10,8 +10,10 @@ import {
   setRefreshToken,
   shareExport,
 } from "./mobile.js";
+import { initPerf, perfNow, recordApi } from "./perf.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || (isNative ? API_ORIGIN : "");
+initPerf(API_BASE);
 export const SESSION_EXPIRED_EVENT = "lattice:session-expired";
 let accessToken = null;
 let refreshPromise = null;
@@ -200,12 +202,20 @@ export async function api(path, { method = "GET", body, _retried = false } = {})
   const isForm = typeof FormData !== "undefined" && body instanceof FormData;
   const headers = isForm ? {} : { "Content-Type": "application/json" };
   if (auth.token) headers.Authorization = `Bearer ${auth.token}`;
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    credentials: isNative ? "omit" : "include",
-    headers,
-    body: isForm ? body : body ? JSON.stringify(body) : undefined,
-  });
+  const startedAt = perfNow();
+  let res;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      method,
+      credentials: isNative ? "omit" : "include",
+      headers,
+      body: isForm ? body : body ? JSON.stringify(body) : undefined,
+    });
+  } catch (error) {
+    recordApi(path, method, 0, perfNow() - startedAt);
+    throw error;
+  }
+  recordApi(path, method, res.status, perfNow() - startedAt);
 
   // On expiry, try one silent refresh then replay the original request.
   if (res.status === 401 && !_retried && auth.token) {

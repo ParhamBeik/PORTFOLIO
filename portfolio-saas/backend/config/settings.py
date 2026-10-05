@@ -57,12 +57,16 @@ INSTALLED_APPS = [
     "accounts",
     "portfolio",
     "research",
+    "perf",
 ]
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "config.observability.RequestIDMiddleware",
+    # Times every /api/ request (after the request id exists, before anything
+    # else runs, so the measurement covers sessions, CSRF and auth too).
+    "perf.middleware.PerfMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -208,6 +212,10 @@ REST_FRAMEWORK = {
         # room full of guests can be accommodated without a deploy.
         "login": os.getenv("LOGIN_THROTTLE", "20/min"),
         "register": os.getenv("REGISTER_THROTTLE", "10/min"),
+        # Browser timing beacons: unauthenticated (sendBeacon carries no
+        # Authorization header), so per IP. A tab flushes about four times a
+        # minute; this leaves room for a full office behind one NAT.
+        "perf_client": os.getenv("PERF_CLIENT_THROTTLE", "240/min"),
     },
     # M5: render Decimal as a string so large Toman values stay exact on the wire.
     "DEFAULT_RENDERER_CLASSES": ("config.api.DecimalStringJSONRenderer",),
@@ -807,6 +815,14 @@ if ENVIRONMENT != "dev" or not DEBUG:
 # 12-factor logging: structured lines to stdout only (the container runtime
 # collects them). No files — disk in a container is ephemeral and stdout plays
 # well with `docker compose logs` / journald / your log shipper.
+# Request latency measurement (perf app). Every /api/ request is timed into an
+# hourly rollup; requests slower than PERF_SLOW_REQUEST_MS also get a WARNING
+# log line with route, ms, SQL count/time and market state, greppable by
+# request id. PERF_LOG_ALL_REQUESTS=1 logs every request at INFO instead.
+PERF_ENABLED = os.getenv("PERF_ENABLED", "1") == "1"
+PERF_SLOW_REQUEST_MS = int(os.getenv("PERF_SLOW_REQUEST_MS", "1000"))
+PERF_LOG_ALL_REQUESTS = os.getenv("PERF_LOG_ALL_REQUESTS", "0") == "1"
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

@@ -45,6 +45,7 @@ urlpatterns = [
     path("api/research/settings/", ResearchSettingsView.as_view(), name="research-settings"),
     path("api/research/runs/", ResearchRunView.as_view(), name="research-runs"),
     path("api/research/runs/<int:run_id>/", ResearchRunDetailView.as_view(), name="research-run-detail"),
+    path("api/perf/", include("perf.urls")),
     path("api/", include("portfolio.urls")),
     path(
         "api/token/refresh/",
