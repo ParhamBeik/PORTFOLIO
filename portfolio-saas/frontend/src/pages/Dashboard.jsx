@@ -460,6 +460,12 @@ function AllocationCard({ state }) {
       <Async {...state} testId="dashboard-allocation-body" empty="No priced holdings yet." minHeight={385}>
         {(data) => {
           const groups = groupByClass(data.items || []);
+          // Cash is part of the hero total, so it is part of the split. Left
+          // out, a portfolio that was 41% cash read "Gold 98.8%" and the ring's
+          // total disagreed with the number directly above it.
+          const cash = Number(data.cash_tomans) || 0;
+          if (cash > 0) groups.push({ name: "Cash", value: cash });
+          groups.sort((a, b) => b.value - a.value);
           if (!groups.length) return <Empty>No priced holdings yet.</Empty>;
           // `Donut` defaults its tooltip to Toman, so this was the last panel on
           // the page still suffixing a converted dollar amount " T" after the

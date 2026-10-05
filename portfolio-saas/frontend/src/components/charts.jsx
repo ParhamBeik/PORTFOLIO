@@ -119,7 +119,7 @@ export function useChartTokens() {
  * charts here change their series COUNT between renders, and a merged update
  * leaves the departed series on screen.
  */
-function EChart({ option, height, label, testId, className = "w-full" }) {
+function EChart({ option, height, label, testId, className = "w-full", onReady }) {
   const host = useRef(null);
   const chart = useRef(null);
   // The newest option, readable from the mount effect. A chart that mounts late
@@ -128,6 +128,8 @@ function EChart({ option, height, label, testId, className = "w-full" }) {
   // chart renders empty until something upstream happens to re-render.
   const latestOption = useRef(option);
   latestOption.current = option;
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   useEffect(() => {
     const el = host.current;
@@ -145,6 +147,7 @@ function EChart({ option, height, label, testId, className = "w-full" }) {
       if (chart.current) return;
       chart.current = init(el);
       if (latestOption.current) chart.current.setOption(latestOption.current, true);
+      onReadyRef.current?.(chart.current);
       resizeObserver = new ResizeObserver(() => chart.current?.resize());
       resizeObserver.observe(el);
     };
@@ -288,6 +291,10 @@ function chrome(t) {
       padding: [8, 10],
       textStyle: { color: t.text, fontSize: 12 },
       extraCssText: "border-radius:8px;",
+      // Keep the tooltip inside the chart's own box. Unconfined, ECharts places
+      // it beside the pointer, and a tap near the edge of a phone screen put it
+      // 22px off the left edge with the asset name cut off.
+      confine: true,
     },
     categoryAxis: {
       axisLine: { lineStyle: { color: t.axis } },
@@ -610,9 +617,13 @@ export function GroupedBar({ data, labels, height = 300, label = "Comparison", t
 /**
  * Composition by category. `data` is [{ name, value }].
  *
- * `valueFormat` renders the raw magnitude in the tooltip. It defaults to Toman
- * because most callers pass money, but a caller passing weights must pass `pct`
- * — otherwise a 0.35 weight reads as "0 T".
+ * `valueFormat` renders the raw magnitude in the centre readout. It defaults to
+ * Toman because most callers pass money, but a caller passing weights must pass
+ * `pct` — otherwise a 0.35 weight reads as "0 T".
+ *
+ * Hovering or tapping a slice OR its legend row selects it and the ring's centre
+ * shows that slice's name, value and share. A 1% slice is a few pixels wide and
+ * cannot be hit with a finger; the legend row is a full-width target.
  *
  * The legend carries name + share as text: that is the relief for the three
  * light-mode palette slots that sit under 3:1 against white, so identity is
@@ -620,23 +631,23 @@ export function GroupedBar({ data, labels, height = 300, label = "Comparison", t
  */
 export function Donut({ data, height = 260, label = "Allocation breakdown", valueFormat = toman, testId }) {
   const t = useChartTokens();
-  const total = (data || []).reduce((s, d) => s + Number(d.value || 0), 0) || 1;
+  const chart = useRef(null);
+  const [active, setActive] = useState(null);
+  const rows = data || [];
+  const total = rows.reduce((s, d) => s + Number(d.value || 0), 0) || 1;
   const option = useMemo(() => {
     if (!t) return null;
-    const c = chrome(t);
     return {
-      tooltip: {
-        trigger: "item",
-        ...c.tooltipBase,
-        formatter: (p) =>
-          tipRows(p, t, () => `${valueFormat(p.value)} · ${pct(p.value / total)}`),
-      },
+      // No floating tooltip: the selection is read out in the ring's centre,
+      // which cannot leave the screen and works the same for a tap as a hover.
+      tooltip: { show: false },
       series: [{
         type: "pie",
-        radius: ["58%", "86%"],
+        radius: ["62%", "88%"],
         avoidLabelOverlap: false,
         label: { show: false },
         labelLine: { show: false },
+        emphasis: { scale: true, scaleSize: 4, focus: "self" },
         data: (data || []).map((d, i) => ({
           name: d.name,
           value: Number(d.value || 0),
@@ -650,21 +661,61 @@ export function Donut({ data, height = 260, label = "Allocation breakdown", valu
       }],
       animation: false,
     };
-  }, [data, t, total, valueFormat]);
+  }, [data, t]);
 
+  const select = (i) => {
+    const c = chart.current;
+    setActive(i);
+    if (!c) return;
+    c.dispatchAction({ type: "downplay", seriesIndex: 0 });
+    if (i != null) c.dispatchAction({ type: "highlight", seriesIndex: 0, dataIndex: i });
+  };
+  const onReady = (c) => {
+    chart.current = c;
+    c.on("mouseover", (p) => select(p.dataIndex));
+    c.on("click", (p) => select(p.dataIndex));
+    c.on("globalout", () => select(null));
+  };
+
+  const shown = active != null ? rows[active] : null;
   return (
-    <div className="flex flex-wrap items-center gap-6" data-testid={testId}>
-      <EChart option={option} height={height} label={label} className="min-w-56 flex-1" />
-      <ul className="min-w-48 flex-1 space-y-1.5 text-sm">
-        {(data || []).map((d, i) => (
-          <li key={d.name} className="flex items-center gap-2">
-            <span
-              aria-hidden="true"
-              className="size-2.5 shrink-0 rounded-full"
-              style={{ background: SERIES[i % SERIES.length] }}
-            />
-            <span className="flex-1 truncate text-text">{d.name}</span>
-            <span className="tabular text-muted">{pct(Number(d.value) / total)}</span>
+    <div className="flex flex-wrap items-center gap-x-6 gap-y-4" data-testid={testId}>
+      <div className="relative min-w-56 flex-1">
+        <EChart option={option} height={height} label={label} onReady={onReady} />
+        <div
+          className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-[22%] text-center"
+          aria-live="polite"
+          data-testid={testId ? `${testId}-readout` : undefined}
+        >
+          <span className="max-w-full truncate text-xs text-muted">{shown ? shown.name : "Total"}</span>
+          <span className="tabular max-w-full truncate text-sm font-semibold text-text">
+            {valueFormat(shown ? Number(shown.value) : rows.reduce((s, d) => s + Number(d.value || 0), 0))}
+          </span>
+          {shown && <span className="tabular text-xs text-muted">{pct(Number(shown.value) / total)}</span>}
+        </div>
+      </div>
+      <ul className="min-w-48 flex-1 text-sm">
+        {rows.map((d, i) => (
+          <li key={d.name}>
+            <button
+              type="button"
+              // Hover is mouse-only: a tap fires a synthetic mouseenter AND a
+              // click, so a toggling click undid the selection it had just made.
+              onPointerEnter={(e) => e.pointerType === "mouse" && select(i)}
+              onPointerLeave={(e) => e.pointerType === "mouse" && select(null)}
+              onFocus={() => select(i)}
+              onClick={() => select(i)}
+              aria-pressed={active === i}
+              className={`flex min-h-10 w-full items-center gap-2 rounded-md px-2 text-left ${active === i ? "bg-panel-2" : ""}`}
+            >
+              <span
+                aria-hidden="true"
+                className="size-2.5 shrink-0 rounded-full"
+                style={{ background: SERIES[i % SERIES.length] }}
+              />
+              <span className="min-w-0 flex-1 truncate text-text">{d.name}</span>
+              <span className="tabular text-muted">{pct(Number(d.value) / total)}</span>
+            </button>
           </li>
         ))}
       </ul>
