@@ -527,7 +527,7 @@ export default function Ledger() {
       // name; the full name stays reachable on hover.
       render: (r) =>
         r.asset_key ? (
-          <bdi title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</bdi>
+          <bdi className="whitespace-nowrap" title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</bdi>
         ) : CASH_KINDS.includes(r.kind) ? (
           "Cash"
         ) : (
@@ -551,8 +551,11 @@ export default function Ledger() {
       key: "actions",
       header: "",
       align: "right",
+      // Shown on the row being pointed at (or focused) on a desktop, where two
+      // buttons on every row were most of the ink in the table; always shown
+      // on a touch screen, which has no hover to reveal them.
       render: (r) => (
-        <div className="flex justify-end gap-2">
+        <div className="flex justify-end gap-2 transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:focus-within:opacity-100">
           {(r.quantity != null || CASH_KINDS.includes(r.kind)) && (
             <Button
               variant="ghost"
@@ -574,7 +577,12 @@ export default function Ledger() {
       key: "portfolio",
       header: "Portfolio",
       mobile: "meta",
-      render: (r) => r.account_name || "—",
+      // One line: a long portfolio name stood every row three lines tall.
+      render: (r) => (
+        <span dir="auto" className="inline-block max-w-[12rem] truncate align-bottom" title={r.account_name || ""}>
+          {r.account_name || "—"}
+        </span>
+      ),
     });
   }
 

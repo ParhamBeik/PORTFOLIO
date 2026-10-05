@@ -386,4 +386,5 @@ export default {
   "{n} of {total} days rebuilt from prices": "{n} روز از {total} روز از روی قیمت‌ها بازسازی شده",
   "Switched-off assets estimated on some days": "دارایی‌های خاموش در برخی روزها تخمینی‌اند",
   "No rows.": "ردیفی نیست.",
+  "Add a holding": "افزودن دارایی",
 };

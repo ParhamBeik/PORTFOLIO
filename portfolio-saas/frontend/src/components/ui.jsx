@@ -470,7 +470,9 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
   // as it did before roles existed.
   const metaKeys = columns.filter((c) => c.mobile === "meta").map((c) => c.key);
   const cellClass = (c, expanded) => {
-    const align = c.align === "right" ? "text-right" : "";
+    // A right-aligned column is a number, and a number never wraps: a price
+    // split as "170,000,000" over "T" reads as two values.
+    const align = c.align === "right" ? "text-right whitespace-nowrap" : "";
     if (!mobileCards) return `px-3 py-2 ${align}`;
     if (!compact) return `px-3 py-2 flex items-start justify-between gap-3 sm:table-cell ${align}`;
     const base = `px-3 py-2 sm:table-cell ${align}`;
@@ -515,7 +517,7 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
               <tr
                 key={key}
                 data-testid={testId ? `${testId}-row` : undefined}
-                className={`border-b border-border/60 last:border-0 hover:bg-panel-2 ${mobileCards ? card : ""} ${
+                className={`group border-b border-border/60 last:border-0 hover:bg-panel-2 ${mobileCards ? card : ""} ${
                   rowClass?.(row) || ""
                 }`}
               >

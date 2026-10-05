@@ -59,7 +59,9 @@ export default function Onboarding() {
     <div className="mx-auto max-w-lg">
       <Card
         testId="onboarding-card"
-        title="Add your first holding"
+        // "First" only when it is: this form is also the Add holdings tab of
+        // a portfolio that already holds plenty.
+        title={accounts.some((a) => (a.holdings || []).length) ? "Add a holding" : "Add your first holding"}
         subtitle="Your dashboard, optimizer and universe comparison all read from your holdings. One is enough to get started."
       >
         <form className="space-y-4" onSubmit={submit}>
