@@ -232,31 +232,32 @@ export default function Comparison() {
 
   return (
     <div>
-      <PageHeader
-        title="Comparison"
-        subtitle="What the same money would have done somewhere else."
-      />
+      <PageHeader title="Compare" />
+      {/* The page's one big choice sits above the card, as its own control.
+          Inside the card's header it shared a line with the range and its
+          own label repeated as the card title. */}
+      <div className="mb-4">
+        <Tabs
+          options={MODES}
+          value={mode}
+          onChange={setMode}
+          label="Comparison mode"
+          testId="comparison-mode"
+          grid
+        />
+      </div>
       <Card
-        title={MODES.find((m) => m.value === mode).label}
+        title="Pick what to compare"
         subtitle={BLURB[mode]}
         testId="comparison-panel"
         actions={
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <Tabs
-              options={MODES}
-              value={mode}
-              onChange={setMode}
-              label="Comparison mode"
-              testId="comparison-mode"
-            />
-            <Tabs
-              options={RANGES}
-              value={range}
-              onChange={setRange}
-              label="Window"
-              testId="comparison-range"
-            />
-          </div>
+          <Tabs
+            options={RANGES}
+            value={range}
+            onChange={setRange}
+            label="Window"
+            testId="comparison-range"
+          />
         }
       >
         <Async {...choices} testId="comparison-choices">
@@ -267,7 +268,10 @@ export default function Comparison() {
                   <Picker
                     label={mode === "holdings" ? "Mine" : "What you did"}
                     value={subject}
-                    onChange={setSubject}
+                    onChange={(v) => {
+                      setSubject(v);
+                      if (v === target) setTarget("");
+                    }}
                     options={holdings}
                     testId="comparison-subject"
                   />
@@ -276,7 +280,11 @@ export default function Comparison() {
                   label={mode === "holdings" ? "Against mine" : "Instead"}
                   value={target}
                   onChange={setTarget}
-                  options={mode === "holdings" ? holdings : targets}
+                  // Never the asset already picked on the left: comparing a
+                  // holding with itself is an answer of "0" dressed up as one.
+                  options={(mode === "holdings" ? holdings : targets).filter(
+                    (o) => !needsSubject || o.key !== subject
+                  )}
                   testId="comparison-target"
                 />
               </div>

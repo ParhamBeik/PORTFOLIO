@@ -391,7 +391,7 @@ export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" 
 }
 
 /** Segmented control. `options` is [{ value, label, disabled }]. */
-export function Tabs({ options, value, onChange, label, testId }) {
+export function Tabs({ options, value, onChange, label, testId, grid = false }) {
   const t = useT();
   return (
     <div
@@ -400,8 +400,11 @@ export function Tabs({ options, value, onChange, label, testId }) {
       data-testid={testId}
       // One row that scrolls sideways when it runs out of width. Wrapping put
       // half the options on a second line and the control changed height when
-      // a label was translated.
-      className="no-scrollbar inline-flex max-w-full gap-1 overflow-x-auto rounded-lg border border-border bg-panel-2 p-1"
+      // a label was translated. `grid` is for a row of long labels that is the
+      // page's main choice: two columns on a phone so none hides off-screen.
+      className={`no-scrollbar max-w-full gap-1 rounded-lg border border-border bg-panel-2 p-1 ${
+        grid ? "grid grid-cols-2 sm:inline-flex sm:overflow-x-auto" : "inline-flex overflow-x-auto"
+      }`}
     >
       {options.map((o) => (
         <button
@@ -411,7 +414,7 @@ export function Tabs({ options, value, onChange, label, testId }) {
           aria-pressed={value === o.value}
           data-testid={testId ? `${testId}-${o.value}` : undefined}
           onClick={() => onChange(o.value)}
-          className={`min-h-9 shrink-0 rounded-md px-3 text-sm font-medium whitespace-nowrap transition-colors sm:min-h-7 ${DISABLED_DIM} ${
+          className={`min-h-9 shrink-0 rounded-md px-3 text-sm font-medium transition-colors sm:min-h-7 sm:whitespace-nowrap ${grid ? "leading-tight" : "whitespace-nowrap"} ${DISABLED_DIM} ${
             value === o.value
               ? "bg-panel text-text shadow-[0_0_0_1px_var(--c-border),0_1px_2px_rgb(0_0_0/0.08)]"
               : "text-muted hover:text-text"

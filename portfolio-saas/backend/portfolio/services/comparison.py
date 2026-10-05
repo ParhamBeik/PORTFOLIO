@@ -276,10 +276,14 @@ def _panel(keys, days, held) -> pd.DataFrame:
 
 def _refuse(keys, reason, detail) -> None:
     if keys:
-        raise ComparisonError(
-            reason, f"{detail} for {', '.join(sorted(set(keys)))}.",
-            keys=sorted(set(keys)),
-        )
+        keys = sorted(set(keys))
+        # The sentence is shown to the reader as is, so it names assets the way
+        # every picker on the page does; the keys stay on the error for code.
+        names = {a.key: _label(a) for a in Asset.objects.filter(key__in=keys)}
+        # Each name in a first-strong isolate: a Persian name beside an English
+        # comma reorders the list in the browser ("for ,سکه امامی یورو.").
+        listed = ", ".join(f"\u2068{names.get(k, k)}\u2069" for k in keys)
+        raise ComparisonError(reason, f"{detail} for {listed}.", keys=keys)
 
 
 def _units_held(flows, index) -> pd.Series:
