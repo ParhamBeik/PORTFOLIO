@@ -1,15 +1,22 @@
+import { lazy, Suspense } from "react";
 import { useSearchParams } from "react-router-dom";
-import Dashboard from "./Dashboard.jsx";
-import DataHealth from "./DataHealth.jsx";
-import Family from "./Family.jsx";
-import Ledger from "./Ledger.jsx";
-import Onboarding from "./Onboarding.jsx";
-import AssetHistory from "./AssetHistory.jsx";
-import Comparison from "./Comparison.jsx";
-import Guidance from "./Guidance.jsx";
-import Explore from "./Explore.jsx";
-import Watchlist from "./Watchlist.jsx";
-import { Tabs } from "../components/ui.jsx";
+import { Loading, Tabs } from "../components/ui.jsx";
+
+// One chunk per page. These used to be static imports, which folded every page
+// -- and through them charts.jsx and echarts -- into the single chunk every
+// signed-in route loads, so opening the ledger downloaded the risk page too.
+const Dashboard = lazy(() => import("./Dashboard.jsx"));
+const DataHealth = lazy(() => import("./DataHealth.jsx"));
+const Family = lazy(() => import("./Family.jsx"));
+const Ledger = lazy(() => import("./Ledger.jsx"));
+const Onboarding = lazy(() => import("./Onboarding.jsx"));
+const AssetHistory = lazy(() => import("./AssetHistory.jsx"));
+const Comparison = lazy(() => import("./Comparison.jsx"));
+const Guidance = lazy(() => import("./Guidance.jsx"));
+const Explore = lazy(() => import("./Explore.jsx"));
+const Watchlist = lazy(() => import("./Watchlist.jsx"));
+
+const page = (element) => <Suspense fallback={<Loading />}>{element}</Suspense>;
 
 function Destination({ choices, initial, testId, user }) {
   const [params, setParams] = useSearchParams();
@@ -26,7 +33,7 @@ function Destination({ choices, initial, testId, user }) {
         label="Section"
         testId={testId}
       />
-      <div className="mt-6"><Current user={user} /></div>
+      <div className="mt-6">{page(<Current user={user} />)}</div>
     </div>
   );
 }
@@ -58,9 +65,9 @@ export function ResearchDestination() {
 }
 
 export function CompareDestination() {
-  return <Comparison />;
+  return page(<Comparison />);
 }
 
 export function GuidanceDestination({ user, onUserChange }) {
-  return <Guidance user={user} onUserChange={onUserChange} />;
+  return page(<Guidance user={user} onUserChange={onUserChange} />);
 }

@@ -9,6 +9,7 @@ from .valuation import (  # noqa: F401
     asset_value,
     get_latest_prices,
     invalidate_prices_cache,
+    refresh_prices_cache,
     value_account,
     value_user,
 )

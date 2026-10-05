@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { auth, me, restoreSession, SESSION_EXPIRED_EVENT } from "./api.js";
 import { clearMobileData, hasOfflineSnapshot, isNative } from "./mobile.js";
+import { beginPage } from "./perf.js";
 import { Network } from "@capacitor/network";
 import OfflinePortfolio from "./OfflinePortfolio.jsx";
 import Auth from "./components/Auth.jsx";
@@ -110,7 +111,12 @@ function AuthRoute({ mode, onAuthed }) {
 }
 
 function RouteTitle({ signedIn = false }) {
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
+  const view = new URLSearchParams(search).get("view");
+
+  useEffect(() => {
+    beginPage(view ? `${pathname}:${view}` : pathname);
+  }, [pathname, view]);
 
   useEffect(() => {
     const page = PAGE_TITLES[pathname] || (signedIn ? "Portfolio" : "Sign in");

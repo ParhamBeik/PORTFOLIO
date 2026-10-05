@@ -10,13 +10,14 @@ from rest_framework.exceptions import NotFound
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from ..models import Holding, LedgerEntry, Transaction
+from ..models import Account, Holding, LedgerEntry, Transaction
 from ..serializers import (
     LedgerEntryInputSerializer,
     LedgerEntryPatchSerializer,
     LedgerEntrySerializer,
     TradeInputSerializer,
     TransactionSerializer,
+    latest_transaction_ids,
 )
 from ..services import execute_trade, get_latest_prices, undo_trade
 from ..services.catalog import resolve_asset_key
@@ -333,7 +334,11 @@ class TransactionListView(APIView):
                 rows = rows.filter(account_id=int(account_id))
             except (TypeError, ValueError):
                 return Response({"detail": "account must be an integer id."}, status=400)
-        return Response(TransactionSerializer(rows, many=True).data)
+        rows = rows.select_related("account")
+        context = {"latest_transaction_ids": latest_transaction_ids(
+            Account.objects.filter(user=request.user)
+        )}
+        return Response(TransactionSerializer(rows, many=True, context=context).data)
 
 
 class TransactionDestroyView(APIView):

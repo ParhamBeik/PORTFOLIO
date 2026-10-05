@@ -3346,3 +3346,42 @@ def test_opposite_moves_at_once_do_not_deadlock(asset_catalog, make_user, monkey
     for t in threads:
         t.join(30)
     assert results == {'a->b': 'ok', 'b->a': 'ok'}, results
+
+
+def test_transaction_list_query_count_does_not_grow_per_row(db):
+    """`is_latest_for_asset` comes from one batched query, not one per row."""
+    from decimal import Decimal
+
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from rest_framework.test import APIClient
+
+    from accounts.models import User
+    from portfolio.models import Account, Asset, Transaction
+
+    user = User.objects.create_user(email="txq@x.com", password="pw123456789")
+    account = Account.objects.create(user=user, name="Main")
+    assets = [
+        Asset.objects.create(key=f"tx_asset_{i}", name=f"A{i}", asset_class=Asset.AssetClass.CASH)
+        for i in range(4)
+    ]
+    client = APIClient()
+    client.force_authenticate(user)
+
+    def run():
+        with CaptureQueriesContext(connection) as ctx:
+            response = client.get("/api/transactions/")
+        assert response.status_code == 200
+        return response, len(ctx.captured_queries)
+
+    Transaction.objects.create(account=account, asset=assets[0], side="buy",
+                               quantity=Decimal("1"), price_tomans=Decimal("10"))
+    _, few = run()
+    for asset in assets:
+        for _ in range(3):
+            Transaction.objects.create(account=account, asset=asset, side="buy",
+                                       quantity=Decimal("1"), price_tomans=Decimal("10"))
+    response, many = run()
+    assert many == few
+    latest = [row for row in response.data if row["is_latest_for_asset"]]
+    assert len(latest) == len(assets)

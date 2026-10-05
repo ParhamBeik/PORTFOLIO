@@ -54,6 +54,7 @@ app.conf.update(
         # backlog and other operational failures.
         "marketdata.tasks.operational_health_check": {"queue": "live"},
         "marketdata.tasks.capture_operational_metrics": {"queue": "live"},
+        "perf.tasks.flush_perf_rollups": {"queue": "live"},
         "marketdata.tasks.capture_research_coverage": {"queue": "live"},
         "marketdata.tasks.capture_derivative_snapshots": {"queue": "live"},
         "marketdata.tasks.capture_market_snapshots": {"queue": "live"},
@@ -163,6 +164,12 @@ app.conf.beat_schedule = {
     "operational-health-every-15-minutes": {
         "task": "marketdata.tasks.operational_health_check",
         "schedule": crontab(minute="*/15"),
+    },
+    # Latency rollups: copies hourly Redis totals into RequestPerfRollup. A few
+    # hundred upserts at most; idempotent, so a missed or doubled run is harmless.
+    "perf-flush-every-5-minutes": {
+        "task": "perf.tasks.flush_perf_rollups",
+        "schedule": 300.0,
     },
     "capture-operational-metrics-every-15-minutes": {
         "task": "marketdata.tasks.capture_operational_metrics",

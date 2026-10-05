@@ -2982,3 +2982,78 @@ def test_past_snapshot_dollars_use_that_days_rate_not_todays(make_user, monkeypa
     assert usd["basis"] == "usd_denominated"
     assert dated[three_ago.strftime("%Y-%m-%d")]["total"] == 20.0
     assert dated[twenty_ago.strftime("%Y-%m-%d")]["total"] is None
+
+
+def test_refresh_overwrites_cache_without_a_cold_gap(asset_catalog, write_prices, monkeypatch):
+    """The fetch task refreshes in place: readers never see a deleted entry."""
+    from portfolio.services.valuation import _LATEST_PRICES_CACHE_KEY, refresh_prices_cache
+
+    write_prices({"emami_coin": Decimal("480000000")})
+    get_latest_prices()
+    write_prices({"emami_coin": Decimal("500000000")})
+
+    refreshed = refresh_prices_cache()
+
+    assert refreshed["emami_coin"] == Decimal("500000000")
+    assert cache.get(_LATEST_PRICES_CACHE_KEY)["emami_coin"] == Decimal("500000000")
+    calls = []
+    monkeypatch.setattr(
+        "portfolio.services.valuation._compute_latest_prices",
+        lambda state: calls.append(state) or {},
+    )
+    assert get_latest_prices()["emami_coin"] == Decimal("500000000")
+    assert calls == []
+
+
+def test_concurrent_miss_waits_for_the_rebuild_in_flight(asset_catalog, write_prices, monkeypatch):
+    """A second reader during a rebuild takes the result instead of recomputing."""
+    import threading
+
+    from portfolio.services import valuation as valuation_mod
+
+    write_prices({"emami_coin": Decimal("480000000")})
+    invalidate_prices_cache()
+    state = valuation_mod.current_market_state()
+    # Another request holds the rebuild lock...
+    assert cache.add(valuation_mod._LATEST_PRICES_LOCK_KEY, 1, timeout=30)
+    calls = []
+    monkeypatch.setattr(
+        valuation_mod, "_compute_latest_prices", lambda s: calls.append(s) or {},
+    )
+    # ...and publishes its result shortly after.
+    publisher = threading.Timer(
+        0.2, valuation_mod._store_latest_prices, args=({"emami_coin": Decimal("1")}, state),
+    )
+    publisher.start()
+    try:
+        assert get_latest_prices() == {"emami_coin": Decimal("1")}
+    finally:
+        publisher.join()
+        cache.delete(valuation_mod._LATEST_PRICES_LOCK_KEY)
+    assert calls == []
+
+
+def test_value_account_liabilities_do_not_query_per_row(db):
+    """One liability or five: the asset join is fetched with the liabilities."""
+    from accounts.models import User
+    from portfolio.models import Account, Asset, Liability
+    from portfolio.services.valuation import value_account
+
+    user = User.objects.create_user(email="liab@x.com", password="pw123456789")
+    account = Account.objects.create(user=user, name="Main")
+    asset = Asset.objects.create(key="loan_ccy", name="Loan", asset_class=Asset.AssetClass.CASH)
+
+    def count_queries():
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as ctx:
+            value_account(account)
+        return len(ctx.captured_queries)
+
+    Liability.objects.create(account=account, asset=asset, label="L0", amount_tomans=100)
+    count_queries()  # warm the shared price cache so only per-account work is counted
+    one = count_queries()
+    for index in range(1, 5):
+        Liability.objects.create(account=account, asset=asset, label=f"L{index}", amount_tomans=100)
+    assert count_queries() == one
