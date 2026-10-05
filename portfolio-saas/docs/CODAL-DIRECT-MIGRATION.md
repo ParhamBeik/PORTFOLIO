@@ -1,6 +1,6 @@
 # Codal direct: migration plan (BrsApi → codal.ir)
 
-Status: **proposal, waiting for owner decisions** (§9). Measured 2026-10-05 from the
+Status: **decided (§9); phase 0 shipped, phase 1 next**. Measured 2026-10-05 from the
 production VPS (`45.139.10.12`, ParsPack AS60631, Iran). Nothing in this document has
 been built or run against production beyond read-only probes and SELECTs.
 
@@ -203,7 +203,7 @@ New model `CodalDiscoveryDay(date, total, pages, letters_seen, verified_complete
 | 0 | CAPTCHA guard + stop Attachment.aspx + attempt cap | fewer codal.ir hits, no bad artifacts | deployed, 48 h with 0 challenged-and-stored |
 | 1 | Fetcher + `CodalDiscoveryDay` + schema; **shadow mode** (crawl, match, write nothing to `CodalAnnouncement`) | search.codal.ir traffic only | cross-reference report (§7) reviewed by owner |
 | 2 | Serial backfill + direct writes behind `CODAL_DISCOVERY_SOURCE=codal` | new letters from codal.ir | 7 days: every day since cutover verified complete |
-| 3 | Retire BrsApi Codal + raise tick share | ~960 AIO/day moves to ticks | tick backlog trending down |
+| 3 | Retire BrsApi Codal + tick share 0.25 → 0.50 | ~960 AIO/day moves to ticks | tick backlog trending down |
 | 4 | Historical day backfill (newest → oldest) | rows only; downloads restricted per §5.5 | owner approval + disk check per storage policy |
 | 5 | Extraction quality (separate plan) | — | — |
 
@@ -239,11 +239,14 @@ Rolled up per symbol and per year. 1404/07/02 so far: 290 theirs vs 201 ours.
 - **Upside of direct discovery:** `HasXbrl` / `XbrlUrl` are exposed directly. XBRL, where present, may beat HTML scraping for statements, which makes it worth a measured look first.
 - **Readers of parsed facts:** only Explore, Research and `research_coverage`. Nothing in valuation, returns or optimization reads them.
 
-## 9. Decisions needed (asked one at a time)
+## 9. Decisions (owner, 2026-10-05)
 
-1. **Discovery scope:** crawl market-wide (all 546k letters, every publisher) or only symbols in our catalog? *Recommendation: market-wide.* Rows are cheap, per-day completeness is only provable market-wide, and downloads are scoped separately.
-2. **Shadow before cutover** (phase 1 writes nothing), or write directly from day one? *Recommendation: shadow, ~1 week.*
-3. **Freed quota:** raise the tick share, and to what? *Recommendation: 0.25 → 0.35 in the same release as phase 3, re-measured after 7 days.*
-4. **Document scope** for the historical backfill (§5.5). *Recommendation: catalog symbols only; HTML/Excel first, PDF only as fallback.*
-5. **Terms of use:** codal.ir publishes no robots.txt. Confirm we're comfortable with automated reads at the measured polite rate.
-6. **Orphan tables:** `CodalFact` / `CodalParsedTable` / `CodalSection` (3.9 GB). Keep as-is per the storage policy, or approve a separate decision. *No action proposed here.*
+| # | Question | Decision |
+|---|---|---|
+| 0 | Ship the CAPTCHA guard ahead of the plan | **Yes**: PR #50 merged (`1ad500d`) |
+| 1 | Discovery scope | **Market-wide** (all publishers); downloads scoped separately |
+| 2 | Rollout | **Shadow mode ~1 week** before writing to `CodalAnnouncement` |
+| 3 | Freed quota | **Tick share 0.25 → 0.50** in the same release as phase 3 |
+| 4 | Historical documents | **Catalog symbols only, HTML/Excel first**, PDF only as fallback; disk checked before each year |
+| 5 | codal.ir terms | **Proceed at the polite rate** (≤ ~24 search requests/h, back off on 429/CAPTCHA, never solve CAPTCHAs) |
+| 6 | Orphan tables (3.9 GB) | Not decided; no action in this plan |
