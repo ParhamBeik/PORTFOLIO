@@ -55,6 +55,14 @@ export function Card({ title, subtitle, info, actions, children, testId, classNa
   const t = useT();
   const [infoOpen, setInfoOpen] = useState(false);
   const infoId = testId ? `${testId}-info` : undefined;
+  // A subtitle that is a sentence is an explanation, and goes behind the (i)
+  // with `info`; a short one is a label ("Hypothetical — not orders", a key)
+  // and stays on screen. One rule here instead of a judgement at fifty sites.
+  const explains = isExplanation(subtitle);
+  const shownSubtitle = explains ? null : subtitle;
+  const details = explains || info
+    ? <>{explains && <p>{t(subtitle)}</p>}{info}</>
+    : null;
   return (
     <section
       data-testid={testId}
@@ -66,22 +74,17 @@ export function Card({ title, subtitle, info, actions, children, testId, classNa
             {title && (
               <div className="flex items-center gap-1">
                 <h2 className="text-base font-semibold">{t(title)}</h2>
-                {info && (
-                  <button
-                    type="button"
+                {details && (
+                  <InfoToggle
+                    open={infoOpen}
                     onClick={() => setInfoOpen((v) => !v)}
-                    aria-expanded={infoOpen}
-                    aria-controls={infoId}
-                    aria-label={t("About this")}
-                    data-testid={infoId ? `${infoId}-toggle` : undefined}
-                    className={`-my-1 inline-flex size-8 items-center justify-center rounded-md transition-colors hover:bg-panel-2 hover:text-text ${infoOpen ? "text-text" : "text-muted"}`}
-                  >
-                    <InfoIcon />
-                  </button>
+                    controls={infoId}
+                    testId={infoId ? `${infoId}-toggle` : undefined}
+                  />
                 )}
               </div>
             )}
-            {subtitle && <p className="mt-1 max-w-prose text-sm text-muted">{t(subtitle)}</p>}
+            {shownSubtitle && <p className="mt-1 max-w-prose text-sm text-muted">{t(shownSubtitle)}</p>}
           </div>
           {/* `min-w-0 max-w-full`: a flex item will not shrink below its
               content by default, so a row of tabs in here stretched the whole
@@ -89,17 +92,37 @@ export function Card({ title, subtitle, info, actions, children, testId, classNa
           {actions && <div className="min-w-0 max-w-full">{actions}</div>}
         </header>
       )}
-      {info && infoOpen && (
+      {details && infoOpen && (
         <div
           id={infoId}
           data-testid={infoId}
           className="-mt-1 mb-4 max-w-prose space-y-1 rounded-lg bg-panel-2 px-3 py-2 text-sm text-muted"
         >
-          {info}
+          {details}
         </div>
       )}
       {children}
     </section>
+  );
+}
+
+/** Longer than a label: a sentence someone may want, not one everyone must read. */
+const isExplanation = (text) => typeof text === "string" && text.length > 60;
+
+function InfoToggle({ open, onClick, controls, testId }) {
+  const t = useT();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-expanded={open}
+      aria-controls={controls}
+      aria-label={t("About this")}
+      data-testid={testId}
+      className={`-my-1 inline-flex size-8 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-panel-2 hover:text-text ${open ? "text-text" : "text-muted"}`}
+    >
+      <InfoIcon />
+    </button>
   );
 }
 
@@ -722,14 +745,30 @@ export const Disclosure = ({ summary, children, testId, open = false }) => (
 
 export function PageHeader({ title, subtitle, actions, meta }) {
   const t = useT();
+  const [open, setOpen] = useState(false);
+  // A page's title says what it is; the sentence about it is for someone who
+  // asks. Behind the (i) it costs one line instead of three on a phone.
+  const explains = isExplanation(subtitle);
   return (
-    <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
-      <div className="min-w-0">
-        <h1 className="text-xl font-semibold">{t(title)}</h1>
-        {subtitle && <p className="mt-1 max-w-prose text-sm text-muted">{t(subtitle)}</p>}
-        {meta}
+    <div className="mb-6">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1">
+            <h1 className="text-xl font-semibold">{t(title)}</h1>
+            {explains && (
+              <InfoToggle open={open} onClick={() => setOpen((v) => !v)} controls="page-header-info" testId="page-header-info-toggle" />
+            )}
+          </div>
+          {subtitle && !explains && <p className="mt-1 max-w-prose text-sm text-muted">{t(subtitle)}</p>}
+          {meta}
+        </div>
+        {actions && <div className="min-w-0 max-w-full">{actions}</div>}
       </div>
-      {actions && <div className="min-w-0 max-w-full">{actions}</div>}
+      {explains && open && (
+        <p id="page-header-info" className="mt-2 max-w-prose rounded-lg bg-panel-2 px-3 py-2 text-sm text-muted">
+          {t(subtitle)}
+        </p>
+      )}
     </div>
   );
 }
