@@ -100,18 +100,39 @@ def _record_origin_failure():
         fails = client.incr(_BREAKER_FAILS_KEY)
         client.expire(_BREAKER_FAILS_KEY, settings.CODAL_ORIGIN_COOLDOWN_SECONDS * 2)
         if fails >= settings.CODAL_ORIGIN_FAILURE_THRESHOLD:
-            client.set(
-                _BREAKER_COOLDOWN_KEY, "1", ex=settings.CODAL_ORIGIN_COOLDOWN_SECONDS
-            )
-            client.set(
-                _BREAKER_PROBE_PENDING_KEY,
-                "1",
-                ex=settings.CODAL_ORIGIN_COOLDOWN_SECONDS + 300,
-            )
-            client.delete(_BREAKER_PROBE_LOCK_KEY)
-            client.delete(_BREAKER_FAILS_KEY)
+            _park_origin(client)
     except Exception:
         pass
+
+
+def _park_origin(client=None):
+    """Open the breaker now: one cooldown, then a single recovery probe."""
+    client = client or _breaker_client()
+    if client is None:
+        return
+    try:
+        client.set(_BREAKER_COOLDOWN_KEY, "1", ex=settings.CODAL_ORIGIN_COOLDOWN_SECONDS)
+        client.set(
+            _BREAKER_PROBE_PENDING_KEY, "1", ex=settings.CODAL_ORIGIN_COOLDOWN_SECONDS + 300
+        )
+        client.delete(_BREAKER_PROBE_LOCK_KEY)
+        client.delete(_BREAKER_FAILS_KEY)
+    except Exception:
+        pass
+
+
+# codal.ir answers a client it considers too busy with a CAPTCHA page ("تأیید
+# کاربر": too many reports viewed, enter the security code) -- HTTP 200,
+# text/html, ~5.5-6 KB, varying per request. Measured 2026-10-05 on Decision.aspx
+# and Attachment.aspx. An `html` artifact accepts text/html, so without this the
+# challenge would be stored as the filing itself. Both markers, so a filing that
+# merely mentions one phrase is not mistaken for it.
+_CHALLENGE_MARKERS = ("تأیید کاربر".encode(), "کد امنیتی".encode())
+
+
+def _is_challenge(content):
+    head = content[:20000]
+    return all(marker in head for marker in _CHALLENGE_MARKERS)
 
 
 def _record_origin_success():
@@ -221,6 +242,12 @@ def download_artifact(url, kind):
                     raise CodalArtifactRejected("artifact_too_large")
                 chunks.append(chunk)
             content = b"".join(chunks)
+            if _is_challenge(content):
+                # Not this document's fault and not a dead path: the origin is
+                # rate-limiting us. Back off as a whole rather than per document,
+                # and leave the report retryable.
+                _park_origin()
+                raise CodalBlockedNetwork(f"captcha_challenge@{urlsplit(current).hostname or '?'}")
             if not _valid_magic(kind, content):
                 raise CodalArtifactRejected("invalid_content_signature")
             _check_archive(content)

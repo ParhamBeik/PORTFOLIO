@@ -933,6 +933,43 @@ def test_a_rejected_document_does_not_trip_the_origin_breaker(monkeypatch):
     assert tripped == []
 
 
+def test_a_captcha_challenge_is_never_stored_and_parks_the_origin(monkeypatch):
+    """codal.ir answers a busy client with a CAPTCHA page as HTTP 200 text/html,
+    which an html artifact would otherwise accept as the filing itself."""
+    from pathlib import Path
+
+    from marketdata.codal_storage import CodalBlockedNetwork
+
+    page = (Path(__file__).parent / "fixtures/codal_direct/captcha_challenge.html").read_bytes()
+    parked = []
+    monkeypatch.setattr(codal_storage, "origin_unreachable", lambda **kw: False)
+    monkeypatch.setattr(codal_storage, "_park_origin", lambda *a: parked.append(1))
+    monkeypatch.setattr(codal_storage, "_record_origin_success", lambda: None)
+
+    class _Response:
+        is_redirect = is_permanent_redirect = False
+        status_code = 200
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, size):
+            yield page
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        codal_storage.requests.Session, "get", lambda *a, **kw: _Response()
+    )
+    with pytest.raises(CodalBlockedNetwork, match="captcha_challenge@codal.ir"):
+        codal_storage.download_artifact(
+            "https://codal.ir/Reports/Decision.aspx?LetterSerial=x", "html"
+        )
+    assert parked == [1]
+
+
 def test_recovery_probe_is_single_flight(monkeypatch):
     class FakeRedis:
         def __init__(self):
