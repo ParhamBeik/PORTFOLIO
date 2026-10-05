@@ -1748,3 +1748,28 @@ def test_watchlist_is_private_tracked_symbols_only_and_shows_last_close(make_use
     assert peer.delete("/api/watchlist/فولاد/").status_code == 404
     assert client.delete("/api/watchlist/فولاد/").status_code == 204
     assert client.get("/api/watchlist/").json()["results"] == []
+
+
+def test_a_second_portfolio_with_the_same_name_is_a_400_not_a_500(make_user):
+    """The unique index used to answer a duplicate name with an IntegrityError."""
+    user = make_user(email="dupe-name@test.test")
+    other = make_user(email="other-owner@test.test")
+    Account.objects.create(user=user, name="Main")
+    Account.objects.create(user=other, name="Savings")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    response = client.post("/api/accounts/", {"name": "  Main  "}, format="json")
+    assert response.status_code == 400
+    assert "name" in response.json().get("details", response.json())
+
+    # Another owner's name is not taken, and the stored name is trimmed.
+    created = client.post("/api/accounts/", {"name": " Savings ", "goal": "Retirement"}, format="json")
+    assert created.status_code == 201
+    assert created.json()["name"] == "Savings"
+    assert created.json()["goal"] == "Retirement"
+
+    # Renaming a portfolio to its own name is not a clash; to a sibling's is.
+    main = Account.objects.get(user=user, name="Main")
+    assert client.patch(f"/api/accounts/{main.pk}/", {"name": "Main"}, format="json").status_code == 200
+    assert client.patch(f"/api/accounts/{main.pk}/", {"name": "Savings"}, format="json").status_code == 400

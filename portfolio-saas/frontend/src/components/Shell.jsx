@@ -4,7 +4,8 @@ import AccountMenu from "./AccountMenu.jsx";
 import Logo from "./Logo.jsx";
 import { usePortfolio } from "./PortfolioContext.jsx";
 import { setLang, useLang, useT } from "../i18n.js";
-import { Button, ErrorState, Select } from "./ui.jsx";
+import { createAccount } from "../api.js";
+import { Button, ErrorState, Field, Input, Modal, Select } from "./ui.jsx";
 
 const APP_NAME = "Holdings";
 
@@ -239,6 +240,80 @@ function BasisToggle({ basis, setBasis }) {
   );
 }
 
+const NEW_PORTFOLIO = "__new__";
+
+/**
+ * Name, and optionally what it is for. Onboarding was the only place a
+ * portfolio could be made, and it redirects anyone who already holds
+ * something -- so after the first, there was no way to make a second.
+ */
+function NewPortfolioDialog({ onClose, onCreated }) {
+  const t = useT();
+  const [name, setName] = useState("");
+  const [goal, setGoal] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      onCreated(await createAccount(name.trim(), "", goal.trim()));
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal
+      title="New portfolio"
+      onClose={onClose}
+      testId="new-portfolio"
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button
+            variant="primary"
+            type="submit"
+            form="new-portfolio-form"
+            disabled={!name.trim() || busy}
+            data-testid="new-portfolio-create"
+          >
+            {busy ? t("Creating…") : t("Create")}
+          </Button>
+        </>
+      }
+    >
+      <form id="new-portfolio-form" onSubmit={submit} className="space-y-4">
+        <Field label={t("Name")}>
+          <Input
+            label="Portfolio name"
+            className="w-full"
+            value={name}
+            maxLength={120}
+            data-autofocus
+            placeholder={t("e.g. Retirement, Kids, Trading")}
+            onChange={(e) => setName(e.target.value)}
+            data-testid="new-portfolio-name"
+          />
+        </Field>
+        <Field label={t("Goal (optional)")}>
+          <Input
+            label="Goal"
+            className="w-full"
+            value={goal}
+            maxLength={40}
+            onChange={(e) => setGoal(e.target.value)}
+            data-testid="new-portfolio-goal"
+          />
+        </Field>
+        {error && <ErrorState error={error} testId="new-portfolio-error" />}
+      </form>
+    </Modal>
+  );
+}
+
 /** فا / EN. Persian flips the whole document to right-to-left. */
 function LanguageToggle() {
   const lang = useLang();
@@ -260,6 +335,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
   const t = useT();
   const { accounts, activeId, setActive, basis, setBasis, error, reload } = usePortfolio();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   // Stable, because the drawer's focus-and-scroll-lock effect lists it as a
   // dependency. A fresh closure per render tore that effect down and rebuilt it
@@ -315,7 +391,15 @@ export default function Shell({ user, onLogout, onUserChange }) {
               data-testid="scope-account"
               className="app-toolbar-select"
               value={activeId ?? ""}
-              onChange={(e) => setActive(e.target.value === "" ? null : Number(e.target.value))}
+              onChange={(e) => {
+                // Not a scope: an action that lives where portfolios are picked,
+                // so the picker keeps showing the current one until it exists.
+                if (e.target.value === NEW_PORTFOLIO) {
+                  setCreating(true);
+                  return;
+                }
+                setActive(e.target.value === "" ? null : Number(e.target.value));
+              }}
             >
               <option value="">{t("All portfolios")}</option>
               {accounts.map((a) => (
@@ -324,6 +408,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
                   {a.goal ? ` · ${a.goal}` : ""}
                 </option>
               ))}
+              <option value={NEW_PORTFOLIO} data-testid="scope-account-new">+ {t("New portfolio")}…</option>
             </Select>
             <BasisToggle basis={basis} setBasis={setBasis} />
           </div>
@@ -367,6 +452,17 @@ export default function Shell({ user, onLogout, onUserChange }) {
           </div>
         </div>
       </header>
+
+      {creating && (
+        <NewPortfolioDialog
+          onClose={() => setCreating(false)}
+          onCreated={async (account) => {
+            setCreating(false);
+            await reload();
+            setActive(account.id);
+          }}
+        />
+      )}
 
       <NavDrawer
         open={mobileOpen}

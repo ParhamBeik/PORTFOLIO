@@ -1439,6 +1439,40 @@ export default function Dashboard({ user }) {
   const { activeId, basis } = portfolio;
   const valuationState = useApi(() => valuation(activeId, basis), [activeId, basis], { pollMs: 60000 });
 
+  // A portfolio with nothing in it -- just created, most often. Every card
+  // below would say "nothing yet" in its own words around a "0 T"; one card
+  // saying what to do first is the whole page.
+  const v = valuationState.data;
+  const isEmpty =
+    activeId != null && v && !valuationState.loading &&
+    !(v.items || []).length && !(v.hidden_items || []).length &&
+    !Number(v.cash_tomans) && !Number(v.total_liabilities);
+  if (isEmpty) {
+    const name = portfolio.accounts.find((a) => a.id === activeId)?.name;
+    return (
+      <div>
+        <h1 className="sr-only">Portfolio</h1>
+        <Card testId="dashboard-empty-portfolio">
+          <Empty
+            minHeight={280}
+            action={
+              <Link
+                to="/activity?add=trade"
+                data-testid="dashboard-empty-add"
+                className="inline-flex min-h-10 items-center rounded-md bg-[var(--c-accent-fill)] px-4 text-sm font-medium text-white hover:opacity-90"
+              >
+                Add the first asset
+              </Link>
+            }
+          >
+            <span className="block text-base font-semibold text-text">{name || "This portfolio"} is empty</span>
+            <span className="mt-1 block">Record something you own, or money you put in.</span>
+          </Empty>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div>
       <h1 className="sr-only">Portfolio</h1>

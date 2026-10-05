@@ -170,6 +170,27 @@ class AccountSerializer(serializers.ModelSerializer):
             "created_at", "updated_at",
         )
 
+    def validate_name(self, value):
+        """One name per owner, said as a 400 before the unique index says 500.
+
+        `uniq_account_name_per_user` is enforced only by the database, and the
+        user is attached in `perform_create`, after validation -- so a second
+        "Main" escaped as an IntegrityError and the client saw a server error
+        instead of a message it could show next to the field.
+        """
+        name = value.strip()
+        if not name:
+            raise serializers.ValidationError("Give the portfolio a name.")
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user is not None and user.is_authenticated:
+            taken = Account.objects.filter(user=user, name=name)
+            if self.instance is not None:
+                taken = taken.exclude(pk=self.instance.pk)
+            if taken.exists():
+                raise serializers.ValidationError("You already have a portfolio with this name.")
+        return name
+
 
 class LedgerEntryInputSerializer(serializers.Serializer):
     kind = serializers.ChoiceField(choices=LedgerEntry.Kind.choices)

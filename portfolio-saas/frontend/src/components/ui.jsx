@@ -648,6 +648,12 @@ const MODAL_WIDTHS = { default: "max-w-lg", wide: "max-w-3xl" };
 
 export function Modal({ title, subtitle, onClose, children, footer, testId, size = "default" }) {
   const panel = useRef(null);
+  // Read through a ref so the effect below runs once per opening. Keyed on
+  // `onClose`, it re-ran whenever a caller passed a fresh arrow -- every render
+  // of the page behind, a price poll included -- and each run sent focus back
+  // to the first button, out of the field someone was typing in.
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
 
   useEffect(() => {
     // Where focus came from, so it can go back there. Without this, closing a
@@ -664,7 +670,7 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
 
     const onKey = (e) => {
       if (e.key === "Escape") {
-        onClose();
+        closeRef.current();
         return;
       }
       // Trap Tab inside the dialog. `aria-modal` tells a screen reader the rest
@@ -690,7 +696,9 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
     // The page behind must not scroll under the scrim.
     const previous = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    focusable()[0]?.focus();
+    // A field marked `data-autofocus` is where the dialog's work starts; the
+    // close button, first in the DOM, is not.
+    (panel.current?.querySelector("[data-autofocus]") || focusable()[0])?.focus();
     return () => {
       document.removeEventListener("keydown", onKey);
       document.body.style.overflow = previous;
@@ -698,7 +706,7 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
       // that the save then removed has nothing to return to.
       if (opener instanceof HTMLElement && document.contains(opener)) opener.focus();
     };
-  }, [onClose]);
+  }, []);
 
   return (
     <div
