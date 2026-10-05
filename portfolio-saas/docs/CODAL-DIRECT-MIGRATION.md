@@ -90,6 +90,11 @@ flowchart LR
 
 - **Join key:** `LetterSerial` is present in `link` on 107,176 of 107,177 rows and is **unique across the table** (0 duplicates). It's the key that matches direct letters to stored rows.
 - **Coverage:** on 1404/07/02 codal.ir has 290 letters. A paged crawl returned **exactly 290 unique `TracingNo`**, so per-day completeness is provable. We hold 201 of them (**69%**). On 1404/07/05 we hold 300; the codal.ir total is _pending_. The full matched/unmatched/duplicate report is phase 2's deliverable.
+- **First match run (read-only), 160 letters = the newest 8 pages of 1404/07/05:**
+  - **114 matched by `LetterSerial` with 0 disagreements** on symbol, code and publish time.
+  - 46 are new to us: **45 from publishers outside our instrument catalog** (funds, unlisted issuers) and **1 for a catalog symbol**. For listed stocks, BrsApi discovery was ~99% complete on this sample.
+  - So the direct switch buys speed (§2), history, category data and zero quota. It does not fix a large daily gap for listed stocks.
+  - Also on this sample: 17 letters have no `let=` in `Url`; `HasXbrl` is 0 of 160; `HasExcel` 82, `HasAttachment` 79.
 - **Codes:** BrsApi `code` is the same `LetterCode` (`ن-67`), already ASCII-folded. `let=` in the URL is the letter type.
 
 ## 4. Where the freed BrsApi quota goes
