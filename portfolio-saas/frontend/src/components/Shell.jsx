@@ -13,7 +13,9 @@ const PAGES = [
   { to: "/activity", label: "Activity" },
   { to: "/research", label: "Research" },
   { to: "/compare", label: "Compare" },
-  { to: "/risk", label: "Risk" },
+  // Beta: its models have not passed the source checks the rest of the app
+  // is held to, and the label says so wherever the link appears.
+  { to: "/risk", label: "Risk", beta: true },
 ];
 
 // Nominal Toman and verified USD only. Real Toman (CPI) and USDT read as two
@@ -36,7 +38,7 @@ function MenuIcon({ open }) {
   );
 }
 
-function NavItem({ to, end, testId, children, onClick }) {
+function NavItem({ to, end, testId, children, onClick, beta }) {
   const t = useT();
   return (
     <NavLink
@@ -47,12 +49,22 @@ function NavItem({ to, end, testId, children, onClick }) {
       className={({ isActive }) => `app-nav-link${isActive ? " is-active" : ""}`}
     >
       {t(children)}
+      {beta && <BetaTag />}
     </NavLink>
   );
 }
 
+function BetaTag() {
+  const t = useT();
+  return (
+    <span className="ms-1.5 rounded border border-border px-1 py-px text-[10px] font-medium tracking-wide text-muted uppercase">
+      {t("Beta")}
+    </span>
+  );
+}
+
 /**
- * The page links, rendered twice: inline above `lg`, in the drawer below it.
+ * The page links, rendered twice: inline from `xl`, in the drawer below it.
  *
  * Two copies means two sets of test ids, and only one can be the canonical
  * `nav-activity` — a duplicate id resolves to whichever the DOM happens to hold
@@ -65,7 +77,7 @@ function NavLinks({ admin, suffix = "", onNavigate }) {
   return (
     <>
       {PAGES.map((p) => (
-        <NavItem key={p.to} to={p.to} end={p.end} testId={id(p.label)} onClick={onNavigate}>
+        <NavItem key={p.to} to={p.to} end={p.end} beta={p.beta} testId={id(p.label)} onClick={onNavigate}>
           {p.label}
         </NavItem>
       ))}
@@ -116,7 +128,7 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
 
   return (
     <div
-      className="app-drawer-scrim lg:hidden"
+      className="app-drawer-scrim xl:hidden"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -295,7 +307,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
               of a sticky header and still cut "All portfolios" to "All portfo".
               Basis is a two-way switch, so it is a toggle, not a dropdown. */}
           <div
-            className="app-toolbar order-2 lg:order-3 lg:ml-auto"
+            className="app-toolbar order-2 xl:order-3 xl:ml-auto"
             data-testid="header-toolbar"
           >
             <Select
@@ -316,7 +328,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
             <BasisToggle basis={basis} setBasis={setBasis} />
           </div>
 
-          {/* From `lg` up there is room for the links inline, and a drawer on
+          {/* From `xl` up there is room for the links inline, and a drawer on
               desktop would be hiding navigation for no reason.
               The breakpoint lives on `.app-nav-rail` in index.css, not in a
               `hidden lg:flex` here: that utility and the component class are
@@ -324,25 +336,25 @@ export default function Shell({ user, onLogout, onUserChange }) {
               rail rendered stacked inside a phone's header. */}
           <nav
             aria-label="Primary"
-            className="app-nav-rail lg:order-2"
+            className="app-nav-rail xl:order-2"
             data-testid="nav"
           >
             <NavLinks admin={user?.role === "admin"} />
           </nav>
 
-          <div className="order-3 ml-auto flex shrink-0 items-center gap-2 sm:gap-3 lg:order-4 lg:ml-0">
+          <div className="order-3 ml-auto flex shrink-0 items-center gap-2 sm:gap-3 xl:order-4 xl:ml-0">
             {/* Log out lives INSIDE this menu, next to the rest of the account
                 actions it belongs with — it was the only one that had a home.
-                The language switch is a once-ever setting: below lg it lives
+                The language switch is a once-ever setting: below xl it lives
                 in the drawer rather than taking header width from the scope. */}
-            <div className="hidden lg:block">
+            <div className="hidden xl:block">
               <LanguageToggle />
             </div>
             <AccountMenu user={user} onLogout={onLogout} onUserChange={onUserChange} />
 
             <button
               type="button"
-              className="app-header-btn inline-flex items-center justify-center rounded-md border border-border bg-panel-2 p-2 text-text lg:hidden"
+              className="app-header-btn inline-flex items-center justify-center rounded-md border border-border bg-panel-2 p-2 text-text xl:hidden"
               aria-label={mobileOpen ? "Close menu" : "Open menu"}
               aria-expanded={mobileOpen}
               aria-haspopup="dialog"

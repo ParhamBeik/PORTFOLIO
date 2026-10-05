@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { guidance, listAssets, setRiskProfile } from "../api.js";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
-import { Async, Card, Empty, PageHeader, Select } from "../components/ui.jsx";
+import { Async, Badge, Card, Empty, PageHeader, Select } from "../components/ui.jsx";
 import { assetLabel, pct } from "../format.js";
 import { useApi } from "../useApi.js";
 
@@ -52,10 +52,16 @@ export default function Guidance({ user, onUserChange }) {
 
   return (
     <div>
-      <PageHeader title="Legacy guidance" subtitle="Experimental rebalance models retained for existing links while their inputs and formulas are audited." />
-      <p className="mb-5 rounded border border-border bg-panel-2 p-3 text-sm text-muted" role="note">
-        These rankings have not passed the source checks required for the new research workspace. Use Portfolio for holdings and performance, and Explore for source-backed company figures.
-      </p>
+      <PageHeader
+        title="Risk"
+        subtitle="Rebalance models whose inputs and formulas are still being audited. They have not passed the source checks the rest of the app is held to; holdings and performance on Home are verified."
+        meta={(
+          <p className="mt-1 flex items-center gap-2 text-sm text-muted" role="note" data-testid="guidance-beta">
+            <Badge variant="warn">Beta</Badge>
+            Not yet source-verified — a starting point, not advice.
+          </p>
+        )}
+      />
       <div className="mb-5 max-w-xs">
         <Select label="Risk profile" value={user.risk_profile || "balanced"} onChange={changeProfile} disabled={saving} data-testid="guidance-risk-profile">
           {PROFILE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}

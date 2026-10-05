@@ -336,7 +336,9 @@ export default function AccountMenu({
         }`}
       >
         <span className="app-user-avatar" aria-hidden="true">{initial}</span>
-        <span className="max-w-[11rem] truncate text-sm text-muted">{user.email}</span>
+        {/* In the header the avatar says whose account it is; the address
+            costs the nav rail its single row until there is room for both. */}
+        <span className={`max-w-[11rem] truncate text-sm text-muted ${panelFill ? "" : "hidden 2xl:inline"}`}>{user.email}</span>
         <svg
           width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"
           className={`shrink-0 text-muted transition-transform ${open ? "rotate-180" : ""}`}

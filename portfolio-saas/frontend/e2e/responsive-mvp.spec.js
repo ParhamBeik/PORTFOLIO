@@ -43,11 +43,14 @@ for (const width of [390, 768, 1366]) {
     await fixtureApi(page);
     for (const path of ["/", "/activity", "/research", "/compare", "/risk", "/ops", "/onboarding"]) {
       await page.goto(path);
-      await expect(page.getByTestId("app-brand")).toBeVisible();
+      // The scope controls are the header's one fixture at every width; the
+      // brand steps aside on a phone, where the Home tab is the way home.
+      await expect(page.getByTestId("header-toolbar")).toBeVisible();
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       expect(overflow, `${path} overflows at ${width}px`).toBeLessThanOrEqual(1);
     }
-    if (width < 1024) {
+    // The inline rail starts at xl (1280px); below it the links are in the drawer.
+    if (width < 1280) {
       await page.getByTestId("nav-toggle").click();
       await expect(page.getByTestId("nav-drawer")).toBeVisible();
       await expect(page.getByTestId("nav-operations-mobile")).toBeVisible();

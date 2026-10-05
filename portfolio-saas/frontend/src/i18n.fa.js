@@ -13,6 +13,7 @@ export default {
   Portfolio: "پرتفوی",
   "All portfolios": "همه پرتفوی‌ها",
   "Language": "زبان",
+  Beta: "آزمایشی",
   "Valuation basis": "مبنای ارزش‌گذاری",
   Basis: "مبنا",
   Toman: "تومان",

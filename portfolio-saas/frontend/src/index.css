@@ -215,7 +215,8 @@ table,
    component class that sets `display` cannot be toggled by a display utility. */
 .app-nav-rail {
   display: none;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  white-space: nowrap;
   align-items: center;
   gap: 0.25rem;
   padding: 0.25rem;
@@ -224,7 +225,9 @@ table,
   background: color-mix(in srgb, var(--c-panel-2) 55%, var(--c-panel));
 }
 
-@media (min-width: 1024px) {
+/* From `xl`, not `lg`: at 1024px the five links, the scope controls and the
+   account button do not fit one row, and the page scrolled sideways. */
+@media (min-width: 1280px) {
   .app-nav-rail {
     display: flex;
   }
@@ -275,7 +278,7 @@ table,
   min-width: 0;
 }
 
-@media (min-width: 1024px) {
+@media (min-width: 1280px) {
   .app-toolbar {
     flex: none;
   }
