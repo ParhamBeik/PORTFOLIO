@@ -284,6 +284,9 @@ table,
 .app-toolbar .app-toolbar-select {
   flex: 0 1 15rem;
   min-width: 0;
+  /* A select is as wide as its longest option; one long portfolio name
+     pushed the nav rail onto a second row. */
+  max-width: 15rem;
   height: 2.5rem;
   padding-top: 0;
   padding-bottom: 0;

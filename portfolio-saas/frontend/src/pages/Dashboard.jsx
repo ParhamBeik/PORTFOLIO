@@ -16,6 +16,7 @@ import {
   benchmarks,
 } from "../api.js";
 import {
+  allocationByClass,
   ago,
   area,
   holdingLabel,
@@ -102,20 +103,6 @@ const ITEM_BADGE = { live: "good", manual: "warn", stale: "warn", quota: "seriou
 // Groups valuation items by asset class for the donut. Palette has 8 fixed
 // slots (charts.jsx SERIES), so anything past the top 7 folds into "Other"
 // rather than cycling colors and losing legend meaning.
-function groupByClass(items) {
-  const totals = new Map();
-  for (const it of items) {
-    const key = it.class || "other";
-    totals.set(key, (totals.get(key) || 0) + Number(it.value || 0));
-  }
-  const groups = [...totals.entries()]
-    .map(([name, value]) => ({ name: humanize(name), value }))
-    .sort((a, b) => b.value - a.value);
-  if (groups.length <= 8) return groups;
-  const rest = groups.slice(7).reduce((s, g) => s + g.value, 0);
-  return [...groups.slice(0, 7), { name: "Other", value: rest }];
-}
-
 /**
  * One chip per market the portfolio holds: open or closed, and how old its
  * newest price is. The total blends a stock market that closed at 12:30 with
@@ -453,6 +440,16 @@ function TrendCard({ activeId, basis }) {
             );
           }
 
+          // One point is not a line. A portfolio whose history starts today
+          // drew a lone dot on an empty grid.
+          if (points.filter((p) => p.y != null).length < 2) {
+            return (
+              <Empty testId="dashboard-trend-starting" minHeight={260}>
+                History starts today. The line fills in day by day.
+              </Empty>
+            );
+          }
+
           return (
             <>
               {/* The basis the POINTS are in, not the one the picker shows: the
@@ -497,13 +494,9 @@ function AllocationCard({ state }) {
       {/* Loaded body measures 382px: the 260px donut plus its legend column. */}
       <Async {...state} testId="dashboard-allocation-body" empty="No priced holdings yet." minHeight={385}>
         {(data) => {
-          const groups = groupByClass(data.items || []);
-          // Cash is part of the hero total, so it is part of the split. Left
-          // out, a portfolio that was 41% cash read "Gold 98.8%" and the ring's
-          // total disagreed with the number directly above it.
-          const cash = Number(data.cash_tomans) || 0;
-          if (cash > 0) groups.push({ name: "Cash", value: cash });
-          groups.sort((a, b) => b.value - a.value);
+          // Cash is part of the hero total, so it is part of the split (see
+          // `allocationByClass`).
+          const groups = allocationByClass(data.items, data.cash_tomans);
           if (!groups.length) return <Empty>No priced holdings yet.</Empty>;
           // `Donut` defaults its tooltip to Toman, so this was the last panel on
           // the page still suffixing a converted dollar amount " T" after the
@@ -1235,7 +1228,12 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
             columns.splice(1, 0, {
               key: "portfolio",
               header: "Portfolio",
-              render: (r) => r.account_name || "—",
+              // Cut to one line: a long portfolio name doubled every phone card.
+              render: (r) => (
+                <span className="inline-block max-w-[11rem] truncate align-bottom" title={r.account_name || ""}>
+                  {r.account_name || "—"}
+                </span>
+              ),
             });
           }
 

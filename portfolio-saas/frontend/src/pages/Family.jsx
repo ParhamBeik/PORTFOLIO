@@ -16,7 +16,7 @@ import {
   toneClass,
   toneFor,
 } from "../components/ui.jsx";
-import { humanize, money, moneyCompact, pct, perfLabel, signedPct } from "../format.js";
+import { allocationByClass, money, moneyCompact, pct, perfLabel, signedPct } from "../format.js";
 import { useApi } from "../useApi.js";
 
 const RANGES = [
@@ -27,17 +27,6 @@ const RANGES = [
 ];
 
 const MAX_CHART_PORTFOLIOS = 8;
-
-function groupByClass(items) {
-  const totals = new Map();
-  for (const it of items || []) {
-    const key = it.class || "other";
-    totals.set(key, (totals.get(key) || 0) + Number(it.value || 0));
-  }
-  return [...totals.entries()]
-    .map(([name, value]) => ({ name: humanize(name), value }))
-    .sort((a, b) => b.value - a.value);
-}
 
 function chartPortfolios(accounts) {
   const sorted = [...accounts].sort((a, b) => Number(b.total) - Number(a.total));
@@ -285,7 +274,7 @@ function AssetMix({ accounts, basis }) {
     <Card title="Asset class mix by portfolio" testId="breakdown-asset-mix">
       <div className="space-y-3">
         {accounts.map((account) => {
-          const groups = groupByClass(account.items);
+          const groups = allocationByClass(account.items, account.cash_tomans);
           if (!groups.length) return null;
           return (
             <Disclosure key={account.id} summary={`${account.name} · ${money(account.total, basis)}`} testId={`breakdown-mix-${account.id}`} open>
@@ -318,6 +307,19 @@ export default function Family() {
           const rowBasis = data.basis || basis;
           if (!rows.length) {
             return <Empty testId="breakdown-empty">Add at least one portfolio to see the breakdown.</Empty>;
+          }
+          // Breakdown compares portfolios. With one there is nothing to compare:
+          // the page drew a 100% share ring, a one-row table and a flat 100%
+          // line -- three ways of saying what Summary already says.
+          if (rows.length === 1) {
+            return (
+              <Empty
+                testId="breakdown-single"
+                action={<Link to="/" className="inline-flex min-h-10 items-center rounded-md border border-border bg-panel-2 px-3 text-sm font-medium text-text hover:bg-border sm:min-h-8">Go to Summary</Link>}
+              >
+                Breakdown compares portfolios side by side. You have one, so its numbers are on Summary.
+              </Empty>
+            );
           }
 
           const shareDonut = rows.map((r) => ({ name: r.name, value: Number(r.total) || 0 }));

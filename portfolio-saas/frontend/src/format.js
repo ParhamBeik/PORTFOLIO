@@ -301,3 +301,34 @@ export const area = (sqm) => (bad(sqm) ? "—" : num(sqm, 2) + " m²");
 
 /** Real-estate unit price: what one square meter costs, e.g. "100,000,000 T / m²". */
 export const perSqm = (tomans) => (bad(tomans) ? "—" : toman(tomans) + " / m²");
+
+/**
+ * A colour per asset class, for every allocation chart in the app. Assigned by
+ * rank, Gold was blue on one screen and orange on the next the moment cash
+ * outgrew it; a class keeps its colour wherever it appears.
+ */
+export const CLASS_SLOT = { Gold: 0, Cash: 1, Stock: 2, Crypto: 3, "Real Estate": 4, Other: 5 };
+
+/**
+ * Holdings grouped by asset class, for the allocation rings.
+ *
+ * Account cash joins the "Cash" class (USD, EUR and USDT are already there):
+ * it is part of the total above the ring, and a second "Cash" slice beside
+ * the first read as two different things. Empty classes are dropped -- an
+ * unpriced holding is not a 0% slice. Beyond eight, the tail becomes "Other".
+ */
+export function allocationByClass(items, cash = 0) {
+  const totals = new Map();
+  for (const it of items || []) {
+    const key = it.class || "Other";
+    totals.set(key, (totals.get(key) || 0) + Number(it.value || 0));
+  }
+  if (Number(cash) > 0) totals.set("Cash", (totals.get("Cash") || 0) + Number(cash));
+  const groups = [...totals.entries()]
+    .filter(([, value]) => value > 0)
+    .map(([key, value]) => ({ name: humanize(key), value, slot: CLASS_SLOT[key] ?? CLASS_SLOT.Other }))
+    .sort((a, b) => b.value - a.value);
+  if (groups.length <= 8) return groups;
+  const rest = groups.slice(7).reduce((sum, g) => sum + g.value, 0);
+  return [...groups.slice(0, 7), { name: "Other", value: rest, slot: CLASS_SLOT.Other }];
+}

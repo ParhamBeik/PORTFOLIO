@@ -290,7 +290,9 @@ function chrome(t) {
       borderWidth: 1,
       padding: [8, 10],
       textStyle: { color: t.text, fontSize: 12 },
-      extraCssText: "border-radius:8px;",
+      // Capped, so a long portfolio name cannot make the box wider than a
+      // phone: `confine` keeps a box inside the chart only if it fits there.
+      extraCssText: "border-radius:8px;max-width:min(320px,calc(100vw - 32px));white-space:normal;",
       // Keep the tooltip inside the chart's own box. Unconfined, ECharts places
       // it beside the pointer, and a tap near the edge of a phone screen put it
       // 22px off the left edge with the asset name cut off.
@@ -357,11 +359,15 @@ function tipRows(params, t, fmt) {
       const value = fmt(p.value?.[1] ?? p.value, p);
       // ECharts can name an unnamed series "series0" or "series 0"; pie
       // slices carry the real label on the datum (`name` = Stock / Gold / …).
+      // On an axis-triggered tooltip `name` is the CATEGORY -- the date -- so
+      // every line in a multi-series chart was labelled "2026-10-03" instead
+      // of the portfolio or asset it is. There the series name comes first.
       const genericSeries = /^series\s*\d+$/i.test(p.seriesName || "");
-      const label = p.name || (!genericSeries ? p.seriesName : "") || "—";
+      const series = !genericSeries ? p.seriesName : "";
+      const label = (p.axisValue !== undefined ? series || p.name : p.name || series) || "—";
       return `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between">` +
-        `<span style="color:${t.text}">${dot}${esc(label)}</span>` +
-        `<span style="color:${t.text};font-variant-numeric:tabular-nums">${value}</span></div>`;
+        `<span style="color:${t.text};min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${dot}${esc(label)}</span>` +
+        `<span style="color:${t.text};flex:none;font-variant-numeric:tabular-nums">${value}</span></div>`;
     })
     .join("");
 }
@@ -657,7 +663,7 @@ export function Donut({ data, height = 260, label = "Allocation breakdown", valu
           name: d.name,
           value: Number(d.value || 0),
           itemStyle: {
-            color: t.series[i % t.series.length],
+            color: t.series[(d.slot ?? i) % t.series.length],
             // 2px surface ring separates adjacent slices.
             borderColor: t.surface,
             borderWidth: 2,
@@ -716,7 +722,7 @@ export function Donut({ data, height = 260, label = "Allocation breakdown", valu
               <span
                 aria-hidden="true"
                 className="size-2.5 shrink-0 rounded-full"
-                style={{ background: SERIES[i % SERIES.length] }}
+                style={{ background: SERIES[(d.slot ?? i) % SERIES.length] }}
               />
               <span className="min-w-0 flex-1 truncate text-text">{d.name}</span>
               <span className="tabular text-muted">{pct(Number(d.value) / total)}</span>
