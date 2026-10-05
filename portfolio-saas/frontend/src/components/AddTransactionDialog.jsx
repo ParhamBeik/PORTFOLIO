@@ -81,6 +81,17 @@ function actionsFor(asset, isNewProperty) {
 
 // Which screens this particular entry needs. A cash movement has no asset to
 // pick, so it does not show a step that would only ever be empty.
+/**
+ * The line under a catalog row: its English name when the label is Persian,
+ * and where its price comes from. The provider's code (IR_COIN_EMAMI) is ours,
+ * not the reader's.
+ */
+function choiceHint(a) {
+  const english = a.name && a.name !== catalogLabel(a) && /[A-Za-z]/.test(a.name) ? a.name : "";
+  const source = a.is_manual ? "you set the price" : "market price";
+  return english ? `${english} · ${source}` : source[0].toUpperCase() + source.slice(1);
+}
+
 const stepsFor = (isCashMove) =>
   isCashMove
     ? ["category", "action", "amount", "review"]
@@ -352,13 +363,18 @@ export default function AddTransactionDialog({
     const lineTotal = priceIsRial
       ? (Number(form.quantity) * Number(form.price)) / 10
       : Number(form.quantity) * Number(form.price);
+    // "now" reads as a time, not a date: "at the market price for that date
+    // — now" was the sentence this used to print for the commonest case.
+    const today = !form.when;
     const priced = priceIsMine && form.price
       ? ` at ${Number(form.price).toLocaleString()} ${priceUnitLabel} each — ${toman(lineTotal)}`
-      : " at the market price for that date";
+      : today ? " at today's market price" : " at that day's market price";
     if (action === "opening_position") {
-      return `${verb} that you already hold ${form.quantity} ${name} — as of ${when}.`;
+      return `${verb} that you already hold ${form.quantity} ${name} — as of ${today ? "today" : when}.`;
     }
-    return `${verb} ${form.quantity} ${name}${priced} — ${when}.`;
+    return today
+      ? `${verb} ${form.quantity} ${name}${priced}.`
+      : `${verb} ${form.quantity} ${name} on ${when}${priced}.`;
   };
 
   const submit = async () => {
@@ -454,7 +470,6 @@ export default function AddTransactionDialog({
   return (
     <Modal
       title="Add to this portfolio"
-      subtitle="Record something you bought, sold, or already own."
       onClose={onClose}
       testId="add-transaction"
       size="wide"
@@ -497,7 +512,9 @@ export default function AddTransactionDialog({
           </p>
         )}
 
-        {accountId == null && (
+        {/* One portfolio is preselected and needs no picker; its name is
+            already on the line below. */}
+        {accountId == null && accounts.length > 1 && (
           <Select
             label="Portfolio"
             data-testid="add-transaction-account"
@@ -513,8 +530,15 @@ export default function AddTransactionDialog({
         )}
 
         {!targetAccountId && <p role="status" className="text-sm text-muted">Choose a portfolio before continuing.</p>}
-        {targetAccount && <p className="text-sm text-muted" data-testid="add-transaction-portfolio">Portfolio: {targetAccount.name}</p>}
-        {!isCashMove && assetKey && !asset?.is_house && <p className="text-sm text-muted" data-testid="add-transaction-owned">You hold {Number(holding?.quantity || 0).toLocaleString()} in this portfolio.</p>}
+        {/* One context line: where this goes, and how much of it is held. */}
+        {targetAccount && (
+          <p className="text-sm text-muted">
+            <span data-testid="add-transaction-portfolio">{targetAccount.name}</span>
+            {!isCashMove && assetKey && !asset?.is_house && (
+              <span data-testid="add-transaction-owned"> · you hold {Number(holding?.quantity || 0).toLocaleString()}</span>
+            )}
+          </p>
+        )}
         {action === "sell" && Number(form.quantity) > Number(holding?.quantity || 0) && <p role="alert" className="text-sm text-[var(--c-critical-text)]" data-testid="add-transaction-oversell">You cannot sell more than you hold.</p>}
         {current === "category" && (
           <Step n={stepNumber} of={totalSteps} title="What kind of thing is it?">
@@ -572,13 +596,7 @@ export default function AddTransactionDialog({
                   key={a.key || `${a.source}:${a.symbol}`}
                   label={catalogLabel(a)}
                   title={nativeName(a)}
-                  hint={
-                    a.is_manual
-                      ? "You set the price yourself"
-                      : a.symbol && a.symbol !== catalogLabel(a)
-                        ? `${a.symbol} — priced from the market`
-                        : "Priced from the market"
-                  }
+                  hint={choiceHint(a)}
                   selected={!!a.key && assetKey === a.key}
                   onClick={() => chooseRow(a)}
                   disabled={busy}
@@ -612,7 +630,8 @@ export default function AddTransactionDialog({
                   label={ACTIONS[k].label}
                   hint={ACTIONS[k].hint}
                   selected={action === k}
-                  onClick={() => { setError(null); setAction(k); }}
+                  // A single choice: picking it is the answer, so move on.
+                  onClick={() => { setError(null); setAction(k); setStep((s) => s + 1); }}
                   disabled={k === "sell" && Number(holding?.quantity || 0) <= 0}
                   testId={`add-transaction-action-${k}`}
                 />
