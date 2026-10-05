@@ -92,6 +92,7 @@ function NavLinks({ admin, suffix = "", onNavigate }) {
  * of the document every time they open it.
  */
 function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
+  const t = useT();
   const panel = useRef(null);
 
   useEffect(() => {
@@ -146,6 +147,11 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
             <NavLinks admin={user?.role === "admin"} suffix="-mobile" onNavigate={onClose} />
           </nav>
 
+          <div className="mt-4 flex items-center justify-between border-t border-border pt-4">
+            <span className="text-sm text-muted">{t("Language")}</span>
+            <LanguageToggle />
+          </div>
+
           {/* Account settings that only exist above the md breakpoint are
               account settings most people never find. */}
           <div className="mt-4 border-t border-border pt-4 md:hidden">
@@ -193,6 +199,34 @@ function BottomTabs() {
   );
 }
 
+/**
+ * Toman / USD. Two options behind a dropdown cost two taps and hid the other
+ * choice; a segmented switch shows both and changes in one. Symbols on a phone,
+ * words from `sm` up; the full name is always the accessible label.
+ */
+function BasisToggle({ basis, setBasis }) {
+  const t = useT();
+  const current = BASES.some(([v]) => v === basis) ? basis : "nominal_toman";
+  return (
+    <div role="group" aria-label={t("Valuation basis")} className="app-basis" data-testid="scope-basis">
+      {BASES.map(([v, l]) => (
+        <button
+          key={v}
+          type="button"
+          aria-pressed={current === v}
+          aria-label={t(l)}
+          data-testid={`scope-basis-${v}`}
+          onClick={() => setBasis(v)}
+          className="app-basis-btn"
+        >
+          <span aria-hidden="true" className="sm:hidden">{v === "usd_denominated" ? "$" : "T"}</span>
+          <span aria-hidden="true" className="hidden sm:inline">{t(l)}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** فا / EN. Persian flips the whole document to right-to-left. */
 function LanguageToggle() {
   const lang = useLang();
@@ -234,9 +268,12 @@ export default function Shell({ user, onLogout, onUserChange }) {
       </a>
 
       <header className="app-header sticky top-0 z-20 border-b border-border bg-panel/95 backdrop-blur-md">
-        <div className="flex min-h-[3.5rem] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2 lg:min-h-[4.25rem] lg:gap-x-5 lg:gap-y-3 lg:px-6 lg:py-3">
+        <div className="flex min-h-[3.5rem] items-center gap-x-3 px-4 sm:gap-x-4 py-2 lg:min-h-[4.25rem] lg:gap-x-5 lg:gap-y-3 lg:px-6 lg:py-3">
           <NavLink
             to="/"
+            // Below `sm` the bottom bar's Home tab is the way home, and the
+            // logo's 44px is the difference between "All portfolios" and
+            // "All portfo" in the scope picker beside it.
             className="app-brand group order-1 shrink-0"
             aria-label={`${APP_NAME} home`}
             data-testid="app-brand"
@@ -245,56 +282,38 @@ export default function Shell({ user, onLogout, onUserChange }) {
               <Logo size={20} title={APP_NAME} />
             </span>
             <span className="flex flex-col leading-tight">
-              <span className="text-sm font-semibold tracking-tight text-text lg:text-base">{APP_NAME}</span>
+              <span className="hidden text-sm font-semibold tracking-tight text-text sm:block lg:text-base">{APP_NAME}</span>
               {/* Below lg the header is fighting for every pixel of height and
                   the strapline is the one thing on it that says nothing. */}
               <span className="hidden text-[11px] text-muted lg:block">{t("Portfolio tracker")}</span>
             </span>
           </NavLink>
 
-          {/* Which portfolio, priced in what: these two say what every number on
-              the page MEANS, so they stay on screen at every width rather than
-              hiding behind the menu button. Below `lg` they are the compact
-              variant -- caption beside the control instead of above it, smaller
-              type -- because the alternative to shrinking them is a header that
-              eats 141px of a phone's viewport before any content loads. */}
+          {/* Which portfolio, priced in what: these say what every number on the
+              page MEANS, so they stay on screen at every width. On a phone they
+              share the brand row -- a second row of labelled selects cost 100px
+              of a sticky header and still cut "All portfolios" to "All portfo".
+              Basis is a two-way switch, so it is a toggle, not a dropdown. */}
           <div
-            className="app-toolbar order-3 w-full lg:ml-auto lg:w-auto"
+            className="app-toolbar order-2 lg:order-3 lg:ml-auto"
             data-testid="header-toolbar"
           >
-            <label className="app-toolbar-label">
-              <span className="app-toolbar-caption">{t("Portfolio")}</span>
-              <Select
-                label="Active portfolio"
-                data-testid="scope-account"
-                className="app-toolbar-select"
-                value={activeId ?? ""}
-                onChange={(e) => setActive(e.target.value === "" ? null : Number(e.target.value))}
-              >
-                <option value="">{t("All portfolios")}</option>
-                {accounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                    {a.goal ? ` · ${a.goal}` : ""}
-                  </option>
-                ))}
-              </Select>
-            </label>
-            <span className="app-toolbar-divider" aria-hidden="true" />
-            <label className="app-toolbar-label">
-              <span className="app-toolbar-caption">{t("Basis")}</span>
-              <Select
-                label="Valuation basis"
-                data-testid="scope-basis"
-                className="app-toolbar-select"
-                value={BASES.some(([v]) => v === basis) ? basis : "nominal_toman"}
-                onChange={(e) => setBasis(e.target.value)}
-              >
-                {BASES.map(([v, l]) => (
-                  <option key={v} value={v}>{t(l)}</option>
-                ))}
-              </Select>
-            </label>
+            <Select
+              label="Active portfolio"
+              data-testid="scope-account"
+              className="app-toolbar-select"
+              value={activeId ?? ""}
+              onChange={(e) => setActive(e.target.value === "" ? null : Number(e.target.value))}
+            >
+              <option value="">{t("All portfolios")}</option>
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                  {a.goal ? ` · ${a.goal}` : ""}
+                </option>
+              ))}
+            </Select>
+            <BasisToggle basis={basis} setBasis={setBasis} />
           </div>
 
           {/* From `lg` up there is room for the links inline, and a drawer on
@@ -305,16 +324,20 @@ export default function Shell({ user, onLogout, onUserChange }) {
               rail rendered stacked inside a phone's header. */}
           <nav
             aria-label="Primary"
-            className="app-nav-rail order-2"
+            className="app-nav-rail lg:order-2"
             data-testid="nav"
           >
             <NavLinks admin={user?.role === "admin"} />
           </nav>
 
-          <div className="order-2 ml-auto flex items-center gap-2 sm:gap-3 lg:order-4 lg:ml-0">
+          <div className="order-3 ml-auto flex shrink-0 items-center gap-2 sm:gap-3 lg:order-4 lg:ml-0">
             {/* Log out lives INSIDE this menu, next to the rest of the account
-                actions it belongs with — it was the only one that had a home. */}
-            <LanguageToggle />
+                actions it belongs with — it was the only one that had a home.
+                The language switch is a once-ever setting: below lg it lives
+                in the drawer rather than taking header width from the scope. */}
+            <div className="hidden lg:block">
+              <LanguageToggle />
+            </div>
             <AccountMenu user={user} onLogout={onLogout} onUserChange={onUserChange} />
 
             <button

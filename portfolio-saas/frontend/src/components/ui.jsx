@@ -54,11 +54,14 @@ export function Card({ title, subtitle, actions, children, testId, className = "
     >
       {(title || actions) && (
         <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
-          <div>
+          <div className="min-w-0">
             {title && <h2 className="text-base font-semibold">{t(title)}</h2>}
             {subtitle && <p className="mt-1 max-w-prose text-sm text-muted">{t(subtitle)}</p>}
           </div>
-          {actions}
+          {/* `min-w-0 max-w-full`: a flex item will not shrink below its
+              content by default, so a row of tabs in here stretched the whole
+              page sideways on a phone instead of scrolling within itself. */}
+          {actions && <div className="min-w-0 max-w-full">{actions}</div>}
         </header>
       )}
       {children}
@@ -139,6 +142,11 @@ export function Badge({ children, variant = "neutral", title, testId }) {
  */
 const DISABLED_DIM = "disabled:cursor-not-allowed disabled:opacity-60";
 
+// Form controls are 16px on a phone: iOS Safari zooms the whole page into any
+// focused field under 16px and does not zoom back out, which reads as the
+// layout jumping. 14px from `sm` up, where no browser does that.
+const FIELD = "min-h-10 rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-base text-text sm:min-h-8 sm:text-sm";
+
 export function Button({ variant = "ghost", className = "", children, ...props }) {
   const t = useT();
   // `-fill` on the two solid variants: white on the display accent is 3.64:1 and
@@ -154,7 +162,8 @@ export function Button({ variant = "ghost", className = "", children, ...props }
   return (
     <button
       type="button"
-      className={`rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${DISABLED_DIM} ${styles[variant]} ${className}`}
+      // 40px tall on a phone (a finger-sized target), 32px from `sm` up.
+      className={`inline-flex items-center justify-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${variant === "link" ? "" : "min-h-10 sm:min-h-8"} ${DISABLED_DIM} ${styles[variant]} ${className}`}
       {...props}
     >
       {t(children)}
@@ -166,7 +175,7 @@ export function Select({ label, className = "", ...props }) {
   return (
     <select
       aria-label={label}
-      className={`rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-sm text-text ${className}`}
+      className={`${FIELD} ${className}`}
       {...props}
     />
   );
@@ -194,7 +203,7 @@ export function Input({ label, className = "", ...props }) {
   return (
     <input
       aria-label={label}
-      className={`rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-sm text-text placeholder:text-muted ${className}`}
+      className={`${FIELD} placeholder:text-muted ${className}`}
       {...props}
     />
   );
@@ -204,7 +213,7 @@ export function Textarea({ label, className = "", ...props }) {
   return (
     <textarea
       aria-label={label}
-      className={`rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-sm text-text placeholder:text-muted ${className}`}
+      className={`${FIELD} placeholder:text-muted ${className}`}
       {...props}
     />
   );
@@ -322,7 +331,10 @@ export function Tabs({ options, value, onChange, label, testId }) {
       role="group"
       aria-label={label}
       data-testid={testId}
-      className="inline-flex flex-wrap gap-1 rounded-lg border border-border bg-panel-2 p-1"
+      // One row that scrolls sideways when it runs out of width. Wrapping put
+      // half the options on a second line and the control changed height when
+      // a label was translated.
+      className="no-scrollbar inline-flex max-w-full gap-1 overflow-x-auto rounded-lg border border-border bg-panel-2 p-1"
     >
       {options.map((o) => (
         <button
@@ -332,8 +344,10 @@ export function Tabs({ options, value, onChange, label, testId }) {
           aria-pressed={value === o.value}
           data-testid={testId ? `${testId}-${o.value}` : undefined}
           onClick={() => onChange(o.value)}
-          className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${DISABLED_DIM} ${
-            value === o.value ? "bg-[var(--c-accent-fill)] text-white" : "text-muted hover:text-text"
+          className={`min-h-9 shrink-0 rounded-md px-3 text-sm font-medium whitespace-nowrap transition-colors sm:min-h-7 ${DISABLED_DIM} ${
+            value === o.value
+              ? "bg-panel text-text shadow-[0_0_0_1px_var(--c-border),0_1px_2px_rgb(0_0_0/0.08)]"
+              : "text-muted hover:text-text"
           }`}
         >
           {t(o.label)}
@@ -666,12 +680,12 @@ export function PageHeader({ title, subtitle, actions, meta }) {
   const t = useT();
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
-      <div>
+      <div className="min-w-0">
         <h1 className="text-xl font-semibold">{t(title)}</h1>
         {subtitle && <p className="mt-1 max-w-prose text-sm text-muted">{t(subtitle)}</p>}
         {meta}
       </div>
-      {actions}
+      {actions && <div className="min-w-0 max-w-full">{actions}</div>}
     </div>
   );
 }
