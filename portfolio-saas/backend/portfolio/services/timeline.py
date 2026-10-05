@@ -149,12 +149,26 @@ def cash_as_of(user, account, at) -> Decimal:
             datetime.datetime.combine(at, datetime.time.max),
             timezone.get_current_timezone(),
         )
+    return _cash_replay(account, [target])[0]
+
+def _cash_replay(account, targets) -> list[Decimal]:
+    """Ledger cash at each of `targets` (ascending), from one pass.
+
+    The one copy of the settling rule: cashless trades never settle, even if a
+    later deposit starts cash tracking. `cash_as_of` and `cash_on_days` both
+    read it here so they cannot drift apart.
+    """
     from .ledger import CASH_KINDS, _cash_delta, active_entries
 
+    replayed = [Decimal("0")] * len(targets)
     cash = Decimal("0")
     settling = False
+    index = 0
     for entry in active_entries(account):
-        if entry.timestamp > target:
+        while index < len(targets) and entry.timestamp > targets[index]:
+            replayed[index] = cash
+            index += 1
+        if index == len(targets):
             break
         if entry.kind in CASH_KINDS:
             settling = True
@@ -162,7 +176,28 @@ def cash_as_of(user, account, at) -> Decimal:
             entry.kind, _q(entry.amount_tomans), reverse=False,
             track_cash=settling,
         )
-    return cash
+    while index < len(targets):
+        replayed[index] = cash
+        index += 1
+    return replayed
+
+
+def cash_on_days(user, account, day_ends) -> list[Decimal]:
+    """Cash held at each of `day_ends` (ascending), for the rebuilt history.
+
+    The ledger replay gives the shape; the last point is pinned to the balance
+    Home shows today (`cash_balance_tomans`, the projection), so the chart's
+    final point can never disagree with the total above it. The two agree
+    unless the projection has drifted, in which case the chart follows Home.
+    """
+    if account.user_id != user.id:
+        return [Decimal("0") for _ in day_ends]
+    targets = list(day_ends)
+    replayed = _cash_replay(account, targets + [timezone.now()])
+    final = replayed.pop()
+    today = account.cash_balance_tomans or Decimal("0")
+    return [today - (final - at) for at in replayed]
+
 
 def xirr(cashflows: List[tuple[datetime.date, Decimal]]) -> Optional[float]:
     """Calculate the Money-Weighted Return (XIRR).

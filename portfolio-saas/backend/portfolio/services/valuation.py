@@ -30,7 +30,7 @@ from portfolio.models import (
     USD_QUOTED_KEYS,
     positive_price_q,
 )
-from .timeline import cash_as_of, holdings_as_of, house_state_as_of, load_house_marks
+from .timeline import cash_as_of, cash_on_days, holdings_as_of, house_state_as_of, load_house_marks
 from .visibility import hidden_asset_ids, hidden_keys
 from marketdata.calendars import candle_close_qs, market_closure_days
 from marketdata.market_state import (
@@ -1262,7 +1262,12 @@ def compute_dynamic_net_worth_series(
         h for h in holdings if (h.asset_id in hidden_ids) == only_hidden
     ]
 
-    if not holdings:
+    # Nothing to value -- unless there is cash, which is net worth on its own:
+    # a book whose every holding is switched off still has its cash, and Home
+    # still shows it.
+    if not holdings and (
+        only_hidden or not any(acc.cash_balance_tomans for acc in accounts)
+    ):
         return []
 
     latest_quantities = {h.asset.key: _q(h.quantity) for h in holdings}
@@ -1490,6 +1495,17 @@ def compute_dynamic_net_worth_series(
         )
         for i in range(days - 1, -1, -1)
     ]
+    # Cash is part of net worth -- `value_account` and the nightly snapshot both
+    # count it -- so the rebuilt days count it too. Left out, the chart's last
+    # point sat below the total directly above it by exactly the cash balance.
+    # The switched-off series is subtracted from the recorded totals and holds
+    # no cash, so it gets none.
+    cash_by_day = [Decimal("0")] * len(day_ends)
+    if not only_hidden:
+        for acc in accounts:
+            for n, amount in enumerate(cash_on_days(user, acc, day_ends)):
+                cash_by_day[n] += amount
+    prev_cash: Decimal | None = None
     walked_quantities = (
         {} if constant_holdings else _walked_quantities(accounts, day_ends)
     )
@@ -1636,6 +1652,20 @@ def compute_dynamic_net_worth_series(
         # RATIO -- repaying a loan is a cash flow, not performance -- and it
         # does not, because the pair below charges one and the same day's figure
         # to both of its sides.
+        # Cash earns nothing, so in the pair it is yesterday's balance on both
+        # sides: it dilutes the day's move exactly as much as it should, and a
+        # deposit -- a flow, like an opening -- never reads as a gain. Fees and
+        # dividends move cash too and are treated the same way, as flows; for a
+        # dividend that is right (adjusted closes already carry it), for a fee
+        # it understates the day's loss by the fee.
+        cash_today = cash_by_day[days - 1 - i]
+        cash_before = cash_today if prev_cash is None else prev_cash
+        total += cash_today
+        total_ex_flows += cash_before
+        total_ex_flows_at_prior_prices += cash_before
+        held_base += cash_before
+        prev_cash = cash_today
+
         total_liabilities, liability_by_key, unattached_liabilities = liabilities_on(
             target_date
         )

@@ -163,6 +163,58 @@ def test_compute_dynamic_net_worth_series(asset_catalog, write_prices, make_user
     assert series[0]["total"] == series[-1]["total"]
 
 
+def test_rebuilt_history_counts_cash_like_the_total(asset_catalog, write_prices, make_user):
+    """The chart's last point is the number above it, cash included.
+
+    `value_account` and the nightly snapshot count cash; the rebuilt series did
+    not, so a portfolio holding 1bn in cash drew its chart 1bn below its total.
+    A deposit mid-window steps the line but is a flow, not a gain.
+    """
+    from portfolio.services.ledger import create_ledger_entry
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+
+    write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
+    user = make_user(email="dynamic-cash@test.test")
+    account = Account.objects.create(user=user, name="Cash too", track_cash=True)
+    Holding.objects.create(account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("1"))
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                        amount_tomans=Decimal("1000000"),
+                        occurred_at=timezone.now() - timedelta(days=3))
+    account.refresh_from_db()
+
+    series = compute_dynamic_net_worth_series(user, account, days=7)
+    total = Decimal(str(value_account(account)["total"]))
+    assert Decimal(series[-1]["total"]) == total
+    # Before the deposit the line is the coin alone; after it, coin plus cash.
+    assert Decimal(series[0]["total"]) == total - Decimal("1000000")
+    # The deposit day's pair holds yesterday's cash on both sides: no fake gain.
+    for point in series:
+        assert Decimal(point["total_ex_flows"]) == Decimal(point["total_ex_flows_base"])
+
+    hidden = compute_dynamic_net_worth_series(user, account, days=7, only_hidden=True)
+    assert all(Decimal(p["total"]) == 0 for p in hidden)
+
+
+def test_rebuilt_history_keeps_cash_when_every_holding_is_switched_off(asset_catalog, write_prices, make_user):
+    """Switching off the last holding leaves the cash, on Home and on the chart."""
+    from portfolio.services.ledger import create_ledger_entry
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+
+    write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
+    user = make_user(email="dynamic-cash-hidden@test.test")
+    account = Account.objects.create(user=user, name="All off", track_cash=True)
+    Holding.objects.create(account=account, asset=asset_catalog["emami_coin"],
+                           quantity=Decimal("1"), is_hidden=True)
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                        amount_tomans=Decimal("2500000"),
+                        occurred_at=timezone.now() - timedelta(days=10))
+    account.refresh_from_db()
+
+    series = compute_dynamic_net_worth_series(user, account, days=5)
+    assert [Decimal(p["total"]) for p in series] == [Decimal("2500000")] * 5
+    assert Decimal(series[-1]["total"]) == Decimal(str(value_account(account)["total"]))
+
+
 def test_compute_dynamic_caps_at_90_days(asset_catalog, write_prices, make_user):
     from portfolio.services.valuation import SYNTHETIC_HISTORY_MAX_DAYS, compute_dynamic_net_worth_series
     write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
