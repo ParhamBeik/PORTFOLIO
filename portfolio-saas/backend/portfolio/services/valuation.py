@@ -6,6 +6,7 @@ Two scale levers live here:
   2. valuation is pure arithmetic over a preloaded holding set.
 """
 import logging
+import time
 from datetime import timedelta
 from decimal import Decimal
 
@@ -56,6 +57,9 @@ logger = logging.getLogger(__name__)
 
 _LATEST_PRICES_CACHE_KEY = "prices:latest:verified-toman-v2"
 _LATEST_PRICES_STATE_KEY = "prices:latest:verified-toman-v2:market-state"
+_LATEST_PRICES_LOCK_KEY = "prices:latest:verified-toman-v2:rebuild-lock"
+_LATEST_PRICES_LOCK_SECONDS = 30
+_LATEST_PRICES_WAIT_SECONDS = 5.0
 _ARCHIVE_DROP_FLOOR = Decimal("0.50")
 _ARCHIVE_SPIKE_CEILING = Decimal("2.00")
 
@@ -138,12 +142,59 @@ def get_latest_prices() -> dict:
     forgets to call it -- is otherwise trusted forever by every valuation. The
     blast radius is total rather than partial: one `price=1` row values the whole
     holding at one Toman. The extra queries are amortised by the 120s cache.
+
+    The live fetch task refreshes this cache right after it writes
+    (`refresh_prices_cache`), so a reader normally hits a warm entry. A miss is
+    rebuilt by one request at a time: the rebuild is a market-wide DISTINCT ON
+    plus the archive cross-check, and before the single-flight lock every
+    request that arrived during a rebuild ran its own copy of it.
     """
     current_state = current_market_state()
+    cached = _cached_latest_prices(current_state)
+    if cached is not None:
+        return cached
+
+    lock_acquired = cache.add(_LATEST_PRICES_LOCK_KEY, 1, timeout=_LATEST_PRICES_LOCK_SECONDS)
+    if not lock_acquired:
+        deadline = time.monotonic() + _LATEST_PRICES_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            cached = _cached_latest_prices(current_state)
+            if cached is not None:
+                return cached
+        # The holder is slow or died: compute rather than keep a request waiting.
+    try:
+        return _store_latest_prices(_compute_latest_prices(current_state), current_state)
+    finally:
+        if lock_acquired:
+            cache.delete(_LATEST_PRICES_LOCK_KEY)
+
+
+def _cached_latest_prices(current_state):
     cached = cache.get(_LATEST_PRICES_CACHE_KEY)
     if cached is not None and cache.get(_LATEST_PRICES_STATE_KEY) == current_state:
         return cached
+    return None
 
+
+def _store_latest_prices(prices, current_state):
+    cache.set(_LATEST_PRICES_CACHE_KEY, prices, timeout=120)
+    cache.set(_LATEST_PRICES_STATE_KEY, current_state, timeout=120)
+    return prices
+
+
+def refresh_prices_cache() -> dict:
+    """Recompute the latest-price map and overwrite the cache in place.
+
+    For writers (the live fetch task). Deleting the entry instead left every
+    reader that arrived before the next rebuild to recompute it themselves --
+    every 20 seconds while the market is open.
+    """
+    current_state = current_market_state()
+    return _store_latest_prices(_compute_latest_prices(current_state), current_state)
+
+
+def _compute_latest_prices(current_state) -> dict:
     latest = (
         Price.objects.select_related("asset")
         .filter(positive_price_q(), asset__is_active=True)
@@ -178,8 +229,6 @@ def get_latest_prices() -> dict:
         ).items()
         if key in prices
     })
-    cache.set(_LATEST_PRICES_CACHE_KEY, prices, timeout=120)
-    cache.set(_LATEST_PRICES_STATE_KEY, current_state, timeout=120)
     return prices
 
 
@@ -847,7 +896,9 @@ def value_account(
     prices = prices if prices is not None else get_latest_prices()
     items, hidden_items, excluded, total = [], [], [], Decimal("0")
     hidden_ids = set() if include_hidden else hidden_asset_ids([account] if account.pk else [])
-    liabilities_qs = account.liabilities.all() if account.pk else Liability.objects.none()
+    liabilities_qs = (
+        account.liabilities.select_related("asset") if account.pk else Liability.objects.none()
+    )
     # A hidden house takes its mortgage with it. Subtracting the debt of an asset
     # we are not counting would drop net worth by the loan alone.
     liabilities_qs = [l for l in liabilities_qs if l.asset_id not in hidden_ids]

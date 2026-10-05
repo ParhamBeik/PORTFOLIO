@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { trackLoad } from "./perf.js";
 
 // The one fetch pattern. Every old component hand-rolled `let current = true`,
 // a `retryKey` counter and its own error string; this replaces all of it.
@@ -40,6 +41,8 @@ export function useApi(
 
     const run = (quiet = false) => {
       let settled = false;
+      // Initial loads count toward the page-ready measurement; polls do not.
+      const loaded = quiet ? () => {} : trackLoad();
       const timer = timeoutMs
         ? setTimeout(() => {
             if (!live || settled) return;
@@ -58,11 +61,13 @@ export function useApi(
       return fnRef.current()
         .then((data) => {
           settled = true;
+          loaded();
           if (timer) clearTimeout(timer);
           if (live) setState({ data, error: null, loading: false });
         })
         .catch((error) => {
           settled = true;
+          loaded();
           if (timer) clearTimeout(timer);
           if (!live) return;
           setState((s) =>
@@ -74,9 +79,14 @@ export function useApi(
     run();
     if (!pollMs) return () => { live = false; };
 
+    // One poll at a time: when the server is slow, a fixed interval would
+    // stack requests behind each other and make it slower still.
+    let polling = false;
     const id = setInterval(() => {
       if (pauseWhenHidden && document.hidden) return;
-      run(true);
+      if (polling) return;
+      polling = true;
+      run(true).finally(() => { polling = false; });
     }, pollMs);
     return () => {
       live = false;

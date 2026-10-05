@@ -466,6 +466,118 @@ def test_scoped_fingerprint_includes_tether_conversion_rate(asset_catalog):
     assert _price_version_fingerprint([coin.key]) != before
 
 
+def test_returns_cache_survives_ticks_it_does_not_read(asset_catalog, write_prices, monkeypatch):
+    """A live tick rotates the matrix only for assets priced from live ticks.
+
+    kama has a warehouse series, so its live Price ticks never enter the
+    matrix; emami has none and falls back to the live table. Before, every
+    tick of either rebuilt the whole matrix.
+    """
+    from django.core.cache import cache
+    import portfolio.services.returns as returns
+
+    kama = asset_catalog["kama_stock"]
+    kama.tse_symbol = "کاما"
+    kama.save(update_fields=["tse_symbol"])
+    _seed_warehouse_days("کاما", MIN_DAILY_RETURNS + 10)
+    write_prices({"emami_coin": 50_000_000})
+
+    real = returns._load_price_panel
+    builds = []
+
+    def counting(*args, **kwargs):
+        builds.append(1)
+        return real(*args, **kwargs)
+
+    cache.clear()
+    monkeypatch.setattr(returns, "_load_price_panel", counting)
+    first, _ = daily_returns_matrix()
+    daily_returns_matrix()
+    assert len(builds) == 1
+
+    Price.objects.create(asset=kama, price=1, source="TEST")
+    again, _ = daily_returns_matrix()
+    assert len(builds) == 1
+    pd.testing.assert_frame_equal(again, first)
+
+    write_prices({"emami_coin": 51_000_000})
+    daily_returns_matrix()
+    assert len(builds) == 2
+
+    # A new warehouse row the matrix does read still rotates it.
+    jday = jdatetime.date.fromgregorian(date=dt.date.today())
+    MarketCandle.objects.create(
+        symbol="کاما", timeframe="1d_adj",
+        date_time=f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}",
+        open_price=9000, high_price=9000, low_price=9000, close_price=9000, volume=1000,
+    )
+    daily_returns_matrix()
+    assert len(builds) == 3
+
+
+def test_integrity_gate_flip_rotates_the_returns_cache(asset_catalog):
+    """SymbolIntegrity is updated in place, so its max id alone cannot see a flip."""
+    from portfolio.services.returns import _returns_version
+
+    SymbolIntegrity.objects.create(symbol="کاما", passes_gate=True)
+    before = _returns_version(["kama_stock"])
+    row = SymbolIntegrity.objects.get(symbol="کاما")
+    row.passes_gate = False
+    row.save()
+    assert _returns_version(["kama_stock"]) != before
+
+
+def test_manual_price_write_rotates_versions_after_commit(asset_catalog, django_capture_on_commit_callbacks):
+    """A manual price commits inside a request, possibly out of id order."""
+    from portfolio.services.ledger import record_manual_price
+    from portfolio.services.returns import _price_version_fingerprint, _returns_version
+
+    before = (_returns_version(["emami_coin"]), _price_version_fingerprint(["emami_coin"]))
+    with django_capture_on_commit_callbacks(execute=True):
+        record_manual_price(asset_catalog["kama_stock"], 1000)
+    after = (_returns_version(["emami_coin"]), _price_version_fingerprint(["emami_coin"]))
+    assert after[0] != before[0]
+    assert after[1] != before[1]
+
+
+def test_proxied_asset_versions_its_proxy_warehouse_rows(asset_catalog):
+    from portfolio.models import Asset
+    from portfolio.services.returns import _returns_version
+
+    proxy = asset_catalog["emami_coin"]
+    proxy.brs_symbol = "IR_COIN_EMAMI"
+    proxy.save(update_fields=["brs_symbol"])
+    bar = Asset.objects.create(
+        key="gold_bar_x", name="Bar", asset_class=Asset.AssetClass.GOLD,
+        is_manual=True, proxy_key=proxy.key,
+    )
+    before = _returns_version([bar.key])
+    GoldCurrencyHistory.objects.create(
+        symbol="IR_COIN_EMAMI", date="1405-07-13", close_price=Decimal("1"), unit="تومان",
+    )
+    assert _returns_version([bar.key]) != before
+
+
+def test_fingerprint_fits_the_snapshot_column(asset_catalog):
+    from portfolio.services.returns import _price_version_fingerprint
+
+    assert len(_price_version_fingerprint(["emami_coin"])) <= 64
+
+
+def test_market_mode_symbols_version_their_own_warehouse_rows(asset_catalog):
+    """A raw-symbol universe item (market mode) is a warehouse key too."""
+    from portfolio.services.returns import _returns_version
+
+    before = _returns_version(["فملی"])
+    jday = jdatetime.date.fromgregorian(date=dt.date.today())
+    MarketCandle.objects.create(
+        symbol="فملی", timeframe="1d_adj",
+        date_time=f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}",
+        open_price=1, high_price=1, low_price=1, close_price=1, volume=1,
+    )
+    assert _returns_version(["فملی"]) != before
+
+
 def test_returns_cache_isolated_by_history_window(monkeypatch):
     import pandas as pd
     from django.core.cache import cache
@@ -518,7 +630,7 @@ def test_usdt_returns_do_not_borrow_cash_usd_when_tether_history_is_missing(monk
     )
     observed = {}
 
-    monkeypatch.setattr(returns, "_price_version_fingerprint", lambda _keys: "no-tether")
+    monkeypatch.setattr(returns, "_price_version_fingerprint", lambda _keys, **_kw: "no-tether")
     monkeypatch.setattr(returns, "toman_price_panel", lambda **_kwargs: (panel.copy(), [], []))
     monkeypatch.setattr(
         returns, "_build_returns_matrix",
@@ -1698,3 +1810,62 @@ def test_asset_class_map_does_not_query_per_symbol(django_assert_num_queries):
         mapping = asset_class_map(symbols)
 
     assert set(mapping) == set(symbols)
+
+
+def _reference_index_returns(target_index, as_of=None):
+    """The pre-bounding loader, kept verbatim as the oracle for the bounded one."""
+    from portfolio.services.returns import to_jalali_str
+
+    qs = MarketIndexData.objects.order_by("date", "time")
+    if as_of is not None:
+        qs = qs.filter(date__lte=to_jalali_str(as_of))
+    records = {}
+    for row in qs:
+        parts = [int(p) for p in row.date.split("-")]
+        records[jdatetime.date(parts[0], parts[1], parts[2]).togregorian()] = float(row.index_overall)
+    s = pd.Series(records).sort_index()
+    s_returns = s.pct_change(fill_method=None)
+    s_returns.index = pd.to_datetime(s_returns.index, utc=True).normalize()
+    return s_returns.reindex(target_index)
+
+
+@pytest.mark.django_db
+@override_settings(HISTORICAL_BENCHMARK_ENABLED=True)
+def test_bounded_index_loader_matches_full_table_load():
+    from django.core.cache import cache
+
+    cache.clear()
+    start = dt.date(2025, 1, 1)
+    rows = []
+    for offset in range(500):
+        day = start + dt.timedelta(days=offset)
+        # A 60-day closure, longer than the window pad, right before the window.
+        if dt.date(2026, 2, 1) <= day < dt.date(2026, 4, 2):
+            continue
+        jday = jdatetime.date.fromgregorian(date=day)
+        date = f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}"
+        rows.append(MarketIndexData(date=date, time="00:00:00", index_overall=1000 + offset))
+        # Intraday ticks: the day's last one must win.
+        rows.append(MarketIndexData(date=date, time="10:00:00", index_overall=1000 + offset * 1.01))
+        rows.append(MarketIndexData(date=date, time="12:30:00", index_overall=1000 + offset * 1.02))
+    MarketIndexData.objects.bulk_create(rows)
+
+    as_of = dt.datetime(2026, 5, 10, tzinfo=dt.timezone.utc)
+    for first, periods in (("2026-04-02", 30), ("2025-06-01", 200), ("2025-01-01", 90)):
+        target = pd.date_range(first, periods=periods, tz="UTC")
+        got = _load_index_returns(target, as_of=as_of)
+        want = _reference_index_returns(target, as_of=as_of)
+        pd.testing.assert_series_equal(got, want, check_names=False, check_freq=False)
+        # The first in-window day after the closure still has its return.
+        assert got.notna().any()
+
+    # Cached on (count, newest id): a new row is visible immediately.
+    target = pd.date_range("2026-05-07", periods=10, tz="UTC")  # through 2026-05-16
+    before = _load_index_returns(target)
+    jday = jdatetime.date.fromgregorian(date=dt.date(2026, 5, 16))
+    MarketIndexData.objects.create(
+        date=f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}", time="00:00:00", index_overall=5000,
+    )
+    after = _load_index_returns(target)
+    assert pd.isna(before.loc[target[-1]])
+    assert after.loc[target[-1]] == pytest.approx(5000 / (1000 + 499 * 1.02) - 1)

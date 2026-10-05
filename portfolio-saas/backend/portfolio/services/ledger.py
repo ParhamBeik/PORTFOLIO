@@ -18,6 +18,7 @@ from portfolio.models import (
     positive_price_q,
 )
 from .timeline import house_area_as_of, house_marks_as_of
+from .returns import bump_price_epoch
 from .valuation import _house_value, asset_value, invalidate_prices_cache
 from collections import defaultdict, deque
 from django.db.models import Q
@@ -629,6 +630,9 @@ def record_manual_price(asset: Asset, unit_price_tomans) -> None:
         price_unit_verified=True,
     )
     invalidate_prices_cache()
+    # Committed inside a request transaction, possibly after a later-numbered
+    # tick: max-id versioning alone could miss it.
+    bump_price_epoch()
 
 
 @transaction.atomic

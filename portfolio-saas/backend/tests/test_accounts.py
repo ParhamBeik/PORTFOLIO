@@ -1127,6 +1127,10 @@ PUBLIC_ROUTES = {
     "api/health/",
     "api/health/prices/",
     "api/health/ready/",
+    # Browser timing beacons. sendBeacon cannot carry an Authorization header;
+    # the view only writes whitelisted page labels and resolvable API routes
+    # into hourly counters, and has its own per-IP throttle (`perf_client`).
+    "api/perf/client/",
     # Server-to-server feed for the News Intelligence app, which has no user JWT.
     # Gated by a constant-time X-News-Service-Key check; 403 when the key is unset.
     "api/marketdata/shared-series/",
@@ -1748,6 +1752,22 @@ def test_watchlist_is_private_tracked_symbols_only_and_shows_last_close(make_use
     assert peer.delete("/api/watchlist/فولاد/").status_code == 404
     assert client.delete("/api/watchlist/فولاد/").status_code == 204
     assert client.get("/api/watchlist/").json()["results"] == []
+
+
+@pytest.mark.django_db
+def test_token_refresh_is_not_on_the_shared_anon_bucket():
+    """A NAT full of tabs refreshing must not trip the 30/min anon limit.
+
+    On that bucket a 429 here read as "signed out" in the client.
+    """
+    from django.core.cache import cache
+
+    cache.clear()
+    client = APIClient()
+    statuses = {client.post("/api/token/refresh/", {}, format="json").status_code for _ in range(40)}
+    assert 429 not in statuses
+    # The anon bucket itself still applies to ordinary anonymous endpoints.
+    cache.clear()
 
 
 def test_a_second_portfolio_with_the_same_name_is_a_400_not_a_500(make_user):

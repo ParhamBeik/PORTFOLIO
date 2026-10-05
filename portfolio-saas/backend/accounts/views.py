@@ -216,6 +216,9 @@ def _rotate_refresh(refresh: str) -> dict:
 class CookieTokenRefreshView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
+    # Own bucket, not the shared anon one: see the "session" rate in settings.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "session"
 
     def post(self, request):
         """Exchange the refresh cookie for an access token, rotating the cookie.
@@ -245,6 +248,9 @@ class CookieTokenRefreshView(APIView):
 class MobileTokenRefreshView(MobileOriginMixin, APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
+    # Own bucket, not the shared anon one: see the "session" rate in settings.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "session"
 
     def post(self, request):
         refresh = request.data.get("refresh")
@@ -259,6 +265,9 @@ class MobileTokenRefreshView(MobileOriginMixin, APIView):
 class CsrfView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
+    # Own bucket, not the shared anon one: see the "session" rate in settings.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "session"
 
     def get(self, request):
         return Response({"csrf_token": get_token(request)})

@@ -9,6 +9,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from portfolio.models import Asset, Price, Snapshot
+from portfolio.services.returns import bump_price_epoch
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,8 @@ def audit_and_repair_prices(fix: bool = False) -> dict:
         with transaction.atomic():
             if corrupt_price_ids:
                 deleted_prices, _ = Price.objects.filter(id__in=corrupt_price_ids).delete()
+                # A deletion never raises a max id; rotate price-versioned caches.
+                bump_price_epoch()
                 stats["repaired_prices"] = deleted_prices
 
             # Purge snapshots relying on corrupted valuations, scoped PER USER.
