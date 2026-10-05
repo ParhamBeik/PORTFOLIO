@@ -5,7 +5,7 @@ import LiabilitiesCard from "../components/Liabilities.jsx";
 import CorporateActionsCard from "../components/CorporateActions.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { useApi } from "../useApi.js";
-import { useT } from "../i18n.js";
+import { translate, useT } from "../i18n.js";
 import {
   valuation,
   snapshots,
@@ -277,6 +277,7 @@ const RANGE_WORD = { 30: "30 days", 90: "90 days", 365: "1 year", all: "all time
 
 /** First-to-last change over the window: the number a chart is asked for. */
 function RangeChange({ points, basis, range }) {
+  const t = useT();
   const valued = points.filter((p) => p.y != null);
   if (valued.length < 2) return null;
   const first = valued[0].y;
@@ -290,7 +291,7 @@ function RangeChange({ points, basis, range }) {
         {diff >= 0 ? "+" : "−"}{money(Math.abs(diff), basis)}
         {rel != null && ` (${diff >= 0 ? "+" : "−"}${pct(Math.abs(rel))})`}
       </span>
-      <span className="text-muted">{RANGE_WORD[range] || ""}</span>
+      <span className="text-muted">{t(RANGE_WORD[range] || "")}</span>
     </div>
   );
 }
@@ -472,13 +473,13 @@ function TrendCard({ activeId, basis }) {
               {hasEstimated && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-note">
                   {estimatedCount === pointCount
-                    ? "Rebuilt from prices"
-                    : `${estimatedCount} of ${pointCount} days rebuilt from prices`}
+                    ? translate("Rebuilt from prices")
+                    : translate("{n} of {total} days rebuilt from prices", undefined, { n: estimatedCount, total: pointCount })}
                 </p>
               )}
               {hasApproximated && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-hidden-note">
-                  Switched-off assets estimated on some days
+                  {translate("Switched-off assets estimated on some days")}
                 </p>
               )}
             </>

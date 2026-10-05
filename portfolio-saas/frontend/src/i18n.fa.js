@@ -383,4 +383,7 @@ export default {
   "Benchmark:": "معیار:",
   "you hold {n}": "{n} عدد دارید",
   "No assets are available yet.": "هنوز دارایی‌ای در دسترس نیست.",
+  "{n} of {total} days rebuilt from prices": "{n} روز از {total} روز از روی قیمت‌ها بازسازی شده",
+  "Switched-off assets estimated on some days": "دارایی‌های خاموش در برخی روزها تخمینی‌اند",
+  "No rows.": "ردیفی نیست.",
 };
