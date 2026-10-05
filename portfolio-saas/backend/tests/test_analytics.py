@@ -492,20 +492,17 @@ def test_returns_cache_survives_ticks_it_does_not_read(asset_catalog, write_pric
     cache.clear()
     monkeypatch.setattr(returns, "_load_price_panel", counting)
     first, _ = daily_returns_matrix()
-    # The first build records which assets it read live; the next one versions
-    # on exactly those, then the cache holds.
     daily_returns_matrix()
-    daily_returns_matrix()
-    assert len(builds) == 2
+    assert len(builds) == 1
 
     Price.objects.create(asset=kama, price=1, source="TEST")
     again, _ = daily_returns_matrix()
-    assert len(builds) == 2
+    assert len(builds) == 1
     pd.testing.assert_frame_equal(again, first)
 
     write_prices({"emami_coin": 51_000_000})
     daily_returns_matrix()
-    assert len(builds) == 3
+    assert len(builds) == 2
 
     # A new warehouse row the matrix does read still rotates it.
     jday = jdatetime.date.fromgregorian(date=dt.date.today())
@@ -515,7 +512,36 @@ def test_returns_cache_survives_ticks_it_does_not_read(asset_catalog, write_pric
         open_price=9000, high_price=9000, low_price=9000, close_price=9000, volume=1000,
     )
     daily_returns_matrix()
-    assert len(builds) == 4
+    assert len(builds) == 3
+
+
+def test_integrity_gate_flip_rotates_the_returns_cache(asset_catalog):
+    """SymbolIntegrity is updated in place, so its max id alone cannot see a flip."""
+    import time
+
+    from portfolio.services.returns import _returns_version
+
+    SymbolIntegrity.objects.create(symbol="کاما", passes_gate=True)
+    before = _returns_version(["kama_stock"])
+    time.sleep(1.1)
+    row = SymbolIntegrity.objects.get(symbol="کاما")
+    row.passes_gate = False
+    row.save()
+    assert _returns_version(["kama_stock"]) != before
+
+
+def test_market_mode_symbols_version_their_own_warehouse_rows(asset_catalog):
+    """A raw-symbol universe item (market mode) is a warehouse key too."""
+    from portfolio.services.returns import _returns_version
+
+    before = _returns_version(["فملی"])
+    jday = jdatetime.date.fromgregorian(date=dt.date.today())
+    MarketCandle.objects.create(
+        symbol="فملی", timeframe="1d_adj",
+        date_time=f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}",
+        open_price=1, high_price=1, low_price=1, close_price=1, volume=1,
+    )
+    assert _returns_version(["فملی"]) != before
 
 
 def test_returns_cache_isolated_by_history_window(monkeypatch):

@@ -512,7 +512,6 @@ def test_returns_cache_invalidates_on_write(synthetic_history, asset_catalog):
 
     df1, _ = daily_returns_matrix()
     assert not df1.empty
-    daily_returns_matrix()  # second build versions on the assets read live
     real = returns._load_price_panel
     builds = []
 

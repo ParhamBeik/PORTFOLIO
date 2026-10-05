@@ -46,7 +46,6 @@ from .deflator import normalize_basis, to_basis
 from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
-from zoneinfo import ZoneInfo
 from marketdata.calendars import candle_close_qs, market_closure_days
 from marketdata.models import (
     DailyStockHistory,
@@ -71,7 +70,6 @@ TRADING_DAYS_PER_YEAR = 252
 # Cache key template — versioned by max(Price.id) so it auto-rotates on writes.
 RETURNS_CACHE_KEY = "returns:daily:{history_days}d:v{version}"
 RETURNS_CACHE_TTL = 600
-_TEHRAN = ZoneInfo("Asia/Tehran")
 # Asset keys whose raw price is in USD; multiply through by usd_cash to Toman.
 # Extra days we fetch upstream of the window so resampling keeps the first row.
 _HISTORY_BUFFER_DAYS = 7
@@ -125,13 +123,16 @@ def _price_version_fingerprint(asset_keys=None, *, include_price=True) -> str:
         symbols = None
     else:
         asset_keys = sorted(set(asset_keys))
-        rows = Asset.objects.filter(key__in=asset_keys).values_list(
-            "tse_symbol", "brs_symbol"
-        )
+        rows = list(Asset.objects.filter(key__in=asset_keys).values_list(
+            "key", "tse_symbol", "brs_symbol"
+        ))
+        # A market-mode universe names instruments by raw symbol, not by Asset
+        # key (`get_candidate_universe`); those are the warehouse keys to watch.
+        raw_symbols = set(asset_keys) - {row[0] for row in rows}
         # Every panel appends cash USD, and Tether-quoted archive rows need
         # USDT/IRT even when neither rate asset is in the requested universe.
-        symbols = sorted({symbol for row in rows for symbol in row if symbol}
-                         | {"USD", "USDT_IRT"})
+        symbols = sorted({symbol for row in rows for symbol in row[1:] if symbol}
+                         | raw_symbols | {"USD", "USDT_IRT"})
 
     def _max_id(qs, *, symbol_keyed=True):
         if symbol_keyed and symbols is not None:
@@ -521,44 +522,37 @@ def get_universe_by_mode(mode: str, user=None, account=None) -> list[str] | None
     return None
 
 
-def _live_keys_memo_key(history_days, as_of_dt, universe, basis, held_keys) -> str:
-    # Per Tehran day: the window slides daily, and with it which assets have
-    # enough warehouse history to skip the live fallback.
-    day = timezone.now().astimezone(_TEHRAN).date().isoformat()
-    base = _returns_cache_key(history_days, as_of_dt, universe, basis, "-", held_keys)
-    return f"returns:live-keys:v1:{day}:{base}"
+def _returns_version(asset_keys) -> str:
+    """Cache version for one returns matrix: the warehouse rows it can read.
 
+    `_price_version_fingerprint` without its `Price` half, plus the integrity
+    gate's last write (it is updated in place, so its max id never moves), plus
+    the UTC day (the window's cutoff slides with it, which can move an asset
+    between its warehouse series and the live fallback).
 
-def _returns_version(asset_keys, live_keys) -> str:
-    """Cache version for one returns matrix: exactly the rows it reads.
-
-    The warehouse half is `_price_version_fingerprint` without its `Price`
-    component. `Price` -- the live 20-second ticks -- only enters a matrix for
-    the assets `_load_price_panel` sends to the live fallback (no or too little
-    warehouse history), so it is versioned over THOSE assets alone, as recorded
-    by the previous build of the same matrix (`live_keys`). Versioning it over
-    every asset in the panel, as before, rotated the key on every tick of every
-    held stock while the market was open, although for a stock with a warehouse
-    series no tick changes a single number in the matrix; every risk, frontier
-    and optimization request rebuilt years of history from scratch for nothing.
-
-    With no record yet (first build of the day, or evicted) the whole panel's
-    `Price` rows are versioned, as before -- the conservative answer.
+    `Price` -- the live 20-second ticks -- is NOT in the key. It only enters a
+    matrix for the assets `_load_price_panel` sends to the live fallback, and
+    each cached entry records exactly those (`live_keys`) and the newest Price
+    id that existed before it was built (`price_seen`); `_entry_is_current`
+    rejects the entry once any of them has a newer tick. Keying on Price over
+    the whole panel, as before, rebuilt every risk, frontier and optimization
+    matrix on every tick of every held stock while the market was open, though
+    a stock with a warehouse series takes no input from those ticks at all.
     """
     warehouse = _price_version_fingerprint(asset_keys, include_price=False)
-    if live_keys is None:
-        price_rows = Price.objects
-        if asset_keys is not None:
-            price_rows = price_rows.filter(asset__key__in=asset_keys)
-        tag = "a"
-    else:
-        price_rows = Price.objects.filter(asset__key__in=live_keys)
-        tag = "l"
-    latest = (
-        price_rows.aggregate(version=Max("id"))["version"] or 0
-        if live_keys is None or live_keys else 0
-    )
-    return f"{tag}{latest:x}:{warehouse}"
+    integrity = SymbolIntegrity.objects.aggregate(t=Max("computed_at"))["t"]
+    day = timezone.now().astimezone(dt.timezone.utc).date().isoformat()
+    stamp = integrity.timestamp() if integrity else 0
+    return f"{day}:{stamp:.0f}:{warehouse}"
+
+
+def _entry_is_current(entry) -> bool:
+    """False when an asset this entry read live has ticked since it was built."""
+    live_keys = entry.get("live_keys")
+    if not live_keys:
+        return True
+    latest = Price.objects.filter(asset__key__in=live_keys).aggregate(v=Max("id"))["v"] or 0
+    return latest <= entry.get("price_seen", -1)
 
 
 def _returns_cache_key(
@@ -1234,11 +1228,11 @@ def daily_returns_matrix(
     basis = normalize_basis(basis)
     held_keys = frozenset(held_keys)
     asset_keys = _returns_asset_keys(universe, held_keys)
-    live_memo_key = _live_keys_memo_key(history_days, as_of_dt, universe, basis, held_keys)
-    live_keys = cache.get(live_memo_key)
-    version = _returns_version(asset_keys, live_keys)
+    version = _returns_version(asset_keys)
     key = _returns_cache_key(history_days, as_of_dt, universe, basis, version, held_keys)
     cached = cache.get(key)
+    if cached is not None and not _entry_is_current(cached):
+        cached = None
     if cached is not None:
         df = pd.DataFrame(
             data=cached["data"],
@@ -1251,13 +1245,14 @@ def daily_returns_matrix(
         )
         return df, cached["excluded"]
 
+    # Read BEFORE the build: any tick the build might see has an id at or below
+    # this, so a later tick can only make the entry look older, never newer.
+    price_seen = Price.objects.aggregate(v=Max("id"))["v"] or 0
     panel, gate_excluded, panel_warnings = toman_price_panel(
         history_days=history_days, as_of=as_of_dt, universe=universe,
         held_keys=held_keys,
     )
-    # Union, never replace: a key that left the fallback since an earlier build
-    # stays versioned, which can only cost a spare rebuild, never a stale hit.
-    read_live = sorted(set(live_keys or ()) | set(panel.attrs.get("live_fallback_keys", ())))
+    live_keys = sorted(panel.attrs.get("live_fallback_keys", ()))
 
     # Apply basis conversion. real_toman raises deflator.CpiUnavailable (see
     # config/settings.py) when the window reaches a Jalali year with no
@@ -1317,13 +1312,13 @@ def daily_returns_matrix(
         "excluded": excluded,
         "warnings": warnings,
         "periods_per_year": frequency,
+        # What makes this entry stale besides its key: see `_entry_is_current`.
+        # Self-contained on purpose -- a shared "which keys are live" record was
+        # a read-modify-write that two concurrent builds could lose.
+        "live_keys": live_keys,
+        "price_seen": price_seen,
     }
     cache.set(key, entry, timeout=RETURNS_CACHE_TTL)
-    # The next build of this matrix versions on the assets this one read live.
-    # (It costs one rebuild after the first build of a day; filing this result
-    # under that next version too is not exact -- that version is read after
-    # the build, so a tick landing mid-build would be filed as already seen.)
-    cache.set(live_memo_key, read_live, timeout=24 * 3600)
     return returns, excluded
 
 
@@ -1364,15 +1359,11 @@ def correlation_matrix(
 
 
 def invalidate_returns_cache() -> None:
-    """Best-effort delete of the cached returns matrix for the current version.
+    """No-op, kept for its callers in the fetch and ingest tasks.
 
-    Called from the fetch task after each write. The next reader recomputes.
+    Matrix entries are keyed on the warehouse rows they read and check their
+    own live inputs on every hit (`_returns_version`, `_entry_is_current`), so
+    there is nothing to delete after a write. The old body rebuilt the global
+    fingerprint -- eight MAX queries -- on every 20-second tick to delete keys
+    that, under the current key scheme, can never exist.
     """
-    try:
-        version = _price_version_fingerprint()
-        for history_days in (30, 90, DEFAULT_HISTORY_DAYS, 365):
-            for basis in ("nominal_toman", "usd_denominated"):
-                key = _returns_cache_key(history_days, None, None, basis, version)
-                cache.delete(key)
-    except Exception:  # cache is best-effort; never crash a fetch on it
-        pass
