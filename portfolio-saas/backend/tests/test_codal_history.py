@@ -180,3 +180,183 @@ def test_ops_history_counts_only_leaf_windows_as_verifications(settings):
     assert status["split_parent_windows"] == status["stale_verified_leaf_windows"] == 1
     settings.CODAL_ENABLED = False
     assert _codal_status()["history_discovery"] == status
+
+
+# ----------------------------------------------------------------------
+# Direct discovery from codal.ir search (phase 1, shadow mode).
+# docs/CODAL-DIRECT-MIGRATION.md; fixtures captured from production 2026-10-05.
+
+import json
+from pathlib import Path
+
+from django.core.cache import cache
+
+from marketdata import codal_discovery
+from marketdata.models import CodalDiscoveryDay, CodalLetter
+from marketdata.sources import codal_search
+from marketdata.sources.http import SourceResponseError
+
+_FIXTURES = Path(__file__).parent / "fixtures" / "codal_direct"
+
+
+def _page():
+    return json.loads((_FIXTURES / "v2_q_day_page1_trimmed.json").read_text())
+
+
+@pytest.fixture(autouse=True)
+def _clear_cache():
+    cache.clear()
+    yield
+    cache.clear()
+
+
+def test_normalize_letter_folds_digits_and_decodes_the_serial():
+    row = codal_search.normalize_letter(_page()["Letters"][0])
+    assert row["tracing_no"] == 1409625
+    assert row["letter_code"] == "ن-30"
+    assert (row["date_publish"], row["time_publish"]) == ("1404-07-02", "21:12:23")
+    # %3d decoded with unquote: the same serial a BrsApi link carries.
+    assert row["letter_serial"] == "UdN7Z4ZTiFs2puG8H2sIiw=="
+    assert row["letter_type"] == 58
+    assert row["raw"]["TracingNo"] == 1409625
+
+
+def test_a_literal_plus_in_a_serial_survives_decoding():
+    """parse_qsl turns "+" into a space; the serial would then match nothing."""
+    letter = {**_page()["Letters"][0], "Url": "/Reports/Decision.aspx?LetterSerial=ab+cd%2Bef%3d&let=6"}
+    assert codal_search.normalize_letter(letter)["letter_serial"] == "ab+cd+ef="
+
+
+def test_a_429_parks_the_origin_and_halves_the_budget(monkeypatch, settings):
+    settings.CODAL_SEARCH_START_PER_HOUR = 12
+
+    def refuse(*args, **kwargs):
+        raise SourceResponseError("429", origin="codal_search", status_code=429)
+
+    monkeypatch.setattr(codal_search, "fetch", refuse)
+    assert codal_search.can_send()
+    with pytest.raises(codal_search.CodalSearchThrottled):
+        codal_search.fetch_letters("1404-07-02", 1)
+    assert not codal_search.can_send()
+    assert cache.get(codal_search._RATE_KEY) == 6
+
+
+def test_the_hourly_budget_is_never_exceeded(settings):
+    settings.CODAL_SEARCH_START_PER_HOUR = 3
+    now = 1_000_000.0
+    for offset in range(3):
+        assert codal_search.can_send(now + offset)
+        codal_search._record_sent(now + offset)
+    assert not codal_search.can_send(now + 10)
+    assert codal_search.can_send(now + 3601)
+
+
+def test_is_attacker_counts_as_a_refusal(monkeypatch):
+    monkeypatch.setattr(codal_search, "fetch", lambda *a, **k: {**_page(), "IsAttacker": True})
+    with pytest.raises(codal_search.CodalSearchThrottled):
+        codal_search.fetch_letters("1404-07-02", 1)
+    assert not codal_search.can_send()
+
+
+def test_an_unexpected_shape_raises_instead_of_reading_as_a_quiet_day(monkeypatch):
+    monkeypatch.setattr(codal_search, "fetch", lambda *a, **k: {"Message": "nope"})
+    with pytest.raises(SourceResponseError):
+        codal_search.fetch_letters("1404-07-02", 1)
+
+
+def _serve(monkeypatch, letters, total, pages):
+    rows = [codal_search.normalize_letter(letter) for letter in letters]
+    monkeypatch.setattr(
+        codal_search, "fetch_letters",
+        lambda day, page: {"total": total, "pages": pages, "letters": rows},
+    )
+
+
+def test_a_day_completes_when_stored_letters_reach_the_total(monkeypatch):
+    _serve(monkeypatch, _page()["Letters"], total=4, pages=1)
+    state = CodalDiscoveryDay.objects.create(date="1404-07-02")
+    result = codal_discovery.step(state)
+    state.refresh_from_db()
+    assert result["complete"] and state.verified_complete
+    assert CodalLetter.objects.filter(date_publish="1404-07-02").count() == 4
+    assert state.next_check_at is not None
+
+
+def test_reaching_the_last_page_short_restarts_with_backoff(monkeypatch):
+    _serve(monkeypatch, _page()["Letters"], total=290, pages=1)
+    state = CodalDiscoveryDay.objects.create(date="1404-07-02")
+    codal_discovery.step(state)
+    state.refresh_from_db()
+    assert not state.verified_complete
+    assert state.next_page == 1 and state.consecutive_failures == 1
+    assert state.last_error == "short: stored 4 of 290"
+    codal_discovery.step(state)
+    state.refresh_from_db()
+    assert state.consecutive_failures == 2
+
+
+def test_refetching_a_letter_updates_it_in_place(monkeypatch):
+    letters = _page()["Letters"]
+    _serve(monkeypatch, letters, total=4, pages=1)
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))
+    _serve(monkeypatch, [{**letters[0], "Title": "اصلاحیه"}], total=4, pages=1)
+    codal_discovery.step(CodalDiscoveryDay.objects.get(date="1404-07-02"))
+    assert CodalLetter.objects.count() == 4
+    assert CodalLetter.objects.get(tracing_no=1409625).title == "اصلاحیه"
+
+
+def test_pick_day_serves_the_live_window_first_then_walks_back(monkeypatch, settings):
+    settings.CODAL_DISCOVERY_LIVE_DAYS = 1
+    settings.CODAL_DISCOVERY_OLDEST_DAY = "1404-06-29"
+    monkeypatch.setattr(codal_discovery, "tehran_today", lambda: "1404-07-02")
+    now = timezone.now()
+    assert codal_discovery.pick_day(now).date == "1404-07-02"
+    for day in ("1404-07-02", "1404-07-01"):
+        CodalDiscoveryDay.objects.update_or_create(date=day, defaults={
+            "verified_complete": True, "last_success_at": now,
+            "next_check_at": now + timedelta(days=7),
+        })
+    assert codal_discovery.pick_day(now).date == "1404-06-31"
+    CodalDiscoveryDay.objects.filter(date="1404-06-31").update(verified_complete=True)
+    assert codal_discovery.pick_day(now).date == "1404-06-30"
+    CodalDiscoveryDay.objects.filter(date="1404-06-30").update(verified_complete=True)
+    assert codal_discovery.pick_day(now).date == "1404-06-29"
+    CodalDiscoveryDay.objects.filter(date="1404-06-29").update(verified_complete=True)
+    assert codal_discovery.pick_day(now) is None
+    # A stale live day is reopened ahead of everything else.
+    assert codal_discovery.pick_day(now + timedelta(minutes=16)).date == "1404-07-02"
+
+
+def test_disabled_discovery_spends_nothing(monkeypatch, settings):
+    from marketdata import tasks
+
+    settings.CODAL_DISCOVERY_ENABLED = False
+    monkeypatch.setattr(codal_search, "fetch_letters", lambda *a: pytest.fail("fetched"))
+    assert tasks.codal_discovery_tick() == "idle"
+    assert not CodalDiscoveryDay.objects.exists()
+
+
+def test_crossref_matches_by_serial_then_by_key_and_counts_the_rest(monkeypatch):
+    from marketdata.management.commands.codal_crossref import crossref_day
+
+    letters = _page()["Letters"]
+    _serve(monkeypatch, letters, total=4, pages=1)
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))
+    first, second = (codal_search.normalize_letter(letter) for letter in letters[:2])
+    CodalAnnouncement.objects.create(
+        symbol=first["symbol"], code=first["letter_code"], title="t",
+        date_publish="1404-07-02", time_publish=first["time_publish"],
+        link="https://codal.ir/Reports/Decision.aspx?LetterSerial="
+             + first["letter_serial"].replace("=", "%3d"),
+    )
+    CodalAnnouncement.objects.create(
+        symbol=second["symbol"], code=second["letter_code"], title="t",
+        date_publish="1404-07-02", time_publish=second["time_publish"], link="",
+    )
+    CodalAnnouncement.objects.create(
+        symbol="X", code="ن-1", title="t", date_publish="1404-07-02", time_publish="09:00:00",
+    )
+    stats, disagree = crossref_day("1404-07-02", catalog={first["symbol"]})
+    assert stats["matched_serial"] == 1 and stats["matched_key"] == 1
+    assert stats["new_catalog"] + stats["new_other"] == 2
+    assert stats["ours_only"] == 1 and not disagree

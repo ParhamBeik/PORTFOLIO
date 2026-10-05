@@ -644,6 +644,25 @@ CODAL_HTTP_PROXY = os.getenv("CODAL_HTTP_PROXY", "") or IRAN_EGRESS_PROXY
 # and one probe per cooldown notices when it comes back.
 CODAL_ORIGIN_FAILURE_THRESHOLD = int(os.getenv("CODAL_ORIGIN_FAILURE_THRESHOLD", "10"))
 CODAL_ORIGIN_COOLDOWN_SECONDS = int(os.getenv("CODAL_ORIGIN_COOLDOWN_SECONDS", "900"))
+
+# Direct discovery from codal.ir's own search (docs/CODAL-DIRECT-MIGRATION.md).
+# Phase 1 is SHADOW mode: it fills CodalLetter/CodalDiscoveryDay only and never
+# touches CodalAnnouncement, so BrsApi discovery keeps running untouched. Off by
+# default -- turning it on is an operator decision.
+CODAL_DISCOVERY_ENABLED = os.getenv("CODAL_DISCOVERY_ENABLED", "0") == "1"
+CODAL_SEARCH_URL = os.getenv("CODAL_SEARCH_URL", "https://search.codal.ir/api/search/v2/q")
+# Measured 2026-10-05: ~30 requests per rolling hour trips a 429, and knocking
+# while blocked extends it. Start well under, earn +2/h per clean hour up to the
+# ceiling, halve and park on any refusal; no request at all while parked.
+CODAL_SEARCH_START_PER_HOUR = int(os.getenv("CODAL_SEARCH_START_PER_HOUR", "12"))
+CODAL_SEARCH_MIN_PER_HOUR = int(os.getenv("CODAL_SEARCH_MIN_PER_HOUR", "4"))
+CODAL_SEARCH_MAX_PER_HOUR = int(os.getenv("CODAL_SEARCH_MAX_PER_HOUR", "24"))
+CODAL_SEARCH_MIN_PARK_SECONDS = int(os.getenv("CODAL_SEARCH_MIN_PARK_SECONDS", "1800"))
+CODAL_SEARCH_MAX_PARK_SECONDS = int(os.getenv("CODAL_SEARCH_MAX_PARK_SECONDS", "21600"))
+# Codal's history starts around 1386-1388 (1385-06-01 returned nothing).
+CODAL_DISCOVERY_OLDEST_DAY = os.getenv("CODAL_DISCOVERY_OLDEST_DAY", "1386-01-01")
+# Today and this many days before it are the live lane: re-crawled, not trusted.
+CODAL_DISCOVERY_LIVE_DAYS = int(os.getenv("CODAL_DISCOVERY_LIVE_DAYS", "3"))
 CODAL_MAX_ARTIFACT_BYTES = int(os.getenv("CODAL_MAX_ARTIFACT_BYTES", str(50 * 1024 * 1024)))
 CODAL_S3_ENDPOINT_URL = os.getenv("CODAL_S3_ENDPOINT_URL", "http://minio:9000")
 CODAL_S3_BUCKET = os.getenv("CODAL_S3_BUCKET", "codal-artifacts")

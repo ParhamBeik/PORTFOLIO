@@ -296,6 +296,62 @@ class CodalHistoryWindow(models.Model):
         ]
 
 
+class CodalLetter(models.Model):
+    """One filing as codal.ir's own search lists it (`sources.codal_search`).
+
+    A faithful copy of the origin, kept apart from the BrsApi-shaped
+    CodalAnnouncement: both describe the same filing and join on
+    `letter_serial`. `raw` is the letter exactly as served.
+    """
+
+    tracing_no = models.BigIntegerField(unique=True)
+    letter_serial = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    symbol = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    company_name = models.CharField(max_length=255, blank=True, default="")
+    title = models.TextField(blank=True, default="")
+    letter_code = models.CharField(max_length=32, blank=True, default="")
+    letter_type = models.PositiveSmallIntegerField(null=True, blank=True)
+    date_publish = models.CharField(max_length=10, db_index=True)
+    time_publish = models.CharField(max_length=8, blank=True, default="")
+    date_sent = models.CharField(max_length=10, blank=True, default="")
+    time_sent = models.CharField(max_length=8, blank=True, default="")
+    url = models.CharField(max_length=1024, blank=True, default="")
+    pdf_url = models.CharField(max_length=1024, blank=True, default="")
+    excel_url = models.CharField(max_length=1024, blank=True, default="")
+    xbrl_url = models.CharField(max_length=1024, blank=True, default="")
+    attachment_url = models.CharField(max_length=1024, blank=True, default="")
+    has_html = models.BooleanField(null=True, blank=True)
+    has_excel = models.BooleanField(null=True, blank=True)
+    has_pdf = models.BooleanField(null=True, blank=True)
+    has_xbrl = models.BooleanField(null=True, blank=True)
+    has_attachment = models.BooleanField(null=True, blank=True)
+    is_estimate = models.BooleanField(null=True, blank=True)
+    under_supervision = models.SmallIntegerField(null=True, blank=True)
+    raw = models.JSONField(default=dict)
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+
+class CodalDiscoveryDay(models.Model):
+    """Crawl state for one Jalali publication day of codal.ir search.
+
+    Complete only when the stored CodalLetter count for the day equals the
+    `total` the origin reported -- counted from the table, not from pages, so
+    letters arriving mid-crawl (which shift every page offset) cannot fake it.
+    """
+
+    date = models.CharField(max_length=10, unique=True)
+    total = models.PositiveIntegerField(null=True, blank=True)
+    next_page = models.PositiveIntegerField(default=1)
+    verified_complete = models.BooleanField(default=False, db_index=True)
+    checks = models.PositiveSmallIntegerField(default=0)
+    consecutive_failures = models.PositiveIntegerField(default=0)
+    last_error = models.CharField(max_length=500, blank=True, default="")
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    next_check_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+
 class StockSymbolMetadata(models.Model):
     """Detailed metadata and fundamental metrics for a TSE stock symbol."""
 
