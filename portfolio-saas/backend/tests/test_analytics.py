@@ -1747,7 +1747,7 @@ def test_bounded_index_loader_matches_full_table_load():
         # The first in-window day after the closure still has its return.
         assert got.notna().any()
 
-    # Cached on the newest id: a new row is visible immediately.
+    # Cached on (count, newest id): a new row is visible immediately.
     target = pd.date_range("2026-05-07", periods=10, tz="UTC")  # through 2026-05-16
     before = _load_index_returns(target)
     jday = jdatetime.date.fromgregorian(date=dt.date(2026, 5, 16))

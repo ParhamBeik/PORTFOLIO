@@ -357,28 +357,34 @@ def _diversification_ratio(
 # previous trading day so the first in-window return is defined; the loader
 # also extends to the last row before the pad, so a long closure cannot NaN it.
 _INDEX_WINDOW_PAD_DAYS = 45
-_INDEX_CLOSES_CACHE_TTL = 3600
+_INDEX_CLOSES_CACHE_TTL = 60
 
 
 def _index_daily_closes(since_jalali: str | None, as_of_jalali: str | None) -> pd.Series | None:
     """Last TEDPIX value of each day in [since, as_of], Gregorian-indexed.
 
-    Cached under the table's newest id. Both writers (`ingest_market_index`,
-    `ingest_tedpix_history`) only insert -- conflicts are skipped, never
-    updated -- so a new max id is exactly "the table changed" and the cache
-    can never serve a stale series. Called once per metrics series (portfolio,
-    every holding, every class), it used to read and convert the whole table
-    each time: ~25 full loads per Risk request, hundreds per MyOptimal.
+    Called once per metrics series (portfolio, every holding, every class),
+    it used to read and convert the whole table each time: ~25 full loads per
+    Risk request, hundreds per MyOptimal. The cache only has to outlive one
+    request, so the TTL is short.
+
+    Keyed on (row count, newest id). Both writers only insert, but max id
+    alone misses a batch that commits after a later-numbered row, and the
+    Django admin can edit or delete rows in place; the count catches the
+    first, and the 60s TTL bounds the second.
     """
     from django.core.cache import cache
-    from django.db.models import Max
+    from django.db.models import Count, Max
     from marketdata.models import MarketIndexData
     import jdatetime
 
-    version = MarketIndexData.objects.aggregate(v=Max("id"))["v"]
-    if version is None:
+    stamp = MarketIndexData.objects.aggregate(v=Max("id"), n=Count("id"))
+    if stamp["v"] is None:
         return None
-    key = f"diag:index-closes:v1:{since_jalali or '-'}:{as_of_jalali or '-'}:{version}"
+    key = (
+        f"diag:index-closes:v2:{since_jalali or '-'}:{as_of_jalali or '-'}"
+        f":{stamp['n']}:{stamp['v']}"
+    )
     cached = cache.get(key)
     if cached is not None:
         return cached if len(cached) else None
