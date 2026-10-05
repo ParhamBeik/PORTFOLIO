@@ -517,17 +517,51 @@ def test_returns_cache_survives_ticks_it_does_not_read(asset_catalog, write_pric
 
 def test_integrity_gate_flip_rotates_the_returns_cache(asset_catalog):
     """SymbolIntegrity is updated in place, so its max id alone cannot see a flip."""
-    import time
-
     from portfolio.services.returns import _returns_version
 
     SymbolIntegrity.objects.create(symbol="کاما", passes_gate=True)
     before = _returns_version(["kama_stock"])
-    time.sleep(1.1)
     row = SymbolIntegrity.objects.get(symbol="کاما")
     row.passes_gate = False
     row.save()
     assert _returns_version(["kama_stock"]) != before
+
+
+def test_manual_price_write_rotates_versions_after_commit(asset_catalog, django_capture_on_commit_callbacks):
+    """A manual price commits inside a request, possibly out of id order."""
+    from portfolio.services.ledger import record_manual_price
+    from portfolio.services.returns import _price_version_fingerprint, _returns_version
+
+    before = (_returns_version(["emami_coin"]), _price_version_fingerprint(["emami_coin"]))
+    with django_capture_on_commit_callbacks(execute=True):
+        record_manual_price(asset_catalog["kama_stock"], 1000)
+    after = (_returns_version(["emami_coin"]), _price_version_fingerprint(["emami_coin"]))
+    assert after[0] != before[0]
+    assert after[1] != before[1]
+
+
+def test_proxied_asset_versions_its_proxy_warehouse_rows(asset_catalog):
+    from portfolio.models import Asset
+    from portfolio.services.returns import _returns_version
+
+    proxy = asset_catalog["emami_coin"]
+    proxy.brs_symbol = "IR_COIN_EMAMI"
+    proxy.save(update_fields=["brs_symbol"])
+    bar = Asset.objects.create(
+        key="gold_bar_x", name="Bar", asset_class=Asset.AssetClass.GOLD,
+        is_manual=True, proxy_key=proxy.key,
+    )
+    before = _returns_version([bar.key])
+    GoldCurrencyHistory.objects.create(
+        symbol="IR_COIN_EMAMI", date="1405-07-13", close_price=Decimal("1"), unit="تومان",
+    )
+    assert _returns_version([bar.key]) != before
+
+
+def test_fingerprint_fits_the_snapshot_column(asset_catalog):
+    from portfolio.services.returns import _price_version_fingerprint
+
+    assert len(_price_version_fingerprint(["emami_coin"])) <= 64
 
 
 def test_market_mode_symbols_version_their_own_warehouse_rows(asset_catalog):
