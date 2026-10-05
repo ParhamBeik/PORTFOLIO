@@ -15,7 +15,7 @@ import {
   VisualMapComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
-import { date, dateTime, dateTick, money, moneyCompact, pct, toman, tomanCompact, trendAxisTick } from "../format.js";
+import { compactAxisDigits, date, dateTime, dateTick, money, moneyCompact, pct, toman, tomanCompact, trendAxisTick } from "../format.js";
 
 registerEcharts([
   BarChart, HeatmapChart, LineChart, PieChart, ScatterChart,
@@ -405,7 +405,7 @@ export function AreaTrend({ data, height = 260, label = "Portfolio value over ti
       },
       yAxis: {
         type: "value", min, max, interval, ...c.valueAxis,
-        axisLabel: { ...c.valueAxis.axisLabel, formatter: (v) => moneyCompact(v, basis) },
+        axisLabel: { ...c.valueAxis.axisLabel, formatter: (v) => moneyCompact(v, basis, compactAxisDigits(max, interval)) },
       },
       series: [{
         type: "line",
@@ -476,7 +476,12 @@ export function MultiLineTrend({
       },
       yAxis: {
         type: "value", min, max, interval, ...c.valueAxis,
-        axisLabel: { ...c.valueAxis.axisLabel, formatter: formatAxis },
+        // The default compact formatter gets enough decimals to keep ticks
+        // distinct; a caller's own formatter is used as given.
+        axisLabel: {
+          ...c.valueAxis.axisLabel,
+          formatter: formatAxis === tomanCompact ? (v) => tomanCompact(v, compactAxisDigits(max, interval)) : formatAxis,
+        },
       },
       series: (series || []).map((s, i) => ({
         type: "line",

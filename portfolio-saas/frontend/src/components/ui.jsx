@@ -45,17 +45,42 @@ export const Delta = ({ value, format }) => (
 
 /* ---------------------------------------------------------------- surfaces */
 
-export function Card({ title, subtitle, actions, children, testId, className = "" }) {
+/**
+ * A panel. `info` is the explanation a reader may want but should not have to
+ * read past: it sits behind an (i) beside the title and expands inline, inside
+ * the card, so it can never land off the edge of a phone screen the way a
+ * floating popover does. Text that every reader needs belongs in the body.
+ */
+export function Card({ title, subtitle, info, actions, children, testId, className = "" }) {
   const t = useT();
+  const [infoOpen, setInfoOpen] = useState(false);
+  const infoId = testId ? `${testId}-info` : undefined;
   return (
     <section
       data-testid={testId}
-      className={`rounded-xl border border-border bg-panel p-5 ${className}`}
+      className={`rounded-xl border border-border bg-panel p-4 sm:p-5 ${className}`}
     >
       {(title || actions) && (
         <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            {title && <h2 className="text-base font-semibold">{t(title)}</h2>}
+            {title && (
+              <div className="flex items-center gap-1">
+                <h2 className="text-base font-semibold">{t(title)}</h2>
+                {info && (
+                  <button
+                    type="button"
+                    onClick={() => setInfoOpen((v) => !v)}
+                    aria-expanded={infoOpen}
+                    aria-controls={infoId}
+                    aria-label={t("About this")}
+                    data-testid={infoId ? `${infoId}-toggle` : undefined}
+                    className={`-my-1 inline-flex size-8 items-center justify-center rounded-md transition-colors hover:bg-panel-2 hover:text-text ${infoOpen ? "text-text" : "text-muted"}`}
+                  >
+                    <InfoIcon />
+                  </button>
+                )}
+              </div>
+            )}
             {subtitle && <p className="mt-1 max-w-prose text-sm text-muted">{t(subtitle)}</p>}
           </div>
           {/* `min-w-0 max-w-full`: a flex item will not shrink below its
@@ -64,8 +89,27 @@ export function Card({ title, subtitle, actions, children, testId, className = "
           {actions && <div className="min-w-0 max-w-full">{actions}</div>}
         </header>
       )}
+      {info && infoOpen && (
+        <div
+          id={infoId}
+          data-testid={infoId}
+          className="-mt-1 mb-4 max-w-prose space-y-1 rounded-lg bg-panel-2 px-3 py-2 text-sm text-muted"
+        >
+          {info}
+        </div>
+      )}
       {children}
     </section>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M8 7.25v3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <circle cx="8" cy="5.1" r="0.9" fill="currentColor" />
+    </svg>
   );
 }
 
@@ -402,7 +446,7 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
     if (c.mobile === "value") return `${base} max-sm:order-2 max-sm:px-1 max-sm:py-1 max-sm:text-right max-sm:font-medium max-sm:tabular-nums`;
     if (c.mobile === "meta") {
       const sep = metaKeys.indexOf(c.key) > 0 ? "max-sm:before:me-1 max-sm:before:content-['·']" : "";
-      return `${base} max-sm:order-4 max-sm:py-0 max-sm:pe-1 max-sm:ps-1 max-sm:text-xs max-sm:text-muted ${sep}`;
+      return `${base} max-sm:order-4 max-sm:inline-flex max-sm:items-center max-sm:py-0 max-sm:pe-1 max-sm:ps-1 max-sm:text-xs max-sm:text-muted ${sep}`;
     }
     return `${base} ${expanded ? "max-sm:order-6 max-sm:flex max-sm:basis-full max-sm:items-start max-sm:justify-between max-sm:gap-3 max-sm:px-1 max-sm:py-1" : "max-sm:hidden"}`;
   };

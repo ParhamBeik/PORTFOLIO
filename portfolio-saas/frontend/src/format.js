@@ -100,12 +100,12 @@ export const signedToman = signed(toman);
 export const indexPoint = (n) => (bad(n) ? "—" : num(n, 1));
 
 /** Compact Toman for chart axes so ticks stay readable. */
-export function tomanCompact(n) {
+export function tomanCompact(n, digits = 1) {
   if (bad(n)) return "—";
   const v = Number(n);
   const a = Math.abs(v);
-  if (a >= 1e9) return (v / 1e9).toFixed(1) + "B";
-  if (a >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (a >= 1e9) return (v / 1e9).toFixed(digits) + "B";
+  if (a >= 1e6) return (v / 1e6).toFixed(digits) + "M";
   if (a >= 1e3) return (v / 1e3).toFixed(0) + "K";
   return String(Math.round(v));
 }
@@ -119,18 +119,31 @@ export function tomanCompact(n) {
  * bases keep two decimals below a thousand, where a $154.54 coin rounding to
  * "155" is a visible error rather than noise.
  */
-export function moneyCompact(n, basis = "nominal_toman") {
+export function moneyCompact(n, basis = "nominal_toman", digits = 1) {
   if (bad(n)) return "—";
   const foreign = basis === "usd_denominated" || basis === "usdt_denominated";
-  if (!foreign) return tomanCompact(n);
+  if (!foreign) return tomanCompact(n, digits);
   const v = Number(n);
   const a = Math.abs(v);
   const mark = basis === "usd_denominated" ? "$" : "";
   const tail = basis === "usdt_denominated" ? " USDT" : "";
-  if (a >= 1e9) return mark + (v / 1e9).toFixed(1) + "B" + tail;
-  if (a >= 1e6) return mark + (v / 1e6).toFixed(1) + "M" + tail;
-  if (a >= 1e3) return mark + (v / 1e3).toFixed(1) + "K" + tail;
+  if (a >= 1e9) return mark + (v / 1e9).toFixed(digits) + "B" + tail;
+  if (a >= 1e6) return mark + (v / 1e6).toFixed(digits) + "M" + tail;
+  if (a >= 1e3) return mark + (v / 1e3).toFixed(digits) + "K" + tail;
   return money(v, basis);
+}
+
+/**
+ * Decimals a compact axis needs so neighbouring ticks never print the same
+ * label. A flat 1.43B portfolio gets ticks 20M apart, and at one decimal every
+ * one of them read "1.4B".
+ */
+export function compactAxisDigits(max, interval) {
+  const a = Math.abs(Number(max));
+  const scale = a >= 1e9 ? 1e9 : a >= 1e6 ? 1e6 : a >= 1e3 ? 1e3 : 1;
+  const step = Number(interval) / scale;
+  if (!(step > 0) || !Number.isFinite(step)) return 1;
+  return Math.min(3, Math.max(1, Math.ceil(-Math.log10(step) - 1e-9)));
 }
 
 // Gregorian, Tehran wall clock — the backend stores UTC, the reader is in Iran.
