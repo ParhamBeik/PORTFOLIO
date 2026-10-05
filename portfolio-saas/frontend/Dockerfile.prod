@@ -4,7 +4,7 @@
 
 # --- build stage ---
 #
-# Node 22, matching `node-version: '22'` in .github/workflows/ci-cd.yml. It was
+# Node 22, matching `node-version: '22'` in .github/workflows/ci.yml. It was
 # node:20-alpine, which is two problems in one line: Node 20 left support on
 # 2026-04-30, and CI proved `npm run build` green on 22 while the image that
 # actually ships to the VPS built the bundle on 20 -- so the tested toolchain

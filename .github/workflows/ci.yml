@@ -1,17 +1,11 @@
-# Push to main -> test -> deploy. Nothing reaches the VPS that has not gone
-# green here first, and the VPS runs origin/main and nothing else.
+# Every PR and every push to main. deploy.yml runs only after this workflow is
+# green on a push to main, so nothing reaches the VPS that has not passed here.
 #
 # The backend suite runs in well under two minutes, so there is no filtered
 # subset and no `|| true`: a red test is a red build, and a red build does not
 # deploy.
 #
-# Required repository secrets (Settings -> Secrets and variables -> Actions):
-#   VPS_HOST         the server's address
-#   VPS_USER         the deploy account (not root once a deploy user exists)
-#   VPS_SSH_KEY      the deploy key's PRIVATE half, in full PEM form
-#   VPS_KNOWN_HOSTS  output of `ssh-keyscan <host>`, so the job never trusts
-#                    an unverified host key
-name: CI/CD
+name: CI
 
 on:
   push:
@@ -21,8 +15,8 @@ on:
   # Advisories are published on the vendor's schedule, not ours, so a
   # dependency audit that only runs on push is blind for however long nobody
   # pushes. That is how 46 CVEs across four dependencies accumulated unnoticed
-  # until someone looked by hand. `deploy` is gated on `github.event_name ==
-  # 'push'`, so the weekly run tests and audits without touching production.
+  # until someone looked by hand. deploy.yml only follows a `push` run, so the
+  # weekly run tests and audits without touching production.
   schedule:
     - cron: '0 6 * * 1'
 
@@ -219,112 +213,3 @@ jobs:
         # tree reports 0 vulnerabilities, so the threshold went back down rather
         # than staying loose after the reason for it expired.
         run: npm audit --omit=dev --audit-level=moderate
-
-  # Reports whether deployment is configured yet. Without this the deploy job
-  # would go red on every push until the secrets exist, training everyone to
-  # ignore a red build -- the one signal that has to stay meaningful.
-  deploy-configured:
-    runs-on: ubuntu-latest
-    outputs:
-      ready: ${{ steps.check.outputs.ready }}
-    steps:
-      - id: check
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-        run: |
-          if [ -n "$VPS_HOST" ]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::VPS secrets are not set; skipping deploy."
-          fi
-
-  # The VPS cannot download wheels (files.pythonhosted.org hangs from Iran), so
-  # the backend image is built here and pulled by the deploy. Tagged by commit,
-  # so what deploys is exactly what this run built.
-  backend-image:
-    needs: [backend, frontend, deploy-configured]
-    if: >-
-      github.ref == 'refs/heads/main'
-      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-      && needs.deploy-configured.outputs.ready == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v7
-      - name: Build and push the backend image
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/portfolio-backend:${GITHUB_SHA}"
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker build -t "$image" portfolio-saas/backend
-          docker push "$image"
-
-  deploy:
-    needs: [backend, frontend, deploy-configured, backend-image]
-    if: >-
-      github.ref == 'refs/heads/main'
-      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-      && needs.deploy-configured.outputs.ready == 'true'
-    runs-on: [self-hosted, vps-deploy]
-    # A GitHub Environment gives this job its own secrets and an optional
-    # manual approval gate; add reviewers there if a deploy should ever pause.
-    environment: production
-    permissions:
-      contents: read
-      packages: read
-    steps:
-      # The job token expires with the run; the logout step below removes it so
-      # no stale ghcr.io login outlives the deploy (a stale one made every
-      # pull fail with "denied" on 2026-09-29).
-      - name: Log in to ghcr.io
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-
-      - name: Deploy origin/main to the VPS
-        run: |
-          set -Eeuo pipefail
-          repo=/opt/apps/portfolio-repo
-          cd "$repo"
-          git fetch --prune origin main
-          # --hard, not merge: the server mirrors origin/main exactly and has no
-          # local commits worth keeping. Untracked files are left alone, which
-          # is what keeps .env.production (gitignored) in place across deploys.
-          # The exact commit this run tested and built the backend image from --
-          # not origin/main, which may have moved on while the image built.
-          # (A merge during a deploy once paired a newer checkout with an older
-          # image.) Runs are serialized, so the next run brings the newer commit.
-          git reset --hard "${GITHUB_SHA}"
-          cd "$repo/portfolio-saas"
-          # deploy.sh builds, migrates, restarts, and then verifies both Celery
-          # workers and three health endpoints. It exits
-          # non-zero on any failed check, which fails this job.
-          #
-          # Missing or unreachable mail is reported as degraded. The superuser
-          # recovery link keeps accounts recoverable until a relay is configured.
-          BACKEND_IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/portfolio-backend:${GITHUB_SHA}" \
-            ./scripts/deploy.sh
-
-      - name: Log out of ghcr.io
-        if: always()
-        run: docker logout ghcr.io || true
-
-      # `if: success()`, never `always()`. With `always()` this step ran after a
-      # failed deploy and printed "Deployed <sha> to production." directly under
-      # the step that had just exited 1 -- so the summary line a human actually
-      # reads asserted the opposite of what happened, on three consecutive runs
-      # where nothing reached the server at all.
-      - name: Report the deployed revision
-        if: success()
-        run: echo "Deployed ${{ github.sha }} to production."
-
-      - name: Report that nothing was deployed
-        if: failure()
-        run: |
-          echo "::error::Deploy FAILED; production is still running the previous revision, not ${{ github.sha }}."
-          exit 1

@@ -115,19 +115,33 @@ fi
 # image instead and passes BACKEND_IMAGE; tagging it with the compose name keeps
 # a later manual `compose up` on the same image rather than a stale local build.
 # Without BACKEND_IMAGE (manual deploys) everything still builds here.
+#
+# IMAGE_TAG is what .github/workflows/deploy.yml passes (through the VPS's
+# app-release wrapper), the same interface as the other three apps on this box:
+# both images were built on GitHub for that commit.
+if [[ -n "${IMAGE_TAG:-}" ]]; then
+  BACKEND_IMAGE="ghcr.io/parhambeik/portfolio-backend:${IMAGE_TAG}"
+  FRONTEND_IMAGE="ghcr.io/parhambeik/portfolio-frontend:${IMAGE_TAG}"
+fi
 if [[ -n "${BACKEND_IMAGE:-}" ]]; then
   # Layers come from GitHub's blob CDN, and one read from this host can stall
   # (a single "timeout awaiting response headers" failed a whole deploy on
   # 2026-09-29). Nothing is stopped yet, so retrying is safe.
-  pulled=0
-  for attempt in 1 2 3 4; do
-    if docker pull "${BACKEND_IMAGE}"; then pulled=1; break; fi
-    echo "Image pull attempt ${attempt} failed; retrying." >&2
-    sleep $(( attempt * 15 ))
+  for image in "${BACKEND_IMAGE}" ${FRONTEND_IMAGE:+"${FRONTEND_IMAGE}"}; do
+    pulled=0
+    for attempt in 1 2 3 4; do
+      if docker pull "${image}"; then pulled=1; break; fi
+      echo "Image pull attempt ${attempt} failed; retrying." >&2
+      sleep $(( attempt * 15 ))
+    done
+    (( pulled )) || { echo "Could not pull ${image}; nothing was stopped." >&2; exit 1; }
   done
-  (( pulled )) || { echo "Could not pull ${BACKEND_IMAGE}; nothing was stopped." >&2; exit 1; }
   docker tag "${BACKEND_IMAGE}" portfolio-saas-backend:latest
-  "${compose[@]}" build frontend
+  if [[ -n "${FRONTEND_IMAGE:-}" ]]; then
+    docker tag "${FRONTEND_IMAGE}" portfolio-saas-frontend:latest
+  else
+    "${compose[@]}" build frontend
+  fi
 else
   "${compose[@]}" build
 fi
