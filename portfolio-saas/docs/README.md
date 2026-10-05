@@ -6,7 +6,7 @@ date inside one of them.
 | File | Kind | Status |
 |---|---|---|
 | [`REFERENCE.md`](REFERENCE.md) | Standing reference | **Live.** Price-unit policy, warehouse safeguards, recovered-holdings provenance. The one file here with no expiry date. |
-| [`DATA-SOURCES.md`](DATA-SOURCES.md) | Standing reference | **Live.** Which origin serves which lane, and which origins geo-block the VPS. |
+| [`DATA-SOURCES.md`](DATA-SOURCES.md) | Standing reference | **Live.** Which origin serves which lane, and which origins the VPS can reach (Iranian VPS since 2026-10; Frankfurt measurements kept as history). |
 | [`MOBILE.md`](MOBILE.md) | Release guide | **Live on `codex/holdings-mobile`.** Capacitor iOS/Android shell, mobile auth, offline snapshot, build and verification. |
 | [`LIGHTHOUSE.md`](LIGHTHOUSE.md) | Audit + enforcement | **Live from "Holding it" onward.** The thresholds it explains are the ones `frontend/lighthouserc.json` asserts today; the audit narrative above that is history. |
 | [`PRODUCTION-READINESS.md`](PRODUCTION-READINESS.md) | Working checklist, 2026-09-08/10 | **Mixed.** "P1 — standing" and the SMTP P0 are open; everything under "fixed in batch 5" has shipped. |

@@ -2,8 +2,9 @@
 
 **Status: written, wired, and NOT verified against the live origin.** Every
 other module in this package was built against payloads captured from the
-production VPS. This one could not be: `cdn.tsetmc.com` drops the SYN from any
-non-Iranian source address, so nothing here has ever seen a real response.
+production VPS. This one could not be: `cdn.tsetmc.com` dropped the SYN from
+the retired Frankfurt VPS and, measured 2026-10-05, still times out from the
+Iranian one, so nothing here has ever seen a real response.
 
 That is why `TSETMC_DIRECT_ENABLED` defaults to 0 and why
 `manage.py check_egress --verify-tsetmc` exists. The command probes each

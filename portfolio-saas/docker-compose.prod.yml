@@ -61,7 +61,8 @@ x-backend-env: &backend-env
   ALERT_TELEGRAM_BOT_TOKEN: ${ALERT_TELEGRAM_BOT_TOKEN:-}
   ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID:-}
   ALERT_TELEGRAM_API_BASE: ${ALERT_TELEGRAM_API_BASE:-https://tapi.bale.ai}
-  # Iranian hop for tsetmc/codal. Empty until setup_iran_egress.sh is live;
+  # Egress hop for TSETMC, which drops even this Iranian VPS. Codal needs none:
+  # codal.ir is reachable directly from here. Empty until a hop exists;
   # TSETMC_DIRECT_ENABLED must stay 0 until check_egress --verify-tsetmc passes.
   IRAN_EGRESS_PROXY: ${IRAN_EGRESS_PROXY:-}
   TSETMC_DIRECT_ENABLED: ${TSETMC_DIRECT_ENABLED:-0}
@@ -336,12 +337,11 @@ services:
   # continuously, but sharing four slots with quota fetches meant it competed with
   # the backfill for exactly the resource it does not consume.
   #
-  # DISABLED 2026-08-25. codal.ir is unreachable from this VPS (TCP 443 times out)
-  # and CODAL_HTTP_PROXY is unset, so this worker spent every cycle retrying a
-  # connect that cannot succeed -- ~20,000 no-op runs and 583 timeouts in one day
-  # at ~10% of a core. Set CODAL_ENABLED=1 and uncomment this block together; the
-  # flag alone controls the queue route and the beat entry, but only this block
-  # creates the worker that would consume the queue.
+  # Running in production (CODAL_ENABLED=1, CODAL_WORKER_ENABLED=1). History:
+  # this block was commented out 2026-08-25 on the retired Frankfurt VPS, where
+  # codal.ir timed out and the worker spent every cycle retrying a dead connect.
+  # The Iranian VPS reaches codal.ir directly. The flag controls the queue route
+  # and the beat entry; only this block creates the worker that consumes it.
   celery_worker_codal:
     build: ./backend
     image: portfolio-saas-backend:latest

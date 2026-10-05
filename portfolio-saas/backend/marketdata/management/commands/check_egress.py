@@ -2,8 +2,9 @@
 
 The migration off BrsApi is gated on one fact per origin -- can we connect --
 and that fact is a property of the *host*, not of the code. It differs between
-a laptop, CI, and the Frankfurt VPS, and for TSETMC it is the entire reason the
-stock lane is still on a paid reseller.
+a laptop, CI, the retired Frankfurt VPS and the current Iranian one, and for
+TSETMC -- which still drops the Iranian VPS -- it is the entire reason the stock
+lane is still on a paid reseller.
 
 So this command answers it by measurement, on the machine in question:
 

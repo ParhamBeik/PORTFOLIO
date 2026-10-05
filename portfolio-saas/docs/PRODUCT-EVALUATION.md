@@ -63,7 +63,8 @@ product still cannot ask it.
 
 **Q7 remains 2/0.** It is blocked on the TSE order book, which is blocked on
 network reachability, not on modelling. `scripts/setup_iran_egress.sh` is the
-unblock; until it runs, nothing about Q7 can move.
+unblock; until it runs, nothing about Q7 can move. *(2026-10-05: still true. The
+app now runs on an Iranian VPS, and `cdn.tsetmc.com` drops that box too.)*
 
 ### Second pass, same day: the frontend column finally moves
 
@@ -651,9 +652,10 @@ that will be wrong for بازار پایه today and wrong again after the next 
 counts, volumes and values — on both `DailyStockHistory` and `RealLegalHistory` (1.6M rows).
 Per-capita real buy (`buy_i_value / buy_count_i`) is the single most-used feature in exactly
 this strategy. Plus `base_volume`, `shares_count`, `free_float`, `market_cap`, `sector`
-(`StockSymbolMetadata`), `MarketIndexData` for market regime, and `CorporateAction`. Codal is
-dormant (`CODAL_ENABLED=0`; codal.ir is unreachable from the VPS), so news features are
-unavailable until that network path exists.
+(`StockSymbolMetadata`), `MarketIndexData` for market regime, and `CorporateAction`. Codal was
+dormant at the time of this audit (`CODAL_ENABLED=0`; codal.ir was unreachable from the
+Frankfurt VPS). *(2026-10-05: the app now runs on an Iranian VPS that reaches codal.ir
+directly, and Codal is enabled.)*
 
 **Intraday path.** `StockTransactionTick` — a TimescaleDB hypertable, ~58M rows — carries
 `price`, `volume`, `time`, `row`, `canceled`. Enough to reconstruct the executed tape:
@@ -676,7 +678,9 @@ was consumed, so a model built on today's data learns the aftermath, not the set
 > symbol per day, with no API key. See [`DATA-SOURCES.md`](DATA-SOURCES.md). This removes
 > the ceiling rather than working around it, and it is the strongest single argument for
 > migrating the TSETMC lane off BrsApi. It is gated on one unverified fact — whether the VPS
-> can reach `cdn.tsetmc.com` at all, given that `codal.ir` times out from it today. The v1
+> can reach `cdn.tsetmc.com` at all, given that `codal.ir` times out from it today.
+> *(2026-10-05: it cannot — not from Frankfurt, and not from the Iranian VPS that replaced it,
+> although that one does reach `codal.ir`.)* The v1
 > staging below is unchanged either way: v1 needs no order book, and it is what tells you
 > whether the label carries signal before you spend anything on the rest.
 
