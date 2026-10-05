@@ -144,7 +144,7 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
         className="app-drawer"
       >
         <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
-          <span className="text-sm font-semibold">Menu</span>
+          <span className="text-sm font-semibold">{t("Menu")}</span>
           <Button
             variant="ghost"
             onClick={onClose}
@@ -352,7 +352,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
         href="#main"
         className="sr-only focus:not-sr-only focus:absolute focus:m-2 focus:rounded focus:bg-[var(--c-accent-fill)] focus:px-3 focus:py-2 focus:text-white"
       >
-        Skip to content
+        {t("Skip to content")}
       </a>
 
       <header className="app-header sticky top-0 z-20 border-b border-border bg-panel/95 backdrop-blur-md">

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { translate } from "../i18n.js";
 import { Link, useSearchParams } from "react-router-dom";
 import { downloadArchivedFiling, exploreStocks, researchRun, researchSettings, runResearch, stockDossier, watch } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
@@ -225,7 +226,7 @@ function Company({ symbol }) {
                 {data.company.sector ? (
                   <>Industry is a current provider-reported {data.company.sector_source === "symbol_metadata" ? "symbol metadata" : "instrument catalog"} label, observed {date(data.company.sector_observed_at)}; it does not establish past membership. </>
                 ) : "Industry is unavailable for this stock. "}
-                Monthly sales appear only where the current Codal filing reconciles to its source rows. Income and balance figures appear only for supported statement templates with verified issuer, unit, period, and arithmetic.
+                {translate("Monthly sales appear only where the current Codal filing reconciles to its source rows. Income and balance figures appear only for supported statement templates with verified issuer, unit, period, and arithmetic.")}
               </p>
             </Card>
 
@@ -252,7 +253,7 @@ function Company({ symbol }) {
                   {" "}{price.candle_disagreements_over_1pct} differ by more than 1%.
                   {price.candle_disagreements_over_1pct > 0 && " Treat this chart as disputed until those days are reconciled."}
                 </p>
-                <p>Adjusted prices, USD conversion, and return comparisons are withheld pending source checks.</p>
+                <p>{translate("Adjusted prices, USD conversion, and return comparisons are withheld pending source checks.")}</p>
               </div>
             </Card>
 

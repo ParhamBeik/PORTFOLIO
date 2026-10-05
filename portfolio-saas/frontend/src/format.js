@@ -10,6 +10,7 @@
 //
 // Money is Toman. The backend serializes Decimals as strings — Number() them.
 
+import { translate } from "./i18n.js";
 import { jalaliLabel, toJalali } from "./jalali.js";
 
 /** User-facing performance metric names (API fields remain twr / xirr). */
@@ -206,23 +207,45 @@ export function trendAxisTick(iso, spanMs) {
   return dtf({ year: "numeric", month: "short" }).format(d);
 }
 
+// Status codes and asset classes reach the screen through this, so it is also
+// where they are translated: "stale" -> "Stale" -> its Persian entry.
 export const humanize = (code) =>
-  !code ? "" : String(code).replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
+  !code ? "" : translate(String(code).replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase()));
+
+/**
+ * A sentence the API wrote, in the reader's language when we know it. Fixed
+ * sentences are dictionary entries; the few that carry a number are matched
+ * here and re-filled, so the number survives the translation.
+ */
+const SERVER_PATTERNS = [
+  [/^Performance available after (\d+) more day\(s\) of tracking\.$/, "Performance available after {n} more day(s) of tracking."],
+];
+export function serverText(text) {
+  if (typeof text !== "string") return text;
+  for (const [re, key] of SERVER_PATTERNS) {
+    const m = text.match(re);
+    if (m) return translate(key, undefined, { n: m[1] });
+  }
+  return translate(text);
+}
 
 /** Relative-age label for a freshness timestamp measured in seconds, e.g. "1h 44m ago". */
 export function ago(seconds) {
   if (bad(seconds)) return "—";
   const s = Math.max(0, Math.round(Number(seconds)));
-  if (s < 60) return "just now";
+  // Whole phrases with placeholders, so Persian can order them its own way.
+  if (s < 60) return translate("just now");
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
+  if (m < 60) return translate("{m}m ago", undefined, { m });
   const h = Math.floor(m / 60);
   if (h < 24) {
     const remM = m % 60;
-    return remM ? `${h}h ${remM}m ago` : `${h}h ago`;
+    return remM
+      ? translate("{h}h {m}m ago", undefined, { h, m: remM })
+      : translate("{h}h ago", undefined, { h });
   }
   const d = Math.floor(h / 24);
-  return `${d}d ago`;
+  return translate("{d}d ago", undefined, { d });
 }
 
 /**

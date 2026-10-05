@@ -54,14 +54,22 @@ const subscribe = (fn) => {
 
 export const useLang = () => useSyncExternalStore(subscribe, () => lang, () => lang);
 
-/** Translate an English UI string; anything that is not a string passes through. */
-export function translate(text, to = lang) {
-  if (to !== "fa" || typeof text !== "string") return text;
-  return FA[text] ?? text;
+/**
+ * Translate an English UI string; anything that is not a string passes through.
+ *
+ * `vars` fills `{name}` placeholders AFTER the lookup, so a sentence with a
+ * number in it is one dictionary entry ("{n} of {total} prices aren't live")
+ * rather than a sentence glued from fragments, which no translation survives:
+ * Persian puts the number and the verb in different places.
+ */
+export function translate(text, to = lang, vars) {
+  if (typeof text !== "string") return text;
+  const out = to === "fa" ? FA[text] ?? text : text;
+  return vars ? out.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m)) : out;
 }
 
 /** Hook form: re-renders the caller when the language changes. */
 export function useT() {
   const current = useLang();
-  return (text) => translate(text, current);
+  return (text, vars) => translate(text, current, vars);
 }

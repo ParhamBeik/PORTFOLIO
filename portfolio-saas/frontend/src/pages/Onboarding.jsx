@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { translate } from "../i18n.js";
 import { useNavigate } from "react-router-dom";
 import { addHolding, createAccount, listAssets } from "../api.js";
 import { assetLabel } from "../format.js";
@@ -77,7 +78,7 @@ export default function Onboarding() {
           )}
 
           <div>
-            <span className="mb-1 block text-sm text-muted">Asset</span>
+            <span className="mb-1 block text-sm text-muted">{translate("Asset")}</span>
             <Async {...assets} testId="onboarding-assets" empty="No assets are available yet.">
               {(list) => (
                 <Select
@@ -88,7 +89,7 @@ export default function Onboarding() {
                   onChange={(e) => setAssetKey(e.target.value)}
                   required
                 >
-                  <option value="">Select an asset…</option>
+                  <option value="">{translate("Select an asset…")}</option>
                   {list.map((a) => (
                     <option key={a.key} value={a.key}>{assetLabel(a)}</option>
                   ))}
@@ -98,7 +99,7 @@ export default function Onboarding() {
           </div>
 
           <label className="block">
-            <span className="mb-1 block text-sm text-muted">Quantity</span>
+            <span className="mb-1 block text-sm text-muted">{translate("Quantity")}</span>
             <Input
               label="Quantity"
               data-testid="onboarding-quantity"

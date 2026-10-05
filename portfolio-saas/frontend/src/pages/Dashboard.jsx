@@ -16,6 +16,7 @@ import {
   benchmarks,
 } from "../api.js";
 import {
+  serverText,
   allocationByClass,
   ago,
   area,
@@ -85,14 +86,13 @@ const REAL_BASIS_NOTE = `In constant ${REAL_BASIS_BASE_YEAR} Tomans`;
 // happily printed a 1-year return and a 90-day comparison while this one said
 // "available after 71 more days", and the three read as a contradiction.
 function PerformanceUnavailable({ detail }) {
+  const t = useT();
   return (
     <Empty testId="dashboard-performance-empty">
-      <span>{detail || PERF_UNLOCK_HINT}</span>
+      <span>{serverText(detail || PERF_UNLOCK_HINT)}</span>
       <span className="mt-2 block text-xs text-muted">
-        This is the return on the money you put in, which needs a tracked opening
-        balance. Price-based returns for the same holdings are already available
-        on <Link to="/optimal" className="underline hover:text-text">My Optimal</Link>{" "}
-        and <Link to="/comparison" className="underline hover:text-text">Comparison</Link>.
+        {t("These measure the return on the money put in, so they need a tracked opening balance.")}{" "}
+        <Link to="/compare" className="underline hover:text-text">{t("Price-based returns are on Compare.")}</Link>
       </span>
     </Empty>
   );
@@ -111,6 +111,7 @@ const ITEM_BADGE = { live: "good", manual: "warn", stale: "warn", quota: "seriou
  * loading so nothing below it moves.
  */
 function MarketClocks({ data }) {
+  const t = useT();
   const markets = data?.markets || [];
   // A dot and a word per market, on the hero's context line. The price age
   // sits in the tooltip: it is the second question, not the first.
@@ -122,14 +123,14 @@ function MarketClocks({ data }) {
           <span
             key={m.market}
             data-testid={`dashboard-market-${m.market}`}
-            title={age != null ? `Last price ${ago(age)}` : undefined}
+            title={age != null ? t("Last price {age}", { age: ago(age) }) : undefined}
             className="inline-flex items-center gap-1.5"
           >
             <span
               aria-hidden="true"
               className={`size-1.5 rounded-full ${m.open ? "bg-[var(--c-good)]" : "bg-[var(--c-muted)]"}`}
             />
-            <span>{m.label} {m.open ? "open" : "closed"}</span>
+            <span>{t(m.open ? "{market} open" : "{market} closed", { market: t(m.label) })}</span>
           </span>
         );
       })}
@@ -624,7 +625,7 @@ function PositionsTable({ rows, showAccount }) {
 function PerformanceLockedNote({ detail }) {
   return (
     <p className="mb-3 text-xs text-muted" data-testid="dashboard-performance-locked-note">
-      {detail || PERF_UNLOCK_HINT}
+      {serverText(detail || PERF_UNLOCK_HINT)}
     </p>
   );
 }
@@ -723,7 +724,7 @@ function PerformanceCard({ activeId, basis, accounts }) {
                         r.performance_available ? (
                           <Badge variant="good">Ready</Badge>
                         ) : (
-                          <span className="text-xs text-muted">{r.detail || "Needs ledger"}</span>
+                          <span className="text-xs text-muted">{serverText(r.detail || "Needs ledger")}</span>
                         ),
                     },
                   ]}
@@ -858,6 +859,7 @@ function PricingGlossary() {
 }
 
 function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
+  const t = useT();
   const [manageMode, setManageMode] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [savingKey, setSavingKey] = useState(null);
@@ -1322,7 +1324,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                   data-testid="dashboard-stale-banner"
                   className="mb-3 rounded-lg border border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 px-4 py-3 text-sm"
                 >
-                  {staleCount} of {visible.length} prices aren&apos;t live — showing the last known price.
+                  {t("{n} of {total} prices aren't live — showing the last known price.", { n: staleCount, total: visible.length })}
                 </div>
               )}
               {hidden.length > 0 && (
@@ -1391,14 +1393,22 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
 
 
 function ExcludedDisclosure({ valuationState }) {
-  const excluded = valuationState.data?.excluded;
+  const data = valuationState.data;
+  const excluded = data?.excluded;
   if (!excluded?.length) return null;
+  // Named as the holdings table names them. This printed the catalog key
+  // (usd_cash, swiss_gold_bar_2_5g) -- an identifier, not a name.
+  const rows = [...(data.items || []), ...(data.hidden_items || [])];
+  const nameOf = (key) => {
+    const row = rows.find((r) => r.key === key);
+    return row ? holdingLabel(row) : humanize(key);
+  };
   return (
     <Disclosure summary="Assets excluded from this valuation" testId="dashboard-excluded">
       <ul className="space-y-1">
         {excluded.map((e) => (
-          <li key={e.asset_key}>
-            {e.asset_key} — {humanize(e.reason)}
+          <li key={`${e.account_id}:${e.asset_key}`}>
+            <bdi>{nameOf(e.asset_key)}</bdi> — {humanize(e.reason)}
           </li>
         ))}
       </ul>

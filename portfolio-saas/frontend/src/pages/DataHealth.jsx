@@ -1,4 +1,5 @@
 import { accountDataQuality, valuation } from "../api.js";
+import { translate } from "../i18n.js";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { Async, Badge, Card, Table } from "../components/ui.jsx";
 import { ago, dateTime, holdingLabel, humanize } from "../format.js";
@@ -75,7 +76,7 @@ function HistoryHealth({ account }) {
   const state = useApi(() => accountDataQuality(account.id), [account.id]);
   return (
     <Card
-      title={`Price history · ${account.name}`}
+      title={`${translate("Price history")} · ${account.name}`}
       subtitle="Whether the history behind returns and charts is complete, and what the backfill is doing about any gap."
       testId={`data-health-history-${account.id}`}
     >
@@ -92,7 +93,7 @@ function HistoryHealth({ account }) {
                 key: "gate",
                 header: "History",
                 render: (r) =>
-                  r.passes_gate == null ? "Manual value" : r.passes_gate ? "Complete enough" : (r.reason_codes || []).map(humanize).join(", ") || "Gaps",
+                  r.passes_gate == null ? translate("Manual value") : r.passes_gate ? translate("Complete enough") : (r.reason_codes || []).map(humanize).join(", ") || translate("Gaps"),
               },
               {
                 key: "repair",

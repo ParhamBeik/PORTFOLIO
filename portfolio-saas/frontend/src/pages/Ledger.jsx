@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { translate } from "../i18n.js";
 import { useSearchParams } from "react-router-dom";
 import {
   commitLedgerImport,
@@ -593,7 +594,7 @@ export default function Ledger() {
               aria-label="Add transaction"
             >
               <PlusIcon />
-              Add
+              {translate("Add")}
             </Button>
             {accountId != null && (
               <Button
@@ -656,7 +657,7 @@ export default function Ledger() {
         testId="ledger-history-card"
         actions={
           <label className="flex items-center gap-2 text-sm text-muted">
-            Rows
+            {translate("Rows")}
             <Select
               label="Rows per page"
               value={pageSize}
@@ -664,7 +665,7 @@ export default function Ledger() {
               data-testid="ledger-page-size"
             >
               {PAGE_SIZES.map((s) => (
-                <option key={s} value={s}>{s === ALL ? "All" : s}</option>
+                <option key={s} value={s}>{s === ALL ? translate("All") : s}</option>
               ))}
             </Select>
           </label>

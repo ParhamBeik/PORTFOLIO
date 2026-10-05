@@ -11,6 +11,7 @@
 // deletion). A destructive action inside a menu that closes when you click
 // past it is a destructive action waiting to be half-completed.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { translate, useT } from "../i18n.js";
 import {
   changePassword,
   deleteAccount,
@@ -37,24 +38,26 @@ function untilLabel(iso) {
   if (!iso) return null;
   const ms = new Date(iso).getTime() - Date.now();
   if (!Number.isFinite(ms)) return null;
-  if (ms <= 0) return "expired";
+  if (ms <= 0) return translate("expired");
   const hours = Math.round(ms / 3600000);
-  if (hours < 1) return `in ${Math.max(1, Math.round(ms / 60000))} min`;
-  if (hours < 48) return `in ${hours}h`;
-  return `in ${Math.round(hours / 24)} days`;
+  if (hours < 1) return translate("this session ends in {n} min", undefined, { n: Math.max(1, Math.round(ms / 60000)) });
+  if (hours < 48) return translate("this session ends in {n}h", undefined, { n: hours });
+  return translate("this session ends in {n} days", undefined, { n: Math.round(hours / 24) });
 }
 
 function Row({ label, children }) {
+  const t = useT();
   return (
     <div className="flex items-baseline justify-between gap-3 py-1">
-      <span className="text-xs text-muted">{label}</span>
-      <span className="text-xs text-text">{children}</span>
+      <span className="text-xs text-muted">{t(label)}</span>
+      <span className="text-xs text-text">{t(children)}</span>
     </div>
   );
 }
 
 /** One tappable line in the menu. Hover and focus look the same on purpose. */
 function MenuItem({ onClick, children, danger, testId, disabled }) {
+  const t = useT();
   return (
     <button
       type="button"
@@ -67,7 +70,7 @@ function MenuItem({ onClick, children, danger, testId, disabled }) {
           : "text-text hover:bg-panel-2 focus-visible:bg-panel-2"
       }`}
     >
-      {children}
+      {t(typeof children === "string" ? children.trim() : children)}
     </button>
   );
 }
@@ -350,7 +353,7 @@ export default function AccountMenu({
       {open && (
         <div
           role="dialog"
-          aria-label="Account"
+          aria-label={translate("Account")}
           data-testid="account-menu"
           className={`absolute z-40 mt-2 rounded-xl border border-border bg-panel p-3 shadow-2xl ${
             panelFill
@@ -373,12 +376,12 @@ export default function AccountMenu({
 
           <div className="border-b border-border py-2">
             <Row label="Member since">{user.date_joined ? dateTime(user.date_joined) : "—"}</Row>
-            <Row label="Signed in">{expires ? `this session ends ${expires}` : "active"}</Row>
+            <Row label="Signed in">{expires || "active"}</Row>
             <Row label="Operations">{user.role === "admin" ? "Available" : "Not available"}</Row>
           </div>
 
           <div className="border-b border-border py-3">
-            <p className="mb-2 text-xs text-muted">Your name, as it appears here</p>
+            <p className="mb-2 text-xs text-muted">{translate("Your name, as it appears here")}</p>
             <div className="flex gap-2">
               <Input
                 label="First name"

@@ -155,6 +155,7 @@ export function StatTile({ label, value, sub, valueTone = "neutral", size = "md"
 
 /** Status wears an icon-free but always-labelled chip — never hue alone. */
 export function Badge({ children, variant = "neutral", title, testId }) {
+  const t = useT();
   // Outline and label are the SAME token, at full opacity, over a plain surface.
   // Two measurements forced that, and each broke the obvious alternative:
   //
@@ -183,10 +184,10 @@ export function Badge({ children, variant = "neutral", title, testId }) {
   return (
     <span
       data-testid={testId}
-      title={title}
+      title={t(title)}
       className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium whitespace-nowrap ${styles[variant]}`}
     >
-      {children}
+      {t(children)}
     </span>
   );
 }
@@ -239,9 +240,10 @@ export function Button({ variant = "ghost", className = "", children, ...props }
 }
 
 export function Select({ label, className = "", ...props }) {
+  const t = useT();
   return (
     <select
-      aria-label={label}
+      aria-label={t(label)}
       className={`${FIELD} ${className}`}
       {...props}
     />
@@ -257,19 +259,22 @@ export function Select({ label, className = "", ...props }) {
  * redefined privately in each one.
  */
 export function Field({ label, hint, children }) {
+  const t = useT();
   return (
     <div>
-      <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">{label}</div>
+      <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">{t(label)}</div>
       {children}
-      {hint && <p className="mt-1 text-xs text-muted">{hint}</p>}
+      {hint && <p className="mt-1 text-xs text-muted">{t(hint)}</p>}
     </div>
   );
 }
 
-export function Input({ label, className = "", ...props }) {
+export function Input({ label, className = "", placeholder, ...props }) {
+  const t = useT();
   return (
     <input
-      aria-label={label}
+      aria-label={t(label)}
+      placeholder={t(placeholder)}
       className={`${FIELD} placeholder:text-muted ${className}`}
       {...props}
     />
@@ -300,6 +305,7 @@ export function Textarea({ label, className = "", ...props }) {
  * dead: the server refuses a future entry, so offering one is offering a 400.
  */
 export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" }) {
+  const t = useT();
   const today = toJalali(Date.now());
   const selected = value ? toJalali(new Date(value)) : null;
   const [view, setView] = useState(() => selected || today);
@@ -322,17 +328,17 @@ export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" 
       <div className="mb-2 flex items-center justify-between gap-2">
         <Button
           onClick={() => step(-1)}
-          aria-label="Previous month"
+          aria-label={t("Previous month")}
           data-testid={testId ? `${testId}-prev` : undefined}
         >
           ‹
         </Button>
         <span className="text-sm font-medium" data-testid={testId ? `${testId}-month` : undefined}>
-          {JALALI_MONTHS[view.jm - 1]} {view.jy}
+          {t(JALALI_MONTHS[view.jm - 1])} {view.jy}
         </span>
         <Button
           onClick={() => step(1)}
-          aria-label="Next month"
+          aria-label={t("Next month")}
           data-testid={testId ? `${testId}-next` : undefined}
         >
           ›
@@ -341,7 +347,7 @@ export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" 
 
       <div className="grid grid-cols-7 gap-1 text-center text-[0.625rem] font-semibold tracking-wide text-muted uppercase">
         {JALALI_WEEKDAYS.map((d) => (
-          <span key={d}>{d}</span>
+          <span key={d}>{t(d)}</span>
         ))}
       </div>
 
@@ -374,7 +380,7 @@ export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" 
 
       <div className="mt-3 flex items-center justify-between gap-2 border-t border-border pt-2">
         <span className="text-xs text-muted" data-testid={testId ? `${testId}-summary` : undefined}>
-          {selected ? jalaliLabel(selected) : todayLabel}
+          {selected ? jalaliLabel(selected) : t(todayLabel)}
         </span>
         {selected && (
           <Button
@@ -581,16 +587,19 @@ export function Pager({ page, count, pageSize = 25, onPage, testId }) {
  * front. Pass the height the panel will actually render (for a chart, its
  * `height` prop).
  */
-export const Loading = ({ children = "Loading…", testId, minHeight }) => (
-  <p
-    role="status"
-    data-testid={testId}
-    className="flex items-center justify-center py-8 text-center text-sm text-muted"
-    style={minHeight ? { minHeight } : undefined}
-  >
-    {children}
-  </p>
-);
+export function Loading({ children = "Loading…", testId, minHeight }) {
+  const t = useT();
+  return (
+    <p
+      role="status"
+      data-testid={testId}
+      className="flex items-center justify-center py-8 text-center text-sm text-muted"
+      style={minHeight ? { minHeight } : undefined}
+    >
+      {t(children)}
+    </p>
+  );
+}
 
 export function Empty({ children, action, testId, minHeight }) {
   const t = useT();
@@ -655,6 +664,7 @@ export function Async({ data, error, loading, reload, children, empty, testId, m
 const MODAL_WIDTHS = { default: "max-w-lg", wide: "max-w-3xl" };
 
 export function Modal({ title, subtitle, onClose, children, footer, testId, size = "default" }) {
+  const t = useT();
   const panel = useRef(null);
   // Read through a ref so the effect below runs once per opening. Keyed on
   // `onClose`, it re-ran whenever a caller passed a fresh arrow -- every render
@@ -727,14 +737,14 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
         ref={panel}
         role="dialog"
         aria-modal="true"
-        aria-label={title}
+        aria-label={t(title)}
         data-testid={testId}
         className={`flex max-h-[calc(100vh-2rem)] w-full flex-col rounded-xl border border-border bg-panel shadow-2xl ${MODAL_WIDTHS[size] || MODAL_WIDTHS.default}`}
       >
         <header className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
           <div>
-            <h2 className="text-base font-semibold">{title}</h2>
-            {subtitle && <p className="mt-1 text-sm text-muted">{subtitle}</p>}
+            <h2 className="text-base font-semibold">{t(title)}</h2>
+            {subtitle && <p className="mt-1 text-sm text-muted">{t(subtitle)}</p>}
           </div>
           <Button variant="ghost" onClick={onClose} aria-label="Close" data-testid={testId ? `${testId}-close` : undefined}>
             ✕
@@ -752,12 +762,15 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
 }
 
 /** Collapsed assumptions / methodology block. */
-export const Disclosure = ({ summary, children, testId, open = false }) => (
-  <details open={open} data-testid={testId} className="mt-4 rounded-lg border border-border bg-panel-2 px-4 py-2">
-    <summary className="cursor-pointer py-1 text-sm font-medium text-muted">{summary}</summary>
-    <div className="pt-2 pb-1 text-sm text-muted">{children}</div>
-  </details>
-);
+export function Disclosure({ summary, children, testId, open = false }) {
+  const t = useT();
+  return (
+    <details open={open} data-testid={testId} className="mt-4 rounded-lg border border-border bg-panel-2 px-4 py-2">
+      <summary className="cursor-pointer py-1 text-sm font-medium text-muted">{t(summary)}</summary>
+      <div className="pt-2 pb-1 text-sm text-muted">{children}</div>
+    </details>
+  );
+}
 
 export function PageHeader({ title, subtitle, actions, meta }) {
   const t = useT();

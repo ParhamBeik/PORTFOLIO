@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { translate } from "../i18n.js";
 import { listAssets, priceHistory } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
 import { Async, Card, Empty, PageHeader, Select, Tabs } from "../components/ui.jsx";
@@ -53,7 +54,7 @@ export default function AssetHistory() {
         actions={
           <div className="flex flex-wrap items-end gap-3">
             <label className="flex flex-col gap-1 text-xs font-medium tracking-wide text-muted uppercase">
-              Asset
+              {translate("Asset")}
               <Select
                 label="Asset"
                 value={assetKey}
@@ -61,7 +62,7 @@ export default function AssetHistory() {
                 data-testid="asset-history-asset"
                 className="min-w-52"
               >
-                <option value="">Choose…</option>
+                <option value="">{translate("Choose…")}</option>
                 {choices.map((asset) => (
                   <option key={asset.key} value={asset.key}>
                     <bdi>{catalogLabel(asset)}</bdi>

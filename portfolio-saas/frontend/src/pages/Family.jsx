@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { translate } from "../i18n.js";
 import { Link } from "react-router-dom";
 import { getPerformance, snapshots, valuation } from "../api.js";
 import { Donut, MultiLineTrend, StackedShareTrend } from "../components/charts.jsx";
@@ -16,7 +17,7 @@ import {
   toneClass,
   toneFor,
 } from "../components/ui.jsx";
-import { allocationByClass, money, moneyCompact, pct, perfLabel, signedPct } from "../format.js";
+import { allocationByClass, serverText, money, moneyCompact, pct, perfLabel, signedPct } from "../format.js";
 import { useApi } from "../useApi.js";
 
 const RANGES = [
@@ -170,7 +171,7 @@ function HistoryCharts({ accounts, basis }) {
           return (
             <div className="space-y-6">
               <div>
-                <h3 className="mb-2 text-sm font-medium text-muted">Share of combined total</h3>
+                <h3 className="mb-2 text-sm font-medium text-muted">{translate("Share of combined total")}</h3>
                 <StackedShareTrend
                   series={chart.series}
                   data={chart.shares}
@@ -179,7 +180,7 @@ function HistoryCharts({ accounts, basis }) {
                 />
               </div>
               <div>
-                <h3 className="mb-2 text-sm font-medium text-muted">Absolute net worth</h3>
+                <h3 className="mb-2 text-sm font-medium text-muted">{translate("Absolute net worth")}</h3>
                 <MultiLineTrend
                   series={chart.series}
                   data={chart.values}
@@ -243,7 +244,7 @@ function PerformanceTable({ accounts, basis }) {
                   r.performance_available ? (
                     <Badge variant="good">Ready</Badge>
                   ) : (
-                    <span className="text-xs text-muted">{r.detail || "Needs ledger"}</span>
+                    <span className="text-xs text-muted">{serverText(r.detail || "Needs ledger")}</span>
                   ),
               },
             ]}
@@ -254,11 +255,8 @@ function PerformanceTable({ accounts, basis }) {
               and the three read as three answers to one question. */}
           {rows.some((r) => !r.performance_available) && (
             <p className="mt-3 text-xs text-muted" data-testid="breakdown-performance-note">
-              These measure the return on the money put in, which needs a tracked
-              opening balance. Price-based returns for the same holdings are
-              already available on{" "}
-              <Link to="/optimal" className="underline hover:text-text">My Optimal</Link>{" "}
-              and <Link to="/comparison" className="underline hover:text-text">Comparison</Link>.
+              {translate("These measure the return on the money put in, so they need a tracked opening balance.")}{" "}
+              <Link to="/compare" className="underline hover:text-text">{translate("Price-based returns are on Compare.")}</Link>
             </p>
           )}
           </>
