@@ -501,7 +501,8 @@ export default function Ledger() {
     return <Empty testId="ledger-empty">Create a portfolio first.</Empty>;
   }
 
-  const showPortfolio = accountId == null;
+  // Only worth a column when there is more than one portfolio to tell apart.
+  const showPortfolio = accountId == null && accounts.length > 1;
 
   const columns = [
     {
@@ -526,6 +527,8 @@ export default function Ledger() {
       render: (r) =>
         r.asset_key ? (
           <bdi title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</bdi>
+        ) : CASH_KINDS.includes(r.kind) ? (
+          "Cash"
         ) : (
           "—"
         ),
