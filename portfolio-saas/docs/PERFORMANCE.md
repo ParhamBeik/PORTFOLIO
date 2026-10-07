@@ -63,6 +63,8 @@ The same data as JSON for staff: `GET /api/perf/report/?days=7&source=api`
 | Change | Problem it fixes |
 |---|---|
 | `_load_price_panel` reads the warehouse only from the window's cutoff day (`_BOUNDED_HISTORY_READS`). The bounded and full reads are pinned equal by a test across windows, as-of dates, dollar-quoted gold and FX flat runs | Every history build (the benchmark tab, Risk, Compare, the analytics matrices) read each symbol's full ~12-year history to draw a 30-day window. Measured locally on a 12-year, 2-asset panel: 180–207 ms became 24–36 ms |
+| `portfolio.models.newest_prices()` replaces the `DISTINCT ON (asset_id)` latest-tick reads (valuation, price map, Ops assets) with one indexed probe per asset | PostgreSQL has no skip scan, so each read walked every tick in the 14-day window. Measured locally on 800k interleaved ticks: 366 ms became 2.6 ms, same rows. Production `/valuation/` spent 240 of 335 ms in the database, and Ops assets took 12 s |
+| Integrity scoring, daily-bar rejections, the USD/USDT basis rates and the index closes read only their window | Each loaded full history to use a 180-day, in-window, 5-day or one-row-per-day slice |
 | `/snapshots/?include_real=1` embeds the `real_toman` series in the nominal response; the Dashboard "vs inflation" mode uses it | That mode sent a second full snapshot request (live valuation plus the hidden-holding replay) only to divide by CPI. On a nominal basis it now costs no request at all |
 
 ## Known, not yet changed

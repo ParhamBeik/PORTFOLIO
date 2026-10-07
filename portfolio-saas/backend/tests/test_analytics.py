@@ -1938,3 +1938,41 @@ def test_bounded_history_reads_match_full_reads(asset_catalog, history_days, his
     assert bounded[2] == full[2]
     assert bounded[0].attrs == full[0].attrs
     assert not bounded[0].empty
+
+
+def test_integrity_ignores_history_before_its_window(asset_catalog):
+    """The score reads only its window; older rows must not change it."""
+    from marketdata.models import MarketInstrument
+
+    MarketInstrument.objects.create(source=MarketInstrument.Source.TSETMC, symbol="کاما")
+    _seed_warehouse_days("کاما", 200)
+    before = compute_symbol_integrity("کاما")
+    today = dt.date.today()
+    old_rows = []
+    for offset in range(400, 3000):
+        j = jdatetime.date.fromgregorian(date=today - dt.timedelta(days=offset))
+        old_rows.append(MarketCandle(
+            symbol="کاما", timeframe="1d_adj", date_time=f"{j.year:04d}-{j.month:02d}-{j.day:02d}",
+            open_price=1, high_price=1, low_price=1, close_price=1, volume=1,
+        ))
+    MarketCandle.objects.bulk_create(old_rows)
+    assert compute_symbol_integrity("کاما") == before
+
+
+def test_usd_basis_ignores_rates_older_than_its_lookback(asset_catalog):
+    index = pd.date_range("2026-03-01", periods=20, tz="UTC")
+    series = pd.Series(range(1, 21), index=index, dtype=float)
+    for day in pd.date_range("2026-02-20", periods=40, tz="UTC"):
+        j = jdatetime.date.fromgregorian(date=day.date())
+        GoldCurrencyHistory.objects.create(
+            symbol="USD", date=f"{j.year:04d}-{j.month:02d}-{j.day:02d}",
+            close_price=Decimal(60000 + day.day), unit="تومان",
+        )
+    before = to_basis(series, "usd_denominated")
+    for day in pd.date_range("2015-01-01", periods=300, tz="UTC"):
+        j = jdatetime.date.fromgregorian(date=day.date())
+        GoldCurrencyHistory.objects.create(
+            symbol="USD", date=f"{j.year:04d}-{j.month:02d}-{j.day:02d}",
+            close_price=Decimal(1), unit="تومان",
+        )
+    pd.testing.assert_series_equal(to_basis(series, "usd_denominated"), before)

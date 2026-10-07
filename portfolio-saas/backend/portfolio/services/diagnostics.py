@@ -400,9 +400,11 @@ def _index_daily_closes(since_jalali: str | None, as_of_jalali: str | None) -> p
 
     # Ordered by (date, time): the last row of a day overwrites the earlier
     # ones, so each date maps to its final value -- as the full load did.
-    last_by_date: dict[str, float] = {}
-    for date, value in qs.order_by("date", "time").values_list("date", "index_overall"):
-        last_by_date[date] = value
+    # The day's last row by time -- (date, time) is unique, so this is the
+    # value the old full walk ended on, without reading every intraday tick.
+    last_by_date: dict[str, float] = dict(
+        qs.order_by("date", "-time").distinct("date").values_list("date", "index_overall")
+    )
 
     records: dict[dt.date, float] = {}
     for date, value in last_by_date.items():

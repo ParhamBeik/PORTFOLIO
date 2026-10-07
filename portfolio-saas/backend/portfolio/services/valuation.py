@@ -29,6 +29,7 @@ from portfolio.models import (
     Liability,
     Price,
     USD_QUOTED_KEYS,
+    newest_prices,
     positive_price_q,
 )
 from .timeline import cash_as_of, holdings_as_of, house_state_as_of, load_house_marks
@@ -196,10 +197,8 @@ def refresh_prices_cache() -> dict:
 
 def _compute_latest_prices(current_state) -> dict:
     latest = (
-        Price.objects.select_related("asset")
-        .filter(positive_price_q(), asset__is_active=True)
-        .order_by("asset_id", "-fetched_at", "-id")
-        .distinct("asset_id")
+        newest_prices(positive_price_q(), Asset.objects.filter(is_active=True))
+        .select_related("asset")
     )
     latest = list(latest)
     prices = {
@@ -241,10 +240,8 @@ def guard_price_map(prices: dict, *, fill_missing=True, archive_replacements=Non
     # per asset, and so does the archive comparison -- a close only outranks a
     # live price if it is not from an older session than the one already held.
     latest_db_rows = list(
-        Price.objects.select_related("asset")
-        .filter(positive_price_q(), asset__is_active=True)
-        .order_by("asset_id", "-fetched_at", "-id")
-        .distinct("asset_id")
+        newest_prices(positive_price_q(), Asset.objects.filter(is_active=True))
+        .select_related("asset")
     )
     prev_prices = {
         row.asset.key: (_q(row.price), row.fetched_at)
@@ -310,10 +307,8 @@ def stored_price_sessions(keys) -> dict:
     """
     return {
         row.asset.key: row.fetched_at
-        for row in Price.objects.select_related("asset")
-        .filter(positive_price_q(), asset__key__in=list(keys))
-        .order_by("asset_id", "-fetched_at", "-id")
-        .distinct("asset_id")
+        for row in newest_prices(positive_price_q(), Asset.objects.filter(key__in=list(keys)))
+        .select_related("asset")
         if row.asset.key not in USD_QUOTED_KEYS
         or (row.price_unit == Price.Unit.IRT and row.price_unit_verified)
     }
@@ -916,9 +911,7 @@ def value_account(
     holdings = list(holdings)
     latest_rows = {
         row.asset_id: row
-        for row in Price.objects.filter(asset_id__in=[h.asset_id for h in holdings])
-        .order_by("asset_id", "-fetched_at", "-id")
-        .distinct("asset_id")
+        for row in newest_prices(assets=[h.asset_id for h in holdings])
     }
     now = timezone.now()
     priced_assets = 0

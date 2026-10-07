@@ -99,12 +99,21 @@ def to_basis(
 
             symbol = "USDT_IRT" if basis == "usdt_denominated" else "USD"
             rates = GoldCurrencyHistory.objects.filter(symbol=symbol, close_price__gt=0)
+            since = None
             if not series.index.empty:
                 jdate = jdatetime.date.fromgregorian(date=series.index.max().date())
                 rates = rates.filter(
                     date__lte=f"{jdate.year:04d}-{jdate.month:02d}-{jdate.day:02d}"
                 )
-            rejected = rejected_pairs([symbol], BRS_SERIES_ENDPOINTS)
+                # The alignment below looks back at most 5 days (merge_asof
+                # tolerance), so no older rate can be used; a sixth day of pad
+                # covers the UTC/Tehran date edge. It loaded the whole history.
+                floor = jdatetime.date.fromgregorian(
+                    date=series.index.min().date() - dt.timedelta(days=6)
+                )
+                since = f"{floor.year:04d}-{floor.month:02d}-{floor.day:02d}"
+                rates = rates.filter(date__gte=since)
+            rejected = rejected_pairs([symbol], BRS_SERIES_ENDPOINTS, since=since)
             rows = list(
                 rates.exclude(date__in=[day for sym, day in rejected if sym == symbol])
                 .order_by("date")

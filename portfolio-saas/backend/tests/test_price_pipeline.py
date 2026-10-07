@@ -2218,3 +2218,43 @@ def test_unpriced_day_is_interpolated_between_real_prices(make_user, asset_catal
     assert middle.total_value_tomans == Decimal("240")
     # After the last real price there is only one side: left missing, not guessed.
     assert not Snapshot.objects.filter(user=user, account=None, day=yesterday).exists()
+
+
+def test_newest_prices_matches_distinct_on(asset_catalog):
+    """One indexed probe per asset must pick exactly the DISTINCT ON row."""
+    from datetime import timedelta as _td
+
+    from django.utils import timezone as _tz
+
+    from portfolio.models import Price, newest_prices, positive_price_q
+
+    now = _tz.now()
+    keys = ["emami_coin", "usd_cash", "bitcoin_usd"]
+    for key in keys:
+        for minutes, price in ((30, 5), (10, 7), (10, 9), (2, 0)):
+            row = Price.objects.create(asset=asset_catalog[key], price=price, source="T")
+            Price.objects.filter(pk=row.pk).update(fetched_at=now - _td(minutes=minutes))
+
+    def old(price_filter=None, **asset_filter):
+        qs = Price.objects.all()
+        if price_filter is not None:
+            qs = qs.filter(price_filter)
+        if asset_filter:
+            qs = qs.filter(**{f"asset__{k}": v for k, v in asset_filter.items()})
+        return {
+            row.asset_id: row.pk
+            for row in qs.order_by("asset_id", "-fetched_at", "-id").distinct("asset_id")
+        }
+
+    from portfolio.models import Asset
+
+    assert {r.asset_id: r.pk for r in newest_prices()} == old()
+    assert {r.asset_id: r.pk for r in newest_prices(positive_price_q())} == old(positive_price_q())
+    subset = Asset.objects.filter(key__in=keys[:2])
+    assert {r.asset_id: r.pk for r in newest_prices(positive_price_q(), subset)} == old(
+        positive_price_q(), key__in=keys[:2]
+    )
+    ids = [asset_catalog[k].pk for k in keys]
+    assert {r.asset_id: r.pk for r in newest_prices(assets=ids)} == old(id__in=ids)
+    # The positive filter skips the zero tick: newest positive is the later of the tie.
+    assert len(old(positive_price_q())) == 3
