@@ -204,3 +204,39 @@ test("the Persian UI leaves no English on Home or in the add dialog", async ({ p
   await page.getByTestId("add-transaction-category-gold").click();
   expect((await english()).filter((s) => !allowed.has(s))).toEqual([]);
 });
+
+test("the Persian sign-in page leaves no English, and offers the language switch", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 860 });
+  // Signed out: the first page every visitor sees, and the one the
+  // translation pass first missed because it only crawled signed-in pages.
+  await page.addInitScript(() => localStorage.setItem("lang", "fa"));
+  await page.route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/registration/") {
+      return route.fulfill({ status: 200, contentType: "application/json", body: '{"registration_open":true,"self_service_reset":true}' });
+    }
+    return route.fulfill({ status: 401, contentType: "application/json", body: '{"detail":"Authentication credentials were not provided."}' });
+  });
+  await page.goto("/login");
+  await expect(page.getByTestId("auth-email-input")).toBeVisible();
+  await expect(page.getByTestId("lang-toggle")).toBeVisible();
+  for (const mode of ["auth-toggle-login", "auth-toggle-register"]) {
+    await page.getByTestId(mode).click();
+    const english = await page.evaluate(() => {
+      const found = new Set();
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        const el = n.parentElement;
+        if (!el || el.closest("script, style, .sr-only, [aria-hidden=true]") || !el.offsetParent) continue;
+        if (/[A-Za-z]{3,}/.test(n.textContent)) found.add(n.textContent.trim());
+      }
+      for (const el of document.querySelectorAll("input[placeholder]")) {
+        const v = el.getAttribute("placeholder");
+        if (/[A-Za-z]{3,}/.test(v) && !v.includes("@")) found.add(v);
+      }
+      return [...found];
+    });
+    // The app's name; "EN" (two letters) is the switch back.
+    expect(english.filter((s) => s !== "Holdings"), mode).toEqual([]);
+  }
+});

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import AccountMenu from "./AccountMenu.jsx";
+import LanguageToggle from "./LanguageToggle.jsx";
 import Logo from "./Logo.jsx";
 import { usePortfolio } from "./PortfolioContext.jsx";
-import { setLang, useLang, useT } from "../i18n.js";
+import { useT } from "../i18n.js";
 import { createAccount } from "../api.js";
 import { Button, ErrorState, Field, Input, Modal, Select } from "./ui.jsx";
 
@@ -311,23 +312,6 @@ function NewPortfolioDialog({ onClose, onCreated }) {
         {error && <ErrorState error={error} testId="new-portfolio-error" />}
       </form>
     </Modal>
-  );
-}
-
-/** فا / EN. Persian flips the whole document to right-to-left. */
-function LanguageToggle() {
-  const lang = useLang();
-  const next = lang === "fa" ? "en" : "fa";
-  return (
-    <button
-      type="button"
-      onClick={() => setLang(next)}
-      data-testid="lang-toggle"
-      aria-label={next === "fa" ? "نمایش به فارسی" : "Show in English"}
-      className="app-header-btn inline-flex items-center justify-center rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-sm font-medium text-text"
-    >
-      {next === "fa" ? "فا" : "EN"}
-    </button>
   );
 }
 

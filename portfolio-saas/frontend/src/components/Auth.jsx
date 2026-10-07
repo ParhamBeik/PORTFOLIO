@@ -11,6 +11,8 @@ import {
 import { useApi } from "../useApi.js";
 import Logo from "./Logo.jsx";
 import { Button, Input } from "./ui.jsx";
+import LanguageToggle from "./LanguageToggle.jsx";
+import { useT } from "../i18n.js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -59,6 +61,7 @@ function friendlyError(msg) {
 }
 
 export default function Auth({ onAuthed, initialMode = "login" }) {
+  const t = useT();
   const registration = useApi(registrationStatus, []);
   const [mode, setMode] = useState(initialMode);
   const [email, setEmail] = useState("");
@@ -161,22 +164,27 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
         noValidate
       >
         <div className="mb-6">
-          <h1 className="flex items-center gap-2 text-xl font-semibold text-text">
-            <Logo size={36} />
-            <span>Holdings</span>
-          </h1>
+          {/* Signed out there is no header, so the language switch lives on
+              the card: a Persian reader on an English browser had no way in. */}
+          <div className="flex items-center justify-between gap-3">
+            <h1 className="flex items-center gap-2 text-xl font-semibold text-text">
+              <Logo size={36} />
+              <span>Holdings</span>
+            </h1>
+            <LanguageToggle />
+          </div>
           <p className="mt-1 text-sm text-muted">
-            {forgetting
+            {t(forgetting
               ? "Enter the email on the account. If it exists, we send a reset link."
               : registering
                 ? "Create your account to start tracking multi-asset portfolios live."
-                : "Welcome back! Sign in to access your portfolios and analytics."}
+                : "Welcome back! Sign in to access your portfolios and analytics.")}
           </p>
         </div>
 
         <div
           role="tablist"
-          aria-label="Authentication mode"
+          aria-label={t("Authentication mode")}
           className="mb-4 inline-flex gap-1 rounded-lg border border-border bg-panel-2 p-1"
         >
           <button
@@ -185,11 +193,11 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
             aria-selected={mode === "login"}
             data-testid="auth-toggle-login"
             onClick={() => switchMode("login")}
-            className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
-              mode === "login" ? "bg-[var(--c-accent-fill)] text-white" : "text-muted hover:text-text"
+            className={`min-h-9 rounded-md px-3 text-sm font-medium transition-colors sm:min-h-7 ${
+              mode === "login" ? "bg-panel text-text shadow-[0_0_0_1px_var(--c-border),0_1px_2px_rgb(0_0_0/0.08)]" : "text-muted hover:text-text"
             }`}
           >
-            Sign in
+            {t("Sign in")}
           </button>
           {registrationOpen && (
             <button
@@ -198,11 +206,11 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
               aria-selected={mode === "signup"}
               data-testid="auth-toggle-register"
               onClick={() => switchMode("signup")}
-              className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
-                mode === "signup" ? "bg-[var(--c-accent-fill)] text-white" : "text-muted hover:text-text"
+              className={`min-h-9 rounded-md px-3 text-sm font-medium transition-colors sm:min-h-7 ${
+                mode === "signup" ? "bg-panel text-text shadow-[0_0_0_1px_var(--c-border),0_1px_2px_rgb(0_0_0/0.08)]" : "text-muted hover:text-text"
               }`}
             >
-              Create account
+              {t("Create account")}
             </button>
           )}
         </div>
@@ -214,7 +222,7 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
             aria-live="polite"
             className="mb-4 rounded-lg border border-[var(--c-critical-text)] bg-panel-2 px-4 py-3 text-sm text-[var(--c-critical-text)]"
           >
-            {error}
+            {t(error)}
           </div>
         )}
 
@@ -224,7 +232,7 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
             role="status"
             className="mb-4 rounded-lg border border-[var(--c-warn-text)] bg-panel-2 px-4 py-3 text-sm text-[var(--c-warn-text)]"
           >
-            New memberships are currently closed. Existing users can still sign in.
+            {t("New memberships are currently closed. Existing users can still sign in.")}
           </div>
         )}
 
@@ -234,14 +242,14 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
             role="status"
             className="mb-4 rounded-lg border border-[var(--c-good-text)] bg-panel-2 px-4 py-3 text-sm text-[var(--c-good-text)]"
           >
-            If an account exists for that email, a reset link has been sent.
+            {t("If an account exists for that email, a reset link has been sent.")}
           </div>
         )}
 
         <div className="mb-4">
           <div className="mb-1 flex items-center justify-between">
             <label htmlFor="auth-email" className="text-sm font-medium text-text">
-              Email address
+              {t("Email address")}
             </label>
             {email && (
               <span
@@ -249,7 +257,7 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
                   emailValid ? "text-[var(--c-good-text)]" : "text-[var(--c-critical-text)]"
                 }`}
               >
-                {emailValid ? "✓ Valid" : "Invalid"}
+                {t(emailValid ? "✓ Valid" : "Invalid")}
               </span>
             )}
           </div>
@@ -266,7 +274,7 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
             className="w-full"
           />
           {fieldError.email && (
-            <p className="mt-1 text-xs text-[var(--c-critical-text)]">{fieldError.email}</p>
+            <p className="mt-1 text-xs text-[var(--c-critical-text)]">{t(fieldError.email)}</p>
           )}
         </div>
 
@@ -274,11 +282,11 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
         <div className="mb-4">
           <div className="mb-1 flex items-center justify-between">
             <label htmlFor="auth-password" className="text-sm font-medium text-text">
-              Password
+              {t("Password")}
             </label>
             {registering && strength.label && (
               <span className="text-xs font-medium" style={{ color: strength.color }}>
-                Strength: {strength.label}
+                {t("Strength: {level}", { level: t(strength.label) })}
               </span>
             )}
           </div>
@@ -306,7 +314,7 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
             </Button>
           </div>
           {fieldError.password && (
-            <p className="mt-1 text-xs text-[var(--c-critical-text)]">{fieldError.password}</p>
+            <p className="mt-1 text-xs text-[var(--c-critical-text)]">{t(fieldError.password)}</p>
           )}
           {registering && password && (
             <div data-testid="auth-strength-meter" className="mt-2 h-1 overflow-hidden rounded-full bg-panel-2">
@@ -328,11 +336,11 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
                 data-testid="auth-forgot"
                 onClick={() => switchMode("forgot")}
               >
-                Forgot password?
+                {t("Forgot password?")}
               </Button>
             ) : (
               <p className="text-xs text-muted" data-testid="auth-reset-unavailable">
-                Lost your password? Ask the operator to send you a reset link.
+                {t("Lost your password? Ask the operator to send you a reset link.")}
               </p>
             )}
           </div>
@@ -342,7 +350,7 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
           <div className="mb-4">
             <div className="mb-1 flex items-center justify-between">
               <label htmlFor="auth-confirm-password" className="text-sm font-medium text-text">
-                Confirm password
+                {t("Confirm password")}
               </label>
               {confirmPassword && (
                 <span
@@ -350,7 +358,7 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
                     password === confirmPassword ? "text-[var(--c-good-text)]" : "text-[var(--c-critical-text)]"
                   }`}
                 >
-                  {password === confirmPassword ? "✓ Match" : "Mismatch"}
+                  {t(password === confirmPassword ? "✓ Match" : "Mismatch")}
                 </span>
               )}
             </div>
@@ -380,7 +388,7 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
 
         {registering && (
           <div className="mb-4 rounded-lg border border-border bg-panel-2 px-4 py-3">
-            <span className="text-sm font-medium text-text">Password requirements:</span>
+            <span className="text-sm font-medium text-text">{t("Password requirements:")}</span>
             <ul className="mt-2 space-y-1 text-sm">
               {checks.map((c) => (
                 <li
@@ -388,7 +396,7 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
                   className={`flex items-center gap-2 ${c.ok ? "text-[var(--c-good-text)]" : "text-muted"}`}
                 >
                   <span>{c.ok ? "✓" : "○"}</span>
-                  <span>{c.label}</span>
+                  <span>{t(c.label)}</span>
                 </li>
               ))}
             </ul>
@@ -402,7 +410,7 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
           disabled={busy || !canSubmit || resetSent}
           className="w-full py-1.5"
         >
-          {busy ? "Working…" : forgetting ? "Send reset link" : registering ? "Create account" : "Sign in"}
+          {t(busy ? "Working…" : forgetting ? "Send reset link" : registering ? "Create account" : "Sign in")}
         </Button>
       </form>
       </main>
