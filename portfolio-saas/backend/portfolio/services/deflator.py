@@ -28,6 +28,26 @@ def normalize_basis(basis: str | None) -> str:
         ) from exc
 
 
+def cpi_unavailable_body(exc) -> dict:
+    """The refusal every real_toman answer gives when a year has no CPI.
+
+    One body for the global 503 (config/api.py) and for the inflation series
+    embedded in a nominal snapshot response, so the two cannot drift.
+    """
+    return {
+        "detail": str(exc),
+        "reason": "cpi_unavailable",
+        "basis": "real_toman",
+        "requested_jalali_year": exc.jalali_year,
+        "last_verified_jalali_year": exc.last_verified_year,
+        "remedy": (
+            "Set CPI_BY_JALALI_YEAR_EXTRA to the published index for "
+            "that year, or CPI_ESTIMATED_ANNUAL_RATE to project one "
+            "forward as a labelled estimate."
+        ),
+    }
+
+
 def cpi_for_date(value) -> float:
     """Linearly interpolate the configured annual CPI index within a Jalali year.
 

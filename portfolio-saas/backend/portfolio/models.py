@@ -485,7 +485,9 @@ def newest_prices(price_filter=None, assets=None):
         )
     # An asset with no matching tick yields NULL, which `IN` never matches.
     ids = asset_qs.annotate(_newest_price=models.Subquery(newest)).values("_newest_price")
-    return Price.objects.filter(id__in=ids)
+    # Asset order, as the DISTINCT ON returned them: the price map is
+    # serialized in this order, and Meta.ordering would reshuffle it every tick.
+    return Price.objects.filter(id__in=ids).order_by("asset_id")
 
 
 class DailyPriceAverage(models.Model):

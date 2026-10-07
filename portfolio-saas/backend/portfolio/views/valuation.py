@@ -24,7 +24,7 @@ from ..services.valuation import (
     compute_dynamic_net_worth_series,
 )
 from ..services.visibility import hidden_asset_ids
-from ..services.deflator import CpiUnavailable, cpi_for_date, normalize_basis
+from ..services.deflator import CpiUnavailable, cpi_for_date, cpi_unavailable_body, normalize_basis
 from ..services.performance import account_performance
 from ._common import _express_real_toman, _express_usd_real, _fx_rate, _int_param, _scope, _with_usd
 from marketdata import jalali
@@ -540,7 +540,7 @@ def _real_payload(series):
     except CpiUnavailable as exc:
         # Same refusal the real_toman request gets from config/api.py: never a
         # nominal number wearing a "real" label.
-        return {"detail": str(exc), "reason": "cpi_unavailable"}
+        return cpi_unavailable_body(exc)
     return {"series": real_series, "basis": "real_toman", "cpi": provenance}
 
 
