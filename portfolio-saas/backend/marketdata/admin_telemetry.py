@@ -652,7 +652,7 @@ def _tick_coverage():
         oldest=Min(NullIf("first_date", Value(""))),
         newest=Max("last_date"),
         # The seed window, not the lived one: `MARKETDATA_TICK_WINDOW_DAYS` is
-        # where a state STARTS, and `promote_priority_tick_windows` grows it
+        # where a state STARTS, and `grow_tick_windows` grows it
         # from there up to MAX_TICK_WINDOW_DAYS. Reporting the setting told the
         # operator "90 days" while 31 symbols were already at the 12,000-day
         # clamp across 29 distinct widths. Report what the states actually hold.

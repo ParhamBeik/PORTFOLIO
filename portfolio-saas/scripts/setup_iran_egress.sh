@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 #
-# Stand up an Iranian egress hop, so this deployment can reach the origins that
-# refuse foreign source addresses: tsetmc.com, tse.ir, fipiran.ir and codal.ir.
+# Stand up an egress hop for TSETMC, the one origin production still cannot
+# reach.
 #
-# WHY THIS IS NEEDED, measured from the production VPS (Frankfurt, AS202269)
-# on 2026-08-31:
+# CURRENT STATUS (2026-10-05): production now runs on an Iranian VPS
+# (45.139.10.12, ParsPack AS60631). From it codal.ir, search.codal.ir and
+# excel.codal.ir answer directly, so Codal needs no hop -- but cdn.tsetmc.com
+# still times out. "An Iranian source address" is therefore not sufficient for
+# TSETMC; the hop must sit on a network TSETMC accepts, which is unmeasured.
+# Verify any hop with `manage.py check_egress --verify-tsetmc` before relying on
+# it.
+#
+# HISTORY: why this was first written, measured from the retired production
+# VPS (Frankfurt, AS202269) on 2026-08-31:
 #
 #     cdn.tsetmc.com:443   SYN dropped (nc -z times out)
 #     cdn.tsetmc.com:80    SYN dropped
@@ -37,7 +45,7 @@
 #
 # WHAT THIS SCRIPT DOES
 #
-# Run it on any always-on computer whose public ISP address is Iranian. This
+# Run it on any always-on computer on a network TSETMC accepts. This
 # can be a small Iranian VPS OR a computer/router inside your house in Iran.
 # It installs tinyproxy bound to
 # WireGuard's interface only, so the proxy is never exposed to the public

@@ -2449,7 +2449,7 @@ export default function Ops({ user }) {
           <>
             <WarehouseCoveragePanel warehouse={overview.coverage.warehouse} />
             {/* Windows GROW: every state starts at the seed and
-                `promote_priority_tick_windows` widens it toward the clamp. This
+                `grow_tick_windows` widens it toward the clamp. This
                 card used to print the seed setting alone, so it read "90d
                 window" while symbols were already holding 12,000 days. */}
             <Card

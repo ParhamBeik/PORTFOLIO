@@ -6,7 +6,7 @@ date inside one of them.
 | File | Kind | Status |
 |---|---|---|
 | [`REFERENCE.md`](REFERENCE.md) | Standing reference | **Live.** Price-unit policy, warehouse safeguards, recovered-holdings provenance. The one file here with no expiry date. |
-| [`DATA-SOURCES.md`](DATA-SOURCES.md) | Standing reference | **Live.** Which origin serves which lane, and which origins geo-block the VPS. |
+| [`DATA-SOURCES.md`](DATA-SOURCES.md) | Standing reference | **Live.** Which origin serves which lane, and which origins the VPS can reach (Iranian VPS since 2026-10; Frankfurt measurements kept as history). |
 | [`MOBILE.md`](MOBILE.md) | Release guide | **Live on `codex/holdings-mobile`.** Capacitor iOS/Android shell, mobile auth, offline snapshot, build and verification. |
 | [`PERFORMANCE.md`](PERFORMANCE.md) | Standing reference | **Live.** How request/page latency is measured (`perf` app, `manage.py perf_report`), the 2026-10-05 fixes, and what is still open. |
 | [`LIGHTHOUSE.md`](LIGHTHOUSE.md) | Audit + enforcement | **Live from "Holding it" onward.** The thresholds it explains are the ones `frontend/lighthouserc.json` asserts today; the audit narrative above that is history. |

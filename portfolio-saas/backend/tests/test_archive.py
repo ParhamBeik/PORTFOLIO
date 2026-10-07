@@ -816,7 +816,7 @@ def test_dirty_probe_result_stays_suspended():
 def test_recovery_never_keys_on_verified_complete():
     """`verified_complete` is a re-arm switch, not a health flag.
 
-    `reopen_states_with_gaps` and `promote_priority_tick_windows` clear it on
+    `reopen_states_with_gaps` and `grow_tick_windows` clear it on
     purpose so a finished state picks up sessions printed since its last pass,
     and a tick state whose window is still growing is essentially never
     `verified_complete` at the instant a probe finishes. Keying recovery on it

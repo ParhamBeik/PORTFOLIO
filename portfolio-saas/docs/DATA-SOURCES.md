@@ -3,6 +3,23 @@
 Probed from the production VPS on 2026-08-31. Companion to
 [`PRODUCT-EVALUATION.md`](PRODUCT-EVALUATION.md).
 
+> **Update 2026-10-05 — production moved into Iran.** The Frankfurt VPS
+> (`89.106.206.4`, AS202269) is retired. The whole stack now runs on an Iranian VPS
+> (`45.139.10.12`, ParsPack, AS60631). Measured from it on 2026-10-05:
+>
+> | Host | Result |
+> |---|---|
+> | `codal.ir` · `search.codal.ir` · `excel.codal.ir` | **200 direct**, 67–94 ms, no proxy |
+> | `Api.BrsApi.ir`, TGJU, Wallex, Nobitex | reachable (`check_egress` ok) |
+> | `cdn.tsetmc.com` | **still times out** — TSETMC drops this box too |
+> | `api.telegram.org` | times out |
+>
+> So **Codal is no longer blocked**; `CODAL_ENABLED=1`, `celery_worker_codal` runs, and
+> `CODAL_HTTP_PROXY`/`IRAN_EGRESS_PROXY` are unset. **TSETMC is still blocked**, so the
+> egress-hop discussion below now concerns TSETMC alone. Sections measured from Frankfurt
+> are kept as history and labelled so. Also seen that day: `check_egress`'s Wallex
+> `USDTTMN` daily-history probe returned **no candles**.
+
 > An earlier draft of this document reasoned from published documentation. Everything below
 > has now been measured from the server that would actually make the calls, and **two of its
 > conclusions were wrong**. They are corrected in place and called out where they mattered.
@@ -11,8 +28,9 @@ Probed from the production VPS on 2026-08-31. Companion to
 
 Gold, FX and crypto are **off BrsApi**. `marketdata/sources/` holds TGJU, Wallex and
 Nobitex clients; `portfolio/live/fetcher.py` fetches them alongside BrsApi and
-`extractor._build_lookup` prefers the direct row. Stocks and Codal are unchanged, because
-they cannot be reached — see the egress section.
+`extractor._build_lookup` prefers the direct row. Stocks are unchanged because TSETMC cannot
+be reached — see the egress section. Codal documents download straight from codal.ir; Codal
+*discovery* still uses BrsApi.
 
 The live loop now attempts the direct board first and calls BrsApi only when that board is
 incomplete or unavailable. This makes the migration save paid requests instead of merely
@@ -25,7 +43,7 @@ preferring one response after spending both quotas.
 | TEDPIX history | `Tsetmc/Index.php` (live only) | **TGJU `bourse` history** | no |
 | Commodity | `Market/Commodity.php` | unchanged — **BrsApi fallback** | yes |
 | Stocks | `Tsetmc/*.php` | unchanged — **blocked** | yes |
-| Codal | `Codal/Announcement.php` | unchanged — **blocked** | yes |
+| Codal discovery | `Codal/Announcement.php` | unchanged — codal.ir **reachable** since the move to Iran; switch planned | yes |
 
 Gold/FX historical backfills now try the mapped TGJU series first and fall back per symbol to
 BrsApi when TGJU is unavailable or has no mapped history. The fallback is retained for
@@ -120,18 +138,19 @@ would have valued every USDT holding at roughly a sixth. The live one is
 `crypto-tether-irr`. `MAX_QUOTE_AGE` is therefore load-bearing, not hygiene, and
 `tests/test_direct_sources.py` pins it against the real captured payload.
 
-## The finding that reorders everything: the VPS is in Frankfurt
+## History (2026-08-31, retired Frankfurt VPS): the VPS was in Frankfurt
 
 ```
 $ curl https://ipinfo.io/json
 {"ip":"89.106.206.4","city":"Frankfurt am Main","country":"DE","org":"AS202269 BitCommand LLC"}
 ```
 
-This is why `codal.ir` times out, and it is why the TSETMC plan below is not available. It
+This was why `codal.ir` timed out from that box, and why the TSETMC plan below was not
+available. (Superseded: see the 2026-10-05 update at the top.) It
 is a single fact that decides the whole data-source strategy, and it was not visible from
 any amount of reading endpoint documentation.
 
-## What is actually reachable
+## What was reachable from Frankfurt (2026-08-31)
 
 Every host below resolves; the difference is whether TCP 443 completes.
 
@@ -250,15 +269,14 @@ before this deployment started watching. Wallex gives ~7.75 years of real OHLC, 
 independent USDT/IRT series give the `usd_cash` rate — which `_dollar_quotes_to_toman`
 multiplies through every dollar-quoted asset — a corroborating source for the first time.
 
-**TSETMC is blocked on transport, exactly as Codal is.** This is now a networking decision,
-not an engineering one, and it is the same decision `CODAL_HTTP_PROXY` is already waiting on:
+**TSETMC is blocked on transport.** This is a networking decision, not an engineering one.
+On 2026-08-31 the options were an Iranian egress hop, moving the deployment into Iran, or
+staying on BrsApi. **The deployment has since moved into Iran (2026-10-05 update).** That
+fixed Codal but not TSETMC, which drops the Iranian VPS as well. What remains:
 
-- **An Iranian egress hop** — a small VPS inside Iran running a forward proxy, with the
-  Frankfurt box dialling through it. Unblocks TSETMC *and* Codal together, which is the
-  argument for doing it: two subsystems, one fix. `CODAL_HTTP_PROXY` already exists as the
-  configuration point.
-- **Move the whole deployment into Iran.** Larger change; also puts the app next to every
-  data source it uses.
+- **An egress hop TSETMC accepts** — `IRAN_EGRESS_PROXY` is the configuration point, and
+  `scripts/setup_iran_egress.sh` builds one. Which source networks TSETMC accepts is
+  unmeasured.
 - **Stay on BrsApi's TSETMC plan.** Legitimate. It costs the ~2-year tick backfill and the
   TSE order book, and those are the two things the migration was for.
 
@@ -266,9 +284,9 @@ Until one of those happens, the ~5M-request tick backlog stays governed by a 10,
 wallet, `INTEGRITY_FAILURE_RATE_THRESHOLD = 0.85` stays a permanent condition rather than a
 transient one, and Q7 stays capped at what executed ticks can show.
 
-### Home-network egress
+### Home-network egress (now TSETMC only)
 
-An Iranian home computer or router can serve as the egress node. It must have an Iranian
+Written when the app ran in Frankfurt; Codal no longer needs it. An Iranian home computer or router can serve as the egress node. It must have an Iranian
 public source address and remain reachable from the application VPS; a home connection
 outside Iran does not change the geo-block. Run `scripts/setup_iran_egress.sh server` on an
 always-on Linux host (or a router with WireGuard/tinyproxy support), forward UDP 51820 to it
@@ -284,7 +302,7 @@ For a Mac behind CGNAT, the simpler option is a private Tailscale link:
    `tailscale serve --tcp=8888 tcp://localhost:8888`.
 3. Set `IRAN_EGRESS_PROXY=http://<mac-tailscale-ip>:8888` on the application deployment.
 4. Run `python manage.py check_egress --verify-tsetmc` from the deployed backend before
-   enabling direct TSETMC or Codal jobs.
+   enabling direct TSETMC jobs.
 
 This keeps the proxy off the public internet and does not require inbound access to the
 home router. The Mac must stay awake and connected; losing it activates the existing
@@ -299,7 +317,7 @@ reachability breaker and paid-provider fallback rather than returning empty mark
    idempotent (`bulk_create(ignore_conflicts=True)`).
 3. **Nobitex `apiv2` as the second crypto opinion**, feeding the same validation gate.
 4. **Decide the Iranian-egress question.** Everything TSETMC — ticks at a sane rate, the
-   TSE order book, Q7 v2, and Codal — is downstream of it.
+   TSE order book, Q7 v2 — is downstream of it. (Codal was too, until the move to Iran.)
 
 ## What changes in the code
 
@@ -323,11 +341,14 @@ layer.
 
 ## Reproducing this
 
+Run against the current production VPS. (The 2026-08-31 tables came from the retired
+`89.106.206.4`.)
+
 ```bash
-ssh root@89.106.206.4 'bash -s' <<'EOF'
-for h in cdn.tsetmc.com www.tsetmc.com apiv2.nobitex.ir api.wallex.ir call1.tgju.org codal.ir; do
+ssh root@45.139.10.12 'bash -s' <<'EOF'
+for h in cdn.tsetmc.com www.tsetmc.com apiv2.nobitex.ir api.wallex.ir call1.tgju.org codal.ir search.codal.ir; do
   printf '%-22s ' "$h"
-  timeout 8 bash -c "cat < /dev/null > /dev/tcp/$h/443" 2>/dev/null && echo OPEN || echo BLOCKED
+  nc -z -w8 "$h" 443 && echo OPEN || echo BLOCKED
 done
 curl -s -m 20 "https://api.wallex.ir/v1/udf/history?symbol=USDTTMN&resolution=D&from=0&to=$(date +%s)" \
   | python3 -c "import sys,json,datetime;d=json.load(sys.stdin);t=d['t'];f=lambda x:datetime.datetime.fromtimestamp(x,datetime.UTC).date();print(len(t),'candles',f(t[0]),'->',f(t[-1]))"
@@ -338,6 +359,6 @@ EOF
 
 - [Wallex API docs](https://developers.wallex.ir/docs) — endpoint shapes confirmed by direct probe
 - [Nobitex API docs](https://apidocs.nobitex.ir/) — note the docs say `api.nobitex.ir`; use `apiv2.nobitex.ir`
-- [m-ahmadi/exref — TSETMC endpoint catalog](https://github.com/m-ahmadi/exref/blob/master/tse/urls.txt) — accurate, but unreachable from this VPS
+- [m-ahmadi/exref — TSETMC endpoint catalog](https://github.com/m-ahmadi/exref/blob/master/tse/urls.txt) — accurate, but unreachable from the production VPS (Frankfurt and Iran alike)
 - [mahs4d/tsetmc-api](https://github.com/mahs4d/tsetmc-api) · [tse-client](https://github.com/m-ahmadi/tse-client)
 - [Abantether docs](https://docs.abantether.com/) — OTC only, no candles, no order book; **do not integrate**

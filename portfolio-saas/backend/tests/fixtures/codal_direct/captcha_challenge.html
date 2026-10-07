@@ -1,0 +1,87 @@
+
+
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="fa" dir="rtl">
+<head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /><title>
+	تأیید کاربر
+</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: Tahoma, Arial, sans-serif; background: #f4f6f8; color: #222; }
+        .backdrop { position: fixed; inset: 0; background: rgba(15,23,42,.68); display: flex; align-items: center; justify-content: center; padding: 16px; }
+        .modal { width: 100%; max-width: 520px; background: #fff; border-radius: 14px; padding: 30px; box-shadow: 0 20px 60px rgba(0,0,0,.3); text-align: center; }
+        h1 { font-size: 21px; margin: 0 0 12px; }
+        p { font-size: 14px; line-height: 2; color: #555; margin: 0 0 18px; }
+        .captcha-row { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 16px; }
+        #captchaImage { width: 130px; height: 50px; border: 1px solid #ddd; border-radius: 4px; background: #fafafa; }
+        button { font-family: inherit; border: 0; border-radius: 5px; cursor: pointer; padding: 10px 16px; }
+        #refreshButton { background: #eef1f4; color: #333; padding: 8px 12px; }
+        #captchaCode { direction: ltr; width: 210px; height: 42px; border: 1px solid #c7ccd1; border-radius: 5px; text-align: center; font-size: 18px; outline: none; }
+        #captchaCode:focus { border-color: #087cb8; box-shadow: 0 0 0 3px rgba(8,124,184,.12); }
+        #submitButton { display: block; min-width: 120px; margin: 16px auto 0; background: #087cb8; color: #fff; }
+        #submitButton:disabled, #refreshButton:disabled { opacity: .6; cursor: default; }
+        .error { min-height: 22px; margin-top: 12px; color: #b00020; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <div class="backdrop" role="dialog" aria-modal="true" aria-labelledby="captchaTitle">
+        <div class="modal">
+            <h1 id="captchaTitle">تأیید کاربر</h1>
+            <p>به دلیل مشاهده تعداد زیادی گزارش، لطفاً برای ادامه کد امنیتی زیر را وارد کنید.</p>
+            <div class="captcha-row">
+                <img id="captchaImage" alt="کد امنیتی" />
+                <button id="refreshButton" type="button">تصویر جدید</button>
+            </div>
+            <input id="captchaCode" maxlength="10" autocomplete="off" inputmode="text" aria-label="کد امنیتی" />
+            <button id="submitButton" type="button">تأیید</button>
+            <div id="errorMessage" class="error" role="alert"></div>
+        </div>
+    </div>
+    <script>
+        (function () {
+            var image = document.getElementById('captchaImage');
+            var code = document.getElementById('captchaCode');
+            var submit = document.getElementById('submitButton');
+            var refresh = document.getElementById('refreshButton');
+            var error = document.getElementById('errorMessage');
+
+            function loadImage(clearError) {
+                if (clearError !== false) error.textContent = '';
+                code.value = '';
+                refresh.disabled = true;
+                fetch('/ReportsCaptcha.aspx/GetCaptchaImage', {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json; charset=UTF-8' }, body: '{}'
+                })
+                    .then(function (response) { if (!response.ok) throw new Error(); return response.json(); })
+                    .then(function (result) { image.src = result.d; refresh.disabled = false; code.focus(); })
+                    .catch(function () { error.textContent = 'دریافت تصویر امنیتی امکان‌پذیر نیست. لطفاً دوباره تلاش کنید.'; refresh.disabled = false; });
+            }
+
+            function setBusy(value) {
+                submit.disabled = value; refresh.disabled = value;
+                submit.textContent = value ? 'در حال بررسی...' : 'تأیید';
+            }
+
+            function verify() {
+                var value = code.value.trim();
+                if (!value) { error.textContent = 'کد امنیتی را وارد کنید.'; code.focus(); return; }
+                setBusy(true); error.textContent = '';
+                fetch('/ReportsCaptcha.aspx/VerifyCaptcha', {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+                    body: JSON.stringify({ code: value })
+                })
+                    .then(function (response) { if (!response.ok) throw new Error(); return response.json(); })
+                    .then(function (result) { if (result.d === true) { window.location.reload(); return; } throw new Error(); })
+                    .catch(function () { error.textContent = 'کد امنیتی صحیح نیست. لطفاً دوباره تلاش کنید.'; setBusy(false); loadImage(false); });
+            }
+
+            refresh.addEventListener('click', function () { loadImage(true); });
+            submit.addEventListener('click', verify);
+            code.addEventListener('keydown', function (event) { if (event.key === 'Enter') { event.preventDefault(); verify(); } });
+            loadImage(true);
+        }());
+    </script>
+</body>
+</html>

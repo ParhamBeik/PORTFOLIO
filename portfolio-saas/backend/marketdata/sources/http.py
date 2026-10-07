@@ -17,8 +17,8 @@ What replaces the quota machinery:
     Iranian egress) costs one probe per cooldown instead of a connect timeout
     on every scheduled fetch. Codal without this burned ~583 doomed connects
     and ~20,000 no-op workflow runs in a single day.
-  * an optional egress proxy, for the origins that geo-block foreign source
-    addresses.
+  * an optional egress proxy, for origins that drop this host (TSETMC, even
+    from the Iranian production VPS).
 """
 import logging
 import threading

@@ -356,19 +356,19 @@ TSETMC_SYMBOL_URL = os.getenv(
 # ceiling -- not disk or CPU -- bounds stock-history backfill. Direct origins
 # also remove a provider dependency from the live path.
 #
-# They split into two groups by REACHABILITY, measured from the production VPS
-# (Frankfurt, AS202269) on 2026-08-31:
+# Reachability is a property of the host. Production runs on an Iranian VPS
+# (ParsPack, AS60631); measured from it on 2026-10-05:
 #
-#   Reachable directly       tgju.org, apiv2.nobitex.ir, api.wallex.ir
-#   Blocked at L3            *.tsetmc.com, tse.ir, fipiran.ir, codal.ir
+#   Reachable directly       tgju.org, apiv2.nobitex.ir, api.wallex.ir,
+#                            codal.ir, search.codal.ir, excel.codal.ir
+#   Times out                cdn.tsetmc.com (and api.telegram.org)
 #
-# The blocked group silently drops the SYN from any non-Iranian source address
-# (`nc -z` times out; ICMP is dropped too, and traceroute dies one hop inside
-# their network). That is a geo-block by the securities organisation's network,
-# not a route failure and not TLS filtering -- so no header, SNI or User-Agent
-# change can defeat it. The only fix is an egress hop inside Iran, which is what
-# IRAN_EGRESS_PROXY is for. Everything downstream of it is already built and
-# tested; setting this variable is the whole activation.
+# History: on the retired Frankfurt VPS (AS202269, 2026-08-31) *.tsetmc.com,
+# tse.ir, fipiran.ir and codal.ir all silently dropped the SYN from the foreign
+# address -- an L3 geo-block. Moving to an Iranian host fixed Codal but not
+# TSETMC, which still drops this box. IRAN_EGRESS_PROXY is the hook for a hop
+# TSETMC does accept; everything downstream of it is built and tested, so
+# setting this variable is the whole activation.
 IRAN_EGRESS_PROXY = os.getenv("IRAN_EGRESS_PROXY", "")
 
 # TGJU: 962 live gold/FX/commodity instruments in ONE ~180KB request, plus daily
@@ -410,7 +410,8 @@ NOBITEX_BASE_URL = os.getenv("NOBITEX_BASE_URL", "https://apiv2.nobitex.ir")
 WALLEX_ENABLED = os.getenv("WALLEX_ENABLED", "1") == "1"
 WALLEX_BASE_URL = os.getenv("WALLEX_BASE_URL", "https://api.wallex.ir")
 
-# Direct TSETMC, used only when IRAN_EGRESS_PROXY is set (see above). Left
+# Direct TSETMC, used only when IRAN_EGRESS_PROXY is set (see above) -- the
+# Iranian production VPS still cannot reach cdn.tsetmc.com on its own. Left
 # defined unconditionally so the code path is tested on every run and the switch
 # is a deploy-time env change rather than a code change.
 TSETMC_DIRECT_ENABLED = os.getenv("TSETMC_DIRECT_ENABLED", "0") == "1"
@@ -603,10 +604,11 @@ MARKETDATA_TICK_VOLUME_TOLERANCE = float(
 # Master switch for the whole Codal subsystem. Off means: no `codal` queue route,
 # no beat entry, no archive states claimed for CODAL_ANNOUNCEMENTS, no extraction
 # enqueued at ingest, and no Ops panel -- the code and the stored rows survive,
-# nothing runs. codal.ir is unreachable from the production VPS (TCP 443 times
-# out) and CODAL_HTTP_PROXY is unset, so every attempt burned CPU retrying a
-# connect that cannot succeed: ~20,000 no-op workflow runs and 583 connect
-# timeouts in one day. Turn back on once the network path exists.
+# nothing runs. On for production since the move to the Iranian VPS, which
+# reaches codal.ir directly. History: it was switched off 2026-08-25 on the
+# retired Frankfurt VPS, where codal.ir timed out and every attempt burned CPU
+# retrying a dead connect (~20,000 no-op workflow runs and 583 connect timeouts
+# in one day). Turn it off on any host that cannot reach codal.ir.
 CODAL_ENABLED = os.getenv("CODAL_ENABLED", "1") == "1"
 # Deployment can retain Codal routing and queued jobs while scaling its paid
 # extraction consumer to zero during the broker handoff.
@@ -632,18 +634,38 @@ CODAL_FETCHING_STALE_SECONDS = int(os.getenv("CODAL_FETCHING_STALE_SECONDS", "18
 # default -- unset means connect to codal.ir directly, correct on any host that
 # can already reach it.
 #
-# Falls back to IRAN_EGRESS_PROXY because codal.ir and tsetmc.com are blocked by
-# the same mechanism from the same networks, so one Iranian hop fixes both. The
-# Codal-specific name stays first for deployments that already set it and for
-# the case where Codal needs a different path than the market feeds.
+# Unset in production: the Iranian VPS reaches codal.ir directly. Falls back to
+# IRAN_EGRESS_PROXY for hosts outside Iran, where codal.ir and tsetmc.com are
+# blocked by the same mechanism. The Codal-specific name stays first for the
+# case where Codal needs a different path than the market feeds.
 CODAL_HTTP_PROXY = os.getenv("CODAL_HTTP_PROXY", "") or IRAN_EGRESS_PROXY
 # Reachability breaker (marketdata/codal_storage.py). codal.ir is unreachable from
-# some hosts -- from the production VPS, TCP 443 times out outright. Without this
-# the extractor retried a dead network path thousands of times a day. After N
+# hosts outside Iran -- from the retired Frankfurt VPS, TCP 443 timed out
+# outright. Without this the extractor retried a dead network path thousands of
+# times a day. After N
 # consecutive connect-level failures the whole origin is parked for the cooldown,
 # and one probe per cooldown notices when it comes back.
 CODAL_ORIGIN_FAILURE_THRESHOLD = int(os.getenv("CODAL_ORIGIN_FAILURE_THRESHOLD", "10"))
 CODAL_ORIGIN_COOLDOWN_SECONDS = int(os.getenv("CODAL_ORIGIN_COOLDOWN_SECONDS", "900"))
+
+# Direct discovery from codal.ir's own search (docs/CODAL-DIRECT-MIGRATION.md).
+# Phase 1 is SHADOW mode: it fills CodalLetter/CodalDiscoveryDay only and never
+# touches CodalAnnouncement, so BrsApi discovery keeps running untouched. Off by
+# default -- turning it on is an operator decision.
+CODAL_DISCOVERY_ENABLED = os.getenv("CODAL_DISCOVERY_ENABLED", "0") == "1"
+CODAL_SEARCH_URL = os.getenv("CODAL_SEARCH_URL", "https://search.codal.ir/api/search/v2/q")
+# Measured 2026-10-05: ~30 requests per rolling hour trips a 429, and knocking
+# while blocked extends it. Start well under, earn +2/h per clean hour up to the
+# ceiling, halve and park on any refusal; no request at all while parked.
+CODAL_SEARCH_START_PER_HOUR = int(os.getenv("CODAL_SEARCH_START_PER_HOUR", "12"))
+CODAL_SEARCH_MIN_PER_HOUR = int(os.getenv("CODAL_SEARCH_MIN_PER_HOUR", "4"))
+CODAL_SEARCH_MAX_PER_HOUR = int(os.getenv("CODAL_SEARCH_MAX_PER_HOUR", "24"))
+CODAL_SEARCH_MIN_PARK_SECONDS = int(os.getenv("CODAL_SEARCH_MIN_PARK_SECONDS", "1800"))
+CODAL_SEARCH_MAX_PARK_SECONDS = int(os.getenv("CODAL_SEARCH_MAX_PARK_SECONDS", "21600"))
+# Codal's history starts around 1386-1388 (1385-06-01 returned nothing).
+CODAL_DISCOVERY_OLDEST_DAY = os.getenv("CODAL_DISCOVERY_OLDEST_DAY", "1386-01-01")
+# Today and this many days before it are the live lane: re-crawled, not trusted.
+CODAL_DISCOVERY_LIVE_DAYS = int(os.getenv("CODAL_DISCOVERY_LIVE_DAYS", "3"))
 CODAL_MAX_ARTIFACT_BYTES = int(os.getenv("CODAL_MAX_ARTIFACT_BYTES", str(50 * 1024 * 1024)))
 CODAL_S3_ENDPOINT_URL = os.getenv("CODAL_S3_ENDPOINT_URL", "http://minio:9000")
 CODAL_S3_BUCKET = os.getenv("CODAL_S3_BUCKET", "codal-artifacts")
