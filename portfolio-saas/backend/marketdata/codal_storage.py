@@ -53,9 +53,10 @@ class CodalArtifactRejected(RuntimeError):
 
 # ------------------------------------------------------------ reachability gate
 #
-# codal.ir is not reachable from every host this runs on -- from the production
-# VPS, TCP 443 simply times out, which put 4,728 artifacts in `blocked_network`
-# and cost ~986 pointless connect attempts a day. That is a property of the
+# codal.ir is not reachable from every host this runs on. From the retired
+# Frankfurt VPS, TCP 443 simply timed out, which put 4,728 artifacts in
+# `blocked_network` and cost ~986 pointless connect attempts a day. The Iranian
+# production VPS reaches it directly, but an outage is still a property of the
 # network path, not of any one document, so retrying per-document learns nothing.
 #
 # One shared breaker: consecutive failures trip a cooldown, and exactly one probe

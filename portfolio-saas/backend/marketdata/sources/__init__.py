@@ -15,8 +15,9 @@ results split cleanly along one line -- who is allowed to connect:
 | tsetmc  | **no**    | `Tsetmc/*.php`                | Rial  | unverified (blocked)     |
 
 The first three are live and need nothing but this code. TSETMC drops the SYN
-from any non-Iranian address, so it needs `IRAN_EGRESS_PROXY` before it can be
-verified at all; see `tsetmc_direct` and `manage.py check_egress`.
+from the production VPS -- from the retired Frankfurt box and, measured
+2026-10-05, from the Iranian one too -- so it needs `IRAN_EGRESS_PROXY` before
+it can be verified at all; see `tsetmc_direct` and `manage.py check_egress`.
 
 Two rules hold across every module here, both learned expensively elsewhere in
 this codebase:

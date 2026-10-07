@@ -774,9 +774,9 @@ def test_the_three_types_left_at_tier_3_stay_there():
 #
 # The extractor used to be a 200-row batch on a six-hourly cron against a backlog
 # of ~74,000 announcements, and every attempt reserved BrsApi quota it had no
-# business spending. Meanwhile codal.ir is unreachable from the production host
-# (TCP 443 times out), so ~986 of those attempts a day were guaranteed to fail at
-# connect. Work now starts at ingest time, and a dead origin parks itself.
+# business spending. Meanwhile codal.ir was unreachable from the then-production
+# Frankfurt host (TCP 443 timed out), so ~986 of those attempts a day were
+# guaranteed to fail at connect. Work now starts at ingest time, and a dead origin parks itself.
 
 
 def test_ingesting_a_new_announcement_queues_its_extraction(monkeypatch, settings):
