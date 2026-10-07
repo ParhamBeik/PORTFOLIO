@@ -266,6 +266,41 @@ def extract_codal_report(announcement_id):
 
 
 @shared_task
+def codal_discovery_tick():
+    """Spend at most one codal.ir search request on the next due day (shadow mode).
+
+    Beat calls this often; `codal_search.can_send` is the real cadence, so a
+    tick with no budget costs a cache read and writes no workflow row.
+    """
+    from django.core.cache import cache
+
+    from . import codal_discovery
+    from .sources import codal_search
+
+    if not settings.CODAL_DISCOVERY_ENABLED or not codal_search.can_send():
+        return "idle"
+    if not cache.add("codal_discovery:lock", 1, timeout=120):
+        return "busy"
+    try:
+        state = codal_discovery.pick_day()
+        if state is None:
+            return "idle"
+        outcome = _ledgered(
+            "codal_discovery", endpoint="codal_search", symbol=state.date,
+            source=settings.CODAL_SEARCH_URL, destination_table="CodalLetter",
+        )
+        try:
+            result = codal_discovery.step(state)
+        except Exception as err:
+            _finish_fail(outcome, err)
+            return "failed"
+        _finish_ok(outcome, rows_received=result["page_letters"], metadata=result)
+        return result
+    finally:
+        cache.delete("codal_discovery:lock")
+
+
+@shared_task
 def queue_codal_extractions():
     """Sweeper for Codal reports the event-driven path did not finish.
 

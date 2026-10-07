@@ -67,6 +67,7 @@ app.conf.update(
         # check the flag.
         "marketdata.tasks.extract_codal_report": {"queue": "codal"},
         "marketdata.tasks.queue_codal_extractions": {"queue": "live"},
+        "marketdata.tasks.codal_discovery_tick": {"queue": "live"},
         "marketdata.tasks.*": {"queue": "archive"},
         "portfolio.tasks.*": {"queue": "live"},
     },
@@ -224,6 +225,14 @@ if os.getenv("MARKETDATA_PANEL_METER_ENABLED", "0") == "1":
     app.conf.beat_schedule["marketdata-read-provider-panel"] = {
         "task": "marketdata.tasks.reconcile_quota_meters",
         "schedule": 300.0,
+    }
+
+if settings.CODAL_DISCOVERY_ENABLED:
+    # Shadow-mode codal.ir crawl. The task's own hourly budget sets the real
+    # pace; this only bounds how soon a freed slot is used.
+    app.conf.beat_schedule["codal-discovery"] = {
+        "task": "marketdata.tasks.codal_discovery_tick",
+        "schedule": 60.0,
     }
 
 if settings.CODAL_ENABLED:
