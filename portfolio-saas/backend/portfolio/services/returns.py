@@ -25,6 +25,7 @@ Two conventions matter here:
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import hashlib
 
 import jdatetime
@@ -42,7 +43,7 @@ from marketdata.integrity import (
 )
 from marketdata.provenance import PRICE_SERIES_ENDPOINTS, rejected_pairs
 from portfolio.models import Asset, Price, USD_QUOTED_KEYS, positive_price_q
-from .deflator import normalize_basis, to_basis
+from .deflator import cpi_series, normalize_basis, to_basis
 from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
@@ -216,15 +217,22 @@ def _jalali_to_gregorian_index(dates: pd.Series) -> pd.DatetimeIndex:
     indexed in Gregorian so it can align with the Price-table series.
     Unparseable dates become NaT (dropped by the caller).
     """
-    def convert(value):
-        try:
-            y, m, d = (int(part) for part in str(value).split(" ")[0].split("-"))
-            g = jdatetime.date(y, m, d).togregorian()
-            return dt.datetime(g.year, g.month, g.day, tzinfo=dt.timezone.utc)
-        except (ValueError, TypeError):
-            return pd.NaT
+    return pd.DatetimeIndex([_jalali_day_to_utc(str(v)) for v in dates])
 
-    return pd.DatetimeIndex([convert(v) for v in dates])
+
+@functools.lru_cache(maxsize=20000)
+def _jalali_day_to_utc(value: str):
+    """One Jalali date string -> UTC midnight of its Gregorian day, or NaT.
+
+    Cached: a panel repeats every session date once per column, and the
+    conversion is a pure function of the string.
+    """
+    try:
+        y, m, d = (int(part) for part in value.split(" ")[0].split("-"))
+        g = jdatetime.date(y, m, d).togregorian()
+        return dt.datetime(g.year, g.month, g.day, tzinfo=dt.timezone.utc)
+    except (ValueError, TypeError):
+        return pd.NaT
 
 
 def _trading_session_index(start: dt.datetime, end: dt.datetime) -> pd.DatetimeIndex:
@@ -1323,8 +1331,9 @@ def daily_returns_matrix(
         for col in panel.columns:
             panel[col] = to_basis(panel[col], basis, usd_series=usdt_series)
     elif basis == "real_toman":
+        cpi = cpi_series(panel.index)
         for col in panel.columns:
-            panel[col] = to_basis(panel[col], basis)
+            panel[col] = to_basis(panel[col], basis, cpi=cpi)
 
     # Frequency is a property of the price panel, not of the surviving columns:
     # measure it before the gates can thin the index.

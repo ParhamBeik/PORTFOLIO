@@ -90,10 +90,16 @@ def _jalali_to_gregorian_index(dates: pd.Series) -> pd.DatetimeIndex:
 
     return pd.DatetimeIndex([convert(v) for v in dates])
 
+def cpi_series(index) -> pd.Series:
+    """`cpi_for_date` for every date of an index, as `to_basis` divides by it."""
+    return pd.Series([cpi_for_date(value) for value in index], index=index, dtype=float)
+
+
 def to_basis(
     series: pd.Series,
     basis: str,
     usd_series: pd.Series | None = None,
+    cpi: pd.Series | None = None,
 ) -> pd.Series:
     """Convert a price series to nominal Toman or USD-denominated values.
 
@@ -106,11 +112,11 @@ def to_basis(
     if basis == "nominal_toman":
         return series
     if basis == "real_toman":
-        cpi = pd.Series(
-            [cpi_for_date(value) for value in series.index],
-            index=series.index,
-            dtype=float,
-        )
+        # A caller converting many columns on one index passes `cpi` built once
+        # (`cpi_series`); recomputing it per column was half of a cold Risk
+        # request -- 5,500 interpolations for five assets over three years.
+        if cpi is None:
+            cpi = cpi_series(series.index)
         return series / cpi * 100.0
     if basis in ("usd_denominated", "usdt_denominated"):
         if usd_series is None:
