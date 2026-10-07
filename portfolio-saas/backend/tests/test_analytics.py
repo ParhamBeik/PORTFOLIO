@@ -1869,3 +1869,72 @@ def test_bounded_index_loader_matches_full_table_load():
     after = _load_index_returns(target)
     assert pd.isna(before.loc[target[-1]])
     assert after.loc[target[-1]] == pytest.approx(5000 / (1000 + 499 * 1.02) - 1)
+
+
+@pytest.mark.parametrize("history_days", [30, 90, 365, 2000])
+@pytest.mark.parametrize("historical", [False, True])
+def test_bounded_history_reads_match_full_reads(asset_catalog, history_days, historical):
+    """The panel loads only from the window's cutoff day; it must equal the full load.
+
+    Twelve years of stock candles, a dollar-quoted gold series converted at
+    each day's own FX rate, an FX flat run straddling the cutoff (flat runs are
+    review gaps), and a rejected row inside the window.
+    """
+    import portfolio.services.returns as returns
+    from marketdata.models import RejectedRecord
+
+    kama = asset_catalog["kama_stock"]
+    kama.tse_symbol = "کاما"
+    kama.save(update_fields=["tse_symbol"])
+    gold = asset_catalog["emami_coin"]
+    gold.brs_symbol = "XAU_TEST"
+    gold.save(update_fields=["brs_symbol"])
+
+    today = dt.date.today()
+
+    def jalali(day):
+        j = jdatetime.date.fromgregorian(date=day)
+        return f"{j.year:04d}-{j.month:02d}-{j.day:02d}"
+
+    candles, history = [], []
+    for offset in range(4400, 0, -1):
+        day = today - dt.timedelta(days=offset)
+        candles.append(MarketCandle(
+            symbol="کاما", timeframe="1d_adj", date_time=jalali(day),
+            open_price=1, high_price=1, low_price=1,
+            close_price=8000 + (offset * 37) % 900, volume=1,
+        ))
+        history.append(GoldCurrencyHistory(
+            symbol="XAU_TEST", date=jalali(day),
+            close_price=Decimal(2000 + (offset * 13) % 300), unit="dollar",
+        ))
+        # FX: flat for twelve days around each window's cutoff, otherwise moving.
+        flat = any(abs(offset - (w + returns._HISTORY_BUFFER_DAYS)) <= 6
+                   for w in (30, 90, 365, 2000))
+        history.append(GoldCurrencyHistory(
+            symbol="USD", date=jalali(day),
+            close_price=Decimal(60000 if flat else 60000 + offset * 7), unit="تومان",
+        ))
+    MarketCandle.objects.bulk_create(candles)
+    GoldCurrencyHistory.objects.bulk_create(history)
+    RejectedRecord.objects.create(
+        endpoint="gold_daily", symbol="XAU_TEST",
+        date=jalali(today - dt.timedelta(days=10)), reason="test",
+    )
+
+    as_of = (dt.datetime.combine(today - dt.timedelta(days=200), dt.time(12),
+                                 tzinfo=dt.timezone.utc) if historical else None)
+    universe = ["kama_stock", "emami_coin"]
+    try:
+        returns._BOUNDED_HISTORY_READS = True
+        bounded = returns.toman_price_panel(history_days=history_days, universe=universe, as_of=as_of)
+        returns._BOUNDED_HISTORY_READS = False
+        full = returns.toman_price_panel(history_days=history_days, universe=universe, as_of=as_of)
+    finally:
+        returns._BOUNDED_HISTORY_READS = True
+
+    pd.testing.assert_frame_equal(bounded[0], full[0])
+    assert bounded[1] == full[1]
+    assert bounded[2] == full[2]
+    assert bounded[0].attrs == full[0].attrs
+    assert not bounded[0].empty

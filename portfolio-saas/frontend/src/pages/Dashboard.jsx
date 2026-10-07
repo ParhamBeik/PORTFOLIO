@@ -279,18 +279,28 @@ function TrendCard({ activeId, basis }) {
   // single axis: the dollar line flattens onto zero and the Toman axis labels
   // it. In that mode both lines are asked for in Toman and the caption says so.
   const trendBasis = mode === "real" ? "nominal_toman" : basis;
+  // A nominal series carries its constant-Toman twin (`data.real`), so
+  // switching to "vs inflation" draws immediately instead of paying for a
+  // second full snapshot request. That twin needs a CPI figure for every
+  // Jalali year the window spans and, like the separate request it replaces,
+  // carries an error rather than reusing last year's index.
+  const includeReal = trendBasis === "nominal_toman";
   const state = useApi(
-    () => snapshots(days, activeId, trendBasis),
-    [days, activeId, trendBasis]
+    () => snapshots(days, activeId, trendBasis, { includeReal }),
+    [days, activeId, trendBasis, includeReal]
   );
-  // The same net worth measured in constant Tomans. Fetched only when asked,
-  // because it needs a CPI figure for every Jalali year the window spans and
-  // fails loudly rather than silently reusing last year's index.
-  const realState = useApi(
+  const embeddedReal = state.data?.real;
+  // Only for a response that predates `include_real` (a stale server).
+  const realFetch = useApi(
     () => snapshots(days, activeId, "real_toman"),
     [days, activeId],
-    { enabled: mode === "real" }
+    { enabled: mode === "real" && !state.loading && !!state.data && !embeddedReal }
   );
+  const realState = embeddedReal
+    ? (embeddedReal.series
+      ? { data: embeddedReal, error: null, loading: false }
+      : { data: null, error: new Error(embeddedReal.detail || "Inflation data unavailable."), loading: false })
+    : realFetch;
   const benchState = useApi(
     () => benchmarks(activeId, { window: effectiveRange === "all" ? "all" : Number(effectiveRange) }),
     [activeId, effectiveRange],

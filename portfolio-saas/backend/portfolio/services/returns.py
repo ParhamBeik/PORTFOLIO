@@ -70,6 +70,8 @@ TRADING_DAYS_PER_YEAR = 252
 # Cache key template — versioned by `_returns_version`; see `_entry_is_current`.
 RETURNS_CACHE_KEY = "returns:daily:{history_days}d:v{version}"
 RETURNS_CACHE_TTL = 600
+# Off only in the test that pins the bounded reads against the full ones.
+_BOUNDED_HISTORY_READS = True
 # Asset keys whose raw price is in USD; multiply through by usd_cash to Toman.
 # Extra days we fetch upstream of the window so resampling keeps the first row.
 _HISTORY_BUFFER_DAYS = 7
@@ -684,10 +686,20 @@ def _load_price_panel(
     if as_of_dt is not None:
         as_of_jalali = to_jalali_str(as_of_dt)
 
+    # Lower bound for every warehouse read below. The series are cut to
+    # `series.index >= cutoff` further down and nothing before that cut reads a
+    # row older than the cutoff day, so loading from that day on is the same
+    # panel -- it used to read every symbol's whole history (twelve years of
+    # candles for a 30-day chart) and convert each row's Jalali date, on every
+    # window and every basis. The FX tables are built from the same bounded
+    # dates and already fetch their own neighbours (`_toman_per_quote`).
+    cutoff_jalali = to_jalali_str(cutoff)
+    since_jalali = cutoff_jalali if _BOUNDED_HISTORY_READS else None
+
     # Bulk query MarketCandle (TSE)
     tse_rows = []
     if tse_symbols:
-        qs_tse = candle_close_qs(tse_symbols, as_of=as_of_jalali)
+        qs_tse = candle_close_qs(tse_symbols, as_of=as_of_jalali, since=since_jalali)
         # Raw Rial -> Toman: the panel mixes TSE and BRS columns and is later
         # multiplied by a Toman FX rate, so units must agree before that.
         # `-id` is load-bearing, not cosmetic. Duplicate (symbol, date) candles
@@ -737,6 +749,8 @@ def _load_price_panel(
             )
             if as_of_jalali is not None:
                 qs_etf_bars = qs_etf_bars.filter(date__lte=as_of_jalali)
+            if since_jalali is not None:
+                qs_etf_bars = qs_etf_bars.filter(date__gte=since_jalali)
             tse_rows.extend(
                 (sym, date, tse_close_to_toman(close))
                 for sym, date, close in qs_etf_bars.order_by("symbol", "date").values_list(
@@ -757,6 +771,8 @@ def _load_price_panel(
         )
         if as_of_jalali is not None:
             qs_brs = qs_brs.filter(date__lte=as_of_jalali)
+        if since_jalali is not None:
+            qs_brs = qs_brs.filter(date__gte=since_jalali)
         raw_brs_rows = list(qs_brs.order_by("symbol", "date").values_list(
             "symbol", "date", "close_price", "unit",
         ))
@@ -798,11 +814,10 @@ def _load_price_panel(
             if item.get("asset") and item["source"] == "brs"
         ]
         brs_rows.extend(
-            row for row in daily_bar_price(brs_assets, as_of=as_of_jalali)
+            row for row in daily_bar_price(brs_assets, since=since_jalali, as_of=as_of_jalali)
             if (row[0], row[1]) not in covered
         )
 
-    cutoff_jalali = to_jalali_str(cutoff)
     rejections = rejected_pairs(
         tse_symbols + brs_symbols, PRICE_SERIES_ENDPOINTS, since=cutoff_jalali
     )

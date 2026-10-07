@@ -58,6 +58,13 @@ The same data as JSON for staff: `GET /api/perf/report/?days=7&source=api`
 | Identical in-flight GETs share one request; polls never stack; a 429 on refresh retries once | Duplicate valuation and asset calls per page; slow responses piled up behind the 60 s poll |
 | The returns matrix is versioned on the rows it actually reads (`_returns_version`; each entry also checks its own live-tick inputs via `_entry_is_current`) | Every live tick of any held stock rebuilt every risk, frontier and optimization matrix from the full history, even though a stock with a warehouse series takes no input from live ticks |
 
+## Changes made (2026-10-07): tab and range switches
+
+| Change | Problem it fixes |
+|---|---|
+| `_load_price_panel` reads the warehouse only from the window's cutoff day (`_BOUNDED_HISTORY_READS`). The bounded and full reads are pinned equal by a test across windows, as-of dates, dollar-quoted gold and FX flat runs | Every history build (the benchmark tab, Risk, Compare, the analytics matrices) read each symbol's full ~12-year history to draw a 30-day window. Measured locally on a 12-year, 2-asset panel: 180–207 ms became 24–36 ms |
+| `/snapshots/?include_real=1` embeds the `real_toman` series in the nominal response; the Dashboard "vs inflation" mode uses it | That mode sent a second full snapshot request (live valuation plus the hidden-holding replay) only to divide by CPI. On a nominal basis it now costs no request at all |
+
 ## Known, not yet changed
 
 - **`optimize()` and MyOptimal still rotate on every tick of a held asset.**
@@ -65,10 +72,6 @@ The same data as JSON for staff: `GET /api/perf/report/?days=7&source=api`
   prices. Since 2026-10-05 the returns matrix underneath them is cached exactly:
   `_returns_version` only rotates on rows the matrix actually reads. So a tick
   now costs a solve, not a rebuild of years of history.
-- `_load_price_panel` loads each symbol's whole candle history and trims it in
-  pandas. Bounding the query also changes `first_observed`, which
-  `_gap_profile` uses for eligibility, so the bound has to keep that output the
-  same.
 - `value_account`, `/performance`, `/snapshots` and `/data-quality` cache
   nothing per user.
 - `ANALYTICS_MAX_CONCURRENT_GLOBAL=5`: about three users on heavy pages at once

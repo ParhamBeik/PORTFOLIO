@@ -24,7 +24,7 @@ from ..services.valuation import (
     compute_dynamic_net_worth_series,
 )
 from ..services.visibility import hidden_asset_ids
-from ..services.deflator import cpi_for_date, normalize_basis
+from ..services.deflator import CpiUnavailable, cpi_for_date, normalize_basis
 from ..services.performance import account_performance
 from ._common import _express_real_toman, _express_usd_real, _fx_rate, _int_param, _scope, _with_usd
 from marketdata import jalali
@@ -483,17 +483,20 @@ class SnapshotListView(APIView):
                 else dated.get(datetime.strptime(row["date"], "%Y-%m-%d").date())
             )) if fx_rate > 0 else None
         elif basis == "real_toman":
-            divisor = lambda row: Decimal(  # noqa: E731
-                str(cpi_for_date(row.get("date") or row.get("timestamp")))
-            ) / Decimal("100")
+            divisor = _real_divisor
         else:
             divisor = None
+        # Computed before the nominal series is divided in place below, and
+        # through the same `_divide_series`, so the embedded real series is the
+        # one `basis=real_toman` would have returned for the same request.
+        real = None
+        if (
+            request.query_params.get("include_real") == "1"
+            and normalize_basis(basis) == "nominal_toman"
+        ):
+            real = _real_payload(series)
         if divisor:
-            for row in series:
-                rate = divisor(row)
-                for field in ("total", "total_usd"):
-                    if row.get(field) is not None:
-                        row[field] = float(Decimal(str(row[field])) / rate) if rate else None
+            _divide_series(series, divisor)
         # The basis these points are actually IN, which is not always the one that
         # was asked for: with no FX rate available `divisor` is None and the series
         # stays in Toman, and the chart would have gone on labelling it dollars.
@@ -508,7 +511,37 @@ class SnapshotListView(APIView):
         }
         if applied_basis == "real_toman":
             payload["cpi"] = _cpi_window_provenance(series)
+        if real is not None:
+            # The "vs inflation" view draws this next to the nominal line. It
+            # used to be a second full request -- a fresh live valuation and
+            # the hidden-holdings replay again -- for a per-day CPI division.
+            payload["real"] = real
         return Response(payload)
+
+
+def _real_divisor(row):
+    return Decimal(str(cpi_for_date(row.get("date") or row.get("timestamp")))) / Decimal("100")
+
+
+def _divide_series(series, divisor):
+    for row in series:
+        rate = divisor(row)
+        for field in ("total", "total_usd"):
+            if row.get(field) is not None:
+                row[field] = float(Decimal(str(row[field])) / rate) if rate else None
+
+
+def _real_payload(series):
+    """The `basis=real_toman` body for a nominal series, or its CPI error body."""
+    real_series = [dict(row) for row in series]
+    try:
+        _divide_series(real_series, _real_divisor)
+        provenance = _cpi_window_provenance(real_series)
+    except CpiUnavailable as exc:
+        # Same refusal the real_toman request gets from config/api.py: never a
+        # nominal number wearing a "real" label.
+        return {"detail": str(exc), "reason": "cpi_unavailable"}
+    return {"series": real_series, "basis": "real_toman", "cpi": provenance}
 
 
 class LatestPricesView(APIView):
