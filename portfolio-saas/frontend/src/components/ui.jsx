@@ -45,24 +45,94 @@ export const Delta = ({ value, format }) => (
 
 /* ---------------------------------------------------------------- surfaces */
 
-export function Card({ title, subtitle, actions, children, testId, className = "" }) {
+/**
+ * A panel. `info` is the explanation a reader may want but should not have to
+ * read past: it sits behind an (i) beside the title and expands inline, inside
+ * the card, so it can never land off the edge of a phone screen the way a
+ * floating popover does. Text that every reader needs belongs in the body.
+ */
+export function Card({ title, subtitle, info, actions, children, testId, className = "" }) {
   const t = useT();
+  const [infoOpen, setInfoOpen] = useState(false);
+  const infoId = testId ? `${testId}-info` : undefined;
+  // A subtitle that is a sentence is an explanation, and goes behind the (i)
+  // with `info`; a short one is a label ("Hypothetical — not orders", a key)
+  // and stays on screen. One rule here instead of a judgement at fifty sites.
+  const explains = isExplanation(subtitle);
+  const shownSubtitle = explains ? null : subtitle;
+  const details = explains || info
+    ? <>{explains && <p>{t(subtitle)}</p>}{info}</>
+    : null;
   return (
     <section
       data-testid={testId}
-      className={`rounded-xl border border-border bg-panel p-5 ${className}`}
+      className={`rounded-xl border border-border bg-panel p-4 sm:p-5 ${className}`}
     >
       {(title || actions) && (
         <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
-          <div>
-            {title && <h2 className="text-base font-semibold">{t(title)}</h2>}
-            {subtitle && <p className="mt-1 max-w-prose text-sm text-muted">{t(subtitle)}</p>}
+          <div className="min-w-0">
+            {title && (
+              <div className="flex items-center gap-1">
+                <h2 className="text-base font-semibold">{t(title)}</h2>
+                {details && (
+                  <InfoToggle
+                    open={infoOpen}
+                    onClick={() => setInfoOpen((v) => !v)}
+                    controls={infoId}
+                    testId={infoId ? `${infoId}-toggle` : undefined}
+                  />
+                )}
+              </div>
+            )}
+            {shownSubtitle && <p className="mt-1 max-w-prose text-sm text-muted">{t(shownSubtitle)}</p>}
           </div>
-          {actions}
+          {/* `min-w-0 max-w-full`: a flex item will not shrink below its
+              content by default, so a row of tabs in here stretched the whole
+              page sideways on a phone instead of scrolling within itself. */}
+          {actions && <div className="min-w-0 max-w-full">{actions}</div>}
         </header>
+      )}
+      {details && infoOpen && (
+        <div
+          id={infoId}
+          data-testid={infoId}
+          className="-mt-1 mb-4 max-w-prose space-y-1 rounded-lg bg-panel-2 px-3 py-2 text-sm text-muted"
+        >
+          {details}
+        </div>
       )}
       {children}
     </section>
+  );
+}
+
+/** Longer than a label: a sentence someone may want, not one everyone must read. */
+const isExplanation = (text) => typeof text === "string" && text.length > 60;
+
+function InfoToggle({ open, onClick, controls, testId }) {
+  const t = useT();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-expanded={open}
+      aria-controls={controls}
+      aria-label={t("About this")}
+      data-testid={testId}
+      className={`-my-1 inline-flex size-8 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-panel-2 hover:text-text ${open ? "text-text" : "text-muted"}`}
+    >
+      <InfoIcon />
+    </button>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M8 7.25v3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <circle cx="8" cy="5.1" r="0.9" fill="currentColor" />
+    </svg>
   );
 }
 
@@ -85,6 +155,7 @@ export function StatTile({ label, value, sub, valueTone = "neutral", size = "md"
 
 /** Status wears an icon-free but always-labelled chip — never hue alone. */
 export function Badge({ children, variant = "neutral", title, testId }) {
+  const t = useT();
   // Outline and label are the SAME token, at full opacity, over a plain surface.
   // Two measurements forced that, and each broke the obvious alternative:
   //
@@ -113,10 +184,10 @@ export function Badge({ children, variant = "neutral", title, testId }) {
   return (
     <span
       data-testid={testId}
-      title={title}
+      title={t(title)}
       className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium whitespace-nowrap ${styles[variant]}`}
     >
-      {children}
+      {t(children)}
     </span>
   );
 }
@@ -139,6 +210,11 @@ export function Badge({ children, variant = "neutral", title, testId }) {
  */
 const DISABLED_DIM = "disabled:cursor-not-allowed disabled:opacity-60";
 
+// Form controls are 16px on a phone: iOS Safari zooms the whole page into any
+// focused field under 16px and does not zoom back out, which reads as the
+// layout jumping. 14px from `sm` up, where no browser does that.
+const FIELD = "min-h-10 rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-base text-text sm:min-h-8 sm:text-sm";
+
 export function Button({ variant = "ghost", className = "", children, ...props }) {
   const t = useT();
   // `-fill` on the two solid variants: white on the display accent is 3.64:1 and
@@ -154,7 +230,8 @@ export function Button({ variant = "ghost", className = "", children, ...props }
   return (
     <button
       type="button"
-      className={`rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${DISABLED_DIM} ${styles[variant]} ${className}`}
+      // 40px tall on a phone (a finger-sized target), 32px from `sm` up.
+      className={`inline-flex items-center justify-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${variant === "link" ? "" : "min-h-10 sm:min-h-8"} ${DISABLED_DIM} ${styles[variant]} ${className}`}
       {...props}
     >
       {t(children)}
@@ -163,10 +240,11 @@ export function Button({ variant = "ghost", className = "", children, ...props }
 }
 
 export function Select({ label, className = "", ...props }) {
+  const t = useT();
   return (
     <select
-      aria-label={label}
-      className={`rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-sm text-text ${className}`}
+      aria-label={t(label)}
+      className={`${FIELD} ${className}`}
       {...props}
     />
   );
@@ -181,20 +259,23 @@ export function Select({ label, className = "", ...props }) {
  * redefined privately in each one.
  */
 export function Field({ label, hint, children }) {
+  const t = useT();
   return (
     <div>
-      <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">{label}</div>
+      <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">{t(label)}</div>
       {children}
-      {hint && <p className="mt-1 text-xs text-muted">{hint}</p>}
+      {hint && <p className="mt-1 text-xs text-muted">{t(hint)}</p>}
     </div>
   );
 }
 
-export function Input({ label, className = "", ...props }) {
+export function Input({ label, className = "", placeholder, ...props }) {
+  const t = useT();
   return (
     <input
-      aria-label={label}
-      className={`rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-sm text-text placeholder:text-muted ${className}`}
+      aria-label={t(label)}
+      placeholder={t(placeholder)}
+      className={`${FIELD} placeholder:text-muted ${className}`}
       {...props}
     />
   );
@@ -204,7 +285,7 @@ export function Textarea({ label, className = "", ...props }) {
   return (
     <textarea
       aria-label={label}
-      className={`rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-sm text-text placeholder:text-muted ${className}`}
+      className={`${FIELD} placeholder:text-muted ${className}`}
       {...props}
     />
   );
@@ -224,6 +305,7 @@ export function Textarea({ label, className = "", ...props }) {
  * dead: the server refuses a future entry, so offering one is offering a 400.
  */
 export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" }) {
+  const t = useT();
   const today = toJalali(Date.now());
   const selected = value ? toJalali(new Date(value)) : null;
   const [view, setView] = useState(() => selected || today);
@@ -246,17 +328,17 @@ export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" 
       <div className="mb-2 flex items-center justify-between gap-2">
         <Button
           onClick={() => step(-1)}
-          aria-label="Previous month"
+          aria-label={t("Previous month")}
           data-testid={testId ? `${testId}-prev` : undefined}
         >
           ‹
         </Button>
         <span className="text-sm font-medium" data-testid={testId ? `${testId}-month` : undefined}>
-          {JALALI_MONTHS[view.jm - 1]} {view.jy}
+          {t(JALALI_MONTHS[view.jm - 1])} {view.jy}
         </span>
         <Button
           onClick={() => step(1)}
-          aria-label="Next month"
+          aria-label={t("Next month")}
           data-testid={testId ? `${testId}-next` : undefined}
         >
           ›
@@ -265,7 +347,7 @@ export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" 
 
       <div className="grid grid-cols-7 gap-1 text-center text-[0.625rem] font-semibold tracking-wide text-muted uppercase">
         {JALALI_WEEKDAYS.map((d) => (
-          <span key={d}>{d}</span>
+          <span key={d}>{t(d)}</span>
         ))}
       </div>
 
@@ -298,7 +380,7 @@ export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" 
 
       <div className="mt-3 flex items-center justify-between gap-2 border-t border-border pt-2">
         <span className="text-xs text-muted" data-testid={testId ? `${testId}-summary` : undefined}>
-          {selected ? jalaliLabel(selected) : todayLabel}
+          {selected ? jalaliLabel(selected) : t(todayLabel)}
         </span>
         {selected && (
           <Button
@@ -315,14 +397,20 @@ export function JalaliDateField({ value, onChange, testId, todayLabel = "Today" 
 }
 
 /** Segmented control. `options` is [{ value, label, disabled }]. */
-export function Tabs({ options, value, onChange, label, testId }) {
+export function Tabs({ options, value, onChange, label, testId, grid = false }) {
   const t = useT();
   return (
     <div
       role="group"
       aria-label={label}
       data-testid={testId}
-      className="inline-flex flex-wrap gap-1 rounded-lg border border-border bg-panel-2 p-1"
+      // One row that scrolls sideways when it runs out of width. Wrapping put
+      // half the options on a second line and the control changed height when
+      // a label was translated. `grid` is for a row of long labels that is the
+      // page's main choice: two columns on a phone so none hides off-screen.
+      className={`no-scrollbar max-w-full gap-1 rounded-lg border border-border bg-panel-2 p-1 ${
+        grid ? "grid grid-cols-2 sm:inline-flex sm:overflow-x-auto" : "inline-flex overflow-x-auto"
+      }`}
     >
       {options.map((o) => (
         <button
@@ -332,8 +420,10 @@ export function Tabs({ options, value, onChange, label, testId }) {
           aria-pressed={value === o.value}
           data-testid={testId ? `${testId}-${o.value}` : undefined}
           onClick={() => onChange(o.value)}
-          className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${DISABLED_DIM} ${
-            value === o.value ? "bg-[var(--c-accent-fill)] text-white" : "text-muted hover:text-text"
+          className={`min-h-9 shrink-0 rounded-md px-3 text-sm font-medium transition-colors sm:min-h-7 sm:whitespace-nowrap ${grid ? "leading-tight" : "whitespace-nowrap"} ${DISABLED_DIM} ${
+            value === o.value
+              ? "bg-panel text-text shadow-[0_0_0_1px_var(--c-border),0_1px_2px_rgb(0_0_0/0.08)]"
+              : "text-muted hover:text-text"
           }`}
         >
           {t(o.label)}
@@ -380,7 +470,9 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
   // as it did before roles existed.
   const metaKeys = columns.filter((c) => c.mobile === "meta").map((c) => c.key);
   const cellClass = (c, expanded) => {
-    const align = c.align === "right" ? "text-right" : "";
+    // A right-aligned column is a number, and a number never wraps: a price
+    // split as "170,000,000" over "T" reads as two values.
+    const align = c.align === "right" ? "text-right whitespace-nowrap" : "";
     if (!mobileCards) return `px-3 py-2 ${align}`;
     if (!compact) return `px-3 py-2 flex items-start justify-between gap-3 sm:table-cell ${align}`;
     const base = `px-3 py-2 sm:table-cell ${align}`;
@@ -388,7 +480,7 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
     if (c.mobile === "value") return `${base} max-sm:order-2 max-sm:px-1 max-sm:py-1 max-sm:text-right max-sm:font-medium max-sm:tabular-nums`;
     if (c.mobile === "meta") {
       const sep = metaKeys.indexOf(c.key) > 0 ? "max-sm:before:me-1 max-sm:before:content-['·']" : "";
-      return `${base} max-sm:order-4 max-sm:py-0 max-sm:pe-1 max-sm:ps-1 max-sm:text-xs max-sm:text-muted ${sep}`;
+      return `${base} max-sm:order-4 max-sm:inline-flex max-sm:items-center max-sm:py-0 max-sm:pe-1 max-sm:ps-1 max-sm:text-xs max-sm:text-muted ${sep}`;
     }
     return `${base} ${expanded ? "max-sm:order-6 max-sm:flex max-sm:basis-full max-sm:items-start max-sm:justify-between max-sm:gap-3 max-sm:px-1 max-sm:py-1" : "max-sm:hidden"}`;
   };
@@ -425,7 +517,7 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
               <tr
                 key={key}
                 data-testid={testId ? `${testId}-row` : undefined}
-                className={`border-b border-border/60 last:border-0 hover:bg-panel-2 ${mobileCards ? card : ""} ${
+                className={`group border-b border-border/60 last:border-0 hover:bg-panel-2 ${mobileCards ? card : ""} ${
                   rowClass?.(row) || ""
                 }`}
               >
@@ -497,27 +589,35 @@ export function Pager({ page, count, pageSize = 25, onPage, testId }) {
  * front. Pass the height the panel will actually render (for a chart, its
  * `height` prop).
  */
-export const Loading = ({ children = "Loading…", testId, minHeight }) => (
-  <p
-    role="status"
-    data-testid={testId}
-    className="flex items-center justify-center py-8 text-center text-sm text-muted"
-    style={minHeight ? { minHeight } : undefined}
-  >
-    {children}
-  </p>
-);
+export function Loading({ children = "Loading…", testId, minHeight }) {
+  const t = useT();
+  return (
+    <p
+      role="status"
+      data-testid={testId}
+      className="flex items-center justify-center py-8 text-center text-sm text-muted"
+      style={minHeight ? { minHeight } : undefined}
+    >
+      {t(children)}
+    </p>
+  );
+}
 
-export const Empty = ({ children, action, testId, minHeight }) => (
-  <div
-    data-testid={testId}
-    className="flex flex-col items-center justify-center py-8 text-center text-sm text-muted"
-    style={minHeight ? { minHeight } : undefined}
-  >
-    <p>{children}</p>
-    {action && <div className="mt-3">{action}</div>}
-  </div>
-);
+export function Empty({ children, action, testId, minHeight }) {
+  const t = useT();
+  return (
+    <div
+      data-testid={testId}
+      className="flex flex-col items-center justify-center py-8 text-center text-sm text-muted"
+      style={minHeight ? { minHeight } : undefined}
+    >
+      {/* A plain sentence is looked up like every other label; anything
+          composed is the caller's to translate. */}
+      <p>{typeof children === "string" ? t(children) : children}</p>
+      {action && <div className="mt-3">{action}</div>}
+    </div>
+  );
+}
 
 export const ErrorState = ({ error, onRetry, testId }) => (
   <div
@@ -566,7 +666,14 @@ export function Async({ data, error, loading, reload, children, empty, testId, m
 const MODAL_WIDTHS = { default: "max-w-lg", wide: "max-w-3xl" };
 
 export function Modal({ title, subtitle, onClose, children, footer, testId, size = "default" }) {
+  const t = useT();
   const panel = useRef(null);
+  // Read through a ref so the effect below runs once per opening. Keyed on
+  // `onClose`, it re-ran whenever a caller passed a fresh arrow -- every render
+  // of the page behind, a price poll included -- and each run sent focus back
+  // to the first button, out of the field someone was typing in.
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
 
   useEffect(() => {
     // Where focus came from, so it can go back there. Without this, closing a
@@ -583,7 +690,7 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
 
     const onKey = (e) => {
       if (e.key === "Escape") {
-        onClose();
+        closeRef.current();
         return;
       }
       // Trap Tab inside the dialog. `aria-modal` tells a screen reader the rest
@@ -609,7 +716,9 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
     // The page behind must not scroll under the scrim.
     const previous = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    focusable()[0]?.focus();
+    // A field marked `data-autofocus` is where the dialog's work starts; the
+    // close button, first in the DOM, is not.
+    (panel.current?.querySelector("[data-autofocus]") || focusable()[0])?.focus();
     return () => {
       document.removeEventListener("keydown", onKey);
       document.body.style.overflow = previous;
@@ -617,7 +726,7 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
       // that the save then removed has nothing to return to.
       if (opener instanceof HTMLElement && document.contains(opener)) opener.focus();
     };
-  }, [onClose]);
+  }, []);
 
   return (
     <div
@@ -630,14 +739,14 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
         ref={panel}
         role="dialog"
         aria-modal="true"
-        aria-label={title}
+        aria-label={t(title)}
         data-testid={testId}
         className={`flex max-h-[calc(100vh-2rem)] w-full flex-col rounded-xl border border-border bg-panel shadow-2xl ${MODAL_WIDTHS[size] || MODAL_WIDTHS.default}`}
       >
         <header className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
           <div>
-            <h2 className="text-base font-semibold">{title}</h2>
-            {subtitle && <p className="mt-1 text-sm text-muted">{subtitle}</p>}
+            <h2 className="text-base font-semibold">{t(title)}</h2>
+            {subtitle && <p className="mt-1 text-sm text-muted">{t(subtitle)}</p>}
           </div>
           <Button variant="ghost" onClick={onClose} aria-label="Close" data-testid={testId ? `${testId}-close` : undefined}>
             ✕
@@ -655,23 +764,42 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
 }
 
 /** Collapsed assumptions / methodology block. */
-export const Disclosure = ({ summary, children, testId, open = false }) => (
-  <details open={open} data-testid={testId} className="mt-4 rounded-lg border border-border bg-panel-2 px-4 py-2">
-    <summary className="cursor-pointer py-1 text-sm font-medium text-muted">{summary}</summary>
-    <div className="pt-2 pb-1 text-sm text-muted">{children}</div>
-  </details>
-);
+export function Disclosure({ summary, children, testId, open = false }) {
+  const t = useT();
+  return (
+    <details open={open} data-testid={testId} className="mt-4 rounded-lg border border-border bg-panel-2 px-4 py-2">
+      <summary className="cursor-pointer py-1 text-sm font-medium text-muted">{t(summary)}</summary>
+      <div className="pt-2 pb-1 text-sm text-muted">{children}</div>
+    </details>
+  );
+}
 
 export function PageHeader({ title, subtitle, actions, meta }) {
   const t = useT();
+  const [open, setOpen] = useState(false);
+  // A page's title says what it is; the sentence about it is for someone who
+  // asks. Behind the (i) it costs one line instead of three on a phone.
+  const explains = isExplanation(subtitle);
   return (
-    <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
-      <div>
-        <h1 className="text-xl font-semibold">{t(title)}</h1>
-        {subtitle && <p className="mt-1 max-w-prose text-sm text-muted">{t(subtitle)}</p>}
-        {meta}
+    <div className="mb-6">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1">
+            <h1 className="text-xl font-semibold">{t(title)}</h1>
+            {explains && (
+              <InfoToggle open={open} onClick={() => setOpen((v) => !v)} controls="page-header-info" testId="page-header-info-toggle" />
+            )}
+          </div>
+          {subtitle && !explains && <p className="mt-1 max-w-prose text-sm text-muted">{t(subtitle)}</p>}
+          {meta}
+        </div>
+        {actions && <div className="min-w-0 max-w-full">{actions}</div>}
       </div>
-      {actions}
+      {explains && open && (
+        <p id="page-header-info" className="mt-2 max-w-prose rounded-lg bg-panel-2 px-3 py-2 text-sm text-muted">
+          {t(subtitle)}
+        </p>
+      )}
     </div>
   );
 }

@@ -14,6 +14,7 @@
     "test:unit": "node --test src/*.test.mjs",
     "test:vitest": "vitest run",
     "test:e2e": "playwright test",
+    "test:layout": "playwright test e2e/layout-sweep.spec.js",
     "test:lighthouse": "bash scripts/lhci.sh",
     "test:lighthouse:auth": "npm i --no-save --silent lighthouse@12 chrome-launcher && node scripts/lh-authenticated.mjs"
   },

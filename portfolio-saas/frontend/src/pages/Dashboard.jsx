@@ -5,17 +5,19 @@ import LiabilitiesCard from "../components/Liabilities.jsx";
 import CorporateActionsCard from "../components/CorporateActions.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { useApi } from "../useApi.js";
+import { translate, useT, useLang } from "../i18n.js";
 import {
   valuation,
   snapshots,
   getPerformance,
-  accountDataQuality,
   updateHolding,
   removeHolding,
   adminAssetEvidence,
   benchmarks,
 } from "../api.js";
 import {
+  serverText,
+  allocationByClass,
   ago,
   area,
   holdingLabel,
@@ -51,7 +53,7 @@ import {
   ErrorState,
   Async,
   Disclosure,
-  PageHeader,
+  toneClass,
   toneFor,
 } from "../components/ui.jsx";
 
@@ -75,12 +77,6 @@ const INFLATION_VIEWS = [
 // 1.55bn with nothing on screen saying which year's money that is.
 const REAL_BASIS_BASE_YEAR = "1398";
 const REAL_BASIS_NOTE = `In constant ${REAL_BASIS_BASE_YEAR} Tomans`;
-const BASIS_LABEL = {
-  nominal_toman: "Nominal Toman",
-  real_toman: `Constant ${REAL_BASIS_BASE_YEAR} Toman`,
-  usd_denominated: "US Dollar",
-  usdt_denominated: "Tether (USDT)",
-};
 
 // What this card measures, said out loud when it has nothing to show.
 //
@@ -90,14 +86,13 @@ const BASIS_LABEL = {
 // happily printed a 1-year return and a 90-day comparison while this one said
 // "available after 71 more days", and the three read as a contradiction.
 function PerformanceUnavailable({ detail }) {
+  const t = useT();
   return (
     <Empty testId="dashboard-performance-empty">
-      <span>{detail || PERF_UNLOCK_HINT}</span>
+      <span>{serverText(detail || PERF_UNLOCK_HINT)}</span>
       <span className="mt-2 block text-xs text-muted">
-        This is the return on the money you put in, which needs a tracked opening
-        balance. Price-based returns for the same holdings are already available
-        on <Link to="/optimal" className="underline hover:text-text">My Optimal</Link>{" "}
-        and <Link to="/comparison" className="underline hover:text-text">Comparison</Link>.
+        {t("These measure the return on the money put in, so they need a tracked opening balance.")}{" "}
+        <Link to="/compare" className="underline hover:text-text">{t("Price-based returns are on Compare.")}</Link>
       </span>
     </Empty>
   );
@@ -108,20 +103,6 @@ const ITEM_BADGE = { live: "good", manual: "warn", stale: "warn", quota: "seriou
 // Groups valuation items by asset class for the donut. Palette has 8 fixed
 // slots (charts.jsx SERIES), so anything past the top 7 folds into "Other"
 // rather than cycling colors and losing legend meaning.
-function groupByClass(items) {
-  const totals = new Map();
-  for (const it of items) {
-    const key = it.class || "other";
-    totals.set(key, (totals.get(key) || 0) + Number(it.value || 0));
-  }
-  const groups = [...totals.entries()]
-    .map(([name, value]) => ({ name: humanize(name), value }))
-    .sort((a, b) => b.value - a.value);
-  if (groups.length <= 8) return groups;
-  const rest = groups.slice(7).reduce((s, g) => s + g.value, 0);
-  return [...groups.slice(0, 7), { name: "Other", value: rest }];
-}
-
 /**
  * One chip per market the portfolio holds: open or closed, and how old its
  * newest price is. The total blends a stock market that closed at 12:30 with
@@ -130,40 +111,39 @@ function groupByClass(items) {
  * loading so nothing below it moves.
  */
 function MarketClocks({ data }) {
+  const t = useT();
   const markets = data?.markets || [];
+  // A dot and a word per market, on the hero's context line. The price age
+  // sits in the tooltip: it is the second question, not the first.
   return (
-    <div className="flex min-h-[28px] flex-wrap gap-2" data-testid="dashboard-market-clocks">
+    <span className="inline-flex flex-wrap items-center gap-x-3 gap-y-1" data-testid="dashboard-market-clocks">
       {markets.map((m) => {
         const age = m.last_priced_at ? (Date.now() - Date.parse(m.last_priced_at)) / 1000 : null;
         return (
           <span
             key={m.market}
             data-testid={`dashboard-market-${m.market}`}
-            className="inline-flex items-center gap-1.5 rounded-full border border-border bg-panel-2 px-2.5 py-1 text-xs text-muted"
+            title={age != null ? t("Last price {age}", { age: ago(age) }) : undefined}
+            className="inline-flex items-center gap-1.5"
           >
             <span
               aria-hidden="true"
               className={`size-1.5 rounded-full ${m.open ? "bg-[var(--c-good)]" : "bg-[var(--c-muted)]"}`}
             />
-            <span className="font-medium text-text">{m.label}</span>
-            <span>{m.open ? "open" : "closed"}</span>
-            {age != null && <span>· last price {ago(age)}</span>}
+            <span>{t(m.open ? "{market} open" : "{market} closed", { market: t(m.label) })}</span>
           </span>
         );
       })}
-    </div>
+    </span>
   );
 }
 
 function HeroRow({ state, basis: selected }) {
+  const t = useT();
   return (
-    // The hero is the first thing under the page title, so anything below it
-    // moves when it grows -- the dashboard's whole measured layout shift was
-    // the chart grid being pushed down when the totals replaced the spinner.
-    // Reserved responsively rather than through `Async`'s inline `minHeight`,
-    // because the two StatTiles stack under `sm` and the reserved height has to
-    // stack with them: 184px measured at 412px wide, 94px at 1350px.
-    <div className="min-h-[184px] sm:min-h-[94px]">
+    // Reserved so nothing below it moves when the totals replace the spinner:
+    // the hero is the first thing on the page.
+    <div className="min-h-[112px]">
       <Async {...state} testId="dashboard-hero">
       {(data) => {
         // The basis the NUMBERS were fetched with, not the one the picker shows.
@@ -179,34 +159,37 @@ function HeroRow({ state, basis: selected }) {
           basis === "nominal_toman" &&
           data.total_usd !== undefined &&
           data.total_usd !== null;
+        // Asked for dollars, answered in Toman: the server had no rate to
+        // convert by. Without saying so the toggle looks like it did nothing.
+        const noRate = selected !== "nominal_toman" && basis === "nominal_toman";
+        const cash = Number(data.cash_tomans);
         return (
-          // The "priced holdings N/N" tile was removed: it read "14/14 Manual"
-          // on a fully priced book, and the pricing story is already told where
-          // it is actionable -- per row in the Status column, and in aggregate
-          // by `dashboard-stale-banner` when half the book is not live.
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3" data-testid="dashboard-hero">
-            <div className="sm:col-span-2">
-              <StatTile
-                label="Total value"
-                value={money(Number(data.total), basis)}
-                size="lg"
-                sub={
-                  basis === "real_toman"
-                    ? REAL_BASIS_NOTE
-                    // Cash is part of the total but has no holding row, so say
-                    // so rather than leave a gap between the rows and the sum.
-                    : Number(data.cash_tomans)
-                      ? `Includes ${money(Number(data.cash_tomans), basis)} cash`
-                      : undefined
-                }
-                testId="dashboard-total"
-              />
+          // One number, then one quiet line of context. The "Valued in" tile
+          // that used to sit beside it repeated the header's basis switch.
+          <div data-testid="dashboard-hero">
+            <div data-testid="dashboard-total">
+              <div className="text-xs font-medium text-muted">{t("Total value")}</div>
+              <div className="tabular mt-1 text-4xl font-semibold tracking-tight sm:text-5xl">
+                {money(Number(data.total), basis)}
+              </div>
             </div>
-            <StatTile
-              label={showUsd ? "USD equivalent" : "Valued in"}
-              value={showUsd ? "$" + num(Number(data.total_usd)) : BASIS_LABEL[basis]}
-              testId="dashboard-usd"
-            />
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted">
+              {showUsd && (
+                <span className="tabular" data-testid="dashboard-usd">≈ ${num(Number(data.total_usd))}</span>
+              )}
+              {basis === "real_toman" ? (
+                <span>{REAL_BASIS_NOTE}</span>
+              ) : cash > 0 ? (
+                // Cash is part of the total but has no holding row.
+                <span className="tabular">{money(cash, basis)} {t("cash")}</span>
+              ) : null}
+              {noRate && (
+                <span className="text-[var(--c-warn-text)]" data-testid="dashboard-basis-fallback">
+                  {t("No USD rate right now — showing Toman")}
+                </span>
+              )}
+              <MarketClocks data={data} />
+            </div>
           </div>
         );
       }}
@@ -268,7 +251,53 @@ function InflationNote({ realGrowth, nominalGrowth, cpi, basis }) {
   );
 }
 
+// What each view of the net-worth chart is, for the card's (i). Said once,
+// on request, instead of under the chart on every visit.
+const TREND_INFO = {
+  nominal: (
+    <>
+      <p>Your total value each day. Days with no recorded snapshot are rebuilt from that day&apos;s prices.</p>
+    </>
+  ),
+  real: (
+    <p>
+      The same net worth in constant Tomans. The gap between the two lines is
+      inflation, not performance.
+    </p>
+  ),
+  benchmarks: (
+    <p>
+      Every line starts at 100, so the gap is relative growth over the window —
+      not the amount of money in each.
+    </p>
+  ),
+};
+
+const RANGE_WORD = { 30: "30 days", 90: "90 days", 365: "1 year", all: "all time" };
+
+/** First-to-last change over the window: the number a chart is asked for. */
+function RangeChange({ points, basis, range }) {
+  const t = useT();
+  const valued = points.filter((p) => p.y != null);
+  if (valued.length < 2) return null;
+  const first = valued[0].y;
+  const last = valued[valued.length - 1].y;
+  const diff = last - first;
+  const rel = first ? diff / first : null;
+  const tone = toneClass(toneFor(diff));
+  return (
+    <div className="mb-3 flex items-baseline gap-2 text-sm" data-testid="dashboard-trend-change">
+      <span className={`tabular font-semibold ${tone}`}>
+        {diff >= 0 ? "+" : "−"}{money(Math.abs(diff), basis)}
+        {rel != null && ` (${diff >= 0 ? "+" : "−"}${pct(Math.abs(rel))})`}
+      </span>
+      <span className="text-muted">{t(RANGE_WORD[range] || "")}</span>
+    </div>
+  );
+}
+
 function TrendCard({ activeId, basis }) {
+  const lang = useLang();
   const [range, setRange] = useState("30");
   const [mode, setMode] = useState("nominal");
   const effectiveRange = RANGES.some((r) => r.value === range) ? range : RANGES[0].value;
@@ -319,6 +348,8 @@ function TrendCard({ activeId, basis }) {
     <Card
       title="Net worth"
       testId="dashboard-trend"
+      info={TREND_INFO[mode]}
+      className="h-full"
       actions={(
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <Tabs
@@ -367,10 +398,6 @@ function TrendCard({ activeId, basis }) {
                   formatAxis={indexPoint}
                   label="Your portfolio against gold, the dollar and the TSE index, indexed to 100"
                 />
-                <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-bench-note">
-                  Each line starts at 100, so the gap is relative growth over the
-                  window — not the amount of money in each.
-                </p>
                 {shortfall && (
                   <p className="mt-1 text-xs text-muted" data-testid="dashboard-trend-bench-shortfall">
                     You asked for {requestedDays} days and this covers {actualDays} — that is as
@@ -433,6 +460,16 @@ function TrendCard({ activeId, basis }) {
             );
           }
 
+          // One point is not a line. A portfolio whose history starts today
+          // drew a lone dot on an empty grid.
+          if (points.filter((p) => p.y != null).length < 2) {
+            return (
+              <Empty testId="dashboard-trend-starting" minHeight={260}>
+                History starts today. The line fills in day by day.
+              </Empty>
+            );
+          }
+
           return (
             <>
               {/* The basis the POINTS are in, not the one the picker shows: the
@@ -440,6 +477,7 @@ function TrendCard({ activeId, basis }) {
                   the server answers `nominal_toman` when it had no rate to
                   convert by. Reading it off the data keeps the axis, the tooltip
                   and the numbers describing the same currency. */}
+              <RangeChange points={points} basis={data.basis || basis} range={effectiveRange} />
               <AreaTrend
                 data={points}
                 longTicks={longTicks}
@@ -452,14 +490,14 @@ function TrendCard({ activeId, basis }) {
               )}
               {hasEstimated && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-note">
-                  {estimatedCount} of {pointCount} points are rebuilt from prices
-                  because no daily snapshot was recorded for those days.
+                  {estimatedCount === pointCount
+                    ? translate("Rebuilt from prices", lang)
+                    : translate("{n} of {total} days rebuilt from prices", lang, { n: estimatedCount, total: pointCount })}
                 </p>
               )}
               {hasApproximated && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-hidden-note">
-                  On some days an asset you switched off had no recorded price, so
-                  the amount removed from the line there is an estimate.
+                  {translate("Switched-off assets estimated on some days", lang)}
                 </p>
               )}
             </>
@@ -476,7 +514,9 @@ function AllocationCard({ state }) {
       {/* Loaded body measures 382px: the 260px donut plus its legend column. */}
       <Async {...state} testId="dashboard-allocation-body" empty="No priced holdings yet." minHeight={385}>
         {(data) => {
-          const groups = groupByClass(data.items || []);
+          // Cash is part of the hero total, so it is part of the split (see
+          // `allocationByClass`).
+          const groups = allocationByClass(data.items, data.cash_tomans);
           if (!groups.length) return <Empty>No priced holdings yet.</Empty>;
           // `Donut` defaults its tooltip to Toman, so this was the last panel on
           // the page still suffixing a converted dollar amount " T" after the
@@ -583,6 +623,11 @@ function PositionsTable({ rows, showAccount }) {
   if (showAccount) {
     columns.splice(1, 0, { key: "portfolio", header: "Portfolio", render: (r) => r.account_name || "—" });
   }
+  // Two lines per asset on a phone: name and value, then quantity and the
+  // P&L that is still open. Seven labelled lines per row, mostly "—", made
+  // this card a third of the page.
+  const roles = { asset: "title", value: "value", portfolio: "meta", qty: "meta", unrealized: "meta" };
+  columns.forEach((c) => { if (roles[c.key]) c.mobile = roles[c.key]; });
   return (
     <Table
       testId="dashboard-performance-table"
@@ -599,11 +644,29 @@ function PositionsTable({ rows, showAccount }) {
 function PerformanceLockedNote({ detail }) {
   return (
     <p className="mb-3 text-xs text-muted" data-testid="dashboard-performance-locked-note">
-      {detail || PERF_UNLOCK_HINT} Until then, what you paid and what it is worth
-      now are shown below — those need no tracking history. Price-based returns
-      are on <Link to="/optimal" className="underline hover:text-text">My Optimal</Link>{" "}
-      and <Link to="/comparison" className="underline hover:text-text">Comparison</Link>.
+      {serverText(detail || PERF_UNLOCK_HINT)}
     </p>
+  );
+}
+
+/**
+ * A positions table is only worth showing when it says something the holdings
+ * table above does not: what was paid. With no purchases recorded every cost
+ * and P&L cell is "—" and the rest repeats the holdings, so say what unlocks it.
+ */
+function hasCostData(rows) {
+  return rows.some((r) => r.total_cost_basis_tomans != null || r.realized_pnl_tomans != null);
+}
+
+function NoCostYet() {
+  const t = useT();
+  return (
+    <Empty
+      testId="dashboard-performance-no-cost"
+      action={<Link to="/activity" className="inline-flex min-h-10 items-center rounded-md border border-border bg-panel-2 px-3 text-sm font-medium text-text hover:bg-border sm:min-h-8">{t("Record purchases")}</Link>}
+    >
+      Record what you paid to see profit and loss.
+    </Empty>
   );
 }
 
@@ -640,6 +703,7 @@ function PerformanceCard({ activeId, basis, accounts }) {
               if (!positions.length) {
                 return <PerformanceUnavailable detail={data.accounts[0]?.detail} />;
               }
+              if (!hasCostData(positions)) return <NoCostYet />;
               return (
                 <>
                   <PerformanceLockedNote detail={data.accounts[0]?.detail} />
@@ -679,7 +743,7 @@ function PerformanceCard({ activeId, basis, accounts }) {
                         r.performance_available ? (
                           <Badge variant="good">Ready</Badge>
                         ) : (
-                          <span className="text-xs text-muted">{r.detail || "Needs ledger"}</span>
+                          <span className="text-xs text-muted">{serverText(r.detail || "Needs ledger")}</span>
                         ),
                     },
                   ]}
@@ -690,6 +754,7 @@ function PerformanceCard({ activeId, basis, accounts }) {
           const rows = positionRows(data.assets);
           if (!data.performance_available) {
             if (!rows.length) return <PerformanceUnavailable detail={data.detail} />;
+            if (!hasCostData(rows)) return <NoCostYet />;
             return (
               <>
                 <PerformanceLockedNote detail={data.detail} />
@@ -796,9 +861,10 @@ function hasDraftChanges(row, draft) {
 
 const inlineInputClass = "w-full min-w-[5rem] rounded-md border border-border bg-panel px-2 py-1 text-right text-sm tabular";
 
-function PricingGlossaryDisclosure() {
+// The status words in the holdings table, behind the card's (i).
+function PricingGlossary() {
   return (
-    <Disclosure summary="What do Live / Manual / Stale / Quota mean?" testId="dashboard-pricing-glossary">
+    <div data-testid="dashboard-pricing-glossary">
       <ul className="space-y-1">
         <li><strong className="text-text">Live</strong> — priced within the last 5 minutes, or the last print from the latest session while that market is shut.</li>
         <li><strong className="text-text">Manual</strong> — house or real-estate marks updated within the last 90 days.</li>
@@ -807,11 +873,12 @@ function PricingGlossaryDisclosure() {
         <li><strong className="text-text">Mixed</strong> — some holdings are stale, quota-blocked, or falling back to an archived price.</li>
         <li><strong className="text-text">Real Toman</strong> — inflation-adjusted using the Statistical Center of Iran's published CPI. The year in progress has no release yet, so that stretch is a labelled projection; the "vs inflation" view prints the rate it used.</li>
       </ul>
-    </Disclosure>
+    </div>
   );
 }
 
 function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
+  const t = useT();
   const [manageMode, setManageMode] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [savingKey, setSavingKey] = useState(null);
@@ -954,7 +1021,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
   );
 
   return (
-    <Card title="Holdings" testId="dashboard-holdings" actions={cardActions}>
+    <Card title="Holdings" testId="dashboard-holdings" actions={cardActions} info={<PricingGlossary />}>
       <Async {...valuationState} testId="dashboard-holdings-body">
         {(data) => {
           // The basis these rows were priced in, not the one the picker shows:
@@ -1169,14 +1236,13 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
               key: "status",
               header: "Status",
               render: (r) => (
-                <div className="flex flex-wrap items-center gap-1">
+                <div className="inline-flex flex-wrap items-center gap-1 align-middle">
                   {r.is_hidden && <Badge variant="warn">Not counted</Badge>}
                   <Badge variant={ITEM_BADGE[r.quality_status] || "neutral"}>{humanize(r.quality_status)}</Badge>
                   {r.price_unit_status === "unverified" && <Badge variant="warn">unverified unit</Badge>}
                 </div>
               ),
             },
-            { key: "source", header: "Source", render: (r) => r.source || "—" },
             { key: "priced_at", header: "As of", render: (r) => r.priced_at ? ago(r.age_seconds) : (r.archive_record?.date || "—") },
           ];
 
@@ -1184,11 +1250,20 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
             columns.splice(1, 0, {
               key: "portfolio",
               header: "Portfolio",
-              render: (r) => r.account_name || "—",
+              // Cut to one line: a long portfolio name doubled every phone card.
+              render: (r) => (
+                <span dir="auto" className="inline-block max-w-[11rem] truncate align-bottom" title={r.account_name || ""}>
+                  {r.account_name || "—"}
+                </span>
+              ),
             });
           }
 
           if (admin) {
+            // The feed a price came from is an operator's question, not an
+            // investor's: "SEED" or a provider path is jargon on a holdings row.
+            columns.splice(columns.findIndex((c) => c.key === "priced_at"), 0,
+              { key: "source", header: "Source", render: (r) => r.source || "—" });
             columns.push({
               key: "why",
               header: "",
@@ -1268,28 +1343,23 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                   data-testid="dashboard-stale-banner"
                   className="mb-3 rounded-lg border border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 px-4 py-3 text-sm"
                 >
-                  Live pricing unavailable for {staleCount} of {visible.length} holdings — showing archived or manual prices instead.
+                  {t("{n} of {total} prices aren't live — showing the last known price.", { n: staleCount, total: visible.length })}
                 </div>
               )}
               {hidden.length > 0 && (
                 <p className="mb-3 text-sm text-muted" data-testid="dashboard-holdings-hidden-note">
-                  {hidden.length === 1 ? "One asset is" : `${hidden.length} assets are`} switched
-                  off — listed below but left out of your total, your allocation, your risk and
-                  your history. Tick the box to count {hidden.length === 1 ? "it" : "them"} again.
+                  {hidden.length === 1 ? "1 asset" : `${hidden.length} assets`} switched off and
+                  left out of every figure. Tick to count {hidden.length === 1 ? "it" : "them"} again.
                 </p>
               )}
               {manageMode === "edit" && (
                 <p className="mb-3 text-xs text-muted" data-testid="dashboard-holdings-edit-hint">
-                  Rename any holding — the name is yours and saves as soon as you click away.
-                  Change a quantity and click Save on the left. A manual asset also takes a unit
-                  price, and a property takes its size plus what a square meter is worth, in
-                  millions of Toman. Market-priced assets keep the feed's price.
+                  Edit a name, quantity or manual price, then Save. Market prices come from the feed.
                 </p>
               )}
               {manageMode === "delete" && (
                 <p className="mb-3 text-xs text-muted" data-testid="dashboard-holdings-delete-hint">
-                  Delete removes the holding and reverses its ledger entries. To keep a holding
-                  but leave it out of every figure, untick its box instead.
+                  Delete also reverses its ledger entries. To just leave it out, untick it instead.
                 </p>
               )}
               <Table
@@ -1307,7 +1377,6 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                 // already guards on every background.
                 rowClass={(r) => (r.is_hidden ? "text-muted" : "")}
               />
-              <PricingGlossaryDisclosure />
               {actionError && (
                 <div className="mt-2">
                   <ErrorState error={actionError} testId="dashboard-holdings-error" />
@@ -1343,14 +1412,22 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
 
 
 function ExcludedDisclosure({ valuationState }) {
-  const excluded = valuationState.data?.excluded;
+  const data = valuationState.data;
+  const excluded = data?.excluded;
   if (!excluded?.length) return null;
+  // Named as the holdings table names them. This printed the catalog key
+  // (usd_cash, swiss_gold_bar_2_5g) -- an identifier, not a name.
+  const rows = [...(data.items || []), ...(data.hidden_items || [])];
+  const nameOf = (key) => {
+    const row = rows.find((r) => r.key === key);
+    return row ? holdingLabel(row) : humanize(key);
+  };
   return (
     <Disclosure summary="Assets excluded from this valuation" testId="dashboard-excluded">
       <ul className="space-y-1">
         {excluded.map((e) => (
-          <li key={e.asset_key}>
-            {e.asset_key} — {humanize(e.reason)}
+          <li key={`${e.account_id}:${e.asset_key}`}>
+            <bdi>{nameOf(e.asset_key)}</bdi> — {humanize(e.reason)}
           </li>
         ))}
       </ul>
@@ -1387,69 +1464,56 @@ function WhyDrawer({ assetKey, onClose }) {
 }
 
 
-function HistoryQualityCard({ activeId }) {
-  const state = useApi(
-    () => accountDataQuality(activeId),
-    [activeId],
-    { enabled: Boolean(activeId) }
-  );
-  if (!activeId) {
-    return (
-      <p className="text-sm text-muted" data-testid="dashboard-quality-all">
-        Select one portfolio to see whether its price history is complete enough to trust.
-      </p>
-    );
-  }
-  return (
-    <Card title="History quality" testId="dashboard-quality">
-      <Async {...state} testId="dashboard-quality-body" empty="No history-quality data yet.">
-        {(data) => {
-          const failing = (data.assets || []).filter((a) => a.passes_gate === false);
-          const tone =
-            data.quality_status === "complete" ? "good"
-            : data.quality_status === "partial" ? "warn"
-            : "neutral";
-          return (
-            <div className="space-y-2 text-sm">
-              <p>
-                <Badge variant={tone}>{humanize(data.quality_status)}</Badge>
-                {" "}
-                {data.passing_assets} of {data.assessed_assets} priced holdings pass the integrity gate.
-              </p>
-              {failing.length > 0 && (
-                <ul className="list-disc pl-5 text-muted">
-                  {failing.map((a) => (
-                    <li key={a.asset_key}>
-                      {a.symbol || a.asset_key}
-                      {a.reason_codes?.length ? ` — ${a.reason_codes.map(humanize).join(", ")}` : ""}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <p className="text-xs text-muted">
-                Live quotes on the holdings table are a different question. This card is about the warehouse history behind returns and P/L.
-              </p>
-            </div>
-          );
-        }}
-      </Async>
-    </Card>
-  );
-}
-
-
-
 export default function Dashboard({ user }) {
+  const t = useT();
   const portfolio = usePortfolio();
   const { activeId, basis } = portfolio;
   const valuationState = useApi(() => valuation(activeId, basis), [activeId, basis], { pollMs: 60000 });
 
+  // A portfolio with nothing in it -- just created, most often. Every card
+  // below would say "nothing yet" in its own words around a "0 T"; one card
+  // saying what to do first is the whole page.
+  const v = valuationState.data;
+  const holdsNothing =
+    activeId != null && v && !valuationState.loading &&
+    !(v.items || []).length && !(v.hidden_items || []).length &&
+    !Number(v.cash_tomans) && !Number(v.total_liabilities);
+  // Nothing today is not the same as never anything: a portfolio emptied by
+  // a withdrawal still has a history to draw, and that keeps the full page.
+  const pastState = useApi(() => snapshots(365, activeId), [activeId], { enabled: Boolean(holdsNothing) });
+  const hadSomething = (pastState.data?.series || []).some((p) => Number(p.total));
+  const isEmpty = holdsNothing && !pastState.loading && !pastState.error && !hadSomething;
+  if (isEmpty) {
+    const name = portfolio.accounts.find((a) => a.id === activeId)?.name;
+    return (
+      <div>
+        <h1 className="sr-only">Portfolio</h1>
+        <Card testId="dashboard-empty-portfolio">
+          <Empty
+            minHeight={280}
+            action={
+              <Link
+                to="/activity?add=trade"
+                data-testid="dashboard-empty-add"
+                className="inline-flex min-h-10 items-center rounded-md bg-[var(--c-accent-fill)] px-4 text-sm font-medium text-white hover:opacity-90"
+              >
+                {t("Add the first asset")}
+              </Link>
+            }
+          >
+            <span className="block text-base font-semibold text-text">{name || "This portfolio"} is empty</span>
+            <span className="mt-1 block">Record something you own, or money you put in.</span>
+          </Empty>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div>
-      <PageHeader title="Portfolio" subtitle="Your holdings, net worth, allocation, and performance in the selected valuation basis." />
+      <h1 className="sr-only">Portfolio</h1>
       <div className="space-y-6">
         <HeroRow state={valuationState} basis={basis} />
-        <MarketClocks data={valuationState.data} />
         <CorporateActionsCard
           onBooked={() => {
             valuationState.reload();
@@ -1462,10 +1526,11 @@ export default function Dashboard({ user }) {
           </div>
           <AllocationCard state={valuationState} />
         </div>
+        {/* What you hold, then what it made you, then what you owe. History
+            quality lives on the Data health tab, not repeated here. */}
         <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} admin={user?.role === "admin"} />
-        <HistoryQualityCard activeId={activeId} />
-        <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} />
         <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
+        <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} />
         <ExcludedDisclosure valuationState={valuationState} />
       </div>
     </div>

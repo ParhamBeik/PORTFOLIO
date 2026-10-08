@@ -414,8 +414,8 @@ export const searchAssetCatalog = (assetClass, q = "") =>
 export const ensureAsset = (source, symbol) =>
   api("/api/assets/ensure/", { method: "POST", body: { source, symbol } });
 export const listAccounts = () => api("/api/accounts/");
-export const createAccount = (name, broker = "") =>
-  api("/api/accounts/", { method: "POST", body: { name, broker } });
+export const createAccount = (name, broker = "", goal = "") =>
+  api("/api/accounts/", { method: "POST", body: { name, broker, goal } });
 export const addHolding = (accountId, assetKey, quantity) =>
   api(`/api/accounts/${accountId}/holdings/`, {
     method: "POST",

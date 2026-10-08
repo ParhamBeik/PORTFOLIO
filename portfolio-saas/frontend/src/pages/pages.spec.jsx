@@ -151,14 +151,16 @@ describe("Page Rendering Tests", () => {
     expect(screen.getByTestId("dashboard-trend")).toBeInTheDocument();
     expect(screen.getByTestId("dashboard-allocation")).toBeInTheDocument();
     expect(screen.getByTestId("dashboard-performance")).toBeInTheDocument();
-    const quality = await screen.findByTestId("dashboard-quality");
+    // Holdings, then returns, then debts. History quality has its own tab.
+    const performance = screen.getByTestId("dashboard-performance");
     const liabilities = await screen.findByTestId("dashboard-liabilities");
     expect(
-      holdings.compareDocumentPosition(quality) & Node.DOCUMENT_POSITION_FOLLOWING
+      holdings.compareDocumentPosition(performance) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
     expect(
-      quality.compareDocumentPosition(liabilities) & Node.DOCUMENT_POSITION_FOLLOWING
+      performance.compareDocumentPosition(liabilities) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
+    expect(screen.queryByTestId("dashboard-quality")).toBeNull();
     expect(screen.queryByTestId("dashboard-risk")).toBeNull();
     expect(screen.queryByTestId("dashboard-insights")).toBeNull();
     expect(api.analytics).not.toHaveBeenCalled();

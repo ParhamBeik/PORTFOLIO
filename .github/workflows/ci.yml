@@ -130,6 +130,28 @@ jobs:
       - name: Lighthouse + response-header assertions
         run: npm run test:lighthouse
 
+  # Layout guard: no page wider than the screen (five widths, light and
+  # dark), chart tooltips on screen, no English left in the Persian UI. Runs
+  # against a fixture API, so it needs no backend and no credentials; its own
+  # job so the browser download runs beside the frontend job, not after it.
+  # What each check pins, and the bug that shipped before it: the header
+  # comment of e2e/layout-sweep.spec.js.
+  layout:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: portfolio-saas/frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: portfolio-saas/frontend/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:layout
+
   # Capacitor sync + Android debug APK. Keeps the native projects from bit-rotting
   # when plugins or webDir change. Does not gate deploy: production remains the
   # website until mobile auth and store signing are live; a red mobile build still

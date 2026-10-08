@@ -147,9 +147,9 @@ test.describe("dashboard", () => {
     }
     const basis = page.getByTestId("scope-basis");
     await expect(basis).toBeVisible();
-    await basis.selectOption("usd_denominated");
-    await expect.soft(basis).toHaveValue("usd_denominated");
-    await basis.selectOption("nominal_toman");
+    await page.getByTestId("scope-basis-usd_denominated").click();
+    await expect.soft(page.getByTestId("scope-basis-usd_denominated")).toHaveAttribute("aria-pressed", "true");
+    await page.getByTestId("scope-basis-nominal_toman").click();
   });
 
   test("add opens the step-by-step dialog when a portfolio is selected", async ({ page }) => {

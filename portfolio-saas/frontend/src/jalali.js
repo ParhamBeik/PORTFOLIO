@@ -1,3 +1,4 @@
+import { translate } from "./i18n.js";
 // The Persian (Jalali) calendar, borrowed from the platform.
 //
 // Intl already ships a correct Persian calendar (`-u-ca-persian`, ICU), so there
@@ -112,7 +113,7 @@ export function firstColumn(jy, jm) {
 }
 
 /** "7 Shahrivar 1405". */
-export const jalaliLabel = ({ jy, jm, jd }) => `${jd} ${JALALI_MONTHS[jm - 1]} ${jy}`;
+export const jalaliLabel = ({ jy, jm, jd }) => `${jd} ${translate(JALALI_MONTHS[jm - 1])} ${jy}`;
 
 /** Move a `{ jy, jm }` view by whole months, wrapping the year. */
 export function shiftMonth({ jy, jm }, by) {

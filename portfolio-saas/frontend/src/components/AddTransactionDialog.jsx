@@ -21,6 +21,7 @@ import {
   updateHolding,
 } from "../api.js";
 import { useApi } from "../useApi.js";
+import { translate, useLang, useT } from "../i18n.js";
 import {
   Badge,
   Button,
@@ -81,6 +82,19 @@ function actionsFor(asset, isNewProperty) {
 
 // Which screens this particular entry needs. A cash movement has no asset to
 // pick, so it does not show a step that would only ever be empty.
+/**
+ * The line under a catalog row: its English name when the label is Persian,
+ * and where its price comes from. The provider's code (IR_COIN_EMAMI) is ours,
+ * not the reader's.
+ */
+function choiceHint(a, lang) {
+  const english = a.name && a.name !== catalogLabel(a) && /[A-Za-z]/.test(a.name) ? a.name : "";
+  // A Persian reader already has the Persian label; the English name is for
+  // everyone else.
+  const source = translate(a.is_manual ? "You set the price" : "Market price", lang);
+  return english && lang !== "fa" ? `${english} · ${source.toLowerCase()}` : source;
+}
+
 const stepsFor = (isCashMove) =>
   isCashMove
     ? ["category", "action", "amount", "review"]
@@ -88,6 +102,7 @@ const stepsFor = (isCashMove) =>
 
 /** A big, obvious choice tile — the step-1 and step-3 control. */
 function Choice({ label, hint, title, selected, onClick, testId, disabled = false }) {
+  const t = useT();
   return (
     <button
       type="button"
@@ -107,20 +122,21 @@ function Choice({ label, hint, title, selected, onClick, testId, disabled = fals
           : "border-border bg-panel-2 hover:border-accent/50"
       }`}
     >
-      <div className="text-sm font-medium">{label}</div>
-      {hint && <div className="mt-0.5 text-xs text-muted">{hint}</div>}
+      <div className="text-sm font-medium">{t(label)}</div>
+      {hint && <div className="mt-0.5 text-xs text-muted">{t(hint)}</div>}
     </button>
   );
 }
 
 function Step({ n, of, title, children }) {
+  const t = useT();
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <Badge variant="neutral">
-          Step {n} of {of}
+          {t("Step {n} of {of}", { n, of })}
         </Badge>
-        <span className="text-sm font-medium">{title}</span>
+        <span className="text-sm font-medium">{t(title)}</span>
       </div>
       {children}
     </div>
@@ -135,6 +151,8 @@ export default function AddTransactionDialog({
   onSaved,
   holdings = [],
 }) {
+  const t = useT();
+  const lang = useLang();
   const assets = useApi(listAssets, []);
   const [step, setStep] = useState(0);
   const [category, setCategory] = useState("");
@@ -323,42 +341,50 @@ export default function AddTransactionDialog({
     return !needsPrice || !priceIsMine || positive(form.price);
   };
 
+  // One template per sentence shape, so Persian can put the verb, the
+  // quantity and the date where its grammar wants them.
   const summary = () => {
     // `form.when` is already the instant the chosen day starts in Tehran, so it
     // is printed back on the calendar it was picked on, not the browser's.
-    const when = form.when ? jalaliLabel(toJalali(new Date(form.when))) : "now";
+    const today = !form.when;
+    const when = today ? "" : jalaliLabel(toJalali(new Date(form.when)));
     // Named exactly as the tile the user just clicked, coin included.
-    const name = newProperty ? form.name || "the property" : isolate(catalogLabel(asset || {}));
+    const name = newProperty ? form.name || t("the property") : isolate(catalogLabel(asset || {}));
     if (isCashMove) {
-      const verb = action === "deposit" ? "Add" : action === "fee" ? "Pay" : "Take out";
-      return `${verb} ${toman(form.amount)} — ${when}.`;
+      const key = { deposit: "Add {amount}", fee: "Pay {amount}" }[action] || "Take out {amount}";
+      return t(today ? `${key} — today.` : `${key} — {when}.`, { amount: toman(form.amount), when });
     }
     if (isProperty || newProperty || asset?.is_house) {
       const sqm = form.areaSqm || holding?.area_sqm;
       const value = Number(sqm || 0) * Number(form.pricePerSqm || 0) * 1e6;
-      return `${name}: ${area(sqm)} at ${perSqm(
-        Number(form.pricePerSqm || 0) * 1e6
-      )} — ${toman(value)}, as of ${when}.`;
+      return t("{name}: {area} at {perSqm} — {value}, as of {when}.", {
+        name, area: area(sqm), perSqm: perSqm(Number(form.pricePerSqm || 0) * 1e6),
+        value: toman(value), when: today ? t("today") : when,
+      });
     }
     if (action === "dividend") {
-      return `Record ${toman(form.amount)} dividend from ${name} — ${when}.`;
+      return t("Record {amount} dividend from {name} — {when}.", { amount: toman(form.amount), name, when: today ? t("today") : when });
     }
     if (action === "rights_issue") {
-      return `Record ${form.quantity} extra ${name} shares — ${when}.`;
+      return t("Record {q} extra {name} shares — {when}.", { q: form.quantity, name, when: today ? t("today") : when });
     }
-    const verb = { buy: "Buy", sell: "Sell", opening_position: "Record" }[action];
+    if (action === "opening_position") {
+      return t("Record that you already hold {q} {name} — as of {when}.", { q: form.quantity, name, when: today ? t("today") : when });
+    }
+    const verb = t({ buy: "Buy", sell: "Sell" }[action] || "Record");
     // A stock's unit price is Rial, so the total is Rial/10. Printing both with
     // toman() overstated a stock purchase tenfold on the confirmation screen.
     const lineTotal = priceIsRial
       ? (Number(form.quantity) * Number(form.price)) / 10
       : Number(form.quantity) * Number(form.price);
-    const priced = priceIsMine && form.price
-      ? ` at ${Number(form.price).toLocaleString()} ${priceUnitLabel} each — ${toman(lineTotal)}`
-      : " at the market price for that date";
-    if (action === "opening_position") {
-      return `${verb} that you already hold ${form.quantity} ${name} — as of ${when}.`;
+    const vars = { verb, q: form.quantity, name, when };
+    if (priceIsMine && form.price) {
+      // "now" reads as a time, not a date: "at the market price for that
+      // date — now" was the sentence this used to print for the commonest case.
+      Object.assign(vars, { price: Number(form.price).toLocaleString(), unit: t(priceUnitLabel), total: toman(lineTotal) });
+      return t(today ? "{verb} {q} {name} at {price} {unit} each — {total}." : "{verb} {q} {name} on {when} at {price} {unit} each — {total}.", vars);
     }
-    return `${verb} ${form.quantity} ${name}${priced} — ${when}.`;
+    return t(today ? "{verb} {q} {name} at today's market price." : "{verb} {q} {name} on {when} at that day's market price.", vars);
   };
 
   const submit = async () => {
@@ -454,7 +480,6 @@ export default function AddTransactionDialog({
   return (
     <Modal
       title="Add to this portfolio"
-      subtitle="Record something you bought, sold, or already own."
       onClose={onClose}
       testId="add-transaction"
       size="wide"
@@ -497,7 +522,9 @@ export default function AddTransactionDialog({
           </p>
         )}
 
-        {accountId == null && (
+        {/* One portfolio is preselected and needs no picker; its name is
+            already on the line below. */}
+        {accountId == null && accounts.length > 1 && targetAccountId && (
           <Select
             label="Portfolio"
             data-testid="add-transaction-account"
@@ -505,18 +532,45 @@ export default function AddTransactionDialog({
             onChange={(e) => setFormAccount(e.target.value)}
             className="w-full"
           >
-            <option value="">Which portfolio?</option>
+            <option value="">{t("Which portfolio?")}</option>
             {accounts.map((a) => (
               <option key={a.id} value={a.id}>{a.name}</option>
             ))}
           </Select>
         )}
 
-        {!targetAccountId && <p role="status" className="text-sm text-muted">Choose a portfolio before continuing.</p>}
-        {targetAccount && <p className="text-sm text-muted" data-testid="add-transaction-portfolio">Portfolio: {targetAccount.name}</p>}
-        {!isCashMove && assetKey && !asset?.is_house && <p className="text-sm text-muted" data-testid="add-transaction-owned">You hold {Number(holding?.quantity || 0).toLocaleString()} in this portfolio.</p>}
+        {/* With several portfolios and none in scope, where it goes is the first
+            question, asked as tiles like every other step. It used to be a
+            select above step 1 that nothing required: three taps in, the
+            amount step refused to continue for a reason off the top of the
+            screen. */}
+        {!targetAccountId && (
+          <Step n={1} of={totalSteps + 1} title="Which portfolio?">
+            <div className="grid gap-2 sm:grid-cols-2">
+              {accounts.map((a) => (
+                <Choice
+                  key={a.id}
+                  label={a.name}
+                  hint={a.goal || undefined}
+                  selected={false}
+                  onClick={() => setFormAccount(String(a.id))}
+                  testId={`add-transaction-portfolio-${a.id}`}
+                />
+              ))}
+            </div>
+          </Step>
+        )}
+        {/* One context line: where this goes, and how much of it is held. */}
+        {targetAccount && (
+          <p className="text-sm text-muted">
+            <span data-testid="add-transaction-portfolio">{targetAccount.name}</span>
+            {!isCashMove && assetKey && !asset?.is_house && (
+              <span data-testid="add-transaction-owned"> · {t("you hold {n}", { n: Number(holding?.quantity || 0).toLocaleString() })}</span>
+            )}
+          </p>
+        )}
         {action === "sell" && Number(form.quantity) > Number(holding?.quantity || 0) && <p role="alert" className="text-sm text-[var(--c-critical-text)]" data-testid="add-transaction-oversell">You cannot sell more than you hold.</p>}
-        {current === "category" && (
+        {targetAccountId && current === "category" && (
           <Step n={stepNumber} of={totalSteps} title="What kind of thing is it?">
             <div className="grid gap-2 sm:grid-cols-2">
               {CATEGORIES.map((c) => (
@@ -572,13 +626,7 @@ export default function AddTransactionDialog({
                   key={a.key || `${a.source}:${a.symbol}`}
                   label={catalogLabel(a)}
                   title={nativeName(a)}
-                  hint={
-                    a.is_manual
-                      ? "You set the price yourself"
-                      : a.symbol && a.symbol !== catalogLabel(a)
-                        ? `${a.symbol} — priced from the market`
-                        : "Priced from the market"
-                  }
+                  hint={choiceHint(a, lang)}
                   selected={!!a.key && assetKey === a.key}
                   onClick={() => chooseRow(a)}
                   disabled={busy}
@@ -587,7 +635,7 @@ export default function AddTransactionDialog({
               ))}
               {!assets.loading && !(searchingCatalog && catalogHits.loading) && !options.length && !isProperty && (
                 <p className="text-sm text-muted" data-testid="add-transaction-asset-empty">
-                  {debounced ? "Nothing matches that search." : "Nothing in this category yet."}
+                  {t(debounced ? "Nothing matches that search." : "Nothing in this category yet.")}
                 </p>
               )}
             </div>
@@ -612,7 +660,8 @@ export default function AddTransactionDialog({
                   label={ACTIONS[k].label}
                   hint={ACTIONS[k].hint}
                   selected={action === k}
-                  onClick={() => { setError(null); setAction(k); }}
+                  // A single choice: picking it is the answer, so move on.
+                  onClick={() => { setError(null); setAction(k); setStep((s) => s + 1); }}
                   disabled={k === "sell" && Number(holding?.quantity || 0) <= 0}
                   testId={`add-transaction-action-${k}`}
                 />
@@ -748,7 +797,7 @@ export default function AddTransactionDialog({
                         onChange={(e) => setOwnPrice(e.target.checked)}
                         data-testid="add-transaction-own-price"
                       />
-                      I paid a different price than the market
+                      {t("I paid a different price than the market")}
                     </label>
                   )}
                   {priceIsMine ? (
@@ -765,7 +814,7 @@ export default function AddTransactionDialog({
                     </Field>
                   ) : (
                     <p className="text-sm text-muted">
-                      The market price for that date will be used.
+                      {t("The market price for that date will be used.")}
                     </p>
                   )}
                 </>

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { translate, useT, useLang } from "../i18n.js";
 import { comparison } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
@@ -42,9 +43,10 @@ const RANGES = [
 ];
 
 function Picker({ label, value, onChange, options, testId }) {
+  const t = useT();
   return (
     <label className="flex flex-col gap-1 text-xs font-medium tracking-wide text-muted uppercase">
-      {label}
+      {t(label)}
       <Select
         label={label}
         value={value}
@@ -52,7 +54,7 @@ function Picker({ label, value, onChange, options, testId }) {
         data-testid={testId}
         className="min-w-44"
       >
-        <option value="">Choose…</option>
+        <option value="">{t("Choose…")}</option>
         {options.map((o) => (
           <option key={o.key} value={o.key}>
             {o.label}
@@ -117,6 +119,7 @@ function Verdict({ result }) {
 }
 
 function Chart({ result }) {
+  const lang = useLang();
   // The API returns one point list per curve; the chart wants one row per date
   // with a column per curve, so they are zipped on the date they share.
   const rows = useMemo(() => {
@@ -152,8 +155,7 @@ function Chart({ result }) {
       />
       {isIndex && (
         <p className="mt-2 text-xs text-muted" data-testid="comparison-index-note">
-          Both lines start at 100, so the gap is relative growth over the window —
-          not the amount of money in each.
+          {translate("Both lines start at 100, so the gap is relative growth over the window — not the amount of money in each.", lang)}
         </p>
       )}
       {/* The sentence, when the server sent one. A warning that reads
@@ -188,6 +190,7 @@ function Chart({ result }) {
 }
 
 export default function Comparison() {
+  const lang = useLang();
   const { activeId } = usePortfolio();
   const [mode, setMode] = useState("counterfactual");
   const [range, setRange] = useState("0");
@@ -232,31 +235,32 @@ export default function Comparison() {
 
   return (
     <div>
-      <PageHeader
-        title="Comparison"
-        subtitle="What the same money would have done somewhere else."
-      />
+      <PageHeader title="Compare" />
+      {/* The page's one big choice sits above the card, as its own control.
+          Inside the card's header it shared a line with the range and its
+          own label repeated as the card title. */}
+      <div className="mb-4">
+        <Tabs
+          options={MODES}
+          value={mode}
+          onChange={setMode}
+          label="Comparison mode"
+          testId="comparison-mode"
+          grid
+        />
+      </div>
       <Card
-        title={MODES.find((m) => m.value === mode).label}
+        title="Pick what to compare"
         subtitle={BLURB[mode]}
         testId="comparison-panel"
         actions={
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <Tabs
-              options={MODES}
-              value={mode}
-              onChange={setMode}
-              label="Comparison mode"
-              testId="comparison-mode"
-            />
-            <Tabs
-              options={RANGES}
-              value={range}
-              onChange={setRange}
-              label="Window"
-              testId="comparison-range"
-            />
-          </div>
+          <Tabs
+            options={RANGES}
+            value={range}
+            onChange={setRange}
+            label="Window"
+            testId="comparison-range"
+          />
         }
       >
         <Async {...choices} testId="comparison-choices">
@@ -267,7 +271,10 @@ export default function Comparison() {
                   <Picker
                     label={mode === "holdings" ? "Mine" : "What you did"}
                     value={subject}
-                    onChange={setSubject}
+                    onChange={(v) => {
+                      setSubject(v);
+                      if (v === target) setTarget("");
+                    }}
                     options={holdings}
                     testId="comparison-subject"
                   />
@@ -276,14 +283,17 @@ export default function Comparison() {
                   label={mode === "holdings" ? "Against mine" : "Instead"}
                   value={target}
                   onChange={setTarget}
-                  options={mode === "holdings" ? holdings : targets}
+                  // Never the asset already picked on the left: comparing a
+                  // holding with itself is an answer of "0" dressed up as one.
+                  options={(mode === "holdings" ? holdings : targets).filter(
+                    (o) => !needsSubject || o.key !== subject
+                  )}
                   testId="comparison-target"
                 />
               </div>
               {!holdings.length && (
                 <p className="text-sm text-muted" data-testid="comparison-no-holdings">
-                  This portfolio has no priced positions to compare yet. Record a
-                  purchase in the Ledger first.
+                  {translate("This portfolio has no priced positions to compare yet. Record a purchase in the Ledger first.", lang)}
                 </p>
               )}
               {/* "Two of mine" needs two. With one holding the picker offered
@@ -292,9 +302,7 @@ export default function Comparison() {
                   shape of the portfolio. */}
               {mode === "holdings" && holdings.length === 1 && (
                 <p className="text-sm text-muted" data-testid="comparison-one-holding">
-                  This portfolio holds only {holdings[0].label}. Compare it
-                  against something you don't own with the other modes above, or
-                  record a second position first.
+                  {translate("This portfolio holds only {name}. Compare it against something you don't own with the other modes above, or record a second position first.", lang, { name: holdings[0].label })}
                 </p>
               )}
               {/* Named rather than simply absent: a reader who owns a house and
@@ -302,11 +310,11 @@ export default function Comparison() {
                   and had no way to tell whether that was a bug. */}
               {!!omitted.length && (
                 <p className="text-xs text-muted" data-testid="comparison-omitted">
-                  Not available to compare:{" "}
+                  {translate("Not available to compare:", lang)}{" "}
                   {omitted.map((o, i) => (
                     <span key={o.key}>
                       {i > 0 && "; "}
-                      <span className="text-text">{o.label}</span> — {o.reason}
+                      <bdi className="text-text">{o.label}</bdi> — {translate(o.reason, lang)}
                     </span>
                   ))}
                   .
@@ -343,9 +351,9 @@ export default function Comparison() {
                 // worse than one.
                 holdings.length !== 1 || mode !== "holdings" ? (
                   <p className="text-sm text-muted" data-testid="comparison-prompt">
-                    {needsSubject
+                    {translate(needsSubject
                       ? "Pick a holding and something to compare it against."
-                      : "Pick something to compare your portfolio against."}
+                      : "Pick something to compare your portfolio against.", lang)}
                   </p>
                 ) : null
               )}

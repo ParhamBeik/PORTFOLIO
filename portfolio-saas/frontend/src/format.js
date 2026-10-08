@@ -10,6 +10,7 @@
 //
 // Money is Toman. The backend serializes Decimals as strings — Number() them.
 
+import { translate } from "./i18n.js";
 import { jalaliLabel, toJalali } from "./jalali.js";
 
 /** User-facing performance metric names (API fields remain twr / xirr). */
@@ -100,12 +101,12 @@ export const signedToman = signed(toman);
 export const indexPoint = (n) => (bad(n) ? "—" : num(n, 1));
 
 /** Compact Toman for chart axes so ticks stay readable. */
-export function tomanCompact(n) {
+export function tomanCompact(n, digits = 1) {
   if (bad(n)) return "—";
   const v = Number(n);
   const a = Math.abs(v);
-  if (a >= 1e9) return (v / 1e9).toFixed(1) + "B";
-  if (a >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (a >= 1e9) return (v / 1e9).toFixed(digits) + "B";
+  if (a >= 1e6) return (v / 1e6).toFixed(digits) + "M";
   if (a >= 1e3) return (v / 1e3).toFixed(0) + "K";
   return String(Math.round(v));
 }
@@ -119,18 +120,31 @@ export function tomanCompact(n) {
  * bases keep two decimals below a thousand, where a $154.54 coin rounding to
  * "155" is a visible error rather than noise.
  */
-export function moneyCompact(n, basis = "nominal_toman") {
+export function moneyCompact(n, basis = "nominal_toman", digits = 1) {
   if (bad(n)) return "—";
   const foreign = basis === "usd_denominated" || basis === "usdt_denominated";
-  if (!foreign) return tomanCompact(n);
+  if (!foreign) return tomanCompact(n, digits);
   const v = Number(n);
   const a = Math.abs(v);
   const mark = basis === "usd_denominated" ? "$" : "";
   const tail = basis === "usdt_denominated" ? " USDT" : "";
-  if (a >= 1e9) return mark + (v / 1e9).toFixed(1) + "B" + tail;
-  if (a >= 1e6) return mark + (v / 1e6).toFixed(1) + "M" + tail;
-  if (a >= 1e3) return mark + (v / 1e3).toFixed(1) + "K" + tail;
+  if (a >= 1e9) return mark + (v / 1e9).toFixed(digits) + "B" + tail;
+  if (a >= 1e6) return mark + (v / 1e6).toFixed(digits) + "M" + tail;
+  if (a >= 1e3) return mark + (v / 1e3).toFixed(digits) + "K" + tail;
   return money(v, basis);
+}
+
+/**
+ * Decimals a compact axis needs so neighbouring ticks never print the same
+ * label. A flat 1.43B portfolio gets ticks 20M apart, and at one decimal every
+ * one of them read "1.4B".
+ */
+export function compactAxisDigits(max, interval) {
+  const a = Math.abs(Number(max));
+  const scale = a >= 1e9 ? 1e9 : a >= 1e6 ? 1e6 : a >= 1e3 ? 1e3 : 1;
+  const step = Number(interval) / scale;
+  if (!(step > 0) || !Number.isFinite(step)) return 1;
+  return Math.min(3, Math.max(1, Math.ceil(-Math.log10(step) - 1e-9)));
 }
 
 // Gregorian, Tehran wall clock — the backend stores UTC, the reader is in Iran.
@@ -193,23 +207,45 @@ export function trendAxisTick(iso, spanMs) {
   return dtf({ year: "numeric", month: "short" }).format(d);
 }
 
+// Status codes and asset classes reach the screen through this, so it is also
+// where they are translated: "stale" -> "Stale" -> its Persian entry.
 export const humanize = (code) =>
-  !code ? "" : String(code).replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
+  !code ? "" : translate(String(code).replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase()));
+
+/**
+ * A sentence the API wrote, in the reader's language when we know it. Fixed
+ * sentences are dictionary entries; the few that carry a number are matched
+ * here and re-filled, so the number survives the translation.
+ */
+const SERVER_PATTERNS = [
+  [/^Performance available after (\d+) more day\(s\) of tracking\.$/, "Performance available after {n} more day(s) of tracking."],
+];
+export function serverText(text) {
+  if (typeof text !== "string") return text;
+  for (const [re, key] of SERVER_PATTERNS) {
+    const m = text.match(re);
+    if (m) return translate(key, undefined, { n: m[1] });
+  }
+  return translate(text);
+}
 
 /** Relative-age label for a freshness timestamp measured in seconds, e.g. "1h 44m ago". */
 export function ago(seconds) {
   if (bad(seconds)) return "—";
   const s = Math.max(0, Math.round(Number(seconds)));
-  if (s < 60) return "just now";
+  // Whole phrases with placeholders, so Persian can order them its own way.
+  if (s < 60) return translate("just now");
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
+  if (m < 60) return translate("{m}m ago", undefined, { m });
   const h = Math.floor(m / 60);
   if (h < 24) {
     const remM = m % 60;
-    return remM ? `${h}h ${remM}m ago` : `${h}h ago`;
+    return remM
+      ? translate("{h}h {m}m ago", undefined, { h, m: remM })
+      : translate("{h}h ago", undefined, { h });
   }
   const d = Math.floor(h / 24);
-  return `${d}d ago`;
+  return translate("{d}d ago", undefined, { d });
 }
 
 /**
@@ -288,3 +324,34 @@ export const area = (sqm) => (bad(sqm) ? "—" : num(sqm, 2) + " m²");
 
 /** Real-estate unit price: what one square meter costs, e.g. "100,000,000 T / m²". */
 export const perSqm = (tomans) => (bad(tomans) ? "—" : toman(tomans) + " / m²");
+
+/**
+ * A colour per asset class, for every allocation chart in the app. Assigned by
+ * rank, Gold was blue on one screen and orange on the next the moment cash
+ * outgrew it; a class keeps its colour wherever it appears.
+ */
+export const CLASS_SLOT = { Gold: 0, Cash: 1, Stock: 2, Crypto: 3, "Real Estate": 4, Other: 5 };
+
+/**
+ * Holdings grouped by asset class, for the allocation rings.
+ *
+ * Account cash joins the "Cash" class (USD, EUR and USDT are already there):
+ * it is part of the total above the ring, and a second "Cash" slice beside
+ * the first read as two different things. Empty classes are dropped -- an
+ * unpriced holding is not a 0% slice. Beyond eight, the tail becomes "Other".
+ */
+export function allocationByClass(items, cash = 0) {
+  const totals = new Map();
+  for (const it of items || []) {
+    const key = it.class || "Other";
+    totals.set(key, (totals.get(key) || 0) + Number(it.value || 0));
+  }
+  if (Number(cash) > 0) totals.set("Cash", (totals.get("Cash") || 0) + Number(cash));
+  const groups = [...totals.entries()]
+    .filter(([, value]) => value > 0)
+    .map(([key, value]) => ({ name: humanize(key), value, slot: CLASS_SLOT[key] ?? CLASS_SLOT.Other }))
+    .sort((a, b) => b.value - a.value);
+  if (groups.length <= 8) return groups;
+  const rest = groups.slice(7).reduce((sum, g) => sum + g.value, 0);
+  return [...groups.slice(0, 7), { name: "Other", value: rest, slot: CLASS_SLOT.Other }];
+}

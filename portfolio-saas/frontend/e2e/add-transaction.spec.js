@@ -57,8 +57,8 @@ test.describe("add transaction", () => {
     }
     await first.click();
 
+    // Picking what happened is the answer to that step and moves on by itself.
     await page.getByTestId("add-transaction-action-buy").click();
-    await page.getByTestId("add-transaction-next").click();
 
     await page.getByTestId("add-transaction-quantity").fill("100");
     await page.getByTestId("add-transaction-next").click();

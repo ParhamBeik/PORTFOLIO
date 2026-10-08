@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { translate, useLang } from "../i18n.js";
 import { useSearchParams } from "react-router-dom";
 import {
   commitLedgerImport,
@@ -404,6 +405,7 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
 }
 
 export default function Ledger() {
+  const lang = useLang();
   const { accounts, activeId, reload, loading: accountsLoading } = usePortfolio();
   const accountId = activeId ?? null;
   const ledger = useApi(() => listLedger(accountId), [accountId], {
@@ -501,7 +503,8 @@ export default function Ledger() {
     return <Empty testId="ledger-empty">Create a portfolio first.</Empty>;
   }
 
-  const showPortfolio = accountId == null;
+  // Only worth a column when there is more than one portfolio to tell apart.
+  const showPortfolio = accountId == null && accounts.length > 1;
 
   const columns = [
     {
@@ -525,7 +528,9 @@ export default function Ledger() {
       // name; the full name stays reachable on hover.
       render: (r) =>
         r.asset_key ? (
-          <bdi title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</bdi>
+          <bdi className="whitespace-nowrap" title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</bdi>
+        ) : CASH_KINDS.includes(r.kind) ? (
+          "Cash"
         ) : (
           "—"
         ),
@@ -547,8 +552,11 @@ export default function Ledger() {
       key: "actions",
       header: "",
       align: "right",
+      // Shown on the row being pointed at (or focused) on a desktop, where two
+      // buttons on every row were most of the ink in the table; always shown
+      // on a touch screen, which has no hover to reveal them.
       render: (r) => (
-        <div className="flex justify-end gap-2">
+        <div className="flex justify-end gap-2 transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:focus-within:opacity-100">
           {(r.quantity != null || CASH_KINDS.includes(r.kind)) && (
             <Button
               variant="ghost"
@@ -570,7 +578,12 @@ export default function Ledger() {
       key: "portfolio",
       header: "Portfolio",
       mobile: "meta",
-      render: (r) => r.account_name || "—",
+      // One line: a long portfolio name stood every row three lines tall.
+      render: (r) => (
+        <span dir="auto" className="inline-block max-w-[12rem] truncate align-bottom" title={r.account_name || ""}>
+          {r.account_name || "—"}
+        </span>
+      ),
     });
   }
 
@@ -590,7 +603,7 @@ export default function Ledger() {
               aria-label="Add transaction"
             >
               <PlusIcon />
-              Add
+              {translate("Add", lang)}
             </Button>
             {accountId != null && (
               <Button
@@ -653,7 +666,7 @@ export default function Ledger() {
         testId="ledger-history-card"
         actions={
           <label className="flex items-center gap-2 text-sm text-muted">
-            Rows
+            {translate("Rows", lang)}
             <Select
               label="Rows per page"
               value={pageSize}
@@ -661,7 +674,7 @@ export default function Ledger() {
               data-testid="ledger-page-size"
             >
               {PAGE_SIZES.map((s) => (
-                <option key={s} value={s}>{s === ALL ? "All" : s}</option>
+                <option key={s} value={s}>{s === ALL ? translate("All", lang) : s}</option>
               ))}
             </Select>
           </label>

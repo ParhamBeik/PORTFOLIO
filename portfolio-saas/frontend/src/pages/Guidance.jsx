@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
+import { translate, useLang } from "../i18n.js";
 import { guidance, listAssets, setRiskProfile } from "../api.js";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
-import { Async, Card, Empty, PageHeader, Select } from "../components/ui.jsx";
+import { Async, Badge, Card, Empty, PageHeader, Select } from "../components/ui.jsx";
 import { assetLabel, pct } from "../format.js";
 import { useApi } from "../useApi.js";
 
@@ -28,6 +29,7 @@ function Allocation({ title, weights, labelFor, testId }) {
 }
 
 export default function Guidance({ user, onUserChange }) {
+  const lang = useLang();
   const { activeId } = usePortfolio();
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
@@ -52,13 +54,19 @@ export default function Guidance({ user, onUserChange }) {
 
   return (
     <div>
-      <PageHeader title="Legacy guidance" subtitle="Experimental rebalance models retained for existing links while their inputs and formulas are audited." />
-      <p className="mb-5 rounded border border-border bg-panel-2 p-3 text-sm text-muted" role="note">
-        These rankings have not passed the source checks required for the new research workspace. Use Portfolio for holdings and performance, and Explore for source-backed company figures.
-      </p>
+      <PageHeader
+        title="Risk"
+        subtitle="Rebalance models whose inputs and formulas are still being audited. They have not passed the source checks the rest of the app is held to; holdings and performance on Home are verified."
+        meta={(
+          <p className="mt-1 flex items-center gap-2 text-sm text-muted" role="note" data-testid="guidance-beta">
+            <Badge variant="warn">Beta</Badge>
+            {translate("Not yet source-verified — a starting point, not advice.", lang)}
+          </p>
+        )}
+      />
       <div className="mb-5 max-w-xs">
         <Select label="Risk profile" value={user.risk_profile || "balanced"} onChange={changeProfile} disabled={saving} data-testid="guidance-risk-profile">
-          {PROFILE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          {PROFILE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{translate(label, lang)}</option>)}
         </Select>
         {saveError && <p role="alert" className="text-sm text-[var(--c-warn-text)]">{saveError}</p>}
       </div>
@@ -66,9 +74,9 @@ export default function Guidance({ user, onUserChange }) {
         {(data) => (
           <div className="space-y-5">
             <p className="text-sm text-muted" data-testid="guidance-window">
-              Personal: {data.personal_window_days ? `${data.personal_window_days === 1095 ? "3" : "1"} year` : "unavailable"}
-              {data.benchmark_window_days ? ` · Benchmark: ${data.benchmark_window_days === 1095 ? "3" : "1"} year` : ""}
-              {data.basis === "nominal_toman" ? " · Nominal Toman (inflation data unavailable)" : " · Real Toman"}
+              {translate("Personal:", lang)} {data.personal_window_days ? translate(data.personal_window_days === 1095 ? "3 years" : "1 year", lang) : translate("unavailable", lang)}
+              {data.benchmark_window_days ? ` · ${translate("Benchmark:", lang)} ${translate(data.benchmark_window_days === 1095 ? "3 years" : "1 year", lang)}` : ""}
+              {" · "}{translate(data.basis === "nominal_toman" ? "Nominal Toman (inflation data unavailable)" : "Real Toman", lang)}
             </p>
             {data.fallback_reason && <p className="text-sm text-[var(--c-warn-text)]" data-testid="guidance-fallback">{data.fallback_reason}</p>}
             <Allocation title="For my portfolio" weights={data.personal?.target_weights} labelFor={labelFor} testId="guidance-personal" />

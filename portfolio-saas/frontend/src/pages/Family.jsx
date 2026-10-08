@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { translate, useLang } from "../i18n.js";
 import { Link } from "react-router-dom";
 import { getPerformance, snapshots, valuation } from "../api.js";
 import { Donut, MultiLineTrend, StackedShareTrend } from "../components/charts.jsx";
@@ -16,7 +17,7 @@ import {
   toneClass,
   toneFor,
 } from "../components/ui.jsx";
-import { humanize, money, moneyCompact, pct, perfLabel, signedPct } from "../format.js";
+import { allocationByClass, serverText, money, moneyCompact, pct, perfLabel, signedPct } from "../format.js";
 import { useApi } from "../useApi.js";
 
 const RANGES = [
@@ -27,17 +28,6 @@ const RANGES = [
 ];
 
 const MAX_CHART_PORTFOLIOS = 8;
-
-function groupByClass(items) {
-  const totals = new Map();
-  for (const it of items || []) {
-    const key = it.class || "other";
-    totals.set(key, (totals.get(key) || 0) + Number(it.value || 0));
-  }
-  return [...totals.entries()]
-    .map(([name, value]) => ({ name: humanize(name), value }))
-    .sort((a, b) => b.value - a.value);
-}
 
 function chartPortfolios(accounts) {
   const sorted = [...accounts].sort((a, b) => Number(b.total) - Number(a.total));
@@ -156,6 +146,7 @@ async function fetchAllPerformance(accounts, basis) {
 }
 
 function HistoryCharts({ accounts, basis }) {
+  const lang = useLang();
   const [range, setRange] = useState("90");
   const days = range === "all" ? "all" : Number(range);
   const accountKey = accounts.map((a) => a.id).join(",");
@@ -181,7 +172,7 @@ function HistoryCharts({ accounts, basis }) {
           return (
             <div className="space-y-6">
               <div>
-                <h3 className="mb-2 text-sm font-medium text-muted">Share of combined total</h3>
+                <h3 className="mb-2 text-sm font-medium text-muted">{translate("Share of combined total", lang)}</h3>
                 <StackedShareTrend
                   series={chart.series}
                   data={chart.shares}
@@ -190,7 +181,7 @@ function HistoryCharts({ accounts, basis }) {
                 />
               </div>
               <div>
-                <h3 className="mb-2 text-sm font-medium text-muted">Absolute net worth</h3>
+                <h3 className="mb-2 text-sm font-medium text-muted">{translate("Absolute net worth", lang)}</h3>
                 <MultiLineTrend
                   series={chart.series}
                   data={chart.values}
@@ -209,6 +200,7 @@ function HistoryCharts({ accounts, basis }) {
 }
 
 function PerformanceTable({ accounts, basis }) {
+  const lang = useLang();
   const accountKey = accounts.map((a) => a.id).join("|");
   const state = useApi(() => fetchAllPerformance(accounts, basis), [accountKey, basis], {
     enabled: accounts.length > 0,
@@ -254,7 +246,7 @@ function PerformanceTable({ accounts, basis }) {
                   r.performance_available ? (
                     <Badge variant="good">Ready</Badge>
                   ) : (
-                    <span className="text-xs text-muted">{r.detail || "Needs ledger"}</span>
+                    <span className="text-xs text-muted">{serverText(r.detail || "Needs ledger")}</span>
                   ),
               },
             ]}
@@ -265,11 +257,8 @@ function PerformanceTable({ accounts, basis }) {
               and the three read as three answers to one question. */}
           {rows.some((r) => !r.performance_available) && (
             <p className="mt-3 text-xs text-muted" data-testid="breakdown-performance-note">
-              These measure the return on the money put in, which needs a tracked
-              opening balance. Price-based returns for the same holdings are
-              already available on{" "}
-              <Link to="/optimal" className="underline hover:text-text">My Optimal</Link>{" "}
-              and <Link to="/comparison" className="underline hover:text-text">Comparison</Link>.
+              {translate("These measure the return on the money put in, so they need a tracked opening balance.", lang)}{" "}
+              <Link to="/compare" className="underline hover:text-text">{translate("Price-based returns are on Compare.", lang)}</Link>
             </p>
           )}
           </>
@@ -285,7 +274,7 @@ function AssetMix({ accounts, basis }) {
     <Card title="Asset class mix by portfolio" testId="breakdown-asset-mix">
       <div className="space-y-3">
         {accounts.map((account) => {
-          const groups = groupByClass(account.items);
+          const groups = allocationByClass(account.items, account.cash_tomans);
           if (!groups.length) return null;
           return (
             <Disclosure key={account.id} summary={`${account.name} · ${money(account.total, basis)}`} testId={`breakdown-mix-${account.id}`} open>
@@ -318,6 +307,19 @@ export default function Family() {
           const rowBasis = data.basis || basis;
           if (!rows.length) {
             return <Empty testId="breakdown-empty">Add at least one portfolio to see the breakdown.</Empty>;
+          }
+          // Breakdown compares portfolios. With one there is nothing to compare:
+          // the page drew a 100% share ring, a one-row table and a flat 100%
+          // line -- three ways of saying what Summary already says.
+          if (rows.length === 1) {
+            return (
+              <Empty
+                testId="breakdown-single"
+                action={<Link to="/" className="inline-flex min-h-10 items-center rounded-md border border-border bg-panel-2 px-3 text-sm font-medium text-text hover:bg-border sm:min-h-8">Go to Summary</Link>}
+              >
+                Breakdown compares portfolios side by side. You have one, so its numbers are on Summary.
+              </Empty>
+            );
           }
 
           const shareDonut = rows.map((r) => ({ name: r.name, value: Number(r.total) || 0 }));

@@ -32,7 +32,7 @@ from portfolio.models import (
     newest_prices,
     positive_price_q,
 )
-from .timeline import cash_as_of, holdings_as_of, house_state_as_of, load_house_marks
+from .timeline import cash_as_of, cash_on_days, holdings_as_of, house_state_as_of, load_house_marks
 from .visibility import hidden_asset_ids, hidden_keys
 from marketdata.calendars import candle_close_qs, market_closure_days
 from marketdata.market_state import (
@@ -1178,6 +1178,28 @@ SYNTHETIC_HISTORY_MAX_DAYS = 90
 HIDDEN_ADJUSTMENT_MAX_DAYS = 1095
 
 
+def _traded_outside(accounts, excluded_asset_ids) -> bool:
+    """Whether any account traded an asset other than `excluded_asset_ids`.
+
+    Reversals net out: a trade entered and then reversed was never made.
+    """
+    from .ledger import active_entries
+
+    trades = active_entries(accounts, kinds=[
+        LedgerEntry.Kind.BUY,
+        LedgerEntry.Kind.SELL,
+        LedgerEntry.Kind.RIGHTS_ISSUE,
+    ])
+    return any(entry.asset_id not in excluded_asset_ids for entry in trades)
+
+
+def _has_cash_history(account) -> bool:
+    """Whether the account ever moved cash, reversals netted out."""
+    from .ledger import CASH_KINDS, active_entries
+
+    return bool(active_entries(account, kinds=CASH_KINDS))
+
+
 def _accounts_have_buy_sell(accounts, asset_ids=None) -> bool:
 
     qs = LedgerEntry.objects.filter(
@@ -1306,7 +1328,17 @@ def compute_dynamic_net_worth_series(
         h for h in holdings if (h.asset_id in hidden_ids) == only_hidden
     ]
 
-    if not holdings:
+    # Nothing to value -- unless there is cash, which is net worth on its own:
+    # a book whose every holding is switched off still has its cash, and Home
+    # still shows it. Cash since withdrawn still has a past, so a ledger with
+    # cash movements counts at a zero balance too -- but not one that ever
+    # traded: only current holdings are valued, so a position bought and sold
+    # off since would be missing from the line and its gain from the return.
+    if not holdings and (
+        only_hidden or not any(
+            acc.cash_balance_tomans or _has_cash_history(acc) for acc in accounts
+        ) or _traded_outside(accounts, hidden_ids)
+    ):
         return []
 
     latest_quantities = {h.asset.key: _q(h.quantity) for h in holdings}
@@ -1534,6 +1566,29 @@ def compute_dynamic_net_worth_series(
         )
         for i in range(days - 1, -1, -1)
     ]
+    # Cash is part of net worth -- `value_account` and the nightly snapshot both
+    # count it -- so the rebuilt days count it too. Left out, the chart's last
+    # point sat below the total directly above it by exactly the cash balance.
+    # The switched-off series is subtracted from the recorded totals and holds
+    # no cash, so it gets none.
+    cash_by_day = [Decimal("0")] * len(day_ends)
+    fees_by_day = [Decimal("0")] * len(day_ends)
+    inflows_by_day = [Decimal("0")] * len(day_ends)
+    if not only_hidden:
+        for acc in accounts:
+            found: dict = {}
+            for n, amount in enumerate(cash_on_days(user, acc, day_ends, totals=found)):
+                cash_by_day[n] += amount
+                fees_by_day[n] += found["fees"][n]
+                inflows_by_day[n] += found["inflows"][n]
+    # A cash-only book is drawn only while it held cash inside the window; a
+    # line of zeros is no history, and a benchmark against it would compare
+    # a portfolio that held nothing.
+    if not holdings and not any(cash_by_day):
+        return []
+    prev_cash: Decimal | None = None
+    prev_fees: Decimal | None = None
+    prev_inflows: Decimal | None = None
     walked_quantities = (
         {} if constant_holdings else _walked_quantities(accounts, day_ends)
     )
@@ -1680,6 +1735,36 @@ def compute_dynamic_net_worth_series(
         # RATIO -- repaying a loan is a cash flow, not performance -- and it
         # does not, because the pair below charges one and the same day's figure
         # to both of its sides.
+        # Cash earns nothing, so in the pair it is yesterday's balance on both
+        # sides: it dilutes the day's move exactly as much as it should, and a
+        # deposit -- a flow, like an opening -- never reads as a gain. A
+        # dividend is treated the same way, as a flow: adjusted closes already
+        # carry it. A fee is not a flow, it is a cost, so the day's fees come
+        # off today's side -- otherwise the line drops by the fee while the
+        # return index, and every benchmark comparison built on it, does not.
+        # Charged as a share of the money it was paid out of: yesterday's book
+        # plus the day's deposits. A commission on a trade funded the same day
+        # would otherwise land whole on a small prior book -- 0.3% of the trade
+        # read as -30% of yesterday -- and the index never gives that back.
+        cash_today = cash_by_day[days - 1 - i]
+        cash_before = cash_today if prev_cash is None else prev_cash
+        fees_today = fees_by_day[days - 1 - i]
+        inflows_today = inflows_by_day[days - 1 - i]
+        fees_paid = Decimal("0") if prev_fees is None else fees_today - prev_fees
+        deposited = Decimal("0") if prev_inflows is None else inflows_today - prev_inflows
+        total += cash_today
+        total_ex_flows_at_prior_prices += cash_before
+        held_base += cash_before
+        base = total_ex_flows_at_prior_prices
+        fee_charge = (
+            min(base, fees_paid * base / (base + deposited))
+            if fees_paid > 0 and base > 0 else Decimal("0")
+        )
+        total_ex_flows += cash_before - fee_charge
+        prev_cash = cash_today
+        prev_fees = fees_today
+        prev_inflows = inflows_today
+
         total_liabilities, liability_by_key, unattached_liabilities = liabilities_on(
             target_date
         )

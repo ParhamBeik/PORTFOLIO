@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { translate, useLang } from "../i18n.js";
 import { useNavigate } from "react-router-dom";
 import { addHolding, createAccount, listAssets } from "../api.js";
 import { assetLabel } from "../format.js";
@@ -11,6 +12,7 @@ import { Async, Button, Card, ErrorState, Input, Select } from "../components/ui
 // only route a new account can reach. It creates the portfolio and the first
 // holding in one submit, then hands over to the dashboard for everything else.
 export default function Onboarding() {
+  const lang = useLang();
   const navigate = useNavigate();
   const { accounts, reload, setActive } = usePortfolio();
   const assets = useApi(listAssets, []);
@@ -58,7 +60,9 @@ export default function Onboarding() {
     <div className="mx-auto max-w-lg">
       <Card
         testId="onboarding-card"
-        title="Add your first holding"
+        // "First" only when it is: this form is also the Add holdings tab of
+        // a portfolio that already holds plenty.
+        title={accounts.some((a) => (a.holdings || []).length) ? "Add a holding" : "Add your first holding"}
         subtitle="Your dashboard, optimizer and universe comparison all read from your holdings. One is enough to get started."
       >
         <form className="space-y-4" onSubmit={submit}>
@@ -77,7 +81,7 @@ export default function Onboarding() {
           )}
 
           <div>
-            <span className="mb-1 block text-sm text-muted">Asset</span>
+            <span className="mb-1 block text-sm text-muted">{translate("Asset", lang)}</span>
             <Async {...assets} testId="onboarding-assets" empty="No assets are available yet.">
               {(list) => (
                 <Select
@@ -88,7 +92,7 @@ export default function Onboarding() {
                   onChange={(e) => setAssetKey(e.target.value)}
                   required
                 >
-                  <option value="">Select an asset…</option>
+                  <option value="">{translate("Select an asset…", lang)}</option>
                   {list.map((a) => (
                     <option key={a.key} value={a.key}>{assetLabel(a)}</option>
                   ))}
@@ -98,7 +102,7 @@ export default function Onboarding() {
           </div>
 
           <label className="block">
-            <span className="mb-1 block text-sm text-muted">Quantity</span>
+            <span className="mb-1 block text-sm text-muted">{translate("Quantity", lang)}</span>
             <Input
               label="Quantity"
               data-testid="onboarding-quantity"
