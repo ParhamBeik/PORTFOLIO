@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { translate } from "../i18n.js";
+import { translate, useLang } from "../i18n.js";
 import { useSearchParams } from "react-router-dom";
 import {
   commitLedgerImport,
@@ -405,6 +405,7 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
 }
 
 export default function Ledger() {
+  const lang = useLang();
   const { accounts, activeId, reload, loading: accountsLoading } = usePortfolio();
   const accountId = activeId ?? null;
   const ledger = useApi(() => listLedger(accountId), [accountId], {
@@ -602,7 +603,7 @@ export default function Ledger() {
               aria-label="Add transaction"
             >
               <PlusIcon />
-              {translate("Add")}
+              {translate("Add", lang)}
             </Button>
             {accountId != null && (
               <Button
@@ -665,7 +666,7 @@ export default function Ledger() {
         testId="ledger-history-card"
         actions={
           <label className="flex items-center gap-2 text-sm text-muted">
-            {translate("Rows")}
+            {translate("Rows", lang)}
             <Select
               label="Rows per page"
               value={pageSize}
@@ -673,7 +674,7 @@ export default function Ledger() {
               data-testid="ledger-page-size"
             >
               {PAGE_SIZES.map((s) => (
-                <option key={s} value={s}>{s === ALL ? translate("All") : s}</option>
+                <option key={s} value={s}>{s === ALL ? translate("All", lang) : s}</option>
               ))}
             </Select>
           </label>

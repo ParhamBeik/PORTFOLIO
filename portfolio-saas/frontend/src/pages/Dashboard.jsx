@@ -5,7 +5,7 @@ import LiabilitiesCard from "../components/Liabilities.jsx";
 import CorporateActionsCard from "../components/CorporateActions.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { useApi } from "../useApi.js";
-import { translate, useT } from "../i18n.js";
+import { translate, useT, useLang } from "../i18n.js";
 import {
   valuation,
   snapshots,
@@ -297,6 +297,7 @@ function RangeChange({ points, basis, range }) {
 }
 
 function TrendCard({ activeId, basis }) {
+  const lang = useLang();
   const [range, setRange] = useState("30");
   const [mode, setMode] = useState("nominal");
   const effectiveRange = RANGES.some((r) => r.value === range) ? range : RANGES[0].value;
@@ -473,13 +474,13 @@ function TrendCard({ activeId, basis }) {
               {hasEstimated && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-note">
                   {estimatedCount === pointCount
-                    ? translate("Rebuilt from prices")
-                    : translate("{n} of {total} days rebuilt from prices", undefined, { n: estimatedCount, total: pointCount })}
+                    ? translate("Rebuilt from prices", lang)
+                    : translate("{n} of {total} days rebuilt from prices", lang, { n: estimatedCount, total: pointCount })}
                 </p>
               )}
               {hasApproximated && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-hidden-note">
-                  {translate("Switched-off assets estimated on some days")}
+                  {translate("Switched-off assets estimated on some days", lang)}
                 </p>
               )}
             </>

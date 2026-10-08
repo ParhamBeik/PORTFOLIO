@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { translate } from "../i18n.js";
+import { translate, useLang } from "../i18n.js";
 import { Link } from "react-router-dom";
 import { getPerformance, snapshots, valuation } from "../api.js";
 import { Donut, MultiLineTrend, StackedShareTrend } from "../components/charts.jsx";
@@ -146,6 +146,7 @@ async function fetchAllPerformance(accounts, basis) {
 }
 
 function HistoryCharts({ accounts, basis }) {
+  const lang = useLang();
   const [range, setRange] = useState("90");
   const days = range === "all" ? "all" : Number(range);
   const accountKey = accounts.map((a) => a.id).join(",");
@@ -171,7 +172,7 @@ function HistoryCharts({ accounts, basis }) {
           return (
             <div className="space-y-6">
               <div>
-                <h3 className="mb-2 text-sm font-medium text-muted">{translate("Share of combined total")}</h3>
+                <h3 className="mb-2 text-sm font-medium text-muted">{translate("Share of combined total", lang)}</h3>
                 <StackedShareTrend
                   series={chart.series}
                   data={chart.shares}
@@ -180,7 +181,7 @@ function HistoryCharts({ accounts, basis }) {
                 />
               </div>
               <div>
-                <h3 className="mb-2 text-sm font-medium text-muted">{translate("Absolute net worth")}</h3>
+                <h3 className="mb-2 text-sm font-medium text-muted">{translate("Absolute net worth", lang)}</h3>
                 <MultiLineTrend
                   series={chart.series}
                   data={chart.values}
@@ -199,6 +200,7 @@ function HistoryCharts({ accounts, basis }) {
 }
 
 function PerformanceTable({ accounts, basis }) {
+  const lang = useLang();
   const accountKey = accounts.map((a) => a.id).join("|");
   const state = useApi(() => fetchAllPerformance(accounts, basis), [accountKey, basis], {
     enabled: accounts.length > 0,
@@ -255,8 +257,8 @@ function PerformanceTable({ accounts, basis }) {
               and the three read as three answers to one question. */}
           {rows.some((r) => !r.performance_available) && (
             <p className="mt-3 text-xs text-muted" data-testid="breakdown-performance-note">
-              {translate("These measure the return on the money put in, so they need a tracked opening balance.")}{" "}
-              <Link to="/compare" className="underline hover:text-text">{translate("Price-based returns are on Compare.")}</Link>
+              {translate("These measure the return on the money put in, so they need a tracked opening balance.", lang)}{" "}
+              <Link to="/compare" className="underline hover:text-text">{translate("Price-based returns are on Compare.", lang)}</Link>
             </p>
           )}
           </>

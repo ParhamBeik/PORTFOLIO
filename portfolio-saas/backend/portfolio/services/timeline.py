@@ -151,50 +151,77 @@ def cash_as_of(user, account, at) -> Decimal:
         )
     return _cash_replay(account, [target])[0]
 
-def _cash_replay(account, targets) -> list[Decimal]:
+def _cash_replay(account, targets, totals=None) -> list[Decimal]:
     """Ledger cash at each of `targets` (ascending), from one pass.
 
     The one copy of the settling rule: cashless trades never settle, even if a
     later deposit starts cash tracking. `cash_as_of` and `cash_on_days` both
     read it here so they cannot drift apart.
+
+    `totals`, when a dict, receives two running totals at each target:
+    "fees" paid (the one cash movement that is a cost, not a flow) and
+    "inflows" (deposits and opening cash -- the money a same-day fee may have
+    been paid out of).
     """
     from .ledger import CASH_KINDS, _cash_delta, active_entries
 
     replayed = [Decimal("0")] * len(targets)
+    paid = [Decimal("0")] * len(targets)
+    added = [Decimal("0")] * len(targets)
     cash = Decimal("0")
+    fee_total = Decimal("0")
+    inflow_total = Decimal("0")
     settling = False
     index = 0
     for entry in active_entries(account):
         while index < len(targets) and entry.timestamp > targets[index]:
-            replayed[index] = cash
+            replayed[index], paid[index], added[index] = cash, fee_total, inflow_total
             index += 1
         if index == len(targets):
             break
         if entry.kind in CASH_KINDS:
             settling = True
-        cash += _cash_delta(
+        delta = _cash_delta(
             entry.kind, _q(entry.amount_tomans), reverse=False,
             track_cash=settling,
         )
+        cash += delta
+        if entry.kind == LedgerEntry.Kind.FEE:
+            fee_total -= delta
+        elif entry.kind in (LedgerEntry.Kind.DEPOSIT, LedgerEntry.Kind.OPENING_CASH):
+            inflow_total += delta
     while index < len(targets):
-        replayed[index] = cash
+        replayed[index], paid[index], added[index] = cash, fee_total, inflow_total
         index += 1
+    if totals is not None:
+        totals["fees"], totals["inflows"] = paid, added
     return replayed
 
 
-def cash_on_days(user, account, day_ends) -> list[Decimal]:
+def cash_on_days(user, account, day_ends, totals=None) -> list[Decimal]:
     """Cash held at each of `day_ends` (ascending), for the rebuilt history.
 
     The ledger replay gives the shape; the last point is pinned to the balance
     Home shows today (`cash_balance_tomans`, the projection), so the chart's
     final point can never disagree with the total above it. The two agree
     unless the projection has drifted, in which case the chart follows Home.
+
+    `totals`, when a dict, receives the running "fees" and "inflows" by each
+    day end (see `_cash_replay`), so the return pair can charge a fee as a
+    loss rather than a flow, against the money that paid it.
     """
     if account.user_id != user.id:
+        if totals is not None:
+            totals["fees"] = [Decimal("0") for _ in day_ends]
+            totals["inflows"] = [Decimal("0") for _ in day_ends]
         return [Decimal("0") for _ in day_ends]
     targets = list(day_ends)
-    replayed = _cash_replay(account, targets + [timezone.now()])
+    found: dict = {}
+    replayed = _cash_replay(account, targets + [timezone.now()], totals=found)
     final = replayed.pop()
+    if totals is not None:
+        totals["fees"] = found["fees"][:-1]
+        totals["inflows"] = found["inflows"][:-1]
     today = account.cash_balance_tomans or Decimal("0")
     return [today - (final - at) for at in replayed]
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { translate, useT } from "../i18n.js";
+import { translate, useT, useLang } from "../i18n.js";
 import { comparison } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
@@ -119,6 +119,7 @@ function Verdict({ result }) {
 }
 
 function Chart({ result }) {
+  const lang = useLang();
   // The API returns one point list per curve; the chart wants one row per date
   // with a column per curve, so they are zipped on the date they share.
   const rows = useMemo(() => {
@@ -154,7 +155,7 @@ function Chart({ result }) {
       />
       {isIndex && (
         <p className="mt-2 text-xs text-muted" data-testid="comparison-index-note">
-          {translate("Both lines start at 100, so the gap is relative growth over the window — not the amount of money in each.")}
+          {translate("Both lines start at 100, so the gap is relative growth over the window — not the amount of money in each.", lang)}
         </p>
       )}
       {/* The sentence, when the server sent one. A warning that reads
@@ -189,6 +190,7 @@ function Chart({ result }) {
 }
 
 export default function Comparison() {
+  const lang = useLang();
   const { activeId } = usePortfolio();
   const [mode, setMode] = useState("counterfactual");
   const [range, setRange] = useState("0");
@@ -291,7 +293,7 @@ export default function Comparison() {
               </div>
               {!holdings.length && (
                 <p className="text-sm text-muted" data-testid="comparison-no-holdings">
-                  {translate("This portfolio has no priced positions to compare yet. Record a purchase in the Ledger first.")}
+                  {translate("This portfolio has no priced positions to compare yet. Record a purchase in the Ledger first.", lang)}
                 </p>
               )}
               {/* "Two of mine" needs two. With one holding the picker offered
@@ -300,7 +302,7 @@ export default function Comparison() {
                   shape of the portfolio. */}
               {mode === "holdings" && holdings.length === 1 && (
                 <p className="text-sm text-muted" data-testid="comparison-one-holding">
-                  {translate("This portfolio holds only {name}. Compare it against something you don't own with the other modes above, or record a second position first.", undefined, { name: holdings[0].label })}
+                  {translate("This portfolio holds only {name}. Compare it against something you don't own with the other modes above, or record a second position first.", lang, { name: holdings[0].label })}
                 </p>
               )}
               {/* Named rather than simply absent: a reader who owns a house and
@@ -308,11 +310,11 @@ export default function Comparison() {
                   and had no way to tell whether that was a bug. */}
               {!!omitted.length && (
                 <p className="text-xs text-muted" data-testid="comparison-omitted">
-                  {translate("Not available to compare:")}{" "}
+                  {translate("Not available to compare:", lang)}{" "}
                   {omitted.map((o, i) => (
                     <span key={o.key}>
                       {i > 0 && "; "}
-                      <bdi className="text-text">{o.label}</bdi> — {translate(o.reason)}
+                      <bdi className="text-text">{o.label}</bdi> — {translate(o.reason, lang)}
                     </span>
                   ))}
                   .
@@ -351,7 +353,7 @@ export default function Comparison() {
                   <p className="text-sm text-muted" data-testid="comparison-prompt">
                     {translate(needsSubject
                       ? "Pick a holding and something to compare it against."
-                      : "Pick something to compare your portfolio against.")}
+                      : "Pick something to compare your portfolio against.", lang)}
                   </p>
                 ) : null
               )}

@@ -240,3 +240,20 @@ test("the Persian sign-in page leaves no English, and offers the language switch
     expect(english.filter((s) => s !== "Holdings"), mode).toEqual([]);
   }
 });
+
+test("switching language on an open page re-renders all of its text", async ({ page }) => {
+  // A component that calls translate() directly, without useT/useLang, keeps
+  // the old language until something else re-renders it. Price history did.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await fixtureApi(page, { lang: "en" });
+  await page.route("**/api/prices/history/**", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
+  );
+  await page.goto("/research?view=prices");
+  const picker = page.getByRole("combobox", { name: "Asset", exact: true });
+  await expect(picker).toBeVisible();
+  await page.getByTestId("lang-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(picker).toHaveCount(0);
+  await expect(page.locator("option", { hasText: "Choose…" })).toHaveCount(0);
+});

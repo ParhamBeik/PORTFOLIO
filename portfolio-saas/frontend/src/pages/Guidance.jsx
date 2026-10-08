@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { translate } from "../i18n.js";
+import { translate, useLang } from "../i18n.js";
 import { guidance, listAssets, setRiskProfile } from "../api.js";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { Async, Badge, Card, Empty, PageHeader, Select } from "../components/ui.jsx";
@@ -29,6 +29,7 @@ function Allocation({ title, weights, labelFor, testId }) {
 }
 
 export default function Guidance({ user, onUserChange }) {
+  const lang = useLang();
   const { activeId } = usePortfolio();
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
@@ -59,13 +60,13 @@ export default function Guidance({ user, onUserChange }) {
         meta={(
           <p className="mt-1 flex items-center gap-2 text-sm text-muted" role="note" data-testid="guidance-beta">
             <Badge variant="warn">Beta</Badge>
-            {translate("Not yet source-verified — a starting point, not advice.")}
+            {translate("Not yet source-verified — a starting point, not advice.", lang)}
           </p>
         )}
       />
       <div className="mb-5 max-w-xs">
         <Select label="Risk profile" value={user.risk_profile || "balanced"} onChange={changeProfile} disabled={saving} data-testid="guidance-risk-profile">
-          {PROFILE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{translate(label)}</option>)}
+          {PROFILE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{translate(label, lang)}</option>)}
         </Select>
         {saveError && <p role="alert" className="text-sm text-[var(--c-warn-text)]">{saveError}</p>}
       </div>
@@ -73,9 +74,9 @@ export default function Guidance({ user, onUserChange }) {
         {(data) => (
           <div className="space-y-5">
             <p className="text-sm text-muted" data-testid="guidance-window">
-              {translate("Personal:")} {data.personal_window_days ? translate(data.personal_window_days === 1095 ? "3 years" : "1 year") : translate("unavailable")}
-              {data.benchmark_window_days ? ` · ${translate("Benchmark:")} ${translate(data.benchmark_window_days === 1095 ? "3 years" : "1 year")}` : ""}
-              {" · "}{translate(data.basis === "nominal_toman" ? "Nominal Toman (inflation data unavailable)" : "Real Toman")}
+              {translate("Personal:", lang)} {data.personal_window_days ? translate(data.personal_window_days === 1095 ? "3 years" : "1 year", lang) : translate("unavailable", lang)}
+              {data.benchmark_window_days ? ` · ${translate("Benchmark:", lang)} ${translate(data.benchmark_window_days === 1095 ? "3 years" : "1 year", lang)}` : ""}
+              {" · "}{translate(data.basis === "nominal_toman" ? "Nominal Toman (inflation data unavailable)" : "Real Toman", lang)}
             </p>
             {data.fallback_reason && <p className="text-sm text-[var(--c-warn-text)]" data-testid="guidance-fallback">{data.fallback_reason}</p>}
             <Allocation title="For my portfolio" weights={data.personal?.target_weights} labelFor={labelFor} testId="guidance-personal" />

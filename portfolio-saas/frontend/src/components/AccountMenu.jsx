@@ -11,7 +11,7 @@
 // deletion). A destructive action inside a menu that closes when you click
 // past it is a destructive action waiting to be half-completed.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { translate, useT } from "../i18n.js";
+import { translate, useT, useLang } from "../i18n.js";
 import {
   changePassword,
   deleteAccount,
@@ -241,6 +241,7 @@ export default function AccountMenu({
   panelFill = false,
   testId = "user-email",
 }) {
+  const lang = useLang();
   const [open, setOpen] = useState(false);
   const [modal, setModal] = useState(null);
   const [notice, setNotice] = useState("");
@@ -353,7 +354,7 @@ export default function AccountMenu({
       {open && (
         <div
           role="dialog"
-          aria-label={translate("Account")}
+          aria-label={translate("Account", lang)}
           data-testid="account-menu"
           className={`absolute z-40 mt-2 rounded-xl border border-border bg-panel p-3 shadow-2xl ${
             panelFill
@@ -381,7 +382,7 @@ export default function AccountMenu({
           </div>
 
           <div className="border-b border-border py-3">
-            <p className="mb-2 text-xs text-muted">{translate("Your name, as it appears here")}</p>
+            <p className="mb-2 text-xs text-muted">{translate("Your name, as it appears here", lang)}</p>
             <div className="flex gap-2">
               <Input
                 label="First name"

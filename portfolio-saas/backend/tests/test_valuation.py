@@ -215,6 +215,132 @@ def test_rebuilt_history_keeps_cash_when_every_holding_is_switched_off(asset_cat
     assert Decimal(series[-1]["total"]) == Decimal(str(value_account(account)["total"]))
 
 
+def test_rebuilt_history_charges_a_fee_as_a_loss(asset_catalog, write_prices, make_user):
+    """A deposit is a flow; a fee is a cost, and the return pair has to say so.
+
+    Holding the fee day's pair level (as for a deposit) dropped the line by the
+    fee while the return index, and every benchmark built on it, stayed flat.
+    """
+    from portfolio.services.ledger import create_ledger_entry
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+
+    write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
+    user = make_user(email="dynamic-fee@test.test")
+    account = Account.objects.create(user=user, name="Fees", track_cash=True)
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                        amount_tomans=Decimal("1000000"),
+                        occurred_at=timezone.now() - timedelta(days=10))
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.FEE,
+                        amount_tomans=Decimal("50000"),
+                        occurred_at=timezone.now() - timedelta(days=2))
+    account.refresh_from_db()
+
+    series = compute_dynamic_net_worth_series(user, account, days=5)
+    assert Decimal(series[-1]["total"]) == Decimal("950000")
+    ratios = [
+        Decimal(p["total_ex_flows"]) / Decimal(p["total_ex_flows_base"])
+        for p in series[1:] if Decimal(p["total_ex_flows_base"])
+    ]
+    # One day carries the fee as a 5% loss; every other day is flat.
+    assert sorted(ratios)[0] == Decimal("0.95")
+    assert all(r == 1 for r in sorted(ratios)[1:])
+
+
+def test_rebuilt_history_survives_a_cash_balance_now_zero(asset_catalog, write_prices, make_user):
+    """Cash deposited and since withdrawn still has a past to draw."""
+    from portfolio.services.ledger import create_ledger_entry
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+
+    write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
+    user = make_user(email="dynamic-cash-gone@test.test")
+    account = Account.objects.create(user=user, name="Emptied", track_cash=True)
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                        amount_tomans=Decimal("3000000"),
+                        occurred_at=timezone.now() - timedelta(days=10))
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.WITHDRAWAL,
+                        amount_tomans=Decimal("3000000"),
+                        occurred_at=timezone.now() - timedelta(days=2))
+    account.refresh_from_db()
+    assert not account.cash_balance_tomans
+
+    series = compute_dynamic_net_worth_series(user, account, days=5)
+    totals = [Decimal(p["total"]) for p in series]
+    assert totals[0] == Decimal("3000000")
+    assert totals[-1] == 0
+
+
+def test_a_fee_paid_from_a_same_day_deposit_is_not_charged_to_yesterday(asset_catalog, write_prices, make_user):
+    """0.3% of the money it was paid out of, not -30% of a small prior book."""
+    from portfolio.services.ledger import create_ledger_entry
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+
+    write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
+    user = make_user(email="dynamic-fee-funded@test.test")
+    account = Account.objects.create(user=user, name="Funded fee", track_cash=True)
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                        amount_tomans=Decimal("1000000"),
+                        occurred_at=timezone.now() - timedelta(days=10))
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                        amount_tomans=Decimal("100000000"),
+                        occurred_at=timezone.now() - timedelta(days=2))
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.FEE,
+                        amount_tomans=Decimal("300000"),
+                        occurred_at=timezone.now() - timedelta(days=2) + timedelta(minutes=1))
+    account.refresh_from_db()
+
+    series = compute_dynamic_net_worth_series(user, account, days=5)
+    ratios = [
+        Decimal(p["total_ex_flows"]) / Decimal(p["total_ex_flows_base"])
+        for p in series[1:] if Decimal(p["total_ex_flows_base"])
+    ]
+    worst = min(ratios)
+    assert Decimal("0.99") < worst < 1
+
+
+def test_cash_withdrawn_before_the_window_is_no_history(asset_catalog, write_prices, make_user):
+    """A window of zeros would let a benchmark compare a portfolio that held nothing."""
+    from portfolio.services.ledger import create_ledger_entry
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+
+    write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
+    user = make_user(email="dynamic-cash-old@test.test")
+    account = Account.objects.create(user=user, name="Long gone", track_cash=True)
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                        amount_tomans=Decimal("3000000"),
+                        occurred_at=timezone.now() - timedelta(days=60))
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.WITHDRAWAL,
+                        amount_tomans=Decimal("3000000"),
+                        occurred_at=timezone.now() - timedelta(days=40))
+    account.refresh_from_db()
+
+    assert compute_dynamic_net_worth_series(user, account, days=10) == []
+
+
+def test_a_sold_off_position_keeps_a_cash_only_book_off_the_chart(asset_catalog, write_prices, make_user):
+    """Only current holdings are valued, so a round trip would be invisible."""
+    from portfolio.services.ledger import create_ledger_entry
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+
+    write_prices({"emami_coin": Decimal("3000000"), "usd_cash": Decimal("60000")})
+    user = make_user(email="dynamic-liquidated@test.test")
+    account = Account.objects.create(user=user, name="Liquidated", track_cash=True)
+    coin = asset_catalog["emami_coin"]
+    now = timezone.now()
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                        amount_tomans=Decimal("3000000"), occurred_at=now - timedelta(days=10))
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.BUY, asset=coin,
+                        quantity=Decimal("1"), unit_price_tomans=Decimal("3000000"),
+                        amount_tomans=Decimal("3000000"), occurred_at=now - timedelta(days=8))
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.SELL, asset=coin,
+                        quantity=Decimal("1"), unit_price_tomans=Decimal("3100000"),
+                        amount_tomans=Decimal("3100000"), occurred_at=now - timedelta(days=4))
+    account.refresh_from_db()
+    Holding.objects.filter(account=account, quantity_atomic=0).delete()
+    assert not account.holdings.exists()
+
+    assert compute_dynamic_net_worth_series(user, account, days=10) == []
+
+
 def test_compute_dynamic_caps_at_90_days(asset_catalog, write_prices, make_user):
     from portfolio.services.valuation import SYNTHETIC_HISTORY_MAX_DAYS, compute_dynamic_net_worth_series
     write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
