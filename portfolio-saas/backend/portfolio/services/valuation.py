@@ -1186,15 +1186,18 @@ HIDDEN_ADJUSTMENT_MAX_DAYS = 1095
 
 
 def _traded_outside(accounts, excluded_asset_ids) -> bool:
-    """Whether any account traded an asset other than `excluded_asset_ids`."""
-    return LedgerEntry.objects.filter(
-        account__in=list(accounts),
-        kind__in=[
-            LedgerEntry.Kind.BUY,
-            LedgerEntry.Kind.SELL,
-            LedgerEntry.Kind.RIGHTS_ISSUE,
-        ],
-    ).exclude(asset_id__in=list(excluded_asset_ids)).exists()
+    """Whether any account traded an asset other than `excluded_asset_ids`.
+
+    Reversals net out: a trade entered and then reversed was never made.
+    """
+    from .ledger import active_entries
+
+    trades = active_entries(accounts, kinds=[
+        LedgerEntry.Kind.BUY,
+        LedgerEntry.Kind.SELL,
+        LedgerEntry.Kind.RIGHTS_ISSUE,
+    ])
+    return any(entry.asset_id not in excluded_asset_ids for entry in trades)
 
 
 def _has_cash_history(account) -> bool:

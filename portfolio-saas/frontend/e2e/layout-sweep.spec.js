@@ -257,3 +257,24 @@ test("switching language on an open page re-renders all of its text", async ({ p
   await expect(picker).toHaveCount(0);
   await expect(page.locator("option", { hasText: "Choose…" })).toHaveCount(0);
 });
+
+test("a portfolio emptied to zero keeps its history; a new one gets the first-step card", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 860 });
+  await fixtureApi(page);
+  await page.addInitScript(() => localStorage.setItem("lattice_active_account", "7"));
+  const empty = { ...valuation, total: "0", cash_tomans: "0", items: [], hidden_items: [], accounts: [] };
+  let past = series;
+  await page.route("**/api/valuation/**", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(empty) })
+  );
+  await page.route("**/api/snapshots/**", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ basis: "nominal_toman", series: past, trades: [] }) })
+  );
+  await page.goto("/");
+  await expect(page.getByTestId("dashboard-trend")).toBeVisible();
+  await expect(page.getByTestId("dashboard-empty-portfolio")).toHaveCount(0);
+
+  past = [{ date: iso(today), total: "0", is_estimated: false }];
+  await page.reload();
+  await expect(page.getByTestId("dashboard-empty-portfolio")).toBeVisible();
+});

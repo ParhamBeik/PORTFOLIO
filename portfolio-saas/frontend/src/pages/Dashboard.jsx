@@ -1457,10 +1457,15 @@ export default function Dashboard({ user }) {
   // below would say "nothing yet" in its own words around a "0 T"; one card
   // saying what to do first is the whole page.
   const v = valuationState.data;
-  const isEmpty =
+  const holdsNothing =
     activeId != null && v && !valuationState.loading &&
     !(v.items || []).length && !(v.hidden_items || []).length &&
     !Number(v.cash_tomans) && !Number(v.total_liabilities);
+  // Nothing today is not the same as never anything: a portfolio emptied by
+  // a withdrawal still has a history to draw, and that keeps the full page.
+  const pastState = useApi(() => snapshots(365, activeId), [activeId], { enabled: Boolean(holdsNothing) });
+  const hadSomething = (pastState.data?.series || []).some((p) => Number(p.total));
+  const isEmpty = holdsNothing && !pastState.loading && !pastState.error && !hadSomething;
   if (isEmpty) {
     const name = portfolio.accounts.find((a) => a.id === activeId)?.name;
     return (

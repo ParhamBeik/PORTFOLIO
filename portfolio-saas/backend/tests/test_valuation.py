@@ -341,6 +341,31 @@ def test_a_sold_off_position_keeps_a_cash_only_book_off_the_chart(asset_catalog,
     assert compute_dynamic_net_worth_series(user, account, days=10) == []
 
 
+def test_a_reversed_trade_does_not_hide_a_cash_only_history(asset_catalog, write_prices, make_user):
+    """A trade entered and reversed was never made; the cash still has a past."""
+    from portfolio.services.ledger import create_ledger_entry, reverse_ledger_entry
+    from portfolio.services.valuation import compute_dynamic_net_worth_series
+
+    write_prices({"emami_coin": Decimal("1000000"), "usd_cash": Decimal("60000")})
+    user = make_user(email="dynamic-reversed@test.test")
+    account = Account.objects.create(user=user, name="Undone", track_cash=True)
+    now = timezone.now()
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                        amount_tomans=Decimal("3000000"), occurred_at=now - timedelta(days=10))
+    buy = create_ledger_entry(account=account, kind=LedgerEntry.Kind.BUY,
+                              asset=asset_catalog["emami_coin"], quantity=Decimal("1"),
+                              unit_price_tomans=Decimal("1000000"),
+                              amount_tomans=Decimal("1000000"),
+                              occurred_at=now - timedelta(days=6))
+    reverse_ledger_entry(user=user, account_id=account.id, entry_id=buy.id)
+    account.refresh_from_db()
+    Holding.objects.filter(account=account, quantity_atomic=0).delete()
+    assert not account.holdings.exists()
+
+    series = compute_dynamic_net_worth_series(user, account, days=5)
+    assert series and Decimal(series[-1]["total"]) == Decimal("3000000")
+
+
 def test_compute_dynamic_caps_at_90_days(asset_catalog, write_prices, make_user):
     from portfolio.services.valuation import SYNTHETIC_HISTORY_MAX_DAYS, compute_dynamic_net_worth_series
     write_prices({"emami_coin": Decimal("480000000"), "usd_cash": Decimal("60000")})
