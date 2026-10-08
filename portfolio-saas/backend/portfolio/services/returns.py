@@ -25,6 +25,7 @@ Two conventions matter here:
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import hashlib
 
 import jdatetime
@@ -42,7 +43,7 @@ from marketdata.integrity import (
 )
 from marketdata.provenance import PRICE_SERIES_ENDPOINTS, rejected_pairs
 from portfolio.models import Asset, Price, USD_QUOTED_KEYS, positive_price_q
-from .deflator import normalize_basis, to_basis
+from .deflator import cpi_series, normalize_basis, to_basis
 from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
@@ -70,6 +71,8 @@ TRADING_DAYS_PER_YEAR = 252
 # Cache key template — versioned by `_returns_version`; see `_entry_is_current`.
 RETURNS_CACHE_KEY = "returns:daily:{history_days}d:v{version}"
 RETURNS_CACHE_TTL = 600
+# Off only in the test that pins the bounded reads against the full ones.
+_BOUNDED_HISTORY_READS = True
 # Asset keys whose raw price is in USD; multiply through by usd_cash to Toman.
 # Extra days we fetch upstream of the window so resampling keeps the first row.
 _HISTORY_BUFFER_DAYS = 7
@@ -214,15 +217,22 @@ def _jalali_to_gregorian_index(dates: pd.Series) -> pd.DatetimeIndex:
     indexed in Gregorian so it can align with the Price-table series.
     Unparseable dates become NaT (dropped by the caller).
     """
-    def convert(value):
-        try:
-            y, m, d = (int(part) for part in str(value).split(" ")[0].split("-"))
-            g = jdatetime.date(y, m, d).togregorian()
-            return dt.datetime(g.year, g.month, g.day, tzinfo=dt.timezone.utc)
-        except (ValueError, TypeError):
-            return pd.NaT
+    return pd.DatetimeIndex([_jalali_day_to_utc(str(v)) for v in dates])
 
-    return pd.DatetimeIndex([convert(v) for v in dates])
+
+@functools.lru_cache(maxsize=20000)
+def _jalali_day_to_utc(value: str):
+    """One Jalali date string -> UTC midnight of its Gregorian day, or NaT.
+
+    Cached: a panel repeats every session date once per column, and the
+    conversion is a pure function of the string.
+    """
+    try:
+        y, m, d = (int(part) for part in value.split(" ")[0].split("-"))
+        g = jdatetime.date(y, m, d).togregorian()
+        return dt.datetime(g.year, g.month, g.day, tzinfo=dt.timezone.utc)
+    except (ValueError, TypeError):
+        return pd.NaT
 
 
 def _trading_session_index(start: dt.datetime, end: dt.datetime) -> pd.DatetimeIndex:
@@ -684,10 +694,20 @@ def _load_price_panel(
     if as_of_dt is not None:
         as_of_jalali = to_jalali_str(as_of_dt)
 
+    # Lower bound for every warehouse read below. The series are cut to
+    # `series.index >= cutoff` further down and nothing before that cut reads a
+    # row older than the cutoff day, so loading from that day on is the same
+    # panel -- it used to read every symbol's whole history (twelve years of
+    # candles for a 30-day chart) and convert each row's Jalali date, on every
+    # window and every basis. The FX tables are built from the same bounded
+    # dates and already fetch their own neighbours (`_toman_per_quote`).
+    cutoff_jalali = to_jalali_str(cutoff)
+    since_jalali = cutoff_jalali if _BOUNDED_HISTORY_READS else None
+
     # Bulk query MarketCandle (TSE)
     tse_rows = []
     if tse_symbols:
-        qs_tse = candle_close_qs(tse_symbols, as_of=as_of_jalali)
+        qs_tse = candle_close_qs(tse_symbols, as_of=as_of_jalali, since=since_jalali)
         # Raw Rial -> Toman: the panel mixes TSE and BRS columns and is later
         # multiplied by a Toman FX rate, so units must agree before that.
         # `-id` is load-bearing, not cosmetic. Duplicate (symbol, date) candles
@@ -737,6 +757,8 @@ def _load_price_panel(
             )
             if as_of_jalali is not None:
                 qs_etf_bars = qs_etf_bars.filter(date__lte=as_of_jalali)
+            if since_jalali is not None:
+                qs_etf_bars = qs_etf_bars.filter(date__gte=since_jalali)
             tse_rows.extend(
                 (sym, date, tse_close_to_toman(close))
                 for sym, date, close in qs_etf_bars.order_by("symbol", "date").values_list(
@@ -757,6 +779,8 @@ def _load_price_panel(
         )
         if as_of_jalali is not None:
             qs_brs = qs_brs.filter(date__lte=as_of_jalali)
+        if since_jalali is not None:
+            qs_brs = qs_brs.filter(date__gte=since_jalali)
         raw_brs_rows = list(qs_brs.order_by("symbol", "date").values_list(
             "symbol", "date", "close_price", "unit",
         ))
@@ -798,11 +822,10 @@ def _load_price_panel(
             if item.get("asset") and item["source"] == "brs"
         ]
         brs_rows.extend(
-            row for row in daily_bar_price(brs_assets, as_of=as_of_jalali)
+            row for row in daily_bar_price(brs_assets, since=since_jalali, as_of=as_of_jalali)
             if (row[0], row[1]) not in covered
         )
 
-    cutoff_jalali = to_jalali_str(cutoff)
     rejections = rejected_pairs(
         tse_symbols + brs_symbols, PRICE_SERIES_ENDPOINTS, since=cutoff_jalali
     )
@@ -1308,8 +1331,9 @@ def daily_returns_matrix(
         for col in panel.columns:
             panel[col] = to_basis(panel[col], basis, usd_series=usdt_series)
     elif basis == "real_toman":
+        cpi = cpi_series(panel.index)
         for col in panel.columns:
-            panel[col] = to_basis(panel[col], basis)
+            panel[col] = to_basis(panel[col], basis, cpi=cpi)
 
     # Frequency is a property of the price panel, not of the surviving columns:
     # measure it before the gates can thin the index.

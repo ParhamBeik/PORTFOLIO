@@ -28,6 +28,26 @@ def normalize_basis(basis: str | None) -> str:
         ) from exc
 
 
+def cpi_unavailable_body(exc) -> dict:
+    """The refusal every real_toman answer gives when a year has no CPI.
+
+    One body for the global 503 (config/api.py) and for the inflation series
+    embedded in a nominal snapshot response, so the two cannot drift.
+    """
+    return {
+        "detail": str(exc),
+        "reason": "cpi_unavailable",
+        "basis": "real_toman",
+        "requested_jalali_year": exc.jalali_year,
+        "last_verified_jalali_year": exc.last_verified_year,
+        "remedy": (
+            "Set CPI_BY_JALALI_YEAR_EXTRA to the published index for "
+            "that year, or CPI_ESTIMATED_ANNUAL_RATE to project one "
+            "forward as a labelled estimate."
+        ),
+    }
+
+
 def cpi_for_date(value) -> float:
     """Linearly interpolate the configured annual CPI index within a Jalali year.
 
@@ -70,10 +90,16 @@ def _jalali_to_gregorian_index(dates: pd.Series) -> pd.DatetimeIndex:
 
     return pd.DatetimeIndex([convert(v) for v in dates])
 
+def cpi_series(index) -> pd.Series:
+    """`cpi_for_date` for every date of an index, as `to_basis` divides by it."""
+    return pd.Series([cpi_for_date(value) for value in index], index=index, dtype=float)
+
+
 def to_basis(
     series: pd.Series,
     basis: str,
     usd_series: pd.Series | None = None,
+    cpi: pd.Series | None = None,
 ) -> pd.Series:
     """Convert a price series to nominal Toman or USD-denominated values.
 
@@ -86,11 +112,11 @@ def to_basis(
     if basis == "nominal_toman":
         return series
     if basis == "real_toman":
-        cpi = pd.Series(
-            [cpi_for_date(value) for value in series.index],
-            index=series.index,
-            dtype=float,
-        )
+        # A caller converting many columns on one index passes `cpi` built once
+        # (`cpi_series`); recomputing it per column was half of a cold Risk
+        # request -- 5,500 interpolations for five assets over three years.
+        if cpi is None:
+            cpi = cpi_series(series.index)
         return series / cpi * 100.0
     if basis in ("usd_denominated", "usdt_denominated"):
         if usd_series is None:
@@ -99,12 +125,21 @@ def to_basis(
 
             symbol = "USDT_IRT" if basis == "usdt_denominated" else "USD"
             rates = GoldCurrencyHistory.objects.filter(symbol=symbol, close_price__gt=0)
+            since = None
             if not series.index.empty:
                 jdate = jdatetime.date.fromgregorian(date=series.index.max().date())
                 rates = rates.filter(
                     date__lte=f"{jdate.year:04d}-{jdate.month:02d}-{jdate.day:02d}"
                 )
-            rejected = rejected_pairs([symbol], BRS_SERIES_ENDPOINTS)
+                # The alignment below looks back at most 5 days (merge_asof
+                # tolerance), so no older rate can be used; a sixth day of pad
+                # covers the UTC/Tehran date edge. It loaded the whole history.
+                floor = jdatetime.date.fromgregorian(
+                    date=series.index.min().date() - dt.timedelta(days=6)
+                )
+                since = f"{floor.year:04d}-{floor.month:02d}-{floor.day:02d}"
+                rates = rates.filter(date__gte=since)
+            rejected = rejected_pairs([symbol], BRS_SERIES_ENDPOINTS, since=since)
             rows = list(
                 rates.exclude(date__in=[day for sym, day in rejected if sym == symbol])
                 .order_by("date")

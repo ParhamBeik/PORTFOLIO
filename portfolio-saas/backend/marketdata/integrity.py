@@ -136,16 +136,24 @@ def compute_symbol_integrity(
             sessions = _expected_sessions(start_date, end_date, tse_calendar=False)
     expected = set(sessions)
 
+    # Bounded to the window: only days in `expected` are counted below, and
+    # `first_observed` is taken after that filter, so no older row is read. It
+    # used to load each symbol's whole history (~12 years) to score 180 days,
+    # once per holding on the data-quality endpoint and ~1,400 times nightly.
+    first, last = _jalali_text(start_date), _jalali_text(end_date)
     if instrument.source == MarketInstrument.Source.TSETMC:
         raw_dates = (
-            candle_close_qs(symbol)
+            candle_close_qs(symbol, since=first, as_of=last)
             if timeframe == MarketCandle.ADJUSTED
-            else MarketCandle.objects.filter(symbol=symbol, timeframe=timeframe)
+            else MarketCandle.objects.filter(
+                symbol=symbol, timeframe=timeframe,
+                date_time__gte=first, date_time__lte=last + " 23:59:59",
+            )
         ).values_list("date_time", flat=True)
     else:
-        raw_dates = GoldCurrencyHistory.objects.filter(symbol=symbol).values_list(
-            "date", flat=True
-        )
+        raw_dates = GoldCurrencyHistory.objects.filter(
+            symbol=symbol, date__gte=first, date__lte=last,
+        ).values_list("date", flat=True)
 
     observed = {
         day for value in raw_dates

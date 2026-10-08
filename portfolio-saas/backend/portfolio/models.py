@@ -457,6 +457,39 @@ class Price(models.Model):
         return super().save(*args, **kwargs)
 
 
+def newest_prices(price_filter=None, assets=None):
+    """The newest `Price` row per asset, one indexed probe per asset.
+
+    Same answer as `Price.objects.filter(price_filter).order_by("asset_id",
+    "-fetched_at", "-id").distinct("asset_id")` -- the same filter and the same
+    tie-break -- but PostgreSQL has no skip scan, so that DISTINCT ON read every
+    tick of every asset in the 14-day retention window (about 60,000 per asset
+    at a 20-second cadence) to keep one row each. This asks the
+    (asset, -fetched_at) index for each asset's top row instead.
+
+    `assets` is an Asset queryset (or ids); `None` means every asset.
+    `price_filter` is a Q over Price, e.g. `positive_price_q()`.
+    """
+    newest = Price.objects.filter(asset_id=models.OuterRef("pk"))
+    if price_filter is not None:
+        newest = newest.filter(price_filter)
+    # Leading with asset_id (constant here) is what lets the planner use the
+    # (asset, -fetched_at) index; ordered on fetched_at alone it walked the
+    # global fetched_at index backwards and filtered every other asset's ticks.
+    newest = newest.order_by("asset_id", "-fetched_at", "-id").values("id")[:1]
+    asset_qs = Asset.objects.all()
+    if assets is not None:
+        asset_qs = (
+            assets if isinstance(assets, models.QuerySet)
+            else asset_qs.filter(pk__in=list(assets))
+        )
+    # An asset with no matching tick yields NULL, which `IN` never matches.
+    ids = asset_qs.annotate(_newest_price=models.Subquery(newest)).values("_newest_price")
+    # Asset order, as the DISTINCT ON returned them: the price map is
+    # serialized in this order, and Meta.ordering would reshuffle it every tick.
+    return Price.objects.filter(id__in=ids).order_by("asset_id")
+
+
 class DailyPriceAverage(models.Model):
     """One averaged live price per asset per calendar day, with its sample size.
 

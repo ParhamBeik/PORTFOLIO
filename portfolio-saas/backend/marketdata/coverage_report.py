@@ -8,7 +8,7 @@ from __future__ import annotations
 from django.db.models import Count, Q
 from django.utils import timezone
 
-from portfolio.models import Asset, Holding, Price, owner_display_names, positive_price_q
+from portfolio.models import Asset, Holding, Price, newest_prices, owner_display_names, positive_price_q
 
 from .archive import _RETIRED_ARCHIVE_ENDPOINTS
 from .evidence import LIVE_PRICE_FRESH_SECONDS
@@ -119,11 +119,9 @@ def _pct(part: int, whole: int) -> float:
 
 
 def _latest_prices_by_asset() -> dict[int, Price]:
-    out: dict[int, Price] = {}
-    for row in Price.objects.filter(positive_price_q()).order_by("asset_id", "-fetched_at", "-id"):
-        if row.asset_id not in out:
-            out[row.asset_id] = row
-    return out
+    # Was a Python walk over every positive tick in the retention window to
+    # keep the first per asset -- 12 s on the admin asset list in production.
+    return {row.asset_id: row for row in newest_prices(positive_price_q())}
 
 
 def classify_live_asset(asset: Asset, price: Price | None, *, now) -> str:

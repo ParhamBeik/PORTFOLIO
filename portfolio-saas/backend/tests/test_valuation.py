@@ -3260,3 +3260,51 @@ def test_value_account_liabilities_do_not_query_per_row(db):
     for index in range(1, 5):
         Liability.objects.create(account=account, asset=asset, label=f"L{index}", amount_tomans=100)
     assert count_queries() == one
+
+
+@pytest.mark.parametrize("days", [30, 365])
+def test_embedded_real_series_equals_the_real_toman_request(make_user, asset_catalog, days):
+    """`include_real=1` must carry exactly what `basis=real_toman` returns.
+
+    It replaces that second request in the "vs inflation" view, so any
+    difference would be a different chart for the same question.
+    """
+    user = make_user(email=f"embed-real-{days}@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    Holding.objects.create(
+        account=account, asset=asset_catalog["emami_coin"], quantity=Decimal("1")
+    )
+    now = timezone.now()
+    for days_ago, total in ((days - 2, "1000000"), (5, "1200000"), (1, "1500000")):
+        Snapshot.objects.create(
+            user=user, account=account,
+            total_value_tomans=Decimal(total),
+            timestamp=now - timedelta(days=days_ago),
+        )
+    client = _client(user)
+    real = client.get(f"/api/snapshots/?days={days}&basis=real_toman&account={account.id}")
+    nominal = client.get(f"/api/snapshots/?days={days}&account={account.id}&include_real=1")
+    plain = client.get(f"/api/snapshots/?days={days}&account={account.id}")
+    assert nominal.status_code == 200
+    body = nominal.json()
+
+    # The nominal series itself is untouched by the embedding.
+    assert body["series"] == plain.json()["series"]
+    assert body["basis"] == "nominal_toman"
+    if real.status_code == 503:
+        assert body["real"]["reason"] == "cpi_unavailable"
+        assert "series" not in body["real"]
+        return
+    expected = real.json()
+    assert body["real"]["series"] == expected["series"]
+    assert body["real"]["cpi"] == expected["cpi"]
+    assert body["real"]["basis"] == "real_toman"
+    assert "real" not in plain.json()
+
+
+def test_include_real_is_ignored_on_a_converted_basis(make_user, asset_catalog):
+    user = make_user(email="embed-real-usd@test.test")
+    Account.objects.create(user=user, name="Main")
+    res = _client(user).get("/api/snapshots/?days=30&basis=usd_denominated&include_real=1")
+    assert res.status_code == 200
+    assert "real" not in res.json()

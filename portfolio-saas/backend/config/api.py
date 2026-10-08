@@ -18,7 +18,7 @@ from rest_framework.response import Response
 from rest_framework.utils.encoders import JSONEncoder
 from rest_framework.views import exception_handler as drf_exception_handler
 
-from portfolio.services.deflator import CpiUnavailable
+from portfolio.services.deflator import CpiUnavailable, cpi_unavailable_body
 
 
 class DecimalAsStringEncoder(JSONEncoder):
@@ -36,18 +36,7 @@ def handle(exc, context):
         # required to answer it. Inflation-adjusted figures must never fall
         # back to nominal ones wearing a "real" label.
         return Response(
-            {
-                "detail": str(exc),
-                "reason": "cpi_unavailable",
-                "basis": "real_toman",
-                "requested_jalali_year": exc.jalali_year,
-                "last_verified_jalali_year": exc.last_verified_year,
-                "remedy": (
-                    "Set CPI_BY_JALALI_YEAR_EXTRA to the published index for "
-                    "that year, or CPI_ESTIMATED_ANNUAL_RATE to project one "
-                    "forward as a labelled estimate."
-                ),
-            },
+            cpi_unavailable_body(exc),
             status=503,
         )
     return drf_exception_handler(exc, context)

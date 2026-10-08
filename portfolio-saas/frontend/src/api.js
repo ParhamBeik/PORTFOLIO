@@ -625,10 +625,13 @@ export const valuation = (account = null, basis = null) => {
 };
 // Net-worth history for the trend chart. account=None -> aggregate series;
 // an account id -> that portfolio's per-account snapshot series.
-export const snapshots = (days = 30, account = null, basis = null) => {
+// `includeReal` asks a nominal series to carry its inflation-adjusted twin
+// (`data.real`), so the "vs inflation" view needs no second request.
+export const snapshots = (days = 30, account = null, basis = null, { includeReal = false } = {}) => {
   let url = `/api/snapshots/?days=${days}`;
   if (account) url += `&${accountParam(account)}`;
   if (basis) url += `&basis=${basis}`;
+  if (includeReal) url += "&include_real=1";
   return api(url);
 };
 
