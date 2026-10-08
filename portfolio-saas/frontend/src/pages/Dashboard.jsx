@@ -290,11 +290,18 @@ function TrendCard({ activeId, basis }) {
     [days, activeId, trendBasis, includeReal]
   );
   const embeddedReal = state.data?.real;
-  // Only for a response that predates `include_real` (a stale server).
+  // Only for a server that predates `include_real`: a COMPLETED nominal answer
+  // without the twin. Right after a basis switch `state` still holds the
+  // previous basis's response, not yet marked loading; keyed on its own
+  // `basis`, that stale answer cannot start this request -- which nothing
+  // would cancel, so the server would compute the second series anyway.
   const realFetch = useApi(
     () => snapshots(days, activeId, "real_toman"),
     [days, activeId],
-    { enabled: mode === "real" && !state.loading && !!state.data && !embeddedReal }
+    {
+      enabled: mode === "real" && !state.loading
+        && state.data?.basis === "nominal_toman" && !embeddedReal,
+    }
   );
   const realState = embeddedReal
     ? (embeddedReal.series
