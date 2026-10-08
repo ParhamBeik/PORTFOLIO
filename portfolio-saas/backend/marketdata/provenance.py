@@ -284,11 +284,16 @@ def daily_bar_price(assets, *, since=None, as_of=None, latest_only=False) -> lis
         queryset = queryset.filter(date__gte=since)
     if as_of is not None:
         queryset = queryset.filter(date__lte=as_of)
-    rejected = set(
-        RejectedRecord.objects.filter(
-            symbol__in=symbols, endpoint__in=DAILY_BAR_ENDPOINTS
-        ).values_list("symbol", "date")
+    rejected_qs = RejectedRecord.objects.filter(
+        symbol__in=symbols, endpoint__in=DAILY_BAR_ENDPOINTS
     )
+    # Only rejections inside the bars' own window can exclude one; each one is
+    # an EXCLUDE clause on the query, so the rest only made it longer.
+    if since is not None:
+        rejected_qs = rejected_qs.filter(date__gte=since)
+    if as_of is not None:
+        rejected_qs = rejected_qs.filter(date__lte=as_of)
+    rejected = set(rejected_qs.values_list("symbol", "date"))
     for symbol, date in rejected:
         queryset = queryset.exclude(symbol=symbol, date=date)
     if latest_only:
