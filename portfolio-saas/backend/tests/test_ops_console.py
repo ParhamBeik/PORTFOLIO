@@ -1879,3 +1879,103 @@ def test_alert_bot_api_base_is_configurable_for_bale():
     with mock.patch("config.observability.requests.post") as post:
         assert notify("bale-alert", {"k": "v"}, dedupe_seconds=60) is True
     assert post.call_args.args[0] == "https://tapi.bale.ai/botbot-token/sendMessage"
+
+
+# ---------------------------------------------------------------------------
+# Recent alerts: the console's view of what fired, app and host alike.
+# ---------------------------------------------------------------------------
+
+class _FakeRedis:
+    """Just the list commands record_alert / recent_alerts use."""
+
+    def __init__(self):
+        self.lists = {}
+
+    def pipeline(self):
+        return self
+
+    def lpush(self, key, value):
+        self.lists.setdefault(key, []).insert(0, value)
+
+    def ltrim(self, key, start, stop):
+        self.lists[key] = self.lists.get(key, [])[start:stop + 1]
+
+    def execute(self):
+        return []
+
+    def lrange(self, key, start, stop):
+        return self.lists.get(key, [])[start:stop + 1]
+
+
+@pytest.fixture
+def alert_redis():
+    fake = _FakeRedis()
+    with mock.patch("config.observability._alert_redis", return_value=fake):
+        yield fake
+
+
+@override_settings(ALERT_WEBHOOK_URL="https://alerts.test/hook")
+def test_sent_alert_is_recorded_once_and_redacted(alert_redis):
+    """Alerts went only to the chat, so the console could not say what fired
+    yesterday. A deduped repeat is not a new alert and must not be listed twice."""
+    from config.observability import notify, recent_alerts
+
+    cache.clear()
+    with mock.patch("config.observability.requests.post"):
+        notify("stale-prices", {"age_seconds": 1200, "token": "abc"}, dedupe_seconds=60)
+        notify("stale-prices", {"age_seconds": 1200, "token": "abc"}, dedupe_seconds=60)
+
+    alerts = recent_alerts()
+    assert [a["event"] for a in alerts] == ["stale-prices"]
+    assert alerts[0]["delivered"] is True
+    assert alerts[0]["source"] == "app"
+    assert "abc" not in alerts[0]["details"]
+    assert "1200" in alerts[0]["details"]
+
+
+@override_settings(ALERT_WEBHOOK_URL="", ALERT_TELEGRAM_BOT_TOKEN="", ALERT_TELEGRAM_CHAT_ID="")
+def test_undelivered_alert_is_still_listed(alert_redis):
+    """With no channel configured the console is the only place it can show up."""
+    from config.observability import notify, recent_alerts
+
+    assert notify("wedged-archive-states", {"n": 3}) is False
+    assert recent_alerts()[0]["delivered"] is False
+
+
+@override_settings(ALERT_WEBHOOK_URL="https://alerts.test/hook")
+def test_recent_alerts_are_capped_newest_first(alert_redis):
+    from config.observability import RECENT_ALERTS_MAX, notify, recent_alerts
+
+    cache.clear()
+    with mock.patch("config.observability.requests.post"):
+        for n in range(RECENT_ALERTS_MAX + 5):
+            notify("burst", {"n": n}, dedupe_seconds=60)
+    alerts = recent_alerts()
+    assert len(alerts) == RECENT_ALERTS_MAX
+    assert '"n": 54' in alerts[0]["details"]
+
+
+def test_recent_alerts_skip_garbage_and_survive_a_redis_outage(alert_redis):
+    from config.observability import RECENT_ALERTS_KEY, recent_alerts, record_alert
+
+    alert_redis.lists[RECENT_ALERTS_KEY] = ["not json", '{"no_event": 1}', '{"event": "ok"}']
+    assert [a["event"] for a in recent_alerts()] == ["ok"]
+
+    broken = mock.Mock(side_effect=ConnectionError("redis down"))
+    with mock.patch("config.observability._alert_redis", broken):
+        assert recent_alerts() == []
+        record_alert("anything", {}, delivered=True)  # must not raise
+
+
+def test_overview_carries_recent_alerts_on_every_request(staff_user, alert_redis):
+    """Fresh on a cache hit too: an alert fired a minute ago belongs on the page now."""
+    from config.observability import record_alert
+
+    cache.clear()
+    client = _auth(APIClient(), staff_user)
+    assert client.get("/api/admin/overview/").json()["recent_alerts"] == []
+
+    record_alert("host-ops-check", {"detail": "service celery_beat is not running"}, delivered=True, source="host")
+    alerts = client.get("/api/admin/overview/").json()["recent_alerts"]
+    assert alerts[0]["event"] == "host-ops-check"
+    assert alerts[0]["source"] == "host"

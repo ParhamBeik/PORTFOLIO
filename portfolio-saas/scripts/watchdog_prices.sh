@@ -58,6 +58,18 @@ fi
 # still hold -- otherwise every subsequent cron tick retries immediately,
 # with zero throttling, in exactly the failure case the cooldown exists for.
 echo "${now}" > "${cooldown_file}"
+# Say so every time. A restart used to write only this log line, so a 3am
+# recovery -- or a restart that itself failed -- reached nobody.
+alert() {
+    python3 "${project_dir}/scripts/host_alert.py" --env-file "${env_file}" \
+        --compose-file "${project_dir}/docker-compose.prod.yml" "$1" "$2" || true
+}
 log "restarting celery_worker_live and celery_beat"
-"${compose[@]}" restart celery_worker_live celery_beat
-log "restart issued"
+if "${compose[@]}" restart celery_worker_live celery_beat; then
+    log "restart issued"
+    alert price-watchdog-restart "prices health check failed (stale or unreachable); restarted celery_worker_live and celery_beat"
+else
+    log "restart failed"
+    alert price-watchdog-restart-failed "prices health check failed and restarting celery_worker_live and celery_beat failed too"
+    exit 1
+fi

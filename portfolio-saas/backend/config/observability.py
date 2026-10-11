@@ -115,6 +115,66 @@ def _send_telegram(token, chat_id, event, safe_details):
     ).raise_for_status()
 
 
+# The console's "Recent alerts" list. A raw Redis list on the cache instance
+# (REDIS_URL, docker-compose.prod.yml DB 1), not a Django cache key, so the host
+# scripts can LPUSH to it with redis-cli when the app itself is down
+# (scripts/host_alert.py writes the same record shape to the same key). Capped:
+# it is a view of the last few alerts, never a log -- the stdout line is the log.
+RECENT_ALERTS_KEY = "ops:recent_alerts"
+RECENT_ALERTS_MAX = 50
+
+
+def _alert_redis():
+    from portfolio.live.redis_client import get_redis
+
+    return get_redis()
+
+
+def record_alert(event, safe_details, *, delivered, source="app"):
+    """Keep one alert in the capped console list. Best-effort: never raises."""
+    from django.utils import timezone
+
+    try:
+        client = _alert_redis()
+        if client is None:
+            return
+        record = json.dumps(
+            {
+                "at": timezone.now().isoformat(),
+                "event": event,
+                "source": source,
+                "delivered": bool(delivered),
+                "details": json.dumps(safe_details, sort_keys=True, default=str, ensure_ascii=False)[:500],
+            },
+            ensure_ascii=False,
+        )
+        pipe = client.pipeline()
+        pipe.lpush(RECENT_ALERTS_KEY, record)
+        pipe.ltrim(RECENT_ALERTS_KEY, 0, RECENT_ALERTS_MAX - 1)
+        pipe.execute()
+    except Exception:
+        logger.warning("could not record alert %s for the ops console", event)
+
+
+def recent_alerts():
+    """Newest first. A malformed entry is skipped rather than failing the page."""
+    try:
+        client = _alert_redis()
+        raw = [] if client is None else client.lrange(RECENT_ALERTS_KEY, 0, RECENT_ALERTS_MAX - 1)
+    except Exception:
+        logger.warning("could not read recent alerts for the ops console")
+        return []
+    alerts = []
+    for item in raw:
+        try:
+            row = json.loads(item)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(row, dict) and row.get("event"):
+            alerts.append(row)
+    return alerts
+
+
 def notify(event, details, *, dedupe_seconds=900):
     """Raise one operator alert: always to stdout, plus every configured channel.
 
@@ -137,6 +197,7 @@ def notify(event, details, *, dedupe_seconds=900):
         # stale-archive-progress 49 times, and every line looked delivered --
         # no channel was configured. `undelivered=1` is the greppable difference.
         logger.warning("alert:%s undelivered=1 %s", event, payload)
+        record_alert(event, safe_details, delivered=False)
         return False
     digest = hashlib.sha256(
         json.dumps([event, safe_details], sort_keys=True, default=str).encode()
@@ -180,4 +241,5 @@ def notify(event, details, *, dedupe_seconds=900):
         except Exception:
             logger.warning("could not release alert dedupe for %s", event)
     logger.warning("alert:%s undelivered=%d %s", event, 0 if delivered else 1, payload)
+    record_alert(event, safe_details, delivered=delivered)
     return delivered

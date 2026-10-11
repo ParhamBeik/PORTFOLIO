@@ -2092,6 +2092,48 @@ function AttentionPanel({ liveHeld, warehouse, onNavigate }) {
 }
 
 
+/**
+ * What fired, newest first: app alerts from `notify()` and host alerts from the
+ * cron scripts (watchdog restarts, the hourly container/disk check). Before this
+ * they went only to the chat, so the console could not say what fired yesterday.
+ * "Not sent" means no channel accepted it -- the console is then the only record.
+ */
+function RecentAlertsCard({ alerts }) {
+  const [showAll, setShowAll] = useState(false);
+  const rows = alerts || [];
+  const shown = showAll ? rows : rows.slice(0, 8);
+  return (
+    <Card
+      title="Recent alerts"
+      subtitle={`Last ${rows.length || 0} sent by the app and the VPS checks, newest first.`}
+      testId="ops-overview-alerts"
+    >
+      {rows.length ? (
+        <ul className="divide-y divide-border text-sm">
+          {shown.map((row, i) => (
+            <li key={`${row.at}-${row.event}-${i}`} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2" data-testid="ops-overview-alert-row">
+              <span className="tabular text-xs text-muted">{row.at ? dateTime(row.at) : "—"}</span>
+              <span className="font-mono text-xs">{row.event}</span>
+              <Badge variant="neutral">{row.source === "host" ? "VPS" : "App"}</Badge>
+              <Badge variant={row.delivered ? "good" : "critical"}>{row.delivered ? "Sent" : "Not sent"}</Badge>
+              {row.details && row.details !== "{}" && (
+                <span className="w-full truncate font-mono text-xs text-muted" title={row.details}>{row.details}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-muted">No alerts recorded. Alerts appear here as they fire.</p>
+      )}
+      {rows.length > 8 && (
+        <Button variant="ghost" className="mt-2 text-xs" onClick={() => setShowAll((v) => !v)} data-testid="ops-overview-alerts-toggle">
+          {showAll ? "Show fewer" : `Show all ${rows.length}`}
+        </Button>
+      )}
+    </Card>
+  );
+}
+
 function OverviewPanel({ overview, tickSeries, depths, onNavigate, user }) {
   const cov = overview.coverage;
   const liveHeld = cov?.live?.held;
@@ -2219,6 +2261,8 @@ function OverviewPanel({ overview, tickSeries, depths, onNavigate, user }) {
       {user?.role === "admin" && <MembersPanel />}
 
       <AttentionPanel liveHeld={liveHeld} warehouse={warehouse} onNavigate={onNavigate} />
+
+      <RecentAlertsCard alerts={overview.recent_alerts} />
 
       <Card
         title="Provider quota by product"
