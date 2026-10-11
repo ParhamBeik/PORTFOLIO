@@ -248,9 +248,23 @@ REST_FRAMEWORK = {
         # using the app -- and a 429 here reads as "signed out" in the client.
         # Guessing a refresh token is not a threat this rate needs to slow.
         "session": os.getenv("SESSION_THROTTLE", "300/min"),
+        # Django admin's own sign-in form (`accounts/admin.py`). It is not a DRF
+        # view, so none of the buckets above ever applied to it, and it guards
+        # the most powerful accounts there are. Per client IP; a person who
+        # mistypes a few times is nowhere near it.
+        "admin_login": os.getenv("ADMIN_LOGIN_THROTTLE", "10/hour"),
     },
     # M5: render Decimal as a string so large Toman values stay exact on the wire.
     "DEFAULT_RENDERER_CLASSES": ("config.api.DecimalStringJSONRenderer",),
+    # Which X-Forwarded-For entry is the client. Unset, DRF keys every throttle
+    # on the WHOLE header, and nginx's `$proxy_add_x_forwarded_for` appends to
+    # whatever the client sent -- so a bot sending a fresh made-up header per
+    # request got a fresh bucket per request: unlimited login guesses, signups
+    # and reset mails. Counting hops from the right reads only entries our own
+    # proxies wrote. Production is two: the shared vps-edge proxy, then this
+    # app's nginx. A request with no header (dev, tests, direct probes) falls
+    # back to REMOTE_ADDR.
+    "NUM_PROXIES": int(os.getenv("TRUSTED_PROXY_COUNT", "2")),
 }
 
 # Companion to the `analytics` throttle above: that bounds requests per minute,
@@ -276,7 +290,7 @@ SIMPLE_JWT = {
     "USER_ID_FIELD": "id",
     "USER_ID_CLAIM": "user_id",
     # Rotate refresh tokens on use and blacklist the old one, so a stolen refresh
-    # token has a single-use window instead of being valid for the full 7 days.
+    # token has a single-use window instead of being valid for its whole lifetime.
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
     "CHECK_REVOKE_TOKEN": True,
