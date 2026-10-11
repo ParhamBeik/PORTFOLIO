@@ -66,9 +66,12 @@ a whole session against a shut market. Iran has roughly twenty such days a year,
 and TSETMC is the wallet that actually binds (it hit 10,034/10,000 on 2026-08-26).
 
 The probe is claimed at most twice an hour: ~14 requests/day out of ~10,000, to
-prevent waste measured in thousands. TGJU covers the index when the probe was not
-claimed or failed, and `live_tedpix_payload` **derives** open/closed from whether
-the index printed today rather than asserting it.
+prevent waste measured in thousands. TGJU covers the index **value** when the probe
+was not claimed or failed, but makes **no state claim** (`live_tedpix_payload`
+returns `state=""`). It used to derive "بسته" from the index not having printed
+today; on 2026-10-05/06 TGJU's index lagged, that "closed" was cached until 13:00,
+and live wrote 15 and 14 stock prices on two normal trading days instead of ~700.
+Only the paid probe may close a session.
 
 ### The benchmark this unlocked
 
