@@ -793,6 +793,10 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True  # survive a broker restart
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
+# How often operational_health_check repeats an alert for a condition that is
+# still true. It runs every 15 minutes; repeating at that cadence sent ~190
+# messages a day for two standing conditions.
+ALERT_REPEAT_SECONDS = int(os.getenv("ALERT_REPEAT_SECONDS", str(6 * 3600)))
 # Second, independent alert channel. Both must be set for it to be used; either
 # channel alone is enough to stop `notify` logging `undelivered=1`.
 ALERT_TELEGRAM_BOT_TOKEN = os.getenv("ALERT_TELEGRAM_BOT_TOKEN", "")

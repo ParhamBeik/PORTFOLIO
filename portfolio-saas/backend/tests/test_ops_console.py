@@ -1979,3 +1979,30 @@ def test_overview_carries_recent_alerts_on_every_request(staff_user, alert_redis
     alerts = client.get("/api/admin/overview/").json()["recent_alerts"]
     assert alerts[0]["event"] == "host-ops-check"
     assert alerts[0]["source"] == "host"
+
+
+@override_settings(ALERT_WEBHOOK_URL="https://alerts.test/hook", ALERT_REPEAT_SECONDS=6 * 3600)
+def test_standing_condition_alerts_once_per_repeat_window_despite_drifting_details(alert_redis):
+    """disk-projection's days-to-80% changes every run, so keyed on its details it
+    re-sent every 15 minutes: 288 times in 72h. One reminder per window instead."""
+    from config.observability import notify, recent_alerts
+
+    cache.clear()
+    with mock.patch("config.observability.requests.post") as post:
+        for days in (21.4, 21.3, 21.2):
+            notify("disk-projection", {"days_until": days}, dedupe_seconds=6 * 3600, dedupe_key="disk-projection")
+        notify("wedged-archive-states", {"n": 3}, dedupe_seconds=6 * 3600, dedupe_key="wedged-archive-states")
+    assert post.call_count == 2
+    assert [a["event"] for a in recent_alerts()] == ["wedged-archive-states", "disk-projection"]
+
+
+@override_settings(ALERT_WEBHOOK_URL="", ALERT_TELEGRAM_BOT_TOKEN="", ALERT_TELEGRAM_CHAT_ID="")
+def test_unconfigured_channel_still_logs_every_time_but_lists_once(alert_redis, caplog):
+    from config.observability import notify, recent_alerts
+
+    cache.clear()
+    with caplog.at_level("WARNING", logger="config.observability"):
+        for n in range(3):
+            notify("wedged-archive-states", {"n": n}, dedupe_seconds=600, dedupe_key="wedged-archive-states")
+    assert sum("undelivered=1" in r.getMessage() for r in caplog.records) == 3
+    assert len(recent_alerts()) == 1

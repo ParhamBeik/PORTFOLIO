@@ -175,8 +175,14 @@ def recent_alerts():
     return alerts
 
 
-def notify(event, details, *, dedupe_seconds=900):
+def notify(event, details, *, dedupe_seconds=900, dedupe_key=None):
     """Raise one operator alert: always to stdout, plus every configured channel.
+
+    Dedupe keys on (event, details) unless `dedupe_key` is given. A standing
+    condition whose details drift every run (disk days-to-80%, a wedged-state
+    count) must pass one: keyed on its details it never repeats, so it re-sent
+    every quarter hour -- 288 disk-projection and 288 wedged-archive-states
+    alerts in the 72h to 2026-10-11.
 
     The stdout line is unconditional because operational_health_check's
     detections (wedged archive states, stale prices, backlog) route only through
@@ -192,21 +198,23 @@ def notify(event, details, *, dedupe_seconds=900):
     url = getattr(settings, "ALERT_WEBHOOK_URL", "")
     telegram = _telegram_target()
     payload = json.dumps(safe_details, sort_keys=True, default=str)[:500]
-    if not (url or telegram):
-        # On 2026-08-27 the archive was dead for 13h having raised
-        # stale-archive-progress 49 times, and every line looked delivered --
-        # no channel was configured. `undelivered=1` is the greppable difference.
-        logger.warning("alert:%s undelivered=1 %s", event, payload)
-        record_alert(event, safe_details, delivered=False)
-        return False
-    digest = hashlib.sha256(
-        json.dumps([event, safe_details], sort_keys=True, default=str).encode()
-    ).hexdigest()
+    identity = [event, dedupe_key] if dedupe_key is not None else [event, safe_details]
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
     cache_key = f"alert:{digest}"
     try:
         reserved = cache.add(cache_key, True, timeout=dedupe_seconds)
     except Exception:
         reserved = True
+    if not (url or telegram):
+        # On 2026-08-27 the archive was dead for 13h having raised
+        # stale-archive-progress 49 times, and every line looked delivered --
+        # no channel was configured. `undelivered=1` is the greppable difference.
+        # The log line stays unconditional; the console list takes the deduped
+        # view so one standing condition cannot push everything else off it.
+        logger.warning("alert:%s undelivered=1 %s", event, payload)
+        if reserved:
+            record_alert(event, safe_details, delivered=False)
+        return False
     if not reserved:
         return False
 

@@ -553,8 +553,10 @@ def operational_health_check():
     if disk.get("alert"):
         alerts.append(("disk-projection", disk))
 
+    # Keyed on the event alone: details drift every run, and a condition that is
+    # still true is worth one reminder per ALERT_REPEAT_SECONDS, not one per run.
     for event, details in alerts:
-        notify(event, details, dedupe_seconds=900)
+        notify(event, details, dedupe_seconds=settings.ALERT_REPEAT_SECONDS, dedupe_key=event)
     return {"alerts": [event for event, _details in alerts]}
 
 
