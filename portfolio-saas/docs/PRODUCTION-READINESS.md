@@ -84,11 +84,12 @@ linters clean, and the edge CSP hardened. A review/plan is not completion.
 
 Two entries in the old baseline were wrong, and both understated the tree:
 
-- **pip-audit IS in CI.** `.github/workflows/ci.yml` has an `audit` job that
+- **pip-audit IS in CI.** `.github/workflows/audit.yml` (an `audit` job in `ci.yml` until 2026-10-11)
   pins pip/setuptools to the Dockerfile builder's versions, installs
   `requirements.txt`, and runs `pip-audit`, plus `npm audit --omit=dev
-  --audit-level=moderate`. It runs on push, PR and a Monday cron, and is
-  deliberately outside `deploy`'s `needs`.
+  --audit-level=moderate`. It runs on push, PR and a Monday cron, and is its
+  own workflow so it cannot gate a deploy: `deploy.yml` follows the whole CI
+  run, so as a CI job it did.
 - **No backups or restore drill.** Backup production was removed for the VPS
   storage baseline; the database lives only in the `pgdata` volume.
 
