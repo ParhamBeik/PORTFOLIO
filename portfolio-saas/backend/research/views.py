@@ -29,9 +29,11 @@ _UNSUPPORTED_TOPICS = (
     "جریان وجوه", "جریان نقد",
 )
 _INCOME_TOPICS = ("profit", "margin", "net income", "operating revenue", "سود", "حاشیه")
+# No "debt" here: it is on _UNSUPPORTED_TOPICS, which is checked first, because
+# the router must not equate total liabilities with interest-bearing debt.
 _BALANCE_TOPICS = (
     "balance sheet", "asset", "liabilit", "equity", "cash", "borrowing",
-    "debt", "ترازنامه", "دارایی", "بدهی", "حقوق مالکانه", "موجودی نقد", "تسهیلات",
+    "ترازنامه", "دارایی", "بدهی", "حقوق مالکانه", "موجودی نقد", "تسهیلات",
 )
 _DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
