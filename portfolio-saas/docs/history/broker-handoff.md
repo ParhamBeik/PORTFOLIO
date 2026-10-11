@@ -1,3 +1,5 @@
+> **History.** Production moved its Celery queues to the `broker` Redis (`redis://broker:6379/0`, verified on the VPS 2026-10-08). The cutover code this note describes was removed from `scripts/deploy.sh` on 2026-10-11.
+
 # Legacy Celery broker handoff
 
 Production still uses Redis DB 2 for both task messages and disposable results. The new Compose file has a separate Redis 7.2 broker with AOF and `noeviction`. On 2026-09-26 the old `archive` queue held 101 messages while its worker was paused, and `codal` held 200 messages without a worker. The default drain cutover must therefore abort before stopping the API.

@@ -90,7 +90,7 @@ jobs:
       - name: Test deployment guard
         working-directory: portfolio-saas
         run: |
-          bash scripts/test_broker_copy_deploy.sh
+          bash scripts/test_deploy.sh
 
   frontend:
     runs-on: ubuntu-latest
