@@ -41,7 +41,7 @@ from .codal_storage import (
     load_artifact,
     store_artifact,
 )
-from .codal_statements import parse_income_statement
+from .codal_statements import parse_income_statement, statement_abstain_reason
 from .models import (
     CodalArtifact,
     CodalCandidateFact,
@@ -100,7 +100,10 @@ def _persist_parsed(report, artifact, parsed):
     # Old extractions remain evidence, including the legacy tables and facts.
     # A new parser version creates a new run; retrying the same exact bytes and
     # version reuses that run instead of replacing its facts.
-    if not parsed.facts and (report.extractions.exists() or report.facts.exists()):
+    # Measured against earlier runs of this pipeline only. The legacy v2 facts
+    # (`report.facts`, 1.56M rows nothing reads) are mostly a disclosure date per
+    # filing; counting them blocked every re-extraction under a newer parser.
+    if not parsed.facts and report.extractions.filter(fact_count__gt=0).exists():
         raise CodalExtractionRegressed(
             "parse produced 0 facts despite an earlier extraction"
         )
@@ -178,6 +181,10 @@ def extract_report(announcement_id):
                 content = load_artifact(artifact)
                 downloaded.append((kind, artifact, content))
                 continue
+            if artifact.fetch_status == CodalArtifact.FetchStatus.REJECTED:
+                # Failed its own content check -- a property of the document.
+                # A re-parse must not fetch 83k rejected attachments again.
+                continue
             # No quota reservation. These bytes come from codal.ir, not from the
             # metered provider -- charging them to the BrsApi archive budget spent
             # ~1,000 requests/day of somebody else's allowance and, on a day when
@@ -244,6 +251,7 @@ def extract_report(announcement_id):
     parsed = None
     chosen = None
     chosen_income = []
+    abstain = ""
     first_generic = None
     parse_errors = []
     for kind, artifact, content in downloaded:
@@ -265,6 +273,8 @@ def extract_report(announcement_id):
                 is_consolidated=report.is_consolidated, is_audited=report.is_audited,
             ) if kind in (CodalArtifact.Kind.EXCEL, CodalArtifact.Kind.HTML) else []
             if not income:
+                if kind == CodalArtifact.Kind.HTML:
+                    abstain = statement_abstain_reason(content, title=announcement.title)
                 continue
             parsed, chosen, chosen_income = candidate, artifact, income
             break
@@ -305,7 +315,10 @@ def extract_report(announcement_id):
     elif not reconciled:
         report.status = CodalReport.Status.NEEDS_REVIEW
         report.quality = CodalReport.Quality.REVIEW
-        report.error_code = f"no_typed_facts:category={report.category}"
+        report.error_code = (
+            f"statement:{abstain}"[:64] if report.category == 2 and abstain
+            else f"no_typed_facts:category={report.category}"
+        )
     else:
         report.status = CodalReport.Status.PARSED
         report.quality = CodalReport.Quality.DEGRADED

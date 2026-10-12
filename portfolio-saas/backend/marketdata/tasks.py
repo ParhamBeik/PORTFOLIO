@@ -378,9 +378,48 @@ def queue_codal_extractions():
         .order_by("-date_publish", "-time_publish")
         .values_list("id", flat=True)[:limit]
     )
+    if len(ids) < limit:
+        ids += _stale_parser_codal_ids(limit - len(ids), exclude=set(ids) | pending_ids)
     queued = _dispatch_codal_ids(ids, slots=limit)
     _finish_ok(outcome, rows_accepted=queued)
     return queued
+
+
+def _stale_parser_codal_ids(limit, exclude=()):
+    """Finished reports a newer parser has not seen yet, statements first.
+
+    PARSED and NEEDS_REVIEW are terminal for the retry path, so a parser
+    upgrade never reached anything that had already parsed: on 2026-10-12,
+    104,011 of 107,701 reports were still on parser v2, including ~18,900
+    financial statements of which 195 had met the statement parser. Re-running
+    reads the archived bytes from MinIO and spends no provider quota; the
+    report's own `parser_version` is stamped at the start of a run, so each one
+    comes back exactly once per version.
+    """
+    statement = Q(code="ن-10") | Q(doc_type__in=("financial_statements", "interim_financials"))
+    clarification = Q(code__in=("ن-26", "ن-20"))
+    stale = (
+        (statement & ~clarification & ~Q(report__parser_version=settings.CODAL_STATEMENT_PARSER_VERSION))
+        | ((~statement | clarification) & ~Q(report__parser_version=settings.CODAL_PARSER_VERSION))
+    )
+    base = (
+        CodalAnnouncement.objects.filter(report__isnull=False)
+        .filter(report__status__in=(
+            CodalReport.Status.PARSED, CodalReport.Status.NEEDS_REVIEW, CodalReport.Status.UNSUPPORTED,
+        ))
+        .filter(stale)
+        .exclude(pk__in=exclude)
+    )
+    ids = list(
+        base.filter(statement & ~clarification)
+        .order_by("-date_publish", "-time_publish").values_list("id", flat=True)[:limit]
+    )
+    if len(ids) < limit:
+        ids += list(
+            base.exclude(pk__in=ids).order_by("-date_publish", "-time_publish")
+            .values_list("id", flat=True)[:limit - len(ids)]
+        )
+    return ids
 
 
 @shared_task(ignore_result=True)

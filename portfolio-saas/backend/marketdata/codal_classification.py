@@ -194,6 +194,20 @@ _TITLE_CATEGORY = (
 )
 
 
+# Codal's own letter code ("ن-10") is the publisher's declaration of what a
+# filing is, so it outranks any reading of the title. Only codes measured
+# against production are listed (2026-10-12, title agreement in brackets):
+# ن-10 lifted 166 investment companies' statements out of "portfolio" (99.1%),
+# and ن-26 is "clarifications about published statements" -- 5,369 filings the
+# title keywords would have sent to the statement parser.
+_CODE_CATEGORY = {
+    "ن-10": _CodalAnnouncement.Category.STATEMENTS,
+    "ن-26": _CodalAnnouncement.Category.GENERAL,
+    "ن-20": _CodalAnnouncement.Category.GENERAL,
+    "ن-30": _CodalAnnouncement.Category.PRODUCTION_SALES,
+}
+
+
 def _letter_type(announcement):
     match = re.search(r"let\d+", f"{announcement.code} {announcement.link}", re.I)
     return match.group(0).lower() if match else ""
@@ -225,7 +239,7 @@ def classify_announcement(announcement, parsed_text=""):
     # not change the identity, period, or correction status of this notice.
     title = normalize_title(announcement.title or "")
     letter_type = _letter_type(announcement)
-    category = _LETTER_CATEGORY.get(letter_type)
+    category = _CODE_CATEGORY.get((announcement.code or "").strip()) or _LETTER_CATEGORY.get(letter_type)
     # let58 covers both operating issuers and investment companies.
     if letter_type == "let58" and any(word in title for word in ("پرتفوی", "سرمایه گذاری")):
         category = _CodalAnnouncement.Category.PORTFOLIO
