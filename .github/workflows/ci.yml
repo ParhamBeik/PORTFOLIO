@@ -5,6 +5,11 @@
 # subset and no `|| true`: a red test is a red build, and a red build does not
 # deploy.
 #
+# deploy.yml waits for this whole workflow to conclude success; it has no
+# per-job `needs`. So every job here gates production. Checks that must not
+# gate a deploy live in their own workflows: audit.yml (dependency CVEs) and
+# mobile.yml (Android build).
+#
 name: CI
 
 on:
@@ -12,13 +17,6 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  # Advisories are published on the vendor's schedule, not ours, so a
-  # dependency audit that only runs on push is blind for however long nobody
-  # pushes. That is how 46 CVEs across four dependencies accumulated unnoticed
-  # until someone looked by hand. deploy.yml only follows a `push` run, so the
-  # weekly run tests and audits without touching production.
-  schedule:
-    - cron: '0 6 * * 1'
 
 # One deploy at a time. Two overlapping runs would race on `git reset --hard`
 # and on the compose rebuild; the newer commit is the one worth shipping.
@@ -30,8 +28,14 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     services:
+      # The image production runs (docker-compose.prod.yml), not plain
+      # postgres:16. Without the extension migrations 0002/0020 skip the tick
+      # hypertable and its compression, and every Timescale-aware reader takes
+      # its fallback, so CI tested a database shape production does not have.
+      # tests/test_timescale_storage.py pins that shape. Keep the tag in step
+      # with docker-compose.prod.yml.
       postgres:
-        image: postgres:16
+        image: timescale/timescaledb:2.17.2-pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -47,6 +51,9 @@ jobs:
       TEST_PG_HOST: localhost
       TEST_PG_USER: postgres
       TEST_PG_PASSWORD: postgres
+      # Fail, not skip, the Timescale storage tests if the service above ever
+      # loses the extension.
+      REQUIRE_TIMESCALEDB: '1'
     defaults:
       run:
         working-directory: portfolio-saas/backend
@@ -90,7 +97,7 @@ jobs:
       - name: Test deployment guard
         working-directory: portfolio-saas
         run: |
-          bash scripts/test_broker_copy_deploy.sh
+          bash scripts/test_deploy.sh
 
   frontend:
     runs-on: ubuntu-latest
@@ -151,87 +158,3 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:layout
-
-  # Capacitor sync + Android debug APK. Keeps the native projects from bit-rotting
-  # when plugins or webDir change. Does not gate deploy: production remains the
-  # website until mobile auth and store signing are live; a red mobile build still
-  # fails the PR so the branch cannot silently diverge.
-  mobile:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: portfolio-saas/frontend
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: portfolio-saas/frontend/package-lock.json
-      - run: npm ci
-      - run: npm run build:mobile
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '21'
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-      - name: Assemble Android debug APK
-        working-directory: portfolio-saas/frontend/android
-        run: |
-          set -euo pipefail
-          if ! sdkmanager "platforms;android-36" "build-tools;35.0.0" >/tmp/sdkmanager.log 2>&1; then
-            cat /tmp/sdkmanager.log
-            exit 1
-          fi
-          ./gradlew :app:assembleDebug --no-daemon
-      - name: Confirm package id
-        working-directory: portfolio-saas/frontend/android
-        run: |
-          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt | sort -V | tail -1)
-          "$AAPT" dump badging app/build/outputs/apk/debug/app-debug.apk \
-            | grep -F "name='ir.parhambm.holdings'"
-
-  # Deliberately NOT in `deploy`'s `needs`. Everything else here tests code we
-  # wrote, so red means "do not ship this". This job tests the world outside the
-  # repo: a CVE published overnight in a transitive dependency has nothing to do
-  # with the commit being pushed, and gating deploys on it would lock us out of
-  # shipping the very upgrade that fixes it. The run still goes red, which is
-  # the part that matters.
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.11'
-      - name: Audit Python dependencies
-        working-directory: portfolio-saas/backend
-        run: |
-          # These two pins mirror backend/Dockerfile's builder stage. Without
-          # them this audits the runner's ambient build environment rather than
-          # the image we ship, and reported setuptools 79.0.1 as vulnerable
-          # while production was already on 84.0.0. An audit that does not
-          # describe the deployed artifact is worse than none -- it spends the
-          # credibility of a red build on a machine nobody runs.
-          pip install --quiet --upgrade "pip>=26.1.2" "setuptools>=83.0.0"
-          pip install --quiet pip-audit
-          # Audits the resolved install, not just the pinned direct
-          # dependencies -- lxml and pypdf are the two fed untrusted bytes, and
-          # both arrived as transitive concerns first.
-          pip install --quiet -r requirements.txt
-          pip-audit --progress-spinner off
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: portfolio-saas/frontend/package-lock.json
-      - name: Audit JS dependencies
-        working-directory: portfolio-saas/frontend
-        # Production dependencies, at `moderate`. This was briefly `high` to
-        # accommodate the echarts XSS advisory; that upgrade has landed and the
-        # tree reports 0 vulnerabilities, so the threshold went back down rather
-        # than staying loose after the reason for it expired.
-        run: npm audit --omit=dev --audit-level=moderate

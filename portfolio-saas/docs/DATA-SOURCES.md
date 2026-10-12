@@ -1,7 +1,6 @@
 # Replacing BrsApi: measured provider assessment
 
-Probed from the production VPS on 2026-08-31. Companion to
-[`PRODUCT-EVALUATION.md`](PRODUCT-EVALUATION.md).
+Probed from the production VPS on 2026-08-31.
 
 > **Update 2026-10-05 — production moved into Iran.** The Frankfurt VPS
 > (`89.106.206.4`, AS202269) is retired. The whole stack now runs on an Iranian VPS

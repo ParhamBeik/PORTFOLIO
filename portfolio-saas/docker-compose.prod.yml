@@ -1,6 +1,6 @@
 # Production stack: Postgres, Redis, Django API (ASGI/gunicorn), separate live
 # archive/Codal Celery workers, Celery Beat, and the built SPA behind nginx.
-# Current shared VPS: about 8 GiB RAM and 100 GB root disk (2026-09 audit).
+# Current shared VPS: 7 GB RAM and a 99 GB root disk (read 2026-10-08).
 # Application state stays on the private network; only frontend joins vps-edge.
 #
 #   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
@@ -118,14 +118,14 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     # Docker's default /dev/shm is 64 MB. Postgres allocates parallel-query and
-    # parallel-vacuum state there, so on this 16 GB warehouse a plain
+    # parallel-vacuum state there, so on this multi-GB warehouse a plain
     # `VACUUM (ANALYZE) marketdata_stocktransactiontick` failed outright with
     # "could not resize shared memory segment ... No space left on device".
     # Any parallel plan over the big tables hits the same wall.
     shm_size: 1gb
     # The image ships the compiled-in defaults (shared_buffers 128 MB), which is
     # what the database had been running on. Values below are sized for
-    # the 6 GB limit set at the foot of this block, not for the host's 16 GB:
+    # the 6 GB limit set at the foot of this block, not for the whole host:
     # shared_buffers ~25% of the container, and work_mem kept modest because it
     # is per sort/hash node and multiplies by max_connections (150).
     command:
@@ -283,7 +283,7 @@ services:
     image: portfolio-saas-backend:latest
     restart: unless-stopped
     logging: *logging
-    entrypoint: []            # skip migrate/seed; the backend service owns DB setup
+    entrypoint: []            # the migrate service owns DB setup
     depends_on:
       backend:
         condition: service_healthy
@@ -369,6 +369,7 @@ services:
         condition: service_healthy
     environment: *backend-env
     command: celery -A config worker -l info --concurrency=4 -Q codal -n codal@%h --max-memory-per-child=600000
+    ulimits: *no-core
     healthcheck:
       test: ["CMD-SHELL", "celery -A config inspect ping -d codal@$$HOSTNAME"]
       interval: 60s
