@@ -49,6 +49,3 @@ live loop's remaining need until Tehran midnight.
 ```bash
 ssh root@45.139.10.12 'cd /opt/apps/portfolio-repo/portfolio-saas && docker compose -f docker-compose.prod.yml --env-file .env.production exec -T backend python manage.py shell -c "from marketdata.models import ApiRequestQuota as Q; from marketdata.quota import quota_day; [print(r.plan, r.used, r.provider_used, r.live_used, r.archive_used, r.other_used) for r in Q.objects.filter(day=quota_day())]"'
 ```
-
-History of how the plan mapping was established:
-[BRSAPI-QUOTA-EVIDENCE-2026-09-22.md](BRSAPI-QUOTA-EVIDENCE-2026-09-22.md).
