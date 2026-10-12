@@ -27,6 +27,7 @@ from django.utils.dateparse import parse_datetime
 from accounts.models import User
 from config.health import PRICE_STALE_AFTER
 from config.mail import mail_is_deliverable
+from config.observability import recent_alerts
 from portfolio.models import Account, Holding, LedgerEntry, Price, Snapshot
 
 from .models import (
@@ -1212,7 +1213,9 @@ def get_ops_overview():
     }
     body["coverage"] = build_coverage_report(database_rows=body["database_rows"])
     cache.set(OVERVIEW_CACHE_KEY, body, OVERVIEW_CACHE_TTL)
-    return body
+    # Not cached: the overlay re-reads it on every hit, and the miss path must
+    # carry the same key or the first load after expiry shows no alerts.
+    return {**body, "recent_alerts": recent_alerts()}
 
 
 def _user_domain_health():
@@ -1318,6 +1321,7 @@ def live_health_overlay():
         },
         "users": _user_domain_health(),
         "quota": get_quota_status(),
+        "recent_alerts": recent_alerts(),
     }
 
 

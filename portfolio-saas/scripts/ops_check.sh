@@ -39,8 +39,12 @@ for service in "${expected_services[@]}"; do
 done
 
 if ((${#failures[@]})); then
-  payload="$(printf '%s\n' "${failures[@]}" | python3 -c 'import json,sys; print(json.dumps({"event":"host-ops-check","details":{"failures":[line.strip() for line in sys.stdin if line.strip()]}}))')"
-  [[ -z "${ALERT_WEBHOOK_URL:-}" ]] || curl -fsS -m 5 -H 'Content-Type: application/json' -d "${payload}" "${ALERT_WEBHOOK_URL}" >/dev/null || true
+  # host_alert.py reads the ALERT_* keys from the env file. This used to curl
+  # "${ALERT_WEBHOOK_URL:-}" straight from its own environment, which cron
+  # leaves empty, so the hourly check failed silently on the box it guards.
+  detail="$(IFS=';'; printf '%s' "${failures[*]}")"
+  python3 "${project_dir}/scripts/host_alert.py" --env-file "${env_file}" \
+    --compose-file "${project_dir}/docker-compose.prod.yml" host-ops-check "${detail}" || true
   printf '%s\n' "${failures[@]}" >&2
   exit 1
 fi

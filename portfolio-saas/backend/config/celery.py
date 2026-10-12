@@ -53,6 +53,7 @@ app.conf.update(
         # A paused archive worker must not silence the check that reports its
         # backlog and other operational failures.
         "marketdata.tasks.operational_health_check": {"queue": "live"},
+        "marketdata.tasks.send_alert_digest_task": {"queue": "live"},
         "marketdata.tasks.capture_operational_metrics": {"queue": "live"},
         "perf.tasks.flush_perf_rollups": {"queue": "live"},
         "marketdata.tasks.capture_research_coverage": {"queue": "live"},
@@ -161,6 +162,11 @@ app.conf.beat_schedule = {
     "nightly-asset-signals": {
         "task": "marketdata.tasks.nightly_asset_signals",
         "schedule": crontab(hour=1, minute=20),
+    },
+    # Non-urgent alerts, once a day, before the 08:30 session opens.
+    "alert-digest-daily": {
+        "task": "marketdata.tasks.send_alert_digest_task",
+        "schedule": crontab(hour=8, minute=0),
     },
     "operational-health-every-15-minutes": {
         "task": "marketdata.tasks.operational_health_check",

@@ -18,6 +18,7 @@ test.describe("ops center", () => {
     await expect(page.getByTestId("ops-data-age")).toContainText(/Data age: \d+s/);
     await expect(page.getByTestId("ops-tabs")).toBeVisible();
     await expect(page.getByTestId("ops-overview")).toBeVisible();
+    await expect(page.getByTestId("ops-overview-alerts")).toBeVisible();
     await page.getByTestId("ops-tabs-live").click();
     await expect(page.getByTestId("ops-live-held")).toBeVisible();
     await page.getByTestId("ops-tabs-warehouse").click();
