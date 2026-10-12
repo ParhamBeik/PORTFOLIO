@@ -35,7 +35,8 @@ jobs:
           package-type: container
           min-versions-to-keep: 10
           ignore-versions: "^latest$"
-      - run: echo "- GHCR \`${{ matrix.package }}\`: kept the 10 newest versions + \`latest\`" >> "$GITHUB_STEP_SUMMARY"
+      - run: |
+          echo "- GHCR \`${{ matrix.package }}\`: kept the 10 newest versions + \`latest\`" >> "$GITHUB_STEP_SUMMARY"
 
   branches:
     # Head branches of merged or closed PRs. Squash merges leave the branch's
@@ -56,15 +57,16 @@ jobs:
           default=$(gh api "repos/$REPO" -q .default_branch)
           open_heads=$(gh pr list -R "$REPO" --state open --limit 500 --json headRefName -q '.[].headRefName')
           deleted=0
-          for branch in $(gh api "repos/$REPO/branches" --paginate -q '.[].name'); do
+          # A finished PR only vouches for the commit it ended on. A reused
+          # branch name with new commits on top is somebody's live work.
+          while read -r branch tip; do
             [ "$branch" = "$default" ] && continue
             grep -qxF "$branch" <<<"$open_heads" && continue
-            state=$(gh pr list -R "$REPO" --state all --head "$branch" --limit 1 --json state -q '.[0].state // ""')
-            case "$state" in
-              MERGED|CLOSED)
-                gh api -X DELETE "repos/$REPO/git/refs/heads/$branch" >/dev/null
-                echo "- deleted \`$branch\` (PR $state)" >> "$GITHUB_STEP_SUMMARY"
-                deleted=$((deleted + 1)) ;;
-            esac
-          done
+            state=$(gh pr list -R "$REPO" --state all --head "$branch" --limit 50 --json state,headRefOid \
+              -q "[.[] | select(.headRefOid == \"$tip\" and (.state == \"MERGED\" or .state == \"CLOSED\"))][0].state // \"\"")
+            [ -n "$state" ] || continue
+            gh api -X DELETE "repos/$REPO/git/refs/heads/$branch" >/dev/null
+            echo "- deleted \`$branch\` (PR $state at ${tip:0:7})" >> "$GITHUB_STEP_SUMMARY"
+            deleted=$((deleted + 1))
+          done < <(gh api "repos/$REPO/branches" --paginate -q '.[] | "\(.name) \(.commit.sha)"')
           echo "**Branches deleted: $deleted**" >> "$GITHUB_STEP_SUMMARY"
