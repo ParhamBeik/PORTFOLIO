@@ -192,7 +192,7 @@ services:
     build: ./backend
     restart: unless-stopped
     logging: *json-logging
-    entrypoint: []        # skip migrate/seed; the backend service owns DB setup
+    entrypoint: []        # the migrate service owns DB setup
     depends_on:
       backend:
         condition: service_started
@@ -228,7 +228,7 @@ services:
     build: ./backend
     restart: unless-stopped
     logging: *json-logging
-    entrypoint: []        # skip migrate/seed; the backend service owns DB setup
+    entrypoint: []        # the migrate service owns DB setup
     depends_on:
       backend:
         condition: service_started

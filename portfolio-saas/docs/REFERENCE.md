@@ -98,3 +98,32 @@ Dashboard.
 
 House constants (from archived settings): `house_area_sqm=90.2`,
 `house_mortgage_deduction=400_000_000`.
+
+## 4. Measuring latency
+
+The `perf` app stores hourly totals only, never one row per request. Sources:
+`api` (server, per `/api/` request, with SQL count/time and in-flight load),
+`client_api`, `client_page` and `client_boot` (browser, `frontend/src/perf.js`).
+Every row is tagged with market state (`open` / `closed_daytime` / `overnight`)
+and Tehran trading day vs Thu/Fri weekend, so compare like with like.
+
+```bash
+python manage.py perf_report --flush --days 7 --source api     # worst server routes
+python manage.py perf_report --days 7 --source client_page     # what users waited for
+python manage.py perf_report --since 2026-10-01 --until 2026-10-06   # before/after a deploy
+```
+
+Staff JSON: `GET /api/perf/report/?days=7&source=api`. Percentiles come from a
+fixed histogram ("p95 <= 750" = the bucket topping out at 750 ms). Rising
+`avg_inflight` alongside latency means contention, not the route. Requests over
+`PERF_SLOW_REQUEST_MS` (1000) log a `perf {...}` WARNING; every response carries
+a `Server-Timing` header.
+
+## 5. Operator commands and switches
+
+| Feature | How to run / enable | What to know |
+|---|---|---|
+| Balance-sheet backfill | `backfill_balance_sheets --symbol فولاد --limit 20 --fetch [--dry-run]` | `--fetch` permits a Codal request; without it only archived sheets are parsed. Parser accepts only observed V9 templates and checks assets = liabilities + equity. Not yet run in production. |
+| Codal history discovery | `backfill_codal_history --start-year 1402 --end-year 1404 [--symbols …] --max-requests 50 --execute` | Read-only without `--execute`. Windows split until ≤ `--max-pages`; complete only when provider count = stored keys. Quota-paced; not scheduled. |
+| AI research (GapGPT) | On the VPS: `python3 deploy/sync_gapgpt_config.py`, then set `GAPGPT_CONFIG_HOST_FILE`, `RESEARCH_MAX_RUN_USD`, `RESEARCH_DAILY_BUDGET_USD` in `.env.production` | Provider key and tariff come from the News deployment, never Git. The model only picks observation ids; the server computes every value. Budget is reserved before each call; restart the backend after a key rotation. |
+| Research coverage scan | Celery beat, daily 04:30 Tehran | Counts what Explore can show per stock over the last 365 days of filings. Reads stored evidence only; no provider calls. Ops marks it stale after 36 h. |
