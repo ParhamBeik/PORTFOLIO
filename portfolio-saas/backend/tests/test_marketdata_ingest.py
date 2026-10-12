@@ -2047,3 +2047,63 @@ def test_tick_replace_still_removes_the_previous_day_under_the_window():
     assert day.count() == 1, "the previous rows for this day must be gone"
     assert int(day.first().price) == 9900
     assert StockTransactionTick.objects.filter(symbol="SYM", date="1405-05-25").count() == 2
+
+
+def _gold_days(closes, start=1):
+    return [
+        {"date": f"1404/05/{start + i:02d}", "open": c, "high": c, "low": c, "close": c}
+        for i, c in enumerate(closes)
+    ]
+
+
+@pytest.mark.django_db
+def test_a_lasting_level_change_is_stored_and_a_one_day_glitch_is_not():
+    """JPY moved from per-10 to per-100 yen; the old screen then rejected every
+    later day forever. 1405-04-31 put the USD rate on every currency for a day."""
+    from marketdata.models import GoldCurrencyHistory, RejectedRecord
+
+    closes = [370, 372, 371, 373, 3820, 3830, 3815, 3840, 96000, 3850, 3845]
+    ingest.ingest_gold_currency_history({"symbol": "JPY", "name": "ین", "unit": "تومان", "history_daily": _gold_days(closes)})
+
+    stored = list(GoldCurrencyHistory.objects.filter(symbol="JPY").order_by("date").values_list("close_price", flat=True))
+    assert [int(c) for c in stored] == [c for c in closes if c != 96000]
+    assert list(RejectedRecord.objects.values_list("date", "reason")) == [("1404-05-09", "outlier_deviation")]
+
+
+@pytest.mark.django_db
+def test_a_day_that_now_passes_is_released_and_priced_again():
+    from marketdata.ingest import quarantine
+    from marketdata.models import RejectedRecord
+    from marketdata.provenance import rejected_pairs
+
+    quarantine("gold_daily", "JPY", "1404-05-05", "outlier_deviation", {"close": 3820})
+    assert ("JPY", "1404-05-05") in rejected_pairs(["JPY"])
+
+    ingest.ingest_gold_currency_history({"symbol": "JPY", "name": "ین", "unit": "تومان",
+                                        "history_daily": _gold_days([3800, 3810, 3820, 3815, 3830], start=3)})
+
+    assert RejectedRecord.objects.get().disposition == "recovered"
+    assert rejected_pairs(["JPY"]) == set()
+
+
+@pytest.mark.django_db
+def test_a_field_level_salvage_does_not_hide_the_stored_day():
+    """~6,500 salvaged TSE days were skipped by every price reader."""
+    from marketdata.ingest import quarantine
+    from marketdata.provenance import rejected_pairs
+
+    quarantine("stock_history_unadjusted", "فملی", "1403-10-19", "field_pf_outside_range", {"pf": 1})
+    quarantine("stock_candle_adjusted", "فملی", "1403-10-20", "price_all_zero", {"close": 0})
+
+    assert rejected_pairs(["فملی"]) == {("فملی", "1403-10-20")}
+
+
+def test_real_legal_rounding_under_one_percent_is_accepted():
+    from marketdata import validation
+
+    row = {"date": "1399-02-24", "Buy_CountI": 3337, "Buy_CountN": 2, "Sell_CountI": 1952, "Sell_CountN": 1,
+           "Buy_I_Volume": 6066584, "Buy_N_Volume": 25677, "Sell_I_Volume": 5551094, "Sell_N_Volume": 553067}
+    accepted, rejected = validation.validate("real_legal", [row])
+    assert len(accepted) == 1 and not rejected
+    row["Sell_N_Volume"] = 900000
+    assert validation.validate("real_legal", [row])[1][0].reason == "buy_sell_volume_mismatch"

@@ -82,6 +82,10 @@ def screen(kind, records, endpoint, symbol="", date_key="date", default_date="")
     """
     records, field_rejections = validation.salvage_ohlc_records(kind, records)
     accepted, rejections = validation.validate(kind, records)
+    release(endpoint, symbol, (
+        normalize_jalali(day) if isinstance(day := (record.get(date_key) or default_date), str) else ""
+        for record in accepted
+    ))
     for rejection in [*field_rejections, *rejections]:
         day = rejection.record.get(date_key) or default_date
         day = normalize_jalali(day) if isinstance(day, str) else ""
@@ -93,6 +97,29 @@ def screen(kind, records, endpoint, symbol="", date_key="date", default_date="")
             ", ".join(sorted({r.reason for r in [*field_rejections, *rejections]})),
         )
     return accepted, len(rejections)
+
+
+def _gold_outlier_indexes(closes, *, window=3, limit=0.50):
+    """`{index: reference}` for closes off by more than `limit` from both sides.
+
+    Each side is the median of up to `window` raw neighbours. With only one side
+    (the first or newest days) that side decides alone; the newest day is then
+    re-judged on the next refresh, once days after it exist.
+    """
+    import statistics
+
+    flagged = {}
+    for index, close in enumerate(closes):
+        if close is None or close <= 0:
+            continue
+        sides = []
+        for neighbours in (closes[max(0, index - window):index], closes[index + 1:index + 1 + window]):
+            values = [value for value in neighbours if value and value > 0]
+            if len(values) >= 2:
+                sides.append(statistics.median(values))
+        if sides and all(abs(close - median) / median > limit for median in sides):
+            flagged[index] = sides[0]
+    return flagged
 
 
 def quarantine(endpoint, symbol, day, reason, payload):
@@ -117,6 +144,27 @@ def quarantine(endpoint, symbol, day, reason, payload):
         occurrences=row.occurrences + (1 if changed else 0),
         payload=payload,
         last_seen=timezone.now(),
+        disposition="quarantined",
+        recovered_at=None,
+    )
+
+
+def release(endpoint, symbol, days):
+    """The provider re-sent these days and they now pass: lift the old verdicts.
+
+    Without this a rejection outlived the reason for it. JPY's 2,179 days stayed
+    hidden from every price reader after the outlier screen stopped flagging
+    them, because nothing ever marked a verdict as recovered. Field-level
+    salvages are left alone (their rows were stored all along).
+    """
+    days = {str(day)[:10] for day in days if day}
+    if not days:
+        return 0
+    return (
+        RejectedRecord.objects.filter(endpoint=endpoint, symbol=str(symbol)[:64], date__in=days)
+        .exclude(reason__startswith="field_")
+        .exclude(disposition="recovered")
+        .update(disposition="recovered", recovered_at=timezone.now())
     )
 
 
@@ -772,21 +820,26 @@ def ingest_gold_currency_history(payload, *, origin=GoldCurrencyHistory.Origin.B
     # Sort by date chronological order so rolling screening works cleanly
     accepted_sorted = sorted(accepted, key=lambda r: normalize_jalali(r.get("date", "")))
 
-    # Outlier screening compares each close against the median of its
-    # *neighbours in this batch*, never against the current price level. The
-    # previous version seeded this from the 5 newest stored rows and then
-    # walked the payload oldest-first, so a full-history fetch measured
-    # 1348-era prices against today's -- every early record read as a >50%
-    # deviation and was blacklisted, 105k rows across all 38 symbols, while
-    # `archive.py` subtracted those dates from `missing` and called the symbol
-    # complete. Seeded from the batch, the median tracks the era being ingested.
-    rolling_closes = []
+    # A close is an outlier only when it disagrees with the raw closes on BOTH
+    # sides of it. The old screen compared each day with the median of the days
+    # it had *accepted*, so one lasting level change (JPY's provider moving from
+    # per-10 to per-100 yen at 1396-09-20) shut the door on every later day:
+    # 2,179 JPY and 1,297 SYP days rejected, nothing stored after the shift.
+    # A one-day provider glitch (1405-04-31: the USD rate on every currency)
+    # still differs from both neighbourhoods and is still rejected.
+    raw_closes = []
+    for rec in accepted_sorted:
+        try:
+            raw_closes.append(to_storage(float(rec["close"])))
+        except (KeyError, TypeError, ValueError):
+            raw_closes.append(None)
+    outlier_days = _gold_outlier_indexes(raw_closes)
 
     rows = []
     outliers = 0
     malformed = 0
     malformed_reasons = set()
-    for rec in accepted_sorted:
+    for index, rec in enumerate(accepted_sorted):
         try:
             c = to_storage(float(rec["close"]))
             salvaged_fields = set(rec.get("_salvaged_ohlc", ()))
@@ -797,26 +850,14 @@ def ingest_gold_currency_history(payload, *, origin=GoldCurrencyHistory.Origin.B
             l = (None if "low" in salvaged_fields else
                  to_storage(float(rec.get("low"))) if rec.get("low") is not None else c)
 
-            # Cross-day outlier screening (both sides are on the storage scale).
-            if len(rolling_closes) >= 3:
-                import statistics
-                median = statistics.median(rolling_closes)
-                if median > 0:
-                    deviation = abs(c - median) / median
-                    if deviation > 0.50:
-                        bad += 1
-                        day_str = normalize_jalali(rec["date"])
-                        quarantine(
-                            "gold_daily", symbol, day_str, "outlier_deviation",
-                            {"close": c, "median": median, "record": rec},
-                        )
-                        outliers += 1
-                        continue
-
-            # Update rolling closes with verified price
-            rolling_closes.append(c)
-            if len(rolling_closes) > 5:
-                rolling_closes.pop(0)
+            if index in outlier_days:
+                bad += 1
+                quarantine(
+                    "gold_daily", symbol, normalize_jalali(rec["date"]), "outlier_deviation",
+                    {"close": c, "median": outlier_days[index], "record": rec},
+                )
+                outliers += 1
+                continue
 
             rows.append(GoldCurrencyHistory(
                 symbol=symbol,

@@ -96,6 +96,9 @@ def screen_series(
     return rejections
 
 
+REAL_LEGAL_VOLUME_TOLERANCE = 0.01
+
+
 def _num(value):
     """Coerce to float, or None when the value is not a usable number."""
     if value is None or isinstance(value, bool):
@@ -299,8 +302,10 @@ def _check_real_legal(rec):
     sold = (_num(rec.get("Sell_I_Volume")) or 0) + (_num(rec.get("Sell_N_Volume")) or 0)
     if bought < 0 or sold < 0:
         return "volume_negative"
-    # Every share bought is a share sold; the two legs must agree exactly.
-    if bought and sold and bought != sold:
+    # Every share bought is a share sold, but the provider's legs carry rounding:
+    # 594 days were rejected over gaps like 6,092,261 vs 6,104,161 (0.2%). Same
+    # 1% bound `recover_rejected_records` already accepts on recovery.
+    if bought and sold and abs(bought - sold) / max(bought, sold) > REAL_LEGAL_VOLUME_TOLERANCE:
         return "buy_sell_volume_mismatch"
     return None
 
