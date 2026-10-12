@@ -68,8 +68,14 @@ npm run android          # opens Android Studio
   Keystore secure storage, the access token only in memory.
 - Offline, the app shows a read-only snapshot (totals, holdings, 30-day chart),
   encrypted and unlocked by device PIN/biometrics. Editing needs a connection.
-- Signing keys, keystores and provisioning profiles never go in Git. Release:
-  Xcode Archive → TestFlight; `./gradlew :app:bundleRelease` → Play internal track.
+- Signing keys, keystores and provisioning profiles never go in Git.
+  - iOS: Xcode → Signing & Capabilities → your team, then Archive → TestFlight.
+  - Android: make an upload key once
+    (`keytool -genkeypair -keystore ~/holdings-upload.jks -keyalg RSA -keysize 2048 -validity 10000 -alias holdings`),
+    then put `storeFile` (absolute path), `storePassword`, `keyAlias`, `keyPassword`
+    in `frontend/android/keystore.properties` (gitignored; `app/build.gradle` reads it).
+    `cd android && ./gradlew :app:bundleRelease` → upload
+    `app/build/outputs/bundle/release/app-release.aab` to the Play internal track.
 - CI's `mobile` job builds the Android debug APK on every PR but does not gate deploys.
 
 ## Docs
