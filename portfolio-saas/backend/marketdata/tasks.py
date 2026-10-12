@@ -23,6 +23,7 @@ from datetime import datetime, time as dtime, timedelta
 
 from celery import group, shared_task
 from django.conf import settings
+from django.core.cache import cache
 from django.utils import timezone
 
 from . import archive, endpoints as endpoint_registry, ingest, jalali, live_states
@@ -1139,6 +1140,10 @@ def reconcile_quota_meters():
 #: reality. Sized above the handful a deploy or a manual probe leaves behind and
 #: well under the 2,226 seen on 2026-09-08.
 _QUOTA_DRIFT_ALERT = 200
+# How long one outage window stays "already reopened": long enough that a
+# re-download which changed nothing is not repeated nightly, short enough that a
+# provider which later publishes the missing sessions still gets asked again.
+OUTAGE_REOPEN_COOLDOWN_SECONDS = 7 * 24 * 3600
 
 
 @shared_task(ignore_result=True)
@@ -1225,8 +1230,16 @@ def nightly_data_integrity():
     outages = market_outage_windows()
     if outages:
         # Market-wide, so every symbol is short the same sessions and the
-        # per-symbol gate cannot see it. Reopen the lot.
-        reopened = reopen_states_with_gaps(None)
+        # per-symbol gate cannot see it. Reopen the lot -- once per window. A
+        # full re-download that left the same hole will leave it again; repeating
+        # it nightly cost ~6,700 requests a night for nothing.
+        window_key = "marketdata:outage-reopened:" + ",".join(
+            f"{start}:{end}" for start, end in outages
+        )
+        if cache.add(window_key, True, timeout=OUTAGE_REOPEN_COOLDOWN_SECONDS):
+            reopened = reopen_states_with_gaps(None)
+        else:
+            reopened = 0
         logger.error(
             "market outage: %d gap(s) in the session calendar; longest %s to %s; "
             "reopened %d archive state(s) to refetch",
