@@ -1750,6 +1750,16 @@ def test_growth_history_keeps_gaps_as_gaps_and_never_shrinks_an_append_only_tabl
     assert [r["counts"]["accounts"] for r in cleaned] == [5, 5, 4, 4]
 
 
+def test_growth_history_follows_a_real_purge_instead_of_flatlining():
+    """The 0005 duplicate purge cut candles 7.53M -> 4.5M. A pure running max
+    then drew a flat 7.53M line for weeks while the table kept filling."""
+    from marketdata.admin_telemetry import _clean_count_history
+
+    rows = [{"counts": {"candles": n}} for n in (7_529_791, 7_400_000, 4_500_000, 4_540_000, 4_520_000, 4_562_844)]
+    cleaned = _clean_count_history(rows, ("candles",))
+    assert [r["counts"]["candles"] for r in cleaned] == [7_529_791, 7_529_791, 4_500_000, 4_540_000, 4_540_000, 4_562_844]
+
+
 # ---------------------------------------------------------------------------
 # DISK PROJECTION. Both halves of this used to be wrong in the reassuring
 # direction. Measured in production on 2026-09-09: the console said "257 days
@@ -2085,3 +2095,26 @@ def test_health_check_interrupts_only_for_what_needs_a_person(monkeypatch, sessi
     tasks.operational_health_check()
 
     assert {event: calls[event] for event in expected} == expected
+
+
+def test_ops_picture_separates_unbackfilled_from_gappy_and_reports_rows_stored():
+    """A blended gate rate read "70% unusable" while TSE stocks passed 97%: the
+    failures were catalog crypto nobody backfills. And job-verified 51.7% read
+    as "half missing" with 99.8% of rows stored."""
+    from marketdata.admin_telemetry import _archive, _integrity_summary
+    from marketdata.models import ArchiveFetchState, SymbolIntegrity
+
+    SymbolIntegrity.objects.create(symbol="فولاد", source="tsetmc", passes_gate=True)
+    SymbolIntegrity.objects.create(symbol="خودرو", source="tsetmc", reason="low_coverage")
+    SymbolIntegrity.objects.create(symbol="$LAMBO", source="brs", reason="insufficient_backfill,stale")
+
+    by_source = _integrity_summary()["by_source"]
+    assert by_source["tsetmc"] == {"assessed": 2, "passing": 1, "not_backfilled": 0, "gappy": 1}
+    assert by_source["brs"] == {"assessed": 1, "passing": 0, "not_backfilled": 1, "gappy": 0}
+
+    ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED, symbol="فولاد",
+        expected_rows=1000, stored_rows=998, verified_complete=False,
+    )
+    row = next(c for c in _archive()["categories"] if c["endpoint"] == ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED)
+    assert (row["row_pct"], row["progress_pct"], row["retired"]) == (99.8, 0.0, False)

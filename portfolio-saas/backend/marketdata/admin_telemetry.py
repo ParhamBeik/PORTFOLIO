@@ -311,6 +311,10 @@ APPEND_ONLY_COUNT_KEYS = frozenset({
 })
 
 
+# Estimator wobble is a few percent; a drop past this is rows that were deleted.
+COUNT_RESET_DROP = 0.10
+
+
 def _clean_count_history(rows, keys):
     """Make the growth series say only true things.
 
@@ -334,10 +338,11 @@ def _clean_count_history(rows, keys):
        strictly closer to the truth than the raw estimate, so it is what we
        plot. Tables that CAN shrink are passed through untouched.
 
-    ponytail: a running max, not a proper estimator-error model. It is exact
-    at every new high (the common case on a growing table) and conservative in
-    between. If a warehouse table ever gains a retention policy, drop its key
-    from APPEND_ONLY_COUNT_KEYS or real deletions will be silently flattened.
+    3. **A large drop is a real deletion, not noise.** The duplicate purge
+       (marketdata 0005) removed ~3M candles and ~2M daily rows; a pure running
+       max held both series at the pre-purge high, so from then on every Ops
+       growth chart drew a flat line over a table that was still filling. Noise
+       is a few percent; anything past COUNT_RESET_DROP resets the baseline.
     """
     running = {}
     for row in rows:
@@ -348,7 +353,9 @@ def _clean_count_history(rows, keys):
                 continue
             value = int(value)
             if key in APPEND_ONLY_COUNT_KEYS:
-                value = max(value, running.get(key, 0))
+                high = running.get(key, 0)
+                if value >= high * (1 - COUNT_RESET_DROP):
+                    value = max(value, high)
                 running[key] = value
             counts[key] = value
         for key in keys:
@@ -620,8 +627,12 @@ def _archive():
             complete=Count("id", filter=Q(verified_complete=True)),
             failed=Count("id", filter=Q(consecutive_failures__gt=0)),
             missing=Sum("missing_rows"),
+            stored=Sum("stored_rows"),
+            expected=Sum("expected_rows"),
         )
     }
+    from .archive import _RETIRED_ARCHIVE_ENDPOINTS
+
     summary["categories"] = []
     for endpoint, label in ArchiveFetchState.Endpoint.choices:
         row = grouped.get(endpoint, {})
@@ -636,8 +647,43 @@ def _archive():
             "failed": row.get("failed", 0) or 0,
             "missing": row.get("missing", 0) or 0,
             "progress_pct": round(complete / total * 100, 1) if total else 0,
+            # "Do we have the data?" -- rows stored against rows the provider
+            # says exist. `progress_pct` answers a stricter question (re-verified
+            # since the last session) and read as "half missing" at 99.8% stored.
+            "stored_rows": row.get("stored", 0) or 0,
+            "expected_rows": row.get("expected", 0) or 0,
+            "row_pct": round((row.get("stored") or 0) / row["expected"] * 100, 1) if row.get("expected") else None,
+            # Filled by live capture, not backfill: a 0% job bar here is by design.
+            "retired": endpoint in _RETIRED_ARCHIVE_ENDPOINTS,
         })
     return summary
+
+
+def _integrity_summary():
+    """Gate pass/fail split by source and by why it fails.
+
+    One blended rate read as "70% of symbols are unusable" on 2026-10-12 when
+    TSE stocks passed 2,154 of 2,220: 5,084 of the failures were provider-catalog
+    crypto tokens no feature reads, failing only because nothing backfills them.
+    "Not backfilled" and "gappy data" need different fixes, so keep them apart.
+    """
+    integrity = SymbolIntegrity.objects.aggregate(
+        assessed=Count("id"),
+        passing=Count("id", filter=Q(passes_gate=True)),
+    )
+    integrity["failing"] = integrity["assessed"] - integrity["passing"]
+    by_source = {}
+    for source, passes, reason in SymbolIntegrity.objects.values_list("source", "passes_gate", "reason").iterator():
+        bucket = by_source.setdefault(source or "unknown", {"assessed": 0, "passing": 0, "not_backfilled": 0, "gappy": 0})
+        bucket["assessed"] += 1
+        if passes:
+            bucket["passing"] += 1
+        elif "insufficient_backfill" in (reason or ""):
+            bucket["not_backfilled"] += 1
+        else:
+            bucket["gappy"] += 1
+    integrity["by_source"] = by_source
+    return integrity
 
 
 def _tick_coverage():
@@ -1080,11 +1126,7 @@ def get_admin_telemetry_context():
     ]
 
     archive = _archive()
-    integrity = SymbolIntegrity.objects.aggregate(
-        assessed=Count("id"),
-        passing=Count("id", filter=Q(passes_gate=True)),
-    )
-    integrity["failing"] = integrity["assessed"] - integrity["passing"]
+    integrity = _integrity_summary()
     rejected = RejectedRecord.objects.filter(disposition="quarantined").aggregate(
         records=Count("id"), occurrences=Sum("occurrences")
     )
