@@ -66,7 +66,7 @@ def test_telegram_goes_to_bale_by_default_as_plain_text():
     url, body = post.call_args.args
     assert url == "https://tapi.bale.ai/bottok/sendMessage"
     assert body["chat_id"] == "42"
-    assert body["text"].startswith("[ev] host\n")
+    assert body["text"] == "🔴 Ev\nd"
     assert "parse_mode" not in body
 
 
@@ -167,3 +167,9 @@ def test_ops_check_alerts_from_env_file_not_cron_environment(tmp_path):
     assert [r["event"] for r in _Hook.received] == ["host-ops-check"]
     assert "celery_beat" in _Hook.received[0]["details"]["detail"]
     assert "LPUSH ops:recent_alerts" in docker_log.read_text()
+
+
+def test_ops_check_failures_read_as_one_bullet_each():
+    title, body = host_alert.format_text("host-ops-check", "disk usage 91%;service celery_beat is not running")
+    assert title == "Server check failed"
+    assert body == "• disk usage 91%\n• service celery_beat is not running"

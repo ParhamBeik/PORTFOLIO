@@ -553,11 +553,48 @@ def operational_health_check():
     if disk.get("alert"):
         alerts.append(("disk-projection", disk))
 
+    # A wallet that is dry while the session is open means live prices on it
+    # have stopped: the one quota condition worth waking someone for. Outside
+    # the session an empty wallet is archive having spent its share, by design.
+    from .market_state import OPEN, market_state
+    from .quota import LIVE, PLANS, effective_limit, remaining_requests
+
+    session_open = market_state() == OPEN
+    if session_open:
+        for quota in ApiRequestQuota.objects.filter(day=_quota_day(), plan__in=PLANS):
+            limit = effective_limit(quota.plan, quota)
+            if limit and remaining_requests(LIVE, quota.plan) == 0:
+                alerts.append(("quota-exhausted-early", {
+                    "plan": quota.plan, "used": quota.used, "limit": limit,
+                }))
+
+    # Interrupt a person only for what needs them within the hour; the rest is
+    # one line each in the next morning's summary (`send_alert_digest_task`).
+    def is_urgent(event, details):
+        if event == "stale-prices":
+            return session_open
+        if event == "disk-projection":
+            days = details.get("days_to_80pct")
+            return days is not None and days < settings.DISK_ALERT_URGENT_DAYS
+        return event == "quota-exhausted-early"
+
     # Keyed on the event alone: details drift every run, and a condition that is
     # still true is worth one reminder per ALERT_REPEAT_SECONDS, not one per run.
     for event, details in alerts:
-        notify(event, details, dedupe_seconds=settings.ALERT_REPEAT_SECONDS, dedupe_key=event)
+        notify(
+            event, details,
+            dedupe_seconds=settings.ALERT_REPEAT_SECONDS,
+            dedupe_key=event,
+            urgent=is_urgent(event, details),
+        )
     return {"alerts": [event for event, _details in alerts]}
+
+
+@shared_task(ignore_result=True)
+def send_alert_digest_task():
+    from config.observability import send_alert_digest
+
+    return send_alert_digest()
 
 
 @shared_task(queue="archive")

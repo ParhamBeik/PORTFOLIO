@@ -34,6 +34,21 @@ RECENT_ALERTS_KEY = "ops:recent_alerts"
 RECENT_ALERTS_MAX = 50
 REDIS_DB = "1"
 DEFAULT_API_BASE = "https://tapi.bale.ai"
+# Titles a person reads on a phone. Mirrors config.observability.ALERT_TEXT for
+# the events only the host raises; anything else falls back to its name.
+TITLES = {
+    "host-ops-check": "Server check failed",
+    "price-watchdog-restart": "Prices froze; workers restarted automatically",
+    "price-watchdog-restart-failed": "Prices froze; automatic restart FAILED",
+}
+
+
+def format_text(event, detail):
+    """(title, body). ops_check joins its failures with ';' -- one bullet each."""
+    title = TITLES.get(event, event.replace("-", " ").capitalize())
+    parts = [part.strip() for part in detail.split(";") if part.strip()]
+    body = "\n".join(f"• {part}" for part in parts) if len(parts) > 1 else detail
+    return title, body
 
 
 def read_env_file(path):
@@ -86,11 +101,11 @@ def send(config, event, details):
             print(f"host_alert: webhook failed for {event}: {type(exc).__name__}", file=sys.stderr)
     if token and chat_id:
         base = (config["ALERT_TELEGRAM_API_BASE"] or DEFAULT_API_BASE).rstrip("/")
-        body = json.dumps(details, sort_keys=True, ensure_ascii=False)
+        title, body = format_text(event, details.get("detail", ""))
         try:
             _post_json(
                 f"{base}/bot{token}/sendMessage",
-                {"chat_id": chat_id, "text": f"[{event}] host\n{body}"[:4096], "disable_web_page_preview": True},
+                {"chat_id": chat_id, "text": f"🔴 {title}\n{body}"[:4096], "disable_web_page_preview": True},
             )
             delivered = True
         except Exception as exc:
@@ -106,6 +121,9 @@ def record(compose_file, env_file, event, details, delivered, run=subprocess.run
             "event": event,
             "source": "host",
             "delivered": delivered,
+            "route": "now",
+            "title": format_text(event, details.get("detail", ""))[0],
+            "text": details.get("detail", "")[:300],
             "details": json.dumps(details, sort_keys=True, ensure_ascii=False)[:500],
         },
         ensure_ascii=False,

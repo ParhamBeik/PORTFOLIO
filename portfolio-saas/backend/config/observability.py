@@ -97,22 +97,79 @@ def _telegram_api_base():
     return (getattr(settings, "ALERT_TELEGRAM_API_BASE", "") or "https://tapi.bale.ai").rstrip("/")
 
 
-def _send_telegram(token, chat_id, event, safe_details):
-    # `text` rather than a parse_mode: alert payloads carry Persian symbol names
-    # and JSON punctuation, and Markdown/HTML parsing would make Telegram reject
-    # the message for an unbalanced `_` in a symbol -- an alert that fails to
-    # send because of the shape of its own contents is the worst failure mode
-    # available here.
-    body = json.dumps(safe_details, sort_keys=True, default=str, ensure_ascii=False)
+def _gb(value):
+    return f"{(value or 0) / 1e9:.1f} GB"
+
+
+def _num(value):
+    return f"{value:,}" if isinstance(value, int) else str(value)
+
+
+def _minutes(seconds):
+    if seconds is None:
+        return "ever (no price stored)"
+    minutes = int(seconds // 60)
+    return f"{minutes} min" if minutes < 120 else f"{minutes // 60} h {minutes % 60} min"
+
+
+def _causes(causes):
+    return ", ".join(f"{count} {cause.rstrip('.')}" for cause, count in (causes or {}).items())
+
+
+# One line a person can act on, per event. Raw details used to go out as a JSON
+# blob (`{"codal_bytes": 22064086717, ...}`), which nobody reads on a phone.
+# An event missing here still sends: title from its name, details as key: value.
+ALERT_TEXT = {
+    "stale-prices": ("Prices frozen", lambda d: f"No new price for {_minutes(d.get('age_seconds'))} while the market is open."),
+    "disk-projection": ("Disk filling up", lambda d: (
+        f"80% full in ~{d.get('days_to_80pct')} days. "
+        f"{_gb(d.get('filesystem_free_bytes'))} free of {_gb(d.get('filesystem_total_bytes'))}, "
+        f"growing {_gb(d.get('growth_bytes_per_day'))}/day.")),
+    "quota-exhausted-early": ("Quota ran out mid-session", lambda d: (
+        f"{d.get('plan')} wallet: {_num(d.get('used'))} of {_num(d.get('limit'))} used. "
+        "Live prices on it stop until Tehran midnight.")),
+    "queue-backlog": ("Task queues backing up", lambda d: " · ".join(f"{q} {_num(n)}" for q, n in d.items())),
+    "wedged-archive-states": ("Archive jobs stuck", lambda d: (
+        f"{_num(d.get('count'))} jobs keep failing: {_causes(d.get('causes'))}.")),
+    "stale-archive-progress": ("Archive stalled", lambda d: (
+        f"No progress in {_minutes(d.get('stale_seconds'))} with {_num(d.get('archive_capacity'))} requests of quota left.")),
+    "failed-integrity-assessments": ("Data-quality gate", lambda d: (
+        f"{_num(d.get('failed'))} of {_num(d.get('assessed'))} symbols fail ({round((d.get('rate') or 0) * 100)}%).")),
+    "elevated-workflow-failure-rate": ("Background jobs failing", lambda d: (
+        f"{_num(d.get('failed'))} of {_num(d.get('total'))} runs failed in the last hour ({round((d.get('rate') or 0) * 100)}%).")),
+    "quota-ledger-drift": ("Quota counters disagree", lambda d: (
+        f"{d.get('plan')}: {_num(d.get('local_attempts'))} requests counted, lanes add up to {_num(d.get('bucket_total'))}.")),
+    "quota-provider-variance-rising": ("Provider counts more than we do", lambda d: (
+        f"{d.get('plan')}: provider {_num(d.get('provider_used'))}, ours {_num(d.get('local_attempts'))} (gap {_num(d.get('variance'))}).")),
+}
+
+
+def format_alert(event, details):
+    """(title, one-line summary) for a person, never raises."""
+    title, render = ALERT_TEXT.get(event, (event.replace("-", " ").capitalize(), None))
+    try:
+        if render is not None:
+            return title, render(details or {})
+    except Exception:
+        logger.warning("could not format alert %s", event)
+    text = "; ".join(f"{k.replace('_', ' ')}: {v}" for k, v in (details or {}).items()) if isinstance(details, dict) else str(details)
+    return title, text
+
+
+def _send_text(token, chat_id, text):
+    # Plain text, no parse_mode: payloads carry Persian symbol names, and an
+    # unbalanced `_` under Markdown makes the bot API reject the whole message --
+    # an alert that fails because of its own contents is the worst failure here.
     requests.post(
         f"{_telegram_api_base()}/bot{token}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": f"[{event}] {get_request_id()}\n{body}"[:4096],
-            "disable_web_page_preview": True,
-        },
+        json={"chat_id": chat_id, "text": text[:4096], "disable_web_page_preview": True},
         timeout=5,
     ).raise_for_status()
+
+
+def _send_telegram(token, chat_id, event, safe_details):
+    title, text = format_alert(event, safe_details)
+    _send_text(token, chat_id, f"🔴 {title}\n{text}")
 
 
 # The console's "Recent alerts" list. A raw Redis list on the cache instance
@@ -130,7 +187,7 @@ def _alert_redis():
     return get_redis()
 
 
-def record_alert(event, safe_details, *, delivered, source="app"):
+def record_alert(event, safe_details, *, delivered, source="app", route="now"):
     """Keep one alert in the capped console list. Best-effort: never raises."""
     from django.utils import timezone
 
@@ -144,6 +201,9 @@ def record_alert(event, safe_details, *, delivered, source="app"):
                 "event": event,
                 "source": source,
                 "delivered": bool(delivered),
+                "route": route,
+                "title": format_alert(event, safe_details)[0],
+                "text": format_alert(event, safe_details)[1][:300],
                 "details": json.dumps(safe_details, sort_keys=True, default=str, ensure_ascii=False)[:500],
             },
             ensure_ascii=False,
@@ -175,8 +235,13 @@ def recent_alerts():
     return alerts
 
 
-def notify(event, details, *, dedupe_seconds=900, dedupe_key=None):
+def notify(event, details, *, dedupe_seconds=900, dedupe_key=None, urgent=True):
     """Raise one operator alert: always to stdout, plus every configured channel.
+
+    `urgent=False` sends nothing now: the alert joins the once-a-day summary
+    (`send_alert_digest`). Only something a person must act on within the hour
+    should interrupt them; everything else firing every 15 minutes is how 583
+    alerts in 72h trained everyone to ignore the channel.
 
     Dedupe keys on (event, details) unless `dedupe_key` is given. A standing
     condition whose details drift every run (disk days-to-80%, a wedged-state
@@ -205,6 +270,12 @@ def notify(event, details, *, dedupe_seconds=900, dedupe_key=None):
         reserved = cache.add(cache_key, True, timeout=dedupe_seconds)
     except Exception:
         reserved = True
+    if not urgent:
+        logger.warning("alert:%s digest=1 %s", event, payload)
+        queue_for_digest(event, safe_details)
+        if reserved:
+            record_alert(event, safe_details, delivered=False, route="digest")
+        return False
     if not (url or telegram):
         # On 2026-08-27 the archive was dead for 13h having raised
         # stale-archive-progress 49 times, and every line looked delivered --
@@ -250,4 +321,83 @@ def notify(event, details, *, dedupe_seconds=900, dedupe_key=None):
             logger.warning("could not release alert dedupe for %s", event)
     logger.warning("alert:%s undelivered=%d %s", event, 0 if delivered else 1, payload)
     record_alert(event, safe_details, delivered=delivered)
+    return delivered
+
+
+# Non-urgent alerts collect here until the daily summary. One hash field per
+# event, so a condition that fired 96 times yesterday is one line with a count.
+DIGEST_KEY = "ops:alert_digest"
+
+
+def queue_for_digest(event, safe_details):
+    """Best-effort: never raises."""
+    from django.utils import timezone
+
+    try:
+        client = _alert_redis()
+        if client is None:
+            return
+        now = timezone.now().isoformat()
+        previous = client.hget(DIGEST_KEY, event)
+        entry = json.loads(previous) if previous else {"count": 0, "first": now}
+        entry.update(count=entry["count"] + 1, last=now, details=safe_details)
+        client.hset(DIGEST_KEY, event, json.dumps(entry, default=str, ensure_ascii=False))
+    except Exception:
+        logger.warning("could not queue alert %s for the daily summary", event)
+
+
+def build_digest_text(entries):
+    """The one daily message. `entries` maps event -> {count, details}."""
+    lines = ["📋 Daily summary (nothing here needed you right away)"]
+    for event, entry in sorted(entries.items(), key=lambda item: -item[1].get("count", 0)):
+        title, text = format_alert(event, entry.get("details") or {})
+        count = entry.get("count", 1)
+        times = f" ×{count}" if count > 1 else ""
+        lines.append(f"\n• {title}{times}\n  {text}")
+    return "\n".join(lines)
+
+
+def send_alert_digest():
+    """Send and clear the summary. Returns True when something was delivered.
+
+    Cleared only after a successful send, so a failed day rolls into the next
+    one instead of disappearing.
+    """
+    try:
+        client = _alert_redis()
+        raw = {} if client is None else client.hgetall(DIGEST_KEY)
+    except Exception:
+        logger.warning("could not read the alert summary")
+        return False
+    entries = {}
+    for key, value in raw.items():
+        try:
+            entries[key.decode() if isinstance(key, bytes) else key] = json.loads(value)
+        except (TypeError, ValueError):
+            continue
+    if not entries:
+        return False
+    text = build_digest_text(entries)
+    url = getattr(settings, "ALERT_WEBHOOK_URL", "")
+    telegram = _telegram_target()
+    delivered = False
+    if url:
+        try:
+            requests.post(url, json={"event": "daily-digest", "details": entries}, timeout=5).raise_for_status()
+            delivered = True
+        except Exception:
+            logger.exception("Alert webhook failed for daily-digest")
+    if telegram:
+        try:
+            _send_text(*telegram, text)
+            delivered = True
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            logger.error("Alert telegram failed for daily-digest status=%s err=%s", status, type(exc).__name__)
+    logger.warning("alert:daily-digest undelivered=%d events=%d", 0 if delivered else 1, len(entries))
+    if delivered:
+        try:
+            client.delete(DIGEST_KEY)
+        except Exception:
+            logger.warning("could not clear the alert summary")
     return delivered

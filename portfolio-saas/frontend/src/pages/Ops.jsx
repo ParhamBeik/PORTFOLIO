@@ -2105,22 +2105,27 @@ function RecentAlertsCard({ alerts }) {
   return (
     <Card
       title="Recent alerts"
-      subtitle={`Last ${rows.length || 0} sent by the app and the VPS checks, newest first.`}
+      subtitle="Red = sent right away. Grey = waits for the 08:00 daily summary."
       testId="ops-overview-alerts"
     >
       {rows.length ? (
         <ul className="divide-y divide-border text-sm">
-          {shown.map((row, i) => (
-            <li key={`${row.at}-${row.event}-${i}`} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2" data-testid="ops-overview-alert-row">
-              <span className="tabular text-xs text-muted">{row.at ? dateTime(row.at) : "—"}</span>
-              <span className="font-mono text-xs">{row.event}</span>
-              <Badge variant="neutral">{row.source === "host" ? "VPS" : "App"}</Badge>
-              <Badge variant={row.delivered ? "good" : "critical"}>{row.delivered ? "Sent" : "Not sent"}</Badge>
-              {row.details && row.details !== "{}" && (
-                <span className="w-full truncate font-mono text-xs text-muted" title={row.details}>{row.details}</span>
-              )}
-            </li>
-          ))}
+          {shown.map((row, i) => {
+            const digest = row.route === "digest";
+            const variant = digest ? "neutral" : row.delivered ? "critical" : "warn";
+            const label = digest ? "Summary" : row.delivered ? "Sent" : "Not sent";
+            return (
+              <li key={`${row.at}-${row.event}-${i}`} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2" data-testid="ops-overview-alert-row">
+                <Badge variant={variant}>{label}</Badge>
+                <span className="font-medium">{row.title || row.event}</span>
+                <span className="tabular text-xs text-muted">{row.at ? dateTime(row.at) : "—"}</span>
+                {row.source === "host" && <Badge variant="neutral">VPS</Badge>}
+                {(row.text || (row.details && row.details !== "{}")) && (
+                  <span className="w-full text-xs text-muted" title={row.details}>{row.text || row.details}</span>
+                )}
+              </li>
+            );
+          })}
         </ul>
       ) : (
         <p className="text-sm text-muted">No alerts recorded. Alerts appear here as they fire.</p>

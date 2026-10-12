@@ -914,8 +914,7 @@ def test_alert_telegram_sends_plain_text_and_does_not_parse_markup():
     assert payload["chat_id"] == "12345"
     assert "parse_mode" not in payload
     assert payload["disable_web_page_preview"] is True
-    assert payload["text"].startswith("[telegram-alert]")
-    assert "FOOLAD_x" in payload["text"]
+    assert payload["text"] == "🔴 Telegram alert\nsymbol: FOOLAD_x"
 
 
 @override_settings(
@@ -1906,6 +1905,18 @@ class _FakeRedis:
     def lrange(self, key, start, stop):
         return self.lists.get(key, [])[start:stop + 1]
 
+    def hget(self, key, field):
+        return self.lists.get(key, {}).get(field)
+
+    def hset(self, key, field, value):
+        self.lists.setdefault(key, {})[field] = value
+
+    def hgetall(self, key):
+        return dict(self.lists.get(key, {}))
+
+    def delete(self, key):
+        self.lists.pop(key, None)
+
 
 @pytest.fixture
 def alert_redis():
@@ -2006,3 +2017,71 @@ def test_unconfigured_channel_still_logs_every_time_but_lists_once(alert_redis, 
             notify("wedged-archive-states", {"n": n}, dedupe_seconds=600, dedupe_key="wedged-archive-states")
     assert sum("undelivered=1" in r.getMessage() for r in caplog.records) == 3
     assert len(recent_alerts()) == 1
+
+
+def test_disk_alert_reads_like_a_sentence():
+    """It used to arrive as `{"codal_bytes": 22064086717, ...}` on a phone."""
+    from config.observability import format_alert
+
+    title, text = format_alert("disk-projection", {
+        "days_to_80pct": 20.7, "filesystem_free_bytes": 32_221_716_480,
+        "filesystem_total_bytes": 105_467_994_112, "growth_bytes_per_day": 745_390_167,
+    })
+    assert title == "Disk filling up"
+    assert text == "80% full in ~20.7 days. 32.2 GB free of 105.5 GB, growing 0.7 GB/day."
+
+
+@override_settings(ALERT_WEBHOOK_URL="", ALERT_TELEGRAM_BOT_TOKEN="tok", ALERT_TELEGRAM_CHAT_ID="42")
+def test_non_urgent_alerts_wait_for_one_daily_summary(alert_redis):
+    from config.observability import notify, recent_alerts, send_alert_digest
+
+    cache.clear()
+    with mock.patch("config.observability.requests.post") as post:
+        for n in range(3):
+            notify("wedged-archive-states", {"count": 90 + n, "causes": {"MarketDataFetchError": 51}},
+                   dedupe_seconds=600, dedupe_key="wedged-archive-states", urgent=False)
+        notify("queue-backlog", {"live": 0, "archive": 1200}, urgent=False)
+        assert post.call_count == 0  # nothing interrupted anyone
+
+        assert send_alert_digest() is True
+        assert send_alert_digest() is False  # cleared once delivered
+
+    assert post.call_count == 1
+    text = post.call_args.kwargs["json"]["text"]
+    assert text.startswith("📋 Daily summary")
+    assert "• Archive jobs stuck ×3\n  92 jobs keep failing: 51 MarketDataFetchError." in text
+    assert "• Task queues backing up\n  live 0 · archive 1,200" in text
+    assert [a["route"] for a in recent_alerts()] == ["digest", "digest"]
+
+
+@override_settings(ALERT_WEBHOOK_URL="", ALERT_TELEGRAM_BOT_TOKEN="tok", ALERT_TELEGRAM_CHAT_ID="42")
+def test_a_failed_summary_is_kept_for_the_next_day(alert_redis):
+    from config.observability import DIGEST_KEY, notify, send_alert_digest
+
+    cache.clear()
+    notify("queue-backlog", {"archive": 1200}, urgent=False)
+    with mock.patch("config.observability.requests.post", side_effect=OSError("down")):
+        assert send_alert_digest() is False
+    assert alert_redis.hgetall(DIGEST_KEY)
+
+
+@pytest.mark.parametrize(
+    "session_open, days, expected",
+    [
+        (True, 20.0, {"stale-prices": True, "disk-projection": False}),
+        (False, 10.0, {"stale-prices": False, "disk-projection": True}),
+    ],
+)
+def test_health_check_interrupts_only_for_what_needs_a_person(monkeypatch, session_open, days, expected):
+    """Frozen prices matter while the market trades; disk matters inside 14 days."""
+    from marketdata import admin_telemetry, market_state, tasks
+
+    monkeypatch.setattr(market_state, "market_state", lambda: market_state.OPEN if session_open else market_state.OVERNIGHT)
+    monkeypatch.setattr(admin_telemetry, "project_disk", lambda usage: {"alert": True, "days_to_80pct": days})
+    calls = {}
+    monkeypatch.setattr("config.observability.notify", lambda event, details, **kw: calls.__setitem__(event, kw["urgent"]))
+    cache.clear()
+
+    tasks.operational_health_check()
+
+    assert {event: calls[event] for event in expected} == expected
