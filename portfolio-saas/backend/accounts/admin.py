@@ -3,6 +3,8 @@ from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from django.contrib.auth.forms import UserChangeForm
 from django.contrib.auth.models import Group
 from django.core.exceptions import ValidationError
+from django.http import HttpResponse
+from rest_framework.throttling import SimpleRateThrottle
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 
 from .models import User
@@ -137,3 +139,43 @@ for model, model_admin in (
     if admin.site.is_registered(model):
         admin.site.unregister(model)
     admin.site.register(model, model_admin)
+
+
+class AdminLoginThrottle(SimpleRateThrottle):
+    """Per-client-IP bucket for Django admin's sign-in form.
+
+    DRF throttles only run inside DRF views, and `/admin/login/` is plain
+    Django, so the `login` bucket that guards the API never covered the one
+    form that signs in an operator. Reuses DRF's rate parsing and client-IP
+    logic (`NUM_PROXIES`) so both forms agree on who the client is.
+    """
+
+    scope = "admin_login"
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
+
+
+_admin_login = admin.site.login
+
+
+def throttled_admin_login(request, extra_context=None):
+    """Count every submitted password; let the GET that draws the form through.
+
+    Assigned onto the site before `config/urls.py` reads `admin.site.urls`, so
+    the URL resolver binds this rather than the original.
+    """
+    if request.method == "POST":
+        throttle = AdminLoginThrottle()
+        if not throttle.allow_request(request, None):
+            response = HttpResponse(
+                "Too many sign-in attempts. Try again later.",
+                status=429,
+                content_type="text/plain",
+            )
+            response["Retry-After"] = str(int(throttle.wait() or 60))
+            return response
+    return _admin_login(request, extra_context)
+
+
+admin.site.login = throttled_admin_login

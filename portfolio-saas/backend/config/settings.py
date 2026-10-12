@@ -248,9 +248,24 @@ REST_FRAMEWORK = {
         # using the app -- and a 429 here reads as "signed out" in the client.
         # Guessing a refresh token is not a threat this rate needs to slow.
         "session": os.getenv("SESSION_THROTTLE", "300/min"),
+        # Django admin's own sign-in form (`accounts/admin.py`). It is not a DRF
+        # view, so none of the buckets above ever applied to it, and it guards
+        # the most powerful accounts there are. Per client IP; a person who
+        # mistypes a few times is nowhere near it.
+        "admin_login": os.getenv("ADMIN_LOGIN_THROTTLE", "10/hour"),
     },
     # M5: render Decimal as a string so large Toman values stay exact on the wire.
     "DEFAULT_RENDERER_CLASSES": ("config.api.DecimalStringJSONRenderer",),
+    # Which X-Forwarded-For entry is the client: count hops from the right, so
+    # only entries our own proxies wrote are read. Production is two -- vps-edge
+    # (Caddy, the only published port) then this app's nginx. Caddy trusts no
+    # upstream and overwrites whatever the client sent, so a spoofed header is
+    # already harmless there (live probe 2026-10-12: 25 logins with 25 made-up
+    # headers, 429 from the 21st). Unset, DRF would key every bucket on the
+    # whole header, and any path that skips Caddy's rewrite -- local stack,
+    # a future `trusted_proxies` -- hands a bot a fresh bucket per request.
+    # A request with no header falls back to REMOTE_ADDR.
+    "NUM_PROXIES": int(os.getenv("TRUSTED_PROXY_COUNT", "2")),
 }
 
 # Companion to the `analytics` throttle above: that bounds requests per minute,
@@ -276,7 +291,7 @@ SIMPLE_JWT = {
     "USER_ID_FIELD": "id",
     "USER_ID_CLAIM": "user_id",
     # Rotate refresh tokens on use and blacklist the old one, so a stolen refresh
-    # token has a single-use window instead of being valid for the full 7 days.
+    # token has a single-use window instead of being valid for its whole lifetime.
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
     "CHECK_REVOKE_TOKEN": True,

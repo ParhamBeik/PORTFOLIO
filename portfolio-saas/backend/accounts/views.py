@@ -33,7 +33,19 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from config.mail import mail_is_deliverable
-from portfolio.models import Account, Holding, ImportBatch, LedgerEntry
+from portfolio.models import (
+    Account,
+    Asset,
+    CorporateActionDismissal,
+    Holding,
+    ImportBatch,
+    LedgerEntry,
+    Liability,
+    Snapshot,
+    WatchlistItem,
+)
+from portfolio.optimization_models import OptimizationSnapshot
+from research.models import ResearchRun
 
 from .models import User
 from .serializers import (
@@ -341,6 +353,10 @@ class RegisterView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
         access, refresh = _tokens(user)
+        return self.registered(request, user, access, refresh)
+
+    def registered(self, request, user, access, refresh):
+        """The answer once a member exists. Web keeps the refresh in a cookie."""
         response = Response(
             {
                 "user": UserSerializer(user).data,
@@ -353,13 +369,7 @@ class RegisterView(generics.CreateAPIView):
 
 
 class MobileRegisterView(MobileOriginMixin, RegisterView):
-    def create(self, request, *args, **kwargs):
-        if not settings.REGISTRATION_OPEN:
-            return Response({"detail": "New memberships are currently closed."}, status=403)
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        user = serializer.save()
-        access, refresh = _tokens(user)
+    def registered(self, request, user, access, refresh):
         return Response({
             "user": UserSerializer(user).data,
             "access": access,
@@ -484,7 +494,7 @@ class PasswordResetRequestView(APIView):
         serializer = PasswordResetRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         email = User.objects.normalize_email(serializer.validated_data["email"])
-        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        user = User.objects.filter(email=email, is_active=True).first()
         if not mail_is_deliverable():
             # No relay, so there is nothing to attempt. The answer is unchanged
             # -- it must stay identical for every address either way, or this
@@ -536,13 +546,11 @@ class AdminPasswordResetLinkView(APIView):
     permission_classes = [IsRoleAdmin]
 
     def post(self, request):
-        if request.user.role != User.Role.ADMIN:
-            return Response({"detail": "Admin access required."}, status=403)
         email = request.data.get("email") if isinstance(request.data, dict) else None
         if not isinstance(email, str) or not email.strip():
             return Response({"detail": "email is required."}, status=400)
         normalized = User.objects.normalize_email(email.strip())
-        user = User.objects.filter(email__iexact=normalized, is_active=True).first()
+        user = User.objects.filter(email=normalized, is_active=True).first()
         if user is None:
             # No enumeration concern here -- the caller is already staff and can
             # list every user -- so this says plainly what happened rather than
@@ -603,6 +611,25 @@ def _csv_bytes(headers, rows) -> bytes:
     return output.getvalue().encode()
 
 
+def _model_csv(queryset) -> bytes:
+    """Every stored column of a model, so a field added later is exported too.
+
+    The hand-listed files above predate this and keep their columns; the tables
+    added here were simply missing from the export, and listing their columns
+    by hand is how they would drift out of it again. JSON columns are written
+    as JSON text rather than Python reprs.
+    """
+    columns = [field.attname for field in queryset.model._meta.concrete_fields]
+
+    def cell(value):
+        return json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else value
+
+    return _csv_bytes(
+        columns,
+        ([cell(value) for value in row] for row in queryset.order_by("pk").values_list(*columns)),
+    )
+
+
 class ExportView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -646,6 +673,20 @@ class ExportView(APIView):
                 ImportBatch.objects.filter(account_id__in=account_ids).values_list(
                     "id", "account_id", "file_hash", "row_count", "created_at"
                 ),
+            ),
+            # Everything else that belongs to this member. Properties are private
+            # catalog rows: without them holdings.csv names an asset_id the
+            # member has no other way to read.
+            "liabilities.csv": _model_csv(Liability.objects.filter(account_id__in=account_ids)),
+            "snapshots.csv": _model_csv(Snapshot.objects.filter(user=user)),
+            "watchlist.csv": _model_csv(WatchlistItem.objects.filter(user=user)),
+            "properties.csv": _model_csv(Asset.objects.filter(owner=user)),
+            "research_runs.csv": _model_csv(ResearchRun.objects.filter(user=user)),
+            "corporate_action_dismissals.csv": _model_csv(
+                CorporateActionDismissal.objects.filter(account_id__in=account_ids)
+            ),
+            "optimization_snapshots.csv": _model_csv(
+                OptimizationSnapshot.objects.filter(account_id__in=account_ids)
             ),
         }
         manifest = {
