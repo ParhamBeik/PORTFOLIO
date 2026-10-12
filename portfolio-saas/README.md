@@ -51,9 +51,39 @@ Both linters run in CI and are correctness-only — no style rules. Their config
 (`backend/ruff.toml`, `frontend/eslint.config.js`) explain which rules are on
 and, more usefully, which are deliberately off.
 
-iOS and Android builds share this frontend through Capacitor. See
-[`docs/MOBILE.md`](docs/MOBILE.md) for setup, private distribution, offline
-behavior, and the release gate.
+## Mobile app
+
+iOS and Android wrap this same frontend with Capacitor (package id
+`ir.parhambm.holdings`). Release builds call `https://portfolio.parhambm.ir`;
+set `VITE_API_URL` at build time only to target a staging HTTPS server.
+
+```bash
+cd frontend && npm ci
+npm run build:mobile     # Vite build + sync into ios/ and android/ — rerun after every frontend change
+npm run ios              # opens Xcode: set the signing team, then build
+npm run android          # opens Android Studio
+```
+
+- Mobile sign-in uses `/api/auth/mobile/*`: the refresh token lives in Keychain /
+  Keystore secure storage, the access token only in memory.
+- Offline, the app shows a read-only snapshot (totals, holdings, 30-day chart),
+  encrypted and unlocked by device PIN/biometrics. Editing needs a connection.
+- Signing keys, keystores and provisioning profiles never go in Git. Release:
+  Xcode Archive → TestFlight; `./gradlew :app:bundleRelease` → Play internal track.
+- CI's `mobile` job builds the Android debug APK on every PR but does not gate deploys.
+
+## Docs
+
+Only living docs are kept; finished plans and dated audits live in git history.
+
+| File | Read it when |
+|---|---|
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | you need the layering and where code belongs |
+| [`docs/REFERENCE.md`](docs/REFERENCE.md) | touching prices/units, warehouse safeguards, latency, operator commands |
+| [`docs/STORAGE-POLICY.md`](docs/STORAGE-POLICY.md) | changing anything that stores data |
+| [`docs/QUOTA.md`](docs/QUOTA.md) | touching BrsApi calls or quota |
+| [`docs/DATA-SOURCES.md`](docs/DATA-SOURCES.md) | adding or changing a price origin |
+| [`docs/CODAL-DIRECT-MIGRATION.md`](docs/CODAL-DIRECT-MIGRATION.md) | working on Codal (plan in progress; delete once phase 2 ships) |
 
 ## Layout
 
