@@ -870,6 +870,31 @@ export function CountTrend({ data, height = 180, label = "Count over time", colo
   return <EChart option={option} height={height} label={label} />;
 }
 
+/** Tiny per-day bars with no axes -- "is this still moving?" at a glance.
+ *  A null day (not measured) draws no bar rather than a zero one. */
+export function SparkBars({ data, height = 44, label = "Per day", color = "var(--c-s1)", testId }) {
+  const t = useChartTokens();
+  const option = useMemo(() => {
+    if (!t) return null;
+    const c = chrome(t);
+    const hex = t.resolve(color);
+    return {
+      ...c,
+      grid: { left: 0, right: 0, top: 2, bottom: 0 },
+      tooltip: {
+        trigger: "axis",
+        ...c.tooltipBase,
+        formatter: (p) => header(date(p[0].axisValue), t) + tipRows(p, t, (v) => numFmt(v)),
+      },
+      xAxis: { type: "category", data: data.map((d) => d.x), show: false },
+      yAxis: { type: "value", show: false, min: 0 },
+      series: [{ type: "bar", name: label, data: data.map((d) => d.y), itemStyle: { color: hex, borderRadius: 1 }, barCategoryGap: "20%" }],
+      animation: false,
+    };
+  }, [data, t, color, label]);
+  return <EChart option={option} height={height} label={label} testId={testId} />;
+}
+
 function numFmt(v) {
   // Same `Number(null) === 0` trap as `extent`: without this the tooltip on an
   // unmeasured hour reads "0" instead of "not measured".

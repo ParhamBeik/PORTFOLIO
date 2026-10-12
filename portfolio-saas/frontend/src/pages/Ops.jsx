@@ -14,7 +14,7 @@ import {
   adminUsers,
   adminWorkflows,
 } from "../api.js";
-import { CountTrend, Donut, StackedStatusBar } from "../components/charts.jsx";
+import { CountTrend, Donut, SparkBars, StackedStatusBar } from "../components/charts.jsx";
 import {
   Badge,
   Button,
@@ -571,8 +571,6 @@ function LiveCoveragePanel({ coverage }) {
 
 function WarehouseCoveragePanel({ warehouse }) {
   if (!warehouse) return null;
-  const labels = warehouse.status_labels || {};
-  const donut = totalsToDonut(warehouse.counts, labels);
   const barData = (warehouse.by_endpoint || [])
     .filter((row) => row.total > 0)
     .map((row) => ({
@@ -593,64 +591,39 @@ function WarehouseCoveragePanel({ warehouse }) {
     <div className="space-y-4" data-testid="ops-warehouse">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatTile
-          label="Holding every row"
-          value={`${warehouse.healthy_pct ?? 0}%`}
-          sub={`${num(warehouse.counts?.complete)} verified · ${num(warehouse.counts?.refresh_due)} refresh due`}
-          valueTone={(warehouse.healthy_pct ?? 0) >= 90 ? "good" : "warn"}
+          label="Rows stored"
+          value={`${warehouse.row_fill_pct ?? 0}%`}
+          sub={`${num(warehouse.missing_rows)} missing`}
+          valueTone={(warehouse.row_fill_pct ?? 0) >= 99 ? "good" : "warn"}
+          testId="ops-warehouse-rows"
         />
         <StatTile
-          label="Rows missing"
+          label="Jobs short of rows"
           value={num(warehouse.counts?.partial)}
-          sub={`${warehouse.partial_pct || 0}% of jobs · ${num(warehouse.missing_rows)} rows`}
           valueTone={(warehouse.counts?.partial || 0) > 0 ? "warn" : "good"}
         />
         <StatTile
-          label="Failing"
+          label="Jobs failing"
           value={num(warehouse.counts?.failed)}
-          sub={`${warehouse.failed_pct || 0}% consecutive failures`}
           valueTone={(warehouse.counts?.failed || 0) > 0 ? "critical" : "good"}
         />
         <StatTile
           label="No payload yet"
           value={num((warehouse.counts?.awaiting_data || 0) + (warehouse.counts?.not_tried || 0))}
-          sub={`${num(warehouse.counts?.awaiting_data)} attempted · ${num(warehouse.counts?.not_tried)} never tried`}
         />
       </div>
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5" data-testid="ops-warehouse-census">
         <StatTile
           label="Symbols fetched"
           value={num(census.fetched)}
-          sub={`${census.fetched_pct ?? 0}% of ${num(census.symbols_total)} symbols`}
+          sub={`${census.fetched_pct ?? 0}% of ${num(census.symbols_total)}`}
           valueTone={(census.fetched_pct ?? 0) >= 90 ? "good" : "warn"}
           testId="ops-warehouse-census-fetched"
         />
-        <StatTile
-          label="Never fetched"
-          value={num(census.never_fetched)}
-          sub="No archive job has ever been attempted"
-          valueTone={(census.never_fetched || 0) > 0 ? "warn" : "good"}
-          testId="ops-warehouse-census-never"
-        />
-        <StatTile
-          label="Attempted, nothing landed"
-          value={num(census.attempted_never_landed)}
-          sub="Tried at least once, still empty"
-          valueTone={(census.attempted_never_landed || 0) > 0 ? "warn" : "good"}
-          testId="ops-warehouse-census-empty"
-        />
-        <StatTile
-          label="Unfetchable"
-          value={num(census.unfetchable)}
-          sub="Every endpoint given up on"
-          valueTone={(census.unfetchable || 0) > 0 ? "warn" : "good"}
-          testId="ops-warehouse-census-unfetchable"
-        />
-        <StatTile
-          label="Partly unfetchable"
-          value={num(census.partially_unfetchable)}
-          sub="Some endpoints given up, others still live"
-          testId="ops-warehouse-census-partial"
-        />
+        <StatTile label="Never fetched" value={num(census.never_fetched)} valueTone={(census.never_fetched || 0) > 0 ? "warn" : "good"} testId="ops-warehouse-census-never" />
+        <StatTile label="Tried, still empty" value={num(census.attempted_never_landed)} valueTone={(census.attempted_never_landed || 0) > 0 ? "warn" : "good"} testId="ops-warehouse-census-empty" />
+        <StatTile label="Given up" value={num(census.unfetchable)} valueTone={(census.unfetchable || 0) > 0 ? "warn" : "good"} testId="ops-warehouse-census-unfetchable" />
+        <StatTile label="Partly given up" value={num(census.partially_unfetchable)} testId="ops-warehouse-census-partial" />
       </div>
       {/* The refresh queue's own health. A completed job is deliberately
           re-armed so it picks up newly printed sessions, so the question that
@@ -658,7 +631,7 @@ function WarehouseCoveragePanel({ warehouse }) {
           furthest-behind symbol". */}
       <Card
         title="Refresh backlog"
-        subtitle="Days since each job last landed a payload — the order the re-fetch queue drains in."
+        info="Days since each job last landed a payload — the order the re-fetch queue drains in."
         testId="ops-warehouse-backlog"
       >
         <p className="text-sm">
@@ -675,19 +648,8 @@ function WarehouseCoveragePanel({ warehouse }) {
           </ul>
         )}
       </Card>
-      <Card title="Row fill (honest)" subtitle="Per-symbol historical backfill. Commodities, crypto, index, and options live on the Live pipeline tab." testId="ops-warehouse-rows">
-        <p className="text-sm">
-          {num(warehouse.stored_rows)} stored / {num(warehouse.expected_rows)} expected ({warehouse.row_fill_pct ?? 0}%)
-          · {num(warehouse.missing_rows)} missing · {num(warehouse.known_gap_rows)} known gaps
-        </p>
-      </Card>
-      {donut.length > 0 && (
-        <Card title="Job lifecycle" subtitle="Per symbol×endpoint ArchiveFetchState — validated from attempt timestamps and failure counters." testId="ops-warehouse-donut">
-          <Donut data={donut} valueFormat={(v) => String(v)} />
-        </Card>
-      )}
       {barData.length > 0 && (
-        <Card title="By endpoint" subtitle="Stacked job counts — not a smoothed progress percentage." testId="ops-completeness">
+        <Card title="Jobs by data type" testId="ops-completeness">
           <StackedStatusBar data={barData} series={WAREHOUSE_SERIES} label="Archive jobs by endpoint and status" testId="ops-warehouse-stack" />
         </Card>
       )}
@@ -819,7 +781,7 @@ function TablesPanel({ overview }) {
           </Card>
         )}
       </div>
-      <Card title="Complete model inventory" subtitle="Row counts are PostgreSQL estimates; a dash means not measured. Token secrets are never shown here." testId="ops-tables-inventory">
+      <Card title="All tables" subtitle="Row counts are PostgreSQL estimates; a dash means not measured. Token secrets are never shown here." testId="ops-tables-inventory">
         <Table
           rows={inventory}
           rowKey={(row) => row.admin_path}
@@ -1119,7 +1081,7 @@ function JobsHealthPanel({
     <div className="space-y-4" data-testid="ops-jobs-health-panel">
       <Card
         title="Process health"
-        subtitle="Workflow runs, failure signatures, and archive backfill jobs in one place."
+        info="Workflow runs, failure signatures, and archive backfill jobs in one place."
         testId="ops-jobs-health-summary"
         actions={<Badge variant={status.tone === "good" ? "good" : status.tone}>{status.label}</Badge>}
       >
@@ -2016,7 +1978,7 @@ function AttentionPanel({ liveHeld, warehouse, onNavigate }) {
         : "Archive data types with failed fetches or incomplete historical backfill."}
       testId="ops-overview-attention"
       actions={(
-        <Button variant="ghost" className="text-xs" onClick={() => onNavigate(view === "live" ? "live" : "warehouse")}>
+        <Button variant="ghost" className="text-xs" onClick={() => onNavigate(view === "live" ? "jobs" : "data")}>
           Details →
         </Button>
       )}
@@ -2105,7 +2067,7 @@ function RecentAlertsCard({ alerts }) {
   return (
     <Card
       title="Recent alerts"
-      subtitle="Red = sent right away. Grey = waits for the 08:00 daily summary."
+      info="Red = sent right away. Grey = waits for the 08:00 daily summary."
       testId="ops-overview-alerts"
     >
       {rows.length ? (
@@ -2139,160 +2101,236 @@ function RecentAlertsCard({ alerts }) {
   );
 }
 
-function OverviewPanel({ overview, tickSeries, depths, onNavigate, user }) {
+function compact(n) {
+  if (n == null) return "—";
+  const v = Number(n);
+  if (Math.abs(v) >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+  if (Math.abs(v) >= 1e3) return `${(v / 1e3).toFixed(1)}k`;
+  return String(v);
+}
+
+const LIGHT_DOT = {
+  good: "bg-[var(--c-good)]",
+  warn: "bg-[var(--c-warn)]",
+  critical: "bg-[var(--c-critical)]",
+  neutral: "bg-muted",
+};
+
+/** One glance: is anything on fire right now? */
+function HealthLights({ overview, depths }) {
+  const days = overview.disk?.days_to_80pct;
+  const queued = Object.values(depths || {}).reduce((sum, v) => sum + Number(v || 0), 0);
+  const remainingLive = overview.quota?.remaining_live;
+  const lights = [
+    { key: "prices", label: "Prices", value: formatAge(overview.price_feed?.age_seconds),
+      tone: overview.price_feed?.status === "fresh" ? "good" : "critical" },
+    { key: "workers", label: "Workers", value: `${num(overview.workers?.summary?.online)} online`,
+      tone: overview.workers?.status === "healthy" ? "good" : "critical" },
+    { key: "queues", label: "Queued", value: num(queued),
+      tone: overview.queues?.status === "healthy" ? "good" : "warn" },
+    { key: "disk", label: "Disk", value: days == null ? "—" : `${days}d to 80%`,
+      tone: days == null ? "neutral" : days < 14 ? "critical" : days < 30 ? "warn" : "good" },
+    { key: "quota", label: "Quota", value: `${num(remainingLive)} left`,
+      tone: remainingLive == null ? "neutral" : remainingLive > 0 ? "good" : "critical" },
+    { key: "mail", label: "Mail", value: overview.outbound_mail?.ok ? "on" : "off",
+      tone: overview.outbound_mail?.ok ? "good" : "warn" },
+  ];
+  return (
+    <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6" data-testid="ops-health-lights">
+      {lights.map((l) => (
+        <li key={l.key} className="flex items-center gap-2 rounded-lg border border-border bg-panel px-3 py-2" data-testid={`ops-light-${l.key}`}>
+          <span aria-hidden="true" className={`h-2.5 w-2.5 shrink-0 rounded-full ${LIGHT_DOT[l.tone]}`} />
+          <span className="text-sm text-muted">{l.label}</span>
+          <span className="ml-auto text-sm font-medium tabular">{l.value}</span>
+          <span className="sr-only">{l.tone === "good" ? "healthy" : l.tone === "neutral" ? "unknown" : "needs attention"}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function rowTone(pct) {
+  if (pct == null) return "neutral";
+  if (pct >= 99) return "good";
+  if (pct >= 90) return "warn";
+  return "critical";
+}
+
+/** "Do we have the data?" -- rows stored vs rows the provider says exist. */
+function VerifiedDataCard({ archive, warehouse }) {
+  const rows = (archive?.categories || [])
+    .filter((c) => (c.expected_rows || 0) > 0)
+    .sort((a, b) => (b.row_pct ?? 0) - (a.row_pct ?? 0));
+  return (
+    <Card
+      title="Data stored"
+      info="Bar: rows we hold out of rows the provider has. Small text: jobs re-checked since the last session."
+      actions={<span className="text-sm font-medium tabular">{warehouse?.row_fill_pct ?? "—"}%</span>}
+      testId="ops-picture-verified"
+    >
+      <div className="space-y-3">
+        {rows.map((c) => (
+          <InfraMeter
+            key={c.endpoint}
+            label={c.retired ? `${c.label} · live capture` : c.label}
+            valueLabel={`${c.row_pct ?? 0}%`}
+            pct={Math.round(c.row_pct ?? 0)}
+            tone={rowTone(c.row_pct)}
+            sub={`${compact(c.stored_rows)} / ${compact(c.expected_rows)} rows · ${c.progress_pct}% re-checked`}
+            testId={`ops-verified-${c.endpoint}`}
+          />
+        ))}
+        {!rows.length && <p className="text-sm text-muted">No archive jobs yet.</p>}
+      </div>
+    </Card>
+  );
+}
+
+const INGEST_KEYS = [
+  ["stock_transaction_ticks", "Trade ticks"],
+  ["stock_history_rows", "Stock daily"],
+  ["candles", "Candles"],
+  ["gold_currency_rows", "Gold & FX"],
+  ["announcements", "Codal filings"],
+  ["shareholders", "Shareholders"],
+];
+
+/** Rows added per day, from the 8-hourly count samples. A day with no sample
+ *  stays a null slot, and a delta is taken only between ADJACENT measured days:
+ *  bridging a collector outage would pile several days of growth onto one bar
+ *  and let "last 7 days" span more than seven days. */
+export function dailyAdds(history, key, days = 30) {
+  const lastByDay = new Map();
+  for (const row of history || []) {
+    const v = row.counts?.[key];
+    if (v == null || !row.captured_at) continue;
+    lastByDay.set(row.captured_at.slice(0, 10), Number(v));
+  }
+  const measured = [...lastByDay.keys()].sort();
+  if (measured.length < 2) return [];
+  const out = [];
+  const end = new Date(`${measured[measured.length - 1]}T00:00:00Z`);
+  for (let d = new Date(`${measured[0]}T00:00:00Z`); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+    if (d.getTime() === new Date(`${measured[0]}T00:00:00Z`).getTime()) continue;
+    const day = d.toISOString().slice(0, 10);
+    const prev = new Date(d);
+    prev.setUTCDate(prev.getUTCDate() - 1);
+    const prevDay = prev.toISOString().slice(0, 10);
+    const y = lastByDay.has(day) && lastByDay.has(prevDay)
+      ? Math.max(0, lastByDay.get(day) - lastByDay.get(prevDay))
+      : null;
+    out.push({ x: day, y });
+  }
+  return out.slice(-days);
+}
+
+function IngestCard({ history }) {
+  return (
+    <Card
+      title="Rows added per day"
+      info="Last 30 days. Big number = last 7 days. A flat run of empty bars means that feed stopped."
+      testId="ops-picture-ingest"
+    >
+      <div className="space-y-3">
+        {INGEST_KEYS.map(([key, label], i) => {
+          const series = dailyAdds(history, key);
+          const week = series.slice(-7).reduce((sum, d) => sum + (d.y || 0), 0);
+          return (
+            <div key={key} className="grid grid-cols-[7rem_1fr_4rem] items-center gap-3" data-testid={`ops-ingest-${key}`}>
+              <span className="text-sm text-muted">{label}</span>
+              {series.length ? (
+                <SparkBars data={series} label={`${label} added per day`} color={`var(--c-s${(i % 4) + 1})`} />
+              ) : (
+                <span className="text-xs text-muted">no samples</span>
+              )}
+              <span className="text-right text-sm font-medium tabular">+{compact(week)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+const SOURCE_LABEL = { tsetmc: "TSE stocks", brs: "Gold, FX & crypto" };
+
+/** Who passes the data-quality gate, per source -- and why the rest don't. */
+function UsableCard({ integrity }) {
+  const sources = Object.entries(integrity?.by_source || {}).sort((a, b) => b[1].assessed - a[1].assessed);
+  return (
+    <Card
+      title="Usable by features"
+      info="Passing symbols feed Risk, Optimize and charts. Grey = never backfilled (no history yet). Red = history has gaps."
+      testId="ops-picture-usable"
+    >
+      <div className="space-y-4">
+        {sources.map(([source, b]) => (
+          <InfraMeter
+            key={source}
+            label={SOURCE_LABEL[source] || source}
+            valueLabel={`${num(b.passing)} / ${num(b.assessed)}`}
+            pct={pctOf(b.passing, b.assessed)}
+            segments={[
+              { key: "pass", pct: pctOf(b.passing, b.assessed), color: "bg-[var(--c-good)]", title: `Usable ${num(b.passing)}` },
+              { key: "nobf", pct: pctOf(b.not_backfilled, b.assessed), color: "bg-muted", title: `Not backfilled ${num(b.not_backfilled)}` },
+              { key: "gap", pct: pctOf(b.gappy, b.assessed), color: "bg-[var(--c-critical)]", title: `Gaps ${num(b.gappy)}` },
+            ]}
+            sub={`${pctOf(b.passing, b.assessed)}% usable · ${num(b.not_backfilled)} not backfilled · ${num(b.gappy)} with gaps`}
+            testId={`ops-usable-${source}`}
+          />
+        ))}
+        {!sources.length && <p className="text-sm text-muted">No symbols assessed yet.</p>}
+      </div>
+    </Card>
+  );
+}
+
+function OverviewPanel({ overview, depths, onNavigate, user }) {
   const cov = overview.coverage;
-  const liveHeld = cov?.live?.held;
-  const warehouse = cov?.warehouse;
-  const liveDonut = totalsToDonut(liveHeld?.totals, liveHeld?.status_labels);
-  const whDonut = totalsToDonut(warehouse?.counts, warehouse?.status_labels);
-  const wfOutcomes = totalsToDonut(overview.workflows_24h?.outcomes, {
-    success: "Success",
-    partial: "Partial",
-    failed: "Failed",
-    retry: "Retry",
-    skipped: "Skipped",
-    blocked_network: "Blocked network",
-    blocked_storage: "Blocked storage",
-  });
-
-  const queueTotal = Object.values(depths || {}).reduce((s, v) => s + Number(v || 0), 0);
-
   return (
     <div className="space-y-4" data-testid="ops-overview">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
-        <StatTile
-          label="Live prices (held)"
-          value={`${liveHeld?.fresh_pct ?? 0}%`}
-          sub={`${num(liveHeld?.fresh_assets)} fresh / ${num(liveHeld?.fetchable_assets)} fetchable`}
-          valueTone={(liveHeld?.fresh_pct ?? 0) >= 90 ? "good" : (liveHeld?.fresh_pct ?? 0) >= 70 ? "warn" : "critical"}
-          testId="ops-overview-live-fresh"
-        />
-        <StatTile
-          label="Warehouse healthy"
-          value={`${warehouse?.healthy_pct ?? 0}%`}
-          sub={`${num(warehouse?.counts?.failed)} failing · ${num(warehouse?.counts?.partial)} short of rows`}
-          valueTone={(warehouse?.counts?.failed || 0) > 0 ? "critical" : (warehouse?.counts?.partial || 0) > 0 ? "warn" : "good"}
-          testId="ops-overview-wh-complete"
-        />
-        <StatTile
-          label="Symbols fetched"
-          value={`${warehouse?.symbol_census?.fetched_pct ?? 0}%`}
-          sub={`${num(warehouse?.symbol_census?.fetched)}/${num(warehouse?.symbol_census?.symbols_total)} · ${num(warehouse?.symbol_census?.never_fetched)} never · ${num(warehouse?.symbol_census?.unfetchable)} unfetchable`}
-          valueTone={(warehouse?.symbol_census?.fetched_pct ?? 0) >= 90 ? "good" : "warn"}
-          testId="ops-overview-symbol-census"
-        />
-        <StatTile
-          label="Row fill"
-          value={`${warehouse?.row_fill_pct ?? 0}%`}
-          sub={`${num(warehouse?.missing_rows)} missing rows`}
-          testId="ops-overview-row-fill"
-        />
-        <StatTile
-          label="179-day gate"
-          value={`${liveHeld?.integrity?.passing ?? 0}/${liveHeld?.integrity?.assessed ?? 0}`}
-          sub={`${num(liveHeld?.integrity?.failing)} fail · ${num(liveHeld?.integrity?.not_assessed)} not assessed`}
-          testId="ops-overview-gate"
-        />
-        <StatTile
-          label="Pipeline rows (24h)"
-          value={num(overview.workflows_24h?.rows_accepted)}
-          sub={`${num(overview.workflows_24h?.total_runs)} job runs · ${num(overview.workflows_24h?.rows_rejected)} rejected`}
-          testId="ops-overview-pipeline-rows-24h"
-        />
+      <HealthLights overview={overview} depths={depths} />
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+        <VerifiedDataCard archive={overview.archive} warehouse={cov?.warehouse} />
+        <IngestCard history={overview.database_history} />
+        <UsableCard integrity={overview.integrity} />
       </div>
-
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <Card
-          title="Live pipeline"
-          subtitle="Held assets — what feeds portfolio valuation right now."
-          testId="ops-overview-live-card"
-          actions={<Button variant="ghost" className="text-xs" onClick={() => onNavigate("live")}>Details →</Button>}
-        >
-          {liveDonut.length ? (
-            <Donut data={liveDonut} valueFormat={(v) => String(v)} testId="ops-overview-live-donut" />
-          ) : (
-            <p className="text-sm text-muted">No live coverage data.</p>
-          )}
-        </Card>
-        <Card
-          title="Warehouse archive"
-          subtitle="Historical marketdata jobs by lifecycle state."
-          testId="ops-overview-wh-card"
-          actions={<Button variant="ghost" className="text-xs" onClick={() => onNavigate("warehouse")}>Details →</Button>}
-        >
-          {whDonut.length ? (
-            <Donut data={whDonut} valueFormat={(v) => String(v)} testId="ops-overview-wh-donut" />
-          ) : (
-            <p className="text-sm text-muted">No warehouse coverage data.</p>
-          )}
-          <p className="mt-3 text-sm text-muted">
-            {num(warehouse?.stored_rows)} stored / {num(warehouse?.expected_rows)} expected rows
-            · {num(overview.archive?.wedged)} wedged jobs
-          </p>
-        </Card>
-      </div>
-
-      <Card
-        title="People and books"
-        subtitle="User-domain health — not warehouse ingest. Snapshot age is how recently valuation history was written."
-        testId="ops-overview-users"
-      >
+      <AttentionPanel liveHeld={cov?.live?.held} warehouse={cov?.warehouse} onNavigate={onNavigate} />
+      <RecentAlertsCard alerts={overview.recent_alerts} />
+      <Card title="People" testId="ops-overview-users">
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <StatTile
-            label="Users"
-            value={num(overview.users?.total)}
-            sub={`${num(overview.users?.active)} active · ${num(overview.users?.admins)} admins`}
-            testId="ops-overview-users-total"
-          />
-          <StatTile
-            label="With a portfolio"
-            value={num(overview.users?.with_accounts)}
-            sub={`${num(overview.users?.accounts)} portfolios · ${num(overview.users?.holdings)} holdings`}
-          />
-          <StatTile
-            label="Last sign-in"
-            value={overview.users?.last_login ? dateTime(overview.users.last_login) : "—"}
-          />
-          <StatTile
-            label="Last valuation snapshot"
-            value={overview.users?.last_snapshot_at ? dateTime(overview.users.last_snapshot_at) : "—"}
-            sub={`${num(overview.users?.snapshots_24h)} in 24h`}
-          />
+          <StatTile label="Users" value={num(overview.users?.total)} sub={`${num(overview.users?.active)} active`} testId="ops-overview-users-total" />
+          <StatTile label="Portfolios" value={num(overview.users?.accounts)} sub={`${num(overview.users?.holdings)} holdings`} />
+          <StatTile label="Last sign-in" value={overview.users?.last_login ? dateTime(overview.users.last_login) : "—"} />
+          <StatTile label="Last snapshot" value={overview.users?.last_snapshot_at ? dateTime(overview.users.last_snapshot_at) : "—"} />
         </div>
         {user?.role === "admin" && <OperatorResetLink />}
       </Card>
-
-      {/* Admin-only roster and account recovery controls. */}
       {user?.role === "admin" && <MembersPanel />}
+    </div>
+  );
+}
 
-      <AttentionPanel liveHeld={liveHeld} warehouse={warehouse} onNavigate={onNavigate} />
-
-      <RecentAlertsCard alerts={overview.recent_alerts} />
-
-      <Card
-        title="Provider quota by product"
-        subtitle="Provider product counters and local request attribution. Compare them before acting on remaining capacity."
-        testId="ops-overview-quota"
-      >
+/** Everything that runs: live feed, quota, infra, job outcomes, growth. */
+function SystemPanel({ overview, depths, tickSeries }) {
+  const wfOutcomes = totalsToDonut(overview.workflows_24h?.outcomes, {
+    success: "Success", partial: "Partial", failed: "Failed", retry: "Retry", skipped: "Skipped",
+    blocked_network: "Blocked network", blocked_storage: "Blocked storage",
+  });
+  const queueTotal = Object.values(depths || {}).reduce((s, v) => s + Number(v || 0), 0);
+  return (
+    <div className="space-y-4">
+      {overview.coverage && <LiveCoveragePanel coverage={overview.coverage} />}
+      <Card title="Provider quota" testId="ops-overview-quota">
         <QuotaWallets quota={overview.quota} />
       </Card>
-
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card title="Infrastructure" testId="ops-overview-infra">
           <InfraPanel overview={overview} depths={depths} queueTotal={queueTotal} gb={gb} />
         </Card>
-
-        <Card title="Workflow outcomes (24h)" testId="ops-overview-wf-24h">
-          {wfOutcomes.length ? (
-            <Donut data={wfOutcomes} valueFormat={(v) => String(v)} height={220} />
-          ) : (
-            <p className="text-sm text-muted">No workflow runs in the last 24 hours.</p>
-          )}
-          <p className="mt-2 text-xs text-muted">
-            Last 15m: {num(overview.workflow_15m?.rows_accepted)} accepted · {num(overview.workflow_15m?.rows_rejected)} rejected
-          </p>
+        <Card title="Job outcomes (24h)" testId="ops-overview-wf-24h">
+          {wfOutcomes.length ? <Donut data={wfOutcomes} valueFormat={(v) => String(v)} height={220} /> : <p className="text-sm text-muted">No runs in 24h.</p>}
         </Card>
-
         <Card title="Top errors (24h)" testId="ops-overview-errors">
           {(overview.error_codes_24h || []).length ? (
             <ul className="space-y-1.5 text-sm">
@@ -2303,18 +2341,14 @@ function OverviewPanel({ overview, tickSeries, depths, onNavigate, user }) {
                 </li>
               ))}
             </ul>
-          ) : (
-            <p className="text-sm text-muted">No error codes recorded in the last 24 hours.</p>
-          )}
-          <Button variant="ghost" className="mt-3 text-xs" onClick={() => onNavigate("jobs")}>Jobs & health →</Button>
+          ) : <p className="text-sm text-muted">None in 24h.</p>}
         </Card>
       </div>
-
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card title="Database growth" testId="ops-bytes-chart">
+        <Card title="Database size" testId="ops-bytes-chart">
           <CountTrend data={tickSeries.bytes} label="Postgres size over time" />
         </Card>
-        <Card title="Tick warehouse growth" testId="ops-tick-chart">
+        <Card title="Trade ticks stored" testId="ops-tick-chart">
           <CountTrend data={tickSeries.ticks} label="Transaction tick rows" color="var(--c-s3)" />
         </Card>
       </div>
@@ -2441,8 +2475,7 @@ export default function Ops({ user }) {
   return (
     <div data-testid="ops-page">
       <PageHeader
-        title="Operations center"
-        subtitle="Data health at a glance — live prices, warehouse archive, and what needs fixing."
+        title="Operations"
         actions={
           <div className="flex items-center gap-2">
             {ageSec != null && (
@@ -2470,12 +2503,9 @@ export default function Ops({ user }) {
         onChange={setTab}
         options={[
           { value: "overview", label: "Overview" },
-          { value: "live", label: "Live pipeline" },
-          { value: "warehouse", label: "Warehouse" },
-          { value: "tables", label: "Tables" },
+          { value: "data", label: "Data" },
+          { value: "jobs", label: "Jobs" },
           { value: "asset", label: "Asset" },
-          { value: "jobs", label: "Jobs & health" },
-          { value: "codal", label: "Codal" },
         ]}
       />
 
@@ -2483,18 +2513,13 @@ export default function Ops({ user }) {
         {tab === "overview" && overview && (
           <OverviewPanel
             overview={overview}
-            tickSeries={tickSeries}
             depths={depths}
             onNavigate={setTab}
             user={user}
           />
         )}
 
-        {tab === "live" && overview?.coverage && (
-          <LiveCoveragePanel coverage={overview.coverage} />
-        )}
-
-        {tab === "warehouse" && overview?.coverage && (
+        {tab === "data" && overview?.coverage && (
           <>
             <WarehouseCoveragePanel warehouse={overview.coverage.warehouse} />
             {/* Windows GROW: every state starts at the seed and
@@ -2502,8 +2527,8 @@ export default function Ops({ user }) {
                 card used to print the seed setting alone, so it read "90d
                 window" while symbols were already holding 12,000 days. */}
             <Card
-              title="Tick window (intraday)"
-              subtitle="Per-symbol windows widen as each symbol completes; the seed is only where they start."
+              title="Tick window"
+              info="Per-symbol windows widen as each symbol completes; the seed is only where they start."
               testId="ops-tick-coverage"
             >
               <p className="text-sm">
@@ -2515,12 +2540,12 @@ export default function Ops({ user }) {
               </p>
               <p className="text-sm text-muted">{overview.tick_coverage?.oldest || "—"} → {overview.tick_coverage?.newest || "—"}</p>
             </Card>
+            <TablesPanel overview={overview} />
+            <CodalPanel codal={overview.codal} />
           </>
         )}
 
-        {tab === "tables" && overview && (
-          <TablesPanel overview={overview} />
-        )}
+        {tab === "jobs" && overview && <SystemPanel overview={overview} depths={depths} tickSeries={tickSeries} />}
 
         {tab === "jobs" && overview && (
           <JobsHealthPanel
@@ -2546,10 +2571,6 @@ export default function Ops({ user }) {
         )}
 
         {tab === "asset" && <AssetInspector />}
-
-        {tab === "codal" && overview && (
-          <CodalPanel codal={overview.codal} />
-        )}
       </div>
     </div>
   );
