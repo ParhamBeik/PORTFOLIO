@@ -1819,6 +1819,8 @@ def test_export_carries_every_member_owned_table_and_nothing_of_anyone_elses(mak
     Snapshot.objects.create(user=user, day=timezone.localdate(), total_value_tomans=42)
     WatchlistItem.objects.create(user=user, symbol="فولاد")
     WatchlistItem.objects.create(user=other, symbol="شپنا")
+    from portfolio.models import CorporateActionDismissal
+    CorporateActionDismissal.objects.create(account=account, symbol="وبملت", date="1404/05/01")
     ResearchRun.objects.create(
         user=user, symbol="فولاد", question="Is the dividend safe?",
         max_cost_usd=Decimal("0.01"), evidence={"facts": ["one"]},
@@ -1834,8 +1836,45 @@ def test_export_carries_every_member_owned_table_and_nothing_of_anyone_elses(mak
     assert "فولاد" in read["watchlist.csv"] and "شپنا" not in read["watchlist.csv"]
     assert "Flat in Tajrish" in read["properties.csv"]
     assert "Is the dividend safe?" in read["research_runs.csv"]
+    assert "وبملت" in read["corporate_action_dismissals.csv"]
     # JSON columns are JSON text, not a Python repr.
     assert '{""facts"": [""one""]}' in read["research_runs.csv"]
+
+
+# Owned rows that are deliberately not in the download, and why.
+_NOT_EXPORTED = {
+    "admin.LogEntry": "operator audit trail, not member data",
+    "token_blacklist.OutstandingToken": "session secrets",
+}
+
+
+def test_export_covers_every_model_a_member_owns():
+    """CorporateActionDismissal and OptimizationSnapshot were missed by hand.
+
+    Any model with a foreign key to a user or an account is member data: it is
+    either exported or listed in _NOT_EXPORTED with a reason.
+    """
+    import inspect
+
+    from django.apps import apps
+    from django.contrib.auth import get_user_model
+
+    from accounts.views import ExportView
+
+    source = inspect.getsource(ExportView)
+    owners = (Account, get_user_model())
+    owned = {
+        model for model in apps.get_models()
+        for field in model._meta.get_fields()
+        if getattr(field, "many_to_one", False) and field.concrete and field.related_model in owners
+    }
+    missing = [
+        model._meta.label for model in owned
+        if model._meta.label not in _NOT_EXPORTED
+        and model.__name__ not in source
+        and model not in owners
+    ]
+    assert missing == []
 
 
 def test_throttle_ident_is_the_client_our_proxies_saw():

@@ -161,6 +161,10 @@ services:
     environment:
       <<: *backend-env
       SERVICE_NAME: backend
+      # Published straight on :8000 with nothing in front (Vite's proxy adds no
+      # X-Forwarded-For), so no hop is trusted: the default of 2 would let a
+      # client pick its own throttle identity.
+      TRUSTED_PROXY_COUNT: "0"
     # --workers 2: a single worker means one slow synchronous view (optimizer,
     # cold-cache admin overview) blocks every other request on the same
     # process, including the healthcheck and login. --timeout 90: Gunicorn's

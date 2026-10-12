@@ -36,6 +36,7 @@ from config.mail import mail_is_deliverable
 from portfolio.models import (
     Account,
     Asset,
+    CorporateActionDismissal,
     Holding,
     ImportBatch,
     LedgerEntry,
@@ -43,6 +44,7 @@ from portfolio.models import (
     Snapshot,
     WatchlistItem,
 )
+from portfolio.optimization_models import OptimizationSnapshot
 from research.models import ResearchRun
 
 from .models import User
@@ -680,6 +682,12 @@ class ExportView(APIView):
             "watchlist.csv": _model_csv(WatchlistItem.objects.filter(user=user)),
             "properties.csv": _model_csv(Asset.objects.filter(owner=user)),
             "research_runs.csv": _model_csv(ResearchRun.objects.filter(user=user)),
+            "corporate_action_dismissals.csv": _model_csv(
+                CorporateActionDismissal.objects.filter(account_id__in=account_ids)
+            ),
+            "optimization_snapshots.csv": _model_csv(
+                OptimizationSnapshot.objects.filter(account_id__in=account_ids)
+            ),
         }
         manifest = {
             "format": "lattice-account-export-v1",
