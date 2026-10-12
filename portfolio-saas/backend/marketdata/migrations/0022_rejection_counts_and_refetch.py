@@ -23,7 +23,7 @@ def repair(apps, schema_editor):
     )
     ArchiveFetchState.objects.filter(endpoint="gold_daily").update(next_attempt_at=None)
     ArchiveFetchState.objects.filter(
-        endpoint="stock_history_unadjusted", symbol__in=real_legal,
+        endpoint="stock_history_adjusted", symbol__in=real_legal,
     ).update(next_attempt_at=None)
 
 
