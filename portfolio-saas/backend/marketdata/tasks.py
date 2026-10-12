@@ -584,7 +584,8 @@ def operational_health_check():
         notify(
             event, details,
             dedupe_seconds=settings.ALERT_REPEAT_SECONDS,
-            dedupe_key=event,
+            # Per-plan events carry the plan: two empty wallets are two alerts.
+            dedupe_key=f"{event}:{details['plan']}" if "plan" in details else event,
             urgent=is_urgent(event, details),
         )
     return {"alerts": [event for event, _details in alerts]}

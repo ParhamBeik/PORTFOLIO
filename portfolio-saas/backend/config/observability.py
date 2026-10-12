@@ -265,7 +265,9 @@ def notify(event, details, *, dedupe_seconds=900, dedupe_key=None, urgent=True):
     payload = json.dumps(safe_details, sort_keys=True, default=str)[:500]
     identity = [event, dedupe_key] if dedupe_key is not None else [event, safe_details]
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
-    cache_key = f"alert:{digest}"
+    # The summary and an interruption reserve separately: a condition queued for
+    # the digest at 08:15 (market shut) must still interrupt at the 08:30 open.
+    cache_key = f"alert:{digest}" if urgent else f"alert:digest:{digest}"
     try:
         reserved = cache.add(cache_key, True, timeout=dedupe_seconds)
     except Exception:
@@ -327,6 +329,7 @@ def notify(event, details, *, dedupe_seconds=900, dedupe_key=None, urgent=True):
 # Non-urgent alerts collect here until the daily summary. One hash field per
 # event, so a condition that fired 96 times yesterday is one line with a count.
 DIGEST_KEY = "ops:alert_digest"
+DIGEST_SENDING_KEY = "ops:alert_digest:sending"
 
 
 def queue_for_digest(event, safe_details):
@@ -363,14 +366,23 @@ def send_alert_digest():
     Cleared only after a successful send, so a failed day rolls into the next
     one instead of disappearing.
     """
+    # Swap the hash out before reading it: the health check runs on the same
+    # queue at the same minute, and anything it queues after a plain read would
+    # be erased by the delete without ever being sent.
     try:
         client = _alert_redis()
-        raw = {} if client is None else client.hgetall(DIGEST_KEY)
+        if client is None:
+            return False
+        try:
+            client.rename(DIGEST_KEY, DIGEST_SENDING_KEY)
+        except Exception:
+            return False  # nothing queued
+        raw = client.hgetall(DIGEST_SENDING_KEY)
     except Exception:
         logger.warning("could not read the alert summary")
         return False
     entries = {}
-    for key, value in raw.items():
+    for key, value in (raw or {}).items():
         try:
             entries[key.decode() if isinstance(key, bytes) else key] = json.loads(value)
         except (TypeError, ValueError):
@@ -395,9 +407,21 @@ def send_alert_digest():
             status = getattr(getattr(exc, "response", None), "status_code", None)
             logger.error("Alert telegram failed for daily-digest status=%s err=%s", status, type(exc).__name__)
     logger.warning("alert:daily-digest undelivered=%d events=%d", 0 if delivered else 1, len(entries))
-    if delivered:
-        try:
-            client.delete(DIGEST_KEY)
-        except Exception:
-            logger.warning("could not clear the alert summary")
+    try:
+        if not delivered:
+            _merge_back(client, entries)
+        client.delete(DIGEST_SENDING_KEY)
+    except Exception:
+        logger.warning("could not clear the alert summary")
     return delivered
+
+
+def _merge_back(client, entries):
+    """A failed day rolls into the next one, counted with whatever arrived since."""
+    for event, entry in entries.items():
+        newer = client.hget(DIGEST_KEY, event)
+        if newer:
+            newer = json.loads(newer)
+            newer.update(count=newer.get("count", 0) + entry.get("count", 0), first=entry.get("first", newer.get("first")))
+            entry = newer
+        client.hset(DIGEST_KEY, event, json.dumps(entry, default=str, ensure_ascii=False))

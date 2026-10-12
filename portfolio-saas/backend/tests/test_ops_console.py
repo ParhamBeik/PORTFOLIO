@@ -1927,6 +1927,11 @@ class _FakeRedis:
     def delete(self, key):
         self.lists.pop(key, None)
 
+    def rename(self, src, dst):
+        if src not in self.lists:
+            raise KeyError("no such key")
+        self.lists[dst] = self.lists.pop(src)
+
 
 @pytest.fixture
 def alert_redis():
@@ -2073,6 +2078,57 @@ def test_a_failed_summary_is_kept_for_the_next_day(alert_redis):
     with mock.patch("config.observability.requests.post", side_effect=OSError("down")):
         assert send_alert_digest() is False
     assert alert_redis.hgetall(DIGEST_KEY)
+
+
+@override_settings(ALERT_WEBHOOK_URL="https://alerts.test/hook")
+def test_a_condition_queued_for_the_summary_still_interrupts_once_urgent(alert_redis):
+    """08:15 market shut -> digest; 08:30 open -> must interrupt, not wait 6h."""
+    from config.observability import notify
+
+    cache.clear()
+    with mock.patch("config.observability.requests.post") as post:
+        notify("stale-prices", {}, dedupe_seconds=21600, dedupe_key="stale-prices", urgent=False)
+        assert notify("stale-prices", {}, dedupe_seconds=21600, dedupe_key="stale-prices", urgent=True)
+    assert post.call_count == 1
+
+
+@override_settings(ALERT_WEBHOOK_URL="", ALERT_TELEGRAM_BOT_TOKEN="tok", ALERT_TELEGRAM_CHAT_ID="42")
+def test_a_summary_failure_keeps_what_arrived_while_sending(alert_redis):
+    """The health check can queue mid-send; a failed send must lose neither half."""
+    import json as _json
+
+    from config.observability import DIGEST_KEY, notify, send_alert_digest
+
+    cache.clear()
+    notify("queue-backlog", {"archive": 1200}, urgent=False)
+
+    def fail_after_new_alert(*args, **kwargs):
+        notify("queue-backlog", {"archive": 1300}, urgent=False)
+        notify("stale-archive-progress", {}, urgent=False)
+        raise OSError("down")
+
+    with mock.patch("config.observability.requests.post", side_effect=fail_after_new_alert):
+        assert send_alert_digest() is False
+    kept = alert_redis.hgetall(DIGEST_KEY)
+    assert set(kept) == {"queue-backlog", "stale-archive-progress"}
+    assert _json.loads(kept["queue-backlog"])["count"] == 2
+
+
+def test_each_empty_quota_wallet_is_its_own_alert(monkeypatch):
+    from marketdata import market_state, tasks
+    from marketdata.models import ApiRequestQuota
+
+    monkeypatch.setattr(market_state, "market_state", lambda: market_state.OPEN)
+    monkeypatch.setattr("marketdata.quota.remaining_requests", lambda lane, plan: 0)
+    for plan in ("aio", "market_cgcc"):
+        ApiRequestQuota.objects.create(day=tasks._quota_day(), plan=plan, used=10)
+    keys = []
+    monkeypatch.setattr("config.observability.notify", lambda event, details, **kw: keys.append(kw["dedupe_key"]))
+    cache.clear()
+
+    tasks.operational_health_check()
+
+    assert {"quota-exhausted-early:aio", "quota-exhausted-early:market_cgcc"} <= set(keys)
 
 
 @pytest.mark.parametrize(

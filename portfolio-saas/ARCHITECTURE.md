@@ -39,7 +39,7 @@ portfolio-saas/
 ├── docker-compose.yml          dev     (Vite + gunicorn/uvicorn, ports published)
 ├── docker-compose.prod.yml     prod    (standalone; frontend joins vps-edge, no ports)
 ├── scripts/                    deploy, backup, restore, ops cron, egress setup
-├── docs/README.md              what each doc is and whether it is still live
+├── docs/                       living references only (list in README → Docs)
 ├── backend/
 │   ├── config/                 Django project: settings, urls, celery, health,
 │   │                           api.py (JSON + error translation), observability.py
@@ -60,7 +60,7 @@ portfolio-saas/
 │   │   ├── calendars.py        which days a market was actually open
 │   │   └── admin_api.py        staff-only /api/admin/* Ops console backend
 │   ├── perf/                   request/page latency rollups (middleware, client beacon,
-│   │                           hourly table, `perf_report`); see docs/PERFORMANCE.md
+│   │                           hourly table, `perf_report`); see docs/REFERENCE.md §4
 │   └── tests/                  thematic suites, one per bounded concern
 └── frontend/src/               pages/ · components/ui.jsx + charts.jsx
                                 api.js + useApi.js (the one fetch pattern)
@@ -101,8 +101,7 @@ not an override of the dev file, and that is deliberate: the dev file publishes
 Postgres, Redis, the API and Vite to the host, and Compose merges `ports` by
 concatenation with no way for an override to drop an inherited binding. Layering
 the two would publish the database on a VPS shared with three other stacks. The
-duplication between the files is the price of that guarantee — see
-[`docs/history/REFACTOR_REPORT.md`](docs/history/REFACTOR_REPORT.md).
+duplication between the files is the price of that guarantee.
 
 **5. The frontend has one of everything.** Pages compose `ui.jsx` primitives and
 write no bespoke panel/loading/error markup; charts go through `charts.jsx`
