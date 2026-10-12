@@ -22,6 +22,7 @@ from rest_framework.views import APIView
 from . import jalali
 from .codal_classification import classify_announcement
 from .codal_storage import CodalBlockedStorage, load_artifact
+from .coverage_report import classify_archive_state
 from .models import (
     ArchiveFetchState,
     CodalAnnouncement,
@@ -481,6 +482,9 @@ class StockDossierView(APIView):
             "coverage": [
                 {
                     "endpoint": endpoint,
+                    # The one classifier Ops uses. `verified_complete` alone reads a
+                    # re-armed or quota-parked job that owes no rows as incomplete.
+                    "status": classify_archive_state(states[endpoint]) if endpoint in states else "not_tried",
                     "stored_rows": states[endpoint].stored_rows if endpoint in states else 0,
                     "missing_rows": states[endpoint].missing_rows if endpoint in states else None,
                     "verified_complete": states[endpoint].verified_complete if endpoint in states else False,

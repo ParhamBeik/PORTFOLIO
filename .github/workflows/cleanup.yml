@@ -1,0 +1,72 @@
+name: Cleanup
+
+# Weekly housekeeping for what CI/CD leaves behind. Each step reports what it
+# removed to the run summary, so the job doubles as the "what piled up" report.
+#
+# What it does NOT do: touch the VPS. The self-hosted runner has no Docker
+# access, by design; old images on the box are removed by deploy.sh on every
+# CI deploy (keeping the serving release and the one before it), and images
+# only arrive with a deploy, so nothing accumulates between deploys.
+on:
+  schedule:
+    - cron: "30 1 * * 5" # Friday 05:00 Tehran: market closed, nobody deploying
+  workflow_dispatch:
+
+concurrency:
+  group: cleanup
+  cancel-in-progress: false
+
+jobs:
+  ghcr:
+    # Every CI deploy pushes a :<sha> image per service and nothing deleted
+    # them. 10 newest is weeks of releases: far more than auto-rollback (the
+    # previous release) or a manual rollback realistically reaches back.
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [portfolio-backend, portfolio-frontend]
+    steps:
+      - uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ matrix.package }}
+          package-type: container
+          min-versions-to-keep: 10
+          ignore-versions: "^latest$"
+      - run: |
+          echo "- GHCR \`${{ matrix.package }}\`: kept the 10 newest versions + \`latest\`" >> "$GITHUB_STEP_SUMMARY"
+
+  branches:
+    # Head branches of merged or closed PRs. Squash merges leave the branch's
+    # commits off main, so `git branch --merged` cannot see them; the PR state
+    # is the only reliable signal. A branch that is the head of any open PR is
+    # never touched, nor is the default branch.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Delete branches whose PRs are finished
+        run: |
+          set -euo pipefail
+          default=$(gh api "repos/$REPO" -q .default_branch)
+          open_heads=$(gh pr list -R "$REPO" --state open --limit 500 --json headRefName -q '.[].headRefName')
+          deleted=0
+          # A finished PR only vouches for the commit it ended on. A reused
+          # branch name with new commits on top is somebody's live work.
+          while read -r branch tip; do
+            [ "$branch" = "$default" ] && continue
+            grep -qxF "$branch" <<<"$open_heads" && continue
+            state=$(gh pr list -R "$REPO" --state all --head "$branch" --limit 50 --json state,headRefOid \
+              -q "[.[] | select(.headRefOid == \"$tip\" and (.state == \"MERGED\" or .state == \"CLOSED\"))][0].state // \"\"")
+            [ -n "$state" ] || continue
+            gh api -X DELETE "repos/$REPO/git/refs/heads/$branch" >/dev/null
+            echo "- deleted \`$branch\` (PR $state at ${tip:0:7})" >> "$GITHUB_STEP_SUMMARY"
+            deleted=$((deleted + 1))
+          done < <(gh api "repos/$REPO/branches" --paginate -q '.[] | "\(.name) \(.commit.sha)"')
+          echo "**Branches deleted: $deleted**" >> "$GITHUB_STEP_SUMMARY"

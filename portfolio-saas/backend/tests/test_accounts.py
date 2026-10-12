@@ -790,6 +790,11 @@ def test_export_is_scoped_zip_without_password_or_tokens(make_user):
             "ledger.csv",
             "holdings.csv",
             "imports.csv",
+            "liabilities.csv",
+            "snapshots.csv",
+            "watchlist.csv",
+            "properties.csv",
+            "research_runs.csv",
         } <= names
         payload = b"".join(archive.read(name) for name in names).decode()
     assert user.email in payload
@@ -1793,3 +1798,145 @@ def test_a_second_portfolio_with_the_same_name_is_a_400_not_a_500(make_user):
     main = Account.objects.get(user=user, name="Main")
     assert client.patch(f"/api/accounts/{main.pk}/", {"name": "Main"}, format="json").status_code == 200
     assert client.patch(f"/api/accounts/{main.pk}/", {"name": "Savings"}, format="json").status_code == 400
+
+
+
+# ----------------------------------------------------------------------
+# Rate limits must key on the client our own proxies saw, not on a header the
+# client wrote, and Django admin's sign-in form needs a limit of its own.
+
+
+def test_export_carries_every_member_owned_table_and_nothing_of_anyone_elses(make_user):
+    """Liabilities, snapshots, watchlist, properties and research runs were missing."""
+    from portfolio.models import Liability, WatchlistItem
+    from research.models import ResearchRun
+
+    user = make_user(email="full-export@test.test")
+    other = make_user(email="not-mine@test.test")
+    account = Account.objects.create(user=user, name="Main")
+    house = Asset.objects.create(key="house_full_export", name="Flat in Tajrish", owner=user)
+    Liability.objects.create(account=account, label="Maskan loan", amount_tomans=1_000_000, asset=house)
+    Snapshot.objects.create(user=user, day=timezone.localdate(), total_value_tomans=42)
+    WatchlistItem.objects.create(user=user, symbol="فولاد")
+    WatchlistItem.objects.create(user=other, symbol="شپنا")
+    from portfolio.models import CorporateActionDismissal
+    CorporateActionDismissal.objects.create(account=account, symbol="وبملت", date="1404/05/01")
+    ResearchRun.objects.create(
+        user=user, symbol="فولاد", question="Is the dividend safe?",
+        max_cost_usd=Decimal("0.01"), evidence={"facts": ["one"]},
+    )
+
+    response = _client(user).get("/api/auth/export/")
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        read = {name: archive.read(name).decode() for name in archive.namelist()}
+    assert "Maskan loan" in read["liabilities.csv"]
+    assert "42" in read["snapshots.csv"]
+    assert "فولاد" in read["watchlist.csv"] and "شپنا" not in read["watchlist.csv"]
+    assert "Flat in Tajrish" in read["properties.csv"]
+    assert "Is the dividend safe?" in read["research_runs.csv"]
+    assert "وبملت" in read["corporate_action_dismissals.csv"]
+    # JSON columns are JSON text, not a Python repr.
+    assert '{""facts"": [""one""]}' in read["research_runs.csv"]
+
+
+# Owned rows that are deliberately not in the download, and why.
+_NOT_EXPORTED = {
+    "admin.LogEntry": "operator audit trail, not member data",
+    "token_blacklist.OutstandingToken": "session secrets",
+}
+
+
+def test_export_covers_every_model_a_member_owns():
+    """CorporateActionDismissal and OptimizationSnapshot were missed by hand.
+
+    Any model with a foreign key to a user or an account is member data: it is
+    either exported or listed in _NOT_EXPORTED with a reason.
+    """
+    import inspect
+
+    from django.apps import apps
+    from django.contrib.auth import get_user_model
+
+    from accounts.views import ExportView
+
+    source = inspect.getsource(ExportView)
+    owners = (Account, get_user_model())
+    owned = {
+        model for model in apps.get_models()
+        for field in model._meta.get_fields()
+        if getattr(field, "many_to_one", False) and field.concrete and field.related_model in owners
+    }
+    missing = [
+        model._meta.label for model in owned
+        if model._meta.label not in _NOT_EXPORTED
+        and model.__name__ not in source
+        and model not in owners
+    ]
+    assert missing == []
+
+
+def test_throttle_ident_is_the_client_our_proxies_saw():
+    """Production is client -> vps-edge -> nginx -> Django: two hops we trust.
+
+    Whatever the client puts at the front of X-Forwarded-For is ignored; the
+    entry the edge wrote is the client.
+    """
+    from django.test import RequestFactory
+    from rest_framework.throttling import AnonRateThrottle
+
+    request = RequestFactory().get(
+        "/", HTTP_X_FORWARDED_FOR="6.6.6.6, 203.0.113.9, 172.18.0.5", REMOTE_ADDR="172.18.0.7"
+    )
+    assert AnonRateThrottle().get_ident(request) == "203.0.113.9"
+    # No header at all (dev, tests, probes inside the box): the socket address.
+    bare = RequestFactory().get("/", REMOTE_ADDR="127.0.0.1")
+    assert AnonRateThrottle().get_ident(bare) == "127.0.0.1"
+
+
+def test_rotating_a_made_up_forwarded_for_does_not_buy_more_login_guesses(make_user):
+    make_user(email="target@test.test")
+    client = APIClient()
+    statuses = [
+        client.post(
+            "/api/auth/login/",
+            {"email": "target@test.test", "password": f"guess-{i}"},
+            format="json",
+            HTTP_X_FORWARDED_FOR=f"10.9.{i}.1, 203.0.113.9, 172.18.0.5",
+        ).status_code
+        for i in range(25)
+    ]
+    assert statuses[:20] == [401] * 20
+    assert set(statuses[20:]) == {429}
+
+
+def test_admin_sign_in_form_is_rate_limited_per_client(make_user):
+    client = APIClient()
+    forwarded = {"HTTP_X_FORWARDED_FOR": "203.0.113.9, 172.18.0.5"}
+    statuses = [
+        client.post(
+            "/admin/login/", {"username": "root@test.test", "password": f"guess-{i}"}, **forwarded
+        ).status_code
+        for i in range(12)
+    ]
+    # A failed Django admin sign-in re-renders the form with a 200.
+    assert statuses[:10] == [200] * 10
+    assert statuses[10:] == [429, 429]
+    # Drawing the form is never refused, and another client has its own bucket.
+    assert client.get("/admin/login/", **forwarded).status_code == 200
+    other = {"HTTP_X_FORWARDED_FOR": "198.51.100.4, 172.18.0.5"}
+    assert client.post(
+        "/admin/login/", {"username": "root@test.test", "password": "x"}, **other
+    ).status_code == 200
+
+
+def test_admin_sign_in_still_works_under_the_limit(make_user):
+    User.objects.create_superuser(email="root@test.test", password="Sup3rSecret!")
+    client = APIClient()
+    response = client.post(
+        "/admin/login/?next=/admin/",
+        {"username": "root@test.test", "password": "Sup3rSecret!", "next": "/admin/"},
+    )
+    assert response.status_code == 302
+    assert response["Location"] == "/admin/"

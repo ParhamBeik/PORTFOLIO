@@ -914,8 +914,7 @@ def test_alert_telegram_sends_plain_text_and_does_not_parse_markup():
     assert payload["chat_id"] == "12345"
     assert "parse_mode" not in payload
     assert payload["disable_web_page_preview"] is True
-    assert payload["text"].startswith("[telegram-alert]")
-    assert "FOOLAD_x" in payload["text"]
+    assert payload["text"] == "🔴 Telegram alert\nsymbol: FOOLAD_x"
 
 
 @override_settings(
@@ -1879,3 +1878,266 @@ def test_alert_bot_api_base_is_configurable_for_bale():
     with mock.patch("config.observability.requests.post") as post:
         assert notify("bale-alert", {"k": "v"}, dedupe_seconds=60) is True
     assert post.call_args.args[0] == "https://tapi.bale.ai/botbot-token/sendMessage"
+
+
+# ---------------------------------------------------------------------------
+# Recent alerts: the console's view of what fired, app and host alike.
+# ---------------------------------------------------------------------------
+
+class _FakeRedis:
+    """Just the list commands record_alert / recent_alerts use."""
+
+    def __init__(self):
+        self.lists = {}
+
+    def pipeline(self):
+        return self
+
+    def lpush(self, key, value):
+        self.lists.setdefault(key, []).insert(0, value)
+
+    def ltrim(self, key, start, stop):
+        self.lists[key] = self.lists.get(key, [])[start:stop + 1]
+
+    def execute(self):
+        return []
+
+    def lrange(self, key, start, stop):
+        return self.lists.get(key, [])[start:stop + 1]
+
+    def hget(self, key, field):
+        return self.lists.get(key, {}).get(field)
+
+    def hset(self, key, field, value):
+        self.lists.setdefault(key, {})[field] = value
+
+    def hgetall(self, key):
+        return dict(self.lists.get(key, {}))
+
+    def delete(self, key):
+        self.lists.pop(key, None)
+
+    def rename(self, src, dst):
+        if src not in self.lists:
+            raise KeyError("no such key")
+        self.lists[dst] = self.lists.pop(src)
+
+
+@pytest.fixture
+def alert_redis():
+    fake = _FakeRedis()
+    with mock.patch("config.observability._alert_redis", return_value=fake):
+        yield fake
+
+
+@override_settings(ALERT_WEBHOOK_URL="https://alerts.test/hook")
+def test_sent_alert_is_recorded_once_and_redacted(alert_redis):
+    """Alerts went only to the chat, so the console could not say what fired
+    yesterday. A deduped repeat is not a new alert and must not be listed twice."""
+    from config.observability import notify, recent_alerts
+
+    cache.clear()
+    with mock.patch("config.observability.requests.post"):
+        notify("stale-prices", {"age_seconds": 1200, "token": "abc"}, dedupe_seconds=60)
+        notify("stale-prices", {"age_seconds": 1200, "token": "abc"}, dedupe_seconds=60)
+
+    alerts = recent_alerts()
+    assert [a["event"] for a in alerts] == ["stale-prices"]
+    assert alerts[0]["delivered"] is True
+    assert alerts[0]["source"] == "app"
+    assert "abc" not in alerts[0]["details"]
+    assert "1200" in alerts[0]["details"]
+
+
+@override_settings(ALERT_WEBHOOK_URL="", ALERT_TELEGRAM_BOT_TOKEN="", ALERT_TELEGRAM_CHAT_ID="")
+def test_undelivered_alert_is_still_listed(alert_redis):
+    """With no channel configured the console is the only place it can show up."""
+    from config.observability import notify, recent_alerts
+
+    assert notify("wedged-archive-states", {"n": 3}) is False
+    assert recent_alerts()[0]["delivered"] is False
+
+
+@override_settings(ALERT_WEBHOOK_URL="https://alerts.test/hook")
+def test_recent_alerts_are_capped_newest_first(alert_redis):
+    from config.observability import RECENT_ALERTS_MAX, notify, recent_alerts
+
+    cache.clear()
+    with mock.patch("config.observability.requests.post"):
+        for n in range(RECENT_ALERTS_MAX + 5):
+            notify("burst", {"n": n}, dedupe_seconds=60)
+    alerts = recent_alerts()
+    assert len(alerts) == RECENT_ALERTS_MAX
+    assert '"n": 54' in alerts[0]["details"]
+
+
+def test_recent_alerts_skip_garbage_and_survive_a_redis_outage(alert_redis):
+    from config.observability import RECENT_ALERTS_KEY, recent_alerts, record_alert
+
+    alert_redis.lists[RECENT_ALERTS_KEY] = ["not json", '{"no_event": 1}', '{"event": "ok"}']
+    assert [a["event"] for a in recent_alerts()] == ["ok"]
+
+    broken = mock.Mock(side_effect=ConnectionError("redis down"))
+    with mock.patch("config.observability._alert_redis", broken):
+        assert recent_alerts() == []
+        record_alert("anything", {}, delivered=True)  # must not raise
+
+
+def test_overview_carries_recent_alerts_on_every_request(staff_user, alert_redis):
+    """Fresh on a cache hit too: an alert fired a minute ago belongs on the page now."""
+    from config.observability import record_alert
+
+    cache.clear()
+    client = _auth(APIClient(), staff_user)
+    assert client.get("/api/admin/overview/").json()["recent_alerts"] == []
+
+    record_alert("host-ops-check", {"detail": "service celery_beat is not running"}, delivered=True, source="host")
+    alerts = client.get("/api/admin/overview/").json()["recent_alerts"]
+    assert alerts[0]["event"] == "host-ops-check"
+    assert alerts[0]["source"] == "host"
+
+
+@override_settings(ALERT_WEBHOOK_URL="https://alerts.test/hook", ALERT_REPEAT_SECONDS=6 * 3600)
+def test_standing_condition_alerts_once_per_repeat_window_despite_drifting_details(alert_redis):
+    """disk-projection's days-to-80% changes every run, so keyed on its details it
+    re-sent every 15 minutes: 288 times in 72h. One reminder per window instead."""
+    from config.observability import notify, recent_alerts
+
+    cache.clear()
+    with mock.patch("config.observability.requests.post") as post:
+        for days in (21.4, 21.3, 21.2):
+            notify("disk-projection", {"days_until": days}, dedupe_seconds=6 * 3600, dedupe_key="disk-projection")
+        notify("wedged-archive-states", {"n": 3}, dedupe_seconds=6 * 3600, dedupe_key="wedged-archive-states")
+    assert post.call_count == 2
+    assert [a["event"] for a in recent_alerts()] == ["wedged-archive-states", "disk-projection"]
+
+
+@override_settings(ALERT_WEBHOOK_URL="", ALERT_TELEGRAM_BOT_TOKEN="", ALERT_TELEGRAM_CHAT_ID="")
+def test_unconfigured_channel_still_logs_every_time_but_lists_once(alert_redis, caplog):
+    from config.observability import notify, recent_alerts
+
+    cache.clear()
+    with caplog.at_level("WARNING", logger="config.observability"):
+        for n in range(3):
+            notify("wedged-archive-states", {"n": n}, dedupe_seconds=600, dedupe_key="wedged-archive-states")
+    assert sum("undelivered=1" in r.getMessage() for r in caplog.records) == 3
+    assert len(recent_alerts()) == 1
+
+
+def test_disk_alert_reads_like_a_sentence():
+    """It used to arrive as `{"codal_bytes": 22064086717, ...}` on a phone."""
+    from config.observability import format_alert
+
+    title, text = format_alert("disk-projection", {
+        "days_to_80pct": 20.7, "filesystem_free_bytes": 32_221_716_480,
+        "filesystem_total_bytes": 105_467_994_112, "growth_bytes_per_day": 745_390_167,
+    })
+    assert title == "Disk filling up"
+    assert text == "80% full in ~20.7 days. 32.2 GB free of 105.5 GB, growing 0.7 GB/day."
+
+
+@override_settings(ALERT_WEBHOOK_URL="", ALERT_TELEGRAM_BOT_TOKEN="tok", ALERT_TELEGRAM_CHAT_ID="42")
+def test_non_urgent_alerts_wait_for_one_daily_summary(alert_redis):
+    from config.observability import notify, recent_alerts, send_alert_digest
+
+    cache.clear()
+    with mock.patch("config.observability.requests.post") as post:
+        for n in range(3):
+            notify("wedged-archive-states", {"count": 90 + n, "causes": {"MarketDataFetchError": 51}},
+                   dedupe_seconds=600, dedupe_key="wedged-archive-states", urgent=False)
+        notify("queue-backlog", {"live": 0, "archive": 1200}, urgent=False)
+        assert post.call_count == 0  # nothing interrupted anyone
+
+        assert send_alert_digest() is True
+        assert send_alert_digest() is False  # cleared once delivered
+
+    assert post.call_count == 1
+    text = post.call_args.kwargs["json"]["text"]
+    assert text.startswith("📋 Daily summary")
+    assert "• Archive jobs stuck ×3\n  92 jobs keep failing: 51 MarketDataFetchError." in text
+    assert "• Task queues backing up\n  live 0 · archive 1,200" in text
+    assert [a["route"] for a in recent_alerts()] == ["digest", "digest"]
+
+
+@override_settings(ALERT_WEBHOOK_URL="", ALERT_TELEGRAM_BOT_TOKEN="tok", ALERT_TELEGRAM_CHAT_ID="42")
+def test_a_failed_summary_is_kept_for_the_next_day(alert_redis):
+    from config.observability import DIGEST_KEY, notify, send_alert_digest
+
+    cache.clear()
+    notify("queue-backlog", {"archive": 1200}, urgent=False)
+    with mock.patch("config.observability.requests.post", side_effect=OSError("down")):
+        assert send_alert_digest() is False
+    assert alert_redis.hgetall(DIGEST_KEY)
+
+
+@override_settings(ALERT_WEBHOOK_URL="https://alerts.test/hook")
+def test_a_condition_queued_for_the_summary_still_interrupts_once_urgent(alert_redis):
+    """08:15 market shut -> digest; 08:30 open -> must interrupt, not wait 6h."""
+    from config.observability import notify
+
+    cache.clear()
+    with mock.patch("config.observability.requests.post") as post:
+        notify("stale-prices", {}, dedupe_seconds=21600, dedupe_key="stale-prices", urgent=False)
+        assert notify("stale-prices", {}, dedupe_seconds=21600, dedupe_key="stale-prices", urgent=True)
+    assert post.call_count == 1
+
+
+@override_settings(ALERT_WEBHOOK_URL="", ALERT_TELEGRAM_BOT_TOKEN="tok", ALERT_TELEGRAM_CHAT_ID="42")
+def test_a_summary_failure_keeps_what_arrived_while_sending(alert_redis):
+    """The health check can queue mid-send; a failed send must lose neither half."""
+    import json as _json
+
+    from config.observability import DIGEST_KEY, notify, send_alert_digest
+
+    cache.clear()
+    notify("queue-backlog", {"archive": 1200}, urgent=False)
+
+    def fail_after_new_alert(*args, **kwargs):
+        notify("queue-backlog", {"archive": 1300}, urgent=False)
+        notify("stale-archive-progress", {}, urgent=False)
+        raise OSError("down")
+
+    with mock.patch("config.observability.requests.post", side_effect=fail_after_new_alert):
+        assert send_alert_digest() is False
+    kept = alert_redis.hgetall(DIGEST_KEY)
+    assert set(kept) == {"queue-backlog", "stale-archive-progress"}
+    assert _json.loads(kept["queue-backlog"])["count"] == 2
+
+
+def test_each_empty_quota_wallet_is_its_own_alert(monkeypatch):
+    from marketdata import market_state, tasks
+    from marketdata.models import ApiRequestQuota
+
+    monkeypatch.setattr(market_state, "market_state", lambda: market_state.OPEN)
+    monkeypatch.setattr("marketdata.quota.remaining_requests", lambda lane, plan: 0)
+    for plan in ("aio", "market_cgcc"):
+        ApiRequestQuota.objects.create(day=tasks._quota_day(), plan=plan, used=10)
+    keys = []
+    monkeypatch.setattr("config.observability.notify", lambda event, details, **kw: keys.append(kw["dedupe_key"]))
+    cache.clear()
+
+    tasks.operational_health_check()
+
+    assert {"quota-exhausted-early:aio", "quota-exhausted-early:market_cgcc"} <= set(keys)
+
+
+@pytest.mark.parametrize(
+    "session_open, days, expected",
+    [
+        (True, 20.0, {"stale-prices": True, "disk-projection": False}),
+        (False, 10.0, {"stale-prices": False, "disk-projection": True}),
+    ],
+)
+def test_health_check_interrupts_only_for_what_needs_a_person(monkeypatch, session_open, days, expected):
+    """Frozen prices matter while the market trades; disk matters inside 14 days."""
+    from marketdata import admin_telemetry, market_state, tasks
+
+    monkeypatch.setattr(market_state, "market_state", lambda: market_state.OPEN if session_open else market_state.OVERNIGHT)
+    monkeypatch.setattr(admin_telemetry, "project_disk", lambda usage: {"alert": True, "days_to_80pct": days})
+    calls = {}
+    monkeypatch.setattr("config.observability.notify", lambda event, details, **kw: calls.__setitem__(event, kw["urgent"]))
+    cache.clear()
+
+    tasks.operational_health_check()
+
+    assert {event: calls[event] for event in expected} == expected

@@ -12,6 +12,7 @@ from rest_framework.test import APIClient
 
 from marketdata import jalali
 from marketdata.models import (
+    ArchiveFetchState,
     CodalAnnouncement,
     CodalArtifact,
     CodalCandidateFact,
@@ -264,3 +265,31 @@ def test_monthly_sales_requires_reconciled_latest_filing(make_user, monkeypatch)
     assert monthly["status"] == "unavailable_unverified"
     assert monthly["verified_periods"] == 0
     assert monthly["withheld_periods"] == 1
+
+
+def test_dossier_coverage_status_does_not_read_a_rearmed_job_as_incomplete(make_user):
+    # `verified_complete` is re-armed to False whenever a state is due another
+    # pass. A job that owes no rows is "refresh_due", not "incomplete".
+    _stock()
+    now = timezone.now()
+    ArchiveFetchState.objects.create(
+        symbol="کاما", endpoint=ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
+        verified_complete=False, stored_rows=120, missing_rows=0,
+        last_attempt_at=now, last_success_at=now - timedelta(days=1),
+    )
+    ArchiveFetchState.objects.create(
+        symbol="کاما", endpoint=ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
+        blacklisted=True,
+    )
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+
+    response = client.get("/api/explore/stocks/کاما/?days=90")
+
+    assert response.status_code == 200, response.data
+    status = {row["endpoint"]: row["status"] for row in response.data["coverage"]}
+    assert status == {
+        ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED: "refresh_due",
+        ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED: "not_tried",
+        ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS: "unfetchable",
+    }
