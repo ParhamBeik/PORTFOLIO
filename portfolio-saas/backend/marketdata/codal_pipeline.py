@@ -262,9 +262,12 @@ def extract_report(announcement_id):
         except Exception as exc:
             parse_errors.append(type(exc).__name__)
             continue
-        if not (candidate.tables or candidate.sections or candidate.text):
+        # The statement parser reads `var datasource` and form inputs, which a
+        # script-rendered page carries with no visible table or text -- so it
+        # runs before the generic emptiness check, not after it.
+        if report.category != 2 and not (candidate.tables or candidate.sections or candidate.text):
             continue
-        if first_generic is None:
+        if first_generic is None and (candidate.tables or candidate.sections or candidate.text):
             first_generic = (candidate, artifact)
         if report.category == 2:
             income = parse_income_statement(
@@ -286,7 +289,7 @@ def extract_report(announcement_id):
         # Downloaded fine, but nothing usable came out of any of them --
         # a template problem, not a network one. Not retried.
         report.status = CodalReport.Status.UNSUPPORTED
-        report.error_code = "unparseable_template"
+        report.error_code = f"statement:{abstain}"[:64] if abstain else "unparseable_template"
         report.save(update_fields=["status", "error_code", "updated_at"])
         return report, {"error_code": report.error_code, "parse_errors": parse_errors}
 
@@ -312,13 +315,17 @@ def extract_report(announcement_id):
         report.status = CodalReport.Status.UNSUPPORTED
         report.quality = CodalReport.Quality.REVIEW
         report.error_code = "unknown_category"
+    elif report.category == 2 and abstain and not chosen_income:
+        # Generic keyword facts can reconcile a statement the strict parser
+        # refused. Keep the parser's reason: it is what sorts the older-template
+        # backlog, and a keyword match is not a verified statement.
+        report.status = CodalReport.Status.NEEDS_REVIEW
+        report.quality = CodalReport.Quality.REVIEW
+        report.error_code = f"statement:{abstain}"[:64]
     elif not reconciled:
         report.status = CodalReport.Status.NEEDS_REVIEW
         report.quality = CodalReport.Quality.REVIEW
-        report.error_code = (
-            f"statement:{abstain}"[:64] if report.category == 2 and abstain
-            else f"no_typed_facts:category={report.category}"
-        )
+        report.error_code = f"no_typed_facts:category={report.category}"
     else:
         report.status = CodalReport.Status.PARSED
         report.quality = CodalReport.Quality.DEGRADED

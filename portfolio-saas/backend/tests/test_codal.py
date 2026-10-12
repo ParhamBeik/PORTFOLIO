@@ -850,6 +850,7 @@ def test_an_unreachable_origin_stops_enqueueing_instead_of_retrying(monkeypatch,
     monkeypatch.setattr(
         "marketdata.codal_storage.origin_unreachable", lambda: True
     )
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
     monkeypatch.setattr(
         "marketdata.tasks.extract_codal_report.delay",
         lambda pk: pytest.fail("must not enqueue against a dead origin"),
@@ -1165,3 +1166,58 @@ def test_a_statement_the_parser_cannot_read_says_why():
     assert statement_abstain_reason(v7, title="صورتهای مالی") == "template:FinancialStatement-Listed-Product-V7"
     assert statement_abstain_reason(b"<html></html>", title="صورتهای مالی") == "no_v9_data"
     assert statement_abstain_reason(b"", title="صورتهای مالی (شرکت فرعی)") == "subsidiary"
+
+
+_V7_PAGE = (b'<html><input id="ctl00_txbSymbol" value="x"><script>var datasource = '
+            b'{"title_En": "FinancialStatement-Listed-Product-V7"};</script></html>')
+
+
+def _statement_run(monkeypatch, parsed):
+    announcement = _announcement(code="ن-10", title="صورتهای مالی", link_excel="", link_pdf="",
+                                 link_attachment="", link="https://codal.ir/r.aspx")
+    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (url, "text/html", _V7_PAGE))
+    monkeypatch.setattr(codal_pipeline, "store_artifact", lambda content, content_type, kind: ("k", "c"))
+    if parsed is not None:
+        monkeypatch.setattr(codal_pipeline, "parse_artifact", lambda kind, content: parsed)
+    return codal_pipeline.extract_report(announcement.pk)
+
+
+def test_a_script_only_statement_page_still_says_which_template_it_is(monkeypatch):
+    """The page has no visible table or text, only `var datasource`."""
+    report, _ = _statement_run(monkeypatch, ParsedDocument())
+
+    assert report.error_code == "statement:template:FinancialStatement-Listed-Product-V7"
+
+
+def test_keyword_facts_do_not_hide_the_statement_parsers_refusal(monkeypatch):
+    monkeypatch.setattr(codal_pipeline, "category_reconciles", lambda parsed, category: True)
+    report, _ = _statement_run(monkeypatch, ParsedDocument(tables=[{
+        "name": "s1", "sheet_name": "s1", "headers": ["درآمدهای عملیاتی"], "rows": [["1"]], "source_coordinates": {},
+    }]))
+
+    assert report.status == CodalReport.Status.NEEDS_REVIEW
+    assert report.error_code == "statement:template:FinancialStatement-Listed-Product-V7"
+
+
+def test_archived_reparses_run_while_the_origin_is_down(monkeypatch, settings):
+    """Re-parsing reads MinIO; only downloads need codal.ir."""
+    settings.CODAL_ENABLED = True
+    settings.CODAL_PARSER_VERSION = "4"
+    settings.CODAL_STATEMENT_PARSER_VERSION = "5"
+    from marketdata import tasks
+
+    archived = _announcement(symbol="A", code="ن-30")
+    half = _announcement(symbol="B", code="ن-30")
+    _announcement(symbol="C", code="ن-30")  # never attempted: needs a download
+    for row, statuses in ((archived, ("stored", "rejected")), (half, ("stored", "pending"))):
+        report = CodalReport.objects.create(announcement=row, status=CodalReport.Status.PARSED, parser_version="2")
+        for i, status in enumerate(statuses):
+            CodalArtifact.objects.create(report=report, kind=CodalArtifact.Kind.HTML,
+                                         source_url=f"https://codal.ir/{row.symbol}{i}", fetch_status=status)
+    queued = []
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: True)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
+    monkeypatch.setattr(tasks.extract_codal_report, "delay", lambda pk: queued.append(pk))
+
+    assert tasks.queue_codal_extractions() == 1
+    assert queued == [archived.pk]

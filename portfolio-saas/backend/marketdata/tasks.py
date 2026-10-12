@@ -52,6 +52,7 @@ from .models import (
     AssetMetricSnapshot,
     AssetSignalSnapshot,
     CodalAnnouncement,
+    CodalArtifact,
     CodalReport,
     CorporateAction,
     GoldCurrencyHistory,
@@ -328,13 +329,10 @@ def queue_codal_extractions():
     if not settings.CODAL_ENABLED:
         outcome.finish(WorkflowRun.Outcome.SKIPPED, error_code="codal_disabled")
         return 0
-    if origin_unreachable():
-        # Every one of these would fail at connect. Enqueueing them anyway is how
-        # the ledger filled with ~986 identical timeouts a day.
-        outcome.finish(
-            WorkflowRun.Outcome.SKIPPED, error_code="origin_unreachable"
-        )
-        return 0
+    # Downloads would fail at connect -- enqueueing them anyway is how the ledger
+    # filled with ~986 identical timeouts a day. Re-parsing bytes already in
+    # MinIO needs no origin, so a parser upgrade still proceeds during an outage.
+    origin_down = origin_unreachable()
 
     # Never enqueue more than the codal queue can absorb: the backlog is ~74,000
     # rows, and a flat batch size would just move it from the database into Redis.
@@ -371,7 +369,7 @@ def queue_codal_extractions():
             CodalReport.Status.FAILED,
         ))
     )
-    ids = list(
+    ids = [] if origin_down else list(
         CodalAnnouncement.objects.filter(has_artifact)
         .filter(Q(report__isnull=True) | retryable)
         .exclude(pk__in=pending_ids)
@@ -379,13 +377,18 @@ def queue_codal_extractions():
         .values_list("id", flat=True)[:limit]
     )
     if len(ids) < limit:
-        ids += _stale_parser_codal_ids(limit - len(ids), exclude=set(ids) | pending_ids)
+        ids += _stale_parser_codal_ids(
+            limit - len(ids), exclude=set(ids) | pending_ids, archived_only=origin_down,
+        )
+    if origin_down and not ids:
+        outcome.finish(WorkflowRun.Outcome.SKIPPED, error_code="origin_unreachable")
+        return 0
     queued = _dispatch_codal_ids(ids, slots=limit)
     _finish_ok(outcome, rows_accepted=queued)
     return queued
 
 
-def _stale_parser_codal_ids(limit, exclude=()):
+def _stale_parser_codal_ids(limit, exclude=(), archived_only=False):
     """Finished reports a newer parser has not seen yet, statements first.
 
     PARSED and NEEDS_REVIEW are terminal for the retry path, so a parser
@@ -410,6 +413,15 @@ def _stale_parser_codal_ids(limit, exclude=()):
         .filter(stale)
         .exclude(pk__in=exclude)
     )
+    if archived_only:
+        # Every artifact either sits in MinIO or was refused on content: a run
+        # then reads only stored bytes and never contacts the origin.
+        base = base.filter(report__artifacts__fetch_status=CodalArtifact.FetchStatus.STORED).exclude(
+            report__artifacts__fetch_status__in=(
+                CodalArtifact.FetchStatus.PENDING, CodalArtifact.FetchStatus.FAILED,
+                CodalArtifact.FetchStatus.BLOCKED_NETWORK, CodalArtifact.FetchStatus.BLOCKED_STORAGE,
+            ),
+        ).distinct()
     ids = list(
         base.filter(statement & ~clarification)
         .order_by("-date_publish", "-time_publish").values_list("id", flat=True)[:limit]
