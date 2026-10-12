@@ -42,7 +42,6 @@ from zoneinfo import ZoneInfo
 from django.conf import settings
 
 from .. import jalali
-from ..market_state import PROVIDER_CLOSED
 from .http import SourceResponseError, fetch
 
 logger = logging.getLogger(__name__)
@@ -296,8 +295,8 @@ def tedpix_history_rows(rows):
 def live_tedpix_payload(current=None, *, now=None):
     """Adapt TGJU's live `bourse` quote to the index-ingest shape.
 
-    A stale or malformed quote returns ``None`` so the caller can retain the
-    existing TSETMC probe as a conservative fallback for market-state decisions.
+    A stale or malformed quote returns ``None``. The payload carries an empty
+    ``state``: TGJU supplies the index value only, never the market state.
     """
     current = fetch_live() if current is None else current
     row = current.get(TEDPIX_HISTORY_SLUG)
@@ -313,23 +312,16 @@ def live_tedpix_payload(current=None, *, now=None):
         return None
     change = _to_decimal(row.get("d")) or Decimal("0")
 
-    # State is OBSERVED, never asserted. Hard-coding "باز" here was a real
-    # hazard: `market_state_at` is clock-based (weekday plus session hours) and
-    # the only thing that can override it is a cached provider "بسته". A
-    # payload that always claims open can therefore never reveal a weekday
-    # public holiday, and the TSE stock job would run all session against a shut
-    # market on the binding quota.
-    #
-    # The index printing today is the evidence. If TGJU's newest TEDPIX tick is
-    # from an earlier day while we are inside session hours, the exchange has
-    # not opened -- that is a stronger signal than a provider's string, because
-    # it is derived from whether a price actually moved.
-    same_day = stamped.date() == moment.date()
-    state = "باز" if same_day else PROVIDER_CLOSED
+    # No state claim. Open/closed is the paid Index.php probe's call alone
+    # (`portfolio.live.fetcher.fetch_all_markets`). This used to derive "بسته"
+    # from the tick being older than today, which froze stock prices for two
+    # whole sessions (2026-10-05/06) whenever TGJU's index lagged, and it
+    # stamped that "بسته" on the quote's own date, an earlier real trading day.
+    # Empty is what `calendars.is_closure_day` ignores, as for historical rows.
     return {
         "date": jalali.from_gregorian(stamped.date()),
         "time": stamped.strftime("%H:%M:%S"),
-        "state": state,
+        "state": "",
         "index": price,
         "index_change": change,
     }

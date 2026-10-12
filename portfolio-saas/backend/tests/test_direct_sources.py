@@ -778,44 +778,17 @@ class TestCryptoHistoryIngest:
         assert QUOTES["TMN"][1] == "تومان" and QUOTES["USDT"][1] == "تتر"
 
 
-class TestIndexStateIsObservedNotAsserted:
+class TestProviderClosedReachesTheJobPlanner:
     """The market-open signal must never be a constant.
 
     `market_state_at` is clock-based -- weekday plus session hours -- and the
-    ONLY thing that can override it is a cached provider "بسته". So a payload
-    that always claims open can never reveal a weekday public holiday, and the
-    TSE stock job would run every two minutes for a whole session against a shut
-    market, on the wallet that actually binds (TSETMC hit 10,034/10,000 once).
+    ONLY thing that can override it is a cached provider "بسته". Since
+    2026-10-11 that comes from the paid Index.php probe alone; TGJU's index
+    makes no state claim (see TestOnlyThePaidProbeCanCloseTheSession).
     """
 
-    def _current(self, ts):
-        return {"bourse": {"p": "6,547,963.76", "d": "31,779.83", "ts": ts}}
-
-    def test_index_printing_today_reads_as_open(self):
-        payload = tgju.live_tedpix_payload(
-            self._current("2026-09-01 12:39:04"),
-            now=datetime(2026, 9, 1, 12, 40, tzinfo=TEHRAN),
-        )
-        assert payload["state"] == "باز"
-
-    def test_an_index_that_has_not_printed_today_reads_as_closed(self):
-        """A weekday holiday: inside session hours, last tick is yesterday's.
-
-        Fresh enough to pass MAX_QUOTE_AGE, so the old code returned it wearing
-        a hard-coded "open". The quote's own date is the evidence that the
-        exchange never opened.
-        """
-        from marketdata.market_state import PROVIDER_CLOSED
-
-        payload = tgju.live_tedpix_payload(
-            self._current("2026-09-01 12:39:04"),
-            now=datetime(2026, 9, 2, 11, 0, tzinfo=TEHRAN),
-        )
-        assert payload is not None, "still within MAX_QUOTE_AGE"
-        assert payload["state"] == PROVIDER_CLOSED
-
     def test_that_closed_state_actually_suppresses_the_stock_job(self):
-        """End to end: the derived state must reach the job planner.
+        """End to end: a provider "closed" must reach the job planner.
 
         Asserting the string alone would pass while the wiring was broken; what
         matters is that `live_job_keys` stops asking for TSE stocks.
@@ -889,3 +862,104 @@ class TestPaidFallbackSkipIsKeyedToWhatTheAppNeeds:
         assert not _required_symbols() <= direct, (
             "GBP is unpriced by the direct board, so BrsApi must still run"
         )
+
+
+class _FakeRedis:
+    """Just enough of redis for the market-state cache: SET (EX/NX), GET, DELETE."""
+
+    def __init__(self):
+        self.data = {}
+
+    def set(self, key, value, ex=None, nx=False):
+        if nx and key in self.data:
+            return None
+        self.data[key] = value
+        return True
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def delete(self, *keys):
+        for key in keys:
+            self.data.pop(key, None)
+
+
+class TestOnlyThePaidProbeCanCloseTheSession:
+    """Replays the 2026-10-05/06 freeze: TSE traded, live wrote ~15 stock prices a day.
+
+    Between half-hourly paid probes the loop read TGJU's TEDPIX. When TGJU's
+    newest index tick was from an earlier day, `live_tedpix_payload` reported
+    "بسته", `remember_provider_state` cached it until 13:00, and every cycle
+    until the next probe skipped the stock job. A lagging free quote is not
+    evidence the exchange is shut; only the paid Index.php state may say so.
+    """
+
+    # Mon 2026-10-05 10:00 Tehran: a trading day, inside session hours.
+    NOW = datetime(2026, 10, 5, 10, 0, tzinfo=TEHRAN)
+    # TGJU still serving Sunday's last index print.
+    STALE_TGJU = {"bourse": {"p": "6,547,963.76", "d": "0", "ts": "2026-10-04 12:29:00"}}
+
+    def _wire(self, monkeypatch, settings, probe_state):
+        from marketdata import market_state
+        from portfolio.live import fetcher
+
+        settings.TGJU_ENABLED = True
+        settings.WALLEX_ENABLED = False
+        settings.NOBITEX_ENABLED = False
+        settings.MARKETDATA_IGNORE_MARKET_HOURS = False
+
+        fake = _FakeRedis()
+        monkeypatch.setattr(market_state, "get_redis", lambda: fake)
+        monkeypatch.setattr(market_state, "_now_tehran", lambda: self.NOW)
+
+        class _Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return TestOnlyThePaidProbeCanCloseTheSession.NOW
+
+        monkeypatch.setattr(fetcher, "datetime", _Clock)
+
+        def paid_probe(_key):
+            payload = {"date": "1405-07-13", "time": "10:00:00",
+                       "state": probe_state, "index": Decimal("6600000")}
+            market_state.remember_provider_state(payload)
+            return payload
+
+        monkeypatch.setattr("marketdata.fetchers.fetch_market_index", paid_probe)
+        monkeypatch.setattr(tgju, "fetch_live", lambda: self.STALE_TGJU)
+        monkeypatch.setattr(fetcher.ingest, "ingest_market_index", lambda _p: (1, 0))
+        monkeypatch.setattr(fetcher, "_direct_job", lambda: {})
+
+        stock_cycles = []
+        monkeypatch.setattr(
+            fetcher, "_tsetmc_job",
+            lambda *_a: stock_cycles.append(True) or {"tsetmc": {}},
+        )
+        return fetcher, market_state, stock_cycles
+
+    API = {"brs_url": "", "brs_api_key": "", "tsetmc_url": "https://paid.example",
+           "tsetmc_api_key": "paid-key"}
+
+    def test_a_lagging_tgju_index_does_not_switch_stocks_off(self, monkeypatch, settings):
+        fetcher, market_state, stock_cycles = self._wire(monkeypatch, settings, "باز")
+
+        fetcher.fetch_all_markets(self.API)   # 1: paid probe claimed, says open
+        for _ in range(5):                    # 2-6: no probe, TGJU's index is stale
+            fetcher.fetch_all_markets(self.API)
+
+        assert not market_state._provider_says_closed()
+        assert len(stock_cycles) == 6, "every in-session cycle must fetch stocks"
+
+    def test_the_paid_probe_still_closes_a_weekday_holiday(self, monkeypatch, settings):
+        fetcher, market_state, stock_cycles = self._wire(monkeypatch, settings, "بسته")
+
+        fetcher.fetch_all_markets(self.API)
+        fetcher.fetch_all_markets(self.API)
+
+        assert market_state._provider_says_closed()
+        assert stock_cycles == []
+
+    def test_tgju_index_payload_makes_no_state_claim(self):
+        payload = tgju.live_tedpix_payload(self.STALE_TGJU, now=self.NOW)
+        assert payload is not None, "still a usable index number"
+        assert payload["state"] == "", "TGJU supplies the index value, never the state"

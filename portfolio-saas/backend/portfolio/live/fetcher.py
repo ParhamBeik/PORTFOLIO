@@ -393,7 +393,6 @@ def fetch_all_markets(api_settings):
         live_job_keys,
         market_state,
         release_provider_state_probe,
-        remember_provider_state,
     )
 
     ignore_hours = getattr(settings, "MARKETDATA_IGNORE_MARKET_HOURS", False)
@@ -427,17 +426,20 @@ def fetch_all_markets(api_settings):
             release_provider_state_probe()
             logger.warning("Index probe failed: %s", exc)
 
-    # TGJU covers the index only when the paid probe produced nothing -- either
-    # it was not claimed this cycle, or it failed. It is a free value, not a
-    # second opinion on whether the market is open: see `live_tedpix_payload`,
-    # which derives open/closed from the quote's own age rather than asserting it.
+    # TGJU covers the index NUMBER only when the paid probe produced nothing --
+    # either it was not claimed this cycle, or it failed. It never decides
+    # whether the market is open, so its payload is not passed to
+    # `remember_provider_state`. It used to be: whenever TGJU's newest TEDPIX
+    # tick was from an earlier day, that cached "بسته" until 13:00 and switched
+    # the stock job off between paid probes. On 2026-10-05 and 10-06 the TSE
+    # traded normally and live wrote 15 and 14 stock prices instead of ~700. A
+    # lagging free quote is not evidence the exchange is shut.
     if index_payload is None and getattr(settings, "TGJU_ENABLED", False):
         try:
             direct_index = tgju.live_tedpix_payload(now=tehran_now)
             if direct_index:
                 ingest.ingest_market_index(direct_index)
                 raw_data.setdefault("market_index", direct_index)
-                remember_provider_state(direct_index)
         except Exception as exc:  # noqa: BLE001 - never let a free source break the loop
             logger.warning("TGJU index probe failed: %s", exc)
 
