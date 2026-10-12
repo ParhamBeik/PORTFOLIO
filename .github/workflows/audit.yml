@@ -1,0 +1,62 @@
+# Dependency audit. This tests the world outside the repo: a CVE published
+# overnight in a transitive dependency has nothing to do with the commit being
+# pushed, and gating deploys on it would lock us out of shipping the very
+# upgrade that fixes it. The run still goes red, which is the part that matters.
+#
+# Its own workflow, not a job in ci.yml, because deploy.yml ships only when the
+# whole "CI" workflow concludes success. As a CI job it gated every deploy, which
+# is exactly what the comment above says it must not do.
+name: Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Advisories are published on the vendor's schedule, not ours, so an audit
+  # that only runs on push is blind for however long nobody pushes. That is how
+  # 46 CVEs across four dependencies accumulated unnoticed until someone looked
+  # by hand.
+  schedule:
+    - cron: '0 6 * * 1'
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Audit Python dependencies
+        working-directory: portfolio-saas/backend
+        run: |
+          # These two pins mirror backend/Dockerfile's builder stage. Without
+          # them this audits the runner's ambient build environment rather than
+          # the image we ship, and reported setuptools 79.0.1 as vulnerable
+          # while production was already on 84.0.0. An audit that does not
+          # describe the deployed artifact is worse than none -- it spends the
+          # credibility of a red build on a machine nobody runs.
+          pip install --quiet --upgrade "pip>=26.1.2" "setuptools>=83.0.0"
+          pip install --quiet pip-audit
+          # Audits the resolved install, not just the pinned direct
+          # dependencies -- lxml and pypdf are the two fed untrusted bytes, and
+          # both arrived as transitive concerns first.
+          pip install --quiet -r requirements.txt
+          pip-audit --progress-spinner off
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: portfolio-saas/frontend/package-lock.json
+      - name: Audit JS dependencies
+        working-directory: portfolio-saas/frontend
+        # Production dependencies, at `moderate`. This was briefly `high` to
+        # accommodate the echarts XSS advisory; that upgrade has landed and the
+        # tree reports 0 vulnerabilities, so the threshold went back down rather
+        # than staying loose after the reason for it expired.
+        run: npm audit --omit=dev --audit-level=moderate

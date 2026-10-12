@@ -76,7 +76,9 @@ npm run android          # opens Android Studio
     in `frontend/android/keystore.properties` (gitignored; `app/build.gradle` reads it).
     `cd android && ./gradlew :app:bundleRelease` → upload
     `app/build/outputs/bundle/release/app-release.aab` to the Play internal track.
-- CI's `mobile` job builds the Android debug APK on every PR but does not gate deploys.
+- `mobile.yml` builds the Android debug APK on every PR. It and `audit.yml` (pip-audit +
+  npm audit) are separate workflows on purpose: `deploy.yml` waits on the whole CI run,
+  so anything inside `ci.yml` gates production.
 
 ## Docs
 
