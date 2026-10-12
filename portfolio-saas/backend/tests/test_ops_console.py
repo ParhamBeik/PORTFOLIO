@@ -2118,3 +2118,14 @@ def test_ops_picture_separates_unbackfilled_from_gappy_and_reports_rows_stored()
     )
     row = next(c for c in _archive()["categories"] if c["endpoint"] == ArchiveFetchState.Endpoint.STOCK_HISTORY_ADJUSTED)
     assert (row["row_pct"], row["progress_pct"], row["retired"]) == (99.8, 0.0, False)
+
+
+def test_nearly_complete_data_type_never_reads_100():
+    from marketdata.admin_telemetry import _archive
+    from marketdata.models import ArchiveFetchState
+
+    ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS, symbol="x", expected_rows=10_000, stored_rows=9_999,
+    )
+    row = next(c for c in _archive()["categories"] if c["endpoint"] == ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS)
+    assert row["row_pct"] == 99.9

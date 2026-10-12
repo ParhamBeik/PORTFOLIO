@@ -2195,8 +2195,10 @@ const INGEST_KEYS = [
   ["shareholders", "Shareholders"],
 ];
 
-/** Rows added per day, from the 8-hourly count samples. A missing sample stays
- *  null all the way to the chart: Number(null) is 0 and would draw a fake dip. */
+/** Rows added per day, from the 8-hourly count samples. A day with no sample
+ *  stays a null slot, and a delta is taken only between ADJACENT measured days:
+ *  bridging a collector outage would pile several days of growth onto one bar
+ *  and let "last 7 days" span more than seven days. */
 export function dailyAdds(history, key, days = 30) {
   const lastByDay = new Map();
   for (const row of history || []) {
@@ -2204,10 +2206,20 @@ export function dailyAdds(history, key, days = 30) {
     if (v == null || !row.captured_at) continue;
     lastByDay.set(row.captured_at.slice(0, 10), Number(v));
   }
-  const dates = [...lastByDay.keys()].sort();
+  const measured = [...lastByDay.keys()].sort();
+  if (measured.length < 2) return [];
   const out = [];
-  for (let i = 1; i < dates.length; i += 1) {
-    out.push({ x: dates[i], y: Math.max(0, lastByDay.get(dates[i]) - lastByDay.get(dates[i - 1])) });
+  const end = new Date(`${measured[measured.length - 1]}T00:00:00Z`);
+  for (let d = new Date(`${measured[0]}T00:00:00Z`); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+    if (d.getTime() === new Date(`${measured[0]}T00:00:00Z`).getTime()) continue;
+    const day = d.toISOString().slice(0, 10);
+    const prev = new Date(d);
+    prev.setUTCDate(prev.getUTCDate() - 1);
+    const prevDay = prev.toISOString().slice(0, 10);
+    const y = lastByDay.has(day) && lastByDay.has(prevDay)
+      ? Math.max(0, lastByDay.get(day) - lastByDay.get(prevDay))
+      : null;
+    out.push({ x: day, y });
   }
   return out.slice(-days);
 }

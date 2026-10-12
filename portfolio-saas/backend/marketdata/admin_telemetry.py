@@ -632,6 +632,7 @@ def _archive():
         )
     }
     from .archive import _RETIRED_ARCHIVE_ENDPOINTS
+    from .coverage_report import _pct
 
     summary["categories"] = []
     for endpoint, label in ArchiveFetchState.Endpoint.choices:
@@ -652,7 +653,7 @@ def _archive():
             # since the last session) and read as "half missing" at 99.8% stored.
             "stored_rows": row.get("stored", 0) or 0,
             "expected_rows": row.get("expected", 0) or 0,
-            "row_pct": round((row.get("stored") or 0) / row["expected"] * 100, 1) if row.get("expected") else None,
+            "row_pct": _pct(row.get("stored") or 0, row["expected"]) if row.get("expected") else None,
             # Filled by live capture, not backfill: a 0% job bar here is by design.
             "retired": endpoint in _RETIRED_ARCHIVE_ENDPOINTS,
         })

@@ -15,4 +15,18 @@ describe("dailyAdds", () => {
       { x: "2026-10-12", y: 0 },
     ]);
   });
+
+  it("leaves a day with no sample empty instead of piling its growth onto the next", () => {
+    const history = [
+      { captured_at: "2026-10-01T22:00:00Z", counts: { ticks: 100 } },
+      { captured_at: "2026-10-04T22:00:00Z", counts: { ticks: 400 } },
+      { captured_at: "2026-10-05T22:00:00Z", counts: { ticks: 450 } },
+    ];
+    expect(dailyAdds(history, "ticks")).toEqual([
+      { x: "2026-10-02", y: null },
+      { x: "2026-10-03", y: null },
+      { x: "2026-10-04", y: null },
+      { x: "2026-10-05", y: 50 },
+    ]);
+  });
 });
