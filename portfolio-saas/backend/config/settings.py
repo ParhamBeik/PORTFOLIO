@@ -256,14 +256,15 @@ REST_FRAMEWORK = {
     },
     # M5: render Decimal as a string so large Toman values stay exact on the wire.
     "DEFAULT_RENDERER_CLASSES": ("config.api.DecimalStringJSONRenderer",),
-    # Which X-Forwarded-For entry is the client. Unset, DRF keys every throttle
-    # on the WHOLE header, and nginx's `$proxy_add_x_forwarded_for` appends to
-    # whatever the client sent -- so a bot sending a fresh made-up header per
-    # request got a fresh bucket per request: unlimited login guesses, signups
-    # and reset mails. Counting hops from the right reads only entries our own
-    # proxies wrote. Production is two: the shared vps-edge proxy, then this
-    # app's nginx. A request with no header (dev, tests, direct probes) falls
-    # back to REMOTE_ADDR.
+    # Which X-Forwarded-For entry is the client: count hops from the right, so
+    # only entries our own proxies wrote are read. Production is two -- vps-edge
+    # (Caddy, the only published port) then this app's nginx. Caddy trusts no
+    # upstream and overwrites whatever the client sent, so a spoofed header is
+    # already harmless there (live probe 2026-10-12: 25 logins with 25 made-up
+    # headers, 429 from the 21st). Unset, DRF would key every bucket on the
+    # whole header, and any path that skips Caddy's rewrite -- local stack,
+    # a future `trusted_proxies` -- hands a bot a fresh bucket per request.
+    # A request with no header falls back to REMOTE_ADDR.
     "NUM_PROXIES": int(os.getenv("TRUSTED_PROXY_COUNT", "2")),
 }
 
