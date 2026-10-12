@@ -1224,6 +1224,29 @@ class TestIngestOutageDetection:
 
         assert market_outage_windows(start="1404-09-01", end="1404-12-29") == []
 
+    def test_a_failed_reopen_is_retried_the_next_night(self, monkeypatch):
+        from django.core.cache import cache
+
+        from marketdata import tasks
+
+        cache.clear()
+        monkeypatch.setattr(tasks, "update_all_symbols_integrity", lambda: [])
+        monkeypatch.setattr(tasks, "market_outage_windows", lambda: [(dt.date(2026, 1, 1), dt.date(2026, 2, 1))])
+        calls = []
+
+        def flaky(symbols):
+            calls.append(symbols)
+            if len(calls) == 1:
+                raise RuntimeError("database went away")
+            return 10
+
+        monkeypatch.setattr(tasks, "reopen_states_with_gaps", flaky)
+        with pytest.raises(RuntimeError):
+            tasks.nightly_data_integrity()
+        tasks.nightly_data_integrity()
+
+        assert calls == [None, None]
+
     def test_one_outage_window_is_reopened_once_not_every_night(self, monkeypatch):
         from django.core.cache import cache
 

@@ -1236,10 +1236,13 @@ def nightly_data_integrity():
         window_key = "marketdata:outage-reopened:" + ",".join(
             f"{start}:{end}" for start, end in outages
         )
-        if cache.add(window_key, True, timeout=OUTAGE_REOPEN_COOLDOWN_SECONDS):
-            reopened = reopen_states_with_gaps(None)
-        else:
+        # Marked only once the reopen has landed: a crash in between must not
+        # silence a genuine outage for a week.
+        if cache.get(window_key):
             reopened = 0
+        else:
+            reopened = reopen_states_with_gaps(None)
+            cache.set(window_key, True, timeout=OUTAGE_REOPEN_COOLDOWN_SECONDS)
         logger.error(
             "market outage: %d gap(s) in the session calendar; longest %s to %s; "
             "reopened %d archive state(s) to refetch",
