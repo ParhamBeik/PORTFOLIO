@@ -17,7 +17,11 @@ class ResearchRun(models.Model):
         ABSTAINED = "abstained", "Abstained"
         FAILED = "failed", "Failed"
 
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    # CASCADE: a run holds the member's own question text, so it leaves with
+    # them. Spend is accounted on ResearchBudgetDay, which closing an account
+    # does not touch. PROTECT here made account deletion raise for anyone who
+    # had ever run research.
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)
     symbol = models.CharField(max_length=64)

@@ -375,3 +375,25 @@ def test_news_secret_projection_uses_only_allowlisted_settings(tmp_path, monkeyp
     assert "do-not-copy" not in projected
     assert destination.stat().st_mode & 0o777 == 0o600
     assert "test-secret" not in capsys.readouterr().out
+
+
+def test_account_deletion_takes_research_runs_with_it(make_user):
+    # ResearchRun.user was PROTECT, so closing the account of anyone who had
+    # ever asked a research question raised ProtectedError and answered 500.
+    user = make_user(email="researcher@test.test")
+    ResearchRun.objects.create(
+        user=user, symbol="فولاد", question="Which month had highest sales?",
+        max_cost_usd=Decimal("0.01"), status=ResearchRun.Status.ABSTAINED,
+    )
+    ResearchBudgetDay.objects.create(date="2026-10-11", spent_usd=Decimal("0.0004"))
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    response = client.delete(
+        "/api/auth/me/", {"password": "Sup3rSecret!", "confirmation": "DELETE"}, format="json",
+    )
+
+    assert response.status_code == 204
+    assert not ResearchRun.objects.filter(user_id=user.pk).exists()
+    # Spend is accounted per day, not per run: closing an account refunds nothing.
+    assert ResearchBudgetDay.objects.get(date="2026-10-11").spent_usd == Decimal("0.0004")
