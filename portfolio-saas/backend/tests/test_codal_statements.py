@@ -438,6 +438,8 @@ def test_a_table_in_an_unconvertible_unit_is_not_read():
     described = "کليه مبالغ به ميليون ريال است".encode()
     assert INTERIM.count(described) == 1
     assert _parse(INTERIM.replace(described, "کليه مبالغ به هزار تومان است".encode())) == []
+    # A currency this reader has no word for is still a stated unit, not a blank.
+    assert _parse(INTERIM.replace(described, "کليه مبالغ به هزار درهم است".encode())) == []
 
 
 def test_audit_status_comes_from_the_data_when_the_title_is_silent():

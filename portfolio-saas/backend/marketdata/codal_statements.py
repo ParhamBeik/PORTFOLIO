@@ -155,7 +155,10 @@ def statement_abstain_reason(content, *, title, extracted=False):
 
 def _unit(text):
     """The Rial scale `text` states; "" when it names none, None when it names
-    one this reader does not convert (Toman, a foreign currency, billions)."""
+    one this reader does not convert (Toman, a foreign currency, billions).
+
+    A statement of amounts in no currency read here ("مبالغ به هزار درهم") is
+    None too, not "": "" lets the page-level Rial note stand in for it."""
     canonical = _canonical(text)
     if any(word in canonical for word in ("تومان", "دلار", "یورو", "میلیارد")):
         return None
@@ -165,6 +168,8 @@ def _unit(text):
         return "thousand_rial"
     if "ریال" in canonical:
         return "rial"
+    if "مبالغ" in canonical or "مبلغ" in canonical:
+        return None
     return ""
 
 
