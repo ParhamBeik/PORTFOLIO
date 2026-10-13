@@ -236,6 +236,7 @@ export default {
   "Difference": "تفاوت",
   "Break-even price": "قیمت سربه‌سر",
   "Would hold": "مقدار معادل",
+  "as of {date}": "تا {date}",
   "Chart": "نمودار",
   "What the same money would be worth in each alternative": "ارزش همین پول در هر گزینه جایگزین",
   "Break-even price: what {name} would have to trade at for your position to be worth exactly the same as the alternative.": "قیمت سربه‌سر: قیمتی که {name} باید به آن برسد تا ارزش دارایی شما دقیقاً با گزینه جایگزین برابر شود.",

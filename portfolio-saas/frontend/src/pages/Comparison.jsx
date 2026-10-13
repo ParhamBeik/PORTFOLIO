@@ -26,6 +26,9 @@ const RANGES = [
   { value: "90", label: "90D" },
 ];
 
+// Whole units are noise on 27M shares, but 0.25 BTC is not "0".
+const units = (n) => num(n, n >= 100 ? 0 : 2);
+
 // The unit travels with every per-unit price the API sends: TSE prices are
 // Rial on every other screen, so a break-even shown in Toman would read as a
 // tenth of the quote.
@@ -85,7 +88,7 @@ function Verdict({ subject }) {
       <StatTile
         label="Price now"
         value={price(subject.price)}
-        sub={`${num(subject.units, 0)} × ${subject.label}`}
+        sub={`${units(subject.units)} × ${subject.label}`}
         testId="comparison-price"
       />
     </div>
@@ -113,7 +116,19 @@ function Rows({ data }) {
       header: "Worth today",
       align: "right",
       mobile: "value",
-      render: (r) => (r.reason ? "—" : toman(r.value_tomans)),
+      // A target whose series stopped ends its row on its last real price;
+      // that value is not today's, so the row says which day it is.
+      render: (r) =>
+        r.reason ? "—" : (
+          <div>
+            {toman(r.value_tomans)}
+            {r.end_date < data.subject.end_date && (
+              <div className="text-xs text-muted" data-testid="comparison-row-as-of">
+                {translate("as of {date}", lang, { date: r.end_date })}
+              </div>
+            )}
+          </div>
+        ),
     },
     {
       key: "lead",
@@ -144,7 +159,7 @@ function Rows({ data }) {
       key: "units",
       header: "Would hold",
       align: "right",
-      render: (r) => (r.reason ? "—" : num(r.units, r.units >= 100 ? 0 : 2)),
+      render: (r) => (r.reason ? "—" : units(r.units)),
     },
   ];
   return (

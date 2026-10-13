@@ -66,9 +66,16 @@ def market_closure_days(*, start=None, end=None) -> set[str]:
     holding a stock was trimmed to the reopening: years of history dropped, and
     the comparison page valued a 2022 purchase at its May 2026 price. A day is
     therefore a closure when fewer than one in `CLOSURE_TRADED_SHARE` of that
-    day's own rows traded. The baseline is the same day's row count, never a
-    window peak: a query that spans only the closure has no ordinary day to
-    compare against.
+    day's own rows traded. The traded share is measured against the same day's
+    row count, never a window's busiest session: a query that spans only the
+    closure has no ordinary session to compare against.
+
+    That ratio alone would let a half-ingested day pass as a closure (nine
+    padded rows and one trade, with the other 2,000 symbols simply missing) and
+    hide the very hole `market_outage_windows` exists to repair. So the day must
+    also be broad -- at least half as many rows as the widest day in the query.
+    The padding is what makes that safe: a real closure still carries a row for
+    every listed symbol.
     """
     cache_key = f"marketdata:closure-days:v2:{start}:{end}"
     cached = cache.get(cache_key)
@@ -80,12 +87,15 @@ def market_closure_days(*, start=None, end=None) -> set[str]:
         queryset = queryset.filter(date__gte=start)
     if end is not None:
         queryset = queryset.filter(date__lte=end)
-    rows = queryset.values("date").annotate(
+    rows = list(queryset.values("date").annotate(
         listed=Count("id"),
         traded=Count("id", filter=Q(tvol__gt=0) | Q(tno__gt=0)),
-    )
+    ))
+    widest = max((r["listed"] for r in rows), default=0)
     result = {
-        r["date"] for r in rows if r["traded"] * CLOSURE_TRADED_SHARE < r["listed"]
+        r["date"] for r in rows
+        if r["traded"] * CLOSURE_TRADED_SHARE < r["listed"]
+        and r["listed"] * 2 >= widest
     }
     cache.set(cache_key, sorted(result), timeout=60 * 60)
     return result

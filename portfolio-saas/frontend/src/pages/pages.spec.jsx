@@ -242,6 +242,14 @@ describe("Page Rendering Tests", () => {
             series, warnings: [],
           },
           { key: "coin", label: "Coin", reason: "missing_price_history", detail: "No usable price history for Coin." },
+          {
+            key: "euro", label: "Euro", units: 0.25,
+            value_tomans: 900000000, actual_tomans: 800000000,
+            invested_tomans: 700000000, difference_tomans: -100000000,
+            difference_pct: -11.1, breakeven_price: { value: 333, unit: "IRR" },
+            start_date: "2022-01-05", end_date: "2026-09-20", window_days: 1720,
+            series, warnings: [],
+          },
         ],
         requested_days: null,
       });
@@ -266,6 +274,10 @@ describe("Page Rendering Tests", () => {
     // A target that could not answer says why, beside the ones that did.
     expect(table).toHaveTextContent("No usable price history for Coin.");
     expect(screen.getByTestId("comparison-price")).toHaveTextContent("6,470 ﷼");
+    // The euro's series stopped early: its value is dated, not called today's.
+    expect(screen.getAllByTestId("comparison-row-as-of")).toHaveLength(1);
+    expect(table).toHaveTextContent("2026-09-20");
+    expect(table).toHaveTextContent("0.25");
   });
 
   it("renders MyOptimal with scenarios and recommended weights", async () => {
