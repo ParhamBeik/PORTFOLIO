@@ -484,6 +484,36 @@ def test_genuine_quota_exhaustion_defers_past_rollover_and_takes_siblings():
     assert sibling.last_error == "Daily quota unavailable (bucket_exhausted)."
 
 
+def test_a_rate_limit_trip_waits_minutes_not_a_day(settings):
+    """A 429 trips the breaker half-open; only a meter-confirmed empty wallet
+    is latched. Parking on the 429 idled 3,345 requests on 2026-10-13."""
+    from marketdata.quota import REASON_PLAN_BLOCKED, TSETMC, QuotaExhausted, trip_plan_breaker
+
+    settings.MARKETDATA_BREAKER_RETRY_SECONDS = 900
+    now = timezone.now()
+    state = _state("rate-sym")
+    sibling = _state("rate-sib", next_attempt_at=now + timedelta(minutes=5))
+    trip_plan_breaker(TSETMC, reason="http_429", bucket=ARCHIVE)
+    with patch("marketdata.archive._fetch_and_ingest",
+               side_effect=QuotaExhausted("blocked", reason=REASON_PLAN_BLOCKED)):
+        with pytest.raises(QuotaExhausted):
+            run_archive_state(state.pk)
+
+    state.refresh_from_db()
+    sibling.refresh_from_db()
+    assert now + timedelta(seconds=440) <= state.next_attempt_at <= now + timedelta(seconds=1360)
+    assert state.last_error == ""
+    assert sibling.next_attempt_at <= now + timedelta(minutes=5, seconds=1)
+
+    trip_plan_breaker(TSETMC, reason="http_429", bucket=None, until_reset=True)
+    with patch("marketdata.archive._fetch_and_ingest",
+               side_effect=QuotaExhausted("spent", reason=REASON_PLAN_BLOCKED)):
+        with pytest.raises(QuotaExhausted):
+            run_archive_state(state.pk)
+    state.refresh_from_db()
+    assert state.last_error == "Daily quota unavailable (plan_blocked)."
+
+
 def test_every_archive_endpoint_declares_which_wallet_it_spends():
     """A new endpoint must not default into a plan by accident.
 

@@ -267,6 +267,21 @@ def _bucket_may_clear(tripped_by, bucket):
     return bucket != LIVE
 
 
+def plan_block_latched(plan):
+    """Whether `plan`'s breaker holds until rollover (meter-confirmed empty).
+
+    Every other trip is half-open after MARKETDATA_BREAKER_RETRY_SECONDS, so a
+    caller deciding how long to wait must not treat it as day-scoped.
+    """
+    from django.core.cache import cache
+
+    try:
+        tripped = cache.get(_breaker_key(plan))
+    except Exception:
+        return False
+    return isinstance(tripped, dict) and bool(tripped.get("until_reset"))
+
+
 def is_plan_blocked(plan, bucket=None, *, admit=False, holding_probe=False):
     """Whether `bucket` is currently barred from spending `plan`.
 

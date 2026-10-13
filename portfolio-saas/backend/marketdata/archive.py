@@ -48,10 +48,12 @@ from .models import (
 from .quota import (
     BRS,
     REASON_LIVE_RESERVED,
+    REASON_PLAN_BLOCKED,
     TSETMC,
     QuotaExhausted,
     archive_capacity,
     increment_historical_full_used,
+    plan_block_latched,
     require_archive_room,
 )
 
@@ -965,7 +967,16 @@ def run_archive_state(state_id):
         # where the whole herd re-refused itself and parked again. 6,863 states
         # sat on `last_error="Daily quota unavailable."` while ~4,000 TSETMC
         # requests a day went unspent.
-        if exc.is_pacing:
+        # A breaker tripped by an ordinary 429/5xx is half-open after
+        # MARKETDATA_BREAKER_RETRY_SECONDS; only meter-confirmed exhaustion is
+        # latched to rollover. Parking every state (and its siblings) until
+        # tomorrow on a 15-minute trip idled the archive with 3,345 requests left
+        # on 2026-10-13, and stamped 818 never-fetched Codal states as failing.
+        transient_block = (
+            exc.reason == REASON_PLAN_BLOCKED
+            and not plan_block_latched(_ENDPOINT_PLAN.get(state.endpoint, TSETMC))
+        )
+        if exc.is_pacing or transient_block:
             # Refused by something that clears on its own before rollover. Come
             # back later and leave the row otherwise untouched: no failure count
             # (nothing failed), and no alarming `last_error` that would make a
@@ -981,6 +992,8 @@ def run_archive_state(state_id):
 
             if exc.reason == REASON_LIVE_RESERVED:
                 base = int(getattr(settings, "MARKETDATA_LIVE_RESERVED_RETRY_SECONDS", 1800))
+            elif transient_block:
+                base = int(getattr(settings, "MARKETDATA_BREAKER_RETRY_SECONDS", 900))
             else:
                 base = int(getattr(settings, "MARKETDATA_ARCHIVE_PACED_RETRY_SECONDS", 180))
             state.last_attempt_at = now
