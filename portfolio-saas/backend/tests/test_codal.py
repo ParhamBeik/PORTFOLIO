@@ -1293,3 +1293,10 @@ def test_an_html_excel_export_says_which_template_it_is(monkeypatch, prefix):
     report, _ = codal_pipeline.extract_report(announcement.pk)
 
     assert report.error_code == "statement:template:FinancialStatement-Listed-Product-V7"
+
+
+def test_a_direct_attachment_is_a_document_but_the_index_page_is_not():
+    direct = _announcement(link_attachment="https://codal.ir/DownloadFile.aspx?id=1", has_attachment=True)
+    index = _announcement(symbol="x", link_attachment="https://codal.ir/Reports/Attachment.aspx?LetterSerial=a")
+    assert (CodalArtifact.Kind.ATTACHMENT, direct.link_attachment) in codal_pipeline._artifact_sources(direct)
+    assert CodalArtifact.Kind.ATTACHMENT not in {kind for kind, _ in codal_pipeline._artifact_sources(index)}
