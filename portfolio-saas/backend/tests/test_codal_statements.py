@@ -558,3 +558,25 @@ def test_a_blocked_main_page_with_an_unreadable_fallback_stays_retryable(monkeyp
     ))
     report, _ = codal_pipeline.extract_report(announcement.pk)
     assert report.status == CodalReport.Status.BLOCKED_NETWORK
+
+
+def test_a_page_that_names_no_issuer_is_not_read():
+    stripped = re.sub(rb'<[^<>]*id="ctl00_txbSymbol"[^<>]*>', b"<span>", INTERIM, count=1)
+    assert stripped != INTERIM and _parse(stripped) == []
+
+
+@pytest.mark.django_db
+def test_every_certified_reading_is_kept_for_comparison(monkeypatch):
+    announcement = _filing("two-readings")
+    announcement.link_excel, announcement.has_excel = "https://excel.codal.ir/r.xlsx", True
+    announcement.save()
+    _serve(monkeypatch, {"": INTERIM, "0": INTERIM_BALANCE})
+    serve = codal_pipeline.download_artifact
+    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (
+        (url, "text/html", INTERIM) if "excel" in url else serve(url, kind)
+    ))
+    report, _ = codal_pipeline.extract_report(announcement.pk)
+    readings = CodalCandidateFact.objects.filter(
+        extraction__report=report, fact_code="income.net_profit", verification_status="reconciled",
+    )
+    assert readings.values("extraction__artifact").distinct().count() == 2

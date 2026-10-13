@@ -156,8 +156,10 @@ def _read_statement(report, announcement, downloaded):
              if kind in (CodalArtifact.Kind.HTML, CodalArtifact.Kind.EXCEL) and looks_like_html(content)]
     found, kinds = {}, set()
     for artifact, content in pages:
-        facts = [fact for fact in parse_statement(content, **arguments)
-                 if fact["fact_code"].split(".")[0] not in kinds]
+        # Every reading is kept, not just the first per family: two certified
+        # pages that disagree are what Explore's conflicting-readings guard is
+        # for, and dropping one would publish the other unchallenged.
+        facts = parse_statement(content, **arguments)
         if facts:
             found[artifact] = facts
             # Only a certified sheet makes its advertised tab unnecessary.

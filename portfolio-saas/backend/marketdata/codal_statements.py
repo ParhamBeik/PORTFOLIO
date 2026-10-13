@@ -204,12 +204,20 @@ def _parse_statement(content, *, symbol, company_name, title, period_end, is_con
     if not source or not isinstance(source.get("sheets"), list):
         return []
     soup = _html_soup(content)
+    named = False
     for selector, expected in (("#ctl00_txbCompanyName", company_name), ("#ctl00_txbSymbol", symbol)):
         node = soup.select_one(selector)
         # The listed symbol can publish a subsidiary's statements: refuse a page
-        # that names somebody else.
-        if node is not None and expected and _canonical(node.get_text(" ", strip=True)) != _canonical(expected):
+        # that names somebody else -- or nobody, since nothing else in the
+        # datasource says whose figures these are.
+        if node is None:
             return []
+        if expected:
+            if _canonical(node.get_text(" ", strip=True)) != _canonical(expected):
+                return []
+            named = True
+    if not named:
+        return []
     try:
         end = normalize_jalali(source.get("periodEndToDate"))
         period = Decimal(str(source.get("period") or 0))
