@@ -165,6 +165,29 @@ def test_never_succeeded_outranks_everything_else(monkeypatch):
     assert claim_archive_batch(limit=1) == [virgin_tick.pk]
 
 
+def test_refresh_due_dailies_that_owe_nothing_open_the_tick_gate(settings):
+    """`verified_complete` is re-armed on finished series by design; the gate
+    must ask whether rows are owed. On flag alone ticks sat at 5% for weeks."""
+    from django.core.cache import cache
+
+    from marketdata.archive import _tick_share_now
+
+    cache.clear()
+    settings.MARKETDATA_TICK_QUOTA_SHARE = 0.25
+    settings.MARKETDATA_TICK_SHARE_WHILE_DAILY_GAPS = 0.05
+    now = timezone.now()
+    for i in range(10):
+        _state(f"d{i}", Endpoint.STOCK_CANDLE_ADJUSTED, verified_complete=False,
+               missing_rows=0, stored_rows=3000, last_success_at=now)
+    assert _tick_share_now() == 0.25
+
+    cache.clear()
+    _state("never", Endpoint.STOCK_CANDLE_ADJUSTED)  # never landed a payload
+    for i in range(10, 20):
+        _state(f"d{i}", Endpoint.STOCK_CANDLE_ADJUSTED, missing_rows=5, last_success_at=now)
+    assert _tick_share_now() == 0.05
+
+
 def test_ticks_take_the_majority_share_once_everything_has_succeeded(monkeypatch, settings):
     """Rule 2: the endpoint with the real backlog gets most of the batch.
 

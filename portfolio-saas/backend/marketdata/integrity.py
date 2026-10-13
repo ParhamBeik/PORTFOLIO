@@ -10,6 +10,7 @@ from .calendars import (
     actual_trading_days,
     candle_close_qs,
     gold_currency_quoting_days,
+    market_closure_days,
     symbol_halt_days,
 )
 from .models import (
@@ -296,14 +297,28 @@ def market_outage_windows(start=None, end=None) -> list[tuple[dt.date, dt.date]]
     sessions, so no symbol is missing any, and coverage reads as healthy. The
     only way to see it is to ask whether the calendar itself has a hole too
     long to be a holiday.
+
+    It asks "did we store anything that day", not "was it a full session":
+    `actual_trading_days` drops any day under a fifth of the busiest day's
+    breadth, which is right for scoring and wrong here. From 1404-12-17 to
+    1405-02-28 the exchange ran partly open (110-190 names a day, every one of
+    them stored) after a 5-session full closure; through the breadth floor that
+    read as an 80-day hole, and every night it reopened ~6,700 complete daily
+    series for a full re-download that could not change anything -- 70% of the
+    AIO wallet while ticks starved. Days `market_closure_days` proves shut
+    (zero volume AND zero trades market-wide) count as accounted for too.
     """
     end_date = _as_gregorian_date(end, timezone.now().date())
     start_date = _as_gregorian_date(start, end_date - dt.timedelta(days=730))
+    first, last = _jalali_text(start_date), _jalali_text(end_date)
+    stored_days = set(
+        MarketCandle.objects.filter(
+            timeframe=MarketCandle.UNADJUSTED, date_time__gte=first, date_time__lte=last + " 23:59:59",
+        ).values_list("date_time", flat=True).distinct()
+    )
     sessions = sorted(
         day
-        for value in actual_trading_days(
-            start=_jalali_text(start_date), end=_jalali_text(end_date)
-        )
+        for value in stored_days | market_closure_days(start=first, end=last)
         if (day := _stored_date(value)) is not None
     )
     return [
@@ -320,6 +335,18 @@ def update_all_symbols_integrity():
     instruments = list(
         MarketInstrument.objects.filter(eligible=True).values_list("symbol", "source")
     )
+    # A BRS instrument is scored against GoldCurrencyHistory, the only BRS table
+    # `compute_symbol_integrity` reads. The ~5,000 catalog coins have no rows
+    # there (their bars are MarketDailyBar, keyed by ticker), so scoring them
+    # produced 5,055 standing "insufficient_backfill,stale" failures that said
+    # nothing about our data and drowned the failure rate the health check uses.
+    with_history = set(
+        GoldCurrencyHistory.objects.values_list("symbol", flat=True).distinct()
+    )
+    instruments = [
+        (symbol, source) for symbol, source in instruments
+        if source == MarketInstrument.Source.TSETMC or symbol in with_history
+    ]
     tse_sessions = None
     if any(source == MarketInstrument.Source.TSETMC for _symbol, source in instruments):
         market_days = actual_trading_days(
@@ -358,6 +385,11 @@ def update_all_symbols_integrity():
             },
         )
         results.append(obj)
+    # A verdict for something no longer scored is stale, not evidence. Every
+    # reader treats a missing verdict as "not passing", so this changes no gate.
+    SymbolIntegrity.objects.exclude(
+        symbol__in=[symbol for symbol, _source in instruments]
+    ).delete()
     return results
 
 

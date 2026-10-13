@@ -1281,11 +1281,19 @@ def _tick_share_now():
     except Exception:
         ratio = None
     if ratio is None:
-        rows = ArchiveFetchState.objects.filter(endpoint__in=_DAILY_GATE_ENDPOINTS)
+        # "Converged" means landed a payload and owes no rows -- NOT
+        # `verified_complete`, which a refresh deliberately re-arms on finished
+        # series. Gated on the flag, routine refreshes held the dailies near 65%
+        # with zero rows owed, and ticks sat at the 5% share for weeks.
+        # Given-up states are neither coverage nor backlog, so they don't count.
+        rows = ArchiveFetchState.objects.filter(
+            endpoint__in=_DAILY_GATE_ENDPOINTS, blacklisted=False, suspended_at__isnull=True
+        )
         total = rows.count()
+        converged = rows.filter(last_success_at__isnull=False, missing_rows=0).count()
         # No daily states at all means nothing to gate on -- do not starve ticks
         # on the strength of an empty table.
-        ratio = (rows.filter(verified_complete=True).count() / total) if total else 1.0
+        ratio = (converged / total) if total else 1.0
         try:
             cache.set(key, ratio, timeout=300)
         except Exception:

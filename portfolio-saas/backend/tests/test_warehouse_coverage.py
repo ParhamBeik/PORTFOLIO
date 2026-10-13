@@ -1189,6 +1189,82 @@ class TestIngestOutageDetection:
         start, end = outages[0]
         assert (end - start).days > 21
 
+    def test_a_proven_market_closure_is_not_an_outage(self):
+        """The 83-day 1404-1405 shutdown: the provider pads every closed day with
+        zero volume AND zero trades market-wide. That is a closure we can prove,
+        and reading it as an outage reopened ~6,700 series every night."""
+        from django.core.cache import cache
+
+        from marketdata.integrity import market_outage_windows
+
+        cache.clear()
+        self._month_of_sessions(1404, 9)
+        for month in (10, 11):
+            for day in range(1, 29):
+                DailyStockHistory.objects.create(
+                    symbol="PADDED", date=f"1404-{month:02d}-{day:02d}", pc=100, tvol=0, tno=0,
+                )
+        self._month_of_sessions(1404, 12)
+
+        assert market_outage_windows(start="1404-09-01", end="1404-12-29") == []
+
+    def test_a_thin_but_stored_market_is_not_an_outage(self):
+        """1404-12-17 to 1405-02-28: ~150 of ~1,100 names traded, all stored.
+        Under the calendar's breadth floor, yet nothing is missing."""
+        from django.core.cache import cache
+
+        from marketdata.integrity import market_outage_windows
+
+        cache.clear()
+        self._month_of_sessions(1404, 9)
+        for month in (10, 11):
+            for day in range(1, 21):
+                _candles(f"1404-{month:02d}-{day:02d}", 5)
+        self._month_of_sessions(1404, 12)
+
+        assert market_outage_windows(start="1404-09-01", end="1404-12-29") == []
+
+    def test_a_failed_reopen_is_retried_the_next_night(self, monkeypatch):
+        from django.core.cache import cache
+
+        from marketdata import tasks
+
+        cache.clear()
+        monkeypatch.setattr(tasks, "update_all_symbols_integrity", lambda: [])
+        monkeypatch.setattr(tasks, "market_outage_windows", lambda: [(dt.date(2026, 1, 1), dt.date(2026, 2, 1))])
+        calls = []
+
+        def flaky(symbols):
+            calls.append(symbols)
+            if len(calls) == 1:
+                raise RuntimeError("database went away")
+            return 10
+
+        monkeypatch.setattr(tasks, "reopen_states_with_gaps", flaky)
+        with pytest.raises(RuntimeError):
+            tasks.nightly_data_integrity()
+        tasks.nightly_data_integrity()
+
+        assert calls == [None, None]
+
+    def test_one_outage_window_is_reopened_once_not_every_night(self, monkeypatch):
+        from django.core.cache import cache
+
+        from marketdata import tasks
+
+        cache.clear()
+        window = [(dt.date(2026, 1, 1), dt.date(2026, 2, 1))]
+        monkeypatch.setattr(tasks, "update_all_symbols_integrity", lambda: [])
+        monkeypatch.setattr(tasks, "market_outage_windows", lambda: window)
+        reopened = []
+        monkeypatch.setattr(tasks, "reopen_states_with_gaps", lambda symbols: reopened.append(symbols) or 6700)
+        monkeypatch.setattr(tasks, "audit_warehouse_units", lambda **kw: {}, raising=False)
+
+        tasks.nightly_data_integrity()
+        tasks.nightly_data_integrity()
+
+        assert reopened == [None]
+
     def test_nowruz_length_closure_is_not_an_outage(self):
         from marketdata.integrity import market_outage_windows
 
@@ -2092,3 +2168,31 @@ def test_archive_claim_survives_a_pending_refresh(staff_client, asset_catalog):
     body = staff_client.get("/api/admin/assets/kama_stock/evidence/").json()
     claims = {c["id"]: c["passed"] for c in body["claims"]}
     assert claims["archive_payload_verified"] is True
+
+
+@pytest.mark.django_db
+def test_only_instruments_with_readable_history_are_scored_and_stale_verdicts_go():
+    """5,055 catalog coins were scored against a table that never holds them."""
+    from marketdata.integrity import update_all_symbols_integrity
+
+    MarketInstrument.objects.create(symbol="SomeCoin", name="", source="brs", category="crypto", eligible=True)
+    MarketInstrument.objects.create(symbol="USD", name="", source="brs", category="gold", eligible=True)
+    GoldCurrencyHistory.objects.create(symbol="USD", date=jalali.today(), close_price=1)
+    SymbolIntegrity.objects.create(symbol="SomeCoin", source="brs", passes_gate=False, reason="insufficient_backfill,stale")
+
+    update_all_symbols_integrity()
+
+    assert set(SymbolIntegrity.objects.values_list("symbol", flat=True)) == {"USD"}
+
+
+@pytest.mark.django_db
+def test_a_resent_bad_row_is_one_rejection_not_one_per_download():
+    from marketdata.ingest import quarantine
+
+    for _ in range(3):
+        quarantine("gold_daily", "USD", "1405-01-01", "outlier_deviation", {"close": 9.5, "record": (1, 2)})
+    row = RejectedRecord.objects.get()
+    assert row.occurrences == 1
+    quarantine("gold_daily", "USD", "1405-01-01", "outlier_deviation", {"close": 9.9})
+    row.refresh_from_db()
+    assert row.occurrences == 2
