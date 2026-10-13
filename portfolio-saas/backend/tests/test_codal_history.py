@@ -360,3 +360,112 @@ def test_crossref_matches_by_serial_then_by_key_and_counts_the_rest(monkeypatch)
     assert stats["matched_serial"] == 1 and stats["matched_key"] == 1
     assert stats["new_catalog"] + stats["new_other"] == 2
     assert stats["ours_only"] == 1 and not disagree
+
+
+# ----------------------------------------------------------------------
+# Phase 2: codal.ir writes the filing list (CODAL_DISCOVERY_SOURCE=codal).
+
+
+
+def _promote_on(settings, monkeypatch, symbols):
+    settings.CODAL_DISCOVERY_ENABLED = True
+    settings.CODAL_DISCOVERY_SOURCE = "codal"
+    for symbol in symbols:
+        MarketInstrument.objects.create(source="tsetmc", symbol=symbol, category="stock", eligible=True)
+    queued = []
+    monkeypatch.setattr("marketdata.ingest._enqueue_codal_extractions", lambda rows: queued.extend(rows))
+    return queued
+
+
+def test_a_crawled_letter_becomes_a_filing_with_absolute_links(monkeypatch, settings):
+    letters = _page()["Letters"]
+    rows = [codal_search.normalize_letter(letter) for letter in letters]
+    queued = _promote_on(settings, monkeypatch, {rows[0]["symbol"]})
+    _serve(monkeypatch, letters, total=4, pages=1)
+
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))
+
+    made = CodalAnnouncement.objects.get(tracing_no=rows[0]["tracing_no"])
+    assert made.source == "codal" and made.code == rows[0]["letter_code"]
+    assert made.link.startswith("https://codal.ir/Reports/")
+    assert made.link_attachment == "" or made.link_attachment.startswith("https://codal.ir/")
+    assert made in queued and len(queued) == CodalAnnouncement.objects.count()
+    # Only catalog symbols become filings; every letter is still kept.
+    assert CodalAnnouncement.objects.count() == sum(row["symbol"] == rows[0]["symbol"] for row in rows)
+    assert CodalLetter.objects.count() == 4
+
+
+def test_a_letter_brsapi_already_wrote_is_matched_not_duplicated(monkeypatch, settings):
+    letters = _page()["Letters"]
+    row = codal_search.normalize_letter(letters[0])
+    queued = _promote_on(settings, monkeypatch, {row["symbol"]})
+    brs = CodalAnnouncement.objects.create(
+        symbol=row["symbol"], code=row["letter_code"], title="from brsapi",
+        date_publish=row["date_publish"], time_publish="00:00:00",
+        link="https://codal.ir/Reports/Decision.aspx?LetterSerial=x", letter_serial=row["letter_serial"],
+    )
+    _serve(monkeypatch, letters[:1], total=1, pages=1)
+
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))
+
+    brs.refresh_from_db()
+    assert CodalAnnouncement.objects.count() == 1 and queued == []
+    assert brs.tracing_no == row["tracing_no"] and brs.title == "from brsapi"
+
+
+def test_shadow_letters_are_promoted_later_in_slices(monkeypatch, settings):
+    letters = _page()["Letters"]
+    _serve(monkeypatch, letters, total=4, pages=1)
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))  # shadow: nothing promoted
+    assert not CodalAnnouncement.objects.exists()
+    rows = [codal_search.normalize_letter(letter) for letter in letters]
+    _promote_on(settings, monkeypatch, {row["symbol"] for row in rows})
+
+    assert codal_discovery.promote_backlog(limit=2) == 2
+    assert codal_discovery.promote_backlog(limit=10) == 2
+    assert codal_discovery.promote_backlog(limit=10) == 0
+
+
+def test_a_failed_write_backs_the_day_off(monkeypatch):
+    _serve(monkeypatch, _page()["Letters"], total=4, pages=1)
+    monkeypatch.setattr(CodalLetter.objects, "bulk_create", lambda *a, **k: (_ for _ in ()).throw(ValueError("too long")))
+    state = CodalDiscoveryDay.objects.create(date="1404-07-02")
+    with pytest.raises(ValueError):
+        codal_discovery.step(state)
+    state.refresh_from_db()
+    assert state.consecutive_failures == 1 and state.next_check_at is not None
+
+
+def test_a_long_multi_symbol_letter_is_stored(monkeypatch):
+    letter = {**_page()["Letters"][0], "Symbol": "، ".join(["نماد" + str(i) for i in range(20)])}
+    _serve(monkeypatch, [letter], total=1, pages=1)
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))
+    assert len(CodalLetter.objects.get().symbol) > 64
+
+
+def test_brsapi_codal_list_is_off_once_codal_ir_writes_it(settings):
+    from marketdata.archive import disabled_endpoints
+
+    settings.CODAL_ENABLED = True
+    settings.CODAL_DISCOVERY_ENABLED = True
+    settings.CODAL_DISCOVERY_SOURCE = "brsapi"
+    assert disabled_endpoints() == frozenset()
+    settings.CODAL_DISCOVERY_SOURCE = "codal"
+    assert "codal_announcements" in disabled_endpoints()
+
+
+def test_documents_codal_ir_says_do_not_exist_are_not_requested():
+    from marketdata.codal_pipeline import _artifact_sources
+
+    row = CodalAnnouncement(link="https://codal.ir/r", link_excel="https://excel.codal.ir/x",
+                            link_pdf="https://codal.ir/p", link_attachment="https://codal.ir/Reports/Attachment.aspx",
+                            has_excel=False, has_pdf=None)
+    assert [kind for kind, _ in _artifact_sources(row)] == ["html", "pdf"]
+
+
+def test_letter_type_comes_from_the_real_let_parameter():
+    from marketdata.codal_classification import _letter_type
+
+    assert _letter_type(CodalAnnouncement(link="https://codal.ir/Reports/Decision.aspx?LetterSerial=a&rt=0&let=6&ct=0")) == "let6"
+    assert _letter_type(CodalAnnouncement(link="", letter_type=58)) == "let58"
+    assert _letter_type(CodalAnnouncement(link="https://codal.ir/x?LetterSerial=let123abc")) == ""

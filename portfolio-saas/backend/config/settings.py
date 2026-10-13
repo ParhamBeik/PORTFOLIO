@@ -668,6 +668,11 @@ CODAL_ORIGIN_COOLDOWN_SECONDS = int(os.getenv("CODAL_ORIGIN_COOLDOWN_SECONDS", "
 # touches CodalAnnouncement, so BrsApi discovery keeps running untouched. Off by
 # default -- turning it on is an operator decision.
 CODAL_DISCOVERY_ENABLED = os.getenv("CODAL_DISCOVERY_ENABLED", "0") == "1"
+# Phase 2: which source writes the filing list the extraction pipeline reads.
+# "codal" (with discovery enabled) promotes crawled letters into
+# CodalAnnouncement and switches BrsApi's Codal list off; "brsapi" keeps the
+# crawl in shadow mode.
+CODAL_DISCOVERY_SOURCE = os.getenv("CODAL_DISCOVERY_SOURCE", "codal")
 CODAL_SEARCH_URL = os.getenv("CODAL_SEARCH_URL", "https://search.codal.ir/api/search/v2/q")
 # Measured 2026-10-05: ~30 requests per rolling hour trips a 429, and knocking
 # while blocked extends it. Start well under, earn +2/h per clean hour up to the

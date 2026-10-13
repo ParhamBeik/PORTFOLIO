@@ -279,7 +279,13 @@ def codal_discovery_tick():
     from . import codal_discovery
     from .sources import codal_search
 
-    if not settings.CODAL_DISCOVERY_ENABLED or not codal_search.can_send():
+    if not settings.CODAL_DISCOVERY_ENABLED:
+        return "idle"
+    try:
+        codal_discovery.promote_backlog()
+    except Exception:
+        logger.exception("Promoting crawled Codal letters failed; the crawl continues.")
+    if not codal_search.can_send():
         return "idle"
     if not cache.add("codal_discovery:lock", 1, timeout=120):
         return "busy"

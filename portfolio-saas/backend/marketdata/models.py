@@ -306,7 +306,9 @@ class CodalLetter(models.Model):
 
     tracing_no = models.BigIntegerField(unique=True)
     letter_serial = models.CharField(max_length=128, blank=True, default="", db_index=True)
-    symbol = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    # Wide on purpose: market-wide notices list several symbols in one field.
+    # At 64 a single such letter failed the whole page's write, every minute.
+    symbol = models.CharField(max_length=255, blank=True, default="", db_index=True)
     company_name = models.CharField(max_length=255, blank=True, default="")
     title = models.TextField(blank=True, default="")
     letter_code = models.CharField(max_length=32, blank=True, default="")
@@ -658,6 +660,21 @@ class CodalAnnouncement(models.Model):
     link_pdf = models.URLField(max_length=1024, blank=True, default="")
     link_excel = models.URLField(max_length=1024, blank=True, default="")
     link_attachment = models.URLField(max_length=1024, blank=True, default="")
+
+    # Identity and availability as codal.ir's own search states them
+    # (docs/CODAL-DIRECT-MIGRATION.md §5.3). `letter_serial` is backfilled from
+    # `link` for BrsApi-era rows, which is how a crawled letter finds its row.
+    class Source(models.TextChoices):
+        BRSAPI = "brsapi", "BrsApi"
+        CODAL = "codal", "codal.ir"
+
+    source = models.CharField(max_length=8, choices=Source.choices, default=Source.BRSAPI)
+    tracing_no = models.BigIntegerField(null=True, blank=True, unique=True)
+    letter_serial = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    letter_type = models.PositiveSmallIntegerField(null=True, blank=True)
+    has_excel = models.BooleanField(null=True, blank=True)
+    has_pdf = models.BooleanField(null=True, blank=True)
+    has_attachment = models.BooleanField(null=True, blank=True)
 
     # Title-based classification (marketdata.codal_classification.classify), filled
     # retroactively by `classify_codal_announcements`. `tier` is null until that

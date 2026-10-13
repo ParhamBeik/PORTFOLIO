@@ -5,7 +5,10 @@ Each `step()` spends exactly one search request. Priority: the live window
 completed days due a re-check, then the newest day not yet complete, walking
 back toward `CODAL_DISCOVERY_OLDEST_DAY`.
 
-Phase 1 is shadow mode: only CodalLetter and CodalDiscoveryDay are written.
+Every letter lands in CodalLetter (market-wide, a faithful copy). With
+`CODAL_DISCOVERY_SOURCE=codal` (phase 2) letters for catalog symbols are also
+promoted into CodalAnnouncement, which is what the extraction pipeline reads;
+BrsApi's Codal list is then switched off (`archive.disabled_endpoints`).
 """
 from datetime import timedelta
 
@@ -15,7 +18,7 @@ from django.db.models import Min, Q
 from django.utils import timezone
 
 from . import jalali
-from .models import CodalDiscoveryDay, CodalLetter
+from .models import CodalAnnouncement, CodalDiscoveryDay, CodalLetter, MarketInstrument
 from .sources import codal_search
 
 # Re-crawl a complete live day once it is this old: today moves fast, the few
@@ -113,13 +116,27 @@ def step(state, now=None):
         raise
 
     letters = result["letters"]
-    if letters:
-        CodalLetter.objects.bulk_create(
-            [CodalLetter(**row) for row in letters],
-            update_conflicts=True,
-            unique_fields=["tracing_no"],
-            update_fields=_UPDATE_FIELDS,
+    try:
+        if letters:
+            CodalLetter.objects.bulk_create(
+                [CodalLetter(**row) for row in letters],
+                update_conflicts=True,
+                unique_fields=["tracing_no"],
+                update_fields=_UPDATE_FIELDS,
+            )
+            if promoting():
+                promote(letters)
+    except Exception as exc:
+        # A write failure is the day's failure too. Outside this guard it skipped
+        # the backoff below, so one over-long symbol re-fetched the same page
+        # every minute (41 requests a day of a ~550/day budget).
+        state.consecutive_failures += 1
+        state.last_error = f"{type(exc).__name__}: {exc}"[:500]
+        state.next_check_at = now + min(
+            timedelta(minutes=10) * 2 ** state.consecutive_failures, timedelta(hours=24)
         )
+        state.save()
+        raise
     state.total = result["total"]
     stored = CodalLetter.objects.filter(date_publish=state.date).count()
     if stored >= state.total:
@@ -149,3 +166,104 @@ def step(state, now=None):
     state.save()
     return {"date": state.date, "page_letters": len(letters), "stored": stored,
             "total": state.total, "complete": state.verified_complete}
+
+
+def promoting():
+    """Phase 2: codal.ir, not BrsApi, writes the filing list the pipeline reads."""
+    return settings.CODAL_DISCOVERY_ENABLED and settings.CODAL_DISCOVERY_SOURCE == "codal"
+
+
+def _absolute(url):
+    """codal.ir answers "/Reports/..." and "DownloadFile.aspx?..."; BrsApi gave full URLs."""
+    if not url:
+        return ""
+    if url.startswith(("http://", "https://")):
+        return url
+    return "https://codal.ir" + (url if url.startswith("/") else "/" + url)
+
+
+_IDENTITY_FIELDS = ("tracing_no", "letter_serial", "letter_type", "has_excel", "has_pdf", "has_attachment")
+
+
+def promote(letters):
+    """Write crawled letters for catalog symbols into CodalAnnouncement.
+
+    Matches the row BrsApi already wrote by `letter_serial`, then by the old
+    unique key, and only fills the identity codal.ir adds -- title, symbol and
+    links that differ are the provider's record and stay. Everything else is
+    inserted with absolute links, and only for the documents codal.ir says
+    exist: `HasExcel=false` was the ~12k `HTTP500@excel.codal.ir` class.
+    New rows go straight to extraction, as BrsApi-era rows always did.
+    """
+    from .codal_classification import classify
+    from .ingest import _enqueue_codal_extractions
+
+    symbols = {row["symbol"] for row in letters if row["symbol"] and len(row["symbol"]) <= 64}
+    catalog = set(MarketInstrument.objects.filter(symbol__in=symbols).values_list("symbol", flat=True))
+    created = []
+    for row in letters:
+        if row["symbol"] not in catalog:
+            continue
+        identity = {field: row[field] for field in _IDENTITY_FIELDS}
+        existing = None
+        if row["letter_serial"]:
+            existing = CodalAnnouncement.objects.filter(letter_serial=row["letter_serial"]).first()
+        if existing is None:
+            existing = CodalAnnouncement.objects.filter(
+                symbol=row["symbol"], code=row["letter_code"],
+                date_publish=row["date_publish"], time_publish=row["time_publish"],
+            ).first()
+        if existing is not None:
+            if existing.tracing_no not in (None, row["tracing_no"]):
+                continue  # already claimed by a different letter: leave both alone
+            if CodalAnnouncement.objects.filter(tracing_no=row["tracing_no"]).exclude(pk=existing.pk).exists():
+                continue
+            CodalAnnouncement.objects.filter(pk=existing.pk).update(**identity)
+            continue
+        if CodalAnnouncement.objects.filter(tracing_no=row["tracing_no"]).exists():
+            continue
+        classification = classify(row["title"])
+        announcement, made = CodalAnnouncement.objects.get_or_create(
+            symbol=row["symbol"], code=row["letter_code"],
+            date_publish=row["date_publish"], time_publish=row["time_publish"],
+            defaults={
+                **identity,
+                "source": CodalAnnouncement.Source.CODAL,
+                "company_name": row["company_name"],
+                "title": row["title"],
+                "date_send": row["date_sent"],
+                "time_send": row["time_sent"],
+                "link": _absolute(row["url"]),
+                "link_pdf": _absolute(row["pdf_url"]) if row["has_pdf"] is not False else "",
+                "link_excel": _absolute(row["excel_url"]) if row["has_excel"] else "",
+                "link_attachment": _absolute(row["attachment_url"]) if row["has_attachment"] else "",
+                "doc_type": classification.doc_type,
+                "tier": classification.tier,
+                "classified_by": classification.classified_by,
+            },
+        )
+        if made:
+            created.append(announcement)
+    if created:
+        _enqueue_codal_extractions(created)
+    return len(created)
+
+
+def promote_backlog(limit=200):
+    """Promote letters crawled before promotion was on (shadow mode), a slice at a time.
+
+    Cheap and idempotent: a letter whose `tracing_no` is already on an
+    announcement is never selected again, so this converges and then costs
+    one indexed query per tick.
+    """
+    if not promoting():
+        return 0
+    catalog = MarketInstrument.objects.values("symbol")
+    pending = (
+        CodalLetter.objects.filter(symbol__in=catalog)
+        .exclude(tracing_no__in=CodalAnnouncement.objects.filter(tracing_no__isnull=False).values("tracing_no"))
+        .order_by("-date_publish", "-time_publish")
+    )
+    fields = [f for f in _UPDATE_FIELDS if f not in ("raw", "last_seen_at")] + ["tracing_no"]
+    letters = list(pending.values(*fields)[:limit])
+    return promote(letters) if letters else 0

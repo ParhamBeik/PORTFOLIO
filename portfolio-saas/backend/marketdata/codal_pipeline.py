@@ -57,11 +57,20 @@ class CodalExtractionRegressed(RuntimeError):
 
 
 def _artifact_sources(announcement):
+    """The documents worth downloading for one filing.
+
+    `Attachment.aspx` is an HTML index of links, not a document: fetching it
+    produced 83,164 "rejected" artifacts and nothing usable. Its link stays on
+    the announcement. Excel/PDF that codal.ir says do not exist are skipped
+    (`has_* is False`; None means unknown, as on BrsApi-era rows).
+    """
     return [
-        (CodalArtifact.Kind.EXCEL, announcement.link_excel),
-        (CodalArtifact.Kind.HTML, announcement.link),
-        (CodalArtifact.Kind.PDF, announcement.link_pdf),
-        (CodalArtifact.Kind.ATTACHMENT, announcement.link_attachment),
+        (kind, link) for kind, link, exists in (
+            (CodalArtifact.Kind.EXCEL, announcement.link_excel, announcement.has_excel),
+            (CodalArtifact.Kind.HTML, announcement.link, True),
+            (CodalArtifact.Kind.PDF, announcement.link_pdf, announcement.has_pdf),
+        )
+        if exists is not False
     ]
 
 

@@ -1,8 +1,12 @@
 # Codal direct: migration plan (BrsApi → codal.ir)
 
-Status: **decided (§9); phase 0 shipped, phase 1 next**. Measured 2026-10-05 from the
-production VPS (`45.139.10.12`, ParsPack AS60631, Iran). Nothing in this document has
-been built or run against production beyond read-only probes and SELECTs.
+Status (2026-10-13): **phases 0-1 shipped; phases 2-3 ship together** on the owner's
+decision to make codal.ir the primary source. `CODAL_DISCOVERY_SOURCE=codal` (the
+default) promotes crawled letters for catalog symbols into `CodalAnnouncement`, matches
+BrsApi-era rows by `letter_serial` (backfilled in migration 0023) and switches the
+BrsApi Codal list off via `archive.disabled_endpoints`. `Attachment.aspx` is no longer
+downloaded and `has_excel/has_pdf=false` documents are skipped (§5.4 items 2-3).
+Original measurements below are from 2026-10-05 (`45.139.10.12`, ParsPack AS60631, Iran).
 
 ## 1. What changes, in one paragraph
 
