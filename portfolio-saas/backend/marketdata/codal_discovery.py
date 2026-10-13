@@ -138,6 +138,16 @@ def step(state, now=None):
         )
         state.save()
         raise
+    if state.next_page > 1 and state.total is not None and result["total"] < state.total:
+        # A letter withdrawn mid-pass shifts every later page up by one, so the
+        # pass can skip a listed letter while the withdrawn row, still stored,
+        # makes up the count. Start the pass over against the new total.
+        state.total = result["total"]
+        state.next_page = 1
+        state.last_error = "total shrank mid-pass"
+        state.save()
+        return {"date": state.date, "page_letters": len(letters), "stored": None,
+                "total": state.total, "complete": False}
     state.total = result["total"]
     stored = CodalLetter.objects.filter(date_publish=state.date).count()
     # A day completed before already stores every letter it found, so the count
@@ -245,6 +255,7 @@ def _absolute(url):
 
 _IDENTITY_FIELDS = ("tracing_no", "letter_serial", "letter_type", "has_excel", "has_pdf", "has_attachment")
 _LINK_FIELDS = ("link", "link_pdf", "link_excel", "link_attachment")
+_PARSED_FIELDS = ("title", "doc_type")
 
 
 def _letter_fields(row):
@@ -311,7 +322,11 @@ def promote(letters):
             # replaced link counts too: artifacts are kept per URL, so the new
             # document is fetched beside the old one rather than over it.
             fields = {**identity, **_letter_fields(row)}
-            gained = any(fields[link] and fields[link] != getattr(existing, link) for link in _LINK_FIELDS)
+            # The title is read by the parser too (an اصلاحیه marker is a
+            # correction and links a revision), so a retitled filing is re-read.
+            gained = any(fields[link] and fields[link] != getattr(existing, link) for link in _LINK_FIELDS) or any(
+                fields[field] != getattr(existing, field) for field in _PARSED_FIELDS
+            )
             CodalAnnouncement.objects.filter(pk=existing.pk).update(**fields)
             if gained:
                 requeue.append(existing.pk)
