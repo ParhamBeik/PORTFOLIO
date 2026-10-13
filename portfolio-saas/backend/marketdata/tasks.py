@@ -378,10 +378,11 @@ def queue_codal_extractions():
     )
     from .codal_discovery import withheld_documents
 
+    # The history gate holds back filings never attempted; one already attempted
+    # (a live filing whose download failed) keeps retrying after it ages out.
     ids = [] if origin_down else list(
         CodalAnnouncement.objects.filter(has_artifact)
-        .filter(Q(report__isnull=True) | retryable)
-        .exclude(withheld_documents())
+        .filter(Q(report__isnull=True) & ~withheld_documents() | retryable)
         .exclude(pk__in=pending_ids)
         .order_by("-date_publish", "-time_publish")
         .values_list("id", flat=True)[:limit]
