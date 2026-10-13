@@ -1221,3 +1221,19 @@ def test_archived_reparses_run_while_the_origin_is_down(monkeypatch, settings):
 
     assert tasks.queue_codal_extractions() == 1
     assert queued == [archived.pk]
+
+
+def test_a_report_the_extractor_stamped_generic_is_not_reselected(monkeypatch, settings):
+    """The extractor's classifier decides the version; the sweep must accept it."""
+    settings.CODAL_ENABLED = True
+    settings.CODAL_PARSER_VERSION = "4"
+    settings.CODAL_STATEMENT_PARSER_VERSION = "5"
+    from marketdata import tasks
+
+    row = _announcement(symbol="A", code="ن-10")
+    CodalReport.objects.create(announcement=row, status=CodalReport.Status.NEEDS_REVIEW, parser_version="4")
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
+    monkeypatch.setattr(tasks.extract_codal_report, "delay", lambda pk: pytest.fail("re-selected"))
+
+    assert tasks.queue_codal_extractions() == 0

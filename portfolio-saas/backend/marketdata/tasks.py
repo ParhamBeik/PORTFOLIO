@@ -401,10 +401,13 @@ def _stale_parser_codal_ids(limit, exclude=(), archived_only=False):
     """
     statement = Q(code="ن-10") | Q(doc_type__in=("financial_statements", "interim_financials"))
     clarification = Q(code__in=("ن-26", "ن-20"))
-    stale = (
-        (statement & ~clarification & ~Q(report__parser_version=settings.CODAL_STATEMENT_PARSER_VERSION))
-        | ((~statement | clarification) & ~Q(report__parser_version=settings.CODAL_PARSER_VERSION))
-    )
+    # Which parser a report needs is the extractor's call (`classify_announcement`
+    # reads the title too), so a report stamped with EITHER current version is
+    # done. Re-deriving "statement" here disagreed with it on some filings and
+    # re-selected them on every sweep, holding the statement-first slots.
+    stale = ~Q(report__parser_version__in=(
+        settings.CODAL_STATEMENT_PARSER_VERSION, settings.CODAL_PARSER_VERSION,
+    ))
     base = (
         CodalAnnouncement.objects.filter(report__isnull=False)
         .filter(report__status__in=(
