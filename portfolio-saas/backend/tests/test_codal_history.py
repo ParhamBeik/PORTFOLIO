@@ -370,6 +370,7 @@ def test_crossref_matches_by_serial_then_by_key_and_counts_the_rest(monkeypatch)
 def _promote_on(settings, monkeypatch, symbols):
     settings.CODAL_DISCOVERY_ENABLED = True
     settings.CODAL_DISCOVERY_SOURCE = "codal"
+    settings.CODAL_HISTORY_DOCUMENTS = "all"  # the fixture day is history by now
     for symbol in symbols:
         MarketInstrument.objects.create(source="tsetmc", symbol=symbol, category="stock", eligible=True)
     queued = []
@@ -556,22 +557,25 @@ def test_a_recrawl_that_lists_a_new_document_updates_and_requeues(monkeypatch, s
     assert made.title.endswith("(اصلاحیه)")
 
 
-def test_old_codal_filings_fetch_only_year_end_statements(monkeypatch, settings):
-    from marketdata import ingest
-
-    settings.CODAL_ENABLED = True
+def test_old_letters_become_filings_only_for_year_end_statements(monkeypatch, settings):
+    """History the owner has not given disk to stays crawled, not a link-only filing."""
+    row = codal_search.normalize_letter(_page()["Letters"][0])
+    queued = _promote_on(settings, monkeypatch, {row["symbol"]})
     settings.CODAL_HISTORY_DOCUMENTS = "annual_statements"
-    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
-    queued = []
-    monkeypatch.setattr("marketdata.tasks._dispatch_codal_ids", lambda ids, **k: queued.extend(ids) or len(ids))
-    old = dict(symbol="فولاد", source="codal", date_publish="1395-01-10", link="https://codal.ir/r")
-    annual = CodalAnnouncement.objects.create(code="ن-10", title="صورتهای مالی سال مالی منتهی به ۱۳۹۴/۱۲/۲۹", **old)
-    monthly = CodalAnnouncement.objects.create(code="ن-30", title="گزارش فعالیت ماهانه", **old)
-    brsapi = CodalAnnouncement.objects.create(code="ن-30", title="x", symbol="فولاد", date_publish="1395-01-11",
-                                              link="https://codal.ir/r2")
+    old = {**row, "date_publish": "1395-01-10"}
+    monthly = {**old, "letter_code": "ن-30", "title": "گزارش فعالیت ماهانه"}
+    annual = {**old, "tracing_no": row["tracing_no"] + 1, "letter_serial": "annual",
+              "letter_code": "ن-10", "title": "صورتهای مالی سال مالی منتهی به ۱۳۹۴/۱۲/۲۹",
+              "time_publish": "09:00:00"}
+    assert codal_discovery.promote([monthly, annual]) == 1
+    assert list(CodalAnnouncement.objects.values_list("tracing_no", flat=True)) == [annual["tracing_no"]]
+    assert [a.tracing_no for a in queued] == [annual["tracing_no"]]
 
-    ingest._enqueue_codal_extractions([annual, monthly, brsapi])
-    assert set(queued) == {annual.pk, brsapi.pk}
+    # The backlog walk skips held letters instead of stalling on them.
+    CodalLetter.objects.create(**{k: monthly[k] for k in (
+        "tracing_no", "letter_serial", "symbol", "company_name", "title", "letter_code",
+        "date_publish", "time_publish", "url")})
+    assert codal_discovery.promote_backlog() == 0
 
 
 def test_a_pdf_is_only_the_fallback(monkeypatch):
@@ -603,10 +607,9 @@ def test_a_failed_live_filing_keeps_retrying_after_it_ages_out(monkeypatch, sett
                date_publish="1395-01-10", link="https://codal.ir/r")
     failed = CodalAnnouncement.objects.create(**old)
     CodalReport.objects.create(announcement=failed, status=CodalReport.Status.BLOCKED_NETWORK)
-    untried = CodalAnnouncement.objects.create(**{**old, "date_publish": "1395-01-11"})
 
     tasks.queue_codal_extractions()
-    assert failed.pk in queued and untried.pk not in queued
+    assert failed.pk in queued
 
 
 def test_a_pdf_is_fetched_when_the_html_reads_as_nothing(monkeypatch):
