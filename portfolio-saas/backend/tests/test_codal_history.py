@@ -511,3 +511,14 @@ def test_research_and_ops_read_the_crawl_once_it_writes_the_list(monkeypatch, se
     account = Account.objects.create(user=user, name="Quality Account")
     limits = client.get(reverse("account-data-quality", kwargs={"account_id": account.id})).data["known_limits"]
     assert "codal_page_cap" not in {limit["code"] for limit in limits}
+
+
+def test_an_unknown_availability_flag_keeps_the_link(monkeypatch, settings):
+    row = codal_search.normalize_letter(_page()["Letters"][0])
+    _promote_on(settings, monkeypatch, {row["symbol"]})
+    row = {**row, "has_excel": None, "excel_url": "https://excel.codal.ir/r.xlsx",
+           "has_attachment": None, "attachment_url": "/Reports/DownloadFile.aspx?id=9"}
+    assert codal_discovery.promote([row]) == 1
+    made = CodalAnnouncement.objects.get(tracing_no=row["tracing_no"])
+    assert made.link_excel == "https://excel.codal.ir/r.xlsx"
+    assert made.link_attachment == "https://codal.ir/Reports/DownloadFile.aspx?id=9"
