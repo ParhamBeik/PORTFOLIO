@@ -1300,3 +1300,20 @@ def test_a_direct_attachment_is_a_document_but_the_index_page_is_not():
     index = _announcement(symbol="x", link_attachment="https://codal.ir/Reports/Attachment.aspx?LetterSerial=a")
     assert (CodalArtifact.Kind.ATTACHMENT, direct.link_attachment) in codal_pipeline._artifact_sources(direct)
     assert CodalArtifact.Kind.ATTACHMENT not in {kind for kind, _ in codal_pipeline._artifact_sources(index)}
+
+
+@pytest.mark.django_db
+def test_a_link_replaced_during_extraction_leaves_the_report_requeued(monkeypatch):
+    announcement = CodalAnnouncement.objects.create(
+        symbol="فولاد", code="ن-10", title="x", date_publish="1404-07-02", link="https://codal.ir/a",
+    )
+
+    def run(pk):
+        # A re-crawl lands while this run is fetching the old document.
+        CodalAnnouncement.objects.filter(pk=pk).update(link="https://codal.ir/b")
+        report = CodalReport.objects.create(announcement_id=pk, status=CodalReport.Status.PARSED)
+        return report, {}
+
+    monkeypatch.setattr(codal_pipeline, "_extract_report", run)
+    report, _ = codal_pipeline.extract_report(announcement.pk)
+    assert report.status == CodalReport.Status.FAILED and report.error_code == "new_document_listed"
