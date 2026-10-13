@@ -282,6 +282,19 @@ def test_a_day_completes_when_stored_letters_reach_the_total(monkeypatch):
     assert state.next_check_at is not None
 
 
+def test_a_rechecked_day_walks_every_page_before_completing(monkeypatch):
+    # Every letter is already stored, so the count meets the total on page 1;
+    # only reaching the last page re-reads the letters below the newest page.
+    _serve(monkeypatch, _page()["Letters"], total=4, pages=2)
+    state = CodalDiscoveryDay.objects.create(date="1404-07-02", checks=1, next_page=1)
+    codal_discovery.step(state)
+    state.refresh_from_db()
+    assert not state.verified_complete and state.next_page == 2
+    codal_discovery.step(state)
+    state.refresh_from_db()
+    assert state.verified_complete and state.checks == 2
+
+
 def test_reaching_the_last_page_short_restarts_with_backoff(monkeypatch):
     _serve(monkeypatch, _page()["Letters"], total=290, pages=1)
     state = CodalDiscoveryDay.objects.create(date="1404-07-02")
@@ -513,6 +526,10 @@ def test_research_and_ops_read_the_crawl_once_it_writes_the_list(monkeypatch, se
     assert codal()["status"] == "partial"
     settings.CODAL_DISCOVERY_OLDEST_DAY = "1404-07-02"
     assert codal()["status"] == "complete" and codal()["stored_rows"] == 1
+    # Older filings held back by a narrower promotion scope are not coverage.
+    settings.CODAL_HISTORY_DOCUMENTS = "annual_statements"
+    assert codal()["status"] == "partial" and codal()["history_documents"] == "annual_statements"
+    settings.CODAL_HISTORY_DOCUMENTS = "all"
     assert _codal_status()["direct_discovery"]["complete"] == 1
 
     account = Account.objects.create(user=user, name="Quality Account")
