@@ -19,7 +19,7 @@ from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
 
 from . import jalali
-from .models import CodalAnnouncement, CodalDiscoveryDay, CodalLetter
+from .models import CodalAnnouncement, CodalDiscoveryDay, CodalLetter, CodalReport
 from .sources import codal_search
 
 # Re-crawl a complete live day once it is this old: today moves fast, the few
@@ -207,6 +207,31 @@ def _absolute(url):
 
 
 _IDENTITY_FIELDS = ("tracing_no", "letter_serial", "letter_type", "has_excel", "has_pdf", "has_attachment")
+_LINK_FIELDS = ("link", "link_pdf", "link_excel", "link_attachment")
+
+
+def _letter_fields(row):
+    """The fields codal.ir owns on a row it wrote, links absolute.
+
+    Only an explicit `Has*=False` means a document is absent; a null flag keeps
+    the URL.
+    """
+    from .codal_classification import classify
+
+    classification = classify(row["title"])
+    return {
+        "company_name": row["company_name"],
+        "title": row["title"],
+        "date_send": row["date_sent"],
+        "time_send": row["time_sent"],
+        "link": _absolute(row["url"]),
+        "link_pdf": _absolute(row["pdf_url"]) if row["has_pdf"] is not False else "",
+        "link_excel": _absolute(row["excel_url"]) if row["has_excel"] is not False else "",
+        "link_attachment": _absolute(row["attachment_url"]) if row["has_attachment"] is not False else "",
+        "doc_type": classification.doc_type,
+        "tier": classification.tier,
+        "classified_by": classification.classified_by,
+    }
 
 
 def promote(letters):
@@ -219,11 +244,10 @@ def promote(letters):
     exist: `HasExcel=false` was the ~12k `HTTP500@excel.codal.ir` class.
     New rows go straight to extraction, as BrsApi-era rows always did.
     """
-    from .codal_classification import classify
     from .ingest import _enqueue_codal_extractions
 
     catalog = _promotable_symbols()
-    created = []
+    created, requeue = [], []
     for row in letters:
         if row["symbol"] not in catalog:
             continue
@@ -241,37 +265,35 @@ def promote(letters):
                 continue  # already claimed by a different letter: leave both alone
             if CodalAnnouncement.objects.filter(tracing_no=row["tracing_no"]).exclude(pk=existing.pk).exists():
                 continue
-            CodalAnnouncement.objects.filter(pk=existing.pk).update(**identity)
+            if existing.source != CodalAnnouncement.Source.CODAL:
+                CodalAnnouncement.objects.filter(pk=existing.pk).update(**identity)
+                continue
+            # Our own row: codal.ir is its record, so a re-crawl that changed the
+            # title or made a document available is applied, and a newly listed
+            # document is fetched instead of staying an empty link forever.
+            fields = {**identity, **_letter_fields(row)}
+            gained = any(fields[link] and not getattr(existing, link) for link in _LINK_FIELDS)
+            CodalAnnouncement.objects.filter(pk=existing.pk).update(**fields)
+            if gained:
+                requeue.append(existing.pk)
             continue
         if CodalAnnouncement.objects.filter(tracing_no=row["tracing_no"]).exists():
             continue
-        classification = classify(row["title"])
         announcement, made = CodalAnnouncement.objects.get_or_create(
             symbol=row["symbol"], code=row["letter_code"],
             date_publish=row["date_publish"], time_publish=row["time_publish"],
-            defaults={
-                **identity,
-                "source": CodalAnnouncement.Source.CODAL,
-                "company_name": row["company_name"],
-                "title": row["title"],
-                "date_send": row["date_sent"],
-                "time_send": row["time_sent"],
-                "link": _absolute(row["url"]),
-                "link_pdf": _absolute(row["pdf_url"]) if row["has_pdf"] is not False else "",
-                # Only an explicit False means absent; a null flag keeps the URL.
-                "link_excel": _absolute(row["excel_url"]) if row["has_excel"] is not False else "",
-                "link_attachment": (
-                    _absolute(row["attachment_url"]) if row["has_attachment"] is not False else ""
-                ),
-                "doc_type": classification.doc_type,
-                "tier": classification.tier,
-                "classified_by": classification.classified_by,
-            },
+            defaults={**identity, "source": CodalAnnouncement.Source.CODAL, **_letter_fields(row)},
         )
         if made:
             created.append(announcement)
     if created:
         _enqueue_codal_extractions(created)
+    if requeue:
+        # Already extracted: the retry sweep (`queue_codal_extractions`) re-runs
+        # FAILED reports, and stored artifacts are read back, not re-fetched.
+        CodalReport.objects.filter(announcement_id__in=requeue).update(
+            status=CodalReport.Status.FAILED, error_code="new_document_listed",
+        )
     return len(created)
 
 

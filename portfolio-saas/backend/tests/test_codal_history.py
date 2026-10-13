@@ -522,3 +522,29 @@ def test_an_unknown_availability_flag_keeps_the_link(monkeypatch, settings):
     made = CodalAnnouncement.objects.get(tracing_no=row["tracing_no"])
     assert made.link_excel == "https://excel.codal.ir/r.xlsx"
     assert made.link_attachment == "https://codal.ir/Reports/DownloadFile.aspx?id=9"
+
+
+def test_a_recrawl_that_lists_a_new_document_updates_and_requeues(monkeypatch, settings):
+    from marketdata.models import CodalReport
+
+    row = codal_search.normalize_letter(_page()["Letters"][0])
+    _promote_on(settings, monkeypatch, {row["symbol"]})
+    first = {**row, "has_attachment": False, "attachment_url": ""}
+    assert codal_discovery.promote([first]) == 1
+    made = CodalAnnouncement.objects.get(tracing_no=row["tracing_no"])
+    CodalReport.objects.create(announcement=made, status=CodalReport.Status.PARSED)
+
+    later = {**row, "has_attachment": True, "attachment_url": "/Reports/DownloadFile.aspx?id=7",
+             "title": row["title"] + " (اصلاحیه)"}
+    assert codal_discovery.promote([later]) == 0
+    made.refresh_from_db()
+    assert made.link_attachment == "https://codal.ir/Reports/DownloadFile.aspx?id=7"
+    assert made.title.endswith("(اصلاحیه)") and made.has_attachment is True
+    assert made.report.status == CodalReport.Status.FAILED
+
+    # BrsApi's row keeps its own fields; only identity is filled in.
+    made.source = "brsapi"
+    made.save()
+    codal_discovery.promote([{**later, "title": "changed again"}])
+    made.refresh_from_db()
+    assert made.title.endswith("(اصلاحیه)")
