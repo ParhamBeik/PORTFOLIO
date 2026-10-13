@@ -2087,6 +2087,32 @@ def test_a_day_that_now_passes_is_released_and_priced_again():
 
 
 @pytest.mark.django_db
+def test_a_refresh_does_not_lift_the_nightly_spike_verdict():
+    """The ingest outlier bar is 50%; the series validator's is ~15-20%."""
+    from marketdata.ingest import quarantine
+    from marketdata.models import RejectedRecord
+
+    quarantine("gold_daily", "JPY", "1404-05-05", "series_spike", {"close": 3820})
+    ingest.ingest_gold_currency_history({"symbol": "JPY", "name": "ین", "unit": "تومان",
+                                        "history_daily": _gold_days([3800, 3810, 3820, 3815, 3830], start=3)})
+
+    assert RejectedRecord.objects.get().disposition == "quarantined"
+
+
+@pytest.mark.django_db
+def test_a_day_that_fails_to_store_keeps_its_verdict():
+    """Validation accepts the prices; `tval="NaN"` then fails conversion."""
+    from marketdata.ingest import quarantine
+    from marketdata.models import RejectedRecord
+
+    quarantine("stock_history_unadjusted", "فملی", "1405-05-03", "price_all_zero", {"pc": 0})
+    ingest.ingest_daily_history("فملی", [{"date": "1405-05-03", "pf": 100, "pl": 100, "pc": 100,
+                                          "pmin": 100, "pmax": 100, "py": 100, "tval": "NaN"}])
+
+    assert RejectedRecord.objects.get().disposition == "quarantined"
+
+
+@pytest.mark.django_db
 def test_a_field_level_salvage_does_not_hide_the_stored_day():
     """~6,500 salvaged TSE days were skipped by every price reader."""
     from marketdata.ingest import quarantine

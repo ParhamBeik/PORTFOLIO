@@ -82,10 +82,6 @@ def screen(kind, records, endpoint, symbol="", date_key="date", default_date="")
     """
     records, field_rejections = validation.salvage_ohlc_records(kind, records)
     accepted, rejections = validation.validate(kind, records)
-    release(endpoint, symbol, (
-        normalize_jalali(day) if isinstance(day := (record.get(date_key) or default_date), str) else ""
-        for record in accepted
-    ))
     for rejection in [*field_rejections, *rejections]:
         day = rejection.record.get(date_key) or default_date
         day = normalize_jalali(day) if isinstance(day, str) else ""
@@ -154,8 +150,13 @@ def release(endpoint, symbol, days):
 
     Without this a rejection outlived the reason for it. JPY's 2,179 days stayed
     hidden from every price reader after the outlier screen stopped flagging
-    them, because nothing ever marked a verdict as recovered. Field-level
-    salvages are left alone (their rows were stored all along).
+    them, because nothing ever marked a verdict as recovered.
+
+    Callers pass only days they actually WROTE: a row validation accepted can
+    still fail conversion, and releasing it then turned a missing day into a
+    "known gap" the verifier skipped. Field-level salvages are left alone
+    (their rows were stored all along), and so is `series_spike`: the nightly
+    series validator owns that verdict and an ingest pass never re-tests it.
     """
     days = {str(day)[:10] for day in days if day}
     if not days:
@@ -163,6 +164,7 @@ def release(endpoint, symbol, days):
     return (
         RejectedRecord.objects.filter(endpoint=endpoint, symbol=str(symbol)[:64], date__in=days)
         .exclude(reason__startswith="field_")
+        .exclude(reason="series_spike")
         .exclude(disposition="recovered")
         .update(disposition="recovered", recovered_at=timezone.now())
     )
@@ -381,6 +383,7 @@ def ingest_daily_history(symbol: str, payload) -> tuple[int, int]:
         unique_fields=("symbol", "date"),
         recent_field="date",
     )
+    release("stock_history_unadjusted", symbol, (row.date for row in rows))
     return created, conflicts + bad
 
 
@@ -436,6 +439,7 @@ def ingest_real_legal(symbol: str, payload) -> tuple[int, int]:
             **fields_to_update,
         ))
     _bulk(RealLegalHistory, rows, scope={"symbol": symbol})
+    release("real_legal_history", symbol, (row.date for row in rows))
     return updated_daily, skipped_daily + bad
 
 
@@ -487,6 +491,7 @@ def ingest_candles(symbol: str, candle_type: int, payload) -> tuple[int, int]:
         unique_fields=("symbol", "timeframe", "date_time"),
         recent_field="date_time",
     )
+    release(endpoint, symbol, (row.date_time for row in rows))
     return created, conflicts + bad
 
 
@@ -892,6 +897,7 @@ def ingest_gold_currency_history(payload, *, origin=GoldCurrencyHistory.Origin.B
         unique_fields=("symbol", "date"),
         recent_field="date",
     )
+    release("gold_daily", symbol, (row.date for row in rows))
     return created, conflicts + bad
 
 
