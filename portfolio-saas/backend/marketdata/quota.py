@@ -124,6 +124,11 @@ def increment_historical_full_used():
 # Why a claim was refused. These are not interchangeable, and treating them as
 # one thing is what stalled the archive for eight days (see PACING_REASONS).
 REASON_PLAN_BLOCKED = "plan_blocked"
+#: The plan's breaker is open but half-open after MARKETDATA_BREAKER_RETRY_SECONDS
+#: (a 429/5xx burst, not a meter-confirmed empty wallet). Distinct from
+#: `plan_blocked`, which a local meter at its ceiling also raises with no breaker
+#: entry at all -- one reason for both made a spent day retry every 15 minutes.
+REASON_BREAKER_OPEN = "breaker_open"
 REASON_BUCKET_EXHAUSTED = "bucket_exhausted"
 REASON_LIVE_RESERVED = "live_reserved"
 REASON_ARCHIVE_PACED = "archive_paced"
@@ -146,9 +151,13 @@ REASON_PROVIDER_OBSERVATION = "provider_observation_pending"
 #: has room for it. If the reserve is ever made static again, take
 #: `live_reserved` back out of this set in the same commit.
 #:
+#: `breaker_open` joined on 2026-10-13: only a meter-confirmed trip latches to
+#: rollover (`plan_blocked`); every other trip reopens within minutes.
+#:
 #: `plan_blocked` and `bucket_exhausted` remain day-scoped.
 PACING_REASONS = frozenset({
     REASON_ARCHIVE_PACED, REASON_LIVE_RESERVED, REASON_PROVIDER_OBSERVATION,
+    REASON_BREAKER_OPEN,
 })
 
 
@@ -280,6 +289,10 @@ def plan_block_latched(plan):
     except Exception:
         return False
     return isinstance(tripped, dict) and bool(tripped.get("until_reset"))
+
+
+def _breaker_reason(plan):
+    return REASON_PLAN_BLOCKED if plan_block_latched(plan) else REASON_BREAKER_OPEN
 
 
 def is_plan_blocked(plan, bucket=None, *, admit=False, holding_probe=False):
@@ -928,7 +941,7 @@ def reserve_request(bucket=OTHER, plan=TSETMC, *, holding_probe=False):
     ):
         raise QuotaExhausted(
             f"Provider reported the {plan} plan exhausted; paused until reset.",
-            reason=REASON_PLAN_BLOCKED,
+            reason=_breaker_reason(plan),
         )
     # Simulate the live plan and the paced allowance *before* locking the
     # quota row. Both walk LiveFetchState / the price loop; holding
@@ -1007,7 +1020,7 @@ def _archive_room_refusal(plan, now=None):
     """
     if is_plan_blocked(plan, bucket=ARCHIVE):
         return (
-            REASON_PLAN_BLOCKED,
+            _breaker_reason(plan),
             f"Provider reported the {plan} plan exhausted; paused until reset.",
         )
     row = ApiRequestQuota.objects.filter(day=quota_day(), plan=plan).first()

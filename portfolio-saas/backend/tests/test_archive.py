@@ -487,7 +487,9 @@ def test_genuine_quota_exhaustion_defers_past_rollover_and_takes_siblings():
 def test_a_rate_limit_trip_waits_minutes_not_a_day(settings):
     """A 429 trips the breaker half-open; only a meter-confirmed empty wallet
     is latched. Parking on the 429 idled 3,345 requests on 2026-10-13."""
-    from marketdata.quota import REASON_PLAN_BLOCKED, TSETMC, QuotaExhausted, trip_plan_breaker
+    from marketdata.quota import (
+        REASON_PLAN_BLOCKED, TSETMC, QuotaExhausted, reserve_request, trip_plan_breaker,
+    )
 
     settings.MARKETDATA_BREAKER_RETRY_SECONDS = 900
     now = timezone.now()
@@ -495,9 +497,11 @@ def test_a_rate_limit_trip_waits_minutes_not_a_day(settings):
     sibling = _state("rate-sib", next_attempt_at=now + timedelta(minutes=5))
     trip_plan_breaker(TSETMC, reason="http_429", bucket=ARCHIVE)
     with patch("marketdata.archive._fetch_and_ingest",
-               side_effect=QuotaExhausted("blocked", reason=REASON_PLAN_BLOCKED)):
-        with pytest.raises(QuotaExhausted):
+               side_effect=lambda _state: reserve_request(ARCHIVE, TSETMC)):
+        with pytest.raises(QuotaExhausted) as refused:
             run_archive_state(state.pk)
+    # The ledger reports the wait as minutes, matching the schedule.
+    assert refused.value.reason == "breaker_open" and refused.value.is_pacing
 
     state.refresh_from_db()
     sibling.refresh_from_db()
@@ -506,6 +510,20 @@ def test_a_rate_limit_trip_waits_minutes_not_a_day(settings):
     assert sibling.next_attempt_at <= now + timedelta(minutes=5, seconds=1)
 
     trip_plan_breaker(TSETMC, reason="http_429", bucket=None, until_reset=True)
+    with patch("marketdata.archive._fetch_and_ingest",
+               side_effect=lambda _state: reserve_request(ARCHIVE, TSETMC)):
+        with pytest.raises(QuotaExhausted) as refused:
+            run_archive_state(state.pk)
+    assert refused.value.reason == REASON_PLAN_BLOCKED
+    state.refresh_from_db()
+    assert state.last_error == "Daily quota unavailable (plan_blocked)."
+
+
+def test_a_local_meter_at_its_ceiling_still_waits_for_rollover():
+    """No breaker entry exists when our own meter says the day is spent."""
+    from marketdata.quota import REASON_PLAN_BLOCKED, QuotaExhausted
+
+    state = _state("meter-sym")
     with patch("marketdata.archive._fetch_and_ingest",
                side_effect=QuotaExhausted("spent", reason=REASON_PLAN_BLOCKED)):
         with pytest.raises(QuotaExhausted):

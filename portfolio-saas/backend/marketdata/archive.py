@@ -47,13 +47,12 @@ from .models import (
 )
 from .quota import (
     BRS,
+    REASON_BREAKER_OPEN,
     REASON_LIVE_RESERVED,
-    REASON_PLAN_BLOCKED,
     TSETMC,
     QuotaExhausted,
     archive_capacity,
     increment_historical_full_used,
-    plan_block_latched,
     require_archive_room,
 )
 
@@ -972,11 +971,8 @@ def run_archive_state(state_id):
         # latched to rollover. Parking every state (and its siblings) until
         # tomorrow on a 15-minute trip idled the archive with 3,345 requests left
         # on 2026-10-13, and stamped 818 never-fetched Codal states as failing.
-        transient_block = (
-            exc.reason == REASON_PLAN_BLOCKED
-            and not plan_block_latched(_ENDPOINT_PLAN.get(state.endpoint, TSETMC))
-        )
-        if exc.is_pacing or transient_block:
+        transient_block = exc.reason == REASON_BREAKER_OPEN
+        if exc.is_pacing:
             # Refused by something that clears on its own before rollover. Come
             # back later and leave the row otherwise untouched: no failure count
             # (nothing failed), and no alarming `last_error` that would make a
