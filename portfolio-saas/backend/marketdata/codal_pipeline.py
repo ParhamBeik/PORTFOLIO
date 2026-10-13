@@ -164,7 +164,13 @@ def _read_statement(report, announcement, downloaded):
             kinds |= {fact["fact_code"].split(".")[0] for fact in facts
                       if fact["verification_status"] == CodalVerification.RECONCILED}
     page = next((content for artifact, content in pages if artifact.source_url == main_url), None)
-    if page is None or report.is_consolidated not in (True, False):
+    if page is None:
+        # The tab list lives on the main page. If it is only temporarily
+        # unavailable, finishing on a fallback would stamp the report and the
+        # tabs would never be looked for: stay retryable instead.
+        main = report.artifacts.filter(source_url=main_url).values_list("fetch_status", flat=True).first()
+        return found, _RETRYABLE_FETCH.get(main)
+    if report.is_consolidated not in (True, False):
         return found, None
     blocked = None
     for kind, url in statement_sheet_urls(page, main_url, is_consolidated=report.is_consolidated).items():

@@ -508,3 +508,18 @@ def test_an_unverified_page_does_not_stand_in_for_the_advertised_tab(monkeypatch
     assert CodalCandidateFact.objects.filter(
         extraction__report=report, fact_code__startswith="income.", verification_status="reconciled",
     ).count() == 7
+
+
+@pytest.mark.django_db
+def test_a_blocked_main_page_keeps_the_report_retryable(monkeypatch):
+    announcement = _filing("main-blocked")
+    announcement.link_excel, announcement.has_excel = "https://excel.codal.ir/r.xlsx", True
+    announcement.save()
+    _serve(monkeypatch, {"": CodalBlockedNetwork("origin_down")})
+    serve = codal_pipeline.download_artifact
+    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (
+        (url, "text/html", INTERIM) if "excel" in url else serve(url, kind)
+    ))
+    report, _ = codal_pipeline.extract_report(announcement.pk)
+    assert report.status == CodalReport.Status.BLOCKED_NETWORK
+    assert report.error_code == "statement_tab_unfetched"
