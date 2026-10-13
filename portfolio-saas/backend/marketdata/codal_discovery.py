@@ -258,8 +258,11 @@ def promote(letters):
                 "time_send": row["time_sent"],
                 "link": _absolute(row["url"]),
                 "link_pdf": _absolute(row["pdf_url"]) if row["has_pdf"] is not False else "",
-                "link_excel": _absolute(row["excel_url"]) if row["has_excel"] else "",
-                "link_attachment": _absolute(row["attachment_url"]) if row["has_attachment"] else "",
+                # Only an explicit False means absent; a null flag keeps the URL.
+                "link_excel": _absolute(row["excel_url"]) if row["has_excel"] is not False else "",
+                "link_attachment": (
+                    _absolute(row["attachment_url"]) if row["has_attachment"] is not False else ""
+                ),
                 "doc_type": classification.doc_type,
                 "tier": classification.tier,
                 "classified_by": classification.classified_by,
