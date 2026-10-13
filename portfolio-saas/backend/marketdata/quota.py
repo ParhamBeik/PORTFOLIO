@@ -216,6 +216,37 @@ def _probe_key(plan):
     return f"{_breaker_key(plan)}:probe"
 
 
+def _archive_probe_key(plan):
+    return f"{_breaker_key(plan)}:archive-probe-dispatched"
+
+
+def claim_archive_probe(plan):
+    """Lease the half-open breaker's one archive probe to a single dispatched state.
+
+    `archive_tick` runs every 15 s, and the worker only claims the probe itself
+    when it reaches `reserve_request`. Without this lease each tick in between
+    saw the slot as free and sent one more state. True when this caller holds it.
+    """
+    interval = int(getattr(settings, "MARKETDATA_BREAKER_RETRY_SECONDS", 900) or 0)
+    if interval <= 0:
+        return False
+    from django.core.cache import cache
+
+    try:
+        return cache.add(_archive_probe_key(plan), 1, timeout=interval)
+    except Exception:
+        return False
+
+
+def _archive_probe_dispatched(plan):
+    from django.core.cache import cache
+
+    try:
+        return bool(cache.get(_archive_probe_key(plan)))
+    except Exception:
+        return False
+
+
 def _probe_claimed(plan):
     from django.core.cache import cache
 
@@ -1259,7 +1290,10 @@ def remaining_requests(bucket=None, plan=TSETMC):
         # mixed batch would not park on it -- which meant an archive-tripped
         # breaker was never probed by archive, and live cannot clear it: the
         # archive sat idle until rollover. `claim_archive_batch` now caps each
-        # plan at its own capacity, so 1 here claims one state.
+        # plan at its own capacity, so 1 here claims one state, and
+        # `claim_archive_probe` leases it so a later tick does not send another.
+        if bucket == ARCHIVE and _archive_probe_dispatched(plan):
+            return 0
         return min(1, leftover if bucket is not None else day_left)
     return leftover if bucket is not None else day_left
 

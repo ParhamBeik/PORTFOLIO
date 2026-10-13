@@ -46,12 +46,15 @@ from .models import (
     StockTransactionTick,
 )
 from .quota import (
+    ARCHIVE,
     BRS,
     REASON_BREAKER_OPEN,
     REASON_LIVE_RESERVED,
     TSETMC,
     QuotaExhausted,
+    _breaker_is_half_open,
     archive_capacity,
+    claim_archive_probe,
     increment_historical_full_used,
     require_archive_room,
 )
@@ -1333,6 +1336,10 @@ def claim_archive_batch(limit=None):
     # taking the minimum would let a spent TSETMC plan stop the handful of gold
     # states, which is the whole cross-plan failure this work removed.
     capacity = archive_capacity()
+    for plan, room in capacity.items():
+        # A half-open breaker's single probe goes to exactly one state.
+        if room and _breaker_is_half_open(plan, ARCHIVE) and not claim_archive_probe(plan):
+            capacity[plan] = 0
     batch_size = min(
         limit or settings.MARKETDATA_ARCHIVE_BATCH_SIZE,
         max([*capacity.values(), 0]),

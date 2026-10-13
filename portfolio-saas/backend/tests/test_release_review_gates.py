@@ -166,3 +166,6 @@ def test_archive_half_open_claims_exactly_its_one_probe(settings):
     with mock.patch("marketdata.quota.time.time", return_value=t0 + 2):
         assert remaining_requests(ARCHIVE, TSETMC) == 1
         assert len(claim_archive_batch(limit=50)) == 1
+        # The next tick, before the worker reached the provider, sends nobody.
+        assert remaining_requests(ARCHIVE, TSETMC) == 0
+        assert claim_archive_batch(limit=50) == []
