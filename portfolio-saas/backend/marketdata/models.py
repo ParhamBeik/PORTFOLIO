@@ -306,7 +306,9 @@ class CodalLetter(models.Model):
 
     tracing_no = models.BigIntegerField(unique=True)
     letter_serial = models.CharField(max_length=128, blank=True, default="", db_index=True)
-    # Wide on purpose: market-wide notices list several symbols in one field.
+    # Wide on purpose: unlisted filers (state companies, Article 44 entities,
+    # charities) put their full legal name here, sometimes with a "،"
+    # inside it -- not a list of issuers (none seen, 2026-10-13).
     # At 64 a single such letter failed the whole page's write, every minute.
     symbol = models.CharField(max_length=255, blank=True, default="", db_index=True)
     company_name = models.CharField(max_length=255, blank=True, default="")
