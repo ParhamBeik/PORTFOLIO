@@ -17,6 +17,7 @@ from django.test import RequestFactory
 from django.utils import timezone
 import pytest
 from rest_framework.test import APIClient
+from zoneinfo import ZoneInfo
 
 from accounts.models import User
 from config.health import PriceFeedView
@@ -36,10 +37,17 @@ from portfolio.services.valuation import get_latest_prices, value_as_of
 from portfolio.tasks import run_price_fetch
 
 
+def _tehran_today():
+    """Today in Tehran, as the sealer computes it. `timezone.localdate()` is the
+    UTC day (settings.TIME_ZONE is UTC) and lags Tehran by one day from 00:00 to
+    03:30 Tehran, which made every sealing test red in that window."""
+    return timezone.localtime(timezone.now(), ZoneInfo("Asia/Tehran")).date()
+
+
 def _seal_test_day(*, close_keys=frozenset()):
     from portfolio.tasks import _write_snapshots
 
-    day = timezone.localdate() - timedelta(days=1)
+    day = _tehran_today() - timedelta(days=1)
     return _write_snapshots(get_latest_prices(), day=day, session_close_keys=set(close_keys))
 
 pytestmark = pytest.mark.django_db
@@ -882,7 +890,7 @@ def test_daily_snapshot_task_is_idempotent_and_uses_tehran_day(asset_catalog, mo
     assert first["rows"] == 2
     assert Snapshot.objects.filter(user=user).count() == 2
     assert set(Snapshot.objects.filter(user=user).values_list("day", flat=True)) == {
-        timezone.localdate() - timedelta(days=1)
+        _tehran_today() - timedelta(days=1)
     }
     assert set(Snapshot.objects.filter(user=user).values_list("total_value_tomans", flat=True)) == {
         Decimal("800000000")
