@@ -1230,10 +1230,33 @@ def test_a_report_the_extractor_stamped_generic_is_not_reselected(monkeypatch, s
     settings.CODAL_STATEMENT_PARSER_VERSION = "5"
     from marketdata import tasks
 
-    row = _announcement(symbol="A", code="ن-10")
-    CodalReport.objects.create(announcement=row, status=CodalReport.Status.NEEDS_REVIEW, parser_version="4")
+    # A let58 investment company: the classifier itself still calls it portfolio.
+    row = _announcement(symbol="A", code="ن-10", link="https://codal.ir/Reports/Decision.aspx?LetterSerial=x&let58",
+                        title="صورت وضعیت پرتفوی شرکت سرمایه گذاری نمونه")
+    CodalReport.objects.create(announcement=row, status=CodalReport.Status.NEEDS_REVIEW, parser_version="4",
+                               category=CodalAnnouncement.Category.PORTFOLIO)
     monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
     monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
     monkeypatch.setattr(tasks.extract_codal_report, "delay", lambda pk: pytest.fail("re-selected"))
 
+    assert tasks.queue_codal_extractions() == 0
+
+
+def test_a_statement_once_filed_as_generic_is_requeued_once(monkeypatch, settings):
+    """ن-10 now outranks the title; earlier generic-v4 runs need the statement parser."""
+    settings.CODAL_ENABLED = True
+    settings.CODAL_PARSER_VERSION = "4"
+    settings.CODAL_STATEMENT_PARSER_VERSION = "5"
+    from marketdata import tasks
+
+    row = _announcement(symbol="A", code="ن-10", title="صورتهای مالی میاندوره ای")
+    report = CodalReport.objects.create(announcement=row, status=CodalReport.Status.PARSED,
+                                        parser_version="4", category=CodalAnnouncement.Category.PORTFOLIO)
+    queued = []
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
+    monkeypatch.setattr(tasks.extract_codal_report, "delay", lambda pk: queued.append(pk))
+
+    assert tasks.queue_codal_extractions() == 1 and queued == [row.pk]
+    CodalReport.objects.filter(pk=report.pk).update(parser_version="5", category=2)
     assert tasks.queue_codal_extractions() == 0

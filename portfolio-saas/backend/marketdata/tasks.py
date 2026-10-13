@@ -388,6 +388,29 @@ def queue_codal_extractions():
     return queued
 
 
+def _codal_family_changed_ids():
+    """ن-10 filings stamped generic that the classifier now calls statements.
+
+    The letter code began outranking the title in the same change, so filings
+    extracted earlier as e.g. portfolio data carry the CURRENT generic version
+    yet need the statement parser. Asking the extractor's own classifier keeps
+    this convergent: a filing it still calls generic (a let58 investment
+    company) is stamped generic again and never re-selected.
+    """
+    from .codal_classification import classify_announcement
+
+    if settings.CODAL_STATEMENT_PARSER_VERSION == settings.CODAL_PARSER_VERSION:
+        return []
+    candidates = (
+        CodalAnnouncement.objects.filter(code="ن-10", report__parser_version=settings.CODAL_PARSER_VERSION)
+        .exclude(report__category=2)
+    )
+    return [
+        row.pk for row in candidates.iterator(chunk_size=500)
+        if classify_announcement(row).get("category") == 2
+    ]
+
+
 def _stale_parser_codal_ids(limit, exclude=(), archived_only=False):
     """Finished reports a newer parser has not seen yet, statements first.
 
@@ -407,7 +430,7 @@ def _stale_parser_codal_ids(limit, exclude=(), archived_only=False):
     # re-selected them on every sweep, holding the statement-first slots.
     stale = ~Q(report__parser_version__in=(
         settings.CODAL_STATEMENT_PARSER_VERSION, settings.CODAL_PARSER_VERSION,
-    ))
+    )) | Q(pk__in=_codal_family_changed_ids())
     base = (
         CodalAnnouncement.objects.filter(report__isnull=False)
         .filter(report__status__in=(
