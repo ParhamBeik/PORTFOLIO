@@ -241,6 +241,7 @@ Rolled up per symbol and per year. 1404/07/02 so far: 290 theirs vs 201 ours.
 - **The `+` bug:** `balance_sheet_url` decodes with `parse_qsl`, which turns a literal `+` into a space.
 - **Classification:** `let\d+` never matches `&let=6`, and with `re.I` it can match inside a base64 serial.
 - **Upside of direct discovery:** `HasXbrl` / `XbrlUrl` are exposed directly. XBRL, where present, may beat HTML scraping for statements, which makes it worth a measured look first.
+- **Resolved 2026-10-13 (statement parser v6):** extraction now fetches the income and balance tabs each filing's own tab list names (an audited filing opens on the auditor's opinion, which holds no figures) and reads them by label and current-period column, any template, proving the sheet's arithmetic before a fact is `reconciled`. Abstain reasons are `subsidiary`, `no_datasource`, `no_statement_sheet`, `unreconciled`. `reparse_income_statements` and `backfill_balance_sheets` are gone: the stale-parser sweep re-runs every statement filing, year-end ones first. Cost measured on production: ~66 KB per stored tab, ~2.5 GB for all ~19k filings.
 - **Readers of parsed facts:** only Explore, Research and `research_coverage`. Nothing in valuation, returns or optimization reads them.
 
 ## 9. Decisions (owner, 2026-10-05)

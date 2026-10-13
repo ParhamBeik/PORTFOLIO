@@ -30,6 +30,7 @@ from django.utils import timezone
 
 from .codal_classification import classify_announcement
 from .codal_parsers import (
+    ParsedDocument,
     looks_like_html,
     category_reconciles, extract_typed_facts, parse_artifact, reconcile_monthly_sales,
 )
@@ -42,7 +43,7 @@ from .codal_storage import (
     load_artifact,
     store_artifact,
 )
-from .codal_statements import parse_income_statement, statement_abstain_reason
+from .codal_statements import parse_statement, statement_abstain_reason, statement_sheet_urls
 from .models import (
     CodalArtifact,
     CodalCandidateFact,
@@ -54,6 +55,13 @@ from .models import (
 
 class CodalExtractionRegressed(RuntimeError):
     """A re-parse produced less than what is already stored."""
+
+
+_RETRYABLE_FETCH = {
+    CodalArtifact.FetchStatus.BLOCKED_NETWORK: CodalReport.Status.BLOCKED_NETWORK,
+    CodalArtifact.FetchStatus.BLOCKED_STORAGE: CodalReport.Status.BLOCKED_STORAGE,
+    CodalArtifact.FetchStatus.FAILED: CodalReport.Status.FAILED,
+}
 
 
 def _artifact_sources(announcement):
@@ -72,6 +80,97 @@ def _artifact_sources(announcement):
         )
         if exists is not False
     ]
+
+
+def _fetch_artifact(report, kind, source_url):
+    """`(artifact, bytes)`; bytes are None when nothing usable was obtained.
+
+    Stored bytes are reused, so a re-parse reads MinIO and never the origin.
+    """
+    artifact, _ = CodalArtifact.objects.get_or_create(
+        report=report, kind=kind, source_url=_absolute_url(source_url)
+    )
+    try:
+        if artifact.fetch_status == CodalArtifact.FetchStatus.STORED and artifact.s3_key:
+            return artifact, load_artifact(artifact)
+        if artifact.fetch_status == CodalArtifact.FetchStatus.REJECTED:
+            # Failed its own content check -- a property of the document.
+            # A re-parse must not fetch 83k rejected attachments again.
+            return artifact, None
+        # No quota reservation. These bytes come from codal.ir, not from the
+        # metered provider -- charging them to the BrsApi archive budget spent
+        # ~1,000 requests/day of somebody else's allowance and, on a day when
+        # the budget ran out, stopped document extraction for a reason that
+        # had nothing to do with documents.
+        _final_url, content_type, content = download_artifact(artifact.source_url, kind)
+        key, checksum = store_artifact(content, content_type, kind)
+        artifact.s3_key = key
+        artifact.checksum_sha256 = checksum
+        artifact.content_type = content_type
+        artifact.size_bytes = len(content)
+        artifact.fetch_status = CodalArtifact.FetchStatus.STORED
+        artifact.error_code = ""
+        artifact.save()
+        return artifact, content
+    except CodalArtifactRejected as exc:
+        artifact.fetch_status = CodalArtifact.FetchStatus.REJECTED
+        artifact.error_code = str(exc)[:64]
+    except CodalBlockedNetwork as exc:
+        artifact.fetch_status = CodalArtifact.FetchStatus.BLOCKED_NETWORK
+        artifact.error_code = str(exc)[:64]
+    except CodalBlockedStorage as exc:
+        artifact.fetch_status = CodalArtifact.FetchStatus.BLOCKED_STORAGE
+        artifact.error_code = str(exc)[:64]
+    except Exception as exc:
+        # Anything unforeseen (a malformed header, a zlib error) used to
+        # escape the whole loop and leave this row claiming "pending" --
+        # the database said the artifact was never attempted when it had
+        # been.
+        artifact.fetch_status = CodalArtifact.FetchStatus.FAILED
+        artifact.error_code = type(exc).__name__[:64]
+    artifact.save(update_fields=["fetch_status", "error_code"])
+    return artifact, None
+
+
+def _read_statement(report, announcement, downloaded):
+    """`({artifact: facts}, blocked_status)` from the filing's statement tabs.
+
+    An audited filing opens on the auditor's opinion, which holds no figures:
+    61% of stored statement pages were that tab. The page's own tab list names
+    the income and balance sheets, which are fetched (once; then archived) and
+    read with the template-independent parser.
+    """
+    arguments = {
+        "symbol": announcement.symbol, "company_name": announcement.company_name,
+        "title": announcement.title, "period_end": report.period_end,
+        "is_consolidated": report.is_consolidated, "is_audited": report.is_audited,
+    }
+    main_url = _absolute_url(announcement.link)
+    pages = [(artifact, content) for kind, artifact, content in downloaded
+             if kind in (CodalArtifact.Kind.HTML, CodalArtifact.Kind.EXCEL) and looks_like_html(content)]
+    found, kinds = {}, set()
+    for artifact, content in pages:
+        facts = [fact for fact in parse_statement(content, **arguments)
+                 if fact["fact_code"].split(".")[0] not in kinds]
+        if facts:
+            found[artifact] = facts
+            kinds |= {fact["fact_code"].split(".")[0] for fact in facts}
+    page = next((content for artifact, content in pages if artifact.source_url == main_url), None)
+    if page is None or report.is_consolidated not in (True, False):
+        return found, None
+    blocked = None
+    for kind, url in statement_sheet_urls(page, main_url, is_consolidated=report.is_consolidated).items():
+        if kind in kinds:
+            continue
+        artifact, content = _fetch_artifact(report, CodalArtifact.Kind.HTML, url)
+        if content is None:
+            if artifact.fetch_status in _RETRYABLE_FETCH:
+                blocked = blocked or _RETRYABLE_FETCH[artifact.fetch_status]
+            continue
+        facts = parse_statement(content, **arguments)
+        if facts:
+            found[artifact] = facts
+    return found, blocked
 
 
 def _artifact_states(report):
@@ -183,53 +282,9 @@ def extract_report(announcement_id):
     for kind, source_url in _artifact_sources(announcement):
         if not source_url:
             continue
-        artifact, _ = CodalArtifact.objects.get_or_create(
-            report=report, kind=kind, source_url=_absolute_url(source_url)
-        )
-        try:
-            if artifact.fetch_status == CodalArtifact.FetchStatus.STORED and artifact.s3_key:
-                content = load_artifact(artifact)
-                downloaded.append((kind, artifact, content))
-                continue
-            if artifact.fetch_status == CodalArtifact.FetchStatus.REJECTED:
-                # Failed its own content check -- a property of the document.
-                # A re-parse must not fetch 83k rejected attachments again.
-                continue
-            # No quota reservation. These bytes come from codal.ir, not from the
-            # metered provider -- charging them to the BrsApi archive budget spent
-            # ~1,000 requests/day of somebody else's allowance and, on a day when
-            # the budget ran out, stopped document extraction for a reason that
-            # had nothing to do with documents.
-            _final_url, content_type, content = download_artifact(source_url, kind)
-            key, checksum = store_artifact(content, content_type, kind)
-            artifact.s3_key = key
-            artifact.checksum_sha256 = checksum
-            artifact.content_type = content_type
-            artifact.size_bytes = len(content)
-            artifact.fetch_status = CodalArtifact.FetchStatus.STORED
-            artifact.error_code = ""
-            artifact.save()
+        artifact, content = _fetch_artifact(report, kind, source_url)
+        if content is not None:
             downloaded.append((kind, artifact, content))
-        except CodalArtifactRejected as exc:
-            artifact.fetch_status = CodalArtifact.FetchStatus.REJECTED
-            artifact.error_code = str(exc)[:64]
-            artifact.save(update_fields=["fetch_status", "error_code"])
-        except CodalBlockedNetwork as exc:
-            artifact.fetch_status = CodalArtifact.FetchStatus.BLOCKED_NETWORK
-            artifact.error_code = str(exc)[:64]
-            artifact.save(update_fields=["fetch_status", "error_code"])
-        except CodalBlockedStorage as exc:
-            artifact.fetch_status = CodalArtifact.FetchStatus.BLOCKED_STORAGE
-            artifact.error_code = str(exc)[:64]
-            artifact.save(update_fields=["fetch_status", "error_code"])
-        except Exception as exc:
-            # Anything unforeseen (a malformed header, a zlib error) used to
-            # escape the whole loop and leave this row claiming "pending" --
-            # the database said the artifact was never attempted when it had
-            # been.
-            artifact.fetch_status = CodalArtifact.FetchStatus.FAILED
-            artifact.error_code = type(exc).__name__[:64]
-            artifact.save(update_fields=["fetch_status", "error_code"])
 
     if not downloaded:
         statuses = set(report.artifacts.values_list("fetch_status", flat=True))
@@ -258,50 +313,39 @@ def extract_report(announcement_id):
             "artifacts": _artifact_states(report),
         }
 
+    statement, blocked = ({}, None)
+    if report.category == 2:
+        statement, blocked = _read_statement(report, announcement, downloaded)
+    certified = any(fact["verification_status"] == CodalVerification.RECONCILED
+                    for facts in statement.values() for fact in facts)
+
     parsed = None
     chosen = None
-    chosen_income = []
-    abstain = ""
-    first_generic = None
     parse_errors = []
     for kind, artifact, content in downloaded:
-        if kind == CodalArtifact.Kind.ATTACHMENT:
-            continue
         try:
             candidate = parse_artifact(kind, content)
         except Exception as exc:
             parse_errors.append(type(exc).__name__)
             continue
-        # The statement parser reads `var datasource` and form inputs, which a
-        # script-rendered page carries with no visible table or text -- so it
-        # runs before the generic emptiness check, not after it.
-        if report.category != 2 and not (candidate.tables or candidate.sections or candidate.text):
-            continue
-        if first_generic is None and (candidate.tables or candidate.sections or candidate.text):
-            first_generic = (candidate, artifact)
-        if report.category == 2:
-            income = parse_income_statement(
-                content, symbol=announcement.symbol, company_name=announcement.company_name,
-                title=announcement.title, period_end=report.period_end,
-                is_consolidated=report.is_consolidated, is_audited=report.is_audited,
-            ) if kind in (CodalArtifact.Kind.EXCEL, CodalArtifact.Kind.HTML) else []
-            if not income:
-                if kind == CodalArtifact.Kind.HTML:
-                    abstain = statement_abstain_reason(content, title=announcement.title)
-                elif kind == CodalArtifact.Kind.EXCEL and not abstain:
-                    # Codal's "Excel" is usually the same HTML page; a real
-                    # workbook has no datasource block to name a template from.
-                    abstain = (
-                        statement_abstain_reason(content, title=announcement.title)
-                        if looks_like_html(content) else "excel_workbook"
-                    )
-                continue
-            parsed, chosen, chosen_income = candidate, artifact, income
+        if candidate.tables or candidate.sections or candidate.text:
+            parsed, chosen = candidate, artifact
             break
-        parsed, chosen = candidate, artifact
-        break
-    if parsed is None and first_generic is not None:
-        parsed, chosen = first_generic
+    if parsed is None and statement:
+        # A script-rendered page has no visible table or text; its statement
+        # figures came from `var datasource` all the same.
+        chosen = next(iter(statement))
+        parsed = ParsedDocument()
+    abstain = ""
+    if report.category == 2 and not certified:
+        # Codal's "Excel" is usually the same HTML page; a real workbook has
+        # no datasource block to name a reason from.
+        page = next((content for kind, _, content in downloaded
+                     if kind != CodalArtifact.Kind.PDF and looks_like_html(content)), None)
+        abstain = (
+            statement_abstain_reason(page, title=announcement.title, extracted=bool(statement))
+            if page is not None else "excel_workbook"
+        )
     if parsed is None:
         # Downloaded fine, but nothing usable came out of any of them --
         # a template problem, not a network one. Not retried.
@@ -314,10 +358,12 @@ def extract_report(announcement_id):
     for field, value in metadata.items():
         setattr(report, field, value)
     extract_typed_facts(parsed, report.category, report.period_end)
-    parsed.facts.extend(chosen_income)
-    reconciled = bool(chosen_income) or category_reconciles(parsed, report.category)
+    parsed.facts.extend(statement.pop(chosen, []))
+    reconciled = certified or category_reconciles(parsed, report.category)
     try:
         _persist_parsed(report, chosen, parsed)
+        for artifact, facts in statement.items():
+            _persist_parsed(report, artifact, ParsedDocument(facts=facts))
     except CodalExtractionRegressed:
         report.status = CodalReport.Status.NEEDS_REVIEW
         report.quality = CodalReport.Quality.REVIEW
@@ -332,7 +378,13 @@ def extract_report(announcement_id):
         report.status = CodalReport.Status.UNSUPPORTED
         report.quality = CodalReport.Quality.REVIEW
         report.error_code = "unknown_category"
-    elif report.category == 2 and abstain and not chosen_income:
+    elif blocked:
+        # A statement tab could not be fetched: what was read is kept, and the
+        # retry path runs the filing again once the origin answers.
+        report.status = blocked
+        report.quality = CodalReport.Quality.REVIEW
+        report.error_code = "statement_tab_unfetched"
+    elif report.category == 2 and not certified:
         # Generic keyword facts can reconcile a statement the strict parser
         # refused. Keep the parser's reason: it is what sorts the older-template
         # backlog, and a keyword match is not a verified statement.

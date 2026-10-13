@@ -1114,15 +1114,18 @@ def test_a_parser_upgrade_reaches_finished_reports_statements_first(monkeypatch,
     sales = _announcement(symbol="A", code="ن-30", date_publish="1405-07-10")
     statement = _announcement(symbol="B", code="ن-10", date_publish="1400-01-01")
     current = _announcement(symbol="C", code="ن-10", date_publish="1405-07-11")
-    for row, version in ((sales, "2"), (statement, "2"), (current, "5")):
+    annual = _announcement(symbol="D", code="ن-10", date_publish="1399-01-01",
+                           title="صورت‌های مالی سال مالی منتهی به ۱۳۹۸/۱۲/۲۹ (حسابرسی شده)")
+    for row, version in ((sales, "2"), (statement, "2"), (current, "5"), (annual, "2")):
         CodalReport.objects.create(announcement=row, status=CodalReport.Status.PARSED, parser_version=version)
     queued = []
     monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
     monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
     monkeypatch.setattr(tasks.extract_codal_report, "delay", lambda pk: queued.append(pk))
 
-    assert tasks.queue_codal_extractions() == 2
-    assert queued == [statement.pk, sales.pk]
+    assert tasks.queue_codal_extractions() == 3
+    # Year-end statements build the sales/profit history; interim ones refine it.
+    assert queued == [annual.pk, statement.pk, sales.pk]
 
 
 def test_legacy_facts_do_not_block_a_reparse(monkeypatch):
@@ -1161,10 +1164,8 @@ def test_a_rejected_artifact_is_not_downloaded_again(monkeypatch):
 def test_a_statement_the_parser_cannot_read_says_why():
     from marketdata.codal_statements import statement_abstain_reason
 
-    v7 = (b'<html><input id="ctl00_txbSymbol" value="x"><script>var datasource = '
-          b'{"title_En": "FinancialStatement-Listed-Product-V7"};</script></html>')
-    assert statement_abstain_reason(v7, title="صورتهای مالی") == "template:FinancialStatement-Listed-Product-V7"
-    assert statement_abstain_reason(b"<html></html>", title="صورتهای مالی") == "no_v9_data"
+    assert statement_abstain_reason(_V7_PAGE, title="صورتهای مالی") == "no_statement_sheet"
+    assert statement_abstain_reason(b"<html></html>", title="صورتهای مالی") == "no_datasource"
     assert statement_abstain_reason(b"", title="صورتهای مالی (شرکت فرعی)") == "subsidiary"
 
 
@@ -1182,11 +1183,11 @@ def _statement_run(monkeypatch, parsed):
     return codal_pipeline.extract_report(announcement.pk)
 
 
-def test_a_script_only_statement_page_still_says_which_template_it_is(monkeypatch):
+def test_a_script_only_statement_page_still_says_why(monkeypatch):
     """The page has no visible table or text, only `var datasource`."""
     report, _ = _statement_run(monkeypatch, ParsedDocument())
 
-    assert report.error_code == "statement:template:FinancialStatement-Listed-Product-V7"
+    assert report.error_code == "statement:no_statement_sheet"
 
 
 def test_keyword_facts_do_not_hide_the_statement_parsers_refusal(monkeypatch):
@@ -1196,7 +1197,7 @@ def test_keyword_facts_do_not_hide_the_statement_parsers_refusal(monkeypatch):
     }]))
 
     assert report.status == CodalReport.Status.NEEDS_REVIEW
-    assert report.error_code == "statement:template:FinancialStatement-Listed-Product-V7"
+    assert report.error_code == "statement:no_statement_sheet"
 
 
 def test_archived_reparses_run_while_the_origin_is_down(monkeypatch, settings):
@@ -1283,7 +1284,7 @@ def test_a_clarification_once_run_as_a_statement_is_requeued_once(monkeypatch, s
 
 
 @pytest.mark.parametrize("prefix", [b"", b"\xef\xbb\xbf"])  # a UTF-8 BOM is still HTML
-def test_an_html_excel_export_says_which_template_it_is(monkeypatch, prefix):
+def test_an_html_excel_export_says_why(monkeypatch, prefix):
     announcement = _announcement(code="ن-10", title="صورتهای مالی", link_excel="https://excel.codal.ir/r.xls",
                                  link_pdf="", link_attachment="", link="")
     monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (url, "application/vnd.ms-excel", prefix + _V7_PAGE))
@@ -1292,4 +1293,4 @@ def test_an_html_excel_export_says_which_template_it_is(monkeypatch, prefix):
 
     report, _ = codal_pipeline.extract_report(announcement.pk)
 
-    assert report.error_code == "statement:template:FinancialStatement-Listed-Product-V7"
+    assert report.error_code == "statement:no_statement_sheet"

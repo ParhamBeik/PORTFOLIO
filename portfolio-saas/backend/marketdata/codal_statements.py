@@ -1,8 +1,9 @@
-"""Certify observed Codal V9 statement cells, never from PDF text."""
+"""Certify Codal statement cells by label and arithmetic, never from PDF text."""
 
 import json
 import re
 import unicodedata
+from decimal import Decimal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import jdatetime
@@ -13,73 +14,6 @@ from .jalali import normalize_jalali
 
 
 _LETTERS = str.maketrans({"ي": "ی", "ك": "ک", "ى": "ی", "ھ": "ه", "ة": "ه"})
-_LABELS = {
-    "income.operating_revenue": "درآمدهایعملیاتی",
-    "income.cost_of_revenue": "بهایتمامشدهدرآمدهایعملیاتی",
-    "income.gross_profit": "سودزیانناخالص",
-    "income.continuing_profit": "سودزیانخالصعملیاتدرحالتداوم",
-    "income.discontinued_profit": "سودزیانخالصعملیاتمتوقفشده",
-    "income.net_profit": "سودزیانخالص",
-}
-_ROWS = {
-    False: {
-        "income.operating_revenue": 3, "income.cost_of_revenue": 4,
-        "income.gross_profit": 5, "income.continuing_profit": 15,
-        "income.discontinued_profit": 21, "income.net_profit": 17,
-    },
-    True: {
-        "income.operating_revenue": 3, "income.cost_of_revenue": 4,
-        "income.gross_profit": 5, "income.continuing_profit": 17,
-        "income.discontinued_profit": 18, "income.net_profit": 19,
-    },
-}
-_SHEETS = {
-    False: (1, "Income Statement", "IncomeStatement", 3220, "7"),
-    True: (
-        13, "Consolidated Income Statement", "ConsolidatedIncomeStatement", 3227, "2",
-    ),
-}
-_V9_TITLES = {
-    consolidated: {
-        f"FinancialStatement-{'Consolidated-' if consolidated else ''}{venue}-Product-V9"
-        for venue in ("Listed", "OTC", "Registered")
-    }
-    for consolidated in (False, True)
-}
-_BALANCE_SHEETS = {
-    False: (0, "Balance Sheet", "BalanceSheet", 3223, "5"),
-    True: (
-        14, "Consolidated Balance Sheet", "ConsolidatedBalanceSheet", 3230, "3",
-    ),
-}
-_BALANCE_ROWS = {
-    False: {
-        "balance.noncurrent_assets": (12, 19, "جمعداراییهایغیرجاری"),
-        "balance.cash": (18, 4, "موجودینقد"),
-        "balance.current_assets": (21, 11, "جمعداراییهایجاری"),
-        "balance.total_assets": (22, 33, "جمعداراییها"),
-        "balance.total_equity": (35, 39, "جمعحقوقمالکانه"),
-        "balance.long_term_borrowings": (39, 16, "تسهیلاتمالیبلندمدت"),
-        "balance.noncurrent_liabilities": (42, 18, "جمعبدهیهایغیرجاری"),
-        "balance.short_term_borrowings": (47, 8, "تسهیلاتمالی"),
-        "balance.current_liabilities": (52, 12, "جمعبدهیهایجاری"),
-        "balance.total_liabilities": (53, 19, "جمعبدهیها"),
-        "balance.liabilities_and_equity": (54, 43, "جمعحقوقمالکانهوبدهیها"),
-    },
-    True: {
-        "balance.noncurrent_assets": (14, 19, "جمعداراییهایغیرجاری"),
-        "balance.cash": (20, 3, "موجودینقد"),
-        "balance.current_assets": (23, 10, "جمعداراییهایجاری"),
-        "balance.total_assets": (24, 36, "جمعداراییها"),
-        "balance.total_equity": (41, 46, "جمعحقوقمالکانه"),
-        "balance.long_term_borrowings": (45, 16, "تسهیلاتمالیبلندمدت"),
-        "balance.noncurrent_liabilities": (48, 18, "جمعبدهیهایغیرجاری"),
-        "balance.short_term_borrowings": (53, 8, "تسهیلاتمالی"),
-        "balance.current_liabilities": (58, 12, "جمعبدهیهایجاری"),
-        "balance.total_liabilities": (59, 19, "جمعبدهیها"),
-        "balance.liabilities_and_equity": (60, 50, "جمعحقوقمالکانهوبدهیها"),
-    },
-}
 
 
 def _canonical(value):
@@ -113,260 +47,250 @@ def _period_start(period_end, months):
         return ""
 
 
-def balance_sheet_url(income_html, source_url, *, is_consolidated):
-    """Select a balance sheet advertised by the same Codal filing page."""
+# Every Codal statement template -- product V5-V9, bank, insurance, investment,
+# service, agriculture, building, leasing -- serves the same `datasource` cell
+# grid: a label in column 1, one column per period, each body cell stamped with
+# its own `periodEndToDate`. Reading by label and by the current-period column,
+# then proving the arithmetic, covers all of them; the V9-only reader this
+# replaced (fixed rows and table ids) covered ~3% of filings.
+
+_INCOME_LABELS = {
+    "income.operating_revenue": ("جمعدرآمدهایعملیاتی", "درآمدهایعملیاتی"),
+    "income.cost_of_revenue": ("بهایتمامشدهدرآمدهایعملیاتی",),
+    "income.gross_profit": ("سودزیانناخالص",),
+    "income.operating_profit": ("سودزیانعملیاتی",),
+    "income.continuing_profit": ("سودزیانخالصعملیاتدرحالتداوم",),
+    "income.discontinued_profit": ("سودزیانخالصعملیاتمتوقفشده",),
+    "income.net_profit": ("سودزیانخالص",),
+}
+_BALANCE_LABELS = {
+    "balance.cash": ("موجودینقد",),
+    "balance.current_assets": ("جمعداراییهایجاری",),
+    "balance.noncurrent_assets": ("جمعداراییهایغیرجاری",),
+    "balance.total_assets": ("جمعداراییها",),
+    "balance.current_liabilities": ("جمعبدهیهایجاری",),
+    "balance.noncurrent_liabilities": ("جمعبدهیهایغیرجاری",),
+    "balance.total_liabilities": ("جمعبدهیها",),
+    "balance.total_equity": ("جمعحقوقمالکانه",),
+    "balance.short_term_borrowings": ("تسهیلاتمالی",),
+    "balance.long_term_borrowings": ("تسهیلاتمالیبلندمدت",),
+    "balance.liabilities_and_equity": ("جمعحقوقمالکانهوبدهیها", "جمعبدهیهاوحقوقمالکانه"),
+}
+# Sheet titles as Codal's tab list and `datasource.sheets[].title_Fa` name them.
+_SHEET_TITLES = {
+    ("income", False): "صورتسودوزیان",
+    ("income", True): "صورتسودوزیانتلفیقی",
+    ("balance", False): "صورتوضعیتمالی",
+    ("balance", True): "صورتوضعیتمالیتلفیقی",
+}
+
+
+def _datasource(content):
+    """The page's `var datasource = {...};` object, or None."""
+    if not content or len(content) > 3_000_000:
+        return None
+    text = content.decode("utf-8", "ignore") if isinstance(content, bytes) else str(content)
+    match = re.search(r"\bvar\s+datasource\s*=\s*", text)
+    if not match:
+        return None
     try:
-        parts = urlsplit(source_url)
-        safe_host = parts.hostname in ("codal.ir", "www.codal.ir") and parts.port in (None, 443)
+        source, _ = json.JSONDecoder().raw_decode(text[match.end():])
     except ValueError:
         return None
-    if (parts.scheme != "https" or not safe_host
+    return source if isinstance(source, dict) else None
+
+
+def statement_sheet_urls(page, source_url, *, is_consolidated):
+    """`{"income"|"balance": url}` for the tabs this filing page lists.
+
+    An audited filing opens on the auditor's opinion (sheetId 19): 61% of the
+    stored statement pages held no figures at all, because nothing ever asked
+    for the statement tabs. The tab list on the page names them, so the URL is
+    built from what the filing itself advertises, never guessed.
+    """
+    try:
+        parts = urlsplit(source_url)
+    except ValueError:
+        return {}
+    if (parts.scheme != "https" or parts.hostname not in ("codal.ir", "www.codal.ir")
             or parts.path != "/Reports/Decision.aspx"):
-        return None
-    params = parse_qsl(parts.query, keep_blank_values=True)
-    serials = [value for key, value in params if key == "LetterSerial"]
-    if len(serials) != 1 or not re.fullmatch(r"[A-Za-z0-9+/=]{8,128}", serials[0]):
-        return None
-    sheet_id = "14" if is_consolidated else "0"
-    expected = "صورتوضعیتمالیتلفیقی" if is_consolidated else "صورتوضعیتمالی"
-    options = _html_soup(income_html).select(f'option[value="{sheet_id}"]')
-    if len(options) != 1 or _canonical(options[0].get_text(" ", strip=True)) != expected:
-        return None
-    params = [(key, value) for key, value in params if key.lower() != "sheetid"]
-    params.append(("sheetId", sheet_id))
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), ""))
+        return {}
+    params = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
+              if key.lower() != "sheetid"]
+    if [key for key, _ in params].count("LetterSerial") != 1:
+        return {}
+    options = {
+        _canonical(option.get_text(" ", strip=True)): option.get("value")
+        for option in _html_soup(page).select("option[value]")
+    }
+    urls = {}
+    for kind in ("income", "balance"):
+        sheet_id = options.get(_SHEET_TITLES[(kind, is_consolidated)])
+        if sheet_id and sheet_id.isdigit():
+            query = urlencode(params + [("sheetId", sheet_id)])
+            urls[kind] = urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
+    return urls
 
 
-def statement_abstain_reason(content, *, title):
-    """Why `parse_income_statement` found nothing, coarse enough to count.
+def statement_abstain_reason(content, *, title, extracted=False):
+    """Why no statement facts reconciled, coarse enough to count.
 
     The parser abstains silently by design; this names the bucket so the
-    backlog says what it would take to read it (2026-10-13 sample of 200
-    filings: 26% subsidiaries, 26% pre-V9 templates, 38% pages with no V9
-    data block) instead of one opaque "no_typed_facts".
+    backlog says what it would take to read it instead of one opaque
+    "no_typed_facts".
     """
     if re.search(r"\(\s*شرکت", str(title or "")):
         return "subsidiary"
-    if len(content) > 2_000_000:
-        return "oversized"
+    if _datasource(content) is None:
+        return "no_datasource"
+    return "unreconciled" if extracted else "no_statement_sheet"
+
+
+def _unit(text):
+    canonical = _canonical(text)
+    if "میلیونریال" in canonical:
+        return "million_rial"
+    if "هزارریال" in canonical:
+        return "thousand_rial"
+    if "ریال" in canonical:
+        return "rial"
+    return ""
+
+
+def parse_statement(content, *, symbol, company_name, title, period_end, is_consolidated, is_audited):
+    """Facts from whichever income/balance sheet this page carries, any template.
+
+    Each fact is `reconciled` only when the sheet's own arithmetic holds
+    (income: net = continuing + discontinued, and gross = revenue + cost where
+    both exist; balance: assets = liabilities + equity = the stated total).
+    Otherwise the facts are kept as `extracted`, which no reader shows.
+    """
+    if is_consolidated not in (True, False) or re.search(r"\(\s*شرکت", str(title or "")):
+        return []
+    source = _datasource(content)
+    if not source or not isinstance(source.get("sheets"), list):
+        return []
     soup = _html_soup(content)
-    scripts = [script.string or script.get_text() for script in soup.find_all("script")
-               if "var datasource =" in (script.string or script.get_text())]
-    if len(scripts) != 1 or not soup.select_one("#ctl00_txbSymbol"):
-        return "no_v9_data"
-    match = re.search(r"\bvar\s+datasource\s*=\s*", scripts[0])
-    try:
-        source, _ = json.JSONDecoder().raw_decode(scripts[0][match.end():])
-        template = str(source.get("title_En") or "")
-    except (AttributeError, ValueError, TypeError):
-        return "no_v9_data"
-    if template not in _V9_TITLES[False] | _V9_TITLES[True]:
-        return f"template:{template[:40]}"
-    return "checks_failed"
-
-
-def parse_income_statement(
-    content, *, symbol, company_name, title, period_end, is_consolidated, is_audited,
-):
-    """Return reconciled current-period facts or abstain for an unknown scope/template."""
-    if len(content) > 2_000_000 or is_consolidated not in (True, False):
-        return []
-    if re.search(r"\(\s*شرکت", str(title or "")):
-        # The listed symbol can publish a subsidiary's own statements.
-        return []
-    soup = _html_soup(content)
-    company_node = soup.select_one("#ctl00_txbCompanyName")
-    symbol_node = soup.select_one("#ctl00_txbSymbol")
-    unit_node = soup.select_one("#ctl00_pPriceNote")
-    if not all((company_node, symbol_node, unit_node)):
-        return []
-    if (_canonical(company_node.get_text(" ", strip=True)) != _canonical(company_name)
-            or _canonical(symbol_node.get_text(" ", strip=True)) != _canonical(symbol)
-            or "میلیونریال" not in _canonical(unit_node.get_text(" ", strip=True))):
-        return []
-
-    scripts = [script.string or script.get_text() for script in soup.find_all("script")
-               if "var datasource =" in (script.string or script.get_text())]
-    if len(scripts) != 1:
-        return []
-    match = re.search(r"\bvar\s+datasource\s*=\s*", scripts[0])
-    if not match:
-        return []
-    try:
-        source, offset = json.JSONDecoder().raw_decode(scripts[0][match.end():])
-        if not scripts[0][match.end() + offset:].lstrip().startswith(";"):
+    for selector, expected in (("#ctl00_txbCompanyName", company_name), ("#ctl00_txbSymbol", symbol)):
+        node = soup.select_one(selector)
+        # The listed symbol can publish a subsidiary's statements: refuse a page
+        # that names somebody else.
+        if node is not None and expected and _canonical(node.get_text(" ", strip=True)) != _canonical(expected):
             return []
-        sheet_code, sheet_name, alias, table_id, table_version = _SHEETS[is_consolidated]
-        end = normalize_jalali(source["periodEndToDate"])
-        months = source["period"]
+    try:
+        end = normalize_jalali(source.get("periodEndToDate"))
+        months = int(source.get("period") or 0)
         start = _period_start(end, months)
-        fiscal_start = _period_start(normalize_jalali(source["yearEndToDate"]), 12)
-        if (source["title_En"] not in _V9_TITLES[is_consolidated] or source["type"] != 6
-                or source["isConsolidated"] is not is_consolidated
-                or source["isAudited"] is not is_audited
-                or end != period_end or not start or start != fiscal_start
-                or not isinstance(source["sheets"], list)):
+        if (end != period_end or source.get("isConsolidated") is not is_consolidated
+                or (is_audited is not None and source.get("isAudited") is not is_audited)):
             return []
-        sheets = [sheet for sheet in source["sheets"] if sheet.get("code") == sheet_code
-                  and sheet.get("title_En") == sheet_name]
-        if len(sheets) != 1:
-            return []
-        tables = [table for table in sheets[0]["tables"] if table.get("aliasName") == alias
-                  and table.get("metaTableId") == table_id]
-        if (len(tables) != 1 or tables[0].get("versionNo") != table_version
-                or not 1 <= len(tables[0]["cells"]) <= 1000):
-            return []
-        table = tables[0]
-        if table.get("description") and "میلیونریال" not in _canonical(table["description"]):
-            return []
-        cells = {}
-        for cell in table["cells"]:
-            address = cell.get("address")
-            if not isinstance(address, str) or address in cells:
-                return []
-            cells[address] = cell
-        facts = []
-        values = {}
-        for code, row in _ROWS[is_consolidated].items():
-            labels = [cell for cell in cells.values() if cell.get("columnCode") == 1
-                      and cell.get("rowCode") == row
-                      and _canonical(cell.get("value")) == _LABELS[code]]
-            if len(labels) != 1 or not re.fullmatch(r"A[1-9][0-9]*", labels[0]["address"]):
-                return []
-            label = labels[0]
-            current = cells["B" + label["address"][1:]]
-            value = parse_number(current["value"])
-            if (value is None or current.get("columnCode") != 2
-                    or current.get("rowSequence") != label.get("rowSequence")
-                    or normalize_jalali(current.get("periodEndToDate")) != end
-                    or current.get("address", "")[0:1] != "B"):
-                return []
-            values[code] = value
-            facts.append({
-                "fact_code": code, "raw_value": str(current["value"]),
-                "numeric_value": value, "unit": "million_rial", "currency": "IRR",
-                "period_start": start, "period_end": end,
-                "dimensions": {
-                    "statement_scope": "consolidated" if is_consolidated else "standalone",
-                    "period_months": months, "audited": is_audited,
-                    "issuer": company_node.get_text(" ", strip=True),
-                    "template": source["title_En"],
-                },
-                "source_coordinates": {
-                    "sheet_code": sheet_code, "table_id": table_id,
-                    "label_address": label["address"], "address": current["address"],
-                },
-                "verification_status": "reconciled",
-            })
-        if (values["income.operating_revenue"] <= 0
-                or values["income.cost_of_revenue"] > 0
-                or values["income.gross_profit"] != (
-                    values["income.operating_revenue"] + values["income.cost_of_revenue"])
-                or values["income.net_profit"] != (
-                    values["income.continuing_profit"] + values["income.discontinued_profit"])):
-            return []
-        return facts
-    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return []
+    note = soup.select_one("#ctl00_pPriceNote")
+    facts = []
+    for sheet in source["sheets"]:
+        sheet_title = _canonical(sheet.get("title_Fa"))
+        kind = next((k for (k, consolidated), name in _SHEET_TITLES.items()
+                     if consolidated is is_consolidated and name == sheet_title), None)
+        if kind is None:
+            continue
+        tables = [t for t in sheet.get("tables") or [] if isinstance(t.get("cells"), list)]
+        if not tables:
+            continue
+        table = max(tables, key=lambda t: len(t["cells"]))
+        unit = _unit(table.get("description") or "") or _unit(note.get_text(" ", strip=True) if note else "")
+        if not unit:
+            continue
+        facts += _sheet_facts(kind, sheet, table, end=end, start=start, months=months, unit=unit,
+                              is_consolidated=is_consolidated, is_audited=is_audited,
+                              template=str(source.get("title_En") or ""))
+    return facts
 
 
-def parse_balance_sheet(
-    content, *, symbol, company_name, title, period_end, is_consolidated, is_audited,
-):
-    """Return point-in-time facts only when the observed sheet balances exactly."""
-    if len(content) > 2_000_000 or is_consolidated not in (True, False):
+def _sheet_facts(kind, sheet, table, *, end, start, months, unit, is_consolidated, is_audited, template):
+    cells = [c for c in table["cells"] if isinstance(c, dict) and isinstance(c.get("address"), str)]
+    header = {}
+    for cell in cells:
+        if cell.get("cellGroupName") == "Header" and cell.get("columnCode") not in (None, 1):
+            header.setdefault(cell["columnCode"], []).append(cell)
+    current = [
+        column for column, heads in header.items()
+        if any(normalize_jalali(h.get("periodEndToDate")) == end for h in heads)
+        and not any("تجدید" in str(h.get("value") or "") for h in heads)
+    ]
+    if len(current) != 1:
         return []
-    if re.search(r"\(\s*شرکت", str(title or "")):
-        return []
-    soup = _html_soup(content)
-    company_node = soup.select_one("#ctl00_txbCompanyName")
-    symbol_node = soup.select_one("#ctl00_txbSymbol")
-    unit_node = soup.select_one("#ctl00_pPriceNote")
-    if not all((company_node, symbol_node, unit_node)):
-        return []
-    if (_canonical(company_node.get_text(" ", strip=True)) != _canonical(company_name)
-            or _canonical(symbol_node.get_text(" ", strip=True)) != _canonical(symbol)
-            or "میلیونریال" not in _canonical(unit_node.get_text(" ", strip=True))):
-        return []
-    scripts = [script.string or script.get_text() for script in soup.find_all("script")
-               if "var datasource =" in (script.string or script.get_text())]
-    if len(scripts) != 1:
-        return []
-    match = re.search(r"\bvar\s+datasource\s*=\s*", scripts[0])
-    if not match:
-        return []
-    try:
-        source, offset = json.JSONDecoder().raw_decode(scripts[0][match.end():])
-        if not scripts[0][match.end() + offset:].lstrip().startswith(";"):
-            return []
-        sheet_code, sheet_name, alias, table_id, version = _BALANCE_SHEETS[is_consolidated]
-        end = normalize_jalali(source["periodEndToDate"])
-        months = source["period"]
-        start = _period_start(end, months)
-        fiscal_start = _period_start(normalize_jalali(source["yearEndToDate"]), 12)
-        if (source["title_En"] not in _V9_TITLES[is_consolidated] or source["type"] != 6
-                or source["isConsolidated"] is not is_consolidated
-                or source["isAudited"] is not is_audited
-                or end != period_end or not start or start != fiscal_start
-                or not isinstance(source["sheets"], list)):
-            return []
-        sheets = [sheet for sheet in source["sheets"] if sheet.get("code") == sheet_code
-                  and sheet.get("title_En") == sheet_name]
-        if len(sheets) != 1:
-            return []
-        tables = [table for table in sheets[0]["tables"] if table.get("aliasName") == alias
-                  and table.get("metaTableId") == table_id]
-        if (len(tables) != 1 or tables[0].get("versionNo") != version
-                or not 1 <= len(tables[0]["cells"]) <= 1000):
-            return []
-        table = tables[0]
-        if table.get("description") and "میلیونریال" not in _canonical(table["description"]):
-            return []
-        cells = {}
-        for cell in table["cells"]:
-            address = cell.get("address")
-            if not isinstance(address, str) or address in cells:
-                return []
-            cells[address] = cell
-        facts = []
-        values = {}
-        for code, (row, row_code, label_text) in _BALANCE_ROWS[is_consolidated].items():
-            label = cells.get(f"A{row}")
-            current = cells.get(f"B{row}")
-            if (not label or label.get("columnCode") != 1
-                    or label.get("rowCode") != row_code
-                    or _canonical(label.get("value")) != label_text
-                    or not current or current.get("columnCode") != 2
-                    or current.get("rowCode") != row_code
-                    or current.get("rowSequence") != label.get("rowSequence")
-                    or normalize_jalali(current.get("periodEndToDate")) != end):
-                return []
-            value = parse_number(current["value"])
-            if value is None:
-                return []
-            values[code] = value
-            facts.append({
-                "fact_code": code, "raw_value": str(current["value"]),
-                "numeric_value": value, "unit": "million_rial", "currency": "IRR",
-                "period_start": "", "period_end": end,
-                "dimensions": {
-                    "statement_scope": "consolidated" if is_consolidated else "standalone",
-                    "reporting_months": months, "audited": is_audited,
-                    "issuer": company_node.get_text(" ", strip=True),
-                    "template": source["title_En"],
-                },
-                "source_coordinates": {
-                    "sheet_code": sheet_code, "table_id": table_id,
-                    "label_address": label["address"], "address": current["address"],
-                },
-                "verification_status": "reconciled",
-            })
-        if (values["balance.total_assets"] <= 0
-                or values["balance.current_assets"] + values["balance.noncurrent_assets"] != values["balance.total_assets"]
-                or values["balance.current_liabilities"] + values["balance.noncurrent_liabilities"] != values["balance.total_liabilities"]
-                or values["balance.total_liabilities"] + values["balance.total_equity"] != values["balance.total_assets"]
-                or values["balance.liabilities_and_equity"] != values["balance.total_assets"]):
-            return []
-        return facts
-    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
-        return []
+    column = current[0]
+    by_row = {}
+    for cell in cells:
+        row = re.sub(r"^[A-Z]+", "", cell["address"])
+        by_row.setdefault(row, {})[cell.get("columnCode")] = cell
+    labels = _INCOME_LABELS if kind == "income" else _BALANCE_LABELS
+    found = {}
+    for code, names in labels.items():
+        for name in names:
+            rows = [row for row, line in by_row.items()
+                    if line.get(1) and _canonical(line[1].get("value")) == name]
+            if len(rows) > 1:
+                break  # ambiguous label: do not guess which row is meant
+            if not rows:
+                continue
+            value_cell = by_row[rows[0]].get(column)
+            if value_cell is None or normalize_jalali(value_cell.get("periodEndToDate")) not in ("", end):
+                break
+            raw = str(value_cell.get("value") or "").strip()
+            number = parse_number(raw) if raw not in ("", "-", "--") else None
+            if number is None and code != "income.discontinued_profit":
+                continue  # a section heading carries no figure; try the next name
+            found[code] = (number if number is not None else Decimal(0), raw, by_row[rows[0]][1], value_cell)
+            break
+    if kind == "income":
+        ok = income_reconciles({code: item[0] for code, item in found.items()})
+        period_start = start
+    else:
+        ok = balance_reconciles({code: item[0] for code, item in found.items()})
+        period_start = ""
+    return [{
+        "fact_code": code, "raw_value": raw, "numeric_value": number,
+        "unit": unit, "currency": "IRR", "period_start": period_start, "period_end": end,
+        "dimensions": {
+            "statement_scope": "consolidated" if is_consolidated else "standalone",
+            "period_months" if kind == "income" else "reporting_months": months,
+            "audited": is_audited, "template": template,
+        },
+        "source_coordinates": {
+            "sheet_code": sheet.get("code"), "table_id": table.get("metaTableId"),
+            "label_address": label["address"], "address": cell["address"],
+        },
+        "verification_status": "reconciled" if ok else "extracted",
+    } for code, (number, raw, label, cell) in found.items()]
+
+
+def income_reconciles(values):
+    if "income.operating_revenue" not in values or "income.net_profit" not in values:
+        return False
+    if "income.continuing_profit" not in values:
+        return False
+    if values["income.net_profit"] != values["income.continuing_profit"] + values.get("income.discontinued_profit", 0):
+        return False
+    if "income.gross_profit" in values and "income.cost_of_revenue" in values:
+        return values["income.gross_profit"] == values["income.operating_revenue"] + values["income.cost_of_revenue"]
+    return True
+
+
+def balance_reconciles(values):
+    needed = ("balance.total_assets", "balance.total_liabilities", "balance.total_equity")
+    if any(code not in values for code in needed) or values["balance.total_assets"] <= 0:
+        return False
+    total = values["balance.total_assets"]
+    if values["balance.total_liabilities"] + values["balance.total_equity"] != total:
+        return False
+    if values.get("balance.liabilities_and_equity", total) != total:
+        return False
+    for parts, whole in (
+        (("balance.current_assets", "balance.noncurrent_assets"), "balance.total_assets"),
+        (("balance.current_liabilities", "balance.noncurrent_liabilities"), "balance.total_liabilities"),
+    ):
+        if all(p in values for p in parts) and sum(values[p] for p in parts) != values[whole]:
+            return False
+    return True

@@ -22,6 +22,7 @@ from rest_framework.views import APIView
 from . import jalali
 from .codal_classification import classify_announcement
 from .codal_discovery import discovery_status, promoting
+from .codal_statements import balance_reconciles, income_reconciles
 from .codal_storage import CodalBlockedStorage, load_artifact
 from .coverage_report import classify_archive_state
 from .models import (
@@ -64,18 +65,32 @@ def _archived_fact(fact, report):
     )
 
 
-def _statement_cell(fact, sheet_code, table_id):
+def _statement_cell(fact):
+    """The value sits on its label's row: column letters vary by template."""
     coordinates = fact.source_coordinates
     if not isinstance(coordinates, dict):
         return False
     address = coordinates.get("address")
     label = coordinates.get("label_address")
+    row = re.compile(r"[A-Z]+([1-9][0-9]*)")
     return bool(
-        coordinates.get("sheet_code") == sheet_code
-        and coordinates.get("table_id") == table_id
-        and isinstance(address, str) and re.fullmatch(r"B[1-9][0-9]*", address)
-        and isinstance(label, str) and label == "A" + address[1:]
+        isinstance(address, str) and isinstance(label, str)
+        and row.fullmatch(address) and row.fullmatch(label)
+        and row.fullmatch(address).group(1) == row.fullmatch(label).group(1)
+        and address != label
     )
+
+
+# Small issuers file in thousands of Rial or Rial; every reading is shown in
+# million Rial.
+_TO_MILLION_RIAL = {
+    "million_rial": Decimal(1), "thousand_rial": Decimal("0.001"), "rial": Decimal("0.000001"),
+}
+
+
+def _million_rial(fact):
+    # Fixed-point text: `str(Decimal)` can print "5E-7", which the page reads as no number.
+    return format(fact.numeric_value * _TO_MILLION_RIAL[fact.unit], "f")
 
 
 def _monthly_sales(symbol, start, end):
@@ -162,18 +177,10 @@ def _monthly_sales(symbol, start, end):
     }
 
 
-_INCOME_CODES = {
-    "income.operating_revenue", "income.cost_of_revenue", "income.gross_profit",
-    "income.continuing_profit", "income.discontinued_profit", "income.net_profit",
-}
-
-_BALANCE_CODES = {
-    "balance.noncurrent_assets", "balance.cash", "balance.current_assets",
-    "balance.total_assets", "balance.total_equity", "balance.long_term_borrowings",
-    "balance.noncurrent_liabilities", "balance.short_term_borrowings",
-    "balance.current_liabilities", "balance.total_liabilities",
-    "balance.liabilities_and_equity",
-}
+# Every template carries these; the rest (cost of revenue, gross profit,
+# borrowings, ...) are shown when the sheet has them. A bank has no gross profit.
+_INCOME_REQUIRED = {"income.operating_revenue", "income.continuing_profit", "income.net_profit"}
+_BALANCE_REQUIRED = {"balance.total_assets", "balance.total_liabilities", "balance.total_equity"}
 
 
 def _latest_statement_reports(symbol, start, end):
@@ -209,8 +216,8 @@ def _income_statements(symbol, start, end):
         extraction__report_id__in=[report.pk for report in latest.values() if report],
         extraction__parser_version=settings.CODAL_STATEMENT_PARSER_VERSION,
         verification_status=CodalVerification.RECONCILED,
-        fact_code__in=_INCOME_CODES,
-        unit="million_rial", currency="IRR",
+        fact_code__startswith="income.",
+        unit__in=list(_TO_MILLION_RIAL), currency="IRR",
     ).select_related("extraction__artifact"):
         candidates[fact.extraction.report_id][fact.extraction_id].append(fact)
 
@@ -223,24 +230,21 @@ def _income_statements(symbol, start, end):
             by_code = {fact.fact_code: fact for fact in facts}
             first = facts[0]
             scope = "consolidated" if consolidated else "standalone"
-            sheet_code, table_id = (13, 3227) if consolidated else (1, 3220)
-            if (len(facts) != len(_INCOME_CODES) or set(by_code) != _INCOME_CODES
+            if (len(facts) != len(by_code) or not _INCOME_REQUIRED <= set(by_code)
                     or not _archived_fact(first, report)
                     or any(fact.numeric_value is None or fact.period_end != period_end
-                           or fact.period_start != first.period_start
+                           or fact.period_start != first.period_start or fact.unit != first.unit
                            or fact.dimensions.get("statement_scope") != scope
                            or fact.dimensions.get("audited") is not report.is_audited
-                           or not _statement_cell(fact, sheet_code, table_id)
+                           or not _statement_cell(fact)
                            for fact in facts)):
                 continue
-            revenue = by_code["income.operating_revenue"].numeric_value
-            if (revenue <= 0
-                    or by_code["income.gross_profit"].numeric_value != revenue + by_code["income.cost_of_revenue"].numeric_value
-                    or by_code["income.net_profit"].numeric_value != by_code["income.continuing_profit"].numeric_value + by_code["income.discontinued_profit"].numeric_value):
+            values = {code: fact.numeric_value for code, fact in by_code.items()}
+            if values["income.operating_revenue"] <= 0 or not income_reconciles(values):
                 continue
             readings.append((first.extraction_id, by_code))
         if not readings or len({
-            (row["income.operating_revenue"].numeric_value, row["income.net_profit"].numeric_value)
+            (_million_rial(row["income.operating_revenue"]), _million_rial(row["income.net_profit"]))
             for _, row in readings
         }) != 1:
             continue
@@ -252,8 +256,8 @@ def _income_statements(symbol, start, end):
             "period_end_jalali": period_end,
             "scope": "consolidated" if consolidated else "standalone",
             "audited": report.is_audited,
-            "revenue": str(revenue.numeric_value),
-            "net_profit": str(profit.numeric_value),
+            "revenue": _million_rial(revenue),
+            "net_profit": _million_rial(profit),
             "net_margin_pct": str((profit.numeric_value / revenue.numeric_value * Decimal("100")).quantize(Decimal("0.01"))),
             "net_margin_formula": "net_profit / operating_revenue * 100",
             "calculation_version": "income_margin_v1",
@@ -296,8 +300,8 @@ def _balance_sheets(symbol, start, end):
         extraction__report_id__in=[report.pk for report in latest.values() if report],
         extraction__parser_version=settings.CODAL_STATEMENT_PARSER_VERSION,
         verification_status=CodalVerification.RECONCILED,
-        fact_code__in=_BALANCE_CODES,
-        unit="million_rial", currency="IRR",
+        fact_code__startswith="balance.",
+        unit__in=list(_TO_MILLION_RIAL), currency="IRR",
     ).select_related("extraction__artifact"):
         candidates[fact.extraction.report_id][fact.extraction_id].append(fact)
 
@@ -310,27 +314,20 @@ def _balance_sheets(symbol, start, end):
             by_code = {fact.fact_code: fact for fact in facts}
             first = facts[0]
             scope = "consolidated" if consolidated else "standalone"
-            sheet_code, table_id = (14, 3230) if consolidated else (0, 3223)
-            if (len(facts) != len(_BALANCE_CODES) or set(by_code) != _BALANCE_CODES
+            if (len(facts) != len(by_code) or not _BALANCE_REQUIRED <= set(by_code)
                     or not _archived_fact(first, report)
-                    or not first.extraction.artifact.source_url.endswith(f"sheetId={sheet_code}")
                     or any(fact.numeric_value is None or fact.period_end != period_end
-                           or fact.period_start != ""
+                           or fact.period_start != "" or fact.unit != first.unit
                            or fact.dimensions.get("statement_scope") != scope
                            or fact.dimensions.get("audited") is not report.is_audited
-                           or not _statement_cell(fact, sheet_code, table_id)
+                           or not _statement_cell(fact)
                            for fact in facts)):
                 continue
-            values = {code: by_code[code].numeric_value for code in _BALANCE_CODES}
-            if (values["balance.total_assets"] <= 0
-                    or values["balance.current_assets"] + values["balance.noncurrent_assets"] != values["balance.total_assets"]
-                    or values["balance.current_liabilities"] + values["balance.noncurrent_liabilities"] != values["balance.total_liabilities"]
-                    or values["balance.total_liabilities"] + values["balance.total_equity"] != values["balance.total_assets"]
-                    or values["balance.liabilities_and_equity"] != values["balance.total_assets"]):
+            if not balance_reconciles({code: fact.numeric_value for code, fact in by_code.items()}):
                 continue
             readings.append((first.extraction_id, by_code))
         if not readings or len({
-            tuple(row[code].numeric_value for code in sorted(_BALANCE_CODES))
+            tuple(sorted((code, _million_rial(fact)) for code, fact in row.items()))
             for _, row in readings
         }) != 1:
             continue
@@ -341,8 +338,8 @@ def _balance_sheets(symbol, start, end):
             "period_end_jalali": period_end,
             "scope": "consolidated" if consolidated else "standalone",
             "audited": report.is_audited,
-            "values": {code.removeprefix("balance."): str(row[code].numeric_value)
-                       for code in sorted(_BALANCE_CODES)},
+            "values": {code.removeprefix("balance."): _million_rial(row[code])
+                       for code in sorted(row)},
             "unit": "million_rial", "currency": "IRR",
             "source_url": _safe_codal_link(first.extraction.artifact.source_url),
             "published_jalali": report.announcement.date_publish,
@@ -352,7 +349,7 @@ def _balance_sheets(symbol, start, end):
             "artifact_id": first.extraction.artifact_id,
             "artifact_sha256": first.extraction.checksum_sha256,
             "source_coordinates": {code.removeprefix("balance."): row[code].source_coordinates
-                                   for code in sorted(_BALANCE_CODES)},
+                                   for code in sorted(row)},
             "verification": CodalVerification.RECONCILED,
         })
     return {
