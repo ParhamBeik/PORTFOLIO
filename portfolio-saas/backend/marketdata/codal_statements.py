@@ -163,8 +163,20 @@ def parse_statement(content, *, symbol, company_name, title, period_end, is_cons
     Each fact is `reconciled` only when the sheet's own arithmetic holds
     (income: net = continuing + discontinued, and gross = revenue + cost where
     both exist; balance: assets = liabilities + equity = the stated total).
-    Otherwise the facts are kept as `extracted`, which no reader shows.
+    Otherwise the facts are kept as `extracted`, which no reader shows. A
+    malformed payload yields nothing: it is external data, and raising left the
+    report in FETCHING to be retried forever.
     """
+    try:
+        return _parse_statement(
+            content, symbol=symbol, company_name=company_name, title=title, period_end=period_end,
+            is_consolidated=is_consolidated, is_audited=is_audited,
+        )
+    except (AttributeError, KeyError, IndexError, TypeError, ValueError):
+        return []
+
+
+def _parse_statement(content, *, symbol, company_name, title, period_end, is_consolidated, is_audited):
     if is_consolidated not in (True, False) or re.search(r"\(\s*شرکت", str(title or "")):
         return []
     source = _datasource(content)
@@ -189,12 +201,15 @@ def parse_statement(content, *, symbol, company_name, title, period_end, is_cons
     note = soup.select_one("#ctl00_pPriceNote")
     facts = []
     for sheet in source["sheets"]:
+        if not isinstance(sheet, dict):
+            continue
         sheet_title = _canonical(sheet.get("title_Fa"))
         kind = next((k for (k, consolidated), name in _SHEET_TITLES.items()
                      if consolidated is is_consolidated and name == sheet_title), None)
         if kind is None:
             continue
-        tables = [t for t in sheet.get("tables") or [] if isinstance(t.get("cells"), list)]
+        tables = [t for t in sheet.get("tables") or []
+                  if isinstance(t, dict) and isinstance(t.get("cells"), list)]
         if not tables:
             continue
         table = max(tables, key=lambda t: len(t["cells"]))

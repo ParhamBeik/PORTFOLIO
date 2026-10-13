@@ -64,6 +64,8 @@ def build_observations(monthly_sales, income=None, balance=None):
             ("short_term_borrowings", "short-term borrowings"),
             ("long_term_borrowings", "long-term borrowings"),
         ):
+            if key not in latest["values"]:
+                continue  # not every template reports it (a bank has no borrowings line)
             result[f"balance_{scope}_{key}"] = {
                 "description": f"Latest verified {scope} balance sheet {label} for this company, with date and audit status",
                 "statement": (

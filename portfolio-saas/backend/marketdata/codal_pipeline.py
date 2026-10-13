@@ -218,7 +218,10 @@ def _persist_parsed(report, artifact, parsed):
     # Measured against earlier runs of this pipeline only. The legacy v2 facts
     # (`report.facts`, 1.56M rows nothing reads) are mostly a disclosure date per
     # filing; counting them blocked every re-extraction under a newer parser.
-    if not parsed.facts and report.extractions.filter(fact_count__gt=0).exists():
+    # Per artifact: a statement filing's facts live on its tab artifacts, so a
+    # report-wide check let one tab's facts block persisting another (or the
+    # opinion page's own empty run), leaving the report stamped and stuck.
+    if not parsed.facts and report.extractions.filter(artifact=artifact, fact_count__gt=0).exists():
         raise CodalExtractionRegressed(
             "parse produced 0 facts despite an earlier extraction"
         )
@@ -328,7 +331,9 @@ def extract_report(announcement_id):
     parsed = None
     chosen = None
     parse_errors = []
-    for kind, artifact, content in downloaded:
+    # The page that carried certified statement figures is the filing's
+    # evidence; a generic Excel export must not be chosen ahead of it.
+    for kind, artifact, content in sorted(downloaded, key=lambda item: item[1] not in statement):
         try:
             candidate = parse_artifact(kind, content)
         except Exception as exc:

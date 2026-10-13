@@ -357,3 +357,62 @@ def test_an_opinion_without_tabs_names_why(monkeypatch):
     report, _ = codal_pipeline.extract_report(_filing("no-tabs").pk)
     assert report.status == CodalReport.Status.NEEDS_REVIEW
     assert report.error_code == "statement:no_datasource"
+
+
+def test_a_malformed_datasource_yields_nothing_instead_of_raising():
+    page = b'<html><script>var datasource = {"periodEndToDate": "1405/03/31", "period": 3, ' \
+           b'"isConsolidated": false, "isAudited": false, "sheets": [null, {"title_Fa": "x", "tables": [null]}]};</script></html>'
+    assert _parse(page) == []
+
+
+def _stored(pages):
+    return lambda artifact: pages[(re.search(r"sheetId=(\d+)", artifact.source_url) or [None, ""])[1]]
+
+
+@pytest.mark.django_db
+def test_a_recovered_tab_is_added_on_retry(monkeypatch):
+    pages = {"": OPINION, "1": INTERIM, "0": INTERIM_BALANCE}
+    monkeypatch.setattr(codal_pipeline, "load_artifact", _stored(pages))
+    _serve(monkeypatch, {**pages, "0": CodalBlockedNetwork("origin_down")})
+    announcement = _filing("retry-tab")
+    report, _ = codal_pipeline.extract_report(announcement.pk)
+    assert report.status == CodalReport.Status.BLOCKED_NETWORK
+
+    _serve(monkeypatch, pages)
+    CodalArtifact.objects.filter(report=report, fetch_status=CodalArtifact.FetchStatus.BLOCKED_NETWORK).update(
+        fetch_status=CodalArtifact.FetchStatus.PENDING,
+    )
+    report, _ = codal_pipeline.extract_report(announcement.pk)
+    assert report.status == CodalReport.Status.PARSED
+    assert CodalCandidateFact.objects.filter(
+        extraction__report=report, fact_code__startswith="balance.", verification_status="reconciled",
+    ).count() == 11
+
+
+@pytest.mark.django_db
+def test_the_statement_page_is_chosen_over_a_generic_excel(monkeypatch):
+    announcement = _filing("excel-first")
+    announcement.link_excel, announcement.has_excel = "https://excel.codal.ir/r.xlsx", True
+    announcement.save()
+    fetched = _serve(monkeypatch, {"": INTERIM, "0": INTERIM_BALANCE})
+    real_download = codal_pipeline.download_artifact
+    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (
+        (url, "application/vnd.ms-excel", b"PK workbook") if "excel" in url else real_download(url, kind)
+    ))
+    monkeypatch.setattr(codal_pipeline, "parse_artifact", lambda kind, content: ParsedDocument(text="generic"))
+    report, result = codal_pipeline.extract_report(announcement.pk)
+    assert result["parsed_from"] == CodalArtifact.Kind.HTML
+    assert report.status == CodalReport.Status.PARSED
+    assert fetched
+
+
+def test_observations_skip_balance_lines_a_template_does_not_report():
+    from research.observations import build_observations
+
+    point = {
+        "scope": "standalone", "period_end_jalali": "1404-12-29", "audited": True,
+        "values": {"total_assets": "10", "total_liabilities": "4", "total_equity": "6"},
+    }
+    observed = build_observations({"points": []}, balance={"points": [point]})
+    assert "balance_standalone_total_assets" in observed
+    assert "balance_standalone_cash" not in observed
