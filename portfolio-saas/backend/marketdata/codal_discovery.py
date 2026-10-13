@@ -223,6 +223,8 @@ def discovery_status():
     # Days are created newest-first as the crawl walks back; all of them
     # reconciled says nothing until the walk has reached its configured floor.
     days["reached_oldest"] = bool(days["oldest"]) and days["oldest"] <= settings.CODAL_DISCOVERY_OLDEST_DAY
+    # ...and reaching back says nothing about today if the crawl has stopped.
+    days["reached_today"] = bool(days["newest"]) and days["newest"] >= tehran_today()
     return {
         "enabled": bool(settings.CODAL_DISCOVERY_ENABLED),
         "promoting": promoting(),
@@ -305,9 +307,11 @@ def promote(letters):
                 continue
             # Our own row: codal.ir is its record, so a re-crawl that changed the
             # title or made a document available is applied, and a newly listed
-            # document is fetched instead of staying an empty link forever.
+            # document is fetched instead of staying an empty link forever. A
+            # replaced link counts too: artifacts are kept per URL, so the new
+            # document is fetched beside the old one rather than over it.
             fields = {**identity, **_letter_fields(row)}
-            gained = any(fields[link] and not getattr(existing, link) for link in _LINK_FIELDS)
+            gained = any(fields[link] and fields[link] != getattr(existing, link) for link in _LINK_FIELDS)
             CodalAnnouncement.objects.filter(pk=existing.pk).update(**fields)
             if gained:
                 requeue.append(existing.pk)
