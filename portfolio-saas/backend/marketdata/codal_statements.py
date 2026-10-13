@@ -152,7 +152,11 @@ def statement_abstain_reason(content, *, title, extracted=False):
 
 
 def _unit(text):
+    """The Rial scale `text` states; "" when it names none, None when it names
+    one this reader does not convert (Toman, a foreign currency)."""
     canonical = _canonical(text)
+    if any(word in canonical for word in ("تومان", "دلار", "یورو")):
+        return None
     if "میلیونریال" in canonical:
         return "million_rial"
     if "هزارریال" in canonical:
@@ -201,6 +205,12 @@ def _parse_statement(content, *, symbol, company_name, title, period_end, is_con
         if (end != period_end or source.get("isConsolidated") is not is_consolidated
                 or (is_audited is not None and source.get("isAudited") is not is_audited)):
             return []
+        if is_audited is None:
+            # The title did not say; the filing's own data does. Stamping None
+            # let an audited statement be shown as unaudited.
+            is_audited = source.get("isAudited")
+            if not isinstance(is_audited, bool):
+                return []
     except (TypeError, ValueError):
         return []
     note = soup.select_one("#ctl00_pPriceNote")
@@ -218,7 +228,11 @@ def _parse_statement(content, *, symbol, company_name, title, period_end, is_con
         if not tables:
             continue
         table = max(tables, key=lambda t: len(t["cells"]))
-        unit = _unit(table.get("description") or "") or _unit(note.get_text(" ", strip=True) if note else "")
+        # The table's own unit wins; the page note only fills in when the table
+        # states none. A table in a unit we cannot convert is not read at all.
+        unit = _unit(table.get("description") or "")
+        if unit == "":
+            unit = _unit(note.get_text(" ", strip=True) if note else "")
         if not unit:
             continue
         facts += _sheet_facts(kind, sheet, table, end=end, start=start, months=months, unit=unit,

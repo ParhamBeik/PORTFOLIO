@@ -368,6 +368,11 @@ def extract_report(announcement_id):
     metadata = classify_announcement(announcement, parsed.text)
     for field, value in metadata.items():
         setattr(report, field, value)
+    if report.is_audited is None:
+        # The title did not say; the statement data does (`isAudited`).
+        audited = {fact["dimensions"].get("audited") for facts in statement.values() for fact in facts}
+        if len(audited) == 1 and isinstance(next(iter(audited)), bool):
+            report.is_audited = audited.pop()
     extract_typed_facts(parsed, report.category, report.period_end)
     parsed.facts.extend(statement.pop(chosen, []))
     reconciled = certified or category_reconciles(parsed, report.category)

@@ -203,7 +203,10 @@ def _latest_statement_reports(symbol, start, end):
         report = getattr(announcement, "report", None)
         latest[key] = report if (report and report.period_end == period
                                   and report.is_consolidated is classified["is_consolidated"]
-                                  and report.is_audited is classified["is_audited"]) else None
+                                  # A title that does not say defers to the
+                                  # statement data the extractor read.
+                                  and (classified["is_audited"] is None
+                                       or report.is_audited is classified["is_audited"])) else None
     return latest
 
 

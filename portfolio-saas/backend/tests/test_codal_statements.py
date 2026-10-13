@@ -430,3 +430,37 @@ def test_legacy_balance_tab_and_equity_names_are_read():
 def test_income_without_a_valid_period_is_not_certified():
     facts = _parse(INTERIM.replace(b'"period":3', b'"period":1'))
     assert facts and {f["verification_status"] for f in facts} == {"extracted"}
+
+
+
+def test_a_table_in_an_unconvertible_unit_is_not_read():
+    # The page note still says million Rial; the table's own unit must win.
+    described = "کليه مبالغ به ميليون ريال است".encode()
+    assert INTERIM.count(described) == 1
+    assert _parse(INTERIM.replace(described, "کليه مبالغ به هزار تومان است".encode())) == []
+
+
+def test_audit_status_comes_from_the_data_when_the_title_is_silent():
+    facts = parse_statement(
+        INTERIM, symbol="فولاد", company_name="فولاد مبارکه اصفهان", title="صورت های مالی",
+        period_end="1405-03-31", is_consolidated=False, is_audited=None,
+    )
+    assert facts and {f["dimensions"]["audited"] for f in facts} == {False}
+
+
+@pytest.mark.django_db
+def test_a_title_silent_on_audit_takes_the_status_from_the_data(monkeypatch, make_user):
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.TSETMC, category=MarketInstrument.Category.STOCK,
+        symbol="فولاد", name="Foolad", eligible=True,
+    )
+    _serve(monkeypatch, {"": INTERIM, "0": INTERIM_BALANCE})
+    announcement = _filing("silent-audit")
+    announcement.title = "صورت های مالی دوره منتهی به ۱۴۰۵/۳/۳۱"
+    announcement.save()
+    report, _ = codal_pipeline.extract_report(announcement.pk)
+    assert report.is_audited is False
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+    income = client.get("/api/explore/stocks/فولاد/").data["financial_metrics"]
+    assert income["status"] == "verified" and income["points"][0]["audited"] is False
