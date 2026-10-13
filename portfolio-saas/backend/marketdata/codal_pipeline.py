@@ -160,7 +160,9 @@ def _read_statement(report, announcement, downloaded):
                  if fact["fact_code"].split(".")[0] not in kinds]
         if facts:
             found[artifact] = facts
-            kinds |= {fact["fact_code"].split(".")[0] for fact in facts}
+            # Only a certified sheet makes its advertised tab unnecessary.
+            kinds |= {fact["fact_code"].split(".")[0] for fact in facts
+                      if fact["verification_status"] == CodalVerification.RECONCILED}
     page = next((content for artifact, content in pages if artifact.source_url == main_url), None)
     if page is None or report.is_consolidated not in (True, False):
         return found, None
@@ -290,6 +292,10 @@ def extract_report(announcement_id):
     downloaded = []
     for kind, source_url in _artifact_sources(announcement):
         if not source_url:
+            continue
+        if kind == CodalArtifact.Kind.PDF and downloaded:
+            # A PDF barely compresses; it is the fallback for a filing whose
+            # HTML/Excel could not be had, not a third copy of one that could.
             continue
         artifact, content = _fetch_artifact(report, kind, source_url)
         if content is not None:

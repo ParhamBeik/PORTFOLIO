@@ -686,6 +686,15 @@ CODAL_SEARCH_MAX_PARK_SECONDS = int(os.getenv("CODAL_SEARCH_MAX_PARK_SECONDS", "
 CODAL_DISCOVERY_OLDEST_DAY = os.getenv("CODAL_DISCOVERY_OLDEST_DAY", "1386-01-01")
 # Today and this many days before it are the live lane: re-crawled, not trusted.
 CODAL_DISCOVERY_LIVE_DAYS = int(os.getenv("CODAL_DISCOVERY_LIVE_DAYS", "3"))
+# Documents of codal.ir filings older than the live window are a disk decision
+# (no backups, 100 GB shared). "annual_statements": year-end statements only --
+# what the sales/profit history is built from; "all"; "none".
+CODAL_HISTORY_DOCUMENTS = os.getenv("CODAL_HISTORY_DOCUMENTS", "annual_statements")
+if (CODAL_DISCOVERY_ENABLED and CODAL_DISCOVERY_SOURCE == "codal"
+        and "MARKETDATA_TICK_QUOTA_SHARE" not in os.environ):
+    # Phase 3 ships with phase 2: the ~960 AIO requests/day BrsApi's Codal list
+    # spent go to the tick backlog (docs/CODAL-DIRECT-MIGRATION.md §8).
+    MARKETDATA_TICK_QUOTA_SHARE = 0.50
 CODAL_MAX_ARTIFACT_BYTES = int(os.getenv("CODAL_MAX_ARTIFACT_BYTES", str(50 * 1024 * 1024)))
 CODAL_S3_ENDPOINT_URL = os.getenv("CODAL_S3_ENDPOINT_URL", "http://minio:9000")
 CODAL_S3_BUCKET = os.getenv("CODAL_S3_BUCKET", "codal-artifacts")

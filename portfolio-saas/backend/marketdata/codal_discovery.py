@@ -174,6 +174,23 @@ def promoting():
     return settings.CODAL_DISCOVERY_ENABLED and settings.CODAL_DISCOVERY_SOURCE == "codal"
 
 
+def withheld_documents():
+    """Filings codal.ir wrote whose documents are not fetched (yet).
+
+    Older than the live window and outside `CODAL_HISTORY_DOCUMENTS`. Without
+    this, promoting the crawled history queued every document it ever listed
+    -- the bulk download the storage policy rules out.
+    """
+    scope = settings.CODAL_HISTORY_DOCUMENTS
+    if scope == "all":
+        return Q(pk__in=[])
+    held = Q(source=CodalAnnouncement.Source.CODAL,
+             date_publish__lt=shift(tehran_today(), settings.CODAL_DISCOVERY_LIVE_DAYS))
+    if scope == "annual_statements":
+        held &= ~(Q(code="ن-10") & Q(title__contains="سال مالی"))
+    return held
+
+
 def discovery_status():
     """What the codal.ir crawl has covered, market-wide (one row per Jalali day).
 

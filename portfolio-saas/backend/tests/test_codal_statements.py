@@ -487,3 +487,24 @@ def test_an_unreadable_discontinued_line_is_not_zero():
     assert {f["verification_status"] for f in _parse(broken)} == {"extracted"}
     blank = INTERIM.replace(cell, cell.replace(b'"value":"0"', b'"value":"-"'))
     assert {f["verification_status"] for f in _parse(blank)} == {"reconciled"}
+
+
+def test_a_billion_rial_table_is_not_read_as_rial():
+    described = "کليه مبالغ به ميليون ريال است".encode()
+    assert _parse(INTERIM.replace(described, "کليه مبالغ به ميليارد ريال است".encode())) == []
+
+
+def test_two_values_at_one_cell_withhold_the_sheet():
+    cell = re.search(rb'\{[^{}]*"address":"B4"[^{}]*\}', INTERIM).group(0)
+    assert _parse(INTERIM) and _parse(INTERIM.replace(cell, cell + b"," + cell, 1)) == []
+
+
+@pytest.mark.django_db
+def test_an_unverified_page_does_not_stand_in_for_the_advertised_tab(monkeypatch):
+    broken = INTERIM.replace(b"834166799", b"834166798")  # sums fail: facts only extracted
+    fetched = _serve(monkeypatch, {"": broken, "1": INTERIM, "0": INTERIM_BALANCE})
+    report, _ = codal_pipeline.extract_report(_filing("tab-over-unverified").pk)
+    assert any(url.endswith("sheetId=1") for url in fetched)
+    assert CodalCandidateFact.objects.filter(
+        extraction__report=report, fact_code__startswith="income.", verification_status="reconciled",
+    ).count() == 7

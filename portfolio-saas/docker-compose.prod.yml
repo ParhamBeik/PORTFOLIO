@@ -45,6 +45,8 @@ x-backend-env: &backend-env
   # Who writes the filing list while discovery runs: `codal` (codal.ir, BrsApi's
   # Codal list off) or `brsapi` (shadow mode / rollback).
   CODAL_DISCOVERY_SOURCE: ${CODAL_DISCOVERY_SOURCE:-codal}
+  # Older codal.ir filings: which documents to fetch (annual_statements|all|none).
+  CODAL_HISTORY_DOCUMENTS: ${CODAL_HISTORY_DOCUMENTS:-annual_statements}
   GAPGPT_CONFIG_FILE: /run/secrets/gapgpt.env
   RESEARCH_MAX_RUN_USD: ${RESEARCH_MAX_RUN_USD:-0.10}
   RESEARCH_DAILY_BUDGET_USD: ${RESEARCH_DAILY_BUDGET_USD:-1.00}

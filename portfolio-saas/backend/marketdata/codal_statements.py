@@ -155,9 +155,9 @@ def statement_abstain_reason(content, *, title, extracted=False):
 
 def _unit(text):
     """The Rial scale `text` states; "" when it names none, None when it names
-    one this reader does not convert (Toman, a foreign currency)."""
+    one this reader does not convert (Toman, a foreign currency, billions)."""
     canonical = _canonical(text)
-    if any(word in canonical for word in ("تومان", "دلار", "یورو")):
+    if any(word in canonical for word in ("تومان", "دلار", "یورو", "میلیارد")):
         return None
     if "میلیونریال" in canonical:
         return "million_rial"
@@ -265,7 +265,12 @@ def _sheet_facts(kind, sheet, table, *, end, start, months, unit, is_consolidate
     by_row = {}
     for cell in cells:
         row = re.sub(r"^[A-Z]+", "", cell["address"])
-        by_row.setdefault(row, {})[cell.get("columnCode")] = cell
+        line = by_row.setdefault(row, {})
+        if cell.get("columnCode") in line:
+            # Two values at one coordinate: picking either by payload order
+            # could make the sums pass on a value the filing contradicts.
+            return []
+        line[cell.get("columnCode")] = cell
     labels = _INCOME_LABELS if kind == "income" else _BALANCE_LABELS
     found, unreadable = {}, set()
     for code, names in labels.items():
