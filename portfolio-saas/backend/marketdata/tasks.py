@@ -389,26 +389,30 @@ def queue_codal_extractions():
 
 
 def _codal_family_changed_ids():
-    """ن-10 filings stamped generic that the classifier now calls statements.
+    """Coded filings whose parser family the classifier now decides differently.
 
-    The letter code began outranking the title in the same change, so filings
-    extracted earlier as e.g. portfolio data carry the CURRENT generic version
-    yet need the statement parser. Asking the extractor's own classifier keeps
-    this convergent: a filing it still calls generic (a let58 investment
-    company) is stamped generic again and never re-selected.
+    The letter code began outranking the title in the same change, in both
+    directions: ن-10 filings extracted earlier as generic now need the
+    statement parser, and ن-26/ن-20/ن-30 filings whose titles mention the
+    statements were run through it and now classify as generic. Both carry a
+    CURRENT version, so only the extractor's own classifier can tell; once
+    re-run the stamp matches it and the filing is never re-selected.
     """
-    from .codal_classification import classify_announcement
+    from .codal_classification import _CODE_CATEGORY, classify_announcement
 
-    if settings.CODAL_STATEMENT_PARSER_VERSION == settings.CODAL_PARSER_VERSION:
+    statement_v, generic_v = settings.CODAL_STATEMENT_PARSER_VERSION, settings.CODAL_PARSER_VERSION
+    if statement_v == generic_v:
         return []
-    candidates = (
-        CodalAnnouncement.objects.filter(code="ن-10", report__parser_version=settings.CODAL_PARSER_VERSION)
-        .exclude(report__category=2)
+    candidates = CodalAnnouncement.objects.filter(code__in=list(_CODE_CATEGORY)).filter(
+        Q(report__parser_version=generic_v) & ~Q(report__category=2) & Q(code="ن-10")
+        | Q(report__parser_version=statement_v) & ~Q(code="ن-10")
     )
-    return [
-        row.pk for row in candidates.iterator(chunk_size=500)
-        if classify_announcement(row).get("category") == 2
-    ]
+    ids = []
+    for row in candidates.select_related("report").iterator(chunk_size=500):
+        wanted = statement_v if classify_announcement(row).get("category") == 2 else generic_v
+        if row.report.parser_version != wanted:
+            ids.append(row.pk)
+    return ids
 
 
 def _stale_parser_codal_ids(limit, exclude=(), archived_only=False):

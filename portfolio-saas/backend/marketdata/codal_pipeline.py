@@ -278,6 +278,13 @@ def extract_report(announcement_id):
             if not income:
                 if kind == CodalArtifact.Kind.HTML:
                     abstain = statement_abstain_reason(content, title=announcement.title)
+                elif kind == CodalArtifact.Kind.EXCEL and not abstain:
+                    # Codal's "Excel" is usually the same HTML page; a real
+                    # workbook has no datasource block to name a template from.
+                    abstain = (
+                        statement_abstain_reason(content, title=announcement.title)
+                        if content.lstrip()[:1] == b"<" else "excel_workbook"
+                    )
                 continue
             parsed, chosen, chosen_income = candidate, artifact, income
             break

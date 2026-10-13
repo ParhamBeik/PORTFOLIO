@@ -1260,3 +1260,35 @@ def test_a_statement_once_filed_as_generic_is_requeued_once(monkeypatch, setting
     assert tasks.queue_codal_extractions() == 1 and queued == [row.pk]
     CodalReport.objects.filter(pk=report.pk).update(parser_version="5", category=2)
     assert tasks.queue_codal_extractions() == 0
+
+
+def test_a_clarification_once_run_as_a_statement_is_requeued_once(monkeypatch, settings):
+    """ن-26 now outranks its "صورت های مالی" title: statement-v5 runs need the generic parser."""
+    settings.CODAL_ENABLED = True
+    settings.CODAL_PARSER_VERSION = "4"
+    settings.CODAL_STATEMENT_PARSER_VERSION = "5"
+    from marketdata import tasks
+
+    row = _announcement(symbol="A", code="ن-26", title="توضیحات در خصوص اطلاعات و صورت های مالی منتشر شده")
+    report = CodalReport.objects.create(announcement=row, status=CodalReport.Status.PARSED,
+                                        parser_version="5", category=2)
+    queued = []
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
+    monkeypatch.setattr(tasks.extract_codal_report, "delay", lambda pk: queued.append(pk))
+
+    assert tasks.queue_codal_extractions() == 1 and queued == [row.pk]
+    CodalReport.objects.filter(pk=report.pk).update(parser_version="4", category=CodalAnnouncement.Category.GENERAL)
+    assert tasks.queue_codal_extractions() == 0
+
+
+def test_an_html_excel_export_says_which_template_it_is(monkeypatch):
+    announcement = _announcement(code="ن-10", title="صورتهای مالی", link_excel="https://excel.codal.ir/r.xls",
+                                 link_pdf="", link_attachment="", link="")
+    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (url, "application/vnd.ms-excel", _V7_PAGE))
+    monkeypatch.setattr(codal_pipeline, "store_artifact", lambda content, content_type, kind: ("k", "c"))
+    monkeypatch.setattr(codal_pipeline, "parse_artifact", lambda kind, content: ParsedDocument())
+
+    report, _ = codal_pipeline.extract_report(announcement.pk)
+
+    assert report.error_code == "statement:template:FinancialStatement-Listed-Product-V7"
