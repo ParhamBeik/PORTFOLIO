@@ -478,3 +478,12 @@ def test_income_off_the_fiscal_year_is_not_certified():
     assert shifted != INTERIM
     facts = _parse(shifted)
     assert facts and {f["verification_status"] for f in facts} == {"extracted"}
+
+
+def test_an_unreadable_discontinued_line_is_not_zero():
+    cell = re.search(rb'\{[^{}]*"address":"B20"[^{}]*\}', INTERIM).group(0)
+    assert b'"value":"0"' in cell
+    broken = INTERIM.replace(cell, cell.replace(b'"value":"0"', b'"value":"n/a"'))
+    assert {f["verification_status"] for f in _parse(broken)} == {"extracted"}
+    blank = INTERIM.replace(cell, cell.replace(b'"value":"0"', b'"value":"-"'))
+    assert {f["verification_status"] for f in _parse(blank)} == {"reconciled"}

@@ -267,7 +267,7 @@ def _sheet_facts(kind, sheet, table, *, end, start, months, unit, is_consolidate
         row = re.sub(r"^[A-Z]+", "", cell["address"])
         by_row.setdefault(row, {})[cell.get("columnCode")] = cell
     labels = _INCOME_LABELS if kind == "income" else _BALANCE_LABELS
-    found = {}
+    found, unreadable = {}, set()
     for code, names in labels.items():
         for name in names:
             rows = [row for row, line in by_row.items()
@@ -280,9 +280,15 @@ def _sheet_facts(kind, sheet, table, *, end, start, months, unit, is_consolidate
             if value_cell is None or normalize_jalali(value_cell.get("periodEndToDate")) not in ("", end):
                 break
             raw = str(value_cell.get("value") or "").strip()
-            number = parse_number(raw) if raw not in ("", "-", "--") else None
-            if number is None and code != "income.discontinued_profit":
-                continue  # a section heading carries no figure; try the next name
+            blank = raw in ("", "-", "--")
+            number = None if blank else parse_number(raw)
+            if number is None and not (blank and code == "income.discontinued_profit"):
+                # A section heading carries no figure; try the next name. Text
+                # that is not a number is no figure either -- and not zero: the
+                # sheet's sums can no longer be proven, so nothing is certified.
+                if not blank:
+                    unreadable.add(code)
+                continue
             found[code] = (number if number is not None else Decimal(0), raw, by_row[rows[0]][1], value_cell)
             break
     if kind == "income":
@@ -293,6 +299,8 @@ def _sheet_facts(kind, sheet, table, *, end, start, months, unit, is_consolidate
     else:
         ok = balance_reconciles({code: item[0] for code, item in found.items()})
         period_start = ""
+    if unreadable - set(found):
+        ok = False
     return [{
         "fact_code": code, "raw_value": raw, "numeric_value": number,
         "unit": unit, "currency": "IRR", "period_start": period_start, "period_end": end,
