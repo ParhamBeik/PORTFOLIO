@@ -525,6 +525,10 @@ def test_research_and_ops_read_the_crawl_once_it_writes_the_list(monkeypatch, se
     # Every crawled day reconciled, but the walk back has not reached its floor.
     assert codal()["status"] == "partial"
     settings.CODAL_DISCOVERY_OLDEST_DAY = "1404-07-02"
+    # Reaching the floor is not enough while the crawl is behind today.
+    monkeypatch.setattr(codal_discovery, "tehran_today", lambda: "1404-07-03")
+    assert codal()["status"] == "partial"
+    monkeypatch.setattr(codal_discovery, "tehran_today", lambda: "1404-07-02")
     assert codal()["status"] == "complete" and codal()["stored_rows"] == 1
     # Older filings held back by a narrower promotion scope are not coverage.
     settings.CODAL_HISTORY_DOCUMENTS = "annual_statements"
@@ -565,6 +569,13 @@ def test_a_recrawl_that_lists_a_new_document_updates_and_requeues(monkeypatch, s
     assert made.link_attachment == "https://codal.ir/Reports/DownloadFile.aspx?id=7"
     assert made.title.endswith("(اصلاحیه)") and made.has_attachment is True
     assert made.report.status == CodalReport.Status.FAILED
+
+    # An unchanged re-crawl is not new work; a replaced link is.
+    CodalReport.objects.filter(announcement=made).update(status=CodalReport.Status.PARSED)
+    codal_discovery.promote([later])
+    assert CodalReport.objects.get(announcement=made).status == CodalReport.Status.PARSED
+    codal_discovery.promote([{**later, "attachment_url": "/Reports/DownloadFile.aspx?id=8"}])
+    assert CodalReport.objects.get(announcement=made).status == CodalReport.Status.FAILED
 
     # BrsApi's row keeps its own fields; only identity is filled in.
     made.source = "brsapi"

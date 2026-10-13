@@ -529,7 +529,7 @@ def _codal_discovery_coverage(symbol):
     crawl = discovery_status()
     scope = settings.CODAL_HISTORY_DOCUMENTS
     complete = (bool(crawl["days"]) and crawl["complete"] == crawl["days"]
-                and crawl["reached_oldest"] and scope == "all")
+                and crawl["reached_oldest"] and crawl["reached_today"] and scope == "all")
     return {
         "endpoint": ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
         "status": "not_tried" if not crawl["days"] else "complete" if complete else "partial",
