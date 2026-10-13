@@ -522,10 +522,14 @@ def _codal_discovery_coverage(symbol):
     """The filing list's coverage once codal.ir writes it: crawl days, market-wide.
 
     codal.ir is crawled by publication day, not per symbol, so "complete" means
-    every crawled day reconciled against codal.ir's own total.
+    every crawled day reconciled against codal.ir's own total -- and every
+    crawled letter promoted: under a narrower `CODAL_HISTORY_DOCUMENTS` the
+    older filings are held back on purpose, so the list is partial by design.
     """
     crawl = discovery_status()
-    complete = bool(crawl["days"]) and crawl["complete"] == crawl["days"] and crawl["reached_oldest"]
+    scope = settings.CODAL_HISTORY_DOCUMENTS
+    complete = (bool(crawl["days"]) and crawl["complete"] == crawl["days"]
+                and crawl["reached_oldest"] and scope == "all")
     return {
         "endpoint": ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
         "status": "not_tried" if not crawl["days"] else "complete" if complete else "partial",
@@ -535,6 +539,7 @@ def _codal_discovery_coverage(symbol):
         "last_success_at": crawl["last_success_at"],
         "source": "codal.ir",
         "crawled_from": crawl["oldest"],
+        "history_documents": scope,
     }
 
 

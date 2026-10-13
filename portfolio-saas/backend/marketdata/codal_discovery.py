@@ -140,7 +140,11 @@ def step(state, now=None):
         raise
     state.total = result["total"]
     stored = CodalLetter.objects.filter(date_publish=state.date).count()
-    if stored >= state.total:
+    # A day completed before already stores every letter it found, so the count
+    # meets the total on page 1; a re-check must walk every page or letters past
+    # the newest page are never refreshed (a new artifact link, a withdrawal).
+    walked = state.checks == 0 or state.next_page >= result["pages"]
+    if stored >= state.total and walked:
         state.consecutive_failures = 0
         state.last_error = ""
         state.verified_complete = True

@@ -545,7 +545,7 @@ MARKETDATA_ARCHIVE_QUEUE_LIMIT = int(
 # read; intraday depth is not. The lanes still lend each other unused slots, so
 # once the dailies converge the ticks reclaim the batch automatically -- this
 # changes the order things finish in, not the total spend.
-MARKETDATA_TICK_QUOTA_SHARE = float(os.getenv("MARKETDATA_TICK_QUOTA_SHARE", "0.25"))
+MARKETDATA_TICK_QUOTA_SHARE = float(os.getenv("MARKETDATA_TICK_QUOTA_SHARE") or "0.25")
 # While the per-symbol DAILY endpoints are still short of
 # MARKETDATA_DAILY_GATE_COMPLETENESS, ticks drop to this share instead. The two
 # lanes are not comparable work: a daily endpoint buys a symbol's entire history
@@ -692,7 +692,7 @@ CODAL_DISCOVERY_LIVE_DAYS = int(os.getenv("CODAL_DISCOVERY_LIVE_DAYS", "3"))
 # is built from; "all"; "none". The rest stay crawled in CodalLetter.
 CODAL_HISTORY_DOCUMENTS = os.getenv("CODAL_HISTORY_DOCUMENTS", "annual_statements")
 if (CODAL_DISCOVERY_ENABLED and CODAL_DISCOVERY_SOURCE == "codal"
-        and "MARKETDATA_TICK_QUOTA_SHARE" not in os.environ):
+        and not os.getenv("MARKETDATA_TICK_QUOTA_SHARE")):
     # Phase 3 ships with phase 2: the ~960 AIO requests/day BrsApi's Codal list
     # spent go to the tick backlog (docs/CODAL-DIRECT-MIGRATION.md §8).
     MARKETDATA_TICK_QUOTA_SHARE = 0.50
