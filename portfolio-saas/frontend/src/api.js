@@ -652,17 +652,16 @@ export const runResearch = (symbol, question, maxCostUsd) =>
     method: "POST", body: { symbol, question, max_cost_usd: maxCostUsd },
   });
 
-// Portfolio against what you could have held instead, indexed to 100.
 /**
- * With no `mode`, answers what the pickers may offer; with one, runs that
- * comparison. `days` omitted means "as far back as my own history goes".
+ * With no `subject`, answers what the pickers may offer; with one, replays its
+ * real purchases into each of `targets` (the server's defaults when omitted).
+ * `days` omitted means "as far back as my own history goes".
  */
-export const comparison = (account = null, { mode, subject, target, days } = {}) => {
+export const comparison = (account = null, { subject, targets, days } = {}) => {
   const params = new URLSearchParams();
   if (account) params.set("account", account);
-  if (mode) params.set("mode", mode);
   if (subject) params.set("subject", subject);
-  if (target) params.set("target", target);
+  if (targets?.length) params.set("targets", targets.join(","));
   if (days != null) params.set("days", String(days));
   const qs = params.toString();
   return api(`/api/comparison/${qs ? `?${qs}` : ""}`);

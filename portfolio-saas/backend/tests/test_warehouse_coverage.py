@@ -1477,6 +1477,45 @@ def test_tse_underlying_classes_share_the_stock_closure_calendar(asset_class):
     assert calendars.is_closure_day(asset_class, "کاما", "1404-06-01") is False
 
 
+def test_a_market_where_only_the_funds_traded_is_a_closure():
+    """1404-12-17 to 1405-02-28: the exchange was shut but fixed-income funds
+    kept trading, ~1 in 12 padded rows. A strict market-wide zero missed 40 of
+    those 45 days, and every price panel holding a stock was trimmed to the
+    reopening -- years of history gone. An ordinary session (~1 in 2) is not.
+    """
+    from django.core.cache import cache
+
+    cache.clear()
+    for n in range(12):
+        _stock_day("1405-01-15", volume=1000 if n == 0 else 0,
+                   trades=5 if n == 0 else 0, symbol=f"S{n}")
+        _stock_day("1405-03-15", volume=1000 if n % 2 else 0,
+                   trades=5 if n % 2 else 0, symbol=f"S{n}")
+
+    closed = calendars.market_closure_days(start="1405-01-01", end="1405-03-31")
+
+    assert "1405-01-15" in closed
+    assert "1405-03-15" not in closed
+
+
+def test_a_half_ingested_day_is_a_hole_not_a_closure():
+    """Three rows and no trades, where every other day has twelve: the rest of
+    the market is missing, not shut. Calling it a closure would forgive the
+    hole and the archive would never refetch it."""
+    from django.core.cache import cache
+
+    cache.clear()
+    for n in range(12):
+        _stock_day("1405-03-15", volume=1000 if n % 2 else 0,
+                   trades=5 if n % 2 else 0, symbol=f"S{n}")
+    for n in range(3):
+        _stock_day("1405-03-16", volume=0, trades=0, symbol=f"S{n}")
+
+    closed = calendars.market_closure_days(start="1405-03-01", end="1405-03-31")
+
+    assert "1405-03-16" not in closed
+
+
 def test_stock_closure_with_no_data_at_all_is_not_forgiven():
     # market_closure_days returns an empty set when there is nothing to judge
     # against; that must fail closed (a real gap), not be waved through.
