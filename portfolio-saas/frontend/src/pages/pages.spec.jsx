@@ -209,30 +209,41 @@ describe("Page Rendering Tests", () => {
     }));
   });
 
-  it("shows an unsigned amount when the alternative wins", async () => {
+  it("tables every alternative with an unsigned difference and a Rial break-even", async () => {
     api.comparison.mockImplementation((_accountId, options) => {
       if (!options) {
         return Promise.resolve({
           holdings: [{ key: "mine", label: "Mine" }],
-          targets: [{ key: "alt", label: "Alternative" }],
+          targets: [
+            { key: "gold", label: "Gold" },
+            { key: "coin", label: "Coin" },
+          ],
+          default_targets: ["gold", "coin"],
           omitted_holdings: [],
         });
       }
+      const series = [
+        { label: "Mine", unit: "toman", points: [{ date: "2026-09-01", value: 10 }] },
+        { label: "Gold", unit: "toman", points: [{ date: "2026-09-01", value: 20 }] },
+      ];
       return Promise.resolve({
-        mode: "counterfactual",
-        series: [
-          { label: "Mine", unit: "toman", points: [{ date: "2026-09-01", value: 10 }] },
-          { label: "Alternative", unit: "toman", points: [{ date: "2026-09-01", value: 20 }] },
-        ],
-        summary: {
-          actual_end_tomans: 1000000000,
-          alternative_end_tomans: 5912390000,
-          difference_tomans: -4912390000,
-          invested_tomans: 900000000,
-          start_date: "2026-01-01",
-          end_date: "2026-09-01",
+        subject: {
+          key: "mine", label: "Mine", units: 27000000,
+          invested_tomans: 4761305759, value_tomans: 17469000000,
+          price: { value: 6470, unit: "IRR" }, end_date: "2026-10-12",
         },
-        warnings: [],
+        rows: [
+          {
+            key: "gold", label: "Gold", units: 1218.4,
+            value_tomans: 31631961015, actual_tomans: 17469000000,
+            invested_tomans: 4761305759, difference_tomans: -14162961015,
+            difference_pct: -44.77, breakeven_price: { value: 11716, unit: "IRR" },
+            start_date: "2022-01-05", end_date: "2026-10-12", window_days: 1743,
+            series, warnings: [],
+          },
+          { key: "coin", label: "Coin", reason: "missing_price_history", detail: "No usable price history for Coin." },
+        ],
+        requested_days: null,
       });
     });
 
@@ -241,14 +252,20 @@ describe("Page Rendering Tests", () => {
         <Comparison />
       </MemoryRouter>
     );
-    fireEvent.change(await screen.findByTestId("comparison-target"), {
-      target: { value: "alt" },
-    });
 
-    const difference = await screen.findByTestId("comparison-difference");
-    expect(difference).toHaveTextContent("The road not taken wins");
-    expect(difference).toHaveTextContent("4,912,390,000 T");
-    expect(difference).not.toHaveTextContent("-4,912,390,000 T");
+    const table = await screen.findByTestId("comparison-table");
+    await waitFor(() =>
+      expect(api.comparison).toHaveBeenCalledWith(1, expect.objectContaining({
+        subject: "mine", targets: ["gold", "coin"],
+      }))
+    );
+    expect(table).toHaveTextContent("14,162,961,015 T");
+    expect(table).not.toHaveTextContent("-14,162,961,015 T");
+    expect(table).toHaveTextContent("-44.8%");
+    expect(table).toHaveTextContent("11,716 ﷼");
+    // A target that could not answer says why, beside the ones that did.
+    expect(table).toHaveTextContent("No usable price history for Coin.");
+    expect(screen.getByTestId("comparison-price")).toHaveTextContent("6,470 ﷼");
   });
 
   it("renders MyOptimal with scenarios and recommended weights", async () => {

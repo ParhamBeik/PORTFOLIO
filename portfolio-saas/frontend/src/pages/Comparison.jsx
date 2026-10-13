@@ -10,27 +10,11 @@ import {
   PageHeader,
   Select,
   StatTile,
+  Table,
   Tabs,
 } from "../components/ui.jsx";
-import { dateTime, humanize, indexPoint, num, toman } from "../format.js";
+import { dateTime, humanize, num, rial, signedPct, toman } from "../format.js";
 import { useApi } from "../useApi.js";
-
-const MODES = [
-  { value: "counterfactual", label: "Same money elsewhere" },
-  { value: "holdings", label: "Two of mine" },
-  { value: "benchmark", label: "Portfolio vs one asset" },
-  { value: "lump_sum", label: "All at once" },
-];
-
-const BLURB = {
-  counterfactual:
-    "Every purchase you actually made — same dates, same amounts — replayed into something else.",
-  holdings: "Two positions you really hold, side by side.",
-  benchmark:
-    "Your whole portfolio against one asset, both starting at 100 so the gap is relative growth.",
-  lump_sum:
-    "The same total, all of it on the first day, instead of spread over your real purchase dates.",
-};
 
 // 0 means "as far back as my own purchases go", which is the answer this page is
 // usually asked for. The others are the windows the rest of the app already
@@ -42,7 +26,12 @@ const RANGES = [
   { value: "90", label: "90D" },
 ];
 
-function Picker({ label, value, onChange, options, testId }) {
+// The unit travels with every per-unit price the API sends: TSE prices are
+// Rial on every other screen, so a break-even shown in Toman would read as a
+// tenth of the quote.
+const price = (p) => (!p ? "—" : p.unit === "IRR" ? rial(p.value) : toman(p.value));
+
+function Picker({ label, value, onChange, options, testId, placeholder = "Choose…" }) {
   const t = useT();
   return (
     <label className="flex flex-col gap-1 text-xs font-medium tracking-wide text-muted uppercase">
@@ -54,7 +43,7 @@ function Picker({ label, value, onChange, options, testId }) {
         data-testid={testId}
         className="min-w-44"
       >
-        <option value="">{t("Choose…")}</option>
+        <option value="">{t(placeholder)}</option>
         {options.map((o) => (
           <option key={o.key} value={o.key}>
             {o.label}
@@ -65,125 +54,179 @@ function Picker({ label, value, onChange, options, testId }) {
   );
 }
 
-function Verdict({ result }) {
-  const s = result.summary;
-  if (result.mode === "benchmark") {
-    const lead = s.actual_change_pct - s.alternative_change_pct;
-    return (
-      <div className="grid gap-3 sm:grid-cols-3">
-        <StatTile
-          label="Your portfolio"
-          value={`${num(s.actual_change_pct, 1)}%`}
-          valueTone={s.actual_change_pct >= 0 ? "good" : "critical"}
-          testId="comparison-actual"
-        />
-        <StatTile
-          label={result.series[1].label}
-          value={`${num(s.alternative_change_pct, 1)}%`}
-          testId="comparison-alternative"
-        />
-        <StatTile
-          label={lead >= 0 ? "You are ahead by" : "You are behind by"}
-          value={`${num(Math.abs(lead), 1)} pts`}
-          valueTone={lead >= 0 ? "good" : "critical"}
-          sub={`${s.start_date} → ${s.end_date}`}
-          testId="comparison-difference"
-        />
-      </div>
-    );
-  }
+function Chips({ chosen, targets, onRemove }) {
+  const t = useT();
+  const label = (key) => targets.find((o) => o.key === key)?.label || key;
+  return (
+    <div className="flex flex-wrap gap-2" data-testid="comparison-targets">
+      {chosen.map((key) => (
+        <button
+          key={key}
+          type="button"
+          onClick={() => onRemove(key)}
+          // The last chip stays: a table with no rows asks nothing.
+          disabled={chosen.length === 1}
+          aria-label={`${t("Remove")} ${label(key)}`}
+          className="rounded-full border border-border bg-panel-2 px-3 py-1 text-sm disabled:opacity-60"
+        >
+          <bdi>{label(key)}</bdi>
+          {chosen.length > 1 && <span aria-hidden="true"> ×</span>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Verdict({ subject }) {
   return (
     <div className="grid gap-3 sm:grid-cols-3">
+      <StatTile label="Put in" value={toman(subject.invested_tomans)} testId="comparison-invested" />
+      <StatTile label="Worth today" value={toman(subject.value_tomans)} testId="comparison-actual" />
       <StatTile
-        label={result.series[0].label}
-        value={toman(s.actual_end_tomans)}
-        sub={
-          s.invested_tomans != null ? `${toman(s.invested_tomans)} put in` : undefined
-        }
-        testId="comparison-actual"
-      />
-      <StatTile
-        label={result.series[1].label}
-        value={toman(s.alternative_end_tomans)}
-        testId="comparison-alternative"
-      />
-      <StatTile
-        label={s.difference_tomans >= 0 ? "You came out ahead" : "The road not taken wins"}
-        value={toman(Math.abs(s.difference_tomans))}
-        valueTone={s.difference_tomans >= 0 ? "good" : "critical"}
-        sub={`${s.start_date} → ${s.end_date}`}
-        testId="comparison-difference"
+        label="Price now"
+        value={price(subject.price)}
+        sub={`${num(subject.units, 0)} × ${subject.label}`}
+        testId="comparison-price"
       />
     </div>
   );
 }
 
-function Chart({ result }) {
+function Rows({ data }) {
   const lang = useLang();
+  const columns = [
+    {
+      key: "label",
+      header: "Instead",
+      mobile: "title",
+      render: (r) => (
+        <div>
+          <bdi>{r.label}</bdi>
+          {r.reason && (
+            <div className="text-xs text-muted">{r.detail || humanize(r.reason)}</div>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "value",
+      header: "Worth today",
+      align: "right",
+      mobile: "value",
+      render: (r) => (r.reason ? "—" : toman(r.value_tomans)),
+    },
+    {
+      key: "lead",
+      header: `${data.subject.label} vs it`,
+      align: "right",
+      mobile: "meta",
+      render: (r) =>
+        r.reason ? "—" : (
+          <span className={r.difference_tomans >= 0 ? "text-[var(--c-good-text)]" : "text-[var(--c-critical-text)]"}>
+            {signedPct(r.difference_pct / 100)}
+          </span>
+        ),
+    },
+    {
+      key: "difference",
+      header: "Difference",
+      align: "right",
+      render: (r) => (r.reason ? "—" : toman(Math.abs(r.difference_tomans))),
+    },
+    {
+      key: "breakeven",
+      header: "Break-even price",
+      align: "right",
+      mobile: "meta",
+      render: (r) => (r.reason ? "—" : price(r.breakeven_price)),
+    },
+    {
+      key: "units",
+      header: "Would hold",
+      align: "right",
+      render: (r) => (r.reason ? "—" : num(r.units, r.units >= 100 ? 0 : 2)),
+    },
+  ];
+  return (
+    <>
+      <Table
+        columns={columns}
+        rows={data.rows}
+        rowKey={(r) => r.key}
+        mobileCards
+        caption={translate("What the same money would be worth in each alternative", lang)}
+        testId="comparison-table"
+      />
+      <p className="mt-2 text-xs text-muted" data-testid="comparison-breakeven-note">
+        {translate("Break-even price: what {name} would have to trade at for your position to be worth exactly the same as the alternative.", lang, { name: data.subject.label })}
+      </p>
+    </>
+  );
+}
+
+function Chart({ row }) {
   // The API returns one point list per curve; the chart wants one row per date
   // with a column per curve, so they are zipped on the date they share.
   const rows = useMemo(() => {
     const byDate = new Map();
-    result.series.forEach((curve, index) => {
+    row.series.forEach((curve, index) => {
       for (const point of curve.points) {
-        const row = byDate.get(point.date) || { x: point.date };
-        row[`s${index}`] = point.value;
-        byDate.set(point.date, row);
+        const entry = byDate.get(point.date) || { x: point.date };
+        entry[`s${index}`] = point.value;
+        byDate.set(point.date, entry);
       }
     });
     return [...byDate.values()].sort((a, b) => a.x.localeCompare(b.x));
-  }, [result]);
+  }, [row]);
 
-  const isIndex = result.series[0].unit === "index";
-  // A week either way is rounding — weekends, a market holiday, the day the
-  // window opens on. Beyond that the range button asked for something the data
-  // could not give, and saying nothing lets the axis imply it did.
-  const { requested_days: asked, window_days: got } = result.summary;
-  const shortfall = asked && got ? asked - got : 0;
   return (
     <>
       <MultiLineTrend
-        series={result.series.map((curve, index) => ({
-          key: `s${index}`,
-          name: curve.label,
-        }))}
+        series={row.series.map((curve, index) => ({ key: `s${index}`, name: curve.label }))}
         data={rows}
         longTicks={rows.length > 400}
-        formatValue={isIndex ? indexPoint : undefined}
-        formatAxis={isIndex ? indexPoint : undefined}
-        label={result.series.map((c) => c.label).join(" versus ")}
+        label={row.series.map((c) => c.label).join(" versus ")}
       />
-      {isIndex && (
-        <p className="mt-2 text-xs text-muted" data-testid="comparison-index-note">
-          {translate("Both lines start at 100, so the gap is relative growth over the window — not the amount of money in each.", lang)}
-        </p>
-      )}
-      {/* The sentence, when the server sent one. A warning that reads
-          "euro cash: series ended." tells a reader something is wrong and
-          nothing about what to do; the detail says which day the data stops on
+      {/* The sentence, when the server sent one: which day the data stops on
           and what the chart did about it. */}
-      {(result.warnings || []).map((w) => (
-        <p
-          key={`${w.key}-${w.reason}`}
-          className="mt-1 text-xs text-muted"
-          data-testid="comparison-warning"
-        >
-          {w.key}: {w.detail || humanize(w.reason)}.
+      {(row.warnings || []).map((w) => (
+        <p key={`${w.key}-${w.reason}`} className="mt-1 text-xs text-muted" data-testid="comparison-warning">
+          {w.detail || humanize(w.reason)}.
         </p>
       ))}
-      {shortfall > 7 && (
-        <p className="mt-1 text-xs text-muted" data-testid="comparison-shortfall">
-          You asked for {result.summary.requested_days} days and this covers{" "}
-          {result.summary.window_days} — that is as much history as these two
-          have in common.
-        </p>
-      )}
-      {result.summary.truncated_to_days && (
-        <p className="mt-1 text-xs text-muted" data-testid="comparison-truncated">
-          Showing the last {result.summary.truncated_to_days} days — your
-          portfolio's value is rebuilt day by day from the ledger, and that is as
-          far back as it goes.
-        </p>
+    </>
+  );
+}
+
+function Result({ data }) {
+  const answered = data.rows.filter((r) => !r.reason);
+  const [shown, setShown] = useState(answered[0]?.key);
+  const row = answered.find((r) => r.key === shown) || answered[0];
+  return (
+    <>
+      <p className="mb-3 text-xs text-muted" data-testid="comparison-as-of">
+        Prices through {data.subject.end_date}.
+        {data.as_of ? ` Computed ${dateTime(data.as_of)}.` : ""}
+      </p>
+      <Verdict subject={data.subject} />
+      <div className="mt-5">
+        <Rows data={data} />
+      </div>
+      {row && (
+        <div className="mt-6">
+          {answered.length > 1 && (
+            <div className="mb-3">
+              <Tabs
+                options={answered.map((r) => ({ value: r.key, label: r.label }))}
+                value={row.key}
+                onChange={setShown}
+                label="Chart"
+                testId="comparison-chart-pick"
+              />
+            </div>
+          )}
+          <Chart row={row} />
+        </div>
       )}
     </>
   );
@@ -192,66 +235,52 @@ function Chart({ result }) {
 export default function Comparison() {
   const lang = useLang();
   const { activeId } = usePortfolio();
-  const [mode, setMode] = useState("counterfactual");
   const [range, setRange] = useState("0");
   const [subject, setSubject] = useState("");
-  const [target, setTarget] = useState("");
+  const [chosen, setChosen] = useState([]);
 
   const choices = useApi(() => comparison(activeId), [activeId]);
-  // Memoized: both effects below depend on these, and `?.x || []` is a new
-  // array every render, so each effect re-ran on every render instead of when
-  // the portfolio actually changed.
+  // Memoized: the effects below depend on these, and `?.x || []` is a new
+  // array every render.
   const holdings = useMemo(() => choices.data?.holdings || [], [choices.data]);
   const targets = useMemo(() => choices.data?.targets || [], [choices.data]);
   const omitted = choices.data?.omitted_holdings || [];
-  const cryptoInvolved = [...holdings, ...targets].some(
-    (row) => (row.key === subject || row.key === target) && row.asset_class === "Crypto"
-  );
 
   // Switching portfolio can strip the holding that was selected; leaving a stale
   // key in place would ask the server about something this portfolio never held.
   useEffect(() => {
     if (subject && !holdings.some((h) => h.key === subject)) setSubject("");
-    if (target && !targets.some((t) => t.key === target)) setTarget("");
-  }, [holdings, targets]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!subject && holdings.length) setSubject(holdings[0].key);
+    else if (!subject && holdings.length) setSubject(holdings[0].key);
   }, [holdings, subject]);
 
-  const needsSubject = mode !== "benchmark";
-  const ready = !!target && (!needsSubject || (!!subject && subject !== target));
+  useEffect(() => {
+    const offered = new Set(targets.map((o) => o.key));
+    setChosen((cur) => {
+      const kept = cur.filter((key) => offered.has(key));
+      return kept.length ? kept : choices.data?.default_targets || [];
+    });
+  }, [targets, choices.data]);
+
+  // The holding itself is never its own alternative.
+  const asked = chosen.filter((key) => key !== subject);
+  const ready = !!subject && asked.length > 0;
   const result = useApi(
     () =>
       comparison(activeId, {
-        mode,
-        subject: needsSubject ? subject : undefined,
-        target,
+        subject,
+        targets: asked,
         days: Number(range) || undefined,
       }),
-    [activeId, mode, subject, target, range, needsSubject],
+    [activeId, subject, asked.join(","), range],
     { enabled: ready }
   );
 
   return (
     <div>
       <PageHeader title="Compare" />
-      {/* The page's one big choice sits above the card, as its own control.
-          Inside the card's header it shared a line with the range and its
-          own label repeated as the card title. */}
-      <div className="mb-4">
-        <Tabs
-          options={MODES}
-          value={mode}
-          onChange={setMode}
-          label="Comparison mode"
-          testId="comparison-mode"
-          grid
-        />
-      </div>
       <Card
-        title="Pick what to compare"
-        subtitle={BLURB[mode]}
+        title="Same money elsewhere"
+        subtitle="Every purchase you actually made — same dates, same amounts — replayed into something else."
         testId="comparison-panel"
         actions={
           <Tabs
@@ -267,42 +296,34 @@ export default function Comparison() {
           {() => (
             <>
               <div className="mb-5 flex flex-wrap items-end gap-4">
-                {needsSubject && (
-                  <Picker
-                    label={mode === "holdings" ? "Mine" : "What you did"}
-                    value={subject}
-                    onChange={(v) => {
-                      setSubject(v);
-                      if (v === target) setTarget("");
-                    }}
-                    options={holdings}
-                    testId="comparison-subject"
-                  />
-                )}
                 <Picker
-                  label={mode === "holdings" ? "Against mine" : "Instead"}
-                  value={target}
-                  onChange={setTarget}
-                  // Never the asset already picked on the left: comparing a
-                  // holding with itself is an answer of "0" dressed up as one.
-                  options={(mode === "holdings" ? holdings : targets).filter(
-                    (o) => !needsSubject || o.key !== subject
-                  )}
+                  label="What you did"
+                  value={subject}
+                  onChange={setSubject}
+                  options={holdings}
+                  testId="comparison-subject"
+                />
+                <Picker
+                  label="Compare with"
+                  value=""
+                  placeholder="Add…"
+                  onChange={(key) => key && setChosen((cur) => [...new Set([...cur, key])])}
+                  options={targets.filter((o) => o.key !== subject && !chosen.includes(o.key))}
                   testId="comparison-target"
                 />
               </div>
+              {!!chosen.length && (
+                <div className="mb-5">
+                  <Chips
+                    chosen={chosen}
+                    targets={targets}
+                    onRemove={(key) => setChosen((cur) => cur.filter((k) => k !== key))}
+                  />
+                </div>
+              )}
               {!holdings.length && (
                 <p className="text-sm text-muted" data-testid="comparison-no-holdings">
                   {translate("This portfolio has no priced positions to compare yet. Record a purchase in the Ledger first.", lang)}
-                </p>
-              )}
-              {/* "Two of mine" needs two. With one holding the picker offered
-                  the same asset back and the page answered "cannot compare an
-                  asset with itself", which reads as a bug rather than as the
-                  shape of the portfolio. */}
-              {mode === "holdings" && holdings.length === 1 && (
-                <p className="text-sm text-muted" data-testid="comparison-one-holding">
-                  {translate("This portfolio holds only {name}. Compare it against something you don't own with the other modes above, or record a second position first.", lang, { name: holdings[0].label })}
                 </p>
               )}
               {/* Named rather than simply absent: a reader who owns a house and
@@ -328,34 +349,15 @@ export default function Comparison() {
                   <ErrorState error={result.error} testId="comparison-result" />
                 ) : (
                   <Async {...result} testId="comparison-result">
-                    {(data) => (
-                      <>
-                        <p className="mb-3 text-xs text-muted" data-testid="comparison-as-of">
-                          Prices through {data.summary?.end_date || "—"}.
-                          {data.as_of ? ` Computed ${dateTime(data.as_of)}.` : ""}
-                          {cryptoInvolved
-                            ? " Crypto series start when this system began watching; there is no provider archive."
-                            : ""}
-                        </p>
-                        <Verdict result={data} />
-                        <div className="mt-5">
-                          <Chart result={data} />
-                        </div>
-                      </>
-                    )}
+                    {(data) => <Result key={`${subject}:${asked.join(",")}`} data={data} />}
                   </Async>
                 )
               ) : (
-                // Silent when the message above already explained why there is
-                // nothing to pick -- two prompts contradicting each other is
-                // worse than one.
-                holdings.length !== 1 || mode !== "holdings" ? (
+                holdings.length > 0 && (
                   <p className="text-sm text-muted" data-testid="comparison-prompt">
-                    {translate(needsSubject
-                      ? "Pick a holding and something to compare it against."
-                      : "Pick something to compare your portfolio against.", lang)}
+                    {translate("Pick a holding and something to compare it against.", lang)}
                   </p>
-                ) : null
+                )
               )}
             </>
           )}

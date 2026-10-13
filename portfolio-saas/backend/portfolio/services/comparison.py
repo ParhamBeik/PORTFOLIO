@@ -1,13 +1,15 @@
 """What the same money would have done somewhere else.
 
-Four questions, one shape of answer: two value curves over one window, plus the
-gap between them at the end.
+One question, asked of several alternatives at once: every purchase you
+actually made of one holding -- real dates, real amounts -- replayed into each
+target. Each target answers with what that money would be worth today, how
+far ahead or behind the holding is, and the holding price at which the two
+would be level.
 
-  counterfactual  Replay the purchases you actually made -- real dates, real
-                  amounts -- into a different asset.
-  holdings        Two things you actually own, side by side.
-  benchmark       Your whole portfolio against one asset, both rebased to 100.
-  lump_sum        The same total, all of it on the first day, in each asset.
+The page used to offer four modes (this one, two holdings side by side, the
+portfolio rebased against one asset, and a lump sum on day one) one pair at a
+time. They were removed: the question people bring here is this one, against
+the dollar, gold and coins together.
 
 Prices come from `returns._load_price_panel`, which is the only reader that has
 already put TSE Rial, BRS Toman and the live-only daily bars into one Toman
@@ -23,12 +25,19 @@ from decimal import Decimal
 import pandas as pd
 from django.utils import timezone
 
-from marketdata.currency import holding_value_to_toman
+from marketdata.currency import (
+    TSE_RIAL_PER_TOMAN, holding_value_to_toman, is_tse_priced,
+)
 
 from ..models import Asset, LedgerEntry, owner_display_names
 from .ledger import active_entries
 
-MODES = ("counterfactual", "holdings", "benchmark", "lump_sum")
+#: What the same money is measured against when the page asks for nothing
+#: else: the three places an Iranian saver actually moves money to.
+DEFAULT_TARGETS = ("usd_cash", "gold_18k_gram", "emami_coin")
+#: Each target is its own panel load, so one request cannot fan out over the
+#: whole catalog.
+MAX_TARGETS = 6
 
 #: The comparison has to reach back to the first purchase, which for a real
 #: broker history is years. Bounded so one request cannot ask the panel for an
@@ -36,15 +45,6 @@ MODES = ("counterfactual", "holdings", "benchmark", "lump_sum")
 MAX_WINDOW_DAYS = 3650
 MIN_WINDOW_DAYS = 7
 
-#: How far back `_benchmark` may rebuild the portfolio's own value series.
-#:
-#: Its own bound, deliberately not `SYNTHETIC_HISTORY_MAX_DAYS`. That constant is
-#: 90 and it made the 1Y, 6M and 90D buttons on this tab return the identical
-#: ninety-day answer -- three range buttons that did nothing. The 90 stands for
-#: the other caller (a fabricated series shown when nothing was recorded); the
-#: replay itself is real arithmetic and now costs one ledger read per account
-#: rather than two per account per day, so a year of it is affordable.
-BENCHMARK_MAX_DAYS = 400
 
 #: Kinds that move a position for money. A rights issue moves the position
 #: without any, so it changes the units held but never the amount invested --
@@ -392,70 +392,33 @@ def _points(series: pd.Series) -> list[dict]:
     ]
 
 
-def _rebase(series: pd.Series) -> pd.Series:
-    base = series.iloc[0] if len(series) and series.iloc[0] else 0
-    return series / base * 100 if base else series * 0
-
-
-def _curve(key, label, series, *, unit="toman") -> dict:
-    return {"key": key, "label": label, "unit": unit, "points": _points(series)}
+def _curve(key, label, series) -> dict:
+    return {"key": key, "label": label, "unit": "toman", "points": _points(series)}
 
 
 def _label(asset) -> str:
     return asset.name_fa or asset.name or asset.key
 
 
-def _summary(
-    actual: pd.Series, alternative: pd.Series, invested=None, *,
-    requested_days=None, carried=0.0,
-) -> dict:
-    end_actual = float(actual.iloc[-1]) if len(actual) else 0.0
-    end_alt = float(alternative.iloc[-1]) if len(alternative) else 0.0
-    summary = {
-        "actual_end_tomans": round(end_actual, 2),
-        "alternative_end_tomans": round(end_alt, 2),
-        "difference_tomans": round(end_actual - end_alt, 2),
-        "start_date": actual.index[0].date().isoformat() if len(actual) else None,
-        "end_date": actual.index[-1].date().isoformat() if len(actual) else None,
-        # What the range button asked for against what the data could give. The
-        # page prints a "1Y" label above a curve whose start date is the only
-        # thing that ever said otherwise; a reader comparing two tabs had no way
-        # to tell a short answer from a short position.
-        "requested_days": requested_days,
-        "window_days": (
-            (actual.index[-1] - actual.index[0]).days + 1 if len(actual) else 0
-        ),
-    }
-    if invested is not None:
-        summary["invested_tomans"] = round(float(invested), 2)
-    if carried:
-        summary["carried_in_tomans"] = round(float(carried), 2)
-    return summary
+def _price_in_quote(asset, tomans_per_unit: float) -> dict:
+    """A per-unit Toman figure in the unit the rest of the app shows this price in.
+
+    TSE prices are shown in Rial everywhere else (see `holding_value_to_toman`),
+    so a break-even stock price printed in Toman would read as a tenth of the
+    number on the quote screen. The unit travels with the value; nothing
+    downstream has to guess it from the asset class.
+    """
+    value = Decimal(str(tomans_per_unit))
+    if is_tse_priced(asset):
+        return {"value": round(float(value * TSE_RIAL_PER_TOMAN)), "unit": "IRR"}
+    return {"value": round(float(value), 2), "unit": "IRT"}
 
 
-def _counterfactual(user, account, subject_key, target_key, days) -> dict:
-    subject = _resolve_asset(subject_key, field="subject")
-    target = _resolve_asset(target_key, field="target")
-    flows = _flows(_accounts(user, account), subject)
-    if not flows:
-        raise ComparisonError(
-            "no_purchase_history",
-            f"There are no recorded {_label(subject)} purchases to replay.",
-        )
-    if sum(flow["spent"] for flow in flows) <= 0:
-        # Every position came in as an opening or a price-less row, so there is
-        # no amount to move. Reporting zero would look like a real answer.
-        raise ComparisonError(
-            "no_recorded_cost",
-            f"Your {_label(subject)} position has no net money in it -- either "
-            "no purchase prices are recorded, or the sales returned more than "
-            "the purchases cost -- so there is no amount to invest elsewhere.",
-        )
-    requested = days
-    days, start = _window(flows, days)
-    panel = _panel([subject.key, target.key], days, held=[subject.key])
+def _replay(subject, target, flows, days) -> dict:
+    """One row of the table: every real purchase of `subject`, replayed into `target`."""
+    load, start = _window(flows, days)
+    panel = _panel([subject.key, target.key], load, held=[subject.key])
     index = panel.index
-
     flows, carried = _carry_in(flows, index, panel[subject.key])
     invested = sum(float(flow["spent"]) for flow in flows)
     if invested <= 0:
@@ -465,280 +428,119 @@ def _counterfactual(user, account, subject_key, target_key, days) -> dict:
             f"window that {_label(target)} has prices for, so there is no "
             "amount to invest elsewhere.",
         )
-    actual = _shown(_units_held(flows, index) * panel[subject.key], start)
-    alternative = _shown(
-        _counterfactual_units(flows, panel[target.key], index) * panel[target.key],
-        start,
-    )
-    return {
-        "mode": "counterfactual",
-        "series": [
-            _curve(subject.key, f"What you did: {_label(subject)}", actual),
-            _curve(target.key, f"Instead: {_label(target)}", alternative),
-        ],
-        "summary": _summary(
-            actual, alternative, invested=invested,
-            requested_days=requested, carried=carried,
+    held = _units_held(flows, index)
+    bought = _counterfactual_units(flows, panel[target.key], index)
+    actual = _shown(held * panel[subject.key], start)
+    alternative = _shown(bought * panel[target.key], start)
+    end_actual = float(actual.iloc[-1])
+    end_alt = float(alternative.iloc[-1])
+    units_now = float(held.iloc[-1])
+    row = {
+        "key": target.key,
+        "label": _label(target),
+        # How much of the alternative the same money would hold today: 105.6
+        # coins says more to a reader than a Toman total does.
+        "units": round(float(bought.iloc[-1]), 6),
+        "value_tomans": round(end_alt, 2),
+        "actual_tomans": round(end_actual, 2),
+        "invested_tomans": round(invested, 2),
+        "difference_tomans": round(end_actual - end_alt, 2),
+        "difference_pct": (
+            round((end_actual / end_alt - 1) * 100, 2) if end_alt > 0 else None
         ),
+        # The subject price at which today's position would be worth exactly
+        # what the alternative is: "KAMA has to reach 11,716 Rial to match gold".
+        "breakeven_price": (
+            _price_in_quote(subject, end_alt / units_now) if units_now > 0 else None
+        ),
+        "start_date": actual.index[0].date().isoformat(),
+        "end_date": actual.index[-1].date().isoformat(),
+        "window_days": (actual.index[-1] - actual.index[0]).days + 1,
+        "series": [
+            _curve(subject.key, _label(subject), actual),
+            _curve(target.key, _label(target), alternative),
+        ],
         "warnings": [
             *panel.attrs["warnings"], *_carried_note(subject, index, carried)
         ],
     }
+    if carried:
+        row["carried_in_tomans"] = round(carried, 2)
+    return row
 
 
-def _holdings(user, account, subject_key, target_key, days) -> dict:
-    subject = _resolve_asset(subject_key, field="subject")
-    target = _resolve_asset(target_key, field="target")
-    accounts = _accounts(user, account)
-    subject_flows = _flows(accounts, subject)
-    target_flows = _flows(accounts, target)
-    for asset, flows in ((subject, subject_flows), (target, target_flows)):
-        if not flows:
-            raise ComparisonError(
-                "no_purchase_history",
-                f"You have no recorded {_label(asset)} position to show.",
-            )
-    requested = days
-    days, start = _window(subject_flows + target_flows, days)
-    panel = _panel([subject.key, target.key], days, held=[subject.key, target.key])
-    index = panel.index
+def compare(user, *, account=None, subject=None, targets=None, days=None) -> dict:
+    """Replay one holding's real purchases into each target.
 
-    # No carry-in here: both curves are units x price, and `_units_held` already
-    # applies a purchase older than the window from the first day onwards. The
-    # value on that day is what the position was worth, which is what this tab
-    # asks. Only the money-replay modes need a stake to start from.
-    left = _shown(_units_held(subject_flows, index) * panel[subject.key], start)
-    right = _shown(_units_held(target_flows, index) * panel[target.key], start)
-    return {
-        "mode": "holdings",
-        "series": [
-            _curve(subject.key, _label(subject), left),
-            _curve(target.key, _label(target), right),
-        ],
-        "summary": _summary(left, right, requested_days=requested),
-        "warnings": panel.attrs["warnings"],
-    }
-
-
-def _twr_index(series: list[dict]) -> pd.Series:
-    """Chain-linked time-weighted index of a net-worth series, starting at 100.
-
-    The raw `total` moves when prices move AND when the book changes, and only
-    the first is performance: recording a position you already owned, or funding
-    a purchase, adds money without earning any. Rebasing `total` straight to 100
-    read those steps as return -- the family account's openings on 2026-08-09
-    showed as a +108% day and turned a real +40% quarter into "+120.7%".
-
-    `total_ex_flows` is the same day valued at the previous day's quantities, so
-    `total_ex_flows[t] / total[t-1]` is the pure price move and the product of
-    those factors is the time-weighted return. A day whose starting value is zero
-    or negative cannot carry a return; it restarts the chain rather than dividing
-    by it.
+    Raises ComparisonError with a renderable reason when the holding itself
+    cannot be replayed. A target that cannot be compared becomes a row carrying
+    its own reason instead: one coin with a short history must not blank the
+    dollar and gold rows beside it.
     """
-    dates = pd.to_datetime([point["date"] for point in series], utc=True)
-    totals = [float(point["total"]) for point in series]
-    # A matched pair: the same holdings at the same quantities, priced today and
-    # priced yesterday. Their ratio is the day's return over one asset set, so an
-    # asset that is priced on only one of the two days sits out of BOTH and
-    # cannot book a phantom move. Dividing by the previous day's `total` instead
-    # did exactly that -- a holding dropped by the forward-fill guard subtracted
-    # its whole weight for a day, and a running product never recovers from it.
-    ex_flows = [float(point.get("total_ex_flows", point["total"])) for point in series]
-    ex_base = [float(point.get("total_ex_flows_base", 0) or 0) for point in series]
-    # Older payloads carry neither field. Falling back to the raw totals
-    # reproduces the pre-fix curve rather than raising on a key that is absent.
-    # Absence is asked about by key, not by truthiness: a book whose assets are
-    # never priced on two consecutive days reports a base of 0 every day, which
-    # is a real answer, and reading it as "no such field" quietly restored the
-    # very chaining this replaced.
-    legacy = not any("total_ex_flows_base" in point for point in series)
-
-    index, level = [], 100.0
-    for position in range(len(totals)):
-        if position > 0:
-            if legacy:
-                if totals[position - 1] > 0:
-                    level *= ex_flows[position] / totals[position - 1]
-            # Both sides net out debt, so an account whose borrowing exceeds the
-            # assets that were priced that day has negative equity on one or both
-            # -- a ratio that would flip the whole curve through zero and take
-            # every later day with it. There is no return on nothing owned; the
-            # day is carried flat and the chain resumes when equity is positive.
-            elif ex_base[position] > 0 and ex_flows[position] > 0:
-                level *= ex_flows[position] / ex_base[position]
-        index.append(level)
-    return pd.Series(index, index=dates).sort_index()
-
-
-def _benchmark(user, account, target_key, days) -> dict:
-    from .valuation import compute_dynamic_net_worth_series
-
-    target = _resolve_asset(target_key, field="target")
-    # No per-asset flows to reach back for here, so unlike the other modes the
-    # requested window IS the whole request. The net-worth series is still
-    # bounded -- every extra day is another day of the replay -- so asking for
-    # more than it gives returns a shorter window than the caller asked for,
-    # and the answer says so rather than letting the axis imply a range the
-    # data does not cover. "All" means "whatever the replay reaches", which is
-    # the bound itself and therefore not a truncation.
-    #
-    # The bound is BENCHMARK_MAX_DAYS, not the 90-day synthetic-series cap this
-    # used to borrow. That cap made 1Y, 6M and 90D three names for the same
-    # ninety days, so two of the four range buttons on this tab were decoration.
-    capped = min(days or BENCHMARK_MAX_DAYS, BENCHMARK_MAX_DAYS)
-    truncated = capped if days and days > capped else None
-    series = compute_dynamic_net_worth_series(
-        user, account, days=capped, max_days=BENCHMARK_MAX_DAYS
-    )
-    if not series:
-        raise ComparisonError(
-            "no_portfolio_history",
-            "This portfolio has no value history to compare yet.",
-        )
-    portfolio = _twr_index(series)
-    # Days before the book held anything are a flat 100 that never moved. A
-    # one-year window on a two-month-old portfolio drew ten months of that line
-    # and dated the verdict to a day on which there was nothing to compare --
-    # the same rule `_window` applies to the money-replay modes.
-    funded = [
-        pd.Timestamp(point["date"], tz="UTC")
-        for point in series
-        if float(point["total"]) != 0
-    ]
-    if funded:
-        portfolio = portfolio[portfolio.index >= min(funded)]
-    panel = _panel([target.key], capped, held=[])
-    index = portfolio.index.intersection(panel.index)
-    if index.empty:
-        raise ComparisonError(
-            "no_overlapping_history",
-            f"Your portfolio history and {_label(target)}'s price history do "
-            "not overlap.",
-        )
-    portfolio = portfolio.reindex(index)
-    prices = panel[target.key].reindex(index)
-    return {
-        "mode": "benchmark",
-        "series": [
-            _curve("portfolio", "Your portfolio", _rebase(portfolio), unit="index"),
-            _curve(target.key, _label(target), _rebase(prices), unit="index"),
-        ],
-        # Rebased curves are unitless, so the Toman end values would be
-        # comparing a portfolio total against one unit of gold. Only the
-        # percentages mean anything here.
-        "summary": {
-            "actual_change_pct": round(float(_rebase(portfolio).iloc[-1]) - 100, 2),
-            "alternative_change_pct": round(float(_rebase(prices).iloc[-1]) - 100, 2),
-            "start_date": index[0].date().isoformat(),
-            "end_date": index[-1].date().isoformat(),
-            "truncated_to_days": truncated,
-            "requested_days": days,
-            "window_days": (index[-1] - index[0]).days + 1,
-        },
-        "warnings": panel.attrs["warnings"],
-    }
-
-
-def _lump_sum(user, account, subject_key, target_key, days) -> dict:
-    subject = _resolve_asset(subject_key, field="subject")
-    target = _resolve_asset(target_key, field="target")
-    flows = _flows(_accounts(user, account), subject)
-    # Net of sales, the same figure the drip-fed comparison reports. Summing
-    # only the buys answers "how much passed through" rather than "how much you
-    # put in", and the two modes would disagree about the same portfolio.
-    invested = sum(float(flow["spent"]) for flow in flows)
-    if invested <= 0:
-        raise ComparisonError(
-            "no_recorded_cost",
-            f"There is no recorded amount invested in {_label(subject)}.",
-        )
-    requested = days
-    days, start = _window(flows, days)
-    panel = _panel([subject.key, target.key], days, held=[subject.key])
-
-    # Bought on the day of the earliest REAL purchase, not on the first day of
-    # the loaded panel. The panel deliberately reaches back further than the
-    # visible window (and further again when a range button asks for more days
-    # than the position has existed), so `iloc[0]` would deploy the money before
-    # it existed -- a year of growth on ten-day-old money, and not comparable to
-    # the drip mode it sits beside.
-    #
-    # When the shared history starts LATER than that purchase the stake is what
-    # the position was worth on the first shared day plus anything added after
-    # it -- the same walk-in the drip mode does, so the two tabs still describe
-    # the same money over the same window.
-    index = panel.index
-    flows, carried = _carry_in(flows, index, panel[subject.key])
-    stake = sum(float(flow["spent"]) for flow in flows)
-    if not flows or stake <= 0:
-        raise ComparisonError(
-            "no_recorded_cost",
-            f"Nothing of your {_label(subject)} position carries into the "
-            f"window that {_label(target)} has prices for, so there is no "
-            "amount to put in on day one.",
-        )
-    opened = index[index >= _day(flows[0]["at"])]
-    if opened.empty:
-        raise ComparisonError(
-            "no_price_on_purchase_date",
-            "There is no price on or after the first purchase date.",
-        )
-    day = opened[0]
-    p_left = float(panel[subject.key].loc[day])
-    p_right = float(panel[target.key].loc[day])
-    if p_left <= 0 or p_right <= 0:
-        _refuse(
-            [k for k, p in ((subject.key, p_left), (target.key, p_right)) if p <= 0],
-            "unpriced_on_purchase_date",
-            "Price on start date must be positive.",
-        )
-    left = _shown(
-        stake / p_left * panel[subject.key].loc[day:],
-        start,
-    )
-    right = _shown(
-        stake / p_right * panel[target.key].loc[day:],
-        start,
-    )
-    return {
-        "mode": "lump_sum",
-        "series": [
-            _curve(subject.key, f"All at once: {_label(subject)}", left),
-            _curve(target.key, f"All at once: {_label(target)}", right),
-        ],
-        "summary": _summary(
-            left, right, invested=stake,
-            requested_days=requested, carried=carried,
-        ),
-        "warnings": [
-            *panel.attrs["warnings"], *_carried_note(subject, index, carried)
-        ],
-    }
-
-
-def compare(user, *, account=None, mode: str, subject=None, target=None, days=None) -> dict:
-    """Run one comparison. Raises ComparisonError with a renderable reason."""
-    if mode not in MODES:
-        raise ComparisonError("unknown_mode", f"No comparison mode {mode!r}.")
-    if not target:
-        raise ComparisonError(
-            "missing_target", "Choose something to compare against.", field="target"
-        )
-    if mode == "benchmark":
-        return _benchmark(user, account, target, days)
     if not subject:
         raise ComparisonError(
             "missing_subject", "Choose a holding to compare.", field="subject"
         )
-    if subject == target:
+    holding = _resolve_asset(subject, field="subject")
+    flows = _flows(_accounts(user, account), holding)
+    if not flows:
         raise ComparisonError(
-            "same_asset", "Pick two different assets.", field="target"
+            "no_purchase_history",
+            f"There are no recorded {_label(holding)} purchases to replay.",
         )
-    if mode == "counterfactual":
-        return _counterfactual(user, account, subject, target, days)
-    if mode == "holdings":
-        return _holdings(user, account, subject, target, days)
-    return _lump_sum(user, account, subject, target, days)
+    invested = sum(float(flow["spent"]) for flow in flows)
+    if invested <= 0:
+        # Every position came in as an opening or a price-less row, so there is
+        # no amount to move. Reporting zero would look like a real answer.
+        raise ComparisonError(
+            "no_recorded_cost",
+            f"Your {_label(holding)} position has no net money in it -- either "
+            "no purchase prices are recorded, or the sales returned more than "
+            "the purchases cost -- so there is no amount to invest elsewhere.",
+        )
+    keys = [
+        key for key in dict.fromkeys(targets or DEFAULT_TARGETS) if key != holding.key
+    ][:MAX_TARGETS]
+    if not keys:
+        raise ComparisonError(
+            "missing_target", "Choose something to compare against.", field="target"
+        )
+    names = {a.key: _label(a) for a in Asset.objects.filter(key__in=keys)}
+    rows, first_error = [], None
+    for key in keys:
+        try:
+            rows.append(_replay(holding, _resolve_asset(key, field="target"), flows, days))
+        except ComparisonError as exc:
+            first_error = first_error or exc
+            rows.append({
+                "key": key, "label": names.get(key, key),
+                "reason": exc.reason, "detail": exc.detail,
+            })
+    answered = [row for row in rows if "reason" not in row]
+    if not answered:
+        raise first_error
+    # The rows can end on different days (a target whose series stopped closes
+    # its own window early), so the holding's own figures come from the row
+    # that reaches furthest -- today, whenever any row does.
+    latest = max(answered, key=lambda row: row["end_date"])
+    units = float(sum(flow["units"] for flow in flows))
+    return {
+        "subject": {
+            "key": holding.key,
+            "label": _label(holding),
+            "units": units,
+            # Net of sales, before any walk-in: the money really put in.
+            "invested_tomans": round(invested, 2),
+            "value_tomans": latest["actual_tomans"],
+            "price": (
+                _price_in_quote(holding, latest["actual_tomans"] / units)
+                if units > 0 else None
+            ),
+            "end_date": latest["end_date"],
+        },
+        "rows": rows,
+        "requested_days": days,
+    }
 
 
 def comparable_assets(user, account=None) -> dict:
@@ -798,8 +600,10 @@ def comparable_assets(user, account=None) -> dict:
         for asset in Asset.objects.filter(id__in=held_ids, is_active=True).order_by("name")
         if asset.id not in hidden and (asset.is_house or asset.is_manual)
     ]
+    offered = {row["key"] for row in rows}
     return {
         "holdings": [row for row in rows if row["held"]],
         "targets": rows,
+        "default_targets": [key for key in DEFAULT_TARGETS if key in offered],
         "omitted_holdings": omitted,
     }
