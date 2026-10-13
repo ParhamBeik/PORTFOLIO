@@ -1182,6 +1182,27 @@ function ResearchCoveragePanel({ coverage }) {
   );
 }
 
+function CodalDirectPanel({ crawl }) {
+  if (!crawl || !crawl.enabled) return null;
+  return (
+    <Card
+      title="Filing list from codal.ir"
+      subtitle={crawl.promoting ? "codal.ir writes the filing list; BrsApi's Codal list is off." : "Shadow mode: crawled and compared, not yet the filing list."}
+      testId="ops-codal-direct"
+    >
+      <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <div><strong>{num(crawl.complete)}</strong> days reconciled <span className="text-muted">of {num(crawl.days)} crawled</span></div>
+        <div><strong>{num(crawl.failing)}</strong> days failing</div>
+        <div><strong>{num(crawl.letters)}</strong> letters crawled</div>
+        <div><strong>{num(crawl.promoted)}</strong> filings added from codal.ir</div>
+      </div>
+      <p className="mt-3 text-xs text-muted">
+        Crawled {crawl.oldest || "—"} → {crawl.newest || "—"}. Last reconciled day {crawl.last_success_at ? dateTime(crawl.last_success_at) : "never"}.
+      </p>
+    </Card>
+  );
+}
+
 function CodalHistoryPanel({ history }) {
   if (!history) return null;
   return (
@@ -1220,7 +1241,8 @@ function CodalPanel({ codal }) {
             Re-enable with CODAL_ENABLED=1 once the origin is reachable from the host.
           </p>
         </Card>
-        <CodalHistoryPanel history={codal.history_discovery} />
+        <CodalDirectPanel crawl={codal.direct_discovery} />
+      <CodalHistoryPanel history={codal.history_discovery} />
         <ResearchCoveragePanel coverage={codal.research_coverage} />
       </div>
     );
@@ -1269,6 +1291,7 @@ function CodalPanel({ codal }) {
           </dl>
         </Card>
       </div>
+      <CodalDirectPanel crawl={codal.direct_discovery} />
       <CodalHistoryPanel history={codal.history_discovery} />
       <ResearchCoveragePanel coverage={codal.research_coverage} />
     </div>

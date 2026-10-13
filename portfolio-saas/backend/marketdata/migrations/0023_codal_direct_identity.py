@@ -6,8 +6,9 @@
 * CodalLetter.symbol widens to 255. 35 market-wide letters list several symbols
   in one field; at 64 each failed its page's write and the day never finished.
 * Existing rows get `letter_serial` and `letter_type` from their own `link`
-  (falling back to `link_pdf`'s `hs=`), so a crawled letter matches the row
-  BrsApi already wrote instead of duplicating it. Decoded with `unquote`, never
+  (falling back to `link_pdf`'s `hs=`, then `link_attachment`), so a crawled
+  letter matches the row BrsApi already wrote instead of duplicating it.
+  Decoded with `unquote`, never
   `parse_qsl`: 2,115 serials carry a literal `+`.
 """
 import re
@@ -24,9 +25,12 @@ def _query_value(url, name):
 def backfill(apps, schema_editor):
     Announcement = apps.get_model("marketdata", "CodalAnnouncement")
     batch = []
-    rows = Announcement.objects.filter(letter_serial="").only("id", "link", "link_pdf")
+    rows = Announcement.objects.filter(letter_serial="").only("id", "link", "link_pdf", "link_attachment")
     for row in rows.iterator(chunk_size=2000):
-        serial = _query_value(row.link, "LetterSerial") or _query_value(row.link_pdf, "hs")
+        serial = (
+            _query_value(row.link, "LetterSerial") or _query_value(row.link_pdf, "hs")
+            or _query_value(row.link_attachment, "LetterSerial")
+        )
         letter_type = _query_value(row.link, "let") or _query_value(row.link_pdf, "let")
         if not serial and not letter_type:
             continue

@@ -10,15 +10,16 @@ Every letter lands in CodalLetter (market-wide, a faithful copy). With
 promoted into CodalAnnouncement, which is what the extraction pipeline reads;
 BrsApi's Codal list is then switched off (`archive.disabled_endpoints`).
 """
+import re
 from datetime import timedelta
 
 import jdatetime
 from django.conf import settings
-from django.db.models import Min, Q
+from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
 
 from . import jalali
-from .models import CodalAnnouncement, CodalDiscoveryDay, CodalLetter, MarketInstrument
+from .models import CodalAnnouncement, CodalDiscoveryDay, CodalLetter
 from .sources import codal_search
 
 # Re-crawl a complete live day once it is this old: today moves fast, the few
@@ -173,6 +174,29 @@ def promoting():
     return settings.CODAL_DISCOVERY_ENABLED and settings.CODAL_DISCOVERY_SOURCE == "codal"
 
 
+def discovery_status():
+    """What the codal.ir crawl has covered, market-wide (one row per Jalali day).
+
+    Once promoting, this -- not `ArchiveFetchState(codal_announcements)`, which
+    `disabled_endpoints()` freezes -- is the filing list's coverage.
+    """
+    days = CodalDiscoveryDay.objects.aggregate(
+        days=Count("id"),
+        complete=Count("id", filter=Q(verified_complete=True)),
+        failing=Count("id", filter=Q(verified_complete=False, consecutive_failures__gt=0)),
+        oldest=Min("date"), newest=Max("date"),
+        last_success_at=Max("last_success_at"),
+    )
+    days["last_success_at"] = days["last_success_at"].isoformat() if days["last_success_at"] else None
+    return {
+        "enabled": bool(settings.CODAL_DISCOVERY_ENABLED),
+        "promoting": promoting(),
+        **days,
+        "letters": CodalLetter.objects.count(),
+        "promoted": CodalAnnouncement.objects.filter(source=CodalAnnouncement.Source.CODAL).count(),
+    }
+
+
 def _absolute(url):
     """codal.ir answers "/Reports/..." and "DownloadFile.aspx?..."; BrsApi gave full URLs."""
     if not url:
@@ -198,8 +222,7 @@ def promote(letters):
     from .codal_classification import classify
     from .ingest import _enqueue_codal_extractions
 
-    symbols = {row["symbol"] for row in letters if row["symbol"] and len(row["symbol"]) <= 64}
-    catalog = set(MarketInstrument.objects.filter(symbol__in=symbols).values_list("symbol", flat=True))
+    catalog = _promotable_symbols()
     created = []
     for row in letters:
         if row["symbol"] not in catalog:
@@ -249,6 +272,18 @@ def promote(letters):
     return len(created)
 
 
+def _promotable_symbols():
+    """The universe BrsApi's Codal archive covered: tracked TSE symbols, no board copies.
+
+    Documents are stored forever, so this is a disk decision. A bare catalog
+    lookup also admitted ineligible TSETMC rows and BRS symbols that happen to
+    share a name; the full market is projected past the shared disk.
+    """
+    from .tasks import tracked_tse_symbols
+
+    return {symbol for symbol in tracked_tse_symbols() if not re.search(r"\d$", symbol)}
+
+
 def promote_backlog(limit=200):
     """Promote letters crawled before promotion was on (shadow mode), a slice at a time.
 
@@ -258,9 +293,8 @@ def promote_backlog(limit=200):
     """
     if not promoting():
         return 0
-    catalog = MarketInstrument.objects.values("symbol")
     pending = (
-        CodalLetter.objects.filter(symbol__in=catalog)
+        CodalLetter.objects.filter(symbol__in=list(_promotable_symbols()))
         .exclude(tracing_no__in=CodalAnnouncement.objects.filter(tracing_no__isnull=False).values("tracing_no"))
         .order_by("-date_publish", "-time_publish")
     )

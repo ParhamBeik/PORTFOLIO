@@ -469,3 +469,45 @@ def test_letter_type_comes_from_the_real_let_parameter():
     assert _letter_type(CodalAnnouncement(link="https://codal.ir/Reports/Decision.aspx?LetterSerial=a&rt=0&let=6&ct=0")) == "let6"
     assert _letter_type(CodalAnnouncement(link="", letter_type=58)) == "let58"
     assert _letter_type(CodalAnnouncement(link="https://codal.ir/x?LetterSerial=let123abc")) == ""
+
+
+def test_only_tracked_tse_stocks_are_promoted(monkeypatch, settings):
+    """Documents are kept forever: a BRS or ineligible row sharing the name is not the universe."""
+    letters = _page()["Letters"]
+    rows = [codal_search.normalize_letter(letter) for letter in letters]
+    _promote_on(settings, monkeypatch, set())
+    MarketInstrument.objects.create(source="brs", symbol=rows[0]["symbol"], category="gold", eligible=True)
+    MarketInstrument.objects.create(source="tsetmc", symbol=rows[1]["symbol"], category="stock", eligible=False)
+    _serve(monkeypatch, letters, total=4, pages=1)
+
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))
+
+    assert not CodalAnnouncement.objects.exists()
+    assert CodalLetter.objects.count() == 4
+
+
+def test_research_and_ops_read_the_crawl_once_it_writes_the_list(monkeypatch, settings, make_user):
+    from django.urls import reverse
+    from rest_framework.test import APIClient
+
+    from marketdata.models import ArchiveFetchState
+    from portfolio.models import Account
+
+    _promote_on(settings, monkeypatch, {"فولاد"})
+    CodalDiscoveryDay.objects.create(date="1404-07-02", verified_complete=True, last_success_at=timezone.now())
+    CodalAnnouncement.objects.create(symbol="فولاد", code="ن-10", title="x", date_publish="1404-07-02")
+    # Frozen by disabled_endpoints(): must not be what the page reports.
+    ArchiveFetchState.objects.create(endpoint=ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS, symbol="فولاد")
+    user = make_user()
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    coverage = client.get("/api/explore/stocks/فولاد/").data["coverage"]
+    codal = [row for row in coverage if row["endpoint"] == "codal_announcements"]
+    assert len(codal) == 1 and codal[0]["source"] == "codal.ir"
+    assert codal[0]["status"] == "complete" and codal[0]["stored_rows"] == 1
+    assert _codal_status()["direct_discovery"]["complete"] == 1
+
+    account = Account.objects.create(user=user, name="Quality Account")
+    limits = client.get(reverse("account-data-quality", kwargs={"account_id": account.id})).data["known_limits"]
+    assert "codal_page_cap" not in {limit["code"] for limit in limits}
