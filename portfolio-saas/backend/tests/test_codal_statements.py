@@ -523,3 +523,20 @@ def test_a_blocked_main_page_keeps_the_report_retryable(monkeypatch):
     report, _ = codal_pipeline.extract_report(announcement.pk)
     assert report.status == CodalReport.Status.BLOCKED_NETWORK
     assert report.error_code == "statement_tab_unfetched"
+
+
+def test_a_positive_cost_of_revenue_is_not_certified():
+    from marketdata.codal_statements import income_reconciles
+
+    base = {"income.operating_revenue": 100, "income.continuing_profit": 10, "income.net_profit": 10}
+    assert income_reconciles({**base, "income.cost_of_revenue": -20, "income.gross_profit": 80})
+    assert not income_reconciles({**base, "income.cost_of_revenue": 20, "income.gross_profit": 120})
+
+
+def test_a_value_whose_row_identity_disagrees_with_its_label_is_not_used():
+    cell = re.search(rb'\{[^{}]*"address":"B4"[^{}]*\}', INTERIM).group(0)
+    moved = re.sub(rb'"rowSequence":\d+', b'"rowSequence":999', cell)
+    assert moved != cell
+    facts = {f["fact_code"]: f for f in _parse(INTERIM.replace(cell, moved))}
+    assert "income.operating_revenue" not in facts
+    assert all(f["verification_status"] == "extracted" for f in facts.values())

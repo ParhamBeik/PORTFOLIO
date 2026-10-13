@@ -282,7 +282,14 @@ def _sheet_facts(kind, sheet, table, *, end, start, months, unit, is_consolidate
             if not rows:
                 continue
             value_cell = by_row[rows[0]].get(column)
-            if value_cell is None or normalize_jalali(value_cell.get("periodEndToDate")) not in ("", end):
+            label_cell = by_row[rows[0]][1]
+            if (value_cell is None
+                    or normalize_jalali(value_cell.get("periodEndToDate")) not in ("", end)
+                    # Same address row is not enough: the payload's own row
+                    # identity must agree, or label and figure are not one line.
+                    or any(value_cell.get(key) != label_cell.get(key)
+                           for key in ("rowCode", "rowSequence")
+                           if key in value_cell or key in label_cell)):
                 break
             raw = str(value_cell.get("value") or "").strip()
             blank = raw in ("", "-", "--")
@@ -329,6 +336,8 @@ def income_reconciles(values):
         return False
     if values["income.net_profit"] != values["income.continuing_profit"] + values.get("income.discontinued_profit", 0):
         return False
+    if "income.cost_of_revenue" in values and values["income.cost_of_revenue"] > 0:
+        return False  # Codal states costs as negatives; gross = revenue + cost
     if "income.gross_profit" in values and "income.cost_of_revenue" in values:
         return values["income.gross_profit"] == values["income.operating_revenue"] + values["income.cost_of_revenue"]
     return True
