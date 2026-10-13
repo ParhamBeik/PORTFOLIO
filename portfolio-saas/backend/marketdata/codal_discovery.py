@@ -174,21 +174,32 @@ def promoting():
     return settings.CODAL_DISCOVERY_ENABLED and settings.CODAL_DISCOVERY_SOURCE == "codal"
 
 
-def withheld_documents():
-    """Filings codal.ir wrote whose documents are not fetched (yet).
+def _history_cutoff():
+    return shift(tehran_today(), settings.CODAL_DISCOVERY_LIVE_DAYS)
 
-    Older than the live window and outside `CODAL_HISTORY_DOCUMENTS`. Without
-    this, promoting the crawled history queued every document it ever listed
-    -- the bulk download the storage policy rules out.
+
+def held_letters():
+    """Crawled letters not yet promoted into the filing list (a `CodalLetter` Q).
+
+    Older than the live window and outside `CODAL_HISTORY_DOCUMENTS`. A filing
+    in the list is one whose source files are kept, so the history the owner has
+    not yet given disk to stays here as crawled rows -- never a filing that is
+    only a remote link, and never a bulk download of everything codal.ir lists.
     """
     scope = settings.CODAL_HISTORY_DOCUMENTS
     if scope == "all":
         return Q(pk__in=[])
-    held = Q(source=CodalAnnouncement.Source.CODAL,
-             date_publish__lt=shift(tehran_today(), settings.CODAL_DISCOVERY_LIVE_DAYS))
+    held = Q(date_publish__lt=_history_cutoff())
     if scope == "annual_statements":
-        held &= ~(Q(code="ن-10") & Q(title__contains="سال مالی"))
+        held &= ~(Q(letter_code="ن-10") & Q(title__contains="سال مالی"))
     return held
+
+
+def _is_held(row):
+    scope = settings.CODAL_HISTORY_DOCUMENTS
+    if scope == "all" or row["date_publish"] >= _history_cutoff():
+        return False
+    return not (scope == "annual_statements" and row["letter_code"] == "ن-10" and "سال مالی" in row["title"])
 
 
 def discovery_status():
@@ -297,7 +308,7 @@ def promote(letters):
             if gained:
                 requeue.append(existing.pk)
             continue
-        if CodalAnnouncement.objects.filter(tracing_no=row["tracing_no"]).exists():
+        if _is_held(row) or CodalAnnouncement.objects.filter(tracing_no=row["tracing_no"]).exists():
             continue
         announcement, made = CodalAnnouncement.objects.get_or_create(
             symbol=row["symbol"], code=row["letter_code"],
@@ -340,6 +351,7 @@ def promote_backlog(limit=200):
         return 0
     pending = (
         CodalLetter.objects.filter(symbol__in=list(_promotable_symbols()))
+        .exclude(held_letters())
         .exclude(tracing_no__in=CodalAnnouncement.objects.filter(tracing_no__isnull=False).values("tracing_no"))
         .order_by("-date_publish", "-time_publish")
     )

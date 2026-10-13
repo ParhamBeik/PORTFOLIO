@@ -686,9 +686,10 @@ CODAL_SEARCH_MAX_PARK_SECONDS = int(os.getenv("CODAL_SEARCH_MAX_PARK_SECONDS", "
 CODAL_DISCOVERY_OLDEST_DAY = os.getenv("CODAL_DISCOVERY_OLDEST_DAY", "1386-01-01")
 # Today and this many days before it are the live lane: re-crawled, not trusted.
 CODAL_DISCOVERY_LIVE_DAYS = int(os.getenv("CODAL_DISCOVERY_LIVE_DAYS", "3"))
-# Documents of codal.ir filings older than the live window are a disk decision
-# (no backups, 100 GB shared). "annual_statements": year-end statements only --
-# what the sales/profit history is built from; "all"; "none".
+# Which crawled codal.ir letters older than the live window become filings (and
+# so have their documents kept). A disk decision -- no backups, 100 GB shared.
+# "annual_statements": year-end statements only, what the sales/profit history
+# is built from; "all"; "none". The rest stay crawled in CodalLetter.
 CODAL_HISTORY_DOCUMENTS = os.getenv("CODAL_HISTORY_DOCUMENTS", "annual_statements")
 if (CODAL_DISCOVERY_ENABLED and CODAL_DISCOVERY_SOURCE == "codal"
         and "MARKETDATA_TICK_QUOTA_SHARE" not in os.environ):
