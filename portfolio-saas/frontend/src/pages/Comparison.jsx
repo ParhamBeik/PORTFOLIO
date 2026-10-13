@@ -200,7 +200,14 @@ function Rows({ subject, rows }) {
         <div>
           <bdi>{r.label}</bdi>
           {r.reason && (
-            <div className="text-xs text-muted">{r.detail || humanize(r.reason)}</div>
+            <div className="text-xs text-muted">
+              {r.detail || humanize(r.reason)}
+              {r.retry && (
+                <Button variant="link" onClick={r.retry} data-testid="comparison-row-retry">
+                  {translate("Retry", lang)}
+                </Button>
+              )}
+            </div>
           )}
         </div>
       ),
@@ -348,13 +355,26 @@ export default function Comparison() {
   const next = subject ? asked.find((key) => !cache[slot(key)]) : undefined;
 
   const settled = asked.map((key) => cache[slot(key)]).filter(Boolean);
-  // A failure of the holding itself (no recorded cost, nothing to replay) is
-  // the same for every target; it is the page's answer, not a row's.
-  const failure = settled.find((entry) => entry.error)?.error;
+  // A 400 is the holding itself (no recorded cost, nothing to replay): the same
+  // for every target, so it is the page's answer. Target refusals come back as
+  // rows with a 200. Anything else -- the per-user concurrency cap, a timeout,
+  // a 5xx -- belongs to the one row it hit and can be retried there.
+  const failure = settled.find((entry) => entry.error?.status === 400)?.error;
+  const retry = (key) =>
+    setCache((cur) => {
+      const nextCache = { ...cur };
+      delete nextCache[slot(key)];
+      return nextCache;
+    });
   const subjectData = settled.find((entry) => entry.data)?.data.subject;
   const rows = asked.map((key) => {
-    const row = cache[slot(key)]?.data?.rows?.[0];
-    return row ? { ...row, label: row.label || labels[key] || key } : { key, label: labels[key] || key, loading: true };
+    const entry = cache[slot(key)];
+    const label = labels[key] || key;
+    if (entry?.error) {
+      return { key, label, reason: "failed", detail: entry.error.message, retry: () => retry(key) };
+    }
+    const row = entry?.data?.rows?.[0];
+    return row ? { ...row, label: row.label || label } : { key, label, loading: true };
   });
   const answered = rows.filter((r) => r.series);
   const chartRow = answered.find((r) => r.key === shown) || answered[0];

@@ -287,6 +287,41 @@ describe("Page Rendering Tests", () => {
     expect(api.comparison.mock.calls.length).toBe(before);
   });
 
+  it("keeps the table when one target is rate-limited, and retries just that row", async () => {
+    let busy = true;
+    api.comparison.mockImplementation((_accountId, options) => {
+      if (!options) {
+        return Promise.resolve({
+          holdings: [{ key: "mine", label: "Mine", priced: true }],
+          targets: [{ key: "gold", label: "Gold" }, { key: "coin", label: "Coin" }],
+          default_targets: ["gold", "coin"],
+          omitted_holdings: [],
+        });
+      }
+      const key = options.targets[0];
+      if (key === "coin" && busy) {
+        busy = false;
+        return Promise.reject(Object.assign(new Error("Too many requests."), { status: 429 }));
+      }
+      return Promise.resolve({
+        subject: { key: "mine", label: "Mine", units: 10, invested_tomans: 100, value_tomans: 200, price: { value: 200, unit: "IRT" }, end_date: "2026-10-12" },
+        rows: [{ key, label: key === "gold" ? "Gold" : "Coin", units: 1, value_tomans: 300, actual_tomans: 200, invested_tomans: 100, difference_tomans: -100, difference_pct: -33.3, breakeven_price: { value: 300, unit: "IRT" }, start_date: "2026-01-01", end_date: "2026-10-12", window_days: 280, series: [], warnings: [] }],
+      });
+    });
+
+    render(
+      <MemoryRouter>
+        <Comparison />
+      </MemoryRouter>
+    );
+
+    const table = await screen.findByTestId("comparison-table");
+    await waitFor(() => expect(table).toHaveTextContent("Too many requests."));
+    expect(table).toHaveTextContent("Gold");
+    fireEvent.click(screen.getByTestId("comparison-row-retry"));
+    await waitFor(() => expect(screen.getByTestId("comparison-table")).not.toHaveTextContent("Too many requests."));
+  });
+
   it("renders MyOptimal with scenarios and recommended weights", async () => {
     api.myOptimal.mockResolvedValue({
       as_of: "2026-09-08T12:00:00Z",
