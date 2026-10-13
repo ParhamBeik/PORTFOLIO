@@ -295,6 +295,17 @@ def test_a_rechecked_day_walks_every_page_before_completing(monkeypatch):
     assert state.verified_complete and state.checks == 2
 
 
+def test_a_total_that_shrinks_mid_pass_restarts_the_pass(monkeypatch):
+    # A withdrawal shifts later pages up; the stale stored row must not let the
+    # pass complete on a count that skipped a listed letter.
+    _serve(monkeypatch, _page()["Letters"], total=3, pages=2)
+    state = CodalDiscoveryDay.objects.create(date="1404-07-02", total=4, next_page=2)
+    result = codal_discovery.step(state)
+    state.refresh_from_db()
+    assert not result["complete"] and not state.verified_complete
+    assert state.next_page == 1 and state.total == 3
+
+
 def test_reaching_the_last_page_short_restarts_with_backoff(monkeypatch):
     _serve(monkeypatch, _page()["Letters"], total=290, pages=1)
     state = CodalDiscoveryDay.objects.create(date="1404-07-02")
@@ -575,6 +586,9 @@ def test_a_recrawl_that_lists_a_new_document_updates_and_requeues(monkeypatch, s
     codal_discovery.promote([later])
     assert CodalReport.objects.get(announcement=made).status == CodalReport.Status.PARSED
     codal_discovery.promote([{**later, "attachment_url": "/Reports/DownloadFile.aspx?id=8"}])
+    assert CodalReport.objects.get(announcement=made).status == CodalReport.Status.FAILED
+    CodalReport.objects.filter(announcement=made).update(status=CodalReport.Status.PARSED)
+    codal_discovery.promote([{**later, "attachment_url": "/Reports/DownloadFile.aspx?id=8", "title": "retitled"}])
     assert CodalReport.objects.get(announcement=made).status == CodalReport.Status.FAILED
 
     # BrsApi's row keeps its own fields; only identity is filled in.
