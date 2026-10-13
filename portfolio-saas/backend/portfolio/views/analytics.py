@@ -1296,11 +1296,12 @@ class OptimizationSnapshotLatestView(APIView):
 class ComparisonView(APIView):
     """Counterfactuals: what the same money would have done somewhere else.
 
-    `GET` with no `mode` answers what the picker can offer; with one, it runs
-    that comparison. Every refusal comes back as a `reason` code the page
-    renders as a sentence, because most of them are data limits the user can
-    act on -- property has no market series, a position with no recorded prices
-    has no amount to move, a coin's history may not reach back to 2022.
+    `GET` with no `subject` answers what the picker can offer; with one, it
+    replays that holding into each of `targets` (comma-separated, defaulting to
+    the dollar, 18k gold and the Emami coin). Every refusal comes back as a
+    `reason` code the page renders as a sentence, because most of them are data
+    limits the user can act on -- property has no market series, a position
+    with no recorded prices has no amount to move.
     """
 
     permission_classes = [IsAuthenticated]
@@ -1314,19 +1315,23 @@ class ComparisonView(APIView):
         )
 
         account = _scope(request)
-        mode = request.query_params.get("mode")
-        if not mode:
+        subject = request.query_params.get("subject")
+        if not subject:
             return Response(comparable_assets(request.user, account))
         days, error = _int_param(request, "days", 0, clamp=(0, MAX_WINDOW_DAYS))
         if error:
             return error
+        targets = [
+            key.strip()
+            for key in request.query_params.get("targets", "").split(",")
+            if key.strip()
+        ]
         try:
             payload = compare(
                 request.user,
                 account=account,
-                mode=mode,
-                subject=request.query_params.get("subject"),
-                target=request.query_params.get("target"),
+                subject=subject,
+                targets=targets or None,
                 # 0 is "as far back as my own history goes", which is the
                 # answer this page is usually asked for.
                 days=days or None,

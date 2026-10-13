@@ -18,7 +18,7 @@ an ingest hole, too strict flags every weekend as broken.
 
 from bisect import bisect_right
 
-from django.db.models import Count, Sum
+from django.db.models import Count, Q, Sum
 from django.core.cache import cache
 
 from .models import (
@@ -34,6 +34,11 @@ from django.db.models.functions import TruncDate
 # Fewest distinct gold/FX symbols on a day before that feed's own publishing
 # pattern is trusted as a market calendar (see gold_currency_quoting_days).
 MIN_FEED_BREADTH_FOR_CALENDAR = 5
+
+# A TSE day is a closure when fewer than 1 in this many of its padded rows
+# traded (see market_closure_days). Ordinary sessions run near 1 in 2; the
+# 1404-1405 war closure, with only fixed-income funds open, near 1 in 12.
+CLOSURE_TRADED_SHARE = 5
 
 
 def market_closure_days(*, start=None, end=None) -> set[str]:
@@ -53,8 +58,26 @@ def market_closure_days(*, start=None, end=None) -> set[str]:
 
     Historically 74 such days across 12 Jalali years — mostly one-to-three-day
     national holidays, plus the extended 1404-1405 closure.
+
+    "Zero" is too strict for that closure, though. From 1404-12-17 to 1405-02-28
+    the fixed-income funds kept trading -- ~170 of ~2,075 padded rows a day,
+    against ~1,070 on an ordinary session -- so only its first five days had a
+    market-wide zero. The other 40 read as an ingest hole, and every price panel
+    holding a stock was trimmed to the reopening: years of history dropped, and
+    the comparison page valued a 2022 purchase at its May 2026 price. A day is
+    therefore a closure when fewer than one in `CLOSURE_TRADED_SHARE` of that
+    day's own rows traded. The traded share is measured against the same day's
+    row count, never a window's busiest session: a query that spans only the
+    closure has no ordinary session to compare against.
+
+    That ratio alone would let a half-ingested day pass as a closure (nine
+    padded rows and one trade, with the other 2,000 symbols simply missing) and
+    hide the very hole `market_outage_windows` exists to repair. So the day must
+    also be broad -- at least half as many rows as the widest day in the query.
+    The padding is what makes that safe: a real closure still carries a row for
+    every listed symbol.
     """
-    cache_key = f"marketdata:closure-days:{start}:{end}"
+    cache_key = f"marketdata:closure-days:v2:{start}:{end}"
     cached = cache.get(cache_key)
     if cached is not None:
         return set(cached)
@@ -64,8 +87,16 @@ def market_closure_days(*, start=None, end=None) -> set[str]:
         queryset = queryset.filter(date__gte=start)
     if end is not None:
         queryset = queryset.filter(date__lte=end)
-    rows = queryset.values("date").annotate(vol=Sum("tvol"), trades=Sum("tno"))
-    result = {r["date"] for r in rows if not r["vol"] and not r["trades"]}
+    rows = list(queryset.values("date").annotate(
+        listed=Count("id"),
+        traded=Count("id", filter=Q(tvol__gt=0) | Q(tno__gt=0)),
+    ))
+    widest = max((r["listed"] for r in rows), default=0)
+    result = {
+        r["date"] for r in rows
+        if r["traded"] * CLOSURE_TRADED_SHARE < r["listed"]
+        and r["listed"] * 2 >= widest
+    }
     cache.set(cache_key, sorted(result), timeout=60 * 60)
     return result
 
