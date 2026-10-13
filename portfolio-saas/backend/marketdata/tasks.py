@@ -376,9 +376,12 @@ def queue_codal_extractions():
             CodalReport.Status.FAILED,
         ))
     )
+    from .codal_discovery import withheld_documents
+
     ids = [] if origin_down else list(
         CodalAnnouncement.objects.filter(has_artifact)
         .filter(Q(report__isnull=True) | retryable)
+        .exclude(withheld_documents())
         .exclude(pk__in=pending_ids)
         .order_by("-date_publish", "-time_publish")
         .values_list("id", flat=True)[:limit]

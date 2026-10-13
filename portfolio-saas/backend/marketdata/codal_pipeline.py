@@ -189,6 +189,10 @@ def extract_report(announcement_id):
     for kind, source_url in _artifact_sources(announcement):
         if not source_url:
             continue
+        if kind == CodalArtifact.Kind.PDF and downloaded:
+            # A PDF barely compresses; it is the fallback for a filing whose
+            # HTML/Excel could not be had, not a third copy of one that could.
+            continue
         artifact, _ = CodalArtifact.objects.get_or_create(
             report=report, kind=kind, source_url=_absolute_url(source_url)
         )

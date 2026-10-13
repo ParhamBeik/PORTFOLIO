@@ -736,10 +736,13 @@ def _enqueue_codal_extractions(rows):
     pair_filter = Q()
     for symbol, code in pairs:
         pair_filter |= Q(symbol=symbol, code=code)
+    from .codal_discovery import withheld_documents
+
     ids = list(
         CodalAnnouncement.objects.filter(
             has_artifact, pair_filter, report__isnull=True
         )
+        .exclude(withheld_documents())
         .order_by("id")
         .values_list("id", flat=True)
     )

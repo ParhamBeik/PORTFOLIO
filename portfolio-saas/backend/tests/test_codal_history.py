@@ -548,3 +548,35 @@ def test_a_recrawl_that_lists_a_new_document_updates_and_requeues(monkeypatch, s
     codal_discovery.promote([{**later, "title": "changed again"}])
     made.refresh_from_db()
     assert made.title.endswith("(اصلاحیه)")
+
+
+def test_old_codal_filings_fetch_only_year_end_statements(monkeypatch, settings):
+    from marketdata import ingest
+
+    settings.CODAL_ENABLED = True
+    settings.CODAL_HISTORY_DOCUMENTS = "annual_statements"
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
+    queued = []
+    monkeypatch.setattr("marketdata.tasks._dispatch_codal_ids", lambda ids, **k: queued.extend(ids) or len(ids))
+    old = dict(symbol="فولاد", source="codal", date_publish="1395-01-10", link="https://codal.ir/r")
+    annual = CodalAnnouncement.objects.create(code="ن-10", title="صورتهای مالی سال مالی منتهی به ۱۳۹۴/۱۲/۲۹", **old)
+    monthly = CodalAnnouncement.objects.create(code="ن-30", title="گزارش فعالیت ماهانه", **old)
+    brsapi = CodalAnnouncement.objects.create(code="ن-30", title="x", symbol="فولاد", date_publish="1395-01-11",
+                                              link="https://codal.ir/r2")
+
+    ingest._enqueue_codal_extractions([annual, monthly, brsapi])
+    assert set(queued) == {annual.pk, brsapi.pk}
+
+
+def test_a_pdf_is_only_the_fallback(monkeypatch):
+    from marketdata import codal_pipeline
+    from marketdata.models import CodalArtifact
+
+    fetched = []
+    monkeypatch.setattr(codal_pipeline, "download_artifact",
+                        lambda url, kind: fetched.append(kind) or (url, "text/html", b"<html>x</html>"))
+    monkeypatch.setattr(codal_pipeline, "store_artifact", lambda content, content_type, kind: ("k", "c"))
+    row = CodalAnnouncement.objects.create(symbol="فولاد", code="ن-30", title="x", date_publish="1404-07-01",
+                                           link="https://codal.ir/r", link_pdf="https://codal.ir/p")
+    codal_pipeline.extract_report(row.pk)
+    assert CodalArtifact.Kind.PDF not in fetched
