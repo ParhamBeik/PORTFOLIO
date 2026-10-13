@@ -16,6 +16,7 @@ Conventions:
 - Jalali dates are normalized to dash form ("1403/10/19" -> "1403-10-19") by
   `normalize_jalali` so exactly one format reaches the DB.
 """
+import json
 import logging
 from decimal import Decimal
 from . import calendars, jalali, jalali as jalali_mod, validation
@@ -84,17 +85,7 @@ def screen(kind, records, endpoint, symbol="", date_key="date", default_date="")
     for rejection in [*field_rejections, *rejections]:
         day = rejection.record.get(date_key) or default_date
         day = normalize_jalali(day) if isinstance(day, str) else ""
-        row, created = RejectedRecord.objects.get_or_create(
-            endpoint=endpoint,
-            symbol=str(symbol)[:64],
-            date=str(day)[:10],
-            reason=rejection.reason[:64],
-            defaults={"payload": _jsonable(rejection.record)},
-        )
-        if not created:
-            RejectedRecord.objects.filter(pk=row.pk).update(
-                occurrences=row.occurrences + 1, payload=_jsonable(rejection.record)
-            )
+        quarantine(endpoint, symbol, day, rejection.reason, _jsonable(rejection.record))
     if field_rejections or rejections:
         (logger.warning if rejections else logger.debug)(
             "%s(%s): rejected %d row(s), salvaged %d field(s) from %d records (%s)",
@@ -102,6 +93,31 @@ def screen(kind, records, endpoint, symbol="", date_key="date", default_date="")
             ", ".join(sorted({r.reason for r in [*field_rejections, *rejections]})),
         )
     return accepted, len(rejections)
+
+
+def quarantine(endpoint, symbol, day, reason, payload):
+    """Keep one rejected row per (endpoint, symbol, date, reason).
+
+    `occurrences` counts distinct bad payloads, not downloads: every full-history
+    refresh re-sends every old bad row, so counting sightings turned 3,505 gold
+    outliers into 117,921 "rejections". `last_seen` still moves on every sighting.
+    """
+    row, created = RejectedRecord.objects.get_or_create(
+        endpoint=endpoint,
+        symbol=str(symbol)[:64],
+        date=str(day)[:10],
+        reason=reason[:64],
+        defaults={"payload": payload},
+    )
+    if created:
+        return
+    # Compared as stored: JSON turns tuples into lists, so compare after the same trip.
+    changed = row.payload != json.loads(json.dumps(payload, default=str))
+    RejectedRecord.objects.filter(pk=row.pk).update(
+        occurrences=row.occurrences + (1 if changed else 0),
+        payload=payload,
+        last_seen=timezone.now(),
+    )
 
 
 def _jsonable(record):
@@ -790,18 +806,10 @@ def ingest_gold_currency_history(payload, *, origin=GoldCurrencyHistory.Origin.B
                     if deviation > 0.50:
                         bad += 1
                         day_str = normalize_jalali(rec["date"])
-                        row_rej, created_rej = RejectedRecord.objects.get_or_create(
-                            endpoint="gold_daily",
-                            symbol=str(symbol)[:64],
-                            date=str(day_str)[:10],
-                            reason="outlier_deviation",
-                            defaults={"payload": {"close": c, "median": median, "record": rec}},
+                        quarantine(
+                            "gold_daily", symbol, day_str, "outlier_deviation",
+                            {"close": c, "median": median, "record": rec},
                         )
-                        if not created_rej:
-                            RejectedRecord.objects.filter(pk=row_rej.pk).update(
-                                occurrences=row_rej.occurrences + 1,
-                                payload={"close": c, "median": median, "record": rec}
-                            )
                         outliers += 1
                         continue
 

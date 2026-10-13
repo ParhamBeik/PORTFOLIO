@@ -1192,10 +1192,9 @@ class TestTrackB:
         assert integrity is not None
         assert integrity.symbol == "TEST_STOCK"
         assert integrity.passes_gate is True
-        # Once to build the shared session calendar for all symbols, once for
-        # the market-wide outage sweep. The point of the guard is that neither
-        # is per-symbol.
-        assert calendar_calls == 2
+        # Once, to build the shared session calendar for all symbols -- never
+        # per symbol. The outage sweep reads stored days, not this calendar.
+        assert calendar_calls == 1
 
     def test_integrity_gate_enforcement(self):
         """Verify that symbols failing the integrity gate are excluded from the daily returns matrix."""
