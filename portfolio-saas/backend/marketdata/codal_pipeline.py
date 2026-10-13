@@ -181,6 +181,15 @@ def _read_statement(report, announcement, downloaded):
     return found, blocked
 
 
+def _usable(kind, content):
+    """Whether a downloaded artifact parses to anything at all."""
+    try:
+        parsed = parse_artifact(kind, content)
+    except Exception:
+        return False
+    return bool(parsed.tables or parsed.sections or parsed.text)
+
+
 def _artifact_states(report):
     """Per-artifact outcome, compact enough for one ledger line."""
     return {
@@ -293,9 +302,9 @@ def extract_report(announcement_id):
     for kind, source_url in _artifact_sources(announcement):
         if not source_url:
             continue
-        if kind == CodalArtifact.Kind.PDF and downloaded:
+        if kind == CodalArtifact.Kind.PDF and any(_usable(k, c) for k, _, c in downloaded):
             # A PDF barely compresses; it is the fallback for a filing whose
-            # HTML/Excel could not be had, not a third copy of one that could.
+            # HTML/Excel did not yield a readable document, not a third copy.
             continue
         artifact, content = _fetch_artifact(report, kind, source_url)
         if content is not None:

@@ -205,6 +205,9 @@ def discovery_status():
         last_success_at=Max("last_success_at"),
     )
     days["last_success_at"] = days["last_success_at"].isoformat() if days["last_success_at"] else None
+    # Days are created newest-first as the crawl walks back; all of them
+    # reconciled says nothing until the walk has reached its configured floor.
+    days["reached_oldest"] = bool(days["oldest"]) and days["oldest"] <= settings.CODAL_DISCOVERY_OLDEST_DAY
     return {
         "enabled": bool(settings.CODAL_DISCOVERY_ENABLED),
         "promoting": promoting(),

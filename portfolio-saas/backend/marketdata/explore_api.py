@@ -525,7 +525,7 @@ def _codal_discovery_coverage(symbol):
     every crawled day reconciled against codal.ir's own total.
     """
     crawl = discovery_status()
-    complete = bool(crawl["days"]) and crawl["complete"] == crawl["days"]
+    complete = bool(crawl["days"]) and crawl["complete"] == crawl["days"] and crawl["reached_oldest"]
     return {
         "endpoint": ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
         "status": "not_tried" if not crawl["days"] else "complete" if complete else "partial",

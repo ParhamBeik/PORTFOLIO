@@ -502,10 +502,16 @@ def test_research_and_ops_read_the_crawl_once_it_writes_the_list(monkeypatch, se
     client = APIClient()
     client.force_authenticate(user=user)
 
-    coverage = client.get("/api/explore/stocks/فولاد/").data["coverage"]
-    codal = [row for row in coverage if row["endpoint"] == "codal_announcements"]
-    assert len(codal) == 1 and codal[0]["source"] == "codal.ir"
-    assert codal[0]["status"] == "complete" and codal[0]["stored_rows"] == 1
+    def codal():
+        coverage = client.get("/api/explore/stocks/فولاد/").data["coverage"]
+        rows = [row for row in coverage if row["endpoint"] == "codal_announcements"]
+        assert len(rows) == 1 and rows[0]["source"] == "codal.ir"
+        return rows[0]
+
+    # Every crawled day reconciled, but the walk back has not reached its floor.
+    assert codal()["status"] == "partial"
+    settings.CODAL_DISCOVERY_OLDEST_DAY = "1404-07-02"
+    assert codal()["status"] == "complete" and codal()["stored_rows"] == 1
     assert _codal_status()["direct_discovery"]["complete"] == 1
 
     account = Account.objects.create(user=user, name="Quality Account")
@@ -580,3 +586,40 @@ def test_a_pdf_is_only_the_fallback(monkeypatch):
                                            link="https://codal.ir/r", link_pdf="https://codal.ir/p")
     codal_pipeline.extract_report(row.pk)
     assert CodalArtifact.Kind.PDF not in fetched
+
+
+
+def test_a_failed_live_filing_keeps_retrying_after_it_ages_out(monkeypatch, settings):
+    from marketdata import tasks
+    from marketdata.models import CodalReport
+
+    settings.CODAL_ENABLED = True
+    settings.CODAL_HISTORY_DOCUMENTS = "annual_statements"
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
+    queued = []
+    monkeypatch.setattr(tasks, "_dispatch_codal_ids", lambda ids, **k: queued.extend(ids) or len(ids))
+    old = dict(symbol="فولاد", source="codal", code="ن-30", title="گزارش فعالیت ماهانه",
+               date_publish="1395-01-10", link="https://codal.ir/r")
+    failed = CodalAnnouncement.objects.create(**old)
+    CodalReport.objects.create(announcement=failed, status=CodalReport.Status.BLOCKED_NETWORK)
+    untried = CodalAnnouncement.objects.create(**{**old, "date_publish": "1395-01-11"})
+
+    tasks.queue_codal_extractions()
+    assert failed.pk in queued and untried.pk not in queued
+
+
+def test_a_pdf_is_fetched_when_the_html_reads_as_nothing(monkeypatch):
+    from marketdata import codal_pipeline
+    from marketdata.codal_parsers import ParsedDocument
+    from marketdata.models import CodalArtifact
+
+    fetched = []
+    monkeypatch.setattr(codal_pipeline, "download_artifact",
+                        lambda url, kind: fetched.append(kind) or (url, "text/html", b"<html></html>"))
+    monkeypatch.setattr(codal_pipeline, "store_artifact", lambda content, content_type, kind: ("k", "c"))
+    monkeypatch.setattr(codal_pipeline, "parse_artifact", lambda kind, content: ParsedDocument())
+    row = CodalAnnouncement.objects.create(symbol="فولاد", code="ن-30", title="x", date_publish="1404-07-01",
+                                           link="https://codal.ir/r", link_pdf="https://codal.ir/p")
+    codal_pipeline.extract_report(row.pk)
+    assert CodalArtifact.Kind.PDF in fetched
