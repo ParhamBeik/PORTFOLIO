@@ -53,6 +53,7 @@ from .models import (
     AssetMetricSnapshot,
     AssetSignalSnapshot,
     CodalAnnouncement,
+    CodalArtifact,
     CodalReport,
     CorporateAction,
     GoldCurrencyHistory,
@@ -329,13 +330,10 @@ def queue_codal_extractions():
     if not settings.CODAL_ENABLED:
         outcome.finish(WorkflowRun.Outcome.SKIPPED, error_code="codal_disabled")
         return 0
-    if origin_unreachable():
-        # Every one of these would fail at connect. Enqueueing them anyway is how
-        # the ledger filled with ~986 identical timeouts a day.
-        outcome.finish(
-            WorkflowRun.Outcome.SKIPPED, error_code="origin_unreachable"
-        )
-        return 0
+    # Downloads would fail at connect -- enqueueing them anyway is how the ledger
+    # filled with ~986 identical timeouts a day. Re-parsing bytes already in
+    # MinIO needs no origin, so a parser upgrade still proceeds during an outage.
+    origin_down = origin_unreachable()
 
     # Never enqueue more than the codal queue can absorb: the backlog is ~74,000
     # rows, and a flat batch size would just move it from the database into Redis.
@@ -372,16 +370,99 @@ def queue_codal_extractions():
             CodalReport.Status.FAILED,
         ))
     )
-    ids = list(
+    ids = [] if origin_down else list(
         CodalAnnouncement.objects.filter(has_artifact)
         .filter(Q(report__isnull=True) | retryable)
         .exclude(pk__in=pending_ids)
         .order_by("-date_publish", "-time_publish")
         .values_list("id", flat=True)[:limit]
     )
+    if len(ids) < limit:
+        ids += _stale_parser_codal_ids(
+            limit - len(ids), exclude=set(ids) | pending_ids, archived_only=origin_down,
+        )
+    if origin_down and not ids:
+        outcome.finish(WorkflowRun.Outcome.SKIPPED, error_code="origin_unreachable")
+        return 0
     queued = _dispatch_codal_ids(ids, slots=limit)
     _finish_ok(outcome, rows_accepted=queued)
     return queued
+
+
+def _codal_family_changed_ids():
+    """Coded filings whose parser family the classifier now decides differently.
+
+    The letter code began outranking the title in the same change, in both
+    directions: ن-10 filings extracted earlier as generic now need the
+    statement parser, and ن-26/ن-20/ن-30 filings whose titles mention the
+    statements were run through it and now classify as generic. Both carry a
+    CURRENT version, so only the extractor's own classifier can tell; once
+    re-run the stamp matches it and the filing is never re-selected.
+    """
+    from .codal_classification import _CODE_CATEGORY, classify_announcement
+
+    statement_v, generic_v = settings.CODAL_STATEMENT_PARSER_VERSION, settings.CODAL_PARSER_VERSION
+    if statement_v == generic_v:
+        return []
+    candidates = CodalAnnouncement.objects.filter(code__in=list(_CODE_CATEGORY)).filter(
+        Q(report__parser_version=generic_v) & ~Q(report__category=2) & Q(code="ن-10")
+        | Q(report__parser_version=statement_v) & ~Q(code="ن-10")
+    )
+    ids = []
+    for row in candidates.select_related("report").iterator(chunk_size=500):
+        wanted = statement_v if classify_announcement(row).get("category") == 2 else generic_v
+        if row.report.parser_version != wanted:
+            ids.append(row.pk)
+    return ids
+
+
+def _stale_parser_codal_ids(limit, exclude=(), archived_only=False):
+    """Finished reports a newer parser has not seen yet, statements first.
+
+    PARSED and NEEDS_REVIEW are terminal for the retry path, so a parser
+    upgrade never reached anything that had already parsed: on 2026-10-12,
+    104,011 of 107,701 reports were still on parser v2, including ~18,900
+    financial statements of which 195 had met the statement parser. Re-running
+    reads the archived bytes from MinIO and spends no provider quota; the
+    report's own `parser_version` is stamped at the start of a run, so each one
+    comes back exactly once per version.
+    """
+    statement = Q(code="ن-10") | Q(doc_type__in=("financial_statements", "interim_financials"))
+    clarification = Q(code__in=("ن-26", "ن-20"))
+    # Which parser a report needs is the extractor's call (`classify_announcement`
+    # reads the title too), so a report stamped with EITHER current version is
+    # done. Re-deriving "statement" here disagreed with it on some filings and
+    # re-selected them on every sweep, holding the statement-first slots.
+    stale = ~Q(report__parser_version__in=(
+        settings.CODAL_STATEMENT_PARSER_VERSION, settings.CODAL_PARSER_VERSION,
+    )) | Q(pk__in=_codal_family_changed_ids())
+    base = (
+        CodalAnnouncement.objects.filter(report__isnull=False)
+        .filter(report__status__in=(
+            CodalReport.Status.PARSED, CodalReport.Status.NEEDS_REVIEW, CodalReport.Status.UNSUPPORTED,
+        ))
+        .filter(stale)
+        .exclude(pk__in=exclude)
+    )
+    if archived_only:
+        # Every artifact either sits in MinIO or was refused on content: a run
+        # then reads only stored bytes and never contacts the origin.
+        base = base.filter(report__artifacts__fetch_status=CodalArtifact.FetchStatus.STORED).exclude(
+            report__artifacts__fetch_status__in=(
+                CodalArtifact.FetchStatus.PENDING, CodalArtifact.FetchStatus.FAILED,
+                CodalArtifact.FetchStatus.BLOCKED_NETWORK, CodalArtifact.FetchStatus.BLOCKED_STORAGE,
+            ),
+        ).distinct()
+    ids = list(
+        base.filter(statement & ~clarification)
+        .order_by("-date_publish", "-time_publish").values_list("id", flat=True)[:limit]
+    )
+    if len(ids) < limit:
+        ids += list(
+            base.exclude(pk__in=ids).order_by("-date_publish", "-time_publish")
+            .values_list("id", flat=True)[:limit - len(ids)]
+        )
+    return ids
 
 
 @shared_task(ignore_result=True)

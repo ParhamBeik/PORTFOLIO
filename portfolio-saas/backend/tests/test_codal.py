@@ -850,6 +850,7 @@ def test_an_unreachable_origin_stops_enqueueing_instead_of_retrying(monkeypatch,
     monkeypatch.setattr(
         "marketdata.codal_storage.origin_unreachable", lambda: True
     )
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
     monkeypatch.setattr(
         "marketdata.tasks.extract_codal_report.delay",
         lambda pk: pytest.fail("must not enqueue against a dead origin"),
@@ -1089,3 +1090,206 @@ def test_recompress_rewrites_only_verified_objects(monkeypatch):
     result = json.loads(out.getvalue().strip().splitlines()[-1])
     assert (result["rewritten"], result["checksum_mismatch"], result["missing"]) == (1, 1, 1)
     assert puts == [("k/good", good)]
+
+
+def test_codal_letter_code_outranks_the_title():
+    """ن-10 is Codal's own "financial statements" code; ن-26 is a clarification
+    about them, whose title still says "صورت های مالی"."""
+    from marketdata.codal_classification import classify_announcement
+
+    investment_co = _announcement(code="ن-10", title="اطلاعات و صورتهای مالی میاندوره ای شرکت سرمایه گذاری نمونه")
+    clarification = _announcement(code="ن-26", title="توضیحات در خصوص اطلاعات و صورت های مالی منتشر شده")
+
+    assert classify_announcement(investment_co)["category"] == CodalAnnouncement.Category.STATEMENTS
+    assert classify_announcement(clarification)["category"] == CodalAnnouncement.Category.GENERAL
+
+
+def test_a_parser_upgrade_reaches_finished_reports_statements_first(monkeypatch, settings):
+    """PARSED is terminal for retries, so 104k reports sat on parser v2."""
+    settings.CODAL_ENABLED = True
+    settings.CODAL_PARSER_VERSION = "4"
+    settings.CODAL_STATEMENT_PARSER_VERSION = "5"
+    from marketdata import tasks
+
+    sales = _announcement(symbol="A", code="ن-30", date_publish="1405-07-10")
+    statement = _announcement(symbol="B", code="ن-10", date_publish="1400-01-01")
+    current = _announcement(symbol="C", code="ن-10", date_publish="1405-07-11")
+    for row, version in ((sales, "2"), (statement, "2"), (current, "5")):
+        CodalReport.objects.create(announcement=row, status=CodalReport.Status.PARSED, parser_version=version)
+    queued = []
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
+    monkeypatch.setattr(tasks.extract_codal_report, "delay", lambda pk: queued.append(pk))
+
+    assert tasks.queue_codal_extractions() == 2
+    assert queued == [statement.pk, sales.pk]
+
+
+def test_legacy_facts_do_not_block_a_reparse(monkeypatch):
+    """The old pipeline's facts (mostly a disclosure date) are not a prior result."""
+    from marketdata.models import CodalFact
+
+    announcement = _announcement()
+    report = CodalReport.objects.create(announcement=announcement, parser_version="2")
+    CodalFact.objects.create(report=report, fact_code="disclosure.date", text_value="1404/01/31")
+    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (url, "application/vnd.ms-excel", b"x"))
+    monkeypatch.setattr(codal_pipeline, "store_artifact", lambda content, content_type, kind: ("k", "c"))
+    monkeypatch.setattr(codal_pipeline, "parse_artifact", lambda kind, content: ParsedDocument(tables=[{
+        "name": "s1", "sheet_name": "s1", "headers": ["ستون نامربوط"], "rows": [["x"]], "source_coordinates": {},
+    }]))
+
+    report, result = codal_pipeline.extract_report(announcement.pk)
+
+    assert result.get("error_code") != "extraction_regressed"
+    assert report.extractions.count() == 1
+
+
+def test_a_rejected_artifact_is_not_downloaded_again(monkeypatch):
+    announcement = _announcement(link_excel="", link_attachment="https://codal.ir/a.zip", link="https://codal.ir/r.aspx")
+    report = CodalReport.objects.create(announcement=announcement)
+    CodalArtifact.objects.create(report=report, kind=CodalArtifact.Kind.ATTACHMENT, source_url="https://codal.ir/a.zip",
+                                 fetch_status=CodalArtifact.FetchStatus.REJECTED, error_code="invalid_content_type")
+    fetched = []
+    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: fetched.append(kind) or (url, "text/html", b"<html></html>"))
+    monkeypatch.setattr(codal_pipeline, "store_artifact", lambda content, content_type, kind: ("k", "c"))
+
+    codal_pipeline.extract_report(announcement.pk)
+
+    assert CodalArtifact.Kind.ATTACHMENT not in fetched
+
+
+def test_a_statement_the_parser_cannot_read_says_why():
+    from marketdata.codal_statements import statement_abstain_reason
+
+    v7 = (b'<html><input id="ctl00_txbSymbol" value="x"><script>var datasource = '
+          b'{"title_En": "FinancialStatement-Listed-Product-V7"};</script></html>')
+    assert statement_abstain_reason(v7, title="صورتهای مالی") == "template:FinancialStatement-Listed-Product-V7"
+    assert statement_abstain_reason(b"<html></html>", title="صورتهای مالی") == "no_v9_data"
+    assert statement_abstain_reason(b"", title="صورتهای مالی (شرکت فرعی)") == "subsidiary"
+
+
+_V7_PAGE = (b'<html><input id="ctl00_txbSymbol" value="x"><script>var datasource = '
+            b'{"title_En": "FinancialStatement-Listed-Product-V7"};</script></html>')
+
+
+def _statement_run(monkeypatch, parsed):
+    announcement = _announcement(code="ن-10", title="صورتهای مالی", link_excel="", link_pdf="",
+                                 link_attachment="", link="https://codal.ir/r.aspx")
+    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (url, "text/html", _V7_PAGE))
+    monkeypatch.setattr(codal_pipeline, "store_artifact", lambda content, content_type, kind: ("k", "c"))
+    if parsed is not None:
+        monkeypatch.setattr(codal_pipeline, "parse_artifact", lambda kind, content: parsed)
+    return codal_pipeline.extract_report(announcement.pk)
+
+
+def test_a_script_only_statement_page_still_says_which_template_it_is(monkeypatch):
+    """The page has no visible table or text, only `var datasource`."""
+    report, _ = _statement_run(monkeypatch, ParsedDocument())
+
+    assert report.error_code == "statement:template:FinancialStatement-Listed-Product-V7"
+
+
+def test_keyword_facts_do_not_hide_the_statement_parsers_refusal(monkeypatch):
+    monkeypatch.setattr(codal_pipeline, "category_reconciles", lambda parsed, category: True)
+    report, _ = _statement_run(monkeypatch, ParsedDocument(tables=[{
+        "name": "s1", "sheet_name": "s1", "headers": ["درآمدهای عملیاتی"], "rows": [["1"]], "source_coordinates": {},
+    }]))
+
+    assert report.status == CodalReport.Status.NEEDS_REVIEW
+    assert report.error_code == "statement:template:FinancialStatement-Listed-Product-V7"
+
+
+def test_archived_reparses_run_while_the_origin_is_down(monkeypatch, settings):
+    """Re-parsing reads MinIO; only downloads need codal.ir."""
+    settings.CODAL_ENABLED = True
+    settings.CODAL_PARSER_VERSION = "4"
+    settings.CODAL_STATEMENT_PARSER_VERSION = "5"
+    from marketdata import tasks
+
+    archived = _announcement(symbol="A", code="ن-30")
+    half = _announcement(symbol="B", code="ن-30")
+    _announcement(symbol="C", code="ن-30")  # never attempted: needs a download
+    for row, statuses in ((archived, ("stored", "rejected")), (half, ("stored", "pending"))):
+        report = CodalReport.objects.create(announcement=row, status=CodalReport.Status.PARSED, parser_version="2")
+        for i, status in enumerate(statuses):
+            CodalArtifact.objects.create(report=report, kind=CodalArtifact.Kind.HTML,
+                                         source_url=f"https://codal.ir/{row.symbol}{i}", fetch_status=status)
+    queued = []
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: True)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
+    monkeypatch.setattr(tasks.extract_codal_report, "delay", lambda pk: queued.append(pk))
+
+    assert tasks.queue_codal_extractions() == 1
+    assert queued == [archived.pk]
+
+
+def test_a_report_the_extractor_stamped_generic_is_not_reselected(monkeypatch, settings):
+    """The extractor's classifier decides the version; the sweep must accept it."""
+    settings.CODAL_ENABLED = True
+    settings.CODAL_PARSER_VERSION = "4"
+    settings.CODAL_STATEMENT_PARSER_VERSION = "5"
+    from marketdata import tasks
+
+    # A let58 investment company: the classifier itself still calls it portfolio.
+    row = _announcement(symbol="A", code="ن-10", link="https://codal.ir/Reports/Decision.aspx?LetterSerial=x&let58",
+                        title="صورت وضعیت پرتفوی شرکت سرمایه گذاری نمونه")
+    CodalReport.objects.create(announcement=row, status=CodalReport.Status.NEEDS_REVIEW, parser_version="4",
+                               category=CodalAnnouncement.Category.PORTFOLIO)
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
+    monkeypatch.setattr(tasks.extract_codal_report, "delay", lambda pk: pytest.fail("re-selected"))
+
+    assert tasks.queue_codal_extractions() == 0
+
+
+def test_a_statement_once_filed_as_generic_is_requeued_once(monkeypatch, settings):
+    """ن-10 now outranks the title; earlier generic-v4 runs need the statement parser."""
+    settings.CODAL_ENABLED = True
+    settings.CODAL_PARSER_VERSION = "4"
+    settings.CODAL_STATEMENT_PARSER_VERSION = "5"
+    from marketdata import tasks
+
+    row = _announcement(symbol="A", code="ن-10", title="صورتهای مالی میاندوره ای")
+    report = CodalReport.objects.create(announcement=row, status=CodalReport.Status.PARSED,
+                                        parser_version="4", category=CodalAnnouncement.Category.PORTFOLIO)
+    queued = []
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
+    monkeypatch.setattr(tasks.extract_codal_report, "delay", lambda pk: queued.append(pk))
+
+    assert tasks.queue_codal_extractions() == 1 and queued == [row.pk]
+    CodalReport.objects.filter(pk=report.pk).update(parser_version="5", category=2)
+    assert tasks.queue_codal_extractions() == 0
+
+
+def test_a_clarification_once_run_as_a_statement_is_requeued_once(monkeypatch, settings):
+    """ن-26 now outranks its "صورت های مالی" title: statement-v5 runs need the generic parser."""
+    settings.CODAL_ENABLED = True
+    settings.CODAL_PARSER_VERSION = "4"
+    settings.CODAL_STATEMENT_PARSER_VERSION = "5"
+    from marketdata import tasks
+
+    row = _announcement(symbol="A", code="ن-26", title="توضیحات در خصوص اطلاعات و صورت های مالی منتشر شده")
+    report = CodalReport.objects.create(announcement=row, status=CodalReport.Status.PARSED,
+                                        parser_version="5", category=2)
+    queued = []
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
+    monkeypatch.setattr(tasks.extract_codal_report, "delay", lambda pk: queued.append(pk))
+
+    assert tasks.queue_codal_extractions() == 1 and queued == [row.pk]
+    CodalReport.objects.filter(pk=report.pk).update(parser_version="4", category=CodalAnnouncement.Category.GENERAL)
+    assert tasks.queue_codal_extractions() == 0
+
+
+@pytest.mark.parametrize("prefix", [b"", b"\xef\xbb\xbf"])  # a UTF-8 BOM is still HTML
+def test_an_html_excel_export_says_which_template_it_is(monkeypatch, prefix):
+    announcement = _announcement(code="ن-10", title="صورتهای مالی", link_excel="https://excel.codal.ir/r.xls",
+                                 link_pdf="", link_attachment="", link="")
+    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (url, "application/vnd.ms-excel", prefix + _V7_PAGE))
+    monkeypatch.setattr(codal_pipeline, "store_artifact", lambda content, content_type, kind: ("k", "c"))
+    monkeypatch.setattr(codal_pipeline, "parse_artifact", lambda kind, content: ParsedDocument())
+
+    report, _ = codal_pipeline.extract_report(announcement.pk)
+
+    assert report.error_code == "statement:template:FinancialStatement-Listed-Product-V7"

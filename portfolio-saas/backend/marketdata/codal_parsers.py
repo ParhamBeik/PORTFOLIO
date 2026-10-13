@@ -87,9 +87,14 @@ def parse_number(value):
         return None
 
 
-def parse_excel(content):
+def looks_like_html(content):
+    """Codal serves many "Excel" files as HTML pages; one rule decides which."""
     sample = content[:2048].lstrip().lower()
-    if b"<html" in sample or b"<!doctype html" in sample or b"<table" in sample:
+    return b"<html" in sample or b"<!doctype html" in sample or b"<table" in sample
+
+
+def parse_excel(content):
+    if looks_like_html(content):
         return parse_html(content)
     from openpyxl import load_workbook
 

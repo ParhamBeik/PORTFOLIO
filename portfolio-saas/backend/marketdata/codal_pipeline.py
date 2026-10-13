@@ -30,6 +30,7 @@ from django.utils import timezone
 
 from .codal_classification import classify_announcement
 from .codal_parsers import (
+    looks_like_html,
     category_reconciles, extract_typed_facts, parse_artifact, reconcile_monthly_sales,
 )
 from .codal_storage import (
@@ -41,7 +42,7 @@ from .codal_storage import (
     load_artifact,
     store_artifact,
 )
-from .codal_statements import parse_income_statement
+from .codal_statements import parse_income_statement, statement_abstain_reason
 from .models import (
     CodalArtifact,
     CodalCandidateFact,
@@ -100,7 +101,10 @@ def _persist_parsed(report, artifact, parsed):
     # Old extractions remain evidence, including the legacy tables and facts.
     # A new parser version creates a new run; retrying the same exact bytes and
     # version reuses that run instead of replacing its facts.
-    if not parsed.facts and (report.extractions.exists() or report.facts.exists()):
+    # Measured against earlier runs of this pipeline only. The legacy v2 facts
+    # (`report.facts`, 1.56M rows nothing reads) are mostly a disclosure date per
+    # filing; counting them blocked every re-extraction under a newer parser.
+    if not parsed.facts and report.extractions.filter(fact_count__gt=0).exists():
         raise CodalExtractionRegressed(
             "parse produced 0 facts despite an earlier extraction"
         )
@@ -178,6 +182,10 @@ def extract_report(announcement_id):
                 content = load_artifact(artifact)
                 downloaded.append((kind, artifact, content))
                 continue
+            if artifact.fetch_status == CodalArtifact.FetchStatus.REJECTED:
+                # Failed its own content check -- a property of the document.
+                # A re-parse must not fetch 83k rejected attachments again.
+                continue
             # No quota reservation. These bytes come from codal.ir, not from the
             # metered provider -- charging them to the BrsApi archive budget spent
             # ~1,000 requests/day of somebody else's allowance and, on a day when
@@ -244,6 +252,7 @@ def extract_report(announcement_id):
     parsed = None
     chosen = None
     chosen_income = []
+    abstain = ""
     first_generic = None
     parse_errors = []
     for kind, artifact, content in downloaded:
@@ -254,9 +263,12 @@ def extract_report(announcement_id):
         except Exception as exc:
             parse_errors.append(type(exc).__name__)
             continue
-        if not (candidate.tables or candidate.sections or candidate.text):
+        # The statement parser reads `var datasource` and form inputs, which a
+        # script-rendered page carries with no visible table or text -- so it
+        # runs before the generic emptiness check, not after it.
+        if report.category != 2 and not (candidate.tables or candidate.sections or candidate.text):
             continue
-        if first_generic is None:
+        if first_generic is None and (candidate.tables or candidate.sections or candidate.text):
             first_generic = (candidate, artifact)
         if report.category == 2:
             income = parse_income_statement(
@@ -265,6 +277,15 @@ def extract_report(announcement_id):
                 is_consolidated=report.is_consolidated, is_audited=report.is_audited,
             ) if kind in (CodalArtifact.Kind.EXCEL, CodalArtifact.Kind.HTML) else []
             if not income:
+                if kind == CodalArtifact.Kind.HTML:
+                    abstain = statement_abstain_reason(content, title=announcement.title)
+                elif kind == CodalArtifact.Kind.EXCEL and not abstain:
+                    # Codal's "Excel" is usually the same HTML page; a real
+                    # workbook has no datasource block to name a template from.
+                    abstain = (
+                        statement_abstain_reason(content, title=announcement.title)
+                        if looks_like_html(content) else "excel_workbook"
+                    )
                 continue
             parsed, chosen, chosen_income = candidate, artifact, income
             break
@@ -276,7 +297,7 @@ def extract_report(announcement_id):
         # Downloaded fine, but nothing usable came out of any of them --
         # a template problem, not a network one. Not retried.
         report.status = CodalReport.Status.UNSUPPORTED
-        report.error_code = "unparseable_template"
+        report.error_code = f"statement:{abstain}"[:64] if abstain else "unparseable_template"
         report.save(update_fields=["status", "error_code", "updated_at"])
         return report, {"error_code": report.error_code, "parse_errors": parse_errors}
 
@@ -302,6 +323,13 @@ def extract_report(announcement_id):
         report.status = CodalReport.Status.UNSUPPORTED
         report.quality = CodalReport.Quality.REVIEW
         report.error_code = "unknown_category"
+    elif report.category == 2 and abstain and not chosen_income:
+        # Generic keyword facts can reconcile a statement the strict parser
+        # refused. Keep the parser's reason: it is what sorts the older-template
+        # backlog, and a keyword match is not a verified statement.
+        report.status = CodalReport.Status.NEEDS_REVIEW
+        report.quality = CodalReport.Quality.REVIEW
+        report.error_code = f"statement:{abstain}"[:64]
     elif not reconciled:
         report.status = CodalReport.Status.NEEDS_REVIEW
         report.quality = CodalReport.Quality.REVIEW

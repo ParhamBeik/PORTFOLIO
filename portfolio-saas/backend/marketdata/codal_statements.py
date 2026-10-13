@@ -137,6 +137,34 @@ def balance_sheet_url(income_html, source_url, *, is_consolidated):
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), ""))
 
 
+def statement_abstain_reason(content, *, title):
+    """Why `parse_income_statement` found nothing, coarse enough to count.
+
+    The parser abstains silently by design; this names the bucket so the
+    backlog says what it would take to read it (2026-10-13 sample of 200
+    filings: 26% subsidiaries, 26% pre-V9 templates, 38% pages with no V9
+    data block) instead of one opaque "no_typed_facts".
+    """
+    if re.search(r"\(\s*شرکت", str(title or "")):
+        return "subsidiary"
+    if len(content) > 2_000_000:
+        return "oversized"
+    soup = _html_soup(content)
+    scripts = [script.string or script.get_text() for script in soup.find_all("script")
+               if "var datasource =" in (script.string or script.get_text())]
+    if len(scripts) != 1 or not soup.select_one("#ctl00_txbSymbol"):
+        return "no_v9_data"
+    match = re.search(r"\bvar\s+datasource\s*=\s*", scripts[0])
+    try:
+        source, _ = json.JSONDecoder().raw_decode(scripts[0][match.end():])
+        template = str(source.get("title_En") or "")
+    except (AttributeError, ValueError, TypeError):
+        return "no_v9_data"
+    if template not in _V9_TITLES[False] | _V9_TITLES[True]:
+        return f"template:{template[:40]}"
+    return "checks_failed"
+
+
 def parse_income_statement(
     content, *, symbol, company_name, title, period_end, is_consolidated, is_audited,
 ):
