@@ -123,7 +123,6 @@ a `Server-Timing` header.
 
 | Feature | How to run / enable | What to know |
 |---|---|---|
-| Balance-sheet backfill | `backfill_balance_sheets --symbol فولاد --limit 20 --fetch [--dry-run]` | `--fetch` permits a Codal request; without it only archived sheets are parsed. Parser accepts only observed V9 templates and checks assets = liabilities + equity. Not yet run in production. |
 | Codal history discovery | `backfill_codal_history --start-year 1402 --end-year 1404 [--symbols …] --max-requests 50 --execute` | Read-only without `--execute`. Windows split until ≤ `--max-pages`; complete only when provider count = stored keys. Quota-paced; not scheduled. |
 | AI research (GapGPT) | On the VPS: `python3 deploy/sync_gapgpt_config.py`, then set `GAPGPT_CONFIG_HOST_FILE`, `RESEARCH_MAX_RUN_USD`, `RESEARCH_DAILY_BUDGET_USD` in `.env.production` | Provider key and tariff come from the News deployment, never Git. The model only picks observation ids; the server computes every value. Budget is reserved before each call; restart the backend after a key rotation. |
 | Research coverage scan | Celery beat, daily 04:30 Tehran | Counts what Explore can show per stock over the last 365 days of filings. Reads stored evidence only; no provider calls. Ops marks it stale after 36 h. |

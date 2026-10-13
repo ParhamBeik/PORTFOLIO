@@ -459,13 +459,15 @@ def _stale_parser_codal_ids(limit, exclude=(), archived_only=False):
                 CodalArtifact.FetchStatus.BLOCKED_NETWORK, CodalArtifact.FetchStatus.BLOCKED_STORAGE,
             ),
         ).distinct()
-    ids = list(
-        base.filter(statement & ~clarification)
-        .order_by("-date_publish", "-time_publish").values_list("id", flat=True)[:limit]
-    )
-    if len(ids) < limit:
+    # Year-end statements first: they are what a company's sales and profit
+    # history is built from, and interim ones only refine it.
+    annual = Q(title__contains="سال مالی")
+    ids = []
+    for tier in (statement & ~clarification & annual, statement & ~clarification, Q()):
+        if len(ids) >= limit:
+            break
         ids += list(
-            base.exclude(pk__in=ids).order_by("-date_publish", "-time_publish")
+            base.filter(tier).exclude(pk__in=ids).order_by("-date_publish", "-time_publish")
             .values_list("id", flat=True)[:limit - len(ids)]
         )
     return ids
