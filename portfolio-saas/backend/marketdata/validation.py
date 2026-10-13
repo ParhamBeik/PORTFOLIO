@@ -96,6 +96,9 @@ def screen_series(
     return rejections
 
 
+REAL_LEGAL_VOLUME_TOLERANCE = 0.01
+
+
 def _num(value):
     """Coerce to float, or None when the value is not a usable number."""
     if value is None or isinstance(value, bool):
@@ -283,10 +286,24 @@ def _check_daily_history(rec):
     )
 
 
+_REAL_LEGAL_NUMERIC = (
+    "Buy_CountI", "Buy_CountN", "Sell_CountI", "Sell_CountN",
+    "Buy_I_Volume", "Buy_N_Volume", "Sell_I_Volume", "Sell_N_Volume",
+    "Buy_I_Value", "Buy_N_Value", "Sell_I_Value", "Sell_N_Value",
+)
+
+
 def _check_real_legal(rec):
     reason = _bad_date(rec.get("date"))
     if reason:
         return reason
+    # Every one of these is written verbatim into an integer column. "NaN" or
+    # "Infinity" also slipped through the tolerance test below (NaN > x is
+    # false) and then aborted the symbol's whole batch at the database.
+    for key in _REAL_LEGAL_NUMERIC:
+        value, number = rec.get(key), _num(rec.get(key))
+        if value is not None and (number is None or not math.isfinite(number)):
+            return "real_legal_not_numeric"
     counts = [
         _num(rec.get(key))
         for key in ("Buy_CountI", "Buy_CountN", "Sell_CountI", "Sell_CountN")
@@ -299,8 +316,10 @@ def _check_real_legal(rec):
     sold = (_num(rec.get("Sell_I_Volume")) or 0) + (_num(rec.get("Sell_N_Volume")) or 0)
     if bought < 0 or sold < 0:
         return "volume_negative"
-    # Every share bought is a share sold; the two legs must agree exactly.
-    if bought and sold and bought != sold:
+    # Every share bought is a share sold, but the provider's legs carry rounding:
+    # 594 days were rejected over gaps like 6,092,261 vs 6,104,161 (0.2%). Same
+    # 1% bound `recover_rejected_records` already accepts on recovery.
+    if bought and sold and abs(bought - sold) / max(bought, sold) > REAL_LEGAL_VOLUME_TOLERANCE:
         return "buy_sell_volume_mismatch"
     return None
 

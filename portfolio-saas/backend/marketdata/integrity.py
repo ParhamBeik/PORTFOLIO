@@ -216,13 +216,12 @@ def compute_symbol_integrity(
     else:
         labels = ("gold_daily", "crypto_daily")
     rejected_count = (
-        RejectedRecord.objects.filter(
+        RejectedRecord.objects.disqualifying().filter(
             symbol=symbol,
             endpoint__in=labels,
             date__gte=_jalali_text(start_date),
             date__lte=_jalali_text(end_date),
         )
-        .exclude(reason__startswith="field_")
         .count()
     )
     rejection_ratio = (

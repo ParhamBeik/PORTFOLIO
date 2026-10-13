@@ -70,7 +70,7 @@ def rejected_pairs(symbols, endpoints=PRICE_SERIES_ENDPOINTS, *, since=None):
     symbols = [s for s in symbols if s]
     if not symbols:
         return set()
-    queryset = RejectedRecord.objects.filter(
+    queryset = RejectedRecord.objects.disqualifying().filter(
         symbol__in=symbols, endpoint__in=list(endpoints)
     )
     if since is not None:
@@ -141,7 +141,7 @@ def latest_market_daily_bar(asset, *, as_of: str | None = None):
         symbol=symbol,
         close_price__gt=0,
     ).exclude(
-        date__in=RejectedRecord.objects.filter(
+        date__in=RejectedRecord.objects.disqualifying().filter(
             symbol=symbol, endpoint__in=DAILY_BAR_ENDPOINTS
         ).values("date")
     )
@@ -183,7 +183,7 @@ def _toman_per_quote(symbol, dates=None) -> tuple[dict, list]:
             for day, _ in run:
                 rates[day] = None
     if rows:
-        rejected = RejectedRecord.objects.filter(
+        rejected = RejectedRecord.objects.disqualifying().filter(
             symbol=symbol, endpoint=ArchiveFetchState.Endpoint.GOLD_DAILY,
             date__gte=rows[0][0], date__lte=rows[-1][0],
         ).values_list("date", flat=True)
@@ -284,7 +284,7 @@ def daily_bar_price(assets, *, since=None, as_of=None, latest_only=False) -> lis
         queryset = queryset.filter(date__gte=since)
     if as_of is not None:
         queryset = queryset.filter(date__lte=as_of)
-    rejected_qs = RejectedRecord.objects.filter(
+    rejected_qs = RejectedRecord.objects.disqualifying().filter(
         symbol__in=symbols, endpoint__in=DAILY_BAR_ENDPOINTS
     )
     # Only rejections inside the bars' own window can exclude one; each one is

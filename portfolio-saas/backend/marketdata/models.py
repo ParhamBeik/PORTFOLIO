@@ -1045,6 +1045,18 @@ class MarketIndexData(models.Model):
         ]
 
 
+class RejectedRecordQuerySet(models.QuerySet):
+    def disqualifying(self):
+        """Verdicts that take a day out of a price series.
+
+        Not a field-level salvage (`field_*`: the row was stored with that one
+        field cleared) and not since recovered. Every price reader used to skip
+        the day for ANY verdict, so ~6,500 stored, salvaged TSE days and every
+        recovered row stayed invisible to valuation and returns.
+        """
+        return self.exclude(reason__startswith="field_").exclude(disposition="recovered")
+
+
 class RejectedRecord(models.Model):
     """A provider record that failed validation, kept instead of discarded.
 
@@ -1065,6 +1077,8 @@ class RejectedRecord(models.Model):
     disposition = models.CharField(max_length=24, default="quarantined", db_index=True)
     recovered_at = models.DateTimeField(null=True, blank=True)
     destination_reference = models.CharField(max_length=255, blank=True, default="")
+
+    objects = RejectedRecordQuerySet.as_manager()
 
     class Meta:
         ordering = ["-last_seen"]

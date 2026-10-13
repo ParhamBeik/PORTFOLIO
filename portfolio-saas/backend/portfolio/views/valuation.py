@@ -576,7 +576,7 @@ _PRICE_HISTORY_REJECTIONS = (
 def _rejected_dates(symbol, since_jalali):
 
     return set(
-        RejectedRecord.objects.filter(
+        RejectedRecord.objects.disqualifying().filter(
             symbol=symbol,
             date__gte=since_jalali,
             endpoint__in=_PRICE_HISTORY_REJECTIONS,

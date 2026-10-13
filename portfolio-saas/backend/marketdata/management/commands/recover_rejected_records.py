@@ -9,6 +9,8 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
+from marketdata.validation import REAL_LEGAL_VOLUME_TOLERANCE
+
 from marketdata.models import (
     DailyStockHistory,
     GoldCurrencyHistory,
@@ -54,7 +56,7 @@ def _real_legal_action(row, existing=None):
     exists = (row.symbol, row.date) in existing if existing is not None else RealLegalHistory.objects.filter(symbol=row.symbol, date=row.date).exists()
     if exists:
         return "salvaged_evidence", mismatch, "RealLegalHistory"
-    if row.date and buy > 0 and sell > 0 and mismatch <= 0.01:
+    if row.date and buy > 0 and sell > 0 and mismatch <= REAL_LEGAL_VOLUME_TOLERANCE:
         return "recoverable", mismatch, "RealLegalHistory"
     return "quarantined", mismatch, ""
 
