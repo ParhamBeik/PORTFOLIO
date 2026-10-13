@@ -1255,11 +1255,11 @@ def remaining_requests(bucket=None, plan=TSETMC):
                 leftover = min(leftover, max(0, allowance - spent))
         leftover = max(0, leftover)
     if _breaker_is_half_open(plan, bucket):
-        # Live may advertise the one probe. Archive must not: the batcher
-        # sizes off this number, and a leftover of 1 would look like room
-        # and claim a full mixed batch that then parks until rollover.
-        if bucket == ARCHIVE:
-            return 0
+        # Advertise exactly the one probe. Archive used to advertise 0 so a
+        # mixed batch would not park on it -- which meant an archive-tripped
+        # breaker was never probed by archive, and live cannot clear it: the
+        # archive sat idle until rollover. `claim_archive_batch` now caps each
+        # plan at its own capacity, so 1 here claims one state.
         return min(1, leftover if bucket is not None else day_left)
     return leftover if bucket is not None else day_left
 

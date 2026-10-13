@@ -1431,6 +1431,20 @@ def claim_archive_batch(limit=None):
         remaining = batch_size - len(states)
         take(starved(ticks, remaining, extra=16), remaining)
 
+        # The batch is sized by the roomiest wallet; no plan may take more
+        # states than its own wallet has room for. A half-open breaker
+        # advertises exactly one request -- its probe -- and a mixed batch
+        # must not send that plan a crowd of states to be refused.
+        taken = {}
+        kept = []
+        for state in states:
+            plan = _ENDPOINT_PLAN.get(state.endpoint)
+            if plan in capacity and taken.get(plan, 0) >= capacity[plan]:
+                continue
+            taken[plan] = taken.get(plan, 0) + 1
+            kept.append(state)
+        states = kept
+
         claim_until = now + timedelta(minutes=10)
         ArchiveFetchState.objects.filter(pk__in=[state.pk for state in states]).update(
             next_attempt_at=claim_until

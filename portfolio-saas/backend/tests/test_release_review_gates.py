@@ -145,15 +145,24 @@ def test_other_reserve_is_tsetmc_only(settings):
     assert other_reserve_remaining(TSETMC, None, now=morning) == 200
 
 
-def test_archive_half_open_does_not_advertise_room_to_the_batcher(settings):
+def test_archive_half_open_claims_exactly_its_one_probe(settings):
+    """Archive must probe its own trip: live successes cannot clear it."""
     import time
+    from marketdata.archive import claim_archive_batch
+    from marketdata.models import ArchiveFetchState
     from marketdata.quota import (
         ARCHIVE, TSETMC, remaining_requests, trip_plan_breaker,
     )
 
     settings.MARKETDATA_BREAKER_RETRY_SECONDS = 1
+    for symbol in ("P1", "P2", "P3"):
+        ArchiveFetchState.objects.create(
+            endpoint=ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED, symbol=symbol,
+        )
     t0 = time.time()
     with mock.patch("marketdata.quota.time.time", return_value=t0):
         trip_plan_breaker(TSETMC, reason="http_429", bucket=ARCHIVE)
-    with mock.patch("marketdata.quota.time.time", return_value=t0 + 2):
         assert remaining_requests(ARCHIVE, TSETMC) == 0
+    with mock.patch("marketdata.quota.time.time", return_value=t0 + 2):
+        assert remaining_requests(ARCHIVE, TSETMC) == 1
+        assert len(claim_archive_batch(limit=50)) == 1
