@@ -81,8 +81,8 @@ def test_observed_balance_sheets_reconcile_and_keep_point_in_time_units():
 
 def test_tab_links_come_from_the_filings_own_tab_list():
     assert statement_sheet_urls(INTERIM, SOURCE, is_consolidated=False) == {
-        "income": SOURCE.replace("%3d", "%3D") + "&sheetId=1",
-        "balance": SOURCE.replace("%3d", "%3D") + "&sheetId=0",
+        "income": SOURCE + "&sheetId=1",
+        "balance": SOURCE + "&sheetId=0",
     }
     assert statement_sheet_urls(ANNUAL, SOURCE, is_consolidated=True)["balance"].endswith("&sheetId=14")
     assert statement_sheet_urls(INTERIM, SOURCE, is_consolidated=True) == {}
@@ -335,7 +335,7 @@ def test_a_page_carrying_its_sheet_skips_that_tab(monkeypatch):
     fetched = _serve(monkeypatch, {"": INTERIM, "0": INTERIM_BALANCE})
     report, _ = codal_pipeline.extract_report(_filing("income-first").pk)
     assert report.status == CodalReport.Status.PARSED
-    assert fetched == [SOURCE, SOURCE.replace("%3d", "%3D") + "&sheetId=0"]
+    assert fetched == [SOURCE, SOURCE + "&sheetId=0"]
 
 
 @pytest.mark.django_db
@@ -464,3 +464,17 @@ def test_a_title_silent_on_audit_takes_the_status_from_the_data(monkeypatch, mak
     client.force_authenticate(user=make_user())
     income = client.get("/api/explore/stocks/فولاد/").data["financial_metrics"]
     assert income["status"] == "verified" and income["points"][0]["audited"] is False
+
+
+def test_a_literal_plus_in_the_serial_survives_the_tab_link():
+    source = "https://codal.ir/Reports/Decision.aspx?LetterSerial=ab+cd%3d%3d&rt=0&sheetId=19"
+    assert statement_sheet_urls(INTERIM, source, is_consolidated=False)["balance"] == (
+        "https://codal.ir/Reports/Decision.aspx?LetterSerial=ab+cd%3d%3d&rt=0&sheetId=0"
+    )
+
+
+def test_income_off_the_fiscal_year_is_not_certified():
+    shifted = INTERIM.replace(b'"yearEndToDate":"1405/12/29"', b'"yearEndToDate":"1405/06/31"')
+    assert shifted != INTERIM
+    facts = _parse(shifted)
+    assert facts and {f["verification_status"] for f in facts} == {"extracted"}

@@ -4,7 +4,7 @@ import json
 import re
 import unicodedata
 from decimal import Decimal
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import jdatetime
 from bs4 import BeautifulSoup
@@ -119,9 +119,11 @@ def statement_sheet_urls(page, source_url, *, is_consolidated):
     if (parts.scheme != "https" or parts.hostname not in ("codal.ir", "www.codal.ir")
             or parts.path != "/Reports/Decision.aspx"):
         return {}
-    params = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
-              if key.lower() != "sheetid"]
-    if [key for key, _ in params].count("LetterSerial") != 1:
+    # The query is kept as raw text: decoding it as a form (`parse_qsl`) turns a
+    # serial's literal `+` into a space, and the rebuilt URL names another filing.
+    params = [part for part in parts.query.split("&")
+              if part and not part.lower().startswith("sheetid=")]
+    if sum(part.startswith("LetterSerial=") for part in params) != 1:
         return {}
     options = {
         _canonical(option.get_text(" ", strip=True)): option.get("value")
@@ -132,7 +134,7 @@ def statement_sheet_urls(page, source_url, *, is_consolidated):
         sheet_id = next((options[name] for name in _SHEET_TITLES[(kind, is_consolidated)]
                          if options.get(name)), None)
         if sheet_id and sheet_id.isdigit():
-            query = urlencode(params + [("sheetId", sheet_id)])
+            query = "&".join(params + [f"sheetId={sheet_id}"])
             urls[kind] = urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
     return urls
 
@@ -202,6 +204,11 @@ def _parse_statement(content, *, symbol, company_name, title, period_end, is_con
         end = normalize_jalali(source.get("periodEndToDate"))
         months = int(source.get("period") or 0)
         start = _period_start(end, months)
+        # Income belongs to the issuer's own fiscal year. A changed fiscal year
+        # or an inconsistent payload implies a different start; certifying under
+        # one we derived would publish a period the filing never stated.
+        if start != _period_start(normalize_jalali(source.get("yearEndToDate")), 12):
+            start = ""
         if (end != period_end or source.get("isConsolidated") is not is_consolidated
                 or (is_audited is not None and source.get("isAudited") is not is_audited)):
             return []
