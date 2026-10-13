@@ -12,6 +12,7 @@ from django.test import override_settings
 from django.utils import timezone
 import pytest
 from rest_framework.test import APIClient
+from zoneinfo import ZoneInfo
 
 from config.settings import CpiUnavailable, cpi_for
 from marketdata.models import GoldCurrencyHistory, MarketDailyBar
@@ -1140,6 +1141,17 @@ def _mark_traded(account, asset):
     )
 
 
+def _tehran_iso(moment):
+    """The Tehran calendar day of `moment`, as the snapshot API labels it.
+
+    Snapshots are bucketed by Tehran day (`Snapshot.save`, the snapshot view),
+    while settings.TIME_ZONE is UTC. `moment.strftime` is the UTC day, which
+    disagrees for the 3.5 h after Tehran midnight -- these tests went red
+    every night between 00:00 Tehran and 00:00 UTC.
+    """
+    return timezone.localtime(moment, ZoneInfo("Asia/Tehran")).date().isoformat()
+
+
 @pytest.mark.django_db
 def test_same_day_snapshots_use_latest_live_point(make_user):
     user = make_user("chart_test_user@example.com")
@@ -1160,10 +1172,10 @@ def test_same_day_snapshots_use_latest_live_point(make_user):
     series = res.json()["series"]
 
     assert len(series) == 2
-    assert series[0]["date"] == yesterday.strftime("%Y-%m-%d")
+    assert series[0]["date"] == _tehran_iso(yesterday)
     assert Decimal(series[0]["total"]) == Decimal("105000")
     assert series[0]["is_session_close"] is True
-    assert series[1]["date"] == now.strftime("%Y-%m-%d")
+    assert series[1]["date"] == _tehran_iso(now)
     assert Snapshot.objects.filter(user=user, account=account).count() == 1
 
 
@@ -1242,11 +1254,11 @@ def test_days_all_returns_history_beyond_one_year(make_user):
 
     capped = client.get(f"/api/snapshots/?days=365&account={account.id}").json()["series"]
     assert len(capped) == 2
-    assert capped[0]["date"] == (timezone.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    assert capped[0]["date"] == _tehran_iso(timezone.now() - timedelta(days=1))
 
     full = client.get(f"/api/snapshots/?days=all&account={account.id}").json()["series"]
     assert len(full) == 3
-    assert full[0]["date"] == old_snapshot_time.strftime("%Y-%m-%d")
+    assert full[0]["date"] == _tehran_iso(old_snapshot_time)
 
 
 @pytest.mark.django_db
@@ -1264,7 +1276,7 @@ def test_snapshot_series_does_not_fabricate_pre_history(make_user):
 
     series = client.get("/api/snapshots/?days=30").json()["series"]
 
-    assert series[0]["date"] == snapshot_time.strftime("%Y-%m-%d")
+    assert series[0]["date"] == _tehran_iso(snapshot_time)
     assert len(series) == 2
 
 
@@ -3172,19 +3184,22 @@ def test_past_snapshot_dollars_use_that_days_rate_not_todays(make_user, monkeypa
     for when in (three_ago, twenty_ago):
         Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("1000000"),
                                 timestamp=when, is_session_close=True)
-    GoldCurrencyHistory.objects.create(symbol="USD", date=to_jalali_str(three_ago), close_price=Decimal("50000"))
+    GoldCurrencyHistory.objects.create(
+        symbol="USD", date=to_jalali_str(dt.date.fromisoformat(_tehran_iso(three_ago))),
+        close_price=Decimal("50000"),
+    )
     monkeypatch.setattr(views, "get_latest_prices", lambda: {"usd_cash": Decimal("100000")})
 
     rows = {r["date"]: r for r in client.get(f"/api/snapshots/?days=30&account={account.id}").json()["series"]}
-    assert Decimal(rows[three_ago.strftime("%Y-%m-%d")]["total_usd"]) == Decimal("20")
+    assert Decimal(rows[_tehran_iso(three_ago)]["total_usd"]) == Decimal("20")
     # No accepted rate within the carry window: a gap, never today's rate.
-    assert rows[twenty_ago.strftime("%Y-%m-%d")]["total_usd"] is None
+    assert rows[_tehran_iso(twenty_ago)]["total_usd"] is None
 
     usd = client.get(f"/api/snapshots/?days=30&account={account.id}&basis=usd_denominated").json()
     dated = {r["date"]: r for r in usd["series"]}
     assert usd["basis"] == "usd_denominated"
-    assert dated[three_ago.strftime("%Y-%m-%d")]["total"] == 20.0
-    assert dated[twenty_ago.strftime("%Y-%m-%d")]["total"] is None
+    assert dated[_tehran_iso(three_ago)]["total"] == 20.0
+    assert dated[_tehran_iso(twenty_ago)]["total"] is None
 
 
 def test_refresh_overwrites_cache_without_a_cold_gap(asset_catalog, write_prices, monkeypatch):
