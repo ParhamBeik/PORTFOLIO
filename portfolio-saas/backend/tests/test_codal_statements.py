@@ -416,3 +416,17 @@ def test_observations_skip_balance_lines_a_template_does_not_report():
     observed = build_observations({"points": []}, balance={"points": [point]})
     assert "balance_standalone_total_assets" in observed
     assert "balance_standalone_cash" not in observed
+
+
+def test_legacy_balance_tab_and_equity_names_are_read():
+    legacy = INTERIM_BALANCE.replace("صورت وضعیت مالی".encode(), "ترازنامه".encode()).replace(
+        "جمع حقوق مالکانه".encode(), "جمع حقوق صاحبان سهام".encode())
+    facts = {f["fact_code"]: f for f in _parse(legacy)}
+    assert facts["balance.total_equity"]["verification_status"] == "reconciled"
+    page = INTERIM.replace("صورت وضعیت مالی".encode(), "ترازنامه".encode())
+    assert statement_sheet_urls(page, SOURCE, is_consolidated=False)["balance"].endswith("&sheetId=0")
+
+
+def test_income_without_a_valid_period_is_not_certified():
+    facts = _parse(INTERIM.replace(b'"period":3', b'"period":1'))
+    assert facts and {f["verification_status"] for f in facts} == {"extracted"}

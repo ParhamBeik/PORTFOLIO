@@ -71,17 +71,21 @@ _BALANCE_LABELS = {
     "balance.current_liabilities": ("جمعبدهیهایجاری",),
     "balance.noncurrent_liabilities": ("جمعبدهیهایغیرجاری",),
     "balance.total_liabilities": ("جمعبدهیها",),
-    "balance.total_equity": ("جمعحقوقمالکانه",),
+    "balance.total_equity": ("جمعحقوقمالکانه", "جمعحقوقصاحبانسهام"),
     "balance.short_term_borrowings": ("تسهیلاتمالی",),
     "balance.long_term_borrowings": ("تسهیلاتمالیبلندمدت",),
-    "balance.liabilities_and_equity": ("جمعحقوقمالکانهوبدهیها", "جمعبدهیهاوحقوقمالکانه"),
+    "balance.liabilities_and_equity": (
+        "جمعحقوقمالکانهوبدهیها", "جمعبدهیهاوحقوقمالکانه",
+        "جمعبدهیهاوحقوقصاحبانسهام", "جمعحقوقصاحبانسهاموبدهیها",
+    ),
 }
 # Sheet titles as Codal's tab list and `datasource.sheets[].title_Fa` name them.
+# Older filings call the balance sheet "ترازنامه", and its equity "حقوق صاحبان سهام".
 _SHEET_TITLES = {
-    ("income", False): "صورتسودوزیان",
-    ("income", True): "صورتسودوزیانتلفیقی",
-    ("balance", False): "صورتوضعیتمالی",
-    ("balance", True): "صورتوضعیتمالیتلفیقی",
+    ("income", False): ("صورتسودوزیان",),
+    ("income", True): ("صورتسودوزیانتلفیقی",),
+    ("balance", False): ("صورتوضعیتمالی", "ترازنامه"),
+    ("balance", True): ("صورتوضعیتمالیتلفیقی", "ترازنامهتلفیقی"),
 }
 
 
@@ -125,7 +129,8 @@ def statement_sheet_urls(page, source_url, *, is_consolidated):
     }
     urls = {}
     for kind in ("income", "balance"):
-        sheet_id = options.get(_SHEET_TITLES[(kind, is_consolidated)])
+        sheet_id = next((options[name] for name in _SHEET_TITLES[(kind, is_consolidated)]
+                         if options.get(name)), None)
         if sheet_id and sheet_id.isdigit():
             query = urlencode(params + [("sheetId", sheet_id)])
             urls[kind] = urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
@@ -204,8 +209,8 @@ def _parse_statement(content, *, symbol, company_name, title, period_end, is_con
         if not isinstance(sheet, dict):
             continue
         sheet_title = _canonical(sheet.get("title_Fa"))
-        kind = next((k for (k, consolidated), name in _SHEET_TITLES.items()
-                     if consolidated is is_consolidated and name == sheet_title), None)
+        kind = next((k for (k, consolidated), names in _SHEET_TITLES.items()
+                     if consolidated is is_consolidated and sheet_title in names), None)
         if kind is None:
             continue
         tables = [t for t in sheet.get("tables") or []
@@ -260,7 +265,9 @@ def _sheet_facts(kind, sheet, table, *, end, start, months, unit, is_consolidate
             found[code] = (number if number is not None else Decimal(0), raw, by_row[rows[0]][1], value_cell)
             break
     if kind == "income":
-        ok = income_reconciles({code: item[0] for code, item in found.items()})
+        # An income figure belongs to a period; without a valid start (an
+        # unknown `period`, or an end that is not a month end) it is not one.
+        ok = bool(start) and income_reconciles({code: item[0] for code, item in found.items()})
         period_start = start
     else:
         ok = balance_reconciles({code: item[0] for code, item in found.items()})
