@@ -46,11 +46,15 @@ from .models import (
     StockTransactionTick,
 )
 from .quota import (
+    ARCHIVE,
     BRS,
+    REASON_BREAKER_OPEN,
     REASON_LIVE_RESERVED,
     TSETMC,
     QuotaExhausted,
+    _breaker_is_half_open,
     archive_capacity,
+    claim_archive_probe,
     increment_historical_full_used,
     require_archive_room,
 )
@@ -965,6 +969,12 @@ def run_archive_state(state_id):
         # where the whole herd re-refused itself and parked again. 6,863 states
         # sat on `last_error="Daily quota unavailable."` while ~4,000 TSETMC
         # requests a day went unspent.
+        # A breaker tripped by an ordinary 429/5xx is half-open after
+        # MARKETDATA_BREAKER_RETRY_SECONDS; only meter-confirmed exhaustion is
+        # latched to rollover. Parking every state (and its siblings) until
+        # tomorrow on a 15-minute trip idled the archive with 3,345 requests left
+        # on 2026-10-13, and stamped 818 never-fetched Codal states as failing.
+        transient_block = exc.reason == REASON_BREAKER_OPEN
         if exc.is_pacing:
             # Refused by something that clears on its own before rollover. Come
             # back later and leave the row otherwise untouched: no failure count
@@ -981,6 +991,8 @@ def run_archive_state(state_id):
 
             if exc.reason == REASON_LIVE_RESERVED:
                 base = int(getattr(settings, "MARKETDATA_LIVE_RESERVED_RETRY_SECONDS", 1800))
+            elif transient_block:
+                base = int(getattr(settings, "MARKETDATA_BREAKER_RETRY_SECONDS", 900))
             else:
                 base = int(getattr(settings, "MARKETDATA_ARCHIVE_PACED_RETRY_SECONDS", 180))
             state.last_attempt_at = now
@@ -1324,6 +1336,10 @@ def claim_archive_batch(limit=None):
     # taking the minimum would let a spent TSETMC plan stop the handful of gold
     # states, which is the whole cross-plan failure this work removed.
     capacity = archive_capacity()
+    for plan, room in capacity.items():
+        # A half-open breaker's single probe goes to exactly one state.
+        if room and _breaker_is_half_open(plan, ARCHIVE) and not claim_archive_probe(plan):
+            capacity[plan] = 0
     batch_size = min(
         limit or settings.MARKETDATA_ARCHIVE_BATCH_SIZE,
         max([*capacity.values(), 0]),
@@ -1421,6 +1437,20 @@ def claim_archive_batch(limit=None):
         # it, so let ticks have them back rather than under-spending the batch.
         remaining = batch_size - len(states)
         take(starved(ticks, remaining, extra=16), remaining)
+
+        # The batch is sized by the roomiest wallet; no plan may take more
+        # states than its own wallet has room for. A half-open breaker
+        # advertises exactly one request -- its probe -- and a mixed batch
+        # must not send that plan a crowd of states to be refused.
+        taken = {}
+        kept = []
+        for state in states:
+            plan = _ENDPOINT_PLAN.get(state.endpoint)
+            if plan in capacity and taken.get(plan, 0) >= capacity[plan]:
+                continue
+            taken[plan] = taken.get(plan, 0) + 1
+            kept.append(state)
+        states = kept
 
         claim_until = now + timedelta(minutes=10)
         ArchiveFetchState.objects.filter(pk__in=[state.pk for state in states]).update(

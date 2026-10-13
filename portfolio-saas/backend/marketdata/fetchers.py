@@ -170,7 +170,7 @@ def fetch_json(
                 raise QuotaExhausted(
                     f"Provider reports the {quota_plan} plan exhausted "
                     f"(HTTP {response.status_code}); paused until reset.",
-                    reason="plan_blocked",
+                    reason="plan_blocked" if confirmed else "breaker_open",
                 )
             # Burst/window 429 or a quota-shaped 5xx while usage is still
             # under the daily ceiling: do not trip the day. Fall through to
