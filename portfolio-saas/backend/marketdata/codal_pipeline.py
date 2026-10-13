@@ -287,6 +287,27 @@ def _persist_parsed(report, artifact, parsed):
 
 
 def extract_report(announcement_id):
+    """Extract one filing; requeue it if its documents changed while it ran.
+
+    A re-crawl that replaces a link mid-extraction marks the report FAILED, and
+    this run's terminal status then overwrote that mark -- the next crawl saw
+    the link already stored and the new document was never fetched.
+    """
+    from .models import CodalAnnouncement
+
+    links = ("link", "link_pdf", "link_excel", "link_attachment", "title")
+    before = CodalAnnouncement.objects.filter(pk=announcement_id).values(*links).first()
+    report, result = _extract_report(announcement_id)
+    after = CodalAnnouncement.objects.filter(pk=announcement_id).values(*links).first()
+    if before is not None and after != before:
+        CodalReport.objects.filter(pk=report.pk).update(
+            status=CodalReport.Status.FAILED, error_code="new_document_listed",
+        )
+        report.refresh_from_db()
+    return report, result
+
+
+def _extract_report(announcement_id):
     from .models import CodalAnnouncement
 
     announcement = CodalAnnouncement.objects.get(pk=announcement_id)
