@@ -15,6 +15,8 @@ from urllib.parse import urljoin, urlsplit
 import requests
 from django.conf import settings
 
+from .codal_parsers import looks_like_html
+
 ALLOWED_HOSTS = frozenset({"codal.ir", "www.codal.ir", "excel.codal.ir"})
 ALLOWED_TYPES = {
     "html": ("text/html", "application/xhtml+xml"),
@@ -167,11 +169,9 @@ def _valid_magic(kind, content):
     if kind == "excel":
         if content.startswith(b"PK\x03\x04") or content.startswith(b"\xd0\xcf\x11\xe0"):
             return True
-        sample = content[:2048].lstrip().lower()
-        return b"<html" in sample or b"<!doctype html" in sample or b"<table" in sample
+        return looks_like_html(content)
     if kind == "html":
-        sample = content[:2048].lstrip().lower()
-        return b"<html" in sample or b"<!doctype html" in sample or b"<table" in sample
+        return looks_like_html(content)
     return bool(content)
 
 

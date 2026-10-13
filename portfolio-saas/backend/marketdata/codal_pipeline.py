@@ -30,6 +30,7 @@ from django.utils import timezone
 
 from .codal_classification import classify_announcement
 from .codal_parsers import (
+    looks_like_html,
     category_reconciles, extract_typed_facts, parse_artifact, reconcile_monthly_sales,
 )
 from .codal_storage import (
@@ -283,7 +284,7 @@ def extract_report(announcement_id):
                     # workbook has no datasource block to name a template from.
                     abstain = (
                         statement_abstain_reason(content, title=announcement.title)
-                        if content.lstrip()[:1] == b"<" else "excel_workbook"
+                        if looks_like_html(content) else "excel_workbook"
                     )
                 continue
             parsed, chosen, chosen_income = candidate, artifact, income

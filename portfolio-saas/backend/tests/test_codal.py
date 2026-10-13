@@ -1282,10 +1282,11 @@ def test_a_clarification_once_run_as_a_statement_is_requeued_once(monkeypatch, s
     assert tasks.queue_codal_extractions() == 0
 
 
-def test_an_html_excel_export_says_which_template_it_is(monkeypatch):
+@pytest.mark.parametrize("prefix", [b"", b"\xef\xbb\xbf"])  # a UTF-8 BOM is still HTML
+def test_an_html_excel_export_says_which_template_it_is(monkeypatch, prefix):
     announcement = _announcement(code="ن-10", title="صورتهای مالی", link_excel="https://excel.codal.ir/r.xls",
                                  link_pdf="", link_attachment="", link="")
-    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (url, "application/vnd.ms-excel", _V7_PAGE))
+    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (url, "application/vnd.ms-excel", prefix + _V7_PAGE))
     monkeypatch.setattr(codal_pipeline, "store_artifact", lambda content, content_type, kind: ("k", "c"))
     monkeypatch.setattr(codal_pipeline, "parse_artifact", lambda kind, content: ParsedDocument())
 
