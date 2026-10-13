@@ -23,6 +23,7 @@ reads to decide what to requeue:
   but the category's fact rules found nothing," which is a parser-coverage
   question, not a fetch problem).
 """
+import re
 from decimal import Decimal, InvalidOperation
 from django.db import transaction
 from django.db.models import Q
@@ -57,12 +58,35 @@ class CodalExtractionRegressed(RuntimeError):
 
 
 def _artifact_sources(announcement):
+    """The documents worth downloading for one filing.
+
+    `Attachment.aspx` is an HTML index of links, not a document: fetching it
+    produced 83,164 "rejected" artifacts and nothing usable. Its link stays on
+    the announcement. An attachment link that points straight at a file is
+    still a document and is kept. Excel/PDF that codal.ir says do not exist
+    are skipped (`has_* is False`; None means unknown, as on BrsApi-era rows).
+    """
+    attachment = announcement.link_attachment
+    if re.search(r"attachment\.aspx", attachment or "", re.I):
+        attachment = ""
     return [
-        (CodalArtifact.Kind.EXCEL, announcement.link_excel),
-        (CodalArtifact.Kind.HTML, announcement.link),
-        (CodalArtifact.Kind.PDF, announcement.link_pdf),
-        (CodalArtifact.Kind.ATTACHMENT, announcement.link_attachment),
+        (kind, link) for kind, link, exists in (
+            (CodalArtifact.Kind.EXCEL, announcement.link_excel, announcement.has_excel),
+            (CodalArtifact.Kind.HTML, announcement.link, True),
+            (CodalArtifact.Kind.PDF, announcement.link_pdf, announcement.has_pdf),
+            (CodalArtifact.Kind.ATTACHMENT, attachment, announcement.has_attachment),
+        )
+        if link and exists is not False
     ]
+
+
+def _usable(kind, content):
+    """Whether a downloaded artifact parses to anything at all."""
+    try:
+        parsed = parse_artifact(kind, content)
+    except Exception:
+        return False
+    return bool(parsed.tables or parsed.sections or parsed.text)
 
 
 def _artifact_states(report):
@@ -153,6 +177,27 @@ def _persist_parsed(report, artifact, parsed):
 
 
 def extract_report(announcement_id):
+    """Extract one filing; requeue it if its documents changed while it ran.
+
+    A re-crawl that replaces a link mid-extraction marks the report FAILED, and
+    this run's terminal status then overwrote that mark -- the next crawl saw
+    the link already stored and the new document was never fetched.
+    """
+    from .models import CodalAnnouncement
+
+    links = ("link", "link_pdf", "link_excel", "link_attachment", "title")
+    before = CodalAnnouncement.objects.filter(pk=announcement_id).values(*links).first()
+    report, result = _extract_report(announcement_id)
+    after = CodalAnnouncement.objects.filter(pk=announcement_id).values(*links).first()
+    if before is not None and after != before:
+        CodalReport.objects.filter(pk=report.pk).update(
+            status=CodalReport.Status.FAILED, error_code="new_document_listed",
+        )
+        report.refresh_from_db()
+    return report, result
+
+
+def _extract_report(announcement_id):
     from .models import CodalAnnouncement
 
     announcement = CodalAnnouncement.objects.get(pk=announcement_id)
@@ -173,6 +218,10 @@ def extract_report(announcement_id):
     downloaded = []
     for kind, source_url in _artifact_sources(announcement):
         if not source_url:
+            continue
+        if kind == CodalArtifact.Kind.PDF and any(_usable(k, c) for k, _, c in downloaded):
+            # A PDF barely compresses; it is the fallback for a filing whose
+            # HTML/Excel did not yield a readable document, not a third copy.
             continue
         artifact, _ = CodalArtifact.objects.get_or_create(
             report=report, kind=kind, source_url=_absolute_url(source_url)

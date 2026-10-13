@@ -173,7 +173,9 @@ _LETTER_CATEGORY = {
     "let60": _CodalAnnouncement.Category.GOVERNANCE,
     "let90": _CodalAnnouncement.Category.AUDITOR_REPORT,
     "let128": _CodalAnnouncement.Category.GENERAL,
-    "let174": _CodalAnnouncement.Category.STATEMENTS,
+    # let=174 is ن-26 on 5,371 of 5,371 production rows: a clarification
+    # about published statements, not the statements themselves.
+    "let174": _CodalAnnouncement.Category.GENERAL,
     "let248": _CodalAnnouncement.Category.GOVERNANCE,
     "let260": _CodalAnnouncement.Category.GOVERNANCE,
     "let2020": _CodalAnnouncement.Category.ASSEMBLY_DECISION,
@@ -209,8 +211,16 @@ _CODE_CATEGORY = {
 
 
 def _letter_type(announcement):
-    match = re.search(r"let\d+", f"{announcement.code} {announcement.link}", re.I)
-    return match.group(0).lower() if match else ""
+    """`let6`-style key from the stored type, else from the link's `let=` parameter.
+
+    The old pattern `let\\d+` never matched the real `&let=6`, so every lookup
+    in `_LETTER_CATEGORY` was dead and filings without a code fell to title
+    keywords alone.
+    """
+    if getattr(announcement, "letter_type", None):
+        return f"let{announcement.letter_type}"
+    match = re.search(r"[?&]let=?(\d+)", announcement.link or "", re.I)
+    return f"let{match.group(1)}" if match else ""
 
 
 def _period(title, fallback=""):

@@ -287,7 +287,12 @@ def disabled_endpoints():
     stay exactly as they are, claimed by nobody, and resume untouched when the
     flag flips back.
     """
-    if settings.CODAL_ENABLED:
+    from .codal_discovery import promoting
+
+    # Off when Codal is off, and off when codal.ir itself writes the filing
+    # list: BrsApi's list spent ~1,100 AIO requests a day for what the crawl
+    # now gets free.
+    if settings.CODAL_ENABLED and not promoting():
         return frozenset()
     return frozenset({ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS})
 

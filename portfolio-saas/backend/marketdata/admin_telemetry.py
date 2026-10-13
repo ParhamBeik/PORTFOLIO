@@ -755,7 +755,10 @@ def _codal_history_status():
 
 
 def _codal_status():
+    from .codal_discovery import discovery_status
+
     history_discovery = _codal_history_status()
+    direct = discovery_status()
     coverage = ResearchCoverageSnapshot.objects.order_by("-finished_at").values(
         "started_at", "finished_at", "window_days", "start_jalali", "end_jalali",
         "universe_size", "eligibility_version", "parser_versions", "summary",
@@ -770,7 +773,7 @@ def _codal_status():
         # number an operator wants while it is switched off.
         return {"enabled": False, "worker_enabled": False,
                 "artifact_bytes": _codal_volume_bytes(), "research_coverage": coverage,
-                "history_discovery": history_discovery}
+                "history_discovery": history_discovery, "direct_discovery": direct}
     counts = {
         row["status"]: row["c"]
         for row in CodalReport.objects.values("status").annotate(c=Count("id"))
@@ -799,6 +802,7 @@ def _codal_status():
         "artifact_bytes": _codal_volume_bytes(),
         "research_coverage": coverage,
         "history_discovery": history_discovery,
+        "direct_discovery": direct,
     }
 
 

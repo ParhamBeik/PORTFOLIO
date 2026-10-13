@@ -545,7 +545,7 @@ MARKETDATA_ARCHIVE_QUEUE_LIMIT = int(
 # read; intraday depth is not. The lanes still lend each other unused slots, so
 # once the dailies converge the ticks reclaim the batch automatically -- this
 # changes the order things finish in, not the total spend.
-MARKETDATA_TICK_QUOTA_SHARE = float(os.getenv("MARKETDATA_TICK_QUOTA_SHARE", "0.25"))
+MARKETDATA_TICK_QUOTA_SHARE = float(os.getenv("MARKETDATA_TICK_QUOTA_SHARE") or "0.25")
 # While the per-symbol DAILY endpoints are still short of
 # MARKETDATA_DAILY_GATE_COMPLETENESS, ticks drop to this share instead. The two
 # lanes are not comparable work: a daily endpoint buys a symbol's entire history
@@ -668,6 +668,11 @@ CODAL_ORIGIN_COOLDOWN_SECONDS = int(os.getenv("CODAL_ORIGIN_COOLDOWN_SECONDS", "
 # touches CodalAnnouncement, so BrsApi discovery keeps running untouched. Off by
 # default -- turning it on is an operator decision.
 CODAL_DISCOVERY_ENABLED = os.getenv("CODAL_DISCOVERY_ENABLED", "0") == "1"
+# Phase 2: which source writes the filing list the extraction pipeline reads.
+# "codal" (with discovery enabled) promotes crawled letters into
+# CodalAnnouncement and switches BrsApi's Codal list off; "brsapi" keeps the
+# crawl in shadow mode.
+CODAL_DISCOVERY_SOURCE = os.getenv("CODAL_DISCOVERY_SOURCE", "codal")
 CODAL_SEARCH_URL = os.getenv("CODAL_SEARCH_URL", "https://search.codal.ir/api/search/v2/q")
 # Measured 2026-10-05: ~30 requests per rolling hour trips a 429, and knocking
 # while blocked extends it. Start well under, earn +2/h per clean hour up to the
@@ -681,6 +686,16 @@ CODAL_SEARCH_MAX_PARK_SECONDS = int(os.getenv("CODAL_SEARCH_MAX_PARK_SECONDS", "
 CODAL_DISCOVERY_OLDEST_DAY = os.getenv("CODAL_DISCOVERY_OLDEST_DAY", "1386-01-01")
 # Today and this many days before it are the live lane: re-crawled, not trusted.
 CODAL_DISCOVERY_LIVE_DAYS = int(os.getenv("CODAL_DISCOVERY_LIVE_DAYS", "3"))
+# Which crawled codal.ir letters older than the live window become filings (and
+# so have their documents kept). A disk decision -- no backups, 100 GB shared.
+# "annual_statements": year-end statements only, what the sales/profit history
+# is built from; "all"; "none". The rest stay crawled in CodalLetter.
+CODAL_HISTORY_DOCUMENTS = os.getenv("CODAL_HISTORY_DOCUMENTS", "annual_statements")
+if (CODAL_DISCOVERY_ENABLED and CODAL_DISCOVERY_SOURCE == "codal"
+        and not os.getenv("MARKETDATA_TICK_QUOTA_SHARE")):
+    # Phase 3 ships with phase 2: the ~960 AIO requests/day BrsApi's Codal list
+    # spent go to the tick backlog (docs/CODAL-DIRECT-MIGRATION.md §8).
+    MARKETDATA_TICK_QUOTA_SHARE = 0.50
 CODAL_MAX_ARTIFACT_BYTES = int(os.getenv("CODAL_MAX_ARTIFACT_BYTES", str(50 * 1024 * 1024)))
 CODAL_S3_ENDPOINT_URL = os.getenv("CODAL_S3_ENDPOINT_URL", "http://minio:9000")
 CODAL_S3_BUCKET = os.getenv("CODAL_S3_BUCKET", "codal-artifacts")

@@ -282,6 +282,30 @@ def test_a_day_completes_when_stored_letters_reach_the_total(monkeypatch):
     assert state.next_check_at is not None
 
 
+def test_a_rechecked_day_walks_every_page_before_completing(monkeypatch):
+    # Every letter is already stored, so the count meets the total on page 1;
+    # only reaching the last page re-reads the letters below the newest page.
+    _serve(monkeypatch, _page()["Letters"], total=4, pages=2)
+    state = CodalDiscoveryDay.objects.create(date="1404-07-02", checks=1, next_page=1)
+    codal_discovery.step(state)
+    state.refresh_from_db()
+    assert not state.verified_complete and state.next_page == 2
+    codal_discovery.step(state)
+    state.refresh_from_db()
+    assert state.verified_complete and state.checks == 2
+
+
+def test_a_total_that_shrinks_mid_pass_restarts_the_pass(monkeypatch):
+    # A withdrawal shifts later pages up; the stale stored row must not let the
+    # pass complete on a count that skipped a listed letter.
+    _serve(monkeypatch, _page()["Letters"], total=3, pages=2)
+    state = CodalDiscoveryDay.objects.create(date="1404-07-02", total=4, next_page=2)
+    result = codal_discovery.step(state)
+    state.refresh_from_db()
+    assert not result["complete"] and not state.verified_complete
+    assert state.next_page == 1 and state.total == 3
+
+
 def test_reaching_the_last_page_short_restarts_with_backoff(monkeypatch):
     _serve(monkeypatch, _page()["Letters"], total=290, pages=1)
     state = CodalDiscoveryDay.objects.create(date="1404-07-02")
@@ -360,3 +384,287 @@ def test_crossref_matches_by_serial_then_by_key_and_counts_the_rest(monkeypatch)
     assert stats["matched_serial"] == 1 and stats["matched_key"] == 1
     assert stats["new_catalog"] + stats["new_other"] == 2
     assert stats["ours_only"] == 1 and not disagree
+
+
+# ----------------------------------------------------------------------
+# Phase 2: codal.ir writes the filing list (CODAL_DISCOVERY_SOURCE=codal).
+
+
+
+def _promote_on(settings, monkeypatch, symbols):
+    settings.CODAL_DISCOVERY_ENABLED = True
+    settings.CODAL_DISCOVERY_SOURCE = "codal"
+    settings.CODAL_HISTORY_DOCUMENTS = "all"  # the fixture day is history by now
+    for symbol in symbols:
+        MarketInstrument.objects.create(source="tsetmc", symbol=symbol, category="stock", eligible=True)
+    queued = []
+    monkeypatch.setattr("marketdata.ingest._enqueue_codal_extractions", lambda rows: queued.extend(rows))
+    return queued
+
+
+def test_a_crawled_letter_becomes_a_filing_with_absolute_links(monkeypatch, settings):
+    letters = _page()["Letters"]
+    rows = [codal_search.normalize_letter(letter) for letter in letters]
+    queued = _promote_on(settings, monkeypatch, {rows[0]["symbol"]})
+    _serve(monkeypatch, letters, total=4, pages=1)
+
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))
+
+    made = CodalAnnouncement.objects.get(tracing_no=rows[0]["tracing_no"])
+    assert made.source == "codal" and made.code == rows[0]["letter_code"]
+    assert made.link.startswith("https://codal.ir/Reports/")
+    assert made.link_attachment == "" or made.link_attachment.startswith("https://codal.ir/")
+    assert made in queued and len(queued) == CodalAnnouncement.objects.count()
+    # Only catalog symbols become filings; every letter is still kept.
+    assert CodalAnnouncement.objects.count() == sum(row["symbol"] == rows[0]["symbol"] for row in rows)
+    assert CodalLetter.objects.count() == 4
+
+
+def test_a_letter_brsapi_already_wrote_is_matched_not_duplicated(monkeypatch, settings):
+    letters = _page()["Letters"]
+    row = codal_search.normalize_letter(letters[0])
+    queued = _promote_on(settings, monkeypatch, {row["symbol"]})
+    brs = CodalAnnouncement.objects.create(
+        symbol=row["symbol"], code=row["letter_code"], title="from brsapi",
+        date_publish=row["date_publish"], time_publish="00:00:00",
+        link="https://codal.ir/Reports/Decision.aspx?LetterSerial=x", letter_serial=row["letter_serial"],
+    )
+    _serve(monkeypatch, letters[:1], total=1, pages=1)
+
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))
+
+    brs.refresh_from_db()
+    assert CodalAnnouncement.objects.count() == 1 and queued == []
+    assert brs.tracing_no == row["tracing_no"] and brs.title == "from brsapi"
+
+
+def test_shadow_letters_are_promoted_later_in_slices(monkeypatch, settings):
+    letters = _page()["Letters"]
+    _serve(monkeypatch, letters, total=4, pages=1)
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))  # shadow: nothing promoted
+    assert not CodalAnnouncement.objects.exists()
+    rows = [codal_search.normalize_letter(letter) for letter in letters]
+    _promote_on(settings, monkeypatch, {row["symbol"] for row in rows})
+
+    assert codal_discovery.promote_backlog(limit=2) == 2
+    assert codal_discovery.promote_backlog(limit=10) == 2
+    assert codal_discovery.promote_backlog(limit=10) == 0
+
+
+def test_a_failed_write_backs_the_day_off(monkeypatch):
+    _serve(monkeypatch, _page()["Letters"], total=4, pages=1)
+    monkeypatch.setattr(CodalLetter.objects, "bulk_create", lambda *a, **k: (_ for _ in ()).throw(ValueError("too long")))
+    state = CodalDiscoveryDay.objects.create(date="1404-07-02")
+    with pytest.raises(ValueError):
+        codal_discovery.step(state)
+    state.refresh_from_db()
+    assert state.consecutive_failures == 1 and state.next_check_at is not None
+
+
+def test_a_long_multi_symbol_letter_is_stored(monkeypatch):
+    letter = {**_page()["Letters"][0], "Symbol": "، ".join(["نماد" + str(i) for i in range(20)])}
+    _serve(monkeypatch, [letter], total=1, pages=1)
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))
+    assert len(CodalLetter.objects.get().symbol) > 64
+
+
+def test_brsapi_codal_list_is_off_once_codal_ir_writes_it(settings):
+    from marketdata.archive import disabled_endpoints
+
+    settings.CODAL_ENABLED = True
+    settings.CODAL_DISCOVERY_ENABLED = True
+    settings.CODAL_DISCOVERY_SOURCE = "brsapi"
+    assert disabled_endpoints() == frozenset()
+    settings.CODAL_DISCOVERY_SOURCE = "codal"
+    assert "codal_announcements" in disabled_endpoints()
+
+
+def test_documents_codal_ir_says_do_not_exist_are_not_requested():
+    from marketdata.codal_pipeline import _artifact_sources
+
+    row = CodalAnnouncement(link="https://codal.ir/r", link_excel="https://excel.codal.ir/x",
+                            link_pdf="https://codal.ir/p", link_attachment="https://codal.ir/Reports/Attachment.aspx",
+                            has_excel=False, has_pdf=None)
+    assert [kind for kind, _ in _artifact_sources(row)] == ["html", "pdf"]
+
+
+def test_letter_type_comes_from_the_real_let_parameter():
+    from marketdata.codal_classification import _letter_type
+
+    assert _letter_type(CodalAnnouncement(link="https://codal.ir/Reports/Decision.aspx?LetterSerial=a&rt=0&let=6&ct=0")) == "let6"
+    assert _letter_type(CodalAnnouncement(link="", letter_type=58)) == "let58"
+    assert _letter_type(CodalAnnouncement(link="https://codal.ir/x?LetterSerial=let123abc")) == ""
+
+
+def test_only_tracked_tse_stocks_are_promoted(monkeypatch, settings):
+    """Documents are kept forever: a BRS or ineligible row sharing the name is not the universe."""
+    letters = _page()["Letters"]
+    rows = [codal_search.normalize_letter(letter) for letter in letters]
+    _promote_on(settings, monkeypatch, set())
+    MarketInstrument.objects.create(source="brs", symbol=rows[0]["symbol"], category="gold", eligible=True)
+    MarketInstrument.objects.create(source="tsetmc", symbol=rows[1]["symbol"], category="stock", eligible=False)
+    _serve(monkeypatch, letters, total=4, pages=1)
+
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))
+
+    assert not CodalAnnouncement.objects.exists()
+    assert CodalLetter.objects.count() == 4
+
+
+def test_research_and_ops_read_the_crawl_once_it_writes_the_list(monkeypatch, settings, make_user):
+    from django.urls import reverse
+    from rest_framework.test import APIClient
+
+    from marketdata.models import ArchiveFetchState
+    from portfolio.models import Account
+
+    _promote_on(settings, monkeypatch, {"فولاد"})
+    CodalDiscoveryDay.objects.create(date="1404-07-02", verified_complete=True, last_success_at=timezone.now())
+    CodalAnnouncement.objects.create(symbol="فولاد", code="ن-10", title="x", date_publish="1404-07-02")
+    # Frozen by disabled_endpoints(): must not be what the page reports.
+    ArchiveFetchState.objects.create(endpoint=ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS, symbol="فولاد")
+    user = make_user()
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    def codal():
+        coverage = client.get("/api/explore/stocks/فولاد/").data["coverage"]
+        rows = [row for row in coverage if row["endpoint"] == "codal_announcements"]
+        assert len(rows) == 1 and rows[0]["source"] == "codal.ir"
+        return rows[0]
+
+    # Every crawled day reconciled, but the walk back has not reached its floor.
+    assert codal()["status"] == "partial"
+    settings.CODAL_DISCOVERY_OLDEST_DAY = "1404-07-02"
+    # Reaching the floor is not enough while the crawl is behind today.
+    monkeypatch.setattr(codal_discovery, "tehran_today", lambda: "1404-07-03")
+    assert codal()["status"] == "partial"
+    monkeypatch.setattr(codal_discovery, "tehran_today", lambda: "1404-07-02")
+    assert codal()["status"] == "complete" and codal()["stored_rows"] == 1
+    # Older filings held back by a narrower promotion scope are not coverage.
+    settings.CODAL_HISTORY_DOCUMENTS = "annual_statements"
+    assert codal()["status"] == "partial" and codal()["history_documents"] == "annual_statements"
+    settings.CODAL_HISTORY_DOCUMENTS = "all"
+    assert _codal_status()["direct_discovery"]["complete"] == 1
+
+    account = Account.objects.create(user=user, name="Quality Account")
+    limits = client.get(reverse("account-data-quality", kwargs={"account_id": account.id})).data["known_limits"]
+    assert "codal_page_cap" not in {limit["code"] for limit in limits}
+
+
+def test_an_unknown_availability_flag_keeps_the_link(monkeypatch, settings):
+    row = codal_search.normalize_letter(_page()["Letters"][0])
+    _promote_on(settings, monkeypatch, {row["symbol"]})
+    row = {**row, "has_excel": None, "excel_url": "https://excel.codal.ir/r.xlsx",
+           "has_attachment": None, "attachment_url": "/Reports/DownloadFile.aspx?id=9"}
+    assert codal_discovery.promote([row]) == 1
+    made = CodalAnnouncement.objects.get(tracing_no=row["tracing_no"])
+    assert made.link_excel == "https://excel.codal.ir/r.xlsx"
+    assert made.link_attachment == "https://codal.ir/Reports/DownloadFile.aspx?id=9"
+
+
+def test_a_recrawl_that_lists_a_new_document_updates_and_requeues(monkeypatch, settings):
+    from marketdata.models import CodalReport
+
+    row = codal_search.normalize_letter(_page()["Letters"][0])
+    _promote_on(settings, monkeypatch, {row["symbol"]})
+    first = {**row, "has_attachment": False, "attachment_url": ""}
+    assert codal_discovery.promote([first]) == 1
+    made = CodalAnnouncement.objects.get(tracing_no=row["tracing_no"])
+    CodalReport.objects.create(announcement=made, status=CodalReport.Status.PARSED)
+
+    later = {**row, "has_attachment": True, "attachment_url": "/Reports/DownloadFile.aspx?id=7",
+             "title": row["title"] + " (اصلاحیه)"}
+    assert codal_discovery.promote([later]) == 0
+    made.refresh_from_db()
+    assert made.link_attachment == "https://codal.ir/Reports/DownloadFile.aspx?id=7"
+    assert made.title.endswith("(اصلاحیه)") and made.has_attachment is True
+    assert made.report.status == CodalReport.Status.FAILED
+
+    # An unchanged re-crawl is not new work; a replaced link is.
+    CodalReport.objects.filter(announcement=made).update(status=CodalReport.Status.PARSED)
+    codal_discovery.promote([later])
+    assert CodalReport.objects.get(announcement=made).status == CodalReport.Status.PARSED
+    codal_discovery.promote([{**later, "attachment_url": "/Reports/DownloadFile.aspx?id=8"}])
+    assert CodalReport.objects.get(announcement=made).status == CodalReport.Status.FAILED
+    CodalReport.objects.filter(announcement=made).update(status=CodalReport.Status.PARSED)
+    codal_discovery.promote([{**later, "attachment_url": "/Reports/DownloadFile.aspx?id=8", "title": "retitled"}])
+    assert CodalReport.objects.get(announcement=made).status == CodalReport.Status.FAILED
+
+    # BrsApi's row keeps its own fields; only identity is filled in.
+    made.source = "brsapi"
+    made.save()
+    codal_discovery.promote([{**later, "title": "changed again"}])
+    made.refresh_from_db()
+    assert made.title.endswith("(اصلاحیه)")
+
+
+def test_old_letters_become_filings_only_for_year_end_statements(monkeypatch, settings):
+    """History the owner has not given disk to stays crawled, not a link-only filing."""
+    row = codal_search.normalize_letter(_page()["Letters"][0])
+    queued = _promote_on(settings, monkeypatch, {row["symbol"]})
+    settings.CODAL_HISTORY_DOCUMENTS = "annual_statements"
+    old = {**row, "date_publish": "1395-01-10"}
+    monthly = {**old, "letter_code": "ن-30", "title": "گزارش فعالیت ماهانه"}
+    annual = {**old, "tracing_no": row["tracing_no"] + 1, "letter_serial": "annual",
+              "letter_code": "ن-10", "title": "صورتهای مالی سال مالی منتهی به ۱۳۹۴/۱۲/۲۹",
+              "time_publish": "09:00:00"}
+    assert codal_discovery.promote([monthly, annual]) == 1
+    assert list(CodalAnnouncement.objects.values_list("tracing_no", flat=True)) == [annual["tracing_no"]]
+    assert [a.tracing_no for a in queued] == [annual["tracing_no"]]
+
+    # The backlog walk skips held letters instead of stalling on them.
+    CodalLetter.objects.create(**{k: monthly[k] for k in (
+        "tracing_no", "letter_serial", "symbol", "company_name", "title", "letter_code",
+        "date_publish", "time_publish", "url")})
+    assert codal_discovery.promote_backlog() == 0
+
+
+def test_a_pdf_is_only_the_fallback(monkeypatch):
+    from marketdata import codal_pipeline
+    from marketdata.models import CodalArtifact
+
+    fetched = []
+    monkeypatch.setattr(codal_pipeline, "download_artifact",
+                        lambda url, kind: fetched.append(kind) or (url, "text/html", b"<html>x</html>"))
+    monkeypatch.setattr(codal_pipeline, "store_artifact", lambda content, content_type, kind: ("k", "c"))
+    row = CodalAnnouncement.objects.create(symbol="فولاد", code="ن-30", title="x", date_publish="1404-07-01",
+                                           link="https://codal.ir/r", link_pdf="https://codal.ir/p")
+    codal_pipeline.extract_report(row.pk)
+    assert CodalArtifact.Kind.PDF not in fetched
+
+
+
+def test_a_failed_live_filing_keeps_retrying_after_it_ages_out(monkeypatch, settings):
+    from marketdata import tasks
+    from marketdata.models import CodalReport
+
+    settings.CODAL_ENABLED = True
+    settings.CODAL_HISTORY_DOCUMENTS = "annual_statements"
+    monkeypatch.setattr("marketdata.codal_storage.origin_unreachable", lambda: False)
+    monkeypatch.setattr(tasks, "_queue_slots", lambda queue, limit: (5, 0))
+    queued = []
+    monkeypatch.setattr(tasks, "_dispatch_codal_ids", lambda ids, **k: queued.extend(ids) or len(ids))
+    old = dict(symbol="فولاد", source="codal", code="ن-30", title="گزارش فعالیت ماهانه",
+               date_publish="1395-01-10", link="https://codal.ir/r")
+    failed = CodalAnnouncement.objects.create(**old)
+    CodalReport.objects.create(announcement=failed, status=CodalReport.Status.BLOCKED_NETWORK)
+
+    tasks.queue_codal_extractions()
+    assert failed.pk in queued
+
+
+def test_a_pdf_is_fetched_when_the_html_reads_as_nothing(monkeypatch):
+    from marketdata import codal_pipeline
+    from marketdata.codal_parsers import ParsedDocument
+    from marketdata.models import CodalArtifact
+
+    fetched = []
+    monkeypatch.setattr(codal_pipeline, "download_artifact",
+                        lambda url, kind: fetched.append(kind) or (url, "text/html", b"<html></html>"))
+    monkeypatch.setattr(codal_pipeline, "store_artifact", lambda content, content_type, kind: ("k", "c"))
+    monkeypatch.setattr(codal_pipeline, "parse_artifact", lambda kind, content: ParsedDocument())
+    row = CodalAnnouncement.objects.create(symbol="فولاد", code="ن-30", title="x", date_publish="1404-07-01",
+                                           link="https://codal.ir/r", link_pdf="https://codal.ir/p")
+    codal_pipeline.extract_report(row.pk)
+    assert CodalArtifact.Kind.PDF in fetched

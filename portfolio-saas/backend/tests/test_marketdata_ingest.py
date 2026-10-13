@@ -2136,3 +2136,18 @@ def test_real_legal_rounding_under_one_percent_is_accepted():
     for bad in ("NaN", "Infinity", "abc"):
         row["Sell_N_Volume"] = bad
         assert validation.validate("real_legal", [row])[1][0].reason == "real_legal_not_numeric"
+
+
+@pytest.mark.django_db
+def test_brsapi_codal_rows_carry_the_serial_and_match_codal_ir_by_it():
+    record = {**CODAL_PAYLOAD["announcement"][0],
+              "link": "https://codal.ir/Reports/Decision.aspx?LetterSerial=ab%2Bc%3D%3D&rt=0&let=6"}
+    created, _ = ingest.ingest_codal({**CODAL_PAYLOAD, "announcement": [record]})
+    row = CodalAnnouncement.objects.get()
+    assert created == 1 and row.letter_serial == "ab+c==" and row.letter_type == 6
+
+    # codal.ir wrote the same letter under another publication time: no duplicate.
+    row.time_publish, row.source = "18:02:00", "codal"
+    row.save()
+    created, skipped = ingest.ingest_codal({**CODAL_PAYLOAD, "announcement": [record]})
+    assert created == 0 and skipped == 1 and CodalAnnouncement.objects.count() == 1

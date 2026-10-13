@@ -28,6 +28,7 @@ from ..services.deflator import CpiUnavailable, cpi_for_date, cpi_unavailable_bo
 from ..services.performance import account_performance
 from ._common import _express_real_toman, _express_usd_real, _fx_rate, _int_param, _scope, _with_usd
 from marketdata import jalali
+from marketdata.codal_discovery import promoting
 from marketdata.currency import is_tse_priced, to_toman
 from marketdata.integrity import compute_symbol_integrity
 from marketdata.jalali import from_gregorian
@@ -155,10 +156,10 @@ class AccountDataQualityView(APIView):
                     "code": "no_iranian_holiday_calendar",
                     "detail": "Clock-based market state can poll on unobserved holidays until provider state refreshes.",
                 },
-                {
+                *([] if promoting() else [{
                     "code": "codal_page_cap",
                     "detail": "Codal verification is complete only to the configured five-page archive cap.",
-                },
+                }]),
                 {
                     "code": "market_state_cache_ttl",
                     "detail": "Provider market state is cached for 3600 seconds and has no external fallback.",

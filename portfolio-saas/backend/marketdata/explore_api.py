@@ -21,6 +21,7 @@ from rest_framework.views import APIView
 
 from . import jalali
 from .codal_classification import classify_announcement
+from .codal_discovery import discovery_status, promoting
 from .codal_storage import CodalBlockedStorage, load_artifact
 from .coverage_report import classify_archive_state
 from .models import (
@@ -480,7 +481,7 @@ class StockDossierView(APIView):
                 "quality": "cross_source_disagreement" if mismatched else "provider_reported_unreconciled",
             },
             "coverage": [
-                {
+                *({
                     "endpoint": endpoint,
                     # The one classifier Ops uses. `verified_complete` alone reads a
                     # re-armed or quota-parked job that owes no rows as incomplete.
@@ -496,8 +497,9 @@ class StockDossierView(APIView):
                 for endpoint in (
                     ArchiveFetchState.Endpoint.STOCK_HISTORY_UNADJUSTED,
                     ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED,
-                    ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
-                )
+                    *(() if promoting() else (ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,)),
+                )),
+                *([_codal_discovery_coverage(symbol)] if promoting() else []),
             ],
             "disclosures": [
                 {
@@ -514,6 +516,31 @@ class StockDossierView(APIView):
             "balance_sheet": _balance_sheets(symbol, start, end_jalali),
             "monthly_sales": _monthly_sales(symbol, start, end_jalali),
         })
+
+
+def _codal_discovery_coverage(symbol):
+    """The filing list's coverage once codal.ir writes it: crawl days, market-wide.
+
+    codal.ir is crawled by publication day, not per symbol, so "complete" means
+    every crawled day reconciled against codal.ir's own total -- and every
+    crawled letter promoted: under a narrower `CODAL_HISTORY_DOCUMENTS` the
+    older filings are held back on purpose, so the list is partial by design.
+    """
+    crawl = discovery_status()
+    scope = settings.CODAL_HISTORY_DOCUMENTS
+    complete = (bool(crawl["days"]) and crawl["complete"] == crawl["days"]
+                and crawl["reached_oldest"] and crawl["reached_today"] and scope == "all")
+    return {
+        "endpoint": ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS,
+        "status": "not_tried" if not crawl["days"] else "complete" if complete else "partial",
+        "stored_rows": CodalAnnouncement.objects.filter(symbol=symbol).count(),
+        "missing_rows": None,
+        "verified_complete": complete,
+        "last_success_at": crawl["last_success_at"],
+        "source": "codal.ir",
+        "crawled_from": crawl["oldest"],
+        "history_documents": scope,
+    }
 
 
 class StockEvidenceView(APIView):

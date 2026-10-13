@@ -18,6 +18,8 @@ Conventions:
 """
 import json
 import logging
+import re
+from urllib.parse import unquote
 from decimal import Decimal
 from . import calendars, jalali, jalali as jalali_mod, validation
 from .currency import canonical_symbol, gold_history_storage_unit, to_toman
@@ -629,7 +631,10 @@ def ingest_codal(payload) -> tuple[int, int]:
             source_category_title = rec.get("category_title", "") or ""
             source_is_audited = rec.get("is_audited") if isinstance(rec.get("is_audited"), bool) else None
             classification = classify(rec["title"], source_category, source_category_title)
+            letter_serial, letter_type = _codal_letter_identity(rec)
             rows.append(CodalAnnouncement(
+                letter_serial=letter_serial,
+                letter_type=letter_type,
                 # Strip: the provider pads some symbols with a trailing space
                 # ("زقیام " vs "زقیام"). Storing it verbatim silently broke every
                 # join to MarketInstrument/Asset for those symbols, so they read
@@ -667,6 +672,13 @@ def ingest_codal(payload) -> tuple[int, int]:
             "ingest_codal: skipped %d malformed record(s) (%s)",
             malformed, ", ".join(sorted(malformed_reasons)),
         )
+    # codal.ir may already hold the letter under a different publication time,
+    # which the (symbol, code, date, time) key cannot see: match on the serial.
+    serials = {row.letter_serial for row in rows if row.letter_serial}
+    known = set(CodalAnnouncement.objects.filter(letter_serial__in=serials)
+                .values_list("letter_serial", flat=True)) if serials else set()
+    matched = sum(row.letter_serial in known for row in rows)
+    rows = [row for row in rows if row.letter_serial not in known]
     # One payload spans several issuers, so the count is scoped to the symbols
     # this batch actually touches rather than the whole (growing) table.
     created, conflicts = _bulk(
@@ -674,7 +686,25 @@ def ingest_codal(payload) -> tuple[int, int]:
     )
     if created:
         _enqueue_codal_extractions(rows)
-    return created, conflicts + bad
+    return created, conflicts + matched + bad
+
+
+def _codal_letter_identity(rec):
+    """`(letter_serial, letter_type)` from a BrsApi record's own links.
+
+    The same derivation migration 0023 applied to the rows that existed then;
+    without it, every row written while BrsApi is the source (shadow mode or a
+    rollback) is invisible to codal.ir's serial match and gets duplicated.
+    `unquote`, never `parse_qsl`: serials carry a literal `+`.
+    """
+    def value(url, name):
+        match = re.search(rf"[?&]{name}=([^&]+)", url or "", re.I)
+        return unquote(match.group(1)) if match else ""
+
+    link, pdf, attachment = (rec.get(key, "") or "" for key in ("link", "link_pdf", "link_attachment"))
+    serial = value(link, "LetterSerial") or value(pdf, "hs") or value(attachment, "LetterSerial")
+    letter_type = value(link, "let") or value(pdf, "let")
+    return serial[:128], (int(letter_type) if letter_type.isdigit() and int(letter_type) < 32768 else None)
 
 
 def _enqueue_codal_extractions(rows):
