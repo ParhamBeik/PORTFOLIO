@@ -2133,3 +2133,6 @@ def test_real_legal_rounding_under_one_percent_is_accepted():
     assert len(accepted) == 1 and not rejected
     row["Sell_N_Volume"] = 900000
     assert validation.validate("real_legal", [row])[1][0].reason == "buy_sell_volume_mismatch"
+    for bad in ("NaN", "Infinity", "abc"):
+        row["Sell_N_Volume"] = bad
+        assert validation.validate("real_legal", [row])[1][0].reason == "real_legal_not_numeric"

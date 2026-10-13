@@ -286,10 +286,24 @@ def _check_daily_history(rec):
     )
 
 
+_REAL_LEGAL_NUMERIC = (
+    "Buy_CountI", "Buy_CountN", "Sell_CountI", "Sell_CountN",
+    "Buy_I_Volume", "Buy_N_Volume", "Sell_I_Volume", "Sell_N_Volume",
+    "Buy_I_Value", "Buy_N_Value", "Sell_I_Value", "Sell_N_Value",
+)
+
+
 def _check_real_legal(rec):
     reason = _bad_date(rec.get("date"))
     if reason:
         return reason
+    # Every one of these is written verbatim into an integer column. "NaN" or
+    # "Infinity" also slipped through the tolerance test below (NaN > x is
+    # false) and then aborted the symbol's whole batch at the database.
+    for key in _REAL_LEGAL_NUMERIC:
+        value, number = rec.get(key), _num(rec.get(key))
+        if value is not None and (number is None or not math.isfinite(number)):
+            return "real_legal_not_numeric"
     counts = [
         _num(rec.get(key))
         for key in ("Buy_CountI", "Buy_CountN", "Sell_CountI", "Sell_CountN")
