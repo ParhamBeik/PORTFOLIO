@@ -23,6 +23,7 @@ reads to decide what to requeue:
   but the category's fact rules found nothing," which is a parser-coverage
   question, not a fetch problem).
 """
+import re
 from decimal import Decimal, InvalidOperation
 from django.db import transaction
 from django.db.models import Q
@@ -69,16 +70,21 @@ def _artifact_sources(announcement):
 
     `Attachment.aspx` is an HTML index of links, not a document: fetching it
     produced 83,164 "rejected" artifacts and nothing usable. Its link stays on
-    the announcement. Excel/PDF that codal.ir says do not exist are skipped
-    (`has_* is False`; None means unknown, as on BrsApi-era rows).
+    the announcement. An attachment link that points straight at a file is
+    still a document and is kept. Excel/PDF that codal.ir says do not exist
+    are skipped (`has_* is False`; None means unknown, as on BrsApi-era rows).
     """
+    attachment = announcement.link_attachment
+    if re.search(r"attachment\.aspx", attachment or "", re.I):
+        attachment = ""
     return [
         (kind, link) for kind, link, exists in (
             (CodalArtifact.Kind.EXCEL, announcement.link_excel, announcement.has_excel),
             (CodalArtifact.Kind.HTML, announcement.link, True),
             (CodalArtifact.Kind.PDF, announcement.link_pdf, announcement.has_pdf),
+            (CodalArtifact.Kind.ATTACHMENT, attachment, announcement.has_attachment),
         )
-        if exists is not False
+        if link and exists is not False
     ]
 
 
