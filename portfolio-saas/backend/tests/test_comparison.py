@@ -147,11 +147,56 @@ def test_one_uncomparable_target_does_not_blank_the_others(compared):
     assert _row(data, "gold_18k_gram")["value_tomans"] > 0
 
 
-def test_when_no_target_can_answer_the_reason_is_the_answer(compared):
+def test_a_target_that_cannot_answer_is_a_row_not_a_failed_request(compared):
+    """The page asks one target at a time and keeps the rows it has, so a
+    refusal has to come back as that target's row. As a 400 it read as "this
+    holding cannot be compared" and blanked the table."""
     response = _get(compared, subject="kama_stock", targets="house_asset")
 
-    assert response.status_code == 400
-    assert response.data["reason"] == "real_estate_not_comparable"
+    assert response.status_code == 200, response.data
+    assert _row(response.data, "house_asset")["reason"] == "real_estate_not_comparable"
+    assert response.data["subject"]["invested_tomans"] == pytest.approx(250000, rel=1e-6)
+
+
+def test_today_is_priced_live_not_at_yesterdays_close(compared, write_prices):
+    """The panel stops at the last daily close; "worth today" must not. Both
+    ends of the row move to the price the rest of the app values holdings at
+    today -- `get_latest_prices`, which takes a live tick during the session and
+    the official close once the session is over."""
+    from portfolio.services.valuation import get_latest_prices
+
+    write_prices({"kama_stock": Decimal("2500"), "gold_18k_gram": Decimal("5000")})
+    today = get_latest_prices()
+
+    data = _get(compared, subject="kama_stock", targets="gold_18k_gram").data
+    gold = _row(data, "gold_18k_gram")
+
+    assert gold["priced_live"] is True
+    assert gold["end_date"] == timezone.now().date().isoformat()
+    # 2,000 shares at today's Rial price, on both the row and the tile.
+    worth = 2000 * float(today["kama_stock"]) / 10
+    assert gold["actual_tomans"] == pytest.approx(worth)
+    assert data["subject"]["value_tomans"] == pytest.approx(worth)
+    assert data["subject"]["price"]["unit"] == "IRR"
+    assert gold["value_tomans"] == pytest.approx(
+        gold["units"] * float(today["gold_18k_gram"])
+    )
+    for curve in gold["series"]:
+        assert curve["points"][-1]["date"] == timezone.now().date().isoformat()
+
+
+def test_the_picker_says_which_holdings_have_money_to_replay(compared, asset_catalog):
+    from portfolio.services.ledger import create_ledger_entry
+
+    create_ledger_entry(
+        account=compared, kind=LedgerEntry.Kind.OPENING_POSITION,
+        asset=asset_catalog["gold_18k_gram"], quantity=Decimal("3"),
+        occurred_at=timezone.now() - datetime.timedelta(days=40),
+    )
+    holdings = {row["key"]: row for row in _get(compared).data["holdings"]}
+
+    assert holdings["kama_stock"]["priced"] is True
+    assert holdings["gold_18k_gram"]["priced"] is False
 
 
 def test_without_targets_it_answers_against_the_defaults(compared):

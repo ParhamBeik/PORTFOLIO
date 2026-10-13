@@ -414,8 +414,31 @@ def _price_in_quote(asset, tomans_per_unit: float) -> dict:
     return {"value": round(float(value), 2), "unit": "IRT"}
 
 
-def _replay(subject, target, flows, days) -> dict:
-    """One row of the table: every real purchase of `subject`, replayed into `target`."""
+def _live_tomans(asset, prices) -> float | None:
+    """Today's price per unit in Toman, from the live price map, or None."""
+    raw = prices.get(asset.key)
+    if not raw or raw <= 0:
+        return None
+    return float(holding_value_to_toman(asset, Decimal(raw)))
+
+
+def _close_today(series: pd.Series, day, value: float) -> pd.Series:
+    """The curve with today's point set to a live value (added or replaced)."""
+    series = series.copy()
+    series.loc[day] = value
+    return series.sort_index()
+
+
+def _replay(subject, target, flows, days, prices=None) -> dict:
+    """One row of the table: every real purchase of `subject`, replayed into `target`.
+
+    The panel ends at the last daily close. The row ends at today's LIVE price
+    instead, for both sides, so "worth today" means today: on 2026-10-13 KAMA
+    closed at 6,290 Rial and traded live at 6,470, which is the difference
+    between trailing the dollar by 1.5% and leading it by 1.2%. A row whose
+    series stopped early keeps its own last real day -- a live tick cannot
+    stand in for a series that has ended.
+    """
     load, start = _window(flows, days)
     panel = _panel([subject.key, target.key], load, held=[subject.key])
     index = panel.index
@@ -432,9 +455,19 @@ def _replay(subject, target, flows, days) -> dict:
     bought = _counterfactual_units(flows, panel[target.key], index)
     actual = _shown(held * panel[subject.key], start)
     alternative = _shown(bought * panel[target.key], start)
+    units_now = float(held.iloc[-1])
+    ended = any(w.get("reason") == "series_ended" for w in panel.attrs["warnings"])
+    live_subject = _live_tomans(subject, prices or {})
+    live_target = _live_tomans(target, prices or {})
+    priced_live = bool(not ended and live_subject and live_target)
+    if priced_live:
+        today = _day(timezone.now())
+        actual = _close_today(actual, today, units_now * live_subject)
+        alternative = _close_today(
+            alternative, today, float(bought.iloc[-1]) * live_target
+        )
     end_actual = float(actual.iloc[-1])
     end_alt = float(alternative.iloc[-1])
-    units_now = float(held.iloc[-1])
     row = {
         "key": target.key,
         "label": _label(target),
@@ -456,6 +489,7 @@ def _replay(subject, target, flows, days) -> dict:
         "start_date": actual.index[0].date().isoformat(),
         "end_date": actual.index[-1].date().isoformat(),
         "window_days": (actual.index[-1] - actual.index[0]).days + 1,
+        "priced_live": priced_live,
         "series": [
             _curve(subject.key, _label(subject), actual),
             _curve(target.key, _label(target), alternative),
@@ -506,24 +540,33 @@ def compare(user, *, account=None, subject=None, targets=None, days=None) -> dic
             "missing_target", "Choose something to compare against.", field="target"
         )
     names = {a.key: _label(a) for a in Asset.objects.filter(key__in=keys)}
-    rows, first_error = [], None
+    from .valuation import get_latest_prices
+
+    prices = get_latest_prices()
+    rows = []
     for key in keys:
         try:
-            rows.append(_replay(holding, _resolve_asset(key, field="target"), flows, days))
+            target = _resolve_asset(key, field="target")
+            rows.append(_replay(holding, target, flows, days, prices))
         except ComparisonError as exc:
-            first_error = first_error or exc
+            # A target that cannot answer is a row with its reason, never a
+            # failed request: the page asks one target at a time and keeps the
+            # rows it already has, so a refusal must not read as "the holding
+            # cannot be compared".
             rows.append({
                 "key": key, "label": names.get(key, key),
                 "reason": exc.reason, "detail": exc.detail,
             })
-    answered = [row for row in rows if "reason" not in row]
-    if not answered:
-        raise first_error
-    # The rows can end on different days (a target whose series stopped closes
-    # its own window early), so the holding's own figures come from the row
-    # that reaches furthest -- today, whenever any row does.
-    latest = max(answered, key=lambda row: row["end_date"])
     units = float(sum(flow["units"] for flow in flows))
+    live = _live_tomans(holding, prices)
+    answered = [row for row in rows if "reason" not in row]
+    latest = max(answered, key=lambda row: row["end_date"], default=None)
+    # Today's live price when there is one; otherwise the last close any row
+    # reached. Both are the holding's own figures, independent of which targets
+    # were asked for.
+    per_unit = live if live else (
+        latest["actual_tomans"] / units if latest and units > 0 else None
+    )
     return {
         "subject": {
             "key": holding.key,
@@ -531,12 +574,13 @@ def compare(user, *, account=None, subject=None, targets=None, days=None) -> dic
             "units": units,
             # Net of sales, before any walk-in: the money really put in.
             "invested_tomans": round(invested, 2),
-            "value_tomans": latest["actual_tomans"],
-            "price": (
-                _price_in_quote(holding, latest["actual_tomans"] / units)
-                if units > 0 else None
+            "value_tomans": round(units * per_unit, 2) if per_unit else None,
+            "price": _price_in_quote(holding, per_unit) if per_unit else None,
+            "priced_live": bool(live),
+            "end_date": (
+                timezone.now().date().isoformat() if live
+                else latest["end_date"] if latest else None
             ),
-            "end_date": latest["end_date"],
         },
         "rows": rows,
         "requested_days": days,
@@ -557,10 +601,17 @@ def comparable_assets(user, account=None) -> dict:
     # Netted, like `_flows`. A raw query leaves an asset whose only purchase was
     # reversed in the picker, where choosing it always answers
     # "no_purchase_history".
-    held_ids = {
-        entry.asset_id
-        for entry in active_entries(accounts, kinds=_POSITION_KINDS)
+    entries = [
+        entry for entry in active_entries(accounts, kinds=_POSITION_KINDS)
         if entry.asset_id
+    ]
+    held_ids = {entry.asset_id for entry in entries}
+    # Which holdings have money in them to replay. The page opens on one of
+    # these: opening on a position recorded without a price answered
+    # "no_recorded_cost" before the reader had chosen anything.
+    priced_ids = {
+        entry.asset_id for entry in entries
+        if entry.kind == LedgerEntry.Kind.BUY and entry.price_tomans
     }
     # `is_manual` assets are excluded from targets: they carry a `proxy_key`,
     # so their panel column is a DIFFERENT asset's price series (a Swiss bar
@@ -575,6 +626,7 @@ def comparable_assets(user, account=None) -> dict:
             "label": _label(asset),
             "asset_class": asset.asset_class,
             "held": asset.id in held_ids,
+            "priced": asset.id in priced_ids,
         }
         for asset in assets
         if asset.id not in hidden
