@@ -160,7 +160,12 @@ def _unit(text):
     A statement of amounts in no currency read here ("مبالغ به هزار درهم") is
     None too, not "": "" lets the page-level Rial note stand in for it."""
     canonical = _canonical(text)
-    if any(word in canonical for word in ("تومان", "دلار", "یورو", "میلیارد")):
+    # Foreign currencies too, including the Rials that are not Iran's (Omani,
+    # Qatari, Saudi, Yemeni): "ریال" alone would read them as IRR.
+    if any(word in canonical for word in (
+        "تومان", "دلار", "یورو", "میلیارد", "درهم", "دینار", "پوند", "یوان", "روبل", "لیر",
+        "فرانک", "عمان", "قطر", "سعود", "یمن",
+    )):
         return None
     if "میلیونریال" in canonical:
         return "million_rial"
@@ -207,7 +212,10 @@ def _parse_statement(content, *, symbol, company_name, title, period_end, is_con
             return []
     try:
         end = normalize_jalali(source.get("periodEndToDate"))
-        months = int(source.get("period") or 0)
+        period = Decimal(str(source.get("period") or 0))
+        if period != period.to_integral_value():
+            return []  # "3.5" is not a three-month statement
+        months = int(period)
         start = _period_start(end, months)
         # Income belongs to the issuer's own fiscal year. A changed fiscal year
         # or an inconsistent payload implies a different start; certifying under
@@ -223,7 +231,7 @@ def _parse_statement(content, *, symbol, company_name, title, period_end, is_con
             is_audited = source.get("isAudited")
             if not isinstance(is_audited, bool):
                 return []
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, ArithmeticError):
         return []
     note = soup.select_one("#ctl00_pPriceNote")
     facts = []

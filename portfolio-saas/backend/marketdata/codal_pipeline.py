@@ -378,6 +378,14 @@ def extract_report(announcement_id):
             statement_abstain_reason(page, title=announcement.title, extracted=bool(statement))
             if page is not None else "excel_workbook"
         )
+    if parsed is None and blocked:
+        # The statement page itself was not fetched: an unreadable fallback says
+        # nothing about the template, so retry rather than call it unsupported.
+        report.status = blocked
+        report.quality = CodalReport.Quality.REVIEW
+        report.error_code = "statement_tab_unfetched"
+        report.save(update_fields=["status", "quality", "error_code", "updated_at"])
+        return report, {"error_code": report.error_code, "parse_errors": parse_errors}
     if parsed is None:
         # Downloaded fine, but nothing usable came out of any of them --
         # a template problem, not a network one. Not retried.

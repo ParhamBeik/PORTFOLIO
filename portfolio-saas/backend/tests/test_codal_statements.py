@@ -430,6 +430,7 @@ def test_legacy_balance_tab_and_equity_names_are_read():
 def test_income_without_a_valid_period_is_not_certified():
     facts = _parse(INTERIM.replace(b'"period":3', b'"period":1'))
     assert facts and {f["verification_status"] for f in facts} == {"extracted"}
+    assert _parse(INTERIM.replace(b'"period":3', b'"period":3.5')) == []
 
 
 
@@ -440,6 +441,7 @@ def test_a_table_in_an_unconvertible_unit_is_not_read():
     assert _parse(INTERIM.replace(described, "کليه مبالغ به هزار تومان است".encode())) == []
     # A currency this reader has no word for is still a stated unit, not a blank.
     assert _parse(INTERIM.replace(described, "کليه مبالغ به هزار درهم است".encode())) == []
+    assert _parse(INTERIM.replace(described, "کليه مبالغ به ريال عمان است".encode())) == []
 
 
 def test_audit_status_comes_from_the_data_when_the_title_is_silent():
@@ -542,3 +544,17 @@ def test_a_value_whose_row_identity_disagrees_with_its_label_is_not_used():
     facts = {f["fact_code"]: f for f in _parse(INTERIM.replace(cell, moved))}
     assert "income.operating_revenue" not in facts
     assert all(f["verification_status"] == "extracted" for f in facts.values())
+
+
+@pytest.mark.django_db
+def test_a_blocked_main_page_with_an_unreadable_fallback_stays_retryable(monkeypatch):
+    announcement = _filing("main-blocked-empty")
+    announcement.link_excel, announcement.has_excel = "https://excel.codal.ir/r.xlsx", True
+    announcement.save()
+    _serve(monkeypatch, {"": CodalBlockedNetwork("origin_down")})
+    serve = codal_pipeline.download_artifact
+    monkeypatch.setattr(codal_pipeline, "download_artifact", lambda url, kind: (
+        (url, "text/html", b"<html><body></body></html>") if "excel" in url else serve(url, kind)
+    ))
+    report, _ = codal_pipeline.extract_report(announcement.pk)
+    assert report.status == CodalReport.Status.BLOCKED_NETWORK
