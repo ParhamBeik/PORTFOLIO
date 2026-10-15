@@ -685,8 +685,11 @@ class GuidanceView(APIView):
         benchmark_days = None
         for days in (1095, 365):
             snap = (
+                # The profile's own model. Pinned to risk_parity, the picker
+                # changed nothing for anyone without a personal plan, while the
+                # nightly job computed min_volatility and max_sharpe for nobody.
                 OptimizationSnapshot.objects.filter(
-                    account__isnull=True, scenario="risk_parity", window_days=days
+                    account__isnull=True, scenario=scenario, window_days=days
                 ).order_by("-created_at", "-pk").first()
             )
             if snap is None or not isinstance(snap.payload, dict):

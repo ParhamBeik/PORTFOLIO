@@ -82,3 +82,27 @@ def test_optimization_current_row_is_replaced_per_exact_key():
 
     assert second.pk == first.pk
     assert OptimizationSnapshot.objects.get(pk=first.pk).payload == {"version": 2}
+
+
+@pytest.mark.parametrize("profile, scenario", [
+    ("conservative", "min_volatility"), ("balanced", "risk_parity"), ("growth", "max_sharpe"),
+])
+def test_benchmark_is_the_chosen_profiles_model(profile, scenario):
+    # Prod, 2026-10-15: the benchmark was always risk_parity, so switching
+    # Balanced -> Conservative changed nothing on a new user's Risk page.
+    user = User.objects.create_user(email=f"{profile}@test.test", password="x")
+    user.risk_profile = profile
+    user.save(update_fields=["risk_profile"])
+    for name in ("min_volatility", "risk_parity", "max_sharpe"):
+        OptimizationSnapshot.objects.create(
+            account=None, scenario=name, window_days=365,
+            payload={**_payload("2025-09-01", "2026-09-01"), "target_weights": {name: 1.0}},
+        )
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    with patch("portfolio.views.analytics._current_weights_and_total", return_value=({}, Decimal("0"), {})):
+        response = client.get("/api/guidance/")
+
+    assert response.status_code == 200
+    assert response.data["benchmark"]["target_weights"] == {scenario: 1.0}
