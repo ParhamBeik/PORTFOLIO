@@ -1530,7 +1530,7 @@ export default function Dashboard({ user }) {
             quality lives on the Data health tab, not repeated here. */}
         <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} admin={user?.role === "admin"} />
         <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
-        <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} />
+        <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} onChanged={valuationState.reload} />
         <ExcludedDisclosure valuationState={valuationState} />
       </div>
     </div>
