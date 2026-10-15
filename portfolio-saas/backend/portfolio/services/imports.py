@@ -2,8 +2,10 @@
 import csv
 import hashlib
 import io
+from zoneinfo import ZoneInfo
 
 from django.db import transaction
+from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from ..models import ImportBatch, LedgerEntry
@@ -37,7 +39,9 @@ def read_csv_upload(upload) -> tuple[bytes, list[dict]]:
         raise LedgerImportError("CSV must be UTF-8 encoded.") from None
     reader = csv.DictReader(io.StringIO(text))
     if tuple(reader.fieldnames or ()) != CSV_FIELDS:
-        raise LedgerImportError("CSV headers do not match the required ledger schema.")
+        raise LedgerImportError(
+            "CSV headers must be exactly, in this order: " + ", ".join(CSV_FIELDS) + "."
+        )
     rows = list(reader)
     if not rows:
         raise LedgerImportError("CSV contains no data rows.")
@@ -60,6 +64,19 @@ def _occurred_at(row: dict, row_number: int):
     value = parse_datetime((row.get("occurred_at") or "").strip())
     if value is None:
         raise LedgerImportError("occurred_at must be an ISO-8601 datetime.", row=row_number)
+    # "1405-07-15" parses as a Gregorian date 621 years ago and was imported
+    # without complaint. Refuse it with the fix spelled out.
+    if value.year < 1900:
+        raise LedgerImportError(
+            "occurred_at looks like a Jalali date; use the Gregorian date "
+            "(e.g. 2026-10-07).",
+            row=row_number,
+        )
+    # A bare date or a time without an offset is a Tehran date, as it is in
+    # the trade wizard. Left naive it reached the ledger and surfaced as
+    # Python's "can't compare offset-naive and offset-aware datetimes".
+    if timezone.is_naive(value):
+        value = timezone.make_aware(value, ZoneInfo("Asia/Tehran"))
     return value
 
 

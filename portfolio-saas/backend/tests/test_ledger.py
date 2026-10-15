@@ -3385,3 +3385,36 @@ def test_transaction_list_query_count_does_not_grow_per_row(db):
     assert many == few
     latest = [row for row in response.data if row["is_latest_for_asset"]]
     assert len(latest) == len(assets)
+
+
+def test_csv_dates_without_a_zone_are_tehran_days_and_jalali_is_refused(ledger_account):
+    """Prod, 2026-10-15: "2026-10-07" failed with Python's "can't compare
+    offset-naive and offset-aware datetimes", and "1405-07-15" imported as
+    the year 1405 AD."""
+    from zoneinfo import ZoneInfo
+
+    header = "external_id,occurred_at,kind,asset_key,quantity,unit_price_tomans,amount_tomans,note\n"
+    day = timezone.localdate() - datetime.timedelta(days=5)
+    client = _client(ledger_account.user)
+
+    response = client.post(
+        f"/api/accounts/{ledger_account.id}/imports/commit/",
+        {"file": _csv_upload(header + f"cash-1,{day.isoformat()},opening_cash,,,,1000,\n")},
+        format="multipart",
+    )
+
+    assert response.status_code == 201, response.data
+    entry = LedgerEntry.objects.get(account=ledger_account, external_id="cash-1")
+    assert entry.occurred_at == datetime.datetime.combine(
+        day, datetime.time(), tzinfo=ZoneInfo("Asia/Tehran")
+    )
+
+    jalali = jdatetime.date.fromgregorian(date=day).strftime("%Y-%m-%d")
+    refused = client.post(
+        f"/api/accounts/{ledger_account.id}/imports/preview/",
+        {"file": _csv_upload(header + f"cash-2,{jalali}T10:00:00+03:30,opening_cash,,,,1000,\n")},
+        format="multipart",
+    )
+
+    assert refused.status_code == 400
+    assert "Jalali" in str(refused.data)
