@@ -924,9 +924,17 @@ def _load_price_panel(
 
     fallback_panel = _load_live_price_panel(cutoff, as_of_dt, fallback_keys)
     for key in fallback_keys:
-        if key in fallback_panel.columns:
+        # The live table only has ticks from the day an asset was first held,
+        # so for a recent purchase it is SHORTER than the warehouse series it
+        # replaces: one tick shadowed eight real closes, and Compare reported
+        # "no usable price history" for فولاد. Take whichever has more days.
+        short = short_warehouse_cols.get(key)
+        if key in fallback_panel.columns and (
+            short is None or fallback_panel[key].notna().sum() >= len(short)
+        ):
             continue
-        if key in short_warehouse_cols:
+        if short is not None:
+            fallback_panel = fallback_panel.drop(columns=key, errors="ignore")
             warehouse_cols[key] = short_warehouse_cols[key]
             warnings.append({
                 "key": key,
