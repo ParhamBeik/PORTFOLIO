@@ -1039,8 +1039,13 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
           // a 945M holding a 109.7% weight. Weight is a share of what is listed.
           const weightBase =
             visible.reduce((sum, i) => sum + Number(i.value || 0), 0) || 1;
-          const staleCount = visible.filter((i) => i.quality_status && i.quality_status !== "live").length;
-          const showStaleBanner = visible.length > 0 && staleCount / visible.length >= 0.5;
+          // A house or other hand-valued holding is never live; counting it
+          // put "1 of 2 prices aren't live" permanently on every portfolio that
+          // owns a property. Past 90 days the API reports it as "stale", which
+          // still counts.
+          const priceable = visible.filter((i) => i.quality_status !== "manual");
+          const staleCount = priceable.filter((i) => i.quality_status && i.quality_status !== "live").length;
+          const showStaleBanner = priceable.length > 0 && staleCount / priceable.length >= 0.5;
 
           const columns = [
             {
@@ -1343,7 +1348,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                   data-testid="dashboard-stale-banner"
                   className="mb-3 rounded-lg border border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 px-4 py-3 text-sm"
                 >
-                  {t("{n} of {total} prices aren't live — showing the last known price.", { n: staleCount, total: visible.length })}
+                  {t("{n} of {total} prices aren't live — showing the last known price.", { n: staleCount, total: priceable.length })}
                 </div>
               )}
               {hidden.length > 0 && (
