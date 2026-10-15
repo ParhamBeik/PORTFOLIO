@@ -513,8 +513,8 @@ def _fetch_and_ingest(state):
 
         # Progress is measured across the whole window, not this one day, so the
         # state stays incomplete and reschedules until the window is covered.
-        expected = set(pending) | _tick_dates_stored(symbol)
         stored = _tick_dates_stored(symbol)
+        expected = set(pending) | stored
     else:
         direct_payload = None
         if getattr(settings, "TGJU_ENABLED", False):
@@ -662,12 +662,7 @@ def _parsed_any(payload):
 
 
 def _tick_dates_stored(symbol):
-    return set(
-        StockTransactionTick.objects.filter(symbol=symbol)
-        .order_by()
-        .values_list("date", flat=True)
-        .distinct()
-    )
+    return ingest.stored_tick_days(symbol)
 
 
 def market_trading_days(window_days=None):
