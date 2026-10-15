@@ -31,8 +31,12 @@ export const num = (n, d = 2) =>
 export const toman = (n) =>
   bad(n) ? "—" : Number(n).toLocaleString("en-US", nf(0)) + " T";
 
+// ﷼ is a strong right-to-left character, so whatever follows it in the same
+// line is laid out right-to-left too: the watchlist printed "9,190 ﷼ ·
+// 1405-07-22" as "22-07-1405". LRI…PDI isolates the amount so it cannot
+// reorder its neighbours.
 export const rial = (n) =>
-  bad(n) ? "—" : Number(n).toLocaleString("en-US", nf(0)) + " ﷼";
+  bad(n) ? "—" : "\u2066" + Number(n).toLocaleString("en-US", nf(0)) + " ﷼\u2069";
 
 /**
  * Money in the basis the user picked, which is NOT always Toman.
