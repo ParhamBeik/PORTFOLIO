@@ -2151,3 +2151,30 @@ def test_brsapi_codal_rows_carry_the_serial_and_match_codal_ir_by_it():
     row.save()
     created, skipped = ingest.ingest_codal({**CODAL_PAYLOAD, "announcement": [record]})
     assert created == 0 and skipped == 1 and CodalAnnouncement.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_stored_tick_days_reads_the_table_once_and_follows_the_writer(
+    django_assert_num_queries, django_capture_on_commit_callbacks,
+):
+    """Which days a symbol has ticks for is read once, then kept by the only writer.
+
+    The DISTINCT over a compressed hypertable decompresses every tick the symbol
+    has (11.5 s for 5.1M rows), and the archive asked it up to three times a run.
+    """
+    from marketdata import ingest
+
+    payload = [{"row": 1, "time": "09:15:22", "price": 4200, "volume": 5}]
+    with django_capture_on_commit_callbacks(execute=True):
+        ingest.ingest_transactions("SYM", "1405-05-24", payload, replace=True)
+
+    assert ingest.stored_tick_days("SYM") == {"1405-05-24"}
+    with django_assert_num_queries(0):
+        assert ingest.stored_tick_days("SYM") == {"1405-05-24"}
+
+    with django_capture_on_commit_callbacks(execute=True):
+        ingest.ingest_transactions("SYM", "1405-05-25", payload, replace=True)
+    with django_capture_on_commit_callbacks(execute=True):
+        ingest.ingest_transactions("SYM", "1405-05-24", [], replace=True)
+    with django_assert_num_queries(0):
+        assert ingest.stored_tick_days("SYM") == {"1405-05-25"}
