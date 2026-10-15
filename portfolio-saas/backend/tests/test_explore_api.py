@@ -293,3 +293,23 @@ def test_dossier_coverage_status_does_not_read_a_rearmed_job_as_incomplete(make_
         ArchiveFetchState.Endpoint.STOCK_CANDLE_UNADJUSTED: "not_tried",
         ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS: "unfetchable",
     }
+
+
+def test_search_puts_the_exact_ticker_first_even_past_thirty_name_matches(make_user):
+    # Prod, 2026-10-15: "فولاد" returned 30 companies with فولاد in their
+    # name -- احیا, ارفع, سیسکو... -- and never فولاد itself.
+    for i in range(31):
+        MarketInstrument.objects.create(
+            source=MarketInstrument.Source.TSETMC,
+            category=MarketInstrument.Category.STOCK,
+            symbol=f"آ{i:02d}", name=f"آهن و فولاد {i}", eligible=True,
+        )
+    _stock("فولاد2")
+    _stock("فولاد")
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+
+    symbols = [row["symbol"] for row in client.get("/api/explore/stocks/?q=فولاد").data]
+
+    assert symbols[:2] == ["فولاد", "فولاد2"]
+    assert len(symbols) == 30
