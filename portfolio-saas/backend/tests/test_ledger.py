@@ -3408,6 +3408,14 @@ def test_csv_dates_without_a_zone_are_tehran_days_and_jalali_is_refused(ledger_a
     assert entry.occurred_at == datetime.datetime.combine(
         day, datetime.time(), tzinfo=ZoneInfo("Asia/Tehran")
     )
+    # Before Iran's 2022 DST repeal the zone database says +04:30 in summer;
+    # the trade wizard uses a fixed +03:30, and a CSV must land on the same
+    # instant or an opening entry made both ways collides.
+    from portfolio.services.imports import _occurred_at
+
+    assert _occurred_at({"occurred_at": "2021-07-01"}, 1) == datetime.datetime(
+        2021, 6, 30, 20, 30, tzinfo=datetime.timezone.utc
+    )
 
     jalali = jdatetime.date.fromgregorian(date=day).strftime("%Y-%m-%d")
     refused = client.post(

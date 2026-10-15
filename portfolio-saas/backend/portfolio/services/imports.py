@@ -1,8 +1,8 @@
 """Validated, atomic and idempotent CSV imports for account ledgers."""
 import csv
 import hashlib
+import datetime
 import io
-from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
@@ -18,6 +18,7 @@ CSV_FIELDS = (
     "unit_price_tomans", "amount_tomans", "note",
 )
 MAX_CSV_BYTES = 2 * 1024 * 1024
+TEHRAN_FIXED_OFFSET = datetime.timezone(datetime.timedelta(hours=3, minutes=30))
 
 
 class LedgerImportError(Exception):
@@ -72,11 +73,13 @@ def _occurred_at(row: dict, row_number: int):
             "(e.g. 2026-10-07).",
             row=row_number,
         )
-    # A bare date or a time without an offset is a Tehran date, as it is in
-    # the trade wizard. Left naive it reached the ledger and surfaced as
-    # Python's "can't compare offset-naive and offset-aware datetimes".
+    # A bare date or a time without an offset is a Tehran date, placed with
+    # the trade wizard's fixed +03:30 (jalali.js TEHRAN_OFFSET_MS), not the
+    # zone database: before 2022's DST repeal Asia/Tehran gives +04:30 in
+    # summer, and the same day would land an hour apart from a wizard entry.
+    # Left naive it surfaced as "can't compare offset-naive and offset-aware".
     if timezone.is_naive(value):
-        value = timezone.make_aware(value, ZoneInfo("Asia/Tehran"))
+        value = value.replace(tzinfo=TEHRAN_FIXED_OFFSET)
     return value
 
 
