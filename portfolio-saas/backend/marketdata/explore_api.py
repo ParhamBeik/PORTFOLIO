@@ -12,6 +12,7 @@ import re
 from urllib.parse import urlparse
 
 from django.conf import settings
+from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
@@ -383,11 +384,22 @@ class StockSearchView(APIView):
             category=MarketInstrument.Category.STOCK,
             eligible=True,
         )
+        order = ["symbol"]
         if query:
             rows = rows.filter(search_filter(typed, "symbol", "name"))
+            # Closest match first, THEN alphabetical. Plain A-to-Z cut at 30
+            # dropped فولاد from its own search: thirty companies with "فولاد"
+            # in the name have tickers that sort before it.
+            rows = rows.annotate(rank=Case(
+                When(symbol=query, then=Value(0)),
+                When(symbol__startswith=query, then=Value(1)),
+                When(symbol__icontains=query, then=Value(2)),
+                default=Value(3), output_field=IntegerField(),
+            ))
+            order = ["rank", "symbol"]
         return Response([
             {"symbol": row.symbol, "name": row.name, "isin": row.isin}
-            for row in rows.order_by("symbol")[:30]
+            for row in rows.order_by(*order)[:30]
         ])
 
 
@@ -409,9 +421,15 @@ class StockDossierView(APIView):
         start = jalali.from_gregorian(end - timedelta(days=days))
         end_jalali = jalali.from_gregorian(end)
         tomorrow_jalali = jalali.from_gregorian(end + timedelta(days=1))
-        closes = list(DailyStockHistory.objects.filter(
+        window = DailyStockHistory.objects.filter(
             symbol=symbol, date__gte=start, date__lte=end_jalali, pl__gt=0,
-        ).order_by("date").values_list("date", "pl"))
+        )
+        # A halted or closed day is padded with the last price and no volume
+        # or trades (`calendars.symbol_halt_days`). Nothing printed, so it is
+        # not a close: drawn, 12 halted days of فولاد read as a flat price.
+        traded = Q(tvol__gt=0) | Q(tno__gt=0)
+        closes = list(window.filter(traded).order_by("date").values_list("date", "pl"))
+        halted_days = window.exclude(traded).count()
         points = [
             {"date": jalali.to_gregorian(day).isoformat(), "jalali_date": day, "close_rial": str(close)}
             for day, close in closes if jalali.to_gregorian(day) is not None
@@ -477,6 +495,7 @@ class StockDossierView(APIView):
                 "points": points,
                 "first_date": points[0]["jalali_date"] if points else None,
                 "last_date": points[-1]["jalali_date"] if points else None,
+                "halted_days": halted_days,
                 "paired_candle_days": len(paired),
                 "candle_disagreements_over_1pct": mismatched,
                 "quality": "cross_source_disagreement" if mismatched else "provider_reported_unreconciled",

@@ -416,17 +416,62 @@ def _rebuild_snapshot_day(user, accounts, day, value_as_of) -> int:
         return 0
     stamp = close_at.astimezone(dt.timezone.utc)
     defaults = {"timestamp": stamp, "is_estimated": True, "is_session_close": False}
+    # The whole-portfolio row is the sum of the account rows as STORED: one that
+    # already existed keeps its own value, and a freshly computed sum would then
+    # disagree with it, so switching portfolio would redraw history.
+    user_total = Decimal("0")
     for account, total in rows:
-        Snapshot.objects.get_or_create(
+        snap, _ = Snapshot.objects.get_or_create(
             user=user, account=account, day=day,
             defaults={**defaults, "total_value_tomans": total.quantize(Decimal("1"), rounding=ROUND_HALF_UP)},
         )
-    user_total = sum((total for _, total in rows), Decimal("0"))
+        user_total += snap.total_value_tomans
     Snapshot.objects.get_or_create(
         user=user, account=None, day=day,
-        defaults={**defaults, "total_value_tomans": user_total.quantize(Decimal("1"), rounding=ROUND_HALF_UP)},
+        defaults={**defaults, "total_value_tomans": user_total},
     )
     return len(rows) + 1
+
+
+def snapshot_scope_mismatches(sample=5) -> dict:
+    """User-days whose "All portfolios" close is not the sum of its portfolios'.
+
+    Each scope is its own row, so nothing stops them drifting apart, and when
+    they do the history changes with the portfolio picker. That shipped once:
+    migration 0040 kept each scope's day from a different moment (05:30 vs
+    20:27 UTC), leaving 15 days on the family book off by up to 393M Toman
+    until they were repaired on 2026-10-15.
+    """
+    from django.db.models import F, OuterRef, Q, Subquery, Sum
+
+    parts = (
+        Snapshot.objects.filter(
+            user_id=OuterRef("user_id"), day=OuterRef("day"), account__isnull=False
+        )
+        .values("user_id")
+        .annotate(total=Sum("total_value_tomans"))
+        .values("total")
+    )
+    # Each portfolio's row is rounded to the Toman on its own, so a sum can
+    # land a Toman or two off the whole-portfolio row's own rounding (prod had
+    # two such days, 1 Toman off on a 75B book). That is not drift.
+    tolerance = Decimal("1")
+    bad = (
+        Snapshot.objects.filter(account__isnull=True)
+        .annotate(parts=Subquery(parts))
+        .exclude(parts__isnull=True)
+        .annotate(gap=F("total_value_tomans") - F("parts"))
+        .filter(Q(gap__gt=tolerance) | Q(gap__lt=-tolerance))
+        .order_by("-day")
+    )
+    return {
+        "count": bad.count(),
+        "sample": [
+            {"user_id": r.user_id, "day": r.day.isoformat(),
+             "difference_tomans": str(r.total_value_tomans - r.parts)}
+            for r in bad[:sample]
+        ],
+    }
 
 
 #: How far either side of a missing day to look for a real price to draw from.

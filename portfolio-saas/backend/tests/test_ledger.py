@@ -1546,6 +1546,29 @@ def test_resolve_historical_price_falls_back_to_the_daily_bar():
     assert resolve_historical_price(asset, timezone.now()) == Decimal("24500")
 
 
+def test_a_backdated_trade_is_priced_at_the_close_of_the_day_chosen():
+    """The wizard stores a chosen day as Tehran midnight, which is still the
+    previous day in UTC. Reading the UTC date priced 15 Mehr at 14 Mehr's close
+    (فولاد: 3,880 instead of 3,990 Rial, seen on prod 2026-10-15)."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    from marketdata.models import MarketCandle
+    from portfolio.services.ledger import resolve_historical_price
+
+    asset = Asset.objects.create(
+        key="fold_stock", name="Foolad", is_active=True,
+        asset_class=Asset.AssetClass.STOCK, tse_symbol="فولاد",
+    )
+    for day, close in (("1405-07-14", "3880"), ("1405-07-15", "3990")):
+        MarketCandle.objects.create(
+            symbol="فولاد", timeframe="1d_unadj", date_time=day, close_price=Decimal(close),
+        )
+    # 15 Mehr 1405, 00:00 Tehran -- as the database hands it back, in UTC.
+    chosen = dt.datetime(2026, 10, 7, tzinfo=ZoneInfo("Asia/Tehran")).astimezone(dt.timezone.utc)
+
+    assert resolve_historical_price(asset, chosen) == Decimal("3990")
+
+
 def test_daily_bar_fallback_ignores_a_same_symbol_bar_from_another_feed():
     from marketdata.models import MarketDailyBar, MarketInstrument
     from portfolio.services.ledger import PriceResolutionError, resolve_historical_price
@@ -3385,3 +3408,44 @@ def test_transaction_list_query_count_does_not_grow_per_row(db):
     assert many == few
     latest = [row for row in response.data if row["is_latest_for_asset"]]
     assert len(latest) == len(assets)
+
+
+def test_csv_dates_without_a_zone_are_tehran_days_and_jalali_is_refused(ledger_account):
+    """Prod, 2026-10-15: "2026-10-07" failed with Python's "can't compare
+    offset-naive and offset-aware datetimes", and "1405-07-15" imported as
+    the year 1405 AD."""
+    from zoneinfo import ZoneInfo
+
+    header = "external_id,occurred_at,kind,asset_key,quantity,unit_price_tomans,amount_tomans,note\n"
+    day = timezone.localdate() - datetime.timedelta(days=5)
+    client = _client(ledger_account.user)
+
+    response = client.post(
+        f"/api/accounts/{ledger_account.id}/imports/commit/",
+        {"file": _csv_upload(header + f"cash-1,{day.isoformat()},opening_cash,,,,1000,\n")},
+        format="multipart",
+    )
+
+    assert response.status_code == 201, response.data
+    entry = LedgerEntry.objects.get(account=ledger_account, external_id="cash-1")
+    assert entry.occurred_at == datetime.datetime.combine(
+        day, datetime.time(), tzinfo=ZoneInfo("Asia/Tehran")
+    )
+    # Before Iran's 2022 DST repeal the zone database says +04:30 in summer;
+    # the trade wizard uses a fixed +03:30, and a CSV must land on the same
+    # instant or an opening entry made both ways collides.
+    from portfolio.services.imports import _occurred_at
+
+    assert _occurred_at({"occurred_at": "2021-07-01"}, 1) == datetime.datetime(
+        2021, 6, 30, 20, 30, tzinfo=datetime.timezone.utc
+    )
+
+    jalali = jdatetime.date.fromgregorian(date=day).strftime("%Y-%m-%d")
+    refused = client.post(
+        f"/api/accounts/{ledger_account.id}/imports/preview/",
+        {"file": _csv_upload(header + f"cash-2,{jalali}T10:00:00+03:30,opening_cash,,,,1000,\n")},
+        format="multipart",
+    )
+
+    assert refused.status_code == 400
+    assert "Jalali" in str(refused.data)

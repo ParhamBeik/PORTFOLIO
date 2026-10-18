@@ -42,6 +42,7 @@ from .models import (
 from .workflows import current_correlation_id
 from datetime import timedelta
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -549,7 +550,53 @@ def ingest_transactions(
         created, conflicts = _bulk(
             StockTransactionTick, rows, scope={"symbol": symbol, "date": day}
         )
+        if created or conflicts or replace:
+            present = bool(created or conflicts)
+            transaction.on_commit(lambda: _note_tick_day(symbol, day, present))
     return created, conflicts + bad
+
+
+#: How long a symbol's set of tick days is trusted before it is re-read.
+TICK_DAYS_TTL_SECONDS = 6 * 3600
+
+
+def _tick_days_key(symbol):
+    return f"tick-days:v1:{symbol}"
+
+
+def stored_tick_days(symbol) -> set[str]:
+    """The days `symbol` has ticks stored for.
+
+    Reading this from the table decompresses every tick the symbol has --
+    compression segments by symbol alone, so a DISTINCT on `date` cannot skip
+    anything: 11.5 s for 5.1M rows on one symbol, asked up to three times per
+    archive run at 233 runs an hour (2026-10-15), which kept the database at its
+    CPU cap and the host swapping. `ingest_transactions` is the only writer, so
+    it keeps the cached set current and the table is read once per TTL.
+    """
+    key = _tick_days_key(symbol)
+    days = cache.get(key)
+    if days is None:
+        days = set(
+            StockTransactionTick.objects.filter(symbol=symbol)
+            .order_by()
+            .values_list("date", flat=True)
+            .distinct()
+        )
+        cache.set(key, days, timeout=TICK_DAYS_TTL_SECONDS)
+    return set(days)
+
+
+def _note_tick_day(symbol, day, present):
+    key = _tick_days_key(symbol)
+    days = cache.get(key)
+    if days is None:
+        return
+    if present:
+        days.add(day)
+    else:
+        days.discard(day)
+    cache.set(key, days, timeout=TICK_DAYS_TTL_SECONDS)
 
 
 def ingest_shareholders(symbol: str, payload, date: str = "") -> tuple[int, int]:

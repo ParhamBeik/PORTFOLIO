@@ -79,6 +79,29 @@ describe("Page Rendering Tests", () => {
     vi.clearAllMocks();
   });
 
+  it("does not call a hand-valued house a price that isn't live", async () => {
+    // Prod, 2026-10-15: adding a property put "1 of 2 prices aren't live"
+    // permanently on the dashboard. A house is valued by hand, never live.
+    const item = (key, quality_status, value_toman) => ({
+      key, name: key, asset_class: "stock", quantity: "1", unit_price: 1,
+      unit_price_currency: "toman", value_toman, value: value_toman, quality_status,
+    });
+    api.valuation.mockResolvedValue({
+      total: 5000908000, total_toman: 5000908000,
+      items: [item("house", "manual", 5000000000), item("foolad", "live", 908000)],
+      quality_status: "complete",
+    });
+    api.snapshots.mockResolvedValue({ series: [] });
+    api.getPerformance.mockResolvedValue({});
+    api.listLiabilities.mockResolvedValue([]);
+    api.accountDataQuality.mockResolvedValue({ quality_status: "complete", assets: [] });
+
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+    await screen.findByTestId("dashboard-holdings");
+    expect(screen.queryByTestId("dashboard-stale-banner")).toBeNull();
+  });
+
   it("renders Dashboard with net worth and asset breakdown", async () => {
     api.valuation.mockResolvedValue({
       total: 500000000,

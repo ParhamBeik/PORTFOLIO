@@ -958,6 +958,37 @@ def test_price_history_returns_ordered_warehouse_points_with_units(asset_catalog
     assert response.data["earliest_date"] == older_iso
 
 
+def test_price_history_merges_the_two_unadjusted_feeds(asset_catalog, make_user):
+    """Each feed has holes the other fills: on prod the candles showed فولاد
+    from 8 Aug to 14 Oct while the daily history had 20 Jul to 17 Oct, and for
+    فملی the daily history was the one that stopped early."""
+    from marketdata.models import DailyStockHistory
+
+    stock = asset_catalog["kama_stock"]
+    days = [_history_day(n) for n in (30, 20, 10, 5)]
+    for (day, _), close in zip(days[1:], ("5100", "5200", "5300")):
+        MarketCandle.objects.create(
+            symbol=stock.tse_symbol, timeframe=MarketCandle.UNADJUSTED,
+            date_time=day, close_price=Decimal(close),
+        )
+    for (day, _), close in zip(days[:3], ("5000", "5099", "5200")):
+        DailyStockHistory.objects.create(
+            symbol=stock.tse_symbol, date=day, pl=Decimal(close), tvol=1000, tno=10,
+        )
+    # A halt is padded with the last price and no trades: not a session.
+    halted, _ = _history_day(2)
+    DailyStockHistory.objects.create(symbol=stock.tse_symbol, date=halted, pl=Decimal("5300"))
+
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+    data = client.get(f"/api/prices/history/?asset={stock.key}&days=90").data
+
+    assert [p["date"] for p in data["points"]] == [iso for _, iso in days]
+    # The candle wins a day both feeds carry.
+    assert [p["price"] for p in data["points"]] == [5000.0, 5100.0, 5200.0, 5300.0]
+    assert data["source"] == "TSETMC daily close"
+
+
 def test_price_history_windows_by_days_not_rows(asset_catalog, make_user):
     """The window is calendar days. A row cap answered "1Y" with half a day of
     two-minute ticks, all collapsed onto one x value.
@@ -2192,6 +2223,45 @@ def test_missed_nightly_closes_are_rebuilt_from_the_ledger(make_user):
     assert not Snapshot.objects.filter(user=user, day__lt=timezone.localtime(started, ZoneInfo("Asia/Tehran")).date()).exists()
     # Idempotent.
     assert backfill_missing_snapshots(yesterday) == 0
+
+
+def test_all_portfolios_close_is_the_sum_of_its_portfolios(make_user):
+    """The "All portfolios" row must equal its portfolios' rows, or the picker redraws history.
+
+    Migration 0040 kept each scope's day from a different moment, and 15 days on
+    the family book disagreed by up to 393M Toman. A rebuild that met an existing
+    portfolio row also summed fresh values instead of the stored ones.
+    """
+    from zoneinfo import ZoneInfo
+    from portfolio.services.ledger import create_ledger_entry
+    from portfolio.models import LedgerEntry
+    from portfolio.tasks import backfill_missing_snapshots, snapshot_scope_mismatches
+
+    user = make_user()
+    account = Account.objects.create(user=user, name="Cash")
+    started = timezone.now() - timedelta(days=10)
+    Account.objects.filter(pk=account.pk).update(created_at=started)
+    account.refresh_from_db()
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                        amount_tomans=Decimal("1000000"), occurred_at=started)
+    yesterday = timezone.localtime(timezone.now(), ZoneInfo("Asia/Tehran")).date() - timedelta(days=1)
+    day = yesterday - timedelta(days=2)
+    # The portfolio's row survived; the whole-portfolio row for the day did not.
+    Snapshot.objects.create(user=user, account=account, day=day, total_value_tomans=Decimal("777"),
+                            timestamp=dt.datetime.combine(day, dt.time(12), tzinfo=ZoneInfo("Asia/Tehran")))
+
+    backfill_missing_snapshots(yesterday)
+    assert Snapshot.objects.get(user=user, account=None, day=day).total_value_tomans == Decimal("777")
+    assert snapshot_scope_mismatches()["count"] == 0
+
+    # A Toman of rounding between separately rounded rows is not drift.
+    Snapshot.objects.filter(user=user, account=None, day=day).update(total_value_tomans=Decimal("776"))
+    assert snapshot_scope_mismatches()["count"] == 0
+
+    Snapshot.objects.filter(user=user, account=None, day=day).update(total_value_tomans=Decimal("700"))
+    found = snapshot_scope_mismatches()
+    assert found["count"] == 1
+    assert found["sample"] == [{"user_id": user.id, "day": day.isoformat(), "difference_tomans": "-77"}]
 
 
 def test_unpriced_day_is_interpolated_between_real_prices(make_user, asset_catalog, monkeypatch):

@@ -465,7 +465,7 @@ export function LiabilityRow({ row, showAccount, onEdit, onDelete }) {
   );
 }
 
-export default function LiabilitiesCard({ activeId, accounts }) {
+export default function LiabilitiesCard({ activeId, accounts, onChanged }) {
   const accountKey = accounts.map((a) => a.id).join("|");
   // Every row carries its owning portfolio id in BOTH branches. Edit and delete
   // address a per-account URL, and only the all-portfolios branch used to set
@@ -494,7 +494,12 @@ export default function LiabilitiesCard({ activeId, accounts }) {
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
 
-  const reload = () => state.reload?.();
+  // A debt is netted out of the hero total, which this card does not own --
+  // reloading only the list left the total stale until a page refresh.
+  const reload = () => {
+    onChanged?.();
+    return state.reload?.();
+  };
   const remove = async (row) => {
     if (!window.confirm(`Delete ${row.label}?`)) return;
     setError("");
