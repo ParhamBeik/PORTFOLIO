@@ -558,3 +558,27 @@ def test_all_and_90d_agree_on_a_purchase_made_this_month(compared, asset_catalog
     assert "reason" not in whole, whole
     assert whole["value_tomans"] == pytest.approx(recent["value_tomans"])
     assert not [w for w in whole.get("warnings", []) if w["reason"] == "history_starts_late"]
+
+
+def test_a_recent_purchase_compares_on_its_daily_closes_not_todays_one_tick(
+    compared, asset_catalog, write_prices
+):
+    """Prod, 2026-10-15: فولاد bought eight sessions ago answered "no usable
+    price history" for every target. Under 30 closes the warehouse series is
+    set aside for the live table, which only holds ticks since the asset was
+    first held -- one, today -- and that one tick won."""
+    start = timezone.now() - datetime.timedelta(days=10)
+    LedgerEntry.objects.filter(account=compared).delete()
+    from portfolio.services.ledger import create_ledger_entry
+
+    create_ledger_entry(
+        account=compared, kind=LedgerEntry.Kind.BUY,
+        asset=asset_catalog["kama_stock"], quantity=Decimal("1000"),
+        unit_price_tomans=Decimal("1500"), occurred_at=start,
+    )
+    write_prices({"kama_stock": Decimal("20000")})
+
+    gold = _row(_get(compared, subject="kama_stock", targets="gold_18k_gram").data, "gold_18k_gram")
+
+    assert "reason" not in gold, gold
+    assert gold["value_tomans"] > 0
