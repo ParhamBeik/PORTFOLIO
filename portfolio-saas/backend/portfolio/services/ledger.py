@@ -1300,9 +1300,19 @@ class PriceResolutionError(Exception):
 
 
 def _jalali_date(when) -> str:
+    """The Tehran trading day `when` falls on.
+
+    `when.date()` alone is the UTC day: a trade the wizard dated 15 Mehr is
+    stored as Tehran midnight, 20:30 UTC on the 14th, and was priced at the 14th's
+    close -- every backdated trade booked at the session before the one chosen.
+    """
+    from zoneinfo import ZoneInfo
+
     import jdatetime
 
     try:
+        if timezone.is_aware(when):
+            when = timezone.localtime(when, ZoneInfo("Asia/Tehran"))
         return jdatetime.date.fromgregorian(date=when.date()).strftime("%Y-%m-%d")
     except Exception as exc:
         raise PriceResolutionError(

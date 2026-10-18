@@ -1546,6 +1546,29 @@ def test_resolve_historical_price_falls_back_to_the_daily_bar():
     assert resolve_historical_price(asset, timezone.now()) == Decimal("24500")
 
 
+def test_a_backdated_trade_is_priced_at_the_close_of_the_day_chosen():
+    """The wizard stores a chosen day as Tehran midnight, which is still the
+    previous day in UTC. Reading the UTC date priced 15 Mehr at 14 Mehr's close
+    (فولاد: 3,880 instead of 3,990 Rial, seen on prod 2026-10-15)."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    from marketdata.models import MarketCandle
+    from portfolio.services.ledger import resolve_historical_price
+
+    asset = Asset.objects.create(
+        key="fold_stock", name="Foolad", is_active=True,
+        asset_class=Asset.AssetClass.STOCK, tse_symbol="فولاد",
+    )
+    for day, close in (("1405-07-14", "3880"), ("1405-07-15", "3990")):
+        MarketCandle.objects.create(
+            symbol="فولاد", timeframe="1d_unadj", date_time=day, close_price=Decimal(close),
+        )
+    # 15 Mehr 1405, 00:00 Tehran -- as the database hands it back, in UTC.
+    chosen = dt.datetime(2026, 10, 7, tzinfo=ZoneInfo("Asia/Tehran")).astimezone(dt.timezone.utc)
+
+    assert resolve_historical_price(asset, chosen) == Decimal("3990")
+
+
 def test_daily_bar_fallback_ignores_a_same_symbol_bar_from_another_feed():
     from marketdata.models import MarketDailyBar, MarketInstrument
     from portfolio.services.ledger import PriceResolutionError, resolve_historical_price
