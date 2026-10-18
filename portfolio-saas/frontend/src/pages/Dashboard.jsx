@@ -672,7 +672,12 @@ function NoCostYet() {
 
 function PerformanceCard({ activeId, basis, accounts }) {
   const targets = performanceTargets(activeId, accounts);
-  const accountKey = accounts.map((a) => `${a.id}:${a.ledger_complete}`).join("|");
+  // The holdings ride in the key: an edit reloads `accounts` but changes
+  // neither id nor ledger_complete, so resizing a house from 100 to 120 m²
+  // left this card on the old size and value until a page refresh.
+  const accountKey = accounts
+    .map((a) => `${a.id}:${a.ledger_complete}:${JSON.stringify(a.holdings ?? [])}`)
+    .join("|");
   const state = useApi(
     () => fetchPerformance(targets, accounts, basis),
     [activeId, basis, accountKey, targets.ids.join(",")],
