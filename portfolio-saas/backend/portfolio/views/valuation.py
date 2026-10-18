@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
 from django.conf import settings
-from django.db.models import Avg
+from django.db.models import Avg, Q
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 from rest_framework import status
@@ -612,10 +612,14 @@ def _tse_price_history(asset, since_jalali):
     # فولاد lacked 18 early and 3 late sessions of a 90-day window, while for
     # فملی it was the daily history that ended 3 sessions early. Merge them,
     # the candle winning a shared day as it always has; the adjusted series is
-    # a different price and stays a last resort.
+    # a different price and stays a last resort. A halted or closed day is
+    # padded in the daily history with the last price and zero volume and
+    # trades (see `calendars.symbol_halt_days`); it printed nothing, so it is
+    # not a point.
     daily = {
         day: float(close)
         for day, close in DailyStockHistory.objects.filter(
+            Q(tvol__gt=0) | Q(tno__gt=0),
             symbol=asset.tse_symbol, date__gte=since_jalali, pl__gt=0,
         ).values_list("date", "pl")
     }

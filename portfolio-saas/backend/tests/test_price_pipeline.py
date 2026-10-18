@@ -972,7 +972,12 @@ def test_price_history_merges_the_two_unadjusted_feeds(asset_catalog, make_user)
             date_time=day, close_price=Decimal(close),
         )
     for (day, _), close in zip(days[:3], ("5000", "5099", "5200")):
-        DailyStockHistory.objects.create(symbol=stock.tse_symbol, date=day, pl=Decimal(close))
+        DailyStockHistory.objects.create(
+            symbol=stock.tse_symbol, date=day, pl=Decimal(close), tvol=1000, tno=10,
+        )
+    # A halt is padded with the last price and no trades: not a session.
+    halted, _ = _history_day(2)
+    DailyStockHistory.objects.create(symbol=stock.tse_symbol, date=halted, pl=Decimal("5300"))
 
     client = APIClient()
     client.force_authenticate(user=make_user())
