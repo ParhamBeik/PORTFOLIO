@@ -2223,6 +2223,10 @@ def test_all_portfolios_close_is_the_sum_of_its_portfolios(make_user):
     assert Snapshot.objects.get(user=user, account=None, day=day).total_value_tomans == Decimal("777")
     assert snapshot_scope_mismatches()["count"] == 0
 
+    # A Toman of rounding between separately rounded rows is not drift.
+    Snapshot.objects.filter(user=user, account=None, day=day).update(total_value_tomans=Decimal("776"))
+    assert snapshot_scope_mismatches()["count"] == 0
+
     Snapshot.objects.filter(user=user, account=None, day=day).update(total_value_tomans=Decimal("700"))
     found = snapshot_scope_mismatches()
     assert found["count"] == 1

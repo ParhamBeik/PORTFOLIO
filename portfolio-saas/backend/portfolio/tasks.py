@@ -442,7 +442,7 @@ def snapshot_scope_mismatches(sample=5) -> dict:
     20:27 UTC), leaving 15 days on the family book off by up to 393M Toman
     until they were repaired on 2026-10-15.
     """
-    from django.db.models import F, OuterRef, Subquery, Sum
+    from django.db.models import F, OuterRef, Q, Subquery, Sum
 
     parts = (
         Snapshot.objects.filter(
@@ -452,11 +452,16 @@ def snapshot_scope_mismatches(sample=5) -> dict:
         .annotate(total=Sum("total_value_tomans"))
         .values("total")
     )
+    # Each portfolio's row is rounded to the Toman on its own, so a sum can
+    # land a Toman or two off the whole-portfolio row's own rounding (prod had
+    # two such days, 1 Toman off on a 75B book). That is not drift.
+    tolerance = Decimal("1")
     bad = (
         Snapshot.objects.filter(account__isnull=True)
         .annotate(parts=Subquery(parts))
         .exclude(parts__isnull=True)
-        .exclude(total_value_tomans=F("parts"))
+        .annotate(gap=F("total_value_tomans") - F("parts"))
+        .filter(Q(gap__gt=tolerance) | Q(gap__lt=-tolerance))
         .order_by("-day")
     )
     return {
