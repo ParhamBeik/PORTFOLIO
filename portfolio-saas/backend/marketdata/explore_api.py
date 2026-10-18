@@ -20,6 +20,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import jalali
+from .catalog import search_filter, search_text
 from .codal_classification import classify_announcement
 from .codal_discovery import discovery_status, promoting
 from .codal_statements import balance_reconciles, income_reconciles
@@ -374,7 +375,8 @@ def _balance_sheets(symbol, start, end):
 
 class StockSearchView(APIView):
     def get(self, request):
-        query = request.query_params.get("q", "").strip()
+        typed = request.query_params.get("q", "")
+        query = search_text(typed)
         if len(query) > 100:
             raise ValidationError({"q": "Search must be 100 characters or fewer."})
         rows = MarketInstrument.objects.filter(
@@ -384,7 +386,7 @@ class StockSearchView(APIView):
         )
         order = ["symbol"]
         if query:
-            rows = rows.filter(Q(symbol__icontains=query) | Q(name__icontains=query))
+            rows = rows.filter(search_filter(typed, "symbol", "name"))
             # Closest match first, THEN alphabetical. Plain A-to-Z cut at 30
             # dropped فولاد from its own search: thirty companies with "فولاد"
             # in the name have tickers that sort before it.
