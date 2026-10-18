@@ -12,7 +12,6 @@ import re
 from urllib.parse import urlparse
 
 from django.conf import settings
-from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
@@ -20,7 +19,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import jalali
-from .catalog import search_text
+from .catalog import search_filter, search_text
 from .codal_classification import classify_announcement
 from .codal_discovery import discovery_status, promoting
 from .codal_statements import balance_reconciles, income_reconciles
@@ -375,7 +374,8 @@ def _balance_sheets(symbol, start, end):
 
 class StockSearchView(APIView):
     def get(self, request):
-        query = search_text(request.query_params.get("q", ""))
+        typed = request.query_params.get("q", "")
+        query = search_text(typed)
         if len(query) > 100:
             raise ValidationError({"q": "Search must be 100 characters or fewer."})
         rows = MarketInstrument.objects.filter(
@@ -384,7 +384,7 @@ class StockSearchView(APIView):
             eligible=True,
         )
         if query:
-            rows = rows.filter(Q(symbol__icontains=query) | Q(name__icontains=query))
+            rows = rows.filter(search_filter(typed, "symbol", "name"))
         return Response([
             {"symbol": row.symbol, "name": row.name, "isin": row.isin}
             for row in rows.order_by("symbol")[:30]

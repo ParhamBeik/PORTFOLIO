@@ -1,7 +1,7 @@
 """Provider catalog synchronization and eligibility classification."""
 import logging
 from django.conf import settings
-from django.db.models import Max, Min
+from django.db.models import Max, Min, Q
 
 from .currency import canonical_symbol
 from .fetchers import fetch_all_symbols, fetch_derivatives, fetch_gold_currency_free
@@ -35,6 +35,20 @@ _ARABIC_TO_PERSIAN = str.maketrans({"ي": "ی", "ى": "ی", "ك": "ک"})
 def search_text(query):
     """A user's search box text, folded to the letters the catalog stores."""
     return (query or "").translate(_ARABIC_TO_PERSIAN).strip(" \t\n\u200c")
+
+
+def search_filter(query, *fields):
+    """`icontains` on each field for the folded query AND the raw one.
+
+    The provider's `l18` is stored as sent, and a few tickers arrive in the
+    Arabic form, so folding alone would hide those from their own spelling.
+    """
+    raw = (query or "").strip(" \t\n\u200c")
+    found = Q()
+    for text in {raw, search_text(query)}:
+        for field in fields:
+            found |= Q(**{f"{field}__icontains": text})
+    return found
 
 
 def is_ordinary_stock(record):

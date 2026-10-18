@@ -127,6 +127,22 @@ def test_search_folds_arabic_keyboard_letters_to_the_persian_catalog(make_user, 
     assert "کاما" in {r.get("symbol") or r.get("tse_symbol") for r in hits}, hits
 
 
+def test_a_ticker_stored_in_arabic_form_is_still_found_by_its_own_spelling(make_user):
+    """The provider's l18 is stored as sent; folding only the query would hide
+    the few tickers that arrive with Arabic ي/ك from their own spelling."""
+    from portfolio.models import Asset
+    from portfolio.services.catalog import search_catalog
+
+    _stock(symbol="فملي")
+    user = make_user()
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    assert [r["symbol"] for r in client.get("/api/explore/stocks/", {"q": "فملي"}).data] == ["فملي"]
+    hits = search_catalog(asset_class=Asset.AssetClass.STOCK, q="فملي", user=user)
+    assert "فملي" in {r.get("symbol") or r.get("tse_symbol") for r in hits}, hits
+
+
 def test_explore_rejects_unbounded_windows_and_unsafe_disclosure_links(make_user):
     _stock()
     CodalAnnouncement.objects.create(

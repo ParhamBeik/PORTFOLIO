@@ -10,7 +10,7 @@ import re
 from django.db.models import Q
 from rest_framework.exceptions import ValidationError
 
-from marketdata.catalog import CASH_LIKE_SYMBOLS, search_text
+from marketdata.catalog import CASH_LIKE_SYMBOLS, search_filter, search_text
 from marketdata.currency import canonical_symbol
 from marketdata.models import MarketInstrument
 from portfolio.models import Asset
@@ -181,13 +181,9 @@ def _matching_assets(asset_class: str, q: str, user):
     qs = Asset.objects.filter(is_active=True, asset_class=asset_class).filter(
         visible_to(user)
     )
-    if q:
+    if search_text(q):
         qs = qs.filter(
-            Q(name__icontains=q)
-            | Q(name_fa__icontains=q)
-            | Q(key__icontains=q)
-            | Q(tse_symbol__icontains=q)
-            | Q(brs_symbol__icontains=q)
+            search_filter(q, "name", "name_fa", "key", "tse_symbol", "brs_symbol")
         )
     return list(qs.order_by("name")[:SEARCH_LIMIT])
 
@@ -201,7 +197,6 @@ def search_catalog(*, asset_class: str, q: str = "", user) -> list[dict]:
     its break before emitting a single instrument and no new ticker could ever
     be found again.
     """
-    q = search_text(q)
     if asset_class not in _CLASS_FILTER:
         return []
 
@@ -215,8 +210,8 @@ def search_catalog(*, asset_class: str, q: str = "", user) -> list[dict]:
     rows = [_row_from_asset(a) for a in assets]
 
     inst_qs = MarketInstrument.objects.filter(_CLASS_FILTER[asset_class])
-    if q:
-        inst_qs = inst_qs.filter(Q(symbol__icontains=q) | Q(name__icontains=q))
+    if search_text(q):
+        inst_qs = inst_qs.filter(search_filter(q, "symbol", "name"))
     instruments = list(inst_qs.order_by("symbol")[:SEARCH_LIMIT])
 
     symbols = [i.symbol for i in instruments]
