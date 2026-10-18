@@ -20,6 +20,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import jalali
+from .catalog import search_text
 from .codal_classification import classify_announcement
 from .codal_discovery import discovery_status, promoting
 from .codal_statements import balance_reconciles, income_reconciles
@@ -374,7 +375,7 @@ def _balance_sheets(symbol, start, end):
 
 class StockSearchView(APIView):
     def get(self, request):
-        query = request.query_params.get("q", "").strip()
+        query = search_text(request.query_params.get("q", ""))
         if len(query) > 100:
             raise ValidationError({"q": "Search must be 100 characters or fewer."})
         rows = MarketInstrument.objects.filter(

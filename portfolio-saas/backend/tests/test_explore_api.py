@@ -110,6 +110,23 @@ def test_company_dossier_labels_catalog_sector_when_detailed_metadata_is_missing
     assert company["subsector"] == ""
 
 
+@pytest.mark.parametrize("typed", ["كاما", " کاما\u200c"])
+def test_search_folds_arabic_keyboard_letters_to_the_persian_catalog(make_user, typed):
+    """Many Iranian keyboards type Arabic ك/ي. They look identical, and an
+    unfolded search for them found nothing on prod."""
+    from portfolio.models import Asset
+    from portfolio.services.catalog import search_catalog
+
+    _stock()
+    user = make_user()
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    assert [r["symbol"] for r in client.get("/api/explore/stocks/", {"q": typed}).data] == ["کاما"]
+    hits = search_catalog(asset_class=Asset.AssetClass.STOCK, q=typed, user=user)
+    assert "کاما" in {r.get("symbol") or r.get("tse_symbol") for r in hits}, hits
+
+
 def test_explore_rejects_unbounded_windows_and_unsafe_disclosure_links(make_user):
     _stock()
     CodalAnnouncement.objects.create(

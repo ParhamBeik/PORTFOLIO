@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 CASH_LIKE_SYMBOLS = frozenset({"USDT", "USDT_IRT", "USD", "EUR"})
 CRYPTO_SYMBOLS = frozenset({"BTC"})
 
+# Arabic-keyboard letters that look identical to the Persian ones the catalog
+# stores. Many Iranian keyboard layouts type ي/ك, and an unfolded search for
+# "فملي" or "كاما" found nothing while "فملی" found three tickers.
+_ARABIC_TO_PERSIAN = str.maketrans({"ي": "ی", "ى": "ی", "ك": "ک"})
+
+
+def search_text(query):
+    """A user's search box text, folded to the letters the catalog stores."""
+    return (query or "").translate(_ARABIC_TO_PERSIAN).strip(" \t\n\u200c")
+
 
 def is_ordinary_stock(record):
     """The live catalog identifies shares with IRO-prefixed ISINs.

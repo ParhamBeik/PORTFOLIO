@@ -10,7 +10,7 @@ import re
 from django.db.models import Q
 from rest_framework.exceptions import ValidationError
 
-from marketdata.catalog import CASH_LIKE_SYMBOLS
+from marketdata.catalog import CASH_LIKE_SYMBOLS, search_text
 from marketdata.currency import canonical_symbol
 from marketdata.models import MarketInstrument
 from portfolio.models import Asset
@@ -201,7 +201,7 @@ def search_catalog(*, asset_class: str, q: str = "", user) -> list[dict]:
     its break before emitting a single instrument and no new ticker could ever
     be found again.
     """
-    q = (q or "").strip()
+    q = search_text(q)
     if asset_class not in _CLASS_FILTER:
         return []
 
