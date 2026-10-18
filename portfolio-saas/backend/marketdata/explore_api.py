@@ -12,7 +12,7 @@ import re
 from urllib.parse import urlparse
 
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
@@ -382,11 +382,22 @@ class StockSearchView(APIView):
             category=MarketInstrument.Category.STOCK,
             eligible=True,
         )
+        order = ["symbol"]
         if query:
             rows = rows.filter(Q(symbol__icontains=query) | Q(name__icontains=query))
+            # Closest match first, THEN alphabetical. Plain A-to-Z cut at 30
+            # dropped فولاد from its own search: thirty companies with "فولاد"
+            # in the name have tickers that sort before it.
+            rows = rows.annotate(rank=Case(
+                When(symbol=query, then=Value(0)),
+                When(symbol__startswith=query, then=Value(1)),
+                When(symbol__icontains=query, then=Value(2)),
+                default=Value(3), output_field=IntegerField(),
+            ))
+            order = ["rank", "symbol"]
         return Response([
             {"symbol": row.symbol, "name": row.name, "isin": row.isin}
-            for row in rows.order_by("symbol")[:30]
+            for row in rows.order_by(*order)[:30]
         ])
 
 
