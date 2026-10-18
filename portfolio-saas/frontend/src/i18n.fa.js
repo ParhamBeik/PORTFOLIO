@@ -225,6 +225,7 @@ export default {
   "No price history is available yet.": "هنوز سابقه قیمتی در دسترس نیست.",
   "History window": "بازه سابقه",
   "Choose an asset": "یک دارایی انتخاب کنید",
+  "{n} days without a trade (a halt or market closure) are left out, not drawn as a flat price.": "{n} روز بدون معامله (توقف نماد یا تعطیلی بازار) کنار گذاشته شده و به‌صورت قیمت ثابت رسم نشده است.",
   "Adjusted prices, USD conversion, and return comparisons are withheld pending source checks.": "قیمت‌های تعدیل‌شده، تبدیل به دلار و مقایسه بازده تا تأیید منبع نمایش داده نمی‌شوند.",
   "Monthly sales appear only where the current Codal filing reconciles to its source rows. Income and balance figures appear only for supported statement templates with verified issuer, unit, period, and arithmetic.": "فروش ماهانه فقط وقتی نمایش داده می‌شود که گزارش کدال با ردیف‌های منبع تطبیق کند. ارقام سود و زیان و ترازنامه فقط برای قالب‌های پشتیبانی‌شده با ناشر، واحد، دوره و محاسبات تأییدشده نمایش داده می‌شوند.",
   "Same money elsewhere": "همین پول جای دیگر",

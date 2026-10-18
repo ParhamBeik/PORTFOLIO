@@ -249,6 +249,11 @@ function Company({ symbol }) {
               ) : <Empty testId="explore-no-prices">No daily close in this period.</Empty>}
               <div className="mt-3 space-y-1 text-xs text-muted" data-testid="explore-price-evidence">
                 <p>Source: {price.source}. {price.points.length} dated closes; {price.first_date || "—"} → {price.last_date || "—"} (Jalali).</p>
+                {price.halted_days > 0 && (
+                  <p data-testid="explore-price-halted">
+                    {translate("{n} days without a trade (a halt or market closure) are left out, not drawn as a flat price.", lang, { n: price.halted_days })}
+                  </p>
+                )}
                 <p>
                   {price.paired_candle_days} days checked against the separate unadjusted candle feed;
                   {" "}{price.candle_disagreements_over_1pct} differ by more than 1%.

@@ -408,9 +408,15 @@ class StockDossierView(APIView):
         start = jalali.from_gregorian(end - timedelta(days=days))
         end_jalali = jalali.from_gregorian(end)
         tomorrow_jalali = jalali.from_gregorian(end + timedelta(days=1))
-        closes = list(DailyStockHistory.objects.filter(
+        window = DailyStockHistory.objects.filter(
             symbol=symbol, date__gte=start, date__lte=end_jalali, pl__gt=0,
-        ).order_by("date").values_list("date", "pl"))
+        )
+        # A halted or closed day is padded with the last price and no volume
+        # or trades (`calendars.symbol_halt_days`). Nothing printed, so it is
+        # not a close: drawn, 12 halted days of فولاد read as a flat price.
+        traded = Q(tvol__gt=0) | Q(tno__gt=0)
+        closes = list(window.filter(traded).order_by("date").values_list("date", "pl"))
+        halted_days = window.exclude(traded).count()
         points = [
             {"date": jalali.to_gregorian(day).isoformat(), "jalali_date": day, "close_rial": str(close)}
             for day, close in closes if jalali.to_gregorian(day) is not None
@@ -476,6 +482,7 @@ class StockDossierView(APIView):
                 "points": points,
                 "first_date": points[0]["jalali_date"] if points else None,
                 "last_date": points[-1]["jalali_date"] if points else None,
+                "halted_days": halted_days,
                 "paired_candle_days": len(paired),
                 "candle_disagreements_over_1pct": mismatched,
                 "quality": "cross_source_disagreement" if mismatched else "provider_reported_unreconciled",

@@ -56,7 +56,7 @@ def test_company_dossier_exposes_price_conflict_but_no_unverified_metrics(make_u
         ins_code=123, l18="کاما", l30="Kama", sector="Metals",
     )
     day = jalali.from_gregorian(timezone.localtime(timezone.now(), jalali.TEHRAN).date() - timedelta(days=3))
-    DailyStockHistory.objects.create(symbol="کاما", date=day, pl=Decimal("1000"))
+    DailyStockHistory.objects.create(symbol="کاما", date=day, pl=Decimal("1000"), tvol=500, tno=5)
     MarketCandle.objects.create(
         symbol="کاما", timeframe=MarketCandle.UNADJUSTED,
         date_time=day, close_price=Decimal("1100"),
@@ -94,6 +94,24 @@ def test_company_dossier_exposes_price_conflict_but_no_unverified_metrics(make_u
     assert data["price"]["quality"] == "cross_source_disagreement"
     assert data["financial_metrics"]["status"] == "unavailable_unverified"
     assert data["disclosures"][0]["source_url"].startswith("https://www.codal.ir/")
+
+
+def test_dossier_leaves_halted_days_out_of_the_price_line(make_user):
+    """The provider pads a halted or closed day with the last price and no
+    volume or trades. Drawn, prod's 12 halted فولاد days read as a flat price."""
+    _stock()
+    today = timezone.localtime(timezone.now(), jalali.TEHRAN).date()
+    traded_day, halted_day = (jalali.from_gregorian(today - timedelta(days=n)) for n in (5, 3))
+    DailyStockHistory.objects.create(symbol="کاما", date=traded_day, pl=Decimal("1000"), tvol=500, tno=5)
+    DailyStockHistory.objects.create(symbol="کاما", date=halted_day, pl=Decimal("1000"))
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+
+    price = client.get("/api/explore/stocks/کاما/?days=90").data["price"]
+
+    assert [p["jalali_date"] for p in price["points"]] == [traded_day]
+    assert price["last_date"] == traded_day
+    assert price["halted_days"] == 1
 
 
 def test_company_dossier_labels_catalog_sector_when_detailed_metadata_is_missing(make_user):
