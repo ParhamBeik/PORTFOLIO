@@ -29,7 +29,7 @@ test("toman and rial format with correct currency suffixes", () => {
   assert.equal(toman(0), "0 T");
   assert.equal(toman(null), "—");
 
-  assert.equal(rial(500000), "500,000 ﷼");
+  assert.equal(rial(500000), "\u2066500,000 ﷼\u2069");
   assert.equal(rial(null), "—");
 });
 
@@ -42,7 +42,7 @@ test("money formats across currency bases", () => {
 });
 
 test("unitPrice formats TSE quotes as rial and others as toman, with USD sub-unit precision", () => {
-  assert.equal(unitPrice(3000, "rial", "nominal_toman"), "3,000 ﷼");
+  assert.equal(unitPrice(3000, "rial", "nominal_toman"), "\u20663,000 ﷼\u2069");
   assert.equal(unitPrice(300, "toman", "nominal_toman"), "300 T");
 
   // USD basis: sub-unit share prices (< 1) keep up to 6 decimals
