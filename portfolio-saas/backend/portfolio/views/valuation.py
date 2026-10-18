@@ -33,6 +33,7 @@ from marketdata.currency import is_tse_priced, to_toman
 from marketdata.integrity import compute_symbol_integrity
 from marketdata.jalali import from_gregorian
 from marketdata.models import (
+    DailyStockHistory,
     GoldCurrencyHistory,
     MarketCandle,
     RejectedRecord,
@@ -589,7 +590,8 @@ def _tse_price_history(asset, since_jalali):
     """TSE daily closes, Rial and provider-verbatim like the rest of the table."""
 
     rejected = _rejected_dates(asset.tse_symbol, since_jalali)
-    for timeframe in (MarketCandle.UNADJUSTED, MarketCandle.ADJUSTED):
+
+    def candles(timeframe):
         rows = (
             MarketCandle.objects.filter(
                 symbol=asset.tse_symbol,
@@ -603,11 +605,22 @@ def _tse_price_history(asset, since_jalali):
         # `date_time` is stored BOTH bare ("1405-05-09") and suffixed with a
         # time, so one session can arrive as two rows; key by day and let the
         # later one win rather than plotting the same close twice.
-        by_day = {
-            str(stamp).split()[0]: float(close)
-            for stamp, close in rows
-            if str(stamp).split()[0] not in rejected
-        }
+        return {str(stamp).split()[0]: float(close) for stamp, close in rows}
+
+    # Two unadjusted feeds of the same closes (0 of 190 shared prod days
+    # differ by 1%), and each has holes the other fills: the candles for
+    # فولاد lacked 18 early and 3 late sessions of a 90-day window, while for
+    # فملی it was the daily history that ended 3 sessions early. Merge them,
+    # the candle winning a shared day as it always has; the adjusted series is
+    # a different price and stays a last resort.
+    daily = {
+        day: float(close)
+        for day, close in DailyStockHistory.objects.filter(
+            symbol=asset.tse_symbol, date__gte=since_jalali, pl__gt=0,
+        ).values_list("date", "pl")
+    }
+    for series in ({**daily, **candles(MarketCandle.UNADJUSTED)}, candles(MarketCandle.ADJUSTED)):
+        by_day = {day: close for day, close in series.items() if day not in rejected}
         if by_day:
             return (
                 [{"date": day, "price": by_day[day]} for day in sorted(by_day)],
