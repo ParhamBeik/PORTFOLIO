@@ -147,6 +147,22 @@ def test_one_uncomparable_target_does_not_blank_the_others(compared):
     assert _row(data, "gold_18k_gram")["value_tomans"] > 0
 
 
+def test_an_asset_priced_from_a_proxy_is_refused_not_replayed(compared, asset_catalog):
+    """A Swiss bar has no price history of its own: the replay bought it at the
+    proxy's level (18k gram, ~26M) and sold it at the bar's own live quote, so
+    prod showed 219M growing to 756M. A refusal row is the honest answer."""
+    bar = asset_catalog["swiss_gold_bar_2_5g"]
+    bar.proxy_key = "gold_18k_gram"
+    bar.save(update_fields=["proxy_key"])
+
+    data = _get(
+        compared, subject="kama_stock", targets="gold_18k_gram,swiss_gold_bar_2_5g"
+    ).data
+
+    assert _row(data, "swiss_gold_bar_2_5g")["reason"] == "proxied_not_comparable"
+    assert _row(data, "gold_18k_gram")["value_tomans"] > 0
+
+
 def test_a_target_that_cannot_answer_is_a_row_not_a_failed_request(compared):
     """The page asks one target at a time and keeps the rows it has, so a
     refusal has to come back as that target's row. As a 400 it read as "this
