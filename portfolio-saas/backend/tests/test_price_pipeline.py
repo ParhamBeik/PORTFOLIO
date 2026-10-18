@@ -958,6 +958,37 @@ def test_price_history_returns_ordered_warehouse_points_with_units(asset_catalog
     assert response.data["earliest_date"] == older_iso
 
 
+def test_price_history_merges_the_two_unadjusted_feeds(asset_catalog, make_user):
+    """Each feed has holes the other fills: on prod the candles showed فولاد
+    from 8 Aug to 14 Oct while the daily history had 20 Jul to 17 Oct, and for
+    فملی the daily history was the one that stopped early."""
+    from marketdata.models import DailyStockHistory
+
+    stock = asset_catalog["kama_stock"]
+    days = [_history_day(n) for n in (30, 20, 10, 5)]
+    for (day, _), close in zip(days[1:], ("5100", "5200", "5300")):
+        MarketCandle.objects.create(
+            symbol=stock.tse_symbol, timeframe=MarketCandle.UNADJUSTED,
+            date_time=day, close_price=Decimal(close),
+        )
+    for (day, _), close in zip(days[:3], ("5000", "5099", "5200")):
+        DailyStockHistory.objects.create(
+            symbol=stock.tse_symbol, date=day, pl=Decimal(close), tvol=1000, tno=10,
+        )
+    # A halt is padded with the last price and no trades: not a session.
+    halted, _ = _history_day(2)
+    DailyStockHistory.objects.create(symbol=stock.tse_symbol, date=halted, pl=Decimal("5300"))
+
+    client = APIClient()
+    client.force_authenticate(user=make_user())
+    data = client.get(f"/api/prices/history/?asset={stock.key}&days=90").data
+
+    assert [p["date"] for p in data["points"]] == [iso for _, iso in days]
+    # The candle wins a day both feeds carry.
+    assert [p["price"] for p in data["points"]] == [5000.0, 5100.0, 5200.0, 5300.0]
+    assert data["source"] == "TSETMC daily close"
+
+
 def test_price_history_windows_by_days_not_rows(asset_catalog, make_user):
     """The window is calendar days. A row cap answered "1Y" with half a day of
     two-minute ticks, all collapsed onto one x value.
