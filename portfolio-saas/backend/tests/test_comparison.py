@@ -534,3 +534,27 @@ def test_benchmarks_all_maps_to_lifetime_days(benchmarked):
     assert response.data["requested_window"] == "all"
     assert response.data["requested_window_days"] >= 30
     assert response.data["data_window"]["observations"] >= 2
+
+
+def test_a_recent_purchase_compares_on_its_daily_closes_not_todays_one_tick(
+    compared, asset_catalog, write_prices
+):
+    """Prod, 2026-10-15: فولاد bought eight sessions ago answered "no usable
+    price history" for every target. Under 30 closes the warehouse series is
+    set aside for the live table, which only holds ticks since the asset was
+    first held -- one, today -- and that one tick won."""
+    start = timezone.now() - datetime.timedelta(days=10)
+    LedgerEntry.objects.filter(account=compared).delete()
+    from portfolio.services.ledger import create_ledger_entry
+
+    create_ledger_entry(
+        account=compared, kind=LedgerEntry.Kind.BUY,
+        asset=asset_catalog["kama_stock"], quantity=Decimal("1000"),
+        unit_price_tomans=Decimal("1500"), occurred_at=start,
+    )
+    write_prices({"kama_stock": Decimal("20000")})
+
+    gold = _row(_get(compared, subject="kama_stock", targets="gold_18k_gram").data, "gold_18k_gram")
+
+    assert "reason" not in gold, gold
+    assert gold["value_tomans"] > 0
