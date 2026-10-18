@@ -2225,6 +2225,45 @@ def test_missed_nightly_closes_are_rebuilt_from_the_ledger(make_user):
     assert backfill_missing_snapshots(yesterday) == 0
 
 
+def test_all_portfolios_close_is_the_sum_of_its_portfolios(make_user):
+    """The "All portfolios" row must equal its portfolios' rows, or the picker redraws history.
+
+    Migration 0040 kept each scope's day from a different moment, and 15 days on
+    the family book disagreed by up to 393M Toman. A rebuild that met an existing
+    portfolio row also summed fresh values instead of the stored ones.
+    """
+    from zoneinfo import ZoneInfo
+    from portfolio.services.ledger import create_ledger_entry
+    from portfolio.models import LedgerEntry
+    from portfolio.tasks import backfill_missing_snapshots, snapshot_scope_mismatches
+
+    user = make_user()
+    account = Account.objects.create(user=user, name="Cash")
+    started = timezone.now() - timedelta(days=10)
+    Account.objects.filter(pk=account.pk).update(created_at=started)
+    account.refresh_from_db()
+    create_ledger_entry(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                        amount_tomans=Decimal("1000000"), occurred_at=started)
+    yesterday = timezone.localtime(timezone.now(), ZoneInfo("Asia/Tehran")).date() - timedelta(days=1)
+    day = yesterday - timedelta(days=2)
+    # The portfolio's row survived; the whole-portfolio row for the day did not.
+    Snapshot.objects.create(user=user, account=account, day=day, total_value_tomans=Decimal("777"),
+                            timestamp=dt.datetime.combine(day, dt.time(12), tzinfo=ZoneInfo("Asia/Tehran")))
+
+    backfill_missing_snapshots(yesterday)
+    assert Snapshot.objects.get(user=user, account=None, day=day).total_value_tomans == Decimal("777")
+    assert snapshot_scope_mismatches()["count"] == 0
+
+    # A Toman of rounding between separately rounded rows is not drift.
+    Snapshot.objects.filter(user=user, account=None, day=day).update(total_value_tomans=Decimal("776"))
+    assert snapshot_scope_mismatches()["count"] == 0
+
+    Snapshot.objects.filter(user=user, account=None, day=day).update(total_value_tomans=Decimal("700"))
+    found = snapshot_scope_mismatches()
+    assert found["count"] == 1
+    assert found["sample"] == [{"user_id": user.id, "day": day.isoformat(), "difference_tomans": "-77"}]
+
+
 def test_unpriced_day_is_interpolated_between_real_prices(make_user, asset_catalog, monkeypatch):
     """A rebuilt day whose holding has no price is drawn between the real prices either side."""
     from zoneinfo import ZoneInfo

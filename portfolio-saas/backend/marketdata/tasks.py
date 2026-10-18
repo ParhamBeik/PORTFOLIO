@@ -637,6 +637,12 @@ def operational_health_check():
         project_disk,
     )
 
+    from portfolio.tasks import snapshot_scope_mismatches
+
+    mismatches = snapshot_scope_mismatches()
+    if mismatches["count"]:
+        alerts.append(("snapshot-scope-mismatch", mismatches))
+
     disk = project_disk(
         {"database_bytes": get_database_bytes(), "codal_bytes": _codal_volume_bytes()}
     )
