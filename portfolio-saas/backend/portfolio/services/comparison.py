@@ -92,6 +92,18 @@ def _resolve_asset(key: str, *, field: str) -> Asset:
             "so it cannot stand in as an investment alternative.",
             field=field,
         )
+    if asset.is_manual and asset.proxy_key:
+        # Its panel column is the proxy's price series (a Swiss bar priced off
+        # gold_18k_gram), while today's point is the asset's own live price.
+        # The two levels joined into one curve: the same 219M in a 2.5 g bar
+        # "became" 756M on prod. `comparable_assets` already kept these out of
+        # the picker; the catalog search that replaced it did not.
+        raise ComparisonError(
+            "proxied_not_comparable",
+            f"{_label(asset)} has no price history of its own -- it is tracked "
+            "against a similar asset -- so it cannot be compared honestly.",
+            field=field,
+        )
     return asset
 
 
