@@ -44,6 +44,13 @@ MAX_TARGETS = 6
 #: unlimited scan.
 MAX_WINDOW_DAYS = 3650
 MIN_WINDOW_DAYS = 7
+#: The panel loader sets aside a series with fewer than 30 closes in its window
+#: for live ticks, which only start the day an asset was first held. Loading
+#: only the days since a recent purchase therefore swapped real closes for a
+#: tick history that began after it: "All" valued a coin bought 26 Sep at its
+#: 30 Sep price while 90D, same purchase, got it right. ~90 calendar days is
+#: 60+ sessions on a five-day market. It sizes the LOAD only, never the window.
+MIN_LOAD_DAYS = 90
 
 
 #: Kinds that move a position for money. A rights issue moves the position
@@ -132,7 +139,7 @@ def _window(flows, days) -> tuple[int, dt.datetime]:
     )
     span = (now - first).days + 1
     shown = span if days is None else max(MIN_WINDOW_DAYS, int(days))
-    load = min(max(span, shown, MIN_WINDOW_DAYS), MAX_WINDOW_DAYS)
+    load = min(max(span, shown, MIN_LOAD_DAYS), MAX_WINDOW_DAYS)
     # Never opens before the money did. A 1Y button on a three-month-old position
     # otherwise drew nine months of a flat zero line and reported a start date on
     # which the user owned nothing -- the range was honoured literally and the

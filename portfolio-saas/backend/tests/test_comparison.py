@@ -534,3 +534,27 @@ def test_benchmarks_all_maps_to_lifetime_days(benchmarked):
     assert response.data["requested_window"] == "all"
     assert response.data["requested_window_days"] >= 30
     assert response.data["data_window"]["observations"] >= 2
+
+
+def test_all_and_90d_agree_on_a_purchase_made_this_month(compared, asset_catalog, write_prices):
+    """Prod, 2026-10-15: a coin bought 26 Sep compared at 230M on "All" and
+    223M on 90D. "All" loaded only the 21 days since the purchase, under the
+    loader's 30-close bar, so real closes were swapped for a live-tick history
+    that began four days after the purchase."""
+    from portfolio.services.ledger import create_ledger_entry
+
+    LedgerEntry.objects.filter(account=compared).delete()
+    create_ledger_entry(
+        account=compared, kind=LedgerEntry.Kind.BUY,
+        asset=asset_catalog["kama_stock"], quantity=Decimal("1000"),
+        unit_price_tomans=Decimal("1500"),
+        occurred_at=timezone.now() - datetime.timedelta(days=20),
+    )
+    write_prices({"kama_stock": Decimal("20000")})
+
+    whole = _row(_get(compared, subject="kama_stock", targets="gold_18k_gram").data, "gold_18k_gram")
+    recent = _row(_get(compared, subject="kama_stock", targets="gold_18k_gram", days=90).data, "gold_18k_gram")
+
+    assert "reason" not in whole, whole
+    assert whole["value_tomans"] == pytest.approx(recent["value_tomans"])
+    assert not [w for w in whole.get("warnings", []) if w["reason"] == "history_starts_late"]
