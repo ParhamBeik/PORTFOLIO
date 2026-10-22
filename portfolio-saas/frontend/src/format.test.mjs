@@ -13,7 +13,9 @@ import {
   signedPct,
   signedToman,
   indexPoint,
+  date,
 } from "./format.js";
+import { setLang, translate } from "./i18n.js";
 
 test("num formatters handle valid and invalid numbers gracefully", () => {
   assert.equal(num(1234.567, 2), "1,234.57");
@@ -71,4 +73,18 @@ test("indexPoint formats unitless rebased series points", () => {
   assert.equal(indexPoint(100), "100");
   assert.equal(indexPoint(130.45), "130.5");
   assert.equal(indexPoint(null), "—");
+});
+
+test("Persian mode: Jalali dates, Persian digits for counts, context keys", () => {
+  assert.equal(translate("Amount|quantity", "en"), "Amount");
+  assert.equal(translate("Amount|quantity", "fa"), "تعداد");
+  assert.equal(translate("Step {n} of {of}", "fa", { n: 1, of: 5 }), "مرحله ۱ از ۵");
+  assert.equal(translate("Step {n} of {of}", "en", { n: 1, of: 5 }), "Step 1 of 5");
+  setLang("fa");
+  try {
+    assert.equal(date("2026-07-20T08:00:00Z"), "29 تیر 1405");
+  } finally {
+    setLang("en");
+  }
+  assert.equal(date("2026-07-20T08:00:00Z"), "20 Jul 2026");
 });

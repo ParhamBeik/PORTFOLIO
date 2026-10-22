@@ -193,7 +193,7 @@ function WatchButton({ symbol }) {
       setState("error");
     }
   };
-  if (state === "done") return <span className="text-sm text-muted" data-testid="explore-watched">On your watchlist</span>;
+  if (state === "done") return <span className="text-sm text-muted" data-testid="explore-watched">{translate("On your watchlist")}</span>;
   return (
     <Button variant="ghost" onClick={add} disabled={state === "busy"} data-testid="explore-watch">
       {state === "error" ? "Could not add — retry" : "Watch"}
@@ -224,9 +224,12 @@ function Company({ symbol }) {
               actions={<div className="flex flex-wrap items-center gap-2"><WatchButton symbol={symbol} /><Badge variant={sales.points.length || income?.points?.length || balance?.points?.length ? "good" : "warn"}>{sales.points.length || income?.points?.length || balance?.points?.length ? "Source-checked figures" : "Financial metrics unverified"}</Badge></div>}
             >
               <p className="text-sm text-muted">
-                {data.company.sector ? (
-                  <>Industry is a current provider-reported {data.company.sector_source === "symbol_metadata" ? "symbol metadata" : "instrument catalog"} label, observed {date(data.company.sector_observed_at)}; it does not establish past membership. </>
-                ) : "Industry is unavailable for this stock. "}
+                {data.company.sector
+                  ? translate("Industry is a current provider-reported {kind} label, observed {date}; it does not establish past membership.", lang, {
+                    kind: translate(data.company.sector_source === "symbol_metadata" ? "symbol metadata" : "instrument catalog", lang),
+                    date: date(data.company.sector_observed_at),
+                  })
+                  : translate("Industry is unavailable for this stock.", lang)}{" "}
                 {translate("Monthly sales appear only where the current Codal filing reconciles to its source rows. Income and balance figures appear only for supported statement templates with verified issuer, unit, period, and arithmetic.", lang)}
               </p>
             </Card>
@@ -248,16 +251,15 @@ function Company({ symbol }) {
                 />
               ) : <Empty testId="explore-no-prices">No daily close in this period.</Empty>}
               <div className="mt-3 space-y-1 text-xs text-muted" data-testid="explore-price-evidence">
-                <p>Source: {price.source}. {price.points.length} dated closes; {price.first_date || "—"} → {price.last_date || "—"} (Jalali).</p>
+                <p>{translate("Source: {source}. {n} dated closes; {first} → {last} (Jalali).", lang, { source: price.source, n: price.points.length, first: price.first_date || "—", last: price.last_date || "—" })}</p>
                 {price.halted_days > 0 && (
                   <p data-testid="explore-price-halted">
                     {translate("{n} days without a trade (a halt or market closure) are left out, not drawn as a flat price.", lang, { n: price.halted_days })}
                   </p>
                 )}
                 <p>
-                  {price.paired_candle_days} days checked against the separate unadjusted candle feed;
-                  {" "}{price.candle_disagreements_over_1pct} differ by more than 1%.
-                  {price.candle_disagreements_over_1pct > 0 && " Treat this chart as disputed until those days are reconciled."}
+                  {translate("{n} days checked against the separate unadjusted candle feed; {m} differ by more than 1%.", lang, { n: price.paired_candle_days, m: price.candle_disagreements_over_1pct })}
+                  {price.candle_disagreements_over_1pct > 0 && ` ${translate("Treat this chart as disputed until those days are reconciled.", lang)}`}
                 </p>
                 <p>{translate("Adjusted prices, USD conversion, and return comparisons are withheld pending source checks.", lang)}</p>
               </div>
