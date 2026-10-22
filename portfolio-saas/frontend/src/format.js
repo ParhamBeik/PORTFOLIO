@@ -10,7 +10,7 @@
 //
 // Money is Toman. The backend serializes Decimals as strings — Number() them.
 
-import { translate } from "./i18n.js";
+import { currentLang, translate } from "./i18n.js";
 import { jalaliLabel, toJalali } from "./jalali.js";
 
 /** User-facing performance metric names (API fields remain twr / xirr). */
@@ -157,6 +157,8 @@ const dtf = (opts) => new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Tehran"
 export function date(iso) {
   const d = new Date(iso);
   if (!iso || isNaN(d)) return "—";
+  // A Persian reader dates everything on the Persian calendar.
+  if (currentLang() === "fa") return jalaliLabel(toJalali(d));
   return dtf({ year: "numeric", month: "short", day: "2-digit" }).format(d);
 }
 

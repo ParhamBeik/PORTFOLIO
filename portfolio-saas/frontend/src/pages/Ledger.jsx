@@ -535,7 +535,7 @@ export default function Ledger() {
           "—"
         ),
     },
-    { key: "qty", header: "Amount", align: "right", mobile: "meta", render: quantityCell },
+    { key: "qty", header: "Amount|quantity", align: "right", mobile: "meta", render: quantityCell },
     { key: "price", header: "Price", align: "right", render: priceCell },
     { key: "amt", header: "Value", align: "right", mobile: "value", render: (r) => toman(r.value_tomans) },
     {

@@ -64,9 +64,22 @@ export const useLang = () => useSyncExternalStore(subscribe, () => lang, () => l
  */
 export function translate(text, to = lang, vars) {
   if (typeof text !== "string") return text;
-  const out = to === "fa" ? FA[text] ?? text : text;
-  return vars ? out.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m)) : out;
+  const out = (to === "fa" ? FA[text] : undefined) ?? text.replace(CONTEXT, "");
+  return vars ? out.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? fill(vars[k], to) : m)) : out;
 }
+
+// "Amount|quantity": one English word that Persian says two ways. The part
+// after "|" only picks the dictionary entry and is never shown.
+const CONTEXT = /\|.*$/s;
+
+// A count dropped into a Persian sentence takes Persian digits ("مرحله ۱ از ۵",
+// not "مرحله 1 از 5"). Only numbers: a string var is already formatted text,
+// such as a Jalali date or an amount with separators, and is left as written.
+const fill = (v, to) =>
+  to === "fa" && typeof v === "number" ? String(v).replace(/\d/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[d]) : String(v);
+
+/** The current language, for formatters that are not components. */
+export const currentLang = () => lang;
 
 /** Hook form: re-renders the caller when the language changes. */
 export function useT() {
