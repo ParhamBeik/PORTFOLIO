@@ -92,6 +92,13 @@ export const unitPrice = (n, currency, basis = "nominal_toman") => {
 export const pct = (f, d = 1) =>
   bad(f) ? "—" : (Number(f) * 100).toLocaleString("en-US", nf(d)) + "%";
 
+/** Like pct, but a real, tiny share reads "<0.1%" rather than "0%". */
+export const pctShare = (f, d = 1) => {
+  if (bad(f)) return "—";
+  const floor = 0.5 / 10 ** (d + 2);
+  return Number(f) > 0 && Number(f) < floor ? `<${(floor * 2 * 100).toFixed(d)}%` : pct(f, d);
+};
+
 const signed = (fn) => (v) =>
   bad(v) ? "—" : (Number(v) > 0 ? "+" : "") + fn(v);
 

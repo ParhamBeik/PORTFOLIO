@@ -10,6 +10,7 @@ import {
   money,
   unitPrice,
   pct,
+  pctShare,
   signedPct,
   signedToman,
   indexPoint,
@@ -87,4 +88,11 @@ test("Persian mode: Jalali dates, Persian digits for counts, context keys", () =
     setLang("en");
   }
   assert.equal(date("2026-07-20T08:00:00Z"), "20 Jul 2026");
+});
+
+test("a tiny but real share reads <0.1%, never 0%", () => {
+  assert.equal(pctShare(0.00015), "<0.1%");
+  assert.equal(pctShare(0), "0%");
+  assert.equal(pctShare(0.25), "25%");
+  assert.equal(pctShare(null), "—");
 });

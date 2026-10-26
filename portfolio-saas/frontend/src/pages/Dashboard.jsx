@@ -27,6 +27,7 @@ import {
   money,
   num,
   pct,
+  pctShare,
   perfLabel,
   perSqm,
   PERF_UNLOCK_HINT,
@@ -67,7 +68,7 @@ const RANGES = [
 const INFLATION_VIEWS = [
   { value: "nominal", label: "Nominal" },
   { value: "real", label: "vs inflation" },
-  { value: "benchmarks", label: "vs coin, USD & TEDPIX" },
+  { value: "benchmarks", label: "vs markets" },
 ];
 
 // ponytail: the CPI table is `base 1398=100` (config/settings.py), and a rebase
@@ -808,6 +809,7 @@ function sortHoldingsByPortfolioValue(items) {
   }
   return portfolioOrder.flatMap((portfolioKey) =>
     grouped.get(portfolioKey).sort((a, b) => {
+      if (Boolean(a.is_hidden) !== Boolean(b.is_hidden)) return a.is_hidden ? 1 : -1;
       const valueDelta = Number(b.value || 0) - Number(a.value || 0);
       return valueDelta || holdingLabel(a).localeCompare(holdingLabel(b));
     })
@@ -996,7 +998,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
   };
 
   const handleDelete = async (holding, accountId) => {
-    if (!window.confirm("Remove this holding?")) return;
+    if (!window.confirm(translate("Remove this holding?"))) return;
     setActionError(null);
     try {
       await removeHolding(accountId, holding.id);
@@ -1240,7 +1242,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
               key: "weight",
               header: "Weight",
               align: "right",
-              render: (r) => (r.is_hidden ? "—" : pct(Number(r.value) / weightBase)),
+              render: (r) => (r.is_hidden ? "—" : pctShare(Number(r.value) / weightBase)),
             },
             {
               key: "status",
@@ -1359,7 +1361,8 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
               {hidden.length > 0 && (
                 <p className="mb-3 text-sm text-muted" data-testid="dashboard-holdings-hidden-note">
                   {hidden.length === 1 ? "1 asset" : `${hidden.length} assets`} switched off and
-                  left out of every figure. Tick to count {hidden.length === 1 ? "it" : "them"} again.
+                  left out of every figure.
+                  <span className="hidden md:inline"> Tick to count {hidden.length === 1 ? "it" : "them"} again.</span>
                 </p>
               )}
               {manageMode === "edit" && (

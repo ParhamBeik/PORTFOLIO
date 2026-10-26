@@ -9,6 +9,8 @@ import * as api from "../api.js";
 vi.mock("../api.js", () => ({
   downloadArchivedFiling: vi.fn(),
   watch: vi.fn(),
+  unwatch: vi.fn(),
+  watchlist: vi.fn(() => Promise.resolve({ results: [] })),
   researchRun: vi.fn(),
   exploreStocks: vi.fn(),
   stockDossier: vi.fn(),
@@ -134,5 +136,16 @@ describe("company research", () => {
     expect(await screen.findByText(/Historical answer: its source selection is changed/i)).toBeInTheDocument();
     expect(screen.getByText(/Highest among verified months/)).toBeInTheDocument();
     expect(api.researchRun).toHaveBeenCalledWith("17");
+  });
+
+  it("shows a followed company as followed and lets you unfollow it", async () => {
+    api.watchlist.mockResolvedValue({ results: [{ symbol: "فولاد" }] });
+    api.unwatch.mockResolvedValue({});
+    render(<MemoryRouter initialEntries={["/explore?symbol=فولاد"]}><Explore /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByTestId("explore-watched"));
+
+    await waitFor(() => expect(api.unwatch).toHaveBeenCalledWith("فولاد"));
+    expect(await screen.findByTestId("explore-watch")).toBeTruthy();
   });
 });

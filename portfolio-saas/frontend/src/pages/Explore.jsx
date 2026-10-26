@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { translate, useLang } from "../i18n.js";
 import { Link, useSearchParams } from "react-router-dom";
-import { downloadArchivedFiling, exploreStocks, researchRun, researchSettings, runResearch, stockDossier, watch } from "../api.js";
+import { downloadArchivedFiling, exploreStocks, researchRun, researchSettings, runResearch, stockDossier, unwatch, watch, watchlist } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
 import { Async, Badge, Button, Card, Empty, Field, Input, PageHeader, Tabs, Textarea } from "../components/ui.jsx";
 import { date, num, rial } from "../format.js";
@@ -181,22 +181,30 @@ function ResearchPanel({ symbol }) {
   );
 }
 
-/** Follow this company from its research page; the list lives under Research → Watchlist. */
+/** Follow or unfollow this company; the list lives under Research → Watchlist. */
 function WatchButton({ symbol }) {
-  const [state, setState] = useState("idle");
-  const add = async () => {
-    setState("busy");
+  const list = useApi(() => watchlist(), []);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(false);
+  // What the user just did beats the fetched list until the list is refetched.
+  const [chosen, setChosen] = useState(null);
+  const watched = chosen ?? (list.data?.results || []).some((r) => r.symbol === symbol);
+  const toggle = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(false);
     try {
-      await watch(symbol);
-      setState("done");
+      if (watched) await unwatch(symbol); else await watch(symbol);
+      setChosen(!watched);
     } catch {
-      setState("error");
+      setError(true);
+    } finally {
+      setBusy(false);
     }
   };
-  if (state === "done") return <span className="text-sm text-muted" data-testid="explore-watched">{translate("On your watchlist")}</span>;
   return (
-    <Button variant="ghost" onClick={add} disabled={state === "busy"} data-testid="explore-watch">
-      {state === "error" ? "Could not add — retry" : "Watch"}
+    <Button variant="ghost" onClick={toggle} disabled={busy || list.loading} data-testid={watched ? "explore-watched" : "explore-watch"}>
+      {error ? translate("Could not save — retry") : watched ? translate("On your watchlist · Remove") : translate("Watch")}
     </Button>
   );
 }
@@ -393,6 +401,16 @@ export default function Explore() {
   const [query, setQuery] = useState("");
   const results = useApi(() => exploreStocks(query), [query]);
 
+  // Search as you type. The box used to do nothing until Search was pressed,
+  // which on a phone reads as a dead field.
+  useEffect(() => {
+    const timer = setTimeout(() => setQuery(draft.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [draft]);
+  // With a company already open and nothing typed, the 30 alphabetical tickers
+  // only push its page below the fold.
+  const showList = Boolean(query) || !symbol;
+
   return (
     <div className="space-y-5">
       <PageHeader title="Explore companies" subtitle="Find a TSE company and inspect prices, coverage, and the original disclosures behind future research." />
@@ -401,7 +419,7 @@ export default function Explore() {
           <Input label="Search by TSE symbol or company name" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Symbol or company name" maxLength={100} className="min-w-52 flex-1" data-testid="explore-query" />
           <Button type="submit" variant="ghost" data-testid="explore-submit">Search</Button>
         </form>
-        <Async {...results} testId="explore-results" empty="No stocks match this search.">
+        {showList && <Async {...results} testId="explore-results" empty="No stocks match this search.">
           {(stocks) => stocks.length ? (
             <div className="mt-3 flex max-h-48 flex-wrap gap-2 overflow-y-auto" data-testid="explore-stock-list">
               {stocks.map((stock) => (
@@ -417,7 +435,7 @@ export default function Explore() {
               ))}
             </div>
           ) : <Empty testId="explore-no-results">No eligible TSE stock matches.</Empty>}
-        </Async>
+        </Async>}
       </Card>
       {symbol ? <Company key={symbol} symbol={symbol} /> : (
         <Empty testId="explore-prompt">Choose a company to inspect its source data.</Empty>

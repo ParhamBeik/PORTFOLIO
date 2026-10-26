@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Loading, Tabs } from "../components/ui.jsx";
+import { usePortfolio } from "../components/PortfolioContext.jsx";
 
 // One chunk per page. These used to be static imports, which folded every page
 // -- and through them charts.jsx and echarts -- into the single chunk every
@@ -18,16 +19,19 @@ const Watchlist = lazy(() => import("./Watchlist.jsx"));
 
 const page = (element) => <Suspense fallback={<Loading />}>{element}</Suspense>;
 
-function Destination({ choices, initial, testId, user }) {
+function Destination({ choices, initial, testId, user, hidden = [] }) {
   const [params, setParams] = useSearchParams();
   const requested = params.get("view");
   const value = choices.some((choice) => choice.value === requested) ? requested : initial;
   const Current = choices.find((choice) => choice.value === value).component;
+  // A hidden tab is dropped from the bar, not from the route: an old link still
+  // lands on its page. The tab you are standing on is never hidden.
+  const shown = choices.filter((choice) => choice.value === value || !hidden.includes(choice.value));
 
   return (
     <div>
       <Tabs
-        options={choices.map(({ value: item, label }) => ({ value: item, label }))}
+        options={shown.map(({ value: item, label }) => ({ value: item, label }))}
         value={value}
         onChange={(next) => setParams({ view: next })}
         label="Section"
@@ -44,7 +48,10 @@ export function PortfolioDestination({ user }) {
     { value: "breakdown", label: "Breakdown", component: Family },
     { value: "health", label: "Data health", component: DataHealth },
   ];
-  return <Destination choices={choices} initial="summary" testId="portfolio-section" user={user} />;
+  // Breakdown compares portfolios; with one there is nothing to compare.
+  const { accounts } = usePortfolio();
+  const hidden = accounts.length < 2 ? ["breakdown"] : [];
+  return <Destination choices={choices} initial="summary" testId="portfolio-section" user={user} hidden={hidden} />;
 }
 
 export function ActivityDestination() {

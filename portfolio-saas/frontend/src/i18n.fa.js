@@ -64,6 +64,12 @@ export default {
   "History quality": "کیفیت تاریخچه",
   Nominal: "اسمی",
   "vs inflation": "در برابر تورم",
+  "vs markets": "در برابر بازار",
+  "Up to {n} at a time — remove one to add another.": "حداکثر {n} مورد هم‌زمان — برای افزودن، یکی را حذف کنید.",
+  "Could not save — retry": "ذخیره نشد — دوباره تلاش کنید",
+  "On your watchlist · Remove": "در دیده‌بان شما · حذف",
+  "Remove this holding?": "این دارایی حذف شود؟",
+  "Delete {name}?": "«{name}» حذف شود؟",
   "vs coin, USD & TEDPIX": "در برابر سکه، دلار و شاخص کل",
   // Data health
   "Current prices": "قیمت‌های فعلی",
