@@ -677,7 +677,7 @@ export default function AddTransactionDialog({
                 <Field label="What do you call it?">
                   <Input
                     label="Property name"
-                    placeholder="Home"
+                    placeholder={`${t("e.g.")} ${t("Home")}`}
                     className="w-full"
                     value={form.name}
                     onChange={set("name")}
@@ -704,7 +704,7 @@ export default function AddTransactionDialog({
                       label="Area"
                       type="number"
                       step="any"
-                      placeholder="91"
+                      placeholder={`${t("e.g.")} 91`}
                       className="w-full"
                       value={form.areaSqm || holding?.area_sqm || ""}
                       onChange={set("areaSqm")}
@@ -716,7 +716,7 @@ export default function AddTransactionDialog({
                       label="Price per square meter"
                       type="number"
                       step="any"
-                      placeholder="100"
+                      placeholder={`${t("e.g.")} 100`}
                       className="w-full"
                       value={form.pricePerSqm}
                       onChange={set("pricePerSqm")}
@@ -811,6 +811,11 @@ export default function AddTransactionDialog({
                         onChange={set("price")}
                         data-testid="add-transaction-price"
                       />
+                      {Number(form.price) > 0 && Number(form.quantity) > 0 && (
+                        <p className="mt-1 text-xs text-muted" data-testid="add-transaction-total">
+                          {t("Total")}: {(Number(form.price) * Number(form.quantity)).toLocaleString("en-US", { maximumFractionDigits: 0 })} {priceUnitLabel}
+                        </p>
+                      )}
                     </Field>
                   ) : (
                     <p className="text-sm text-muted">
