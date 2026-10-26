@@ -28,8 +28,13 @@ const bad = (n) => n === null || n === undefined || n === "" || isNaN(Number(n))
 export const num = (n, d = 2) =>
   bad(n) ? "—" : Number(n).toLocaleString("en-US", nf(d));
 
+// A number followed by a Latin unit, in a right-to-left page: the space between a
+// digit and a letter takes the page's direction, so "30,702,452,972 T" drew as
+// "T 30,702,452,972". LRI…PDI keeps the amount one left-to-right unit.
+const ltr = (text) => "\u2066" + text + "\u2069";
+
 export const toman = (n) =>
-  bad(n) ? "—" : Number(n).toLocaleString("en-US", nf(0)) + " T";
+  bad(n) ? "—" : ltr(Number(n).toLocaleString("en-US", nf(0)) + " T");
 
 // ﷼ is a strong right-to-left character, so whatever follows it in the same
 // line is laid out right-to-left too: the watchlist printed "9,190 ﷼ ·
@@ -47,10 +52,10 @@ export const rial = (n) =>
  * where rounding to the unit is a visible 0.5% error on a small holding.
  */
 const BASIS_MONEY = {
-  nominal_toman: (v) => v.toLocaleString("en-US", nf(0)) + " T",
-  real_toman: (v) => v.toLocaleString("en-US", nf(0)) + " T",
-  usd_denominated: (v) => "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-  usdt_denominated: (v) => v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " USDT",
+  nominal_toman: (v) => ltr(v.toLocaleString("en-US", nf(0)) + " T"),
+  real_toman: (v) => ltr(v.toLocaleString("en-US", nf(0)) + " T"),
+  usd_denominated: (v) => ltr("$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })),
+  usdt_denominated: (v) => ltr(v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " USDT"),
 };
 
 export const money = (n, basis) =>
@@ -81,7 +86,7 @@ export const unitPrice = (n, currency, basis = "nominal_toman") => {
         minimumFractionDigits: 2,
         maximumFractionDigits: 6,
       });
-      return basis === "usd_denominated" ? "$" + digits : digits + " USDT";
+      return ltr(basis === "usd_denominated" ? "$" + digits : digits + " USDT");
     }
     return money(n, basis);
   }
@@ -91,6 +96,13 @@ export const unitPrice = (n, currency, basis = "nominal_toman") => {
 /** @param {number} f fraction, e.g. 0.12 → "12.0%" */
 export const pct = (f, d = 1) =>
   bad(f) ? "—" : (Number(f) * 100).toLocaleString("en-US", nf(d)) + "%";
+
+/** Like pct, but a real, tiny share reads "<0.1%" rather than "0%". */
+export const pctShare = (f, d = 1) => {
+  if (bad(f)) return "—";
+  const floor = 0.5 / 10 ** (d + 2);
+  return Number(f) > 0 && Number(f) < floor ? `<${(floor * 2 * 100).toFixed(d)}%` : pct(f, d);
+};
 
 const signed = (fn) => (v) =>
   bad(v) ? "—" : (Number(v) > 0 ? "+" : "") + fn(v);

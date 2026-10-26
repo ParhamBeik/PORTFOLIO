@@ -94,7 +94,10 @@ export default function AssetHistory() {
             const rows = data.points.map((point) => ({ x: point.date, price: point.price }));
             const unit = data.asset?.unit || "Toman";
             return (
-              <div className="space-y-2">
+              <div
+                className={`space-y-2 transition-opacity ${history.loading ? "opacity-50" : ""}`}
+                aria-busy={history.loading || undefined}
+              >
                 <MultiLineTrend
                   series={[{ key: "price", name: `${data.asset.symbol} (${unit})` }]}
                   data={rows}

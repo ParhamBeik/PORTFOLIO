@@ -104,7 +104,12 @@ function HistoryHealth({ account }) {
                   r.repair_state ? (
                     <span className="inline-flex flex-col items-end gap-0.5">
                       <Badge variant={REPAIR_TONE[r.repair_state] || "neutral"}>{REPAIR_LABEL[r.repair_state] || humanize(r.repair_state)}</Badge>
-                      {r.next_repair_at && <span className="text-xs text-muted">next try {dateTime(r.next_repair_at)}</span>}
+                      {r.next_repair_at && (
+                        <span className="text-xs text-muted">
+                          {r.repair_state === "complete" || r.repair_state === "refresh_due"
+                            ? translate("next check", lang) : translate("next try", lang)} {dateTime(r.next_repair_at)}
+                        </span>
+                      )}
                     </span>
                   ) : "—",
               },

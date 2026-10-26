@@ -3200,6 +3200,10 @@ def test_past_snapshot_dollars_use_that_days_rate_not_todays(make_user, monkeypa
     assert usd["basis"] == "usd_denominated"
     assert dated[_tehran_iso(three_ago)]["total"] == 20.0
     assert dated[_tehran_iso(twenty_ago)]["total"] is None
+    # In dollars the two fields are one number, not a dollar figure divided by
+    # the rate again.
+    assert dated[_tehran_iso(three_ago)]["total_usd"] == 20.0
+    assert dated[_tehran_iso(twenty_ago)]["total_usd"] is None
 
 
 def test_refresh_overwrites_cache_without_a_cold_gap(asset_catalog, write_prices, monkeypatch):

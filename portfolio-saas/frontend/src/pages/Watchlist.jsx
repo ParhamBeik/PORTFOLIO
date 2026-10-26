@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { unwatch, watchlist } from "../api.js";
 import { Async, Button, Card, Table } from "../components/ui.jsx";
@@ -13,12 +13,19 @@ export default function Watchlist() {
   const state = useApi(() => watchlist(), []);
   const [busy, setBusy] = useState(null);
 
+  // A ref, not the `busy` state: three taps land before React re-renders, and
+  // each one sent its own DELETE (two came back 404).
+  const inFlight = useRef(false);
+
   const remove = async (symbol) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusy(symbol);
     try {
       await unwatch(symbol);
       state.reload();
     } finally {
+      inFlight.current = false;
       setBusy(null);
     }
   };

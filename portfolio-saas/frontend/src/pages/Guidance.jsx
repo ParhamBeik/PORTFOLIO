@@ -12,11 +12,11 @@ const PROFILE_OPTIONS = [
   ["growth", "Growth"],
 ];
 
-function Allocation({ title, weights, labelFor, testId }) {
+function Allocation({ title, subtitle, weights, labelFor, testId }) {
   const rows = Object.entries(weights || {}).sort((a, b) => b[1] - a[1]);
   if (!rows.length) return <Empty testId={`${testId}-empty`}>Not enough verified history yet.</Empty>;
   return (
-    <Card title={title}>
+    <Card title={title} subtitle={subtitle}>
       <ul className="space-y-2" data-testid={testId}>
         {rows.map(([key, weight]) => (
           <li key={key} className="flex justify-between gap-4 border-b border-border py-1 text-sm">
@@ -80,7 +80,7 @@ export default function Guidance({ user, onUserChange }) {
             </p>
             {data.fallback_reason && <p className="text-sm text-[var(--c-warn-text)]" data-testid="guidance-fallback">{data.fallback_reason}</p>}
             <Allocation title="For my portfolio" weights={data.personal?.target_weights} labelFor={labelFor} testId="guidance-personal" />
-            <Allocation title="Market benchmark" weights={data.benchmark?.target_weights} labelFor={labelFor} testId="guidance-benchmark" />
+            <Allocation title="Market benchmark" subtitle="The market-wide model for your risk profile: the share each listed asset would hold." weights={data.benchmark?.target_weights} labelFor={labelFor} testId="guidance-benchmark" />
           </div>
         )}
       </Async>

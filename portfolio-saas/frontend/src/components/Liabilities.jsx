@@ -9,6 +9,7 @@
  * server is the matching authority; nothing here computes a balance.
  */
 import { useState } from "react";
+import { translate } from "../i18n.js";
 
 import {
   createLiability,
@@ -501,7 +502,7 @@ export default function LiabilitiesCard({ activeId, accounts, onChanged }) {
     return state.reload?.();
   };
   const remove = async (row) => {
-    if (!window.confirm(`Delete ${row.label}?`)) return;
+    if (!window.confirm(translate("Delete {name}?", undefined, { name: row.label }))) return;
     setError("");
     try {
       await deleteLiability(row.account_id || activeId, row.id);

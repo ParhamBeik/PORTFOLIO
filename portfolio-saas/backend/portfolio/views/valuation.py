@@ -499,6 +499,12 @@ class SnapshotListView(APIView):
             real = _real_payload(series)
         if divisor:
             _divide_series(series, divisor)
+            if basis in ("usd_denominated", "usdt_denominated"):
+                # `total` is now the dollar figure, so `total_usd` is the same
+                # number. Left alone it was divided by the rate a second time:
+                # a 4,338 USD book reported total_usd = 0.0159.
+                for row in series:
+                    row["total_usd"] = row["total"]
         # The basis these points are actually IN, which is not always the one that
         # was asked for: with no FX rate available `divisor` is None and the series
         # stays in Toman, and the chart would have gone on labelling it dollars.

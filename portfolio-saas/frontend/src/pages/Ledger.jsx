@@ -86,7 +86,7 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
   return (
     <Modal
       title="Import transaction history"
-      subtitle="Upload the CSV exported from your broker, review it, then commit it as ledger history."
+      subtitle="Upload a CSV in this app's own columns (a wrong header lists them), review it, then commit it as ledger history."
       onClose={onClose}
       testId="ledger-import-dialog"
       footer={

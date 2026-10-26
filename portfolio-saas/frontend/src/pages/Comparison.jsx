@@ -150,6 +150,10 @@ function TargetSearch({ onAdd, exclude }) {
   );
 }
 
+// The server's own cap (MAX_TARGETS in services/comparison.py). The page asks one
+// target per request, so the server never saw the count and 7+ chips piled up.
+const MAX_TARGETS = 6;
+
 function Chips({ chosen, labels, onRemove }) {
   const t = useT();
   return (
@@ -381,6 +385,7 @@ export default function Comparison() {
   const chartRow = answered.find((r) => r.key === shown) || answered[0];
 
   const add = (key, label) => {
+    if (!chosen.includes(key) && chosen.length >= MAX_TARGETS) return;
     setLabels((cur) => ({ ...cur, [key]: label || cur[key] || key }));
     setChosen((cur) => (cur.includes(key) ? cur : [...cur, key]));
     setShown(key);
@@ -428,6 +433,11 @@ export default function Comparison() {
                     <Button onClick={() => setAdding((v) => !v)} data-testid="comparison-add">
                       {adding ? translate("Done", lang) : translate("+ Compare with…", lang)}
                     </Button>
+                    {chosen.length >= MAX_TARGETS && (
+                      <span className="text-xs text-muted" data-testid="comparison-max">
+                        {translate("Up to {n} at a time — remove one to add another.", lang, { n: MAX_TARGETS })}
+                      </span>
+                    )}
                   </div>
                   {adding && (
                     <div className="mb-4">
