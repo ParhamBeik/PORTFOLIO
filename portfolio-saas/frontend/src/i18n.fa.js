@@ -442,4 +442,33 @@ export default {
   "Enter a valid email address.": "یک ایمیل معتبر وارد کنید.",
   "Password is required.": "گذرواژه لازم است.",
   "Password requirements:": "شرایط گذرواژه:",
+  // Range chips: the same windows Home already names in Persian.
+  "90D": "۹۰ روز",
+  "6M": "۶ ماه",
+  "1Y": "۱ سال",
+  "5Y": "۵ سال",
+  "10Y": "۱۰ سال",
+  // Research dossier
+  "Source-checked figures": "ارقام بررسی‌شده با منبع",
+  "Financial metrics unverified": "ارقام مالی تأییدنشده",
+  "Daily share price": "قیمت روزانه سهم",
+  "Unadjusted last trade close in Rial per share. This is a quoted price, not a total return.": "آخرین قیمت معامله تعدیل‌نشده برای هر سهم به ریال. این قیمت تابلو است، نه بازده کل.",
+  "Download archived filing": "دریافت گزارش بایگانی‌شده",
+  "Checking archive…": "در حال بررسی بایگانی…",
+  "Run research": "اجرای پژوهش",
+  "Checking evidence…": "در حال بررسی شواهد…",
+  "Industry is a current provider-reported {kind} label, observed {date}; it does not establish past membership.": "صنعت، برچسب فعلی {kind} به گزارش ارائه‌دهنده است که در {date} دیده شده؛ عضویت در گذشته را نشان نمی‌دهد.",
+  "symbol metadata": "اطلاعات نماد",
+  "instrument catalog": "فهرست ابزارها",
+  "Industry is unavailable for this stock.": "صنعت این سهم در دسترس نیست.",
+  "Source: {source}. {n} dated closes; {first} → {last} (Jalali).": "منبع: {source}. {n} قیمت پایانی تاریخ‌دار؛ از {first} تا {last}.",
+  "{n} days checked against the separate unadjusted candle feed; {m} differ by more than 1%.": "{n} روز با فید جداگانهٔ کندل‌های تعدیل‌نشده مقایسه شد؛ {m} روز بیش از ۱٪ اختلاف دارد.",
+  "Treat this chart as disputed until those days are reconciled.": "تا تطبیق آن روزها، این نمودار را مورد اختلاف بدانید.",
+  "Source: {source}. {first} → {last}.": "منبع: {source}. از {first} تا {last}.",
+  // Activity: the column holds shares, grams or m², not money.
+  "Amount|quantity": "تعداد",
+  // Compare: the gap as a percentage, then in Toman.
+  "{name} vs it": "{name} در برابر آن",
+  "Difference|percent": "تفاوت درصدی",
+  "Difference|Toman": "تفاوت به تومان",
 };

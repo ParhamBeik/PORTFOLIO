@@ -233,7 +233,8 @@ function Rows({ subject, rows }) {
     },
     {
       key: "lead",
-      header: subject ? `${subject.label} vs it` : "Difference",
+      // Two "Difference" columns in English; Persian names which is which.
+      header: subject ? translate("{name} vs it", lang, { name: subject.label }) : "Difference|percent",
       align: "right",
       mobile: "meta",
       render: (r) =>
@@ -245,7 +246,7 @@ function Rows({ subject, rows }) {
     },
     {
       key: "difference",
-      header: "Difference",
+      header: "Difference|Toman",
       align: "right",
       render: (r) => (r.difference_tomans == null ? dash(r) : toman(Math.abs(r.difference_tomans))),
     },
