@@ -138,7 +138,9 @@ services:
     command:
       - postgres
       - -c
-      - shared_preload_libraries=timescaledb
+      # pg_stat_statements: per-query cost; run `CREATE EXTENSION IF NOT EXISTS
+      # pg_stat_statements;` once in the portfolio database (docs/MONITORING.md).
+      - shared_preload_libraries=timescaledb,pg_stat_statements
       - -c
       # Capacity for the bounded API/Celery workers, with headroom for admin
       # maintenance.  The previous persisted default of 75 was exhausted.
@@ -154,14 +156,52 @@ services:
       - -c
       - effective_cache_size=4GB
       - -c
-      - work_mem=16MB
+      # 32 MB, not 16: 219 GB of temp files in 13.8k spills (avg ~16 MB each)
+      # showed typical sorts/hashes running just over the old limit.
+      - work_mem=32MB
       - -c
       - maintenance_work_mem=512MB
+      # --- 2026-10 ops tuning (docs/MONITORING.md) ---
+      # The 1 GB default max_wal_size forced a checkpoint (a burst of disk
+      # writes) 30+ times on busy days, and each one competes with API reads.
+      # 4 GB lets the timed checkpoint (every 15 min) do the work instead.
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - min_wal_size=1GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+      # Smaller WAL = less disk write for the same data.
+      - -c
+      - wal_compression=on
+      # JIT adds 100s of ms of compile time to analytics queries on a 4-core
+      # box and almost never pays back here.
+      - -c
+      - jit=off
+      - -c
+      - effective_io_concurrency=200
+      # Make the next slowdown diagnosable: per-query stats, IO timing, and
+      # log lines for spills, slow queries, long lock waits and slow vacuums.
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_temp_files=64MB
+      - -c
+      - log_min_duration_statement=2000
+      - -c
+      - log_lock_waits=on
+      - -c
+      - log_autovacuum_min_duration=5000
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-portfolio}"]
       interval: 5s
       timeout: 5s
       retries: 10
+    # CPU priority only matters when the 4 cores are contended: then the
+    # database and API win over background workers (default weight is 1024).
+    cpu_shares: 2048
     deploy:
       resources:
         limits:
@@ -217,6 +257,11 @@ services:
       MINIO_COMPRESSION_ENABLE: "on"
       MINIO_COMPRESSION_EXTENSIONS: ".html,.htm,.xls,.xlsx,.pdf,.json,.txt,.csv,.xml"
       MINIO_COMPRESSION_MIME_TYPES: "text/*,application/json,application/xml,application/pdf,application/ms-excel,application/vnd.ms-excel"
+      # MinIO's background scanner re-walks every object to compute usage. It
+      # held MinIO at its whole CPU limit around the clock and read ~1.9 TB from
+      # disk in 3 weeks. "slowest" makes it pause between objects; the only
+      # cost is that usage/quota figures refresh more slowly.
+      MINIO_SCANNER_SPEED: slowest
     volumes:
       - codaldata:/data
     healthcheck:
@@ -224,11 +269,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    cpu_shares: 256
     deploy:
       resources:
         limits:
-          cpus: "0.25"
-          memory: 256m
+          cpus: "0.5"          # was 0.25: the scanner pinned it at the limit
+          memory: 384m         # was 256m: sat at 218 MB, one spike from an OOM kill
 
   migrate:
     build: ./backend
@@ -273,6 +319,7 @@ services:
       - ${GAPGPT_CONFIG_HOST_FILE:-./deploy/gapgpt-disabled.env}:/run/secrets/gapgpt.env:ro
     expose: ["8000"]
     ulimits: *no-core
+    cpu_shares: 2048
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -H 'Host: ${PORTFOLIO_DOMAIN:?set PORTFOLIO_DOMAIN}' -H 'X-Forwarded-Proto: https' http://localhost:8000/api/health/ready/ || exit 1"]
       interval: 15s
@@ -335,6 +382,7 @@ services:
     environment: *backend-env
     command: celery -A config worker -l info --concurrency=4 -Q archive -n archive@%h --max-memory-per-child=600000
     ulimits: *no-core
+    cpu_shares: 256        # background backfill yields to the API and live lane
     healthcheck:
       test: ["CMD-SHELL", "celery -A config inspect ping -d archive@$$HOSTNAME"]
       interval: 60s
@@ -377,6 +425,7 @@ services:
     environment: *backend-env
     command: celery -A config worker -l info --concurrency=4 -Q codal -n codal@%h --max-memory-per-child=600000
     ulimits: *no-core
+    cpu_shares: 256
     healthcheck:
       test: ["CMD-SHELL", "celery -A config inspect ping -d codal@$$HOSTNAME"]
       interval: 60s
@@ -401,6 +450,7 @@ services:
     environment: *backend-env
     command: celery -A config beat -l info
     ulimits: *no-core
+    cpu_shares: 256
     healthcheck:
       disable: true
     deploy:
