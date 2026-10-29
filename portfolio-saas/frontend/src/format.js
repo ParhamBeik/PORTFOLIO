@@ -163,8 +163,14 @@ export function compactAxisDigits(max, interval) {
   return Math.min(3, Math.max(1, Math.ceil(-Math.log10(step) - 1e-9)));
 }
 
-// Gregorian, Tehran wall clock — the backend stores UTC, the reader is in Iran.
-const dtf = (opts) => new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Tehran", ...opts });
+// Tehran wall clock — the backend stores UTC, the reader is in Iran. A Persian
+// reader gets the Persian calendar and month names (Latin digits, as every
+// other number on the page): chart axes read "Sept 30, Oct 06" in Persian mode.
+const dtf = (opts) =>
+  new Intl.DateTimeFormat(currentLang() === "fa" ? "fa-IR-u-ca-persian-nu-latn" : "en-GB", {
+    timeZone: "Asia/Tehran",
+    ...opts,
+  });
 
 export function date(iso) {
   const d = new Date(iso);
@@ -314,6 +320,23 @@ export const nativeName = (a) => {
  * Plain strings only -- confirm(), aria-label, title -- where `<bdi>` cannot go.
  */
 export const isolate = (text) => `\u2068${text}\u2069`;
+
+/**
+ * The status word for a holding's price. The server calls a price "live" when
+ * no newer one could exist -- which, with its market shut, is the last close.
+ * "Live" beside "Stocks closed" read as false, so it says "Last close" then.
+ * `markets` is the valuation's per-market clock list.
+ */
+export function priceStatus(item, markets = []) {
+  const status = item?.quality_status;
+  if (status !== "live") return humanize(status);
+  const group =
+    item.symbol || item.class === "Stock" ? "stocks"
+      : item.class === "Gold" || item.class === "Cash" ? "gold_fx"
+        : item.class === "Crypto" ? "crypto" : null;
+  const clock = markets.find((m) => m.market === group);
+  return clock && clock.open === false ? translate("Last close") : humanize(status);
+}
 
 export const holdingLabel = (row) =>
   row?.label || row?.name_fa || row?.asset_name_fa || row?.asset ||

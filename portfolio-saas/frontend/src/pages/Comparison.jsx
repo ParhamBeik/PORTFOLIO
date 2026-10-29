@@ -26,11 +26,12 @@ const NEEDS_COST = new Set(["no_recorded_cost", "no_purchase_history"]);
 // 0 means "as far back as my own purchases go", which is the answer this page is
 // usually asked for. The others are the windows the rest of the app already
 // offers, so a user does not learn a second vocabulary of ranges here.
+// Shortest first, as on Home: the two pages listed the same idea in opposite orders.
 const RANGES = [
-  { value: "0", label: "All" },
-  { value: "365", label: "1Y" },
-  { value: "180", label: "6M" },
   { value: "90", label: "90D" },
+  { value: "180", label: "6M" },
+  { value: "365", label: "1Y" },
+  { value: "0", label: "All" },
 ];
 
 // Whole units are noise on 27M shares, but 0.25 BTC is not "0".
@@ -471,7 +472,7 @@ export default function Comparison() {
                 // there is no amount to replay. Say so and point at the fix.
                 <Empty
                   testId="comparison-needs-cost"
-                  action={<Link to="/activity" className="text-sm text-[var(--c-accent-text)] underline underline-offset-2">{translate("Record a purchase", lang)}</Link>}
+                  action={<Link to="/activity?add=trade" className="text-sm text-[var(--c-accent-text)] underline underline-offset-2">{translate("Record a purchase", lang)}</Link>}
                 >
                   {translate("Compare replays the money you paid. Record what you paid for {name} to see what it would have done elsewhere.", lang, { name: isolate(holdings.find((h) => h.key === subject)?.label || "") })}
                 </Empty>

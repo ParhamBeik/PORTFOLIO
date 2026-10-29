@@ -2,7 +2,7 @@ import { accountDataQuality, valuation } from "../api.js";
 import { translate, useLang } from "../i18n.js";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { Async, Badge, Card, Table } from "../components/ui.jsx";
-import { ago, dateTime, holdingLabel, humanize } from "../format.js";
+import { ago, dateTime, holdingLabel, humanize, priceStatus } from "../format.js";
 import { useApi } from "../useApi.js";
 
 const LIVE_TONE = { live: "good", manual: "neutral", stale: "warn", quota: "warn", fallback: "warn", unavailable: "critical" };
@@ -13,7 +13,7 @@ const REPAIR_TONE = {
 const REPAIR_LABEL = {
   complete: "Complete", refresh_due: "Complete · refresh due", awaiting_data: "Waiting for first data",
   not_tried: "Queued", failed: "Retrying after failures", suspended: "Paused by operator",
-  unfetchable: "Provider has no data", not_scheduled: "No backfill job",
+  unfetchable: "Provider has no data", not_scheduled: "Not scheduled yet",
 };
 
 /**
@@ -57,7 +57,7 @@ export default function DataHealth() {
                   align: "right",
                   render: (r) => (
                     <Badge variant={LIVE_TONE[r.quality_status] || "neutral"}>
-                      {humanize(r.quality_status || "unknown")}
+                      {r.quality_status ? priceStatus(r, data.markets) : humanize("unknown")}
                       {r.price_unit_status === "unverified" ? " · unit unverified" : ""}
                     </Badge>
                   ),

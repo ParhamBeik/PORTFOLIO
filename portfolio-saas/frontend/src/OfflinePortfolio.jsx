@@ -123,7 +123,7 @@ export default function OfflinePortfolio({ available, onReconnect, onSignOut }) 
           </label>
           <p className="text-xs text-muted" data-testid="offline-updated">Saved {new Date(selected.updatedAt).toLocaleString()} · {accountId === "all" ? "All portfolios" : "Selected portfolio"}</p>
           <section className="rounded-xl border border-border bg-panel p-5">
-            <h2 className="text-sm text-muted">Total value</h2>
+            <h2 className="text-sm text-muted">Net worth</h2>
             <p className="break-words text-3xl font-semibold" data-testid="offline-total">{money(selected.valuation.total, basis)}</p>
           </section>
           <section className="rounded-xl border border-border bg-panel p-5">

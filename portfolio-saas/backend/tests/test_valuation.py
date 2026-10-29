@@ -3206,6 +3206,30 @@ def test_past_snapshot_dollars_use_that_days_rate_not_todays(make_user, monkeypa
     assert dated[_tehran_iso(twenty_ago)]["total_usd"] is None
 
 
+def test_snapshot_series_reports_money_moved_in_after_its_first_point(make_user):
+    """A deposit is not a gain: the chart's headline change subtracts it."""
+    user = make_user("chart_flows@example.com")
+    client = APIClient()
+    client.force_authenticate(user=user)
+    account = Account.objects.create(user=user, name="Flows")
+    asset = Asset.objects.create(key="test_gold_flows", name="Gold", asset_class=Asset.AssetClass.GOLD, is_active=True)
+    Holding.objects.create(account=account, asset=asset, quantity=Decimal("1"))
+    _mark_traded(account, asset)
+    now = timezone.now()
+    Snapshot.objects.create(user=user, account=account, total_value_tomans=Decimal("1000000"),
+                            timestamp=now - timedelta(days=10), is_session_close=True)
+    # Before the window's first close: already inside its starting value.
+    LedgerEntry.objects.create(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                               amount_tomans=Decimal("999"), timestamp=now - timedelta(days=20))
+    LedgerEntry.objects.create(account=account, kind=LedgerEntry.Kind.DEPOSIT,
+                               amount_tomans=Decimal("500000"), timestamp=now - timedelta(days=5))
+    LedgerEntry.objects.create(account=account, kind=LedgerEntry.Kind.WITHDRAWAL,
+                               amount_tomans=Decimal("100000"), timestamp=now - timedelta(days=2))
+
+    body = client.get(f"/api/snapshots/?days=30&account={account.id}").json()
+    assert Decimal(body["net_flows"]) == Decimal("400000")
+
+
 def test_refresh_overwrites_cache_without_a_cold_gap(asset_catalog, write_prices, monkeypatch):
     """The fetch task refreshes in place: readers never see a deleted entry."""
     from portfolio.services.valuation import _LATEST_PRICES_CACHE_KEY, refresh_prices_cache

@@ -449,10 +449,11 @@ export function Tabs({ options, value, onChange, label, testId, grid = false }) 
  *   "title"  — first line, left (the asset)
  *   "value"  — first line, right (the amount that matters)
  *   "meta"   — one small muted line under it, joined with "·"
+ *   "action" — a row button, at the end of that line (Save, Delete)
  *   omitted  — hidden until the card is expanded, then a labelled line
  * Expanding is a real button (aria-expanded), so it works without a pointer.
  */
-const MOBILE_SHOWN = new Set(["title", "value", "meta"]);
+const MOBILE_SHOWN = new Set(["title", "value", "meta", "action"]);
 
 export function Table({ columns, rows, rowKey, empty = "No rows.", testId, caption, rowClass, mobileCards = false }) {
   const t = useT();
@@ -460,6 +461,8 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
   if (!rows?.length) return <Empty testId={testId ? `${testId}-empty` : undefined}>{empty}</Empty>;
   const compact = mobileCards && columns.some((c) => c.mobile);
   const hasDetail = compact && columns.some((c) => !MOBILE_SHOWN.has(c.mobile));
+  // Only one thing may push to the end of the line, or a row button floats mid-card.
+  const hasAction = compact && columns.some((c) => c.mobile === "action");
   const toggle = (key) => setOpen((cur) => {
     const next = new Set(cur);
     if (next.has(key)) next.delete(key); else next.add(key);
@@ -478,6 +481,8 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
     const base = `px-3 py-2 sm:table-cell ${align}`;
     if (c.mobile === "title") return `${base} max-sm:order-1 max-sm:min-w-0 max-sm:flex-1 max-sm:px-1 max-sm:py-1 max-sm:font-medium`;
     if (c.mobile === "value") return `${base} max-sm:order-2 max-sm:px-1 max-sm:py-1 max-sm:text-right max-sm:font-medium max-sm:tabular-nums`;
+    // A button among the "·"-joined details read as one more detail.
+    if (c.mobile === "action") return `${base} max-sm:order-5 max-sm:ms-auto max-sm:px-1 max-sm:py-1`;
     if (c.mobile === "meta") {
       const sep = metaKeys.indexOf(c.key) > 0 ? "max-sm:before:me-1 max-sm:before:content-['·']" : "";
       return `${base} max-sm:order-4 max-sm:inline-flex max-sm:items-center max-sm:py-0 max-sm:pe-1 max-sm:ps-1 max-sm:text-xs max-sm:text-muted ${sep}`;
@@ -488,9 +493,9 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
   return (
     <div className={mobileCards ? "sm:overflow-x-auto" : "overflow-x-auto"}>
       <table data-testid={testId} className={`w-full text-sm ${mobileCards ? "block sm:table" : ""}`}>
-        {caption && <caption className="sr-only">{caption}</caption>}
+        {caption && <caption className="sr-only">{t(caption)}</caption>}
         <thead className={mobileCards ? "sr-only sm:not-sr-only" : ""}>
-          <tr className="border-b border-border text-left">
+          <tr className="border-b border-border text-start">
             {columns.map((c) => (
               <th
                 key={c.key}
@@ -543,7 +548,7 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
                 {compact && <td aria-hidden="true" className="order-3 basis-full sm:hidden" />}
                 {hasDetail && (
                   <>
-                    <td className="order-5 ms-auto sm:hidden">
+                    <td className={`order-5 sm:hidden ${hasAction ? "" : "ms-auto"}`}>
                       <button
                         type="button"
                         aria-expanded={expanded}

@@ -347,6 +347,34 @@ def _cpi_window_provenance(series: list[dict]) -> dict:
     return provenance
 
 
+def _net_flows_after(accounts, series, basis):
+    """Money the owner moved in (+) or out (-) after the window's first point.
+
+    The chart's headline change is last minus first, so without this a deposit
+    read as a gain: adding 1B Toman of cash printed "+70%" in green. Opening
+    cash counts too -- it is money brought in, and the rebuilt history before
+    it does not hold it. `None` when a flow cannot be expressed in the basis.
+    """
+    if not series or not accounts:
+        return "0"
+    from ..services.ledger import active_entries
+    from ..services.performance import _flow_amount
+
+    tehran = ZoneInfo("Asia/Tehran")
+    # The first point is that day's close, so a flow on the same day is inside it.
+    start = datetime.strptime(series[0]["date"], "%Y-%m-%d").replace(tzinfo=tehran) + timedelta(days=1)
+    kinds = [LedgerEntry.Kind.DEPOSIT, LedgerEntry.Kind.WITHDRAWAL, LedgerEntry.Kind.OPENING_CASH]
+    net = Decimal("0")
+    for entry in active_entries(accounts, kinds=kinds):
+        if entry.timestamp < start:
+            continue
+        amount = _flow_amount(entry, basis)
+        if amount is None:
+            return None
+        net += -amount if entry.kind == LedgerEntry.Kind.WITHDRAWAL else amount
+    return str(net.quantize(Decimal("0.01")))
+
+
 class SnapshotListView(APIView):
     """Completed Tehran-day closes plus today's derived point and trade markers."""
 
@@ -519,6 +547,7 @@ class SnapshotListView(APIView):
             "series": series,
             "trades": markers,
             "basis": applied_basis,
+            "net_flows": _net_flows_after(accounts, series, applied_basis),
         }
         if applied_basis == "real_toman":
             payload["cpi"] = _cpi_window_provenance(series)

@@ -721,7 +721,7 @@ export function Donut({ data, height = 260, label = "Allocation breakdown", valu
               onFocus={() => select(i)}
               onClick={() => select(i)}
               aria-pressed={active === i}
-              className={`flex min-h-10 w-full items-center gap-2 rounded-md px-2 text-left ${active === i ? "bg-panel-2" : ""}`}
+              className={`flex min-h-10 w-full items-center gap-2 rounded-md px-2 text-start ${active === i ? "bg-panel-2" : ""}`}
             >
               <span
                 aria-hidden="true"

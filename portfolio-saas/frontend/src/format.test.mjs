@@ -9,6 +9,7 @@ import {
   rial,
   money,
   unitPrice,
+  priceStatus,
   pct,
   pctShare,
   signedPct,
@@ -95,4 +96,11 @@ test("a tiny but real share reads <0.1%, never 0%", () => {
   assert.equal(pctShare(0), "0%");
   assert.equal(pctShare(0.25), "25%");
   assert.equal(pctShare(null), "—");
+});
+
+test("a live price on a shut market reads as its last close", () => {
+  const markets = [{ market: "stocks", open: false }, { market: "gold_fx", open: true }];
+  assert.equal(priceStatus({ quality_status: "live", class: "Stock", symbol: "کاما" }, markets), "Last close");
+  assert.equal(priceStatus({ quality_status: "live", class: "Gold" }, markets), "Live");
+  assert.equal(priceStatus({ quality_status: "stale", class: "Stock" }, markets), "Stale");
 });

@@ -233,6 +233,7 @@ function priceCell(row) {
 const CASH_KINDS = ["opening_cash", "deposit", "withdrawal", "dividend", "fee"];
 
 function EditEntryDialog({ row, accounts, onClose, onSaved }) {
+  const lang = useLang();
   const [kind, setKind] = useState(row.kind);
   const [targetAccount, setTargetAccount] = useState(String(row.account_id));
   const [when, setWhen] = useState(row.occurred_at || "");
@@ -342,7 +343,7 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
               entry would keep its old one: clearing restores the saved date. */}
           <Field label="When"><JalaliDateField value={when} onChange={(v) => setWhen(v || row.occurred_at || "")} testId="ledger-edit-when" /></Field>
           {cash && <Field label="Amount (Toman)"><Input label="Amount" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} data-testid="ledger-edit-amount" /></Field>}
-          {tradeKind && <Field label={`Price for one (${row.unit_price_currency === "rial" ? "Rial" : row.unit_price_currency === "usd" ? "USD" : "Toman"})`}>
+          {tradeKind && <Field label={translate("Price for one ({unit})", lang, { unit: translate(row.unit_price_currency === "rial" ? "Rial" : row.unit_price_currency === "usd" ? "USD" : "Toman", lang) })}>
             <Input label="Unit price" type="number" step="any" value={price} onChange={(e) => setPrice(e.target.value)} data-testid="ledger-edit-price" />
           </Field>}
           {declaresBasis && <Field label={row.is_house ? "What did you pay per square meter? (millions of Toman)" : `What did you pay for one? (${row.unit_price_currency === "rial" ? "Rial" : "Toman"})`}>

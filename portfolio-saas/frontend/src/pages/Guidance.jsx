@@ -86,7 +86,7 @@ export default function Guidance({ user, onUserChange }) {
               {[
                 data.personal_window_days && `${translate("Personal:", lang)} ${translate(data.personal_window_days === 1095 ? "3 years" : "1 year", lang)}`,
                 data.benchmark_window_days && `${translate("Benchmark:", lang)} ${translate(data.benchmark_window_days === 1095 ? "3 years" : "1 year", lang)}`,
-                translate(data.basis === "nominal_toman" ? "Nominal Toman (inflation data unavailable)" : "Real Toman", lang),
+                translate(data.basis === "nominal_toman" ? "Nominal Toman (inflation data unavailable)" : "Real Toman (after inflation)", lang),
               ].filter(Boolean).join(" · ")}
             </p>
             {data.fallback_reason && <p className="text-sm text-[var(--c-warn-text)]" data-testid="guidance-fallback">{data.fallback_reason}</p>}

@@ -28,6 +28,7 @@ import {
   num,
   pct,
   pctShare,
+  priceStatus,
   perfLabel,
   perSqm,
   PERF_UNLOCK_HINT,
@@ -169,7 +170,7 @@ function HeroRow({ state, basis: selected }) {
           // that used to sit beside it repeated the header's basis switch.
           <div data-testid="dashboard-hero">
             <div data-testid="dashboard-total">
-              <div className="text-xs font-medium text-muted">{t("Total value")}</div>
+              <div className="text-xs font-medium text-muted">{t("Net worth")}</div>
               <div className="tabular mt-1 text-4xl font-semibold tracking-tight sm:text-5xl">
                 {money(Number(data.total), basis)}
               </div>
@@ -276,23 +277,38 @@ const TREND_INFO = {
 
 const RANGE_WORD = { 30: "30 days", 90: "90 days", 365: "1 year", all: "all time" };
 
-/** First-to-last change over the window: the number a chart is asked for. */
-function RangeChange({ points, basis, range }) {
+/**
+ * First-to-last change over the window, less the money moved in or out:
+ * a deposit is not a gain. Before `flows` was subtracted, adding 1B Toman of
+ * cash printed "+70%" in green.
+ */
+function RangeChange({ points, basis, range, flows }) {
   const t = useT();
   const valued = points.filter((p) => p.y != null);
   if (valued.length < 2) return null;
   const first = valued[0].y;
   const last = valued[valued.length - 1].y;
-  const diff = last - first;
-  const rel = first ? diff / first : null;
+  const moved = flows == null ? 0 : Number(flows) || 0;
+  const diff = last - first - moved;
+  // Against what was there to start with plus what was added, so a
+  // portfolio that began near zero does not report a thousand-percent gain.
+  const base = first + Math.max(moved, 0);
+  const rel = base > 0 ? diff / base : null;
   const tone = toneClass(toneFor(diff));
   return (
-    <div className="mb-3 flex items-baseline gap-2 text-sm" data-testid="dashboard-trend-change">
+    <div className="mb-3 flex flex-wrap items-baseline gap-x-2 text-sm" data-testid="dashboard-trend-change">
       <span className={`tabular font-semibold ${tone}`}>
         {diff >= 0 ? "+" : "−"}{money(Math.abs(diff), basis)}
         {rel != null && ` (${diff >= 0 ? "+" : "−"}${pct(Math.abs(rel))})`}
       </span>
       <span className="text-muted">{t(RANGE_WORD[range] || "")}</span>
+      {moved !== 0 && (
+        <span className="text-xs text-muted" data-testid="dashboard-trend-flows">
+          {t(moved > 0 ? "not counting {amount} you added" : "not counting {amount} you took out", {
+            amount: money(Math.abs(moved), basis),
+          })}
+        </span>
+      )}
     </div>
   );
 }
@@ -478,7 +494,7 @@ function TrendCard({ activeId, basis }) {
                   the server answers `nominal_toman` when it had no rate to
                   convert by. Reading it off the data keeps the axis, the tooltip
                   and the numbers describing the same currency. */}
-              <RangeChange points={points} basis={data.basis || basis} range={effectiveRange} />
+              <RangeChange points={points} basis={data.basis || basis} range={effectiveRange} flows={data.net_flows} />
               <AreaTrend
                 data={points}
                 longTicks={longTicks}
@@ -664,7 +680,7 @@ function NoCostYet() {
   return (
     <Empty
       testId="dashboard-performance-no-cost"
-      action={<Link to="/activity" className="inline-flex min-h-10 items-center rounded-md border border-border bg-panel-2 px-3 text-sm font-medium text-text hover:bg-border sm:min-h-8">{t("Record purchases")}</Link>}
+      action={<Link to="/activity?add=trade" className="inline-flex min-h-10 items-center rounded-md border border-border bg-panel-2 px-3 text-sm font-medium text-text hover:bg-border sm:min-h-8">{t("Record purchases")}</Link>}
     >
       Record what you paid to see profit and loss.
     </Empty>
@@ -1013,13 +1029,18 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
       <Button
         variant={manageMode === "edit" ? "primary" : "ghost"}
         onClick={() => toggleManageMode("edit")}
+        aria-pressed={manageMode === "edit"}
         data-testid="dashboard-holdings-manage-edit"
       >
         Edit
       </Button>
       <Button
-        variant={manageMode === "delete" ? "danger" : "ghost"}
+        // On, it must look on: the bare `danger` style has no fill, so the
+        // active mode read as the inactive one next to a filled Edit button.
+        variant="ghost"
+        className={manageMode === "delete" ? "border-[var(--c-critical-text)] text-[var(--c-critical-text)]" : ""}
         onClick={() => toggleManageMode("delete")}
+        aria-pressed={manageMode === "delete"}
         data-testid="dashboard-holdings-manage-delete"
       >
         Delete
@@ -1043,9 +1064,13 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
           const items = sortHoldingsByPortfolioValue([...visible, ...hidden]);
           // `data.total` is the NET figure (liabilities and real estate netted
           // off), while these rows are gross holding values. Dividing by it gave
-          // a 945M holding a 109.7% weight. Weight is a share of what is listed.
+          // a 945M holding a 109.7% weight. Weight is a share of what is listed
+          // plus cash, as the Allocation donut splits it: without the cash one
+          // coin read 61.7% beside a donut putting all gold at 58%. The server
+          // rescales `cash_tomans` to the basis with every other figure.
           const weightBase =
-            visible.reduce((sum, i) => sum + Number(i.value || 0), 0) || 1;
+            visible.reduce((sum, i) => sum + Number(i.value || 0), 0) +
+              Math.max(Number(data.cash_tomans) || 0, 0) || 1;
           // A house or other hand-valued holding is never live; counting it
           // put "1 of 2 prices aren't live" permanently on every portfolio that
           // owns a property. Past 90 days the API reports it as "stale", which
@@ -1062,21 +1087,25 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                 const holding = resolveHolding(r);
                 if (!holding) return null;
                 return (
+                  // Labelled on a phone, where the tooltip below never shows.
+                  <label className="inline-flex items-center gap-2">
                   <input
                     type="checkbox"
                     checked={!r.is_hidden}
                     disabled={savingKey === holdingsRowKey(r)}
-                    aria-label={`Count ${isolate(holdingLabel(r))} in this portfolio`}
-                    title={
+                    aria-label={t("Count {name} in this portfolio", { name: isolate(holdingLabel(r)) })}
+                    title={t(
                       r.is_hidden
                         ? "Switched off — not counted anywhere. Tick to include it again."
                         : "Counted. Untick to leave it out of every figure without deleting it."
-                    }
+                    )}
                     data-testid="dashboard-holdings-include"
                     onChange={(e) =>
                       patchPresentation(r, holding, { isHidden: !e.target.checked })
                     }
                   />
+                  <span className="text-xs text-muted sm:hidden">{t("Count in totals")}</span>
+                  </label>
                 );
               },
             },
@@ -1093,7 +1122,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                       // The name it falls back to when cleared — the ticker for
                       // a stock, the catalog name otherwise.
                       placeholder={r.symbol || r.name_fa || r.asset}
-                      aria-label={`Name for ${isolate(holdingLabel(r))}`}
+                      aria-label={t("Name for {name}", { name: isolate(holdingLabel(r)) })}
                       data-testid="dashboard-holdings-edit-name"
                       disabled={savingKey === holdingsRowKey(r)}
                       onBlur={(e) => {
@@ -1128,9 +1157,9 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                     <input
                       type="number"
                       step="any"
-                      className={inlineInputClass}
+                      className={`${inlineInputClass} max-sm:w-24`}
                       value={draft.area}
-                      aria-label={`Size in square meters for ${isolate(holdingLabel(r))}`}
+                      aria-label={t("Size in square meters for {name}", { name: isolate(holdingLabel(r)) })}
                       data-testid="dashboard-holdings-edit-area"
                       disabled={savingKey === rk}
                       onChange={(e) => setDraftField(r, "area", e.target.value)}
@@ -1150,9 +1179,9 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                       type="number"
                       step={step}
                       min="0"
-                      className={inlineInputClass}
+                      className={`${inlineInputClass} max-sm:w-24`}
                       value={draft.qty}
-                      aria-label={`Quantity for ${isolate(holdingLabel(r))}`}
+                      aria-label={t("Quantity for {name}", { name: isolate(holdingLabel(r)) })}
                       title={
                         isWholeUnit(step)
                           ? "Counted in whole units"
@@ -1184,7 +1213,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                       step="any"
                       className={inlineInputClass}
                       value={draft.qty}
-                      aria-label={`Price per square meter, in millions, for ${isolate(holdingLabel(r))}`}
+                      aria-label={t("Price per square meter, in millions, for {name}", { name: isolate(holdingLabel(r)) })}
                       title="Millions of Toman per square meter"
                       data-testid="dashboard-holdings-edit-price-per-sqm"
                       disabled={savingKey === rk}
@@ -1201,7 +1230,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                       step="any"
                       className={inlineInputClass}
                       value={draft.price}
-                      aria-label={`Unit price for ${isolate(holdingLabel(r))}`}
+                      aria-label={t("Unit price for {name}", { name: isolate(holdingLabel(r)) })}
                       data-testid="dashboard-holdings-edit-price"
                       disabled={savingKey === rk}
                       onChange={(e) => setDraftField(r, "price", e.target.value)}
@@ -1250,7 +1279,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
               render: (r) => (
                 <div className="inline-flex flex-wrap items-center gap-1 align-middle">
                   {r.is_hidden && <Badge variant="warn">Not counted</Badge>}
-                  <Badge variant={ITEM_BADGE[r.quality_status] || "neutral"}>{humanize(r.quality_status)}</Badge>
+                  <Badge variant={ITEM_BADGE[r.quality_status] || "neutral"}>{priceStatus(r, data.markets)}</Badge>
                   {r.price_unit_status === "unverified" && <Badge variant="warn">unverified unit</Badge>}
                 </div>
               ),
@@ -1343,7 +1372,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
           // buttons stay visible; everything else waits behind "More".
           const MOBILE_ROLES = {
             asset: "title", value: "value",
-            portfolio: "meta", qty: "meta", status: "meta", actions: "meta",
+            portfolio: "meta", qty: "meta", status: "meta", actions: "action",
           };
           columns.forEach((c) => { if (MOBILE_ROLES[c.key]) c.mobile = MOBILE_ROLES[c.key]; });
 
@@ -1360,19 +1389,18 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
               )}
               {hidden.length > 0 && (
                 <p className="mb-3 text-sm text-muted" data-testid="dashboard-holdings-hidden-note">
-                  {hidden.length === 1 ? "1 asset" : `${hidden.length} assets`} switched off and
-                  left out of every figure.
-                  <span className="hidden md:inline"> Tick to count {hidden.length === 1 ? "it" : "them"} again.</span>
+                  {t(hidden.length === 1 ? "1 asset switched off and left out of every figure." : "{n} assets switched off and left out of every figure.", { n: hidden.length })}
+                  <span className="hidden md:inline"> {t(hidden.length === 1 ? "Tick to count it again." : "Tick to count them again.")}</span>
                 </p>
               )}
               {manageMode === "edit" && (
                 <p className="mb-3 text-xs text-muted" data-testid="dashboard-holdings-edit-hint">
-                  Edit a name, quantity or manual price, then Save. Market prices come from the feed.
+                  {t("Edit a name, quantity or manual price, then Save. Market prices come from the feed.")}
                 </p>
               )}
               {manageMode === "delete" && (
                 <p className="mb-3 text-xs text-muted" data-testid="dashboard-holdings-delete-hint">
-                  Delete also reverses its ledger entries. To just leave it out, untick it instead.
+                  {t("Delete also reverses its ledger entries. To just leave it out, untick it instead.")}
                 </p>
               )}
               <Table
