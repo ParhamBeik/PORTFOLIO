@@ -347,7 +347,7 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
             <Input label="Unit price" type="number" step="any" className="w-full" value={price} onChange={(e) => setPrice(e.target.value)} data-testid="ledger-edit-price" />
           </Field>}
           {declaresBasis && <Field label={row.is_house ? "What did you pay per square meter? (millions of Toman)" : translate("What did you pay for one? ({unit})", lang, { unit: translate(row.unit_price_currency === "rial" ? "Rial" : "Toman", lang) })}>
-            <Input label="Purchase price" type="number" step="any" className="w-full" value={costBasis} onChange={(e) => setCostBasis(e.target.value)} data-testid="ledger-edit-cost-basis" />
+            <Input label="Purchase price" type="number" step="any" className="w-full" autoFocus={!!row.focusCost} value={costBasis} onChange={(e) => setCostBasis(e.target.value)} data-testid="ledger-edit-cost-basis" />
           </Field>}
         </>}
         {!cash && <>
@@ -546,10 +546,15 @@ export default function Ledger() {
       // A bare dash in a card's headline slot reads as a broken row; say why it is empty.
       render: (r) =>
         r.value_tomans == null && r.kind === "opening_position" ? (
-          // The place to record a cost, offered where its absence is shown.
-          <Button variant="link" className="text-xs font-normal" onClick={() => setEditing(r)} data-testid="ledger-add-cost">
-            {translate("Add what you paid", lang)}
-          </Button>
+          r.cost_basis_tomans == null ? (
+            // The place to record a cost, offered where its absence is shown.
+            <Button variant="link" className="text-xs font-normal" onClick={() => setEditing({ ...r, focusCost: true })} data-testid="ledger-add-cost">
+              {translate("Add what you paid", lang)}
+            </Button>
+          ) : (
+            // Once saved, say so -- the link staying put read as a failed save.
+            <span className="text-xs font-normal text-muted" data-testid="ledger-cost-recorded">{translate("Cost recorded", lang)}</span>
+          )
         ) : (
           toman(r.value_tomans)
         ),
@@ -606,7 +611,7 @@ export default function Ledger() {
   return (
     <div>
       <PageHeader
-        title="Ledger"
+        title="Transactions"
         subtitle="Everything you have bought, sold, or already owned. Anything you hold without a recorded purchase is listed too, so you can fill in its details."
         actions={
           <div className="flex flex-wrap gap-2">

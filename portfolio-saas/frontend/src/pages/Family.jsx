@@ -21,9 +21,9 @@ import { allocationByClass, serverText, money, moneyCompact, pct, perfLabel, sig
 import { useApi } from "../useApi.js";
 
 const RANGES = [
-  { value: "30", label: "30d" },
-  { value: "90", label: "90d" },
-  { value: "365", label: "1y" },
+  { value: "30", label: "30D" },
+  { value: "90", label: "90D" },
+  { value: "365", label: "1Y" },
   { value: "all", label: "All" },
 ];
 

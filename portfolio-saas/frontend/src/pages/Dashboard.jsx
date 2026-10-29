@@ -61,9 +61,9 @@ import {
 } from "../components/ui.jsx";
 
 const RANGES = [
-  { value: "30", label: "30d" },
-  { value: "90", label: "90d" },
-  { value: "365", label: "1y" },
+  { value: "30", label: "30D" },
+  { value: "90", label: "90D" },
+  { value: "365", label: "1Y" },
   { value: "all", label: "All" },
 ];
 
@@ -608,6 +608,7 @@ function positionRows(assets, accountName) {
  * exactly when someone most wants to know what they paid.
  */
 function PositionsTable({ rows, showAccount }) {
+  const t = useT();
   const columns = [
     { key: "asset", header: "Asset", render: (r) => r.asset_name },
     {
@@ -648,15 +649,26 @@ function PositionsTable({ rows, showAccount }) {
   // this card a third of the page.
   const roles = { asset: "title", value: "value", portfolio: "meta", qty: "meta", unrealized: "meta" };
   columns.forEach((c) => { if (roles[c.key]) c.mobile = roles[c.key]; });
+  // Once one holding has a cost the "Record purchases" prompt is gone, so the
+  // rest need their own way back to the ledger.
+  const missing = rows.filter((r) => r.total_cost_basis_tomans == null && r.realized_pnl_tomans == null).length;
   return (
-    <Table
-      testId="dashboard-performance-table"
-      caption="Position performance"
-      mobileCards
-      rowKey={(r) => r.key}
-      rows={rows}
-      columns={columns}
-    />
+    <>
+      <Table
+        testId="dashboard-performance-table"
+        caption="Position performance"
+        mobileCards
+        rowKey={(r) => r.key}
+        rows={rows}
+        columns={columns}
+      />
+      {missing > 0 && (
+        <p className="mt-3 text-xs text-muted" data-testid="dashboard-performance-missing-cost">
+          {t(missing === 1 ? "1 holding has no cost yet." : "{n} holdings have no cost yet.", { n: missing })}{" "}
+          <Link to="/activity" className="text-[var(--c-accent-text)] underline underline-offset-2">{t("Add what you paid")}</Link>
+        </p>
+      )}
+    </>
   );
 }
 

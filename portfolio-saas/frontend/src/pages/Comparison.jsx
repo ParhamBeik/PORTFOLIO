@@ -472,9 +472,9 @@ export default function Comparison() {
                 // there is no amount to replay. Say so and point at the fix.
                 <Empty
                   testId="comparison-needs-cost"
-                  action={<Link to="/activity" className="text-sm text-[var(--c-accent-text)] underline underline-offset-2">{translate("Add what you paid", lang)}</Link>}
+                  action={<Link to="/activity" className="text-sm text-[var(--c-accent-text)] underline underline-offset-2">{translate("Open Activity", lang)}</Link>}
                 >
-                  {translate("Compare replays the money you paid. In Activity, tap “Add what you paid” on the {name} row to see what it would have done elsewhere.", lang, { name: isolate(holdings.find((h) => h.key === subject)?.label || "") })}
+                  {translate("Compare replays dated purchases. {name} is recorded as already owned, so there is no purchase to replay: in Activity, edit that row, set its type to “Bought” and add the date and price.", lang, { name: isolate(holdings.find((h) => h.key === subject)?.label || "") })}
                 </Empty>
               ) : failure ? (
                 // Other refusals are data limits with a sentence attached.

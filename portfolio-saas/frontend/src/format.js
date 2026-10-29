@@ -34,7 +34,7 @@ export const num = (n, d = 2) =>
 const ltr = (text) => "\u2066" + text + "\u2069";
 
 export const toman = (n) =>
-  bad(n) ? "—" : ltr(Number(n).toLocaleString("en-US", nf(0)) + " T");
+  bad(n) ? "—" : ltr(Number(n).toLocaleString("en-US", nf(0)) + "\u00a0T");
 
 // ﷼ is a strong right-to-left character, so whatever follows it in the same
 // line is laid out right-to-left too: the watchlist printed "9,190 ﷼ ·
@@ -52,8 +52,8 @@ export const rial = (n) =>
  * where rounding to the unit is a visible 0.5% error on a small holding.
  */
 const BASIS_MONEY = {
-  nominal_toman: (v) => ltr(v.toLocaleString("en-US", nf(0)) + " T"),
-  real_toman: (v) => ltr(v.toLocaleString("en-US", nf(0)) + " T"),
+  nominal_toman: (v) => ltr(v.toLocaleString("en-US", nf(0)) + "\u00a0T"),
+  real_toman: (v) => ltr(v.toLocaleString("en-US", nf(0)) + "\u00a0T"),
   usd_denominated: (v) => ltr("$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })),
   usdt_denominated: (v) => ltr(v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " USDT"),
 };
@@ -116,14 +116,18 @@ export const signedToman = signed(toman);
  */
 export const indexPoint = (n) => (bad(n) ? "—" : num(n, 1));
 
+// B/M/K mean nothing to a Persian reader; the words do.
+const compactMark = (k) =>
+  currentLang() === "fa" ? { B: " میلیارد", M: " میلیون", K: " هزار" }[k] : k;
+
 /** Compact Toman for chart axes so ticks stay readable. */
 export function tomanCompact(n, digits = 1) {
   if (bad(n)) return "—";
   const v = Number(n);
   const a = Math.abs(v);
-  if (a >= 1e9) return (v / 1e9).toFixed(digits) + "B";
-  if (a >= 1e6) return (v / 1e6).toFixed(digits) + "M";
-  if (a >= 1e3) return (v / 1e3).toFixed(0) + "K";
+  if (a >= 1e9) return (v / 1e9).toFixed(digits) + compactMark("B");
+  if (a >= 1e6) return (v / 1e6).toFixed(digits) + compactMark("M");
+  if (a >= 1e3) return (v / 1e3).toFixed(0) + compactMark("K");
   return String(Math.round(v));
 }
 
@@ -144,9 +148,9 @@ export function moneyCompact(n, basis = "nominal_toman", digits = 1) {
   const a = Math.abs(v);
   const mark = basis === "usd_denominated" ? "$" : "";
   const tail = basis === "usdt_denominated" ? " USDT" : "";
-  if (a >= 1e9) return mark + (v / 1e9).toFixed(digits) + "B" + tail;
-  if (a >= 1e6) return mark + (v / 1e6).toFixed(digits) + "M" + tail;
-  if (a >= 1e3) return mark + (v / 1e3).toFixed(digits) + "K" + tail;
+  if (a >= 1e9) return mark + (v / 1e9).toFixed(digits) + compactMark("B") + tail;
+  if (a >= 1e6) return mark + (v / 1e6).toFixed(digits) + compactMark("M") + tail;
+  if (a >= 1e3) return mark + (v / 1e3).toFixed(digits) + compactMark("K") + tail;
   return money(v, basis);
 }
 
@@ -246,13 +250,15 @@ export const humanize = (code) =>
  * here and re-filled, so the number survives the translation.
  */
 const SERVER_PATTERNS = [
-  [/^Performance available after (\d+) more day\(s\) of tracking\.$/, "Performance available after {n} more day(s) of tracking."],
+  // "day(s)" read as unfinished; the count picks the word.
+  [/^Performance available after (\d+) more day\(s\) of tracking\.$/, (n) =>
+    n === "1" ? "Performance available after 1 more day of tracking." : "Performance available after {n} more days of tracking."],
 ];
 export function serverText(text) {
   if (typeof text !== "string") return text;
   for (const [re, key] of SERVER_PATTERNS) {
     const m = text.match(re);
-    if (m) return translate(key, undefined, { n: m[1] });
+    if (m) return translate(typeof key === "function" ? key(m[1]) : key, undefined, { n: m[1] });
   }
   return translate(text);
 }
