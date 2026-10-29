@@ -393,7 +393,7 @@ export default function AddTransactionDialog({
     const vars = { verb, q: form.quantity, name, when };
     if (priceIsMine && !form.price) {
       // "at today's market price" was wrong the moment the box was ticked.
-      return t("{verb} {q} {name} — enter the price you paid.", vars);
+      return t(action === "sell" ? "{verb} {q} {name} — enter the price you sold at." : "{verb} {q} {name} — enter the price you paid.", vars);
     }
     if (priceIsMine && form.price) {
       // "now" reads as a time, not a date: "at the market price for that
@@ -847,7 +847,9 @@ export default function AddTransactionDialog({
                       />
                       {Number(form.price) > 0 && Number(form.quantity) > 0 && (
                         <p className="mt-1 text-xs text-muted" data-testid="add-transaction-total">
-                          {t("Total")}: {isolate(`${(Number(form.price) * Number(form.quantity)).toLocaleString("en-US", { maximumFractionDigits: 0 })} ${t(priceUnitLabel)}`)}
+                          {/* In Toman like the summary below it: a Rial total over a Toman
+                              summary read as two different amounts. */}
+                          {t("Total")}: {toman(priceIsRial ? (Number(form.price) * Number(form.quantity)) / 10 : Number(form.price) * Number(form.quantity))}
                         </p>
                       )}
                     </Field>
@@ -871,7 +873,7 @@ export default function AddTransactionDialog({
                       ? "What did you pay per square meter? (millions of Toman, optional)"
                       : t("What did you pay for one? ({unit}, optional)", { unit: t(priceUnitLabel) })
                   }
-                  hint="Fills in your cost basis and unrealized gain. Leave it blank if you would rather not say."
+                  hint="Lets the app show your profit or loss. Leave it blank if you would rather not say."
                 >
                   <Input
                     label="Purchase price"

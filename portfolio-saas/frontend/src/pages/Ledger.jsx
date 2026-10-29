@@ -312,8 +312,8 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
 
   return (
     <Modal
-      title={`Edit ${isolate(holdingLabel(row))}`}
-      subtitle={`${jalaliDate(row.occurred_at)} · ${dateTime(row.occurred_at)}`}
+      title={translate("Edit {name}", lang, { name: isolate(holdingLabel(row)) })}
+      subtitle={lang === "fa" ? dateTime(row.occurred_at) : `${jalaliDate(row.occurred_at)} · ${dateTime(row.occurred_at)}`}
       onClose={onClose}
       testId="ledger-edit-dialog"
       footer={
@@ -337,23 +337,23 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
             {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
           </Select></Field>
           <Field label="Type"><Select label="Type" value={kind} onChange={(e) => changeKind(e.target.value)} data-testid="ledger-edit-kind" className="w-full">
-            {kindOptions.map((k) => <option key={k} value={k}>{KIND_LABEL[k] || humanize(k)}</option>)}
+            {kindOptions.map((k) => <option key={k} value={k}>{KIND_LABEL[k] ? translate(KIND_LABEL[k], lang) : humanize(k)}</option>)}
           </Select></Field>
           {/* Clearing the picker reads "Today" but the save sends no date, so the
               entry would keep its old one: clearing restores the saved date. */}
           <Field label="When"><JalaliDateField value={when} onChange={(v) => setWhen(v || row.occurred_at || "")} testId="ledger-edit-when" /></Field>
           {cash && <Field label="Amount (Toman)"><Input label="Amount" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} data-testid="ledger-edit-amount" /></Field>}
           {tradeKind && <Field label={translate("Price for one ({unit})", lang, { unit: translate(row.unit_price_currency === "rial" ? "Rial" : row.unit_price_currency === "usd" ? "USD" : "Toman", lang) })}>
-            <Input label="Unit price" type="number" step="any" value={price} onChange={(e) => setPrice(e.target.value)} data-testid="ledger-edit-price" />
+            <Input label="Unit price" type="number" step="any" className="w-full" value={price} onChange={(e) => setPrice(e.target.value)} data-testid="ledger-edit-price" />
           </Field>}
-          {declaresBasis && <Field label={row.is_house ? "What did you pay per square meter? (millions of Toman)" : `What did you pay for one? (${row.unit_price_currency === "rial" ? "Rial" : "Toman"})`}>
-            <Input label="Purchase price" type="number" step="any" value={costBasis} onChange={(e) => setCostBasis(e.target.value)} data-testid="ledger-edit-cost-basis" />
+          {declaresBasis && <Field label={row.is_house ? "What did you pay per square meter? (millions of Toman)" : translate("What did you pay for one? ({unit})", lang, { unit: translate(row.unit_price_currency === "rial" ? "Rial" : "Toman", lang) })}>
+            <Input label="Purchase price" type="number" step="any" className="w-full" value={costBasis} onChange={(e) => setCostBasis(e.target.value)} data-testid="ledger-edit-cost-basis" />
           </Field>}
         </>}
         {!cash && <>
         <div>
           <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">
-            {row.is_house ? "Price per square meter (millions of Toman)" : "How many"}
+            {translate(row.is_house ? "Price per square meter (millions of Toman)" : "How many?", lang)}
           </div>
           <Input
             label="Quantity"
@@ -374,7 +374,7 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
         {row.is_house && !row.is_synthetic && (
           <div>
             <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">
-              Size (square meters)
+              {translate("Size (square meters)", lang)}
             </div>
             <Input
               label="Size in square meters"
@@ -390,7 +390,7 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
         )}
         {!row.is_synthetic && (
           <div>
-            <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">Note</div>
+            <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">{translate("Note", lang)}</div>
             <Input
               label="Note"
               className="w-full"
@@ -546,7 +546,10 @@ export default function Ledger() {
       // A bare dash in a card's headline slot reads as a broken row; say why it is empty.
       render: (r) =>
         r.value_tomans == null && r.kind === "opening_position" ? (
-          <span className="text-xs font-normal text-muted">{translate("No cost recorded", lang)}</span>
+          // The place to record a cost, offered where its absence is shown.
+          <Button variant="link" className="text-xs font-normal" onClick={() => setEditing(r)} data-testid="ledger-add-cost">
+            {translate("Add what you paid", lang)}
+          </Button>
         ) : (
           toman(r.value_tomans)
         ),

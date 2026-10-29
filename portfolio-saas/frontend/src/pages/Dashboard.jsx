@@ -28,6 +28,7 @@ import {
   num,
   pct,
   pctShare,
+  isLastClose,
   priceStatus,
   perfLabel,
   perSqm,
@@ -297,10 +298,12 @@ function RangeChange({ points, basis, range, flows }) {
   const tone = toneClass(toneFor(diff));
   return (
     <div className="mb-3 flex flex-wrap items-baseline gap-x-2 text-sm" data-testid="dashboard-trend-change">
-      <span className={`tabular font-semibold ${tone}`}>
+      {/* Left-to-right as one unit: in Persian the sign and the percent
+          otherwise reorder into "(0%+) 0 T+". */}
+      <bdi dir="ltr" className={`tabular font-semibold ${tone}`}>
         {diff >= 0 ? "+" : "−"}{money(Math.abs(diff), basis)}
         {rel != null && ` (${diff >= 0 ? "+" : "−"}${pct(Math.abs(rel))})`}
-      </span>
+      </bdi>
       <span className="text-muted">{t(RANGE_WORD[range] || "")}</span>
       {moved !== 0 && (
         <span className="text-xs text-muted" data-testid="dashboard-trend-flows">
@@ -680,7 +683,7 @@ function NoCostYet() {
   return (
     <Empty
       testId="dashboard-performance-no-cost"
-      action={<Link to="/activity?add=trade" className="inline-flex min-h-10 items-center rounded-md border border-border bg-panel-2 px-3 text-sm font-medium text-text hover:bg-border sm:min-h-8">{t("Record purchases")}</Link>}
+      action={<Link to="/activity" className="inline-flex min-h-10 items-center rounded-md border border-border bg-panel-2 px-3 text-sm font-medium text-text hover:bg-border sm:min-h-8">{t("Record purchases")}</Link>}
     >
       Record what you paid to see profit and loss.
     </Empty>
@@ -1038,7 +1041,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
         // On, it must look on: the bare `danger` style has no fill, so the
         // active mode read as the inactive one next to a filled Edit button.
         variant="ghost"
-        className={manageMode === "delete" ? "border-[var(--c-critical-text)] text-[var(--c-critical-text)]" : ""}
+        className={manageMode === "delete" ? "border-[var(--c-critical-text)]! text-[var(--c-critical-text)]! bg-[var(--c-critical-text)]/10!" : ""}
         onClick={() => toggleManageMode("delete")}
         aria-pressed={manageMode === "delete"}
         data-testid="dashboard-holdings-manage-delete"
@@ -1184,8 +1187,8 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                       aria-label={t("Quantity for {name}", { name: isolate(holdingLabel(r)) })}
                       title={
                         isWholeUnit(step)
-                          ? "Counted in whole units"
-                          : "This asset can be held in fractions"
+                          ? t("Counted in whole units")
+                          : t("This asset can be held in fractions")
                       }
                       data-testid="dashboard-holdings-edit-qty"
                       disabled={savingKey === rk}
@@ -1247,7 +1250,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                   return (
                     <span
                       className="text-muted"
-                      title="Priced from the market feed — not editable. Only manual assets and property take a price you type."
+                      title={t("Priced from the market feed — not editable. Only manual assets and property take a price you type.")}
                     >
                       {shown}
                     </span>
@@ -1279,7 +1282,8 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
               render: (r) => (
                 <div className="inline-flex flex-wrap items-center gap-1 align-middle">
                   {r.is_hidden && <Badge variant="warn">Not counted</Badge>}
-                  <Badge variant={ITEM_BADGE[r.quality_status] || "neutral"}>{priceStatus(r, data.markets)}</Badge>
+                  {/* A closing price is current but not moving: neutral, not the green of a live feed. */}
+                  <Badge variant={isLastClose(r, data.markets) ? "neutral" : ITEM_BADGE[r.quality_status] || "neutral"}>{priceStatus(r, data.markets)}</Badge>
                   {r.price_unit_status === "unverified" && <Badge variant="warn">unverified unit</Badge>}
                 </div>
               ),

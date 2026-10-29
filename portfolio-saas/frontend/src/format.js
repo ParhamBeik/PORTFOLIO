@@ -167,10 +167,14 @@ export function compactAxisDigits(max, interval) {
 // reader gets the Persian calendar and month names (Latin digits, as every
 // other number on the page): chart axes read "Sept 30, Oct 06" in Persian mode.
 const dtf = (opts) =>
-  new Intl.DateTimeFormat(currentLang() === "fa" ? "fa-IR-u-ca-persian-nu-latn" : "en-GB", {
-    timeZone: "Asia/Tehran",
-    ...opts,
-  });
+  currentLang() === "fa"
+    ? new Intl.DateTimeFormat("fa-IR-u-ca-persian-nu-latn", {
+        timeZone: "Asia/Tehran",
+        ...opts,
+        // "7 آبان", as `jalaliLabel` writes it, not "07 آبان" beside it.
+        ...(opts.day ? { day: "numeric" } : {}),
+      })
+    : new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Tehran", ...opts });
 
 export function date(iso) {
   const d = new Date(iso);
@@ -327,16 +331,18 @@ export const isolate = (text) => `\u2068${text}\u2069`;
  * "Live" beside "Stocks closed" read as false, so it says "Last close" then.
  * `markets` is the valuation's per-market clock list.
  */
-export function priceStatus(item, markets = []) {
-  const status = item?.quality_status;
-  if (status !== "live") return humanize(status);
+export function isLastClose(item, markets = []) {
+  if (item?.quality_status !== "live") return false;
   const group =
     item.symbol || item.class === "Stock" ? "stocks"
       : item.class === "Gold" || item.class === "Cash" ? "gold_fx"
         : item.class === "Crypto" ? "crypto" : null;
-  const clock = markets.find((m) => m.market === group);
-  return clock && clock.open === false ? translate("Last close") : humanize(status);
+  const clock = (markets || []).find((m) => m.market === group);
+  return Boolean(clock && clock.open === false);
 }
+
+export const priceStatus = (item, markets = []) =>
+  isLastClose(item, markets) ? translate("Last close") : humanize(item?.quality_status);
 
 export const holdingLabel = (row) =>
   row?.label || row?.name_fa || row?.asset_name_fa || row?.asset ||
