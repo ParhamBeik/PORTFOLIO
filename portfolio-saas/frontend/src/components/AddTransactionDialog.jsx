@@ -320,6 +320,7 @@ export default function AddTransactionDialog({
 
   const canContinue = () => {
     if (!targetAccountId) return false;
+    if (current === "category") return !!category;
     if (current === "asset") return !!assetKey || newProperty;
     if (current === "action") return !!action && (action !== "sell" || Number(holding?.quantity || 0) > 0);
     if (current === "amount") {
@@ -369,7 +370,18 @@ export default function AddTransactionDialog({
       return t("Record {q} extra {name} shares — {when}.", { q: form.quantity, name, when: today ? t("today") : when });
     }
     if (action === "opening_position") {
-      return t("Record that you already hold {q} {name} — as of {when}.", { q: form.quantity, name, when: today ? t("today") : when });
+      // The server pins an opening to the tracking start, whatever day was picked.
+      const start = targetAccount?.tracking_started_at;
+      const asOf = start ? jalaliLabel(toJalali(new Date(start))) : today ? t("today") : when;
+      // An opening adds to what is held; "already hold 50" read as replacing 100,000.
+      const held = Number(holding?.quantity || 0);
+      if (held > 0) {
+        return t("Add {q} {name} you already owned — {total} in all, as of {when}.", {
+          q: form.quantity, name, when: asOf,
+          total: (held + Number(form.quantity || 0)).toLocaleString("en-US", { maximumFractionDigits: 6 }),
+        });
+      }
+      return t("Record that you already hold {q} {name} — as of {when}.", { q: form.quantity, name, when: asOf });
     }
     const verb = t({ buy: "Buy", sell: "Sell" }[action] || "Record");
     // A stock's unit price is Rial, so the total is Rial/10. Printing both with
@@ -485,7 +497,8 @@ export default function AddTransactionDialog({
       size="wide"
       footer={
         <>
-          <Button onClick={back} disabled={step === 0 || busy || saved} data-testid="add-transaction-back">
+          {/* Kept in the layout on the first step so Continue does not jump sides. */}
+          <Button onClick={back} disabled={step === 0 || busy || saved} className={step === 0 ? "invisible" : ""} data-testid="add-transaction-back">
             Back
           </Button>
           {saved ? (
@@ -770,16 +783,25 @@ export default function AddTransactionDialog({
                   )}
                 </Field>
               )}
-              <Field label={targetAccount?.tracking_started_at && action === "opening_position"
-                ? "When? (existing positions use the portfolio's tracking start)"
-                : "When?"}>
-                <JalaliDateField
-                  value={form.when}
-                  onChange={(iso) => setForm((f) => ({ ...f, when: iso }))}
-                  todayLabel="Recorded as of today"
-                  testId="add-transaction-when"
-                />
-              </Field>
+              {/* The server pins an opening to the portfolio's tracking start, so a
+                  calendar here would offer a choice that is silently ignored. */}
+              {targetAccount?.tracking_started_at && action === "opening_position" ? (
+                <p className="text-xs text-muted" data-testid="add-transaction-opening-date">
+                  {t("Recorded from this portfolio's tracking start, {date}. To keep an older date, choose “I bought it”.").replace(
+                    "{date}",
+                    jalaliLabel(toJalali(new Date(targetAccount.tracking_started_at)))
+                  )}
+                </p>
+              ) : (
+                <Field label="When?">
+                  <JalaliDateField
+                    value={form.when}
+                    onChange={(iso) => setForm((f) => ({ ...f, when: iso }))}
+                    todayLabel="Recorded as of today"
+                    testId="add-transaction-when"
+                  />
+                </Field>
+              )}
             </div>
           </Step>
         )}

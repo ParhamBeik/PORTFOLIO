@@ -197,9 +197,12 @@ function expireSession() {
   window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
 }
 
-function apiError(message, status) {
+function apiError(message, status, reason) {
   const error = new Error(message);
   error.status = status;
+  // A machine-readable refusal ("no_recorded_cost"), so a page can answer an
+  // expected state with a next step instead of a red error box.
+  if (reason) error.reason = reason;
   return error;
 }
 
@@ -260,7 +263,8 @@ async function request(path, { method = "GET", body, _retried = false } = {}) {
     // nothing to act on. Say at least what the server said.
     throw apiError(
       extractError(detail) || res.statusText || `Request failed (${res.status}).`,
-      res.status
+      res.status,
+      typeof detail?.reason === "string" ? detail.reason : undefined
     );
   }
   if (res.status === 204) return null;

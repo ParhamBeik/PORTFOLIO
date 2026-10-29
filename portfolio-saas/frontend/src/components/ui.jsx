@@ -517,7 +517,8 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
               <tr
                 key={key}
                 data-testid={testId ? `${testId}-row` : undefined}
-                className={`group border-b border-border/60 last:border-0 hover:bg-panel-2 ${mobileCards ? card : ""} ${
+                // A phone card keeps its border on the last row; only the desktop table drops it.
+                className={`group border-b border-border/60 ${mobileCards ? "sm:last:border-b-0" : "last:border-0"} hover:bg-panel-2 ${mobileCards ? card : ""} ${
                   rowClass?.(row) || ""
                 }`}
               >
@@ -525,7 +526,12 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
                   const content = c.render ? c.render(row) : row[c.key];
                   const labelled = mobileCards && c.header && (!compact || !MOBILE_SHOWN.has(c.mobile));
                   return (
-                    <td key={c.key} data-meta={c.mobile === "meta" ? "" : undefined} className={cellClass(c, expanded)}>
+                    <td
+                      key={c.key}
+                      data-meta={c.mobile === "meta" ? "" : undefined}
+                      // An empty detail on a phone card is just "· —" noise.
+                      className={`${cellClass(c, expanded)} ${mobileCards && c.mobile === "meta" && content === "—" ? "max-sm:hidden!" : ""}`}
+                    >
                       {labelled && <span className="shrink-0 text-xs font-medium uppercase text-muted sm:hidden">{t(c.header)}</span>}
                       {labelled ? (
                         <span className="min-w-0 text-right sm:contents">{content}</span>
@@ -533,10 +539,10 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
                     </td>
                   );
                 })}
+                {/* Ends the first line so the meta cells start a new one. */}
+                {compact && <td aria-hidden="true" className="order-3 basis-full sm:hidden" />}
                 {hasDetail && (
                   <>
-                    {/* Ends the first line so the meta cells start a new one. */}
-                    <td aria-hidden="true" className="order-3 basis-full sm:hidden" />
                     <td className="order-5 ms-auto sm:hidden">
                       <button
                         type="button"

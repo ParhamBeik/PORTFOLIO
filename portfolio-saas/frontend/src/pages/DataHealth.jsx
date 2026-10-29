@@ -42,16 +42,18 @@ export default function DataHealth() {
               rows={data.items || []}
               empty="No holdings to check."
               columns={[
-                { key: "label", header: "Holding", render: (r) => <bdi>{holdingLabel(r)}</bdi> },
-                { key: "source", header: "Source", render: (r) => r.source || "—" },
+                { key: "label", header: "Holding", mobile: "title", render: (r) => <bdi>{holdingLabel(r)}</bdi> },
+                { key: "source", header: "Source", mobile: "meta", render: (r) => r.source || "—" },
                 {
                   key: "priced_at",
                   header: "Priced",
+                  mobile: "meta",
                   render: (r) => (r.priced_at ? <span title={dateTime(r.priced_at)}>{ago(r.age_seconds)}</span> : "—"),
                 },
                 {
                   key: "quality_status",
                   header: "Status",
+                  mobile: "value",
                   align: "right",
                   render: (r) => (
                     <Badge variant={LIVE_TONE[r.quality_status] || "neutral"}>
@@ -89,16 +91,18 @@ function HistoryHealth({ account }) {
             rows={data.assets || []}
             empty="No priced holdings in this portfolio."
             columns={[
-              { key: "symbol", header: "Holding", render: (r) => <bdi>{r.symbol || r.asset_key}</bdi> },
+              { key: "symbol", header: "Holding", mobile: "title", render: (r) => <bdi>{holdingLabel(r)}</bdi> },
               {
                 key: "gate",
                 header: "History",
+                mobile: "meta",
                 render: (r) =>
                   r.passes_gate == null ? translate("Manual value", lang) : r.passes_gate ? translate("Complete enough", lang) : (r.reason_codes || []).map(humanize).join(", ") || translate("Gaps", lang),
               },
               {
                 key: "repair",
                 header: "Backfill",
+                mobile: "value",
                 align: "right",
                 render: (r) =>
                   r.repair_state ? (

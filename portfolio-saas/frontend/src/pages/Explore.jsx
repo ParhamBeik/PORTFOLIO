@@ -413,7 +413,7 @@ export default function Explore() {
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Explore companies" subtitle="Find a TSE company and inspect prices, coverage, and the original disclosures behind future research." />
+      <PageHeader title="Explore companies" subtitle="Look up any TSE company: its prices, trading days and filings." />
       <Card title="Find a company" testId="explore-search">
         <form className="flex flex-wrap gap-2" onSubmit={(event) => { event.preventDefault(); setQuery(draft.trim()); }}>
           <Input label="Search by TSE symbol or company name" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Symbol or company name" maxLength={100} className="min-w-52 flex-1" data-testid="explore-query" />
@@ -434,11 +434,17 @@ export default function Explore() {
                 </Button>
               ))}
             </div>
-          ) : <Empty testId="explore-no-results">No eligible TSE stock matches.</Empty>}
+          ) : (
+            // Before anything is typed there was no search to "match", so the
+            // empty default list says what is actually the case.
+            <Empty testId="explore-no-results">
+              {query ? "No company matches this search. Try its ticker, like فولاد." : "No companies are listed yet."}
+            </Empty>
+          )}
         </Async>}
       </Card>
       {symbol ? <Company key={symbol} symbol={symbol} /> : (
-        <Empty testId="explore-prompt">Choose a company to inspect its source data.</Empty>
+        <Empty testId="explore-prompt">Pick a company above to see its prices and filings.</Empty>
       )}
     </div>
   );

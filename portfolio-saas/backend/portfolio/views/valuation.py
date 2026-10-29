@@ -113,6 +113,8 @@ class AccountDataQualityView(APIView):
             if asset.is_house or asset.is_manual or not symbol:
                 assets.append({
                     "asset_key": asset.key,
+                    # Named as Home names it; the provider code (IR_COIN_EMAMI) is not.
+                    "label": holding.label,
                     "symbol": symbol or None,
                     "passes_gate": None,
                     "quality_status": "manual",
@@ -136,6 +138,7 @@ class AccountDataQualityView(APIView):
             assets.append({
                 "asset_key": asset.key,
                 **result,
+                "label": holding.label,
                 "repair_state": classify_archive_state(state) if state else "not_scheduled",
                 "next_repair_at": state.next_attempt_at.isoformat() if state and state.next_attempt_at else None,
                 "last_repaired_at": state.last_success_at.isoformat() if state and state.last_success_at else None,

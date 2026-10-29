@@ -7,6 +7,7 @@ import {
   Async,
   Card,
   Button,
+  Empty,
   ErrorState,
   Input,
   PageHeader,
@@ -15,8 +16,12 @@ import {
   Table,
   Tabs,
 } from "../components/ui.jsx";
-import { humanize, num, rial, signedPct, toman } from "../format.js";
+import { humanize, isolate, num, rial, signedPct, toman } from "../format.js";
 import { useApi } from "../useApi.js";
+import { Link } from "react-router-dom";
+
+// Refusals that mean "nothing paid on record yet", not "something broke".
+const NEEDS_COST = new Set(["no_recorded_cost", "no_purchase_history"]);
 
 // 0 means "as far back as my own purchases go", which is the answer this page is
 // usually asked for. The others are the windows the rest of the app already
@@ -461,9 +466,17 @@ export default function Comparison() {
                   .
                 </p>
               )}
-              {failure ? (
-                // Most refusals here are data limits with a sentence attached
-                // — a position with no recorded cost has nothing to replay.
+              {NEEDS_COST.has(failure?.reason) ? (
+                // Not a fault: the holding simply has no purchase price yet, so
+                // there is no amount to replay. Say so and point at the fix.
+                <Empty
+                  testId="comparison-needs-cost"
+                  action={<Link to="/activity" className="text-sm text-[var(--c-accent-text)] underline underline-offset-2">{translate("Record a purchase", lang)}</Link>}
+                >
+                  {translate("Compare replays the money you paid. Record what you paid for {name} to see what it would have done elsewhere.", lang, { name: isolate(holdings.find((h) => h.key === subject)?.label || "") })}
+                </Empty>
+              ) : failure ? (
+                // Other refusals are data limits with a sentence attached.
                 <ErrorState error={failure} testId="comparison-result" />
               ) : asked.length ? (
                 <div data-testid="comparison-result">

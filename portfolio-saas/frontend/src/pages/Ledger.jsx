@@ -530,14 +530,26 @@ export default function Ledger() {
         r.asset_key ? (
           <bdi className="whitespace-nowrap" title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</bdi>
         ) : CASH_KINDS.includes(r.kind) ? (
-          "Cash"
+          translate("Cash balance", lang)
         ) : (
           "—"
         ),
     },
     { key: "qty", header: "Amount|quantity", align: "right", mobile: "meta", render: quantityCell },
     { key: "price", header: "Price", align: "right", render: priceCell },
-    { key: "amt", header: "Value", align: "right", mobile: "value", render: (r) => toman(r.value_tomans) },
+    {
+      key: "amt",
+      header: "Value",
+      align: "right",
+      mobile: "value",
+      // A bare dash in a card's headline slot reads as a broken row; say why it is empty.
+      render: (r) =>
+        r.value_tomans == null && r.kind === "opening_position" ? (
+          <span className="text-xs font-normal text-muted">{translate("No cost recorded", lang)}</span>
+        ) : (
+          toman(r.value_tomans)
+        ),
+    },
     {
       key: "pnl",
       header: "P/L",
