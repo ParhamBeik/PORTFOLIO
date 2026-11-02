@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { translate, useLang } from "../i18n.js";
-import { guidance, listAssets, setRiskProfile } from "../api.js";
+import { guidance, listAssets, setRiskProfile, valuation } from "../api.js";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { Async, Badge, Card, Empty, Field, PageHeader, Select } from "../components/ui.jsx";
 import { assetLabel, pct } from "../format.js";
@@ -12,7 +12,7 @@ const PROFILE_OPTIONS = [
   ["growth", "Growth"],
 ];
 
-function Allocation({ title, subtitle, weights, labelFor, testId }) {
+function Allocation({ title, subtitle, weights, labelFor, testId, empty = "Not enough price history yet — this needs about a year of daily prices." }) {
   const rows = Object.entries(weights || {}).sort((a, b) => b[1] - a[1]);
   // The empty state keeps its card title: two bare, identical sentences
   // stacked on the page did not say which model was missing.
@@ -27,7 +27,7 @@ function Allocation({ title, subtitle, weights, labelFor, testId }) {
           ))}
         </ul>
       ) : (
-        <Empty testId={`${testId}-empty`}>Not enough price history yet — this needs about a year of daily prices.</Empty>
+        <Empty testId={`${testId}-empty`}>{empty}</Empty>
       )}
     </Card>
   );
@@ -35,7 +35,9 @@ function Allocation({ title, subtitle, weights, labelFor, testId }) {
 
 export default function Guidance({ user, onUserChange }) {
   const lang = useLang();
-  const { activeId } = usePortfolio();
+  const { activeId, basis } = usePortfolio();
+  // An empty portfolio is short of holdings, not of price history.
+  const held = useApi(() => valuation(activeId, basis), [activeId, basis]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const result = useApi(() => guidance(activeId), [activeId, user.risk_profile], { timeoutMs: 120000 });
@@ -90,7 +92,7 @@ export default function Guidance({ user, onUserChange }) {
               ].filter(Boolean).join(" · ")}
             </p>
             {data.fallback_reason && <p className="text-sm text-[var(--c-warn-text)]" data-testid="guidance-fallback">{data.fallback_reason}</p>}
-            <Allocation title="For my portfolio" weights={data.personal?.target_weights} labelFor={labelFor} testId="guidance-personal" />
+            <Allocation empty={held.data && !held.data.items?.length ? "Add something to this portfolio first. This model works from what you own." : undefined} title="For my portfolio" weights={data.personal?.target_weights} labelFor={labelFor} testId="guidance-personal" />
             <Allocation title="Market benchmark" subtitle="The market-wide model for your risk profile: the share each listed asset would hold." weights={data.benchmark?.target_weights} labelFor={labelFor} testId="guidance-benchmark" />
           </div>
         )}

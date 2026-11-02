@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { translate, useLang } from "../i18n.js";
+import { translate, useLang, useT } from "../i18n.js";
 import { useSearchParams } from "react-router-dom";
 import {
   commitLedgerImport,
@@ -30,6 +30,7 @@ import {
   Pager,
   Select,
   Table,
+  Disclosure,
 } from "../components/ui.jsx";
 import {
   area,
@@ -46,7 +47,21 @@ import {
 import { useApi } from "../useApi.js";
 import { quantityError, validQuantity } from "../quantity.js";
 
+// Plain words for the CSV's fixed headers; the headers themselves stay as they
+// are because the importer matches them exactly.
+const CSV_COLUMNS = [
+  ["external_id", "Your own reference for the row. Optional; a repeated one is refused."],
+  ["occurred_at", "The date, in the Gregorian calendar: 2026-10-07. Jalali dates are refused."],
+  ["kind", "buy, sell, deposit, withdrawal, dividend or fee."],
+  ["asset_key", "The asset's code, the last part of its page address, such as emami_coin. Empty for money in or out."],
+  ["quantity", "How many units. Empty for money in or out."],
+  ["unit_price_tomans", "The price of one unit. Iranian stocks stay in Rial; everything else is in Toman."],
+  ["amount_tomans", "The total in Toman, for money in or out."],
+  ["note", "Anything you want to remember. Optional."],
+];
+
 function ImportCsvDialog({ accountId, onClose, onImported }) {
+  const t = useT();
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -75,7 +90,7 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
       const result = await commitLedgerImport(accountId, file);
       setDone(true);
       await onImported?.();
-      if (!result.row_count) setError("The import completed without any rows.");
+      if (!result.row_count) setError(t("The import completed without any rows."));
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -86,7 +101,7 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
   return (
     <Modal
       title="Import transaction history"
-      subtitle="Upload a CSV in this app's own columns (a wrong header lists them), review it, then commit it as ledger history."
+      subtitle="Fill in our template, check the file, then import it."
       onClose={onClose}
       testId="ledger-import-dialog"
       footer={
@@ -109,13 +124,13 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
         {error && <ErrorState error={new Error(error)} testId="ledger-import-error" />}
         {done ? (
           <p className="text-sm text-[var(--c-good-text)]" data-testid="ledger-import-success">
-            Import complete. The same file can be selected again safely; duplicate files are ignored.
+            {t("Import complete. The same file can be selected again safely; duplicate files are ignored.")}
           </p>
         ) : (
           <>
             <label className="block text-sm">
               <span className="mb-1 block text-xs font-medium tracking-wide text-muted uppercase">
-                CSV file
+                {t("CSV file")}
               </span>
               <input
                 type="file"
@@ -129,11 +144,24 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
                 className="block w-full rounded-md border border-border bg-panel-2 px-3 py-2 text-sm"
               />
             </label>
-            <p className="text-xs text-muted">
-              Required columns: external_id, occurred_at, kind, asset_key, quantity,
-              unit_price_tomans, amount_tomans, note. Dates must be ISO-8601; TSE stock
-              unit prices stay in Rial, and all other unit prices use Toman.
-            </p>
+            <a
+              href="/transactions-template.csv"
+              download
+              data-testid="ledger-import-template"
+              className="inline-block text-sm text-[var(--c-accent-text)] underline"
+            >
+              {t("Download the template")}
+            </a>
+            <Disclosure summary="What each column means" testId="ledger-import-columns">
+              <dl className="space-y-2 py-2 text-xs text-muted">
+                {CSV_COLUMNS.map(([name, meaning]) => (
+                  <div key={name}>
+                    <dt dir="ltr" className="font-mono text-text rtl:text-right">{name}</dt>
+                    <dd>{t(meaning)}</dd>
+                  </div>
+                ))}
+              </dl>
+            </Disclosure>
             <Button
               variant="secondary"
               disabled={!file || busy}
@@ -144,7 +172,7 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
             </Button>
             {preview?.valid && (
               <p className="text-sm" data-testid="ledger-import-preview-result">
-                {preview.row_count} rows are valid and ready to import.
+                {t("{n} rows are valid and ready to import.", { n: preview.row_count })}
               </p>
             )}
           </>
@@ -742,6 +770,7 @@ export default function Ledger() {
                   mobileCards
                   rowKey={(r) => r.id}
                   rows={rows.slice((current - 1) * size, current * size)}
+                  empty="Nothing recorded yet. Use Add to record your first buy, sale, or holding."
                   columns={columns}
                 />
                 {pages > 1 && (

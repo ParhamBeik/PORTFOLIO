@@ -1561,8 +1561,8 @@ export default function Dashboard({ user }) {
               </Link>
             }
           >
-            <span className="block text-base font-semibold text-text">{name || "This portfolio"} is empty</span>
-            <span className="mt-1 block">Record something you own, or money you put in.</span>
+            <span className="block text-base font-semibold text-text">{name ? t("{name} is empty", { name: isolate(name) }) : t("This portfolio is empty")}</span>
+            <span className="mt-1 block">{t("Record something you own, or money you put in.")}</span>
           </Empty>
         </Card>
       </div>

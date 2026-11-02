@@ -166,7 +166,12 @@ function HistoryCharts({ accounts, basis }) {
     >
       <Async {...state} testId="breakdown-history-body" empty="Not enough history yet.">
         {(history) => {
-          const chart = collapseForChart(seriesMeta, history.values, history.shares);
+          const collapsed = collapseForChart(seriesMeta, history.values, history.shares);
+          // A portfolio that has never held anything is only a flat line on zero.
+          const chart = {
+            ...collapsed,
+            series: collapsed.series.filter((s) => collapsed.values.some((row) => Number(row[s.key]))),
+          };
           const longTicks = range === "365" || range === "all";
           if (!chart.values.length) return <Empty>No snapshot history for this range.</Empty>;
           return (
@@ -295,7 +300,7 @@ export default function Family() {
     <div>
       <PageHeader
         title="Portfolio Breakdown"
-        subtitle="How each portfolio contributes to your combined net worth — current allocation, share over time, and performance."
+        subtitle="How each portfolio contributes to your combined net worth — current allocation, share over time, and performance. This page always covers all of them, whichever one is selected above."
       />
       <Async {...state} testId="breakdown-body">
         {(data) => {
@@ -322,7 +327,9 @@ export default function Family() {
             );
           }
 
-          const shareDonut = rows.map((r) => ({ name: r.name, value: Number(r.total) || 0 }));
+          const shareDonut = rows
+            .map((r) => ({ name: r.name, value: Number(r.total) || 0 }))
+            .filter((r) => r.value > 0);
 
           return (
             <div className="space-y-5">

@@ -22,7 +22,7 @@ import {
 } from "../api.js";
 import { dateTime } from "../format.js";
 import { isNative } from "../mobile.js";
-import { Badge, Button, ErrorState, Input, Modal } from "./ui.jsx";
+import { Badge, Button, ErrorState, Field, Input, Modal } from "./ui.jsx";
 
 /** Staff is a real capability here — it is what puts Ops in the nav. */
 function roleOf(user) {
@@ -216,14 +216,16 @@ function DeleteAccountModal({ onClose, onDeleted }) {
           onChange={(e) => setPassword(e.target.value)}
           data-testid="account-delete-password"
         />
-        <Input
-          label={t("Type {word} to confirm", { word })}
-          placeholder={word}
-          className="w-full"
-          value={confirmation}
-          onChange={(e) => setConfirmation(e.target.value)}
-          data-testid="account-delete-confirm"
-        />
+        <Field label={t("Type {word} to confirm", { word })}>
+          <Input
+            label={t("Type {word} to confirm", { word })}
+            placeholder={word}
+            className="w-full"
+            value={confirmation}
+            onChange={(e) => setConfirmation(e.target.value)}
+            data-testid="account-delete-confirm"
+          />
+        </Field>
         {error && <ErrorState error={error} testId="account-delete-error" />}
       </div>
     </Modal>

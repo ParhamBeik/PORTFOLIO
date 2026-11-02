@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { translate, useT, useLang } from "../i18n.js";
+import { Link } from "react-router-dom";
 import { comparison, ensureAsset, searchAssetCatalog } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
@@ -421,9 +422,16 @@ export default function Comparison() {
                 />
               )}
               {!holdings.length ? (
-                <p className="text-sm text-muted" data-testid="comparison-no-holdings">
-                  {translate("This portfolio has no priced positions to compare yet. Record a purchase in the Ledger first.", lang)}
-                </p>
+                <Empty
+                  testId="comparison-no-holdings"
+                  action={
+                    <Link to="/activity?add=trade" className="inline-flex min-h-10 items-center rounded-md bg-[var(--c-accent-fill)] px-4 text-sm font-medium text-white hover:opacity-90">
+                      {translate("Add something you bought", lang)}
+                    </Link>
+                  }
+                >
+                  This portfolio has no priced positions to compare yet.
+                </Empty>
               ) : (
                 <>
                   <div className="mb-4 flex flex-wrap items-end gap-4">
@@ -466,7 +474,7 @@ export default function Comparison() {
                   .
                 </p>
               )}
-              {NEEDS_COST.has(failure?.reason) ? (
+              {!holdings.length ? null : NEEDS_COST.has(failure?.reason) ? (
                 // Not a fault, and deliberately no call to action: turning an
                 // opening into a purchase would take its cost out of the cash balance.
                 <Empty testId="comparison-needs-cost">

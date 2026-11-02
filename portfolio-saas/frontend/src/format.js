@@ -255,6 +255,7 @@ export const humanize = (code) =>
  * here and re-filled, so the number survives the translation.
  */
 const SERVER_PATTERNS = [
+  [/^Complete an opening baseline/, "Add what this portfolio holds to start measuring."],
   // "day(s)" read as unfinished; the count picks the word.
   [/^Performance available after (\d+) more day\(s\) of tracking\.$/, (n) =>
     n === "1" ? "Performance available after 1 more day of tracking." : "Performance available after {n} more days of tracking."],
