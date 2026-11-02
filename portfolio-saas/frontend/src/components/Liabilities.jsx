@@ -9,7 +9,7 @@
  * server is the matching authority; nothing here computes a balance.
  */
 import { useState } from "react";
-import { translate } from "../i18n.js";
+import { translate, useT } from "../i18n.js";
 
 import {
   createLiability,
@@ -91,6 +91,7 @@ function securableAssets(accounts, accountId) {
 }
 
 export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) {
+  const t = useT();
   const [form, setForm] = useState({
     account: String(accountId || row?.account_id || ""),
     label: row?.label || "",
@@ -215,7 +216,7 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
               onChange={set("account")}
               data-testid="liability-account"
             >
-              <option value="">Choose a portfolio</option>
+              <option value="">{t("Choose a portfolio")}</option>
               {accounts.map((account) => (
                 <option key={account.id} value={account.id}>{account.name}</option>
               ))}
@@ -229,6 +230,7 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
             value={form.kind}
             onChange={(value) => put("kind", value)}
             label="Kind of debt"
+            grid
             testId="liability-kind"
           />
         </Field>
@@ -269,7 +271,7 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
               onChange={set("assetKey")}
               data-testid="liability-asset"
             >
-              <option value="">Not secured against anything</option>
+              <option value="">{t("Not secured against anything")}</option>
               {assets.map((asset) => (
                 <option key={`${asset.accountName}-${asset.key}`} value={asset.key}>
                   {asset.label}
@@ -287,6 +289,7 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
               value={form.mode}
               onChange={(value) => put("mode", value)}
               label="Balance mode"
+              grid
               testId="liability-mode"
             />
           </Field>
@@ -381,7 +384,7 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
         )}
 
         {problem && (
-          <p className="text-xs text-muted" data-testid="liability-incomplete">{problem}</p>
+          <p className="text-xs text-muted" data-testid="liability-incomplete">{t(problem)}</p>
         )}
       </div>
     </Modal>
@@ -404,6 +407,7 @@ const LIABILITY_KIND_LABEL = {
  * thing someone typed.
  */
 export function LiabilityRow({ row, showAccount, onEdit, onDelete }) {
+  const t = useT();
   const owed = Number(row.outstanding_tomans ?? row.amount_tomans);
   const scheduled = row.balance_basis !== "declared";
   const paidOff =
@@ -416,11 +420,11 @@ export function LiabilityRow({ row, showAccount, onEdit, onDelete }) {
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium">{row.label}</span>
           <Badge variant={row.kind === "secured_debt" ? "warn" : "neutral"}>
-            {LIABILITY_KIND_LABEL[row.kind] || "Other"}
+            {t(LIABILITY_KIND_LABEL[row.kind] || "Other")}
           </Badge>
           {row.asset_label && (
-            <Badge variant="neutral" title="This debt rides with the asset it is secured against.">
-              on {row.asset_label}
+            <Badge variant="neutral" title={t("This debt rides with the asset it is secured against.")}>
+              {t("on {name}", { name: row.asset_label })}
             </Badge>
           )}
         </div>
@@ -431,12 +435,12 @@ export function LiabilityRow({ row, showAccount, onEdit, onDelete }) {
             // Only for a scheduled loan. On a declared balance there is no
             // progress to report and printing "0 of 0" invents one.
             scheduled && row.term_months
-              ? `${row.installments_paid} of ${row.term_months} installments paid`
+              ? t("{paid} of {total} installments paid", { paid: row.installments_paid, total: row.term_months })
               : null,
             scheduled && row.scheduled_installment_tomans
-              ? `${toman(row.scheduled_installment_tomans)} / month`
+              ? t("{amount} / month", { amount: toman(row.scheduled_installment_tomans) })
               : null,
-            scheduled && row.payoff_on ? `paid off ${date(row.payoff_on)}` : null,
+            scheduled && row.payoff_on ? t("paid off {date}", { date: date(row.payoff_on) }) : null,
           ]
             .filter(Boolean)
             .join(" · ")}
@@ -456,7 +460,7 @@ export function LiabilityRow({ row, showAccount, onEdit, onDelete }) {
           {/* Where the number came from. A figure someone typed six months ago
               and one the schedule produced this morning are not the same claim. */}
           <div className="text-[11px] text-muted">
-            {scheduled ? "still owed" : "as entered"}
+            {t(scheduled ? "still owed" : "as entered")}
           </div>
         </div>
         <Button variant="ghost" onClick={onEdit} data-testid="liability-edit">Edit</Button>
@@ -467,6 +471,7 @@ export function LiabilityRow({ row, showAccount, onEdit, onDelete }) {
 }
 
 export default function LiabilitiesCard({ activeId, accounts, onChanged }) {
+  const t = useT();
   const accountKey = accounts.map((a) => a.id).join("|");
   // Every row carries its owning portfolio id in BOTH branches. Edit and delete
   // address a per-account URL, and only the all-portfolios branch used to set
@@ -544,7 +549,7 @@ export default function LiabilitiesCard({ activeId, accounts, onChanged }) {
               className="flex items-center justify-between gap-3 pt-1 text-sm font-medium"
               data-testid="dashboard-liabilities-total"
             >
-              <span>Total owed</span>
+              <span>{t("Total owed")}</span>
               <span className="tabular-nums">
                 {toman(rows.reduce((sum, r) => sum + Number(r.outstanding_tomans || 0), 0))}
               </span>
