@@ -416,9 +416,9 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
         {registering && (
           <p className="mt-3 text-center text-xs text-muted" data-testid="auth-legal">
             {t("By creating an account you accept the")}{" "}
-            <Link to="/terms" className="underline">{t("Terms of Use")}</Link>{" "}
+            <Link to="/terms" target="_blank" className="underline">{t("Terms of Use")}</Link>{" "}
             {t("and the")}{" "}
-            <Link to="/privacy" className="underline">{t("Privacy Notice")}</Link>.
+            <Link to="/privacy" target="_blank" className="underline">{t("Privacy Notice")}</Link>.
           </p>
         )}
       </form>
