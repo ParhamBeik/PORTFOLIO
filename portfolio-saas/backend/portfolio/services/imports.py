@@ -120,7 +120,13 @@ def _create_rows(account, rows: list[dict], *, batch=None) -> None:
 
 @transaction.atomic
 def preview_ledger_import(account, upload) -> dict:
-    _raw, rows = read_csv_upload(upload)
+    raw, rows = read_csv_upload(upload)
+    # Committing this file again is a no-op, so its rows must not be reported
+    # as conflicting with the very entries it created.
+    if ImportBatch.objects.filter(
+        account=account, file_hash=hashlib.sha256(raw).hexdigest()
+    ).exists():
+        return {"valid": True, "row_count": len(rows), "already_imported": True}
     _create_rows(account, rows)
     transaction.set_rollback(True)
     return {"valid": True, "row_count": len(rows)}

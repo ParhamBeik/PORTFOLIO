@@ -76,6 +76,7 @@ function MenuItem({ onClick, children, danger, testId, disabled }) {
 }
 
 function ChangePasswordModal({ onClose, onDone }) {
+  const t = useT();
   const [form, setForm] = useState({ oldPassword: "", newPassword: "", confirmPassword: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -150,7 +151,7 @@ function ChangePasswordModal({ onClose, onDone }) {
         />
         {mismatch && (
           <p className="text-xs text-[var(--c-critical-text)]" data-testid="account-password-mismatch">
-            The two new passwords do not match.
+            {t("The two new passwords do not match.")}
           </p>
         )}
         {error && <ErrorState error={error} testId="account-password-error" />}

@@ -214,6 +214,7 @@ function HeroRow({ state, basis: selected }) {
  * that visible from the page instead of from the settings file.
  */
 function InflationNote({ realGrowth, nominalGrowth, cpi, basis }) {
+  const t = useT();
   if (realGrowth == null) return null;
   const rate = cpi?.applied_annual_rate;
   const estimated = (cpi?.estimated_jalali_years || []).length > 0;
@@ -225,29 +226,21 @@ function InflationNote({ realGrowth, nominalGrowth, cpi, basis }) {
     <div className="mt-2 space-y-1 text-xs text-muted" data-testid="dashboard-trend-real-note">
       <p>
         {nominalGrowth != null && (
-          <>Nominal {nominalGrowth >= 0 ? "+" : "−"}{pct(Math.abs(nominalGrowth))} over this
-          window{rate != null ? ", " : ". "}</>
+          <>{t("Before inflation: {v} over this window.", { v: `${nominalGrowth >= 0 ? "+" : "−"}${pct(Math.abs(nominalGrowth))}` })}{" "}</>
         )}
         {rate != null && (
-          <>{nominalGrowth == null ? "Prices" : "prices"} rose {pct(rate)} a year
-          over the same days, so </>
+          <>{t("Prices rose {v} a year over the same days.", { v: pct(rate) })}{" "}</>
         )}
-        {/* The rate clause is the only one that hands over mid-sentence, on
-            "so ". Every other path ends in a full stop or prints nothing, and
-            both of those left a lowercase "in" starting the sentence. */}
-        {rate != null ? "in" : "In"} constant Tomans your net worth is{" "}
-        {realGrowth >= 0 ? "up" : "down"}{" "}
-        {pct(Math.abs(realGrowth))}. The gap between the two lines is inflation,
-        not performance.
+        {t(realGrowth >= 0 ? "In constant Tomans your net worth is up {v}." : "In constant Tomans your net worth is down {v}.", { v: pct(Math.abs(realGrowth)) })}{" "}
+        {t("The gap between the two lines is inflation, not performance.")}
         {foreignBasis && (
-          <> Both lines are shown in Tomans — an inflation comparison only means
-          something in the currency being inflated.</>
+          <> {t("Both lines are shown in Tomans — an inflation comparison only means something in the currency being inflated.")}</>
         )}
       </p>
       {cpi?.source && (
         <p data-testid="dashboard-trend-cpi-source">
-          Inflation index: {cpi.source}.
-          {estimated && " The current year has no published figure yet, so that part of the line is a projection."}
+          {t("Inflation index: {source}.", { source: cpi.source })}
+          {estimated && ` ${t("The current year has no published figure yet, so that part of the line is a projection.")}`}
         </p>
       )}
     </div>
@@ -257,23 +250,9 @@ function InflationNote({ realGrowth, nominalGrowth, cpi, basis }) {
 // What each view of the net-worth chart is, for the card's (i). Said once,
 // on request, instead of under the chart on every visit.
 const TREND_INFO = {
-  nominal: (
-    <>
-      <p>Your total value each day. Days with no recorded snapshot are rebuilt from that day&apos;s prices.</p>
-    </>
-  ),
-  real: (
-    <p>
-      The same net worth in constant Tomans. The gap between the two lines is
-      inflation, not performance.
-    </p>
-  ),
-  benchmarks: (
-    <p>
-      Every line starts at 100, so the gap is relative growth over the window —
-      not the amount of money in each.
-    </p>
-  ),
+  nominal: "Your total value each day. Days with no recorded snapshot are rebuilt from that day's prices.",
+  real: "The same net worth in constant Tomans. The gap between the two lines is inflation, not performance.",
+  benchmarks: "Every line starts at 100, so the gap is relative growth over the window — not the amount of money in each.",
 };
 
 const RANGE_WORD = { 30: "30 days", 90: "90 days", 365: "1 year", all: "all time" };
@@ -317,6 +296,7 @@ function RangeChange({ points, basis, range, flows }) {
 }
 
 function TrendCard({ activeId, basis }) {
+  const t = useT();
   const lang = useLang();
   const [range, setRange] = useState("30");
   const [mode, setMode] = useState("nominal");
@@ -368,7 +348,7 @@ function TrendCard({ activeId, basis }) {
     <Card
       title="Net worth"
       testId="dashboard-trend"
-      info={TREND_INFO[mode]}
+      info={<p>{translate(TREND_INFO[mode], lang)}</p>}
       className="h-full"
       actions={(
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -420,13 +400,12 @@ function TrendCard({ activeId, basis }) {
                 />
                 {shortfall && (
                   <p className="mt-1 text-xs text-muted" data-testid="dashboard-trend-bench-shortfall">
-                    You asked for {requestedDays} days and this covers {actualDays} — that is as
-                    much shared history as these series have in common.
+                    {t("You asked for {a} days and this covers {b}, which is all the history these series share.", { a: requestedDays, b: actualDays })}
                   </p>
                 )}
                 {(bench.unavailable || []).map((u) => (
                   <p key={u.key} className="mt-1 text-xs text-muted">
-                    {u.label} not shown: {u.reason}.
+                    {t("{name} not shown: {reason}.", { name: t(u.label), reason: serverText(u.reason) })}
                   </p>
                 ))}
               </>
@@ -505,7 +484,7 @@ function TrendCard({ activeId, basis }) {
               />
               {mode === "real" && realState.error && (
                 <p className="mt-2 text-xs text-muted" data-testid="dashboard-trend-real-error">
-                  No inflation-adjusted series for this window: {realState.error.message}
+                  {t("No inflation-adjusted series for this window:")} {serverText(realState.error.message)}
                 </p>
               )}
               {hasEstimated && (
@@ -708,6 +687,7 @@ function NoCostYet() {
 }
 
 function PerformanceCard({ activeId, basis, accounts }) {
+  const t = useT();
   const targets = performanceTargets(activeId, accounts);
   // The holdings ride in the key: an edit reloads `accounts` but changes
   // neither id nor ledger_complete, so resizing a house from 100 to 120 m²
@@ -756,7 +736,7 @@ function PerformanceCard({ activeId, basis, accounts }) {
             return (
               <>
                 {activeId == null && accounts.length > 1 && (
-                  <p className="mb-3 text-xs text-muted">All portfolios with a completed opening baseline.</p>
+                  <p className="mb-3 text-xs text-muted">{t("All portfolios with a starting balance.")}</p>
                 )}
                 <Table
                   testId="dashboard-performance-table"
@@ -905,16 +885,23 @@ function hasDraftChanges(row, draft) {
 const inlineInputClass = "w-full min-w-[5rem] rounded-md border border-border bg-panel px-2 py-1 text-right text-sm tabular";
 
 // The status words in the holdings table, behind the card's (i).
+const PRICING_TERMS = [
+  ["Live", "priced within the last 5 minutes, or the last price from the latest session while that market is shut."],
+  ["Manual", "house or real-estate values updated within the last 90 days."],
+  ["Stale", "the quote is from a previous session; a fresher one should have arrived."],
+  ["Quota", "the provider refused further requests today; showing the last known price, which is not current."],
+  ["Mixed", "some holdings are stale, quota-blocked, or falling back to an archived price."],
+  ["Real Toman", "adjusted for inflation using the Statistical Center of Iran's published CPI. The year in progress has no release yet, so that stretch is a labelled projection; the \"vs inflation\" view prints the rate it used."],
+];
+
 function PricingGlossary() {
+  const t = useT();
   return (
     <div data-testid="dashboard-pricing-glossary">
       <ul className="space-y-1">
-        <li><strong className="text-text">Live</strong> — priced within the last 5 minutes, or the last print from the latest session while that market is shut.</li>
-        <li><strong className="text-text">Manual</strong> — house or real-estate marks updated within the last 90 days.</li>
-        <li><strong className="text-text">Stale</strong> — the quote is from a previous session; a fresher one should have arrived.</li>
-        <li><strong className="text-text">Quota</strong> — the provider refused further requests today; showing the last known price, which is not current.</li>
-        <li><strong className="text-text">Mixed</strong> — some holdings are stale, quota-blocked, or falling back to an archived price.</li>
-        <li><strong className="text-text">Real Toman</strong> — inflation-adjusted using the Statistical Center of Iran's published CPI. The year in progress has no release yet, so that stretch is a labelled projection; the "vs inflation" view prints the rate it used.</li>
+        {PRICING_TERMS.map(([term, meaning]) => (
+          <li key={term}><strong className="text-text">{t(term)}</strong> — {t(meaning)}</li>
+        ))}
       </ul>
     </div>
   );

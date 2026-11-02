@@ -668,8 +668,7 @@ export default function AddTransactionDialog({
                 and the user concludes their stock is not supported. */}
             {searchingCatalog && options.length >= CATALOG_PAGE_SIZE && (
               <p className="text-xs text-muted" data-testid="add-transaction-asset-truncated">
-                Showing the first {CATALOG_PAGE_SIZE} matches. Type a ticker or
-                name to narrow it down.
+                {t("Showing the first {n} matches. Type a ticker or name to narrow it down.", { n: CATALOG_PAGE_SIZE })}
               </p>
             )}
           </Step>

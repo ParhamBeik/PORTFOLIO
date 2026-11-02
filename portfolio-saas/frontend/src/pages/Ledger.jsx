@@ -71,6 +71,7 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
+  const [importedCount, setImportedCount] = useState(0);
   const [codeQuery, setCodeQuery] = useState("");
   const assets = useApi(listAssets, []);
   const errorRef = useRef(null);
@@ -111,6 +112,7 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
     setError("");
     try {
       const result = await commitLedgerImport(accountId, file);
+      setImportedCount(result.row_count);
       setDone(true);
       await onImported?.();
       if (!result.row_count) setError(t("The import completed without any rows."));
@@ -133,7 +135,7 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
           {!done && (
             <Button
               variant="primary"
-              disabled={!preview?.valid || !!busy}
+              disabled={!preview?.valid || preview.already_imported || !!busy}
               onClick={commit}
               data-testid="ledger-import-commit"
             >
@@ -146,7 +148,7 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
       <div className="space-y-4">
         {done ? (
           <p className="text-sm text-[var(--c-good-text)]" data-testid="ledger-import-success">
-            {t("Import complete. The same file can be selected again safely; duplicate files are ignored.")}
+            {t(importedCount === 1 ? "1 row imported." : "{n} rows imported.", { n: importedCount })}
           </p>
         ) : (
           <>
@@ -217,7 +219,9 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
             </Button>
             {preview?.valid && (
               <p className="text-sm" data-testid="ledger-import-preview-result">
-                {t(preview.row_count === 1 ? "1 row is valid and ready to import." : "{n} rows are valid and ready to import.", { n: preview.row_count })}
+                {preview.already_imported
+                  ? t("You already imported this file. Importing it again would add nothing.")
+                  : t(preview.row_count === 1 ? "1 row is valid and ready to import." : "{n} rows are valid and ready to import.", { n: preview.row_count })}
               </p>
             )}
           </>
@@ -747,10 +751,10 @@ export default function Ledger() {
         {removeError && <p role="alert" className="mb-2 text-sm text-[var(--c-critical-text)]" data-testid="ledger-remove-error">{removeError}</p>}
         <p>{jalaliDate(removing.occurred_at)} · {holdingLabel(removing)} · {KIND_LABEL[removing.kind] || humanize(removing.kind)}</p>
         <p>{removing.account_name} · {quantityCell(removing)} · {toman(removing.value_tomans ?? removing.amount_tomans)}</p>
-        <p className="mt-3 text-sm text-muted">Holdings and cash will update. {removing.is_synthetic ? "If this can be undone, an Undo button appears for 8 seconds." : "You can undo for 8 seconds. Your financial history is retained."}</p>
+        <p className="mt-3 text-sm text-muted">{translate("Holdings and cash will update.", lang)} {translate(removing.is_synthetic ? "If this can be undone, an Undo button appears for 8 seconds." : "You can undo for 8 seconds. Your financial history is retained.", lang)}</p>
       </Modal>}
       {undo && <div role="status" className="fixed bottom-24 inset-x-4 z-40 mx-auto flex max-w-md items-center justify-between gap-3 rounded-lg border border-border bg-panel p-3 shadow-xl" data-testid="ledger-undo-toast">
-        <span>Transaction removed.</span><Button disabled={busy} onClick={undoRemoval} data-testid="ledger-undo">Undo</Button>
+        <span>{translate("Transaction removed.", lang)}</span><Button disabled={busy} onClick={undoRemoval} data-testid="ledger-undo">Undo</Button>
       </div>}
       {adding && (
         <AddTransactionDialog

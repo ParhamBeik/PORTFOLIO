@@ -96,7 +96,7 @@ export default function Onboarding() {
           )}
           {!accounts.length && (
             <label className="block">
-              <span className="mb-1 block text-sm text-muted">Portfolio name</span>
+              <span className="mb-1 block text-sm text-muted">{translate("Portfolio name", lang)}</span>
               <Input
                 label="Portfolio name"
                 data-testid="onboarding-name"

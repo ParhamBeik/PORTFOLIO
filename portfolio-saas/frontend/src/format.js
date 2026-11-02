@@ -256,6 +256,7 @@ export const humanize = (code) =>
  */
 const SERVER_PATTERNS = [
   [/^Complete an opening baseline/, "Add what this portfolio holds to start measuring."],
+  [/^external_id already exists\.$/, "This row's reference is already in your history."],
   [/^Unknown asset_key: (.+)\.$/, "Unknown asset code: {n}."],
   [/^CSV headers must be exactly/, "The column headers do not match. Start from the template."],
   // "day(s)" read as unfinished; the count picks the word.

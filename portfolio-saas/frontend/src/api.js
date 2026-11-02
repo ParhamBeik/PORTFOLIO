@@ -378,7 +378,7 @@ export async function downloadExport() {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = "lattice-export.zip";
+  link.download = "holdings-export.zip";
   document.body.appendChild(link);
   link.click();
   link.remove();

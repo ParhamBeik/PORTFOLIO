@@ -93,8 +93,8 @@ describe("company research", () => {
     expect(screen.getByText(/Model cost: \$0\.0004/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Open saved answer/ })).toHaveAttribute("href", "/research?view=companies&symbol=%D9%81%D9%88%D9%84%D8%A7%D8%AF&run=17");
     expect(screen.getAllByRole("link", { name: /Codal filing/i })[0]).toHaveAttribute("href", source.source_url);
-    expect(screen.getByTestId("explore-income-evidence")).toHaveTextContent(/revenue cell B4 · profit cell B21/i);
-    expect(screen.getByTestId("explore-balance-evidence")).toHaveTextContent(/assets cell B22 · liabilities cell B53 · equity cell B35/i);
+    expect(screen.getByTestId("explore-income-evidence")).toHaveTextContent(/revenue cell B4, profit cell B21/i);
+    expect(screen.getByTestId("explore-balance-evidence")).toHaveTextContent(/assets cell B22, liabilities cell B53, equity cell B35/i);
     expect(screen.getByRole("link", { name: "Original Codal balance sheet" })).toHaveAttribute("href", `${source.source_url}&sheetId=0`);
     fireEvent.click(screen.getAllByTestId("explore-archive-2")[0]);
     await waitFor(() => expect(api.downloadArchivedFiling).toHaveBeenCalledWith("فولاد", 2, 365));
@@ -120,7 +120,7 @@ describe("company research", () => {
     fireEvent.change(await screen.findByTestId("explore-research-question"), { target: { value: "What are total assets?" } });
     fireEvent.click(screen.getByTestId("explore-research-submit"));
     expect(await screen.findByText(/total assets 6,278,290,305 million Rial/i)).toBeInTheDocument();
-    expect(screen.getByTestId("explore-research-result")).toHaveTextContent(/balance cells assets B22 \/ liabilities B53 \/ equity B35/i);
+    expect(screen.getByTestId("explore-research-result")).toHaveTextContent(/balance sheet cells: assets B22, liabilities B53, equity B35/i);
     fireEvent.click(screen.getByTestId("explore-archive-4"));
     await waitFor(() => expect(api.downloadArchivedFiling).toHaveBeenCalledWith("فولاد", 4, 3650));
   });
@@ -133,7 +133,7 @@ describe("company research", () => {
       cost_usd: "0.0004", cost_basis: "provider_reported",
     });
     render(<MemoryRouter initialEntries={["/explore?symbol=فولاد&run=17"]}><Explore /></MemoryRouter>);
-    expect(await screen.findByText(/Historical answer: its source selection is changed/i)).toBeInTheDocument();
+    expect(await screen.findByText(/older answer: its sources have changed/i)).toBeInTheDocument();
     expect(screen.getByText(/Highest among verified months/)).toBeInTheDocument();
     expect(api.researchRun).toHaveBeenCalledWith("17");
   });

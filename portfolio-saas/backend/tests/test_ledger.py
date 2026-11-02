@@ -269,6 +269,22 @@ def test_csv_preview_validates_without_writing(ledger_account):
     assert not LedgerEntry.objects.filter(account=ledger_account).exists()
 
 
+def test_csv_preview_recognises_a_file_already_imported(ledger_account):
+    occurred_at = (timezone.now() - datetime.timedelta(days=5)).isoformat()
+    content = (
+        "external_id,occurred_at,kind,asset_key,quantity,unit_price_tomans,amount_tomans,note\n"
+        f"cash-1,{occurred_at},opening_cash,,,,1000,Starting cash\n"
+    )
+    client = _client(ledger_account.user)
+    url = f"/api/accounts/{ledger_account.id}/imports/"
+    client.post(f"{url}commit/", {"file": _csv_upload(content)}, format="multipart")
+
+    response = client.post(f"{url}preview/", {"file": _csv_upload(content)}, format="multipart")
+
+    assert response.status_code == 200, response.data
+    assert response.data["already_imported"] is True
+
+
 def test_csv_commit_is_atomic_and_idempotent(ledger_account, asset_catalog):
     occurred_at = (timezone.now() - datetime.timedelta(days=5)).isoformat()
     content = (
