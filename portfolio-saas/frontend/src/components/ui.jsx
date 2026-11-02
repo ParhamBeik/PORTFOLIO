@@ -676,7 +676,7 @@ export function Async({ data, error, loading, reload, children, empty, testId, m
  *  showing roughly three rows. */
 const MODAL_WIDTHS = { default: "max-w-lg", wide: "max-w-3xl" };
 
-export function Modal({ title, subtitle, onClose, children, footer, testId, size = "default" }) {
+export function Modal({ title, subtitle, onClose, children, footer, testId, size = "default", keepOnBackdrop = false }) {
   const t = useT();
   const panel = useRef(null);
   // Read through a ref so the effect below runs once per opening. Keyed on
@@ -743,7 +743,7 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
     <div
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:items-center"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget && !keepOnBackdrop) onClose();
       }}
     >
       <div

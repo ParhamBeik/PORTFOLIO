@@ -104,8 +104,13 @@ export const pctShare = (f, d = 1) => {
   return Number(f) > 0 && Number(f) < floor ? `<${(floor * 2 * 100).toFixed(d)}%` : pct(f, d);
 };
 
-const signed = (fn) => (v) =>
-  bad(v) ? "—" : (Number(v) > 0 ? "+" : "") + fn(v);
+// The sign goes inside the left-to-right run: outside it, a Persian page drew
+// "23,200,000 T+" and "5%+".
+const signed = (fn) => (v) => {
+  if (bad(v)) return "—";
+  const text = fn(v).replace(/^\u2066|\u2069$/g, "");
+  return ltr((Number(v) > 0 ? "+" : "") + text);
+};
 
 export const signedPct = signed(pct);
 export const signedToman = signed(toman);

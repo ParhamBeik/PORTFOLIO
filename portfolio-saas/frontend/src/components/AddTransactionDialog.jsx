@@ -498,6 +498,8 @@ export default function AddTransactionDialog({
     <Modal
       title="Add to this portfolio"
       onClose={onClose}
+      // Past the first step a stray tap outside would throw away what was entered.
+      keepOnBackdrop={step > 0 && !saved}
       testId="add-transaction"
       size="wide"
       footer={

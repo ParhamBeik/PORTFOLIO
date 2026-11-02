@@ -566,7 +566,11 @@ export default function Ledger() {
             </Button>
           ) : (
             // Once saved, say so -- the link staying put read as a failed save.
-            <span className="text-xs font-normal text-muted" data-testid="ledger-cost-recorded">{translate("Cost recorded", lang)}</span>
+            <span className="text-xs font-normal text-muted" data-testid="ledger-cost-recorded">
+              {r.is_house || !r.quantity
+                ? translate("Cost recorded", lang)
+                : translate("Paid {amount}", lang, { amount: toman(Number(r.cost_basis_tomans) * Number(r.quantity) / (r.unit_price_currency === "rial" ? 10 : 1)) })}
+            </span>
           )
         ) : (
           toman(r.value_tomans)
@@ -590,7 +594,7 @@ export default function Ledger() {
       // buttons on every row were most of the ink in the table; always shown
       // on a touch screen, which has no hover to reveal them.
       render: (r) => (
-        <div className="flex justify-end gap-2 transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:focus-within:opacity-100">
+        <div className="flex justify-end gap-2 transition-opacity [@media(hover:hover)]:opacity-50 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:focus-within:opacity-100">
           {(r.quantity != null || CASH_KINDS.includes(r.kind)) && (
             <Button
               variant="ghost"

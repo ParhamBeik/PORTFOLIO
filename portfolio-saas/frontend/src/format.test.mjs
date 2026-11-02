@@ -63,11 +63,11 @@ test("pct converts fractions to formatted percentage strings", () => {
 });
 
 test("signed formatters add + prefix to positive numbers only", () => {
-  assert.equal(signedPct(0.05), "+5%");
-  assert.equal(signedPct(-0.05), "-5%");
-  assert.equal(signedPct(0), "0%");
+  assert.equal(signedPct(0.05), "\u2066+5%\u2069");
+  assert.equal(signedPct(-0.05), "\u2066-5%\u2069");
+  assert.equal(signedPct(0), "\u20660%\u2069");
 
-  assert.equal(signedToman(1000), "+\u20661,000\u00a0T\u2069");
+  assert.equal(signedToman(1000), "\u2066+1,000\u00a0T\u2069");
   assert.equal(signedToman(-1000), "\u2066-1,000\u00a0T\u2069");
 });
 

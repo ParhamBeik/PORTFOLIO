@@ -470,7 +470,7 @@ export default function Comparison() {
                 // Not a fault, and deliberately no call to action: turning an
                 // opening into a purchase would take its cost out of the cash balance.
                 <Empty testId="comparison-needs-cost">
-                  {translate("Compare replays dated purchases. {name} is recorded as already owned, with no purchase behind it, so there is nothing to replay. Anything you record with “I bought it” can be compared.", lang, { name: isolate(holdings.find((h) => h.key === subject)?.label || "") })}
+                  {translate("Compare replays purchases from the day they happened. {name} is recorded as already owned, so it has no purchase date, even if you noted what you paid. Anything you record with “I bought it” can be compared.", lang, { name: isolate(holdings.find((h) => h.key === subject)?.label || "") })}
                 </Empty>
               ) : failure ? (
                 // Other refusals are data limits with a sentence attached.
