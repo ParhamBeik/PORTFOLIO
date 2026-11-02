@@ -441,7 +441,7 @@ export default function AccountMenu({
           </div>
 
           {notice && (
-            <p className="mt-2 text-xs text-[var(--c-good-text)]" data-testid="account-notice">{notice}</p>
+            <p className="mt-2 text-xs text-[var(--c-good-text)]" data-testid="account-notice">{t(notice)}</p>
           )}
           {error && (
             <div className="mt-2">

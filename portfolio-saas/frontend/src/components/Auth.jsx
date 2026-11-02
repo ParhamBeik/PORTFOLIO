@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { useState } from "react";
 import {
   auth,
@@ -412,6 +413,14 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
         >
           {t(busy ? "Working…" : forgetting ? "Send reset link" : registering ? "Create account" : "Sign in")}
         </Button>
+        {registering && (
+          <p className="mt-3 text-center text-xs text-muted" data-testid="auth-legal">
+            {t("By creating an account you accept the")}{" "}
+            <Link to="/terms" className="underline">{t("Terms of Use")}</Link>{" "}
+            {t("and the")}{" "}
+            <Link to="/privacy" className="underline">{t("Privacy Notice")}</Link>.
+          </p>
+        )}
       </form>
       </main>
     </div>

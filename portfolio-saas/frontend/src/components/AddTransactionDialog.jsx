@@ -823,6 +823,14 @@ export default function AddTransactionDialog({
         {current === "review" && (
           <Step n={stepNumber} of={totalSteps} title="Check it over">
             <div className="space-y-3">
+              {/* A warning, not a refusal: the ledger allows cash below zero, and an
+                  extra zero is the mistake this catches. */}
+              {isCashMove && action !== "deposit" && targetAccount?.cash_balance_tomans != null &&
+                Number(form.amount) > Number(targetAccount.cash_balance_tomans) && (
+                <p role="status" className="text-sm text-[var(--c-warn-text)]" data-testid="add-transaction-over-cash">
+                  {t("This is more than the {cash} cash in this portfolio. Check the amount; you can still save it.", { cash: toman(targetAccount.cash_balance_tomans) })}
+                </p>
+              )}
               {needsPrice && (
                 <>
                   {!asset?.is_manual && (

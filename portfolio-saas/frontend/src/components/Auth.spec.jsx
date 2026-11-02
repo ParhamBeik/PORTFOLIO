@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 /**
  * Integration test at the component boundary: the forgot-password path
  * on the sign-in card. Pyramid: this is cheaper than e2e for the form
@@ -47,7 +48,7 @@ describe("Auth recovery", () => {
     api.register.mockResolvedValue({ access: "token", session_expires_at: "2026-10-01" });
     api.me.mockResolvedValue({ id: 2, email: "new@example.com" });
     const onAuthed = vi.fn();
-    render(<Auth onAuthed={onAuthed} />);
+    render(<MemoryRouter><Auth onAuthed={onAuthed} /></MemoryRouter>);
 
     fireEvent.click(await screen.findByTestId("auth-toggle-register"));
     fireEvent.change(screen.getByTestId("auth-email-input"), {
