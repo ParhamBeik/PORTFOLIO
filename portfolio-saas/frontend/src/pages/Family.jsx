@@ -176,15 +176,17 @@ function HistoryCharts({ accounts, basis }) {
           if (!chart.values.length) return <Empty>No snapshot history for this range.</Empty>;
           return (
             <div className="space-y-6">
-              <div>
-                <h3 className="mb-2 text-sm font-medium text-muted">{translate("Share of combined total", lang)}</h3>
-                <StackedShareTrend
-                  series={chart.series}
-                  data={chart.shares}
-                  longTicks={longTicks}
-                  label="Portfolio share over time"
-                />
-              </div>
+              {chart.series.length > 1 && (
+                <div>
+                  <h3 className="mb-2 text-sm font-medium text-muted">{translate("Share of combined total", lang)}</h3>
+                  <StackedShareTrend
+                    series={chart.series}
+                    data={chart.shares}
+                    longTicks={longTicks}
+                    label="Portfolio share over time"
+                  />
+                </div>
+              )}
               <div>
                 <h3 className="mb-2 text-sm font-medium text-muted">{translate("Absolute net worth", lang)}</h3>
                 <MultiLineTrend
@@ -293,6 +295,7 @@ function AssetMix({ accounts, basis }) {
 }
 
 export default function Family() {
+  const lang = useLang();
   const { basis, accounts: portfolioAccounts } = usePortfolio();
   const state = useApi(() => valuation(null, basis), [basis], { pollMs: 60000 });
 
@@ -300,7 +303,8 @@ export default function Family() {
     <div>
       <PageHeader
         title="Portfolio Breakdown"
-        subtitle="How each portfolio contributes to your combined net worth — current allocation, share over time, and performance. This page always covers all of them, whichever one is selected above."
+        subtitle="How each portfolio contributes to your combined net worth — current allocation, share over time, and performance."
+        meta={<p className="mt-1 text-sm text-muted" data-testid="breakdown-scope">{translate("Always covers all your portfolios, whichever one is selected above.", lang)}</p>}
       />
       <Async {...state} testId="breakdown-body">
         {(data) => {
@@ -343,10 +347,13 @@ export default function Family() {
                 />
               </div>
 
-              <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-                <Card title="Current allocation" testId="breakdown-allocation">
-                  <Donut data={shareDonut} valueFormat={(v) => money(v, rowBasis)} testId="breakdown-allocation-donut" />
-                </Card>
+              <div className={`grid grid-cols-1 gap-5 ${shareDonut.length > 1 ? "lg:grid-cols-2" : ""}`}>
+                {/* One funded portfolio makes this a plain full ring. */}
+                {shareDonut.length > 1 && (
+                  <Card title="Current allocation" testId="breakdown-allocation">
+                    <Donut data={shareDonut} valueFormat={(v) => money(v, rowBasis)} testId="breakdown-allocation-donut" />
+                  </Card>
+                )}
                 <Card title="Portfolio summary" testId="breakdown-table-card">
                   <Table
                     testId="breakdown-table"

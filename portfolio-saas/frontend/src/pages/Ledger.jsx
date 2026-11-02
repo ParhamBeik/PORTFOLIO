@@ -7,6 +7,7 @@ import {
   deleteLedgerHolding,
   listLedger,
   restoreLedgerEntry,
+  listAssets,
   previewLedgerImport,
   updateLedgerEntry,
   updateLedgerHolding,
@@ -43,6 +44,8 @@ import {
   toman,
   unitPrice,
   isolate,
+  serverText,
+  assetLabel,
 } from "../format.js";
 import { useApi } from "../useApi.js";
 import { quantityError, validQuantity } from "../quantity.js";
@@ -64,27 +67,44 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
   const t = useT();
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
-  const [busy, setBusy] = useState(false);
+  // "checking" or "importing": a check must never read as the real import.
+  const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
+  const [codeQuery, setCodeQuery] = useState("");
+  const assets = useApi(listAssets, []);
+  const errorRef = useRef(null);
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [error]);
+  const explain = (e) => {
+    const message = serverText(e.message || String(e));
+    return e.row ? t("Row {n}: {message}", { n: e.row, message }) : message;
+  };
+  const needle = codeQuery.trim().toLowerCase();
+  const codeHits = needle
+    ? (assets.data || [])
+        .filter((a) => [a.key, a.name, a.name_fa].some((v) => v?.toLowerCase().includes(needle)))
+        .slice(0, 6)
+    : [];
 
   const inspect = async () => {
     if (!file) return;
-    setBusy(true);
+    setBusy("checking");
     setError("");
     try {
       setPreview(await previewLedgerImport(accountId, file));
     } catch (e) {
-      setError(e.message || String(e));
+      setError(explain(e));
       setPreview(null);
     } finally {
-      setBusy(false);
+      setBusy("");
     }
   };
 
   const commit = async () => {
     if (!file || !preview?.valid) return;
-    setBusy(true);
+    setBusy("importing");
     setError("");
     try {
       const result = await commitLedgerImport(accountId, file);
@@ -92,9 +112,9 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
       await onImported?.();
       if (!result.row_count) setError(t("The import completed without any rows."));
     } catch (e) {
-      setError(e.message || String(e));
+      setError(explain(e));
     } finally {
-      setBusy(false);
+      setBusy("");
     }
   };
 
@@ -106,22 +126,21 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
       testId="ledger-import-dialog"
       footer={
         <>
-          <Button onClick={onClose} disabled={busy}>Close</Button>
+          <Button onClick={onClose} disabled={!!busy}>Close</Button>
           {!done && (
             <Button
               variant="primary"
-              disabled={!preview?.valid || busy}
+              disabled={!preview?.valid || !!busy}
               onClick={commit}
               data-testid="ledger-import-commit"
             >
-              {busy ? "Importing…" : "Import rows"}
+              {busy === "importing" ? "Importing…" : "Import rows"}
             </Button>
           )}
         </>
       }
     >
       <div className="space-y-4">
-        {error && <ErrorState error={new Error(error)} testId="ledger-import-error" />}
         {done ? (
           <p className="text-sm text-[var(--c-good-text)]" data-testid="ledger-import-success">
             {t("Import complete. The same file can be selected again safely; duplicate files are ignored.")}
@@ -162,13 +181,36 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
                 ))}
               </dl>
             </Disclosure>
+            <Disclosure summary="Find an asset code" testId="ledger-import-codes">
+              <div className="py-2">
+                <Input
+                  label="Asset name or code"
+                  placeholder="Asset name or code"
+                  className="w-full"
+                  value={codeQuery}
+                  onChange={(e) => setCodeQuery(e.target.value)}
+                  data-testid="ledger-import-code-search"
+                />
+                {!!needle && (
+                  <ul className="mt-2 space-y-1 text-xs" data-testid="ledger-import-code-results">
+                    {codeHits.map((a) => (
+                      <li key={a.key} className="flex justify-between gap-3">
+                        <bdi className="min-w-0 text-muted">{assetLabel(a)}</bdi>
+                        <code dir="ltr" className="shrink-0 select-all text-text">{a.key}</code>
+                      </li>
+                    ))}
+                    {!codeHits.length && <li className="text-muted">{t("No matching asset.")}</li>}
+                  </ul>
+                )}
+              </div>
+            </Disclosure>
             <Button
               variant="secondary"
-              disabled={!file || busy}
+              disabled={!file || !!busy}
               onClick={inspect}
               data-testid="ledger-import-preview"
             >
-              {busy ? "Checking…" : "Validate file"}
+              {busy === "checking" ? "Checking…" : "Validate file"}
             </Button>
             {preview?.valid && (
               <p className="text-sm" data-testid="ledger-import-preview-result">
@@ -176,6 +218,12 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
               </p>
             )}
           </>
+        )}
+        {/* Under the button that caused it: above the form it landed off-screen. */}
+        {error && (
+          <div ref={errorRef}>
+            <ErrorState error={new Error(error)} testId="ledger-import-error" />
+          </div>
         )}
       </div>
     </Modal>

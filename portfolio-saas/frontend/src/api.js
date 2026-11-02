@@ -261,11 +261,14 @@ async function request(path, { method = "GET", body, _retried = false } = {}) {
     // any error the body didn't explain arrived as an Error with an empty
     // message, and the UI fell back to a bare "Something went wrong." with
     // nothing to act on. Say at least what the server said.
-    throw apiError(
+    const failure = apiError(
       extractError(detail) || res.statusText || `Request failed (${res.status}).`,
       res.status,
       typeof detail?.reason === "string" ? detail.reason : undefined
     );
+    // The CSV importer names the line at fault.
+    if (Number.isInteger(detail?.row)) failure.row = detail.row;
+    throw failure;
   }
   if (res.status === 204) return null;
   const data = await res.json();

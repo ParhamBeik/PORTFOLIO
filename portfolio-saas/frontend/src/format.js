@@ -256,6 +256,8 @@ export const humanize = (code) =>
  */
 const SERVER_PATTERNS = [
   [/^Complete an opening baseline/, "Add what this portfolio holds to start measuring."],
+  [/^Unknown asset_key: (.+)\.$/, "Unknown asset code: {n}."],
+  [/^CSV headers must be exactly/, "The column headers do not match. Start from the template."],
   // "day(s)" read as unfinished; the count picks the word.
   [/^Performance available after (\d+) more day\(s\) of tracking\.$/, (n) =>
     n === "1" ? "Performance available after 1 more day of tracking." : "Performance available after {n} more days of tracking."],
@@ -264,7 +266,8 @@ export function serverText(text) {
   if (typeof text !== "string") return text;
   for (const [re, key] of SERVER_PATTERNS) {
     const m = text.match(re);
-    if (m) return translate(typeof key === "function" ? key(m[1]) : key, undefined, { n: m[1] });
+    // A count takes Persian digits only as a number (i18n.js `fill`).
+    if (m) return translate(typeof key === "function" ? key(m[1]) : key, undefined, { n: /^\d+$/.test(m[1]) ? Number(m[1]) : m[1] });
   }
   return translate(text);
 }
