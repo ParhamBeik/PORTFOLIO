@@ -121,6 +121,7 @@ export function useChartTokens() {
  * leaves the departed series on screen.
  */
 function EChart({ option, height, label, testId, className = "w-full", onReady }) {
+  const tr = useT();
   const host = useRef(null);
   const chart = useRef(null);
   // The newest option, readable from the mount effect. A chart that mounts late
@@ -190,7 +191,7 @@ function EChart({ option, height, label, testId, className = "w-full", onReady }
       className={className}
       style={{ height }}
       role="img"
-      aria-label={label}
+      aria-label={label ? tr(label) : undefined}
       data-testid={testId}
     />
   );

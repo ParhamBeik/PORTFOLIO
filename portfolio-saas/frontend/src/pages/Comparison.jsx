@@ -18,7 +18,6 @@ import {
 } from "../components/ui.jsx";
 import { humanize, isolate, num, rial, signedPct, toman } from "../format.js";
 import { useApi } from "../useApi.js";
-import { Link } from "react-router-dom";
 
 // Refusals that mean "nothing paid on record yet", not "something broke".
 const NEEDS_COST = new Set(["no_recorded_cost", "no_purchase_history"]);
@@ -468,13 +467,10 @@ export default function Comparison() {
                 </p>
               )}
               {NEEDS_COST.has(failure?.reason) ? (
-                // Not a fault: the holding simply has no purchase price yet, so
-                // there is no amount to replay. Say so and point at the fix.
-                <Empty
-                  testId="comparison-needs-cost"
-                  action={<Link to="/activity" className="text-sm text-[var(--c-accent-text)] underline underline-offset-2">{translate("Open Activity", lang)}</Link>}
-                >
-                  {translate("Compare replays dated purchases. {name} is recorded as already owned, so there is no purchase to replay: in Activity, edit that row, set its type to “Bought” and add the date and price.", lang, { name: isolate(holdings.find((h) => h.key === subject)?.label || "") })}
+                // Not a fault, and deliberately no call to action: turning an
+                // opening into a purchase would take its cost out of the cash balance.
+                <Empty testId="comparison-needs-cost">
+                  {translate("Compare replays dated purchases. {name} is recorded as already owned, with no purchase behind it, so there is nothing to replay. Anything you record with “I bought it” can be compared.", lang, { name: isolate(holdings.find((h) => h.key === subject)?.label || "") })}
                 </Empty>
               ) : failure ? (
                 // Other refusals are data limits with a sentence attached.

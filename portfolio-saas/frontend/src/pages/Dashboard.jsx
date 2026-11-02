@@ -639,7 +639,10 @@ function PositionsTable({ rows, showAccount }) {
     { key: "basis", header: "Cost basis", align: "right", render: (r) => r.total_cost_basis_tomans == null ? "—" : toman(r.total_cost_basis_tomans) },
     { key: "value", header: "Current value", align: "right", render: (r) => r.current_value_tomans == null ? "—" : toman(r.current_value_tomans) },
     { key: "realized", header: "Realized P&L", align: "right", render: (r) => r.realized_pnl_tomans == null ? "—" : <Delta value={r.realized_pnl_tomans} format={signedToman} /> },
-    { key: "unrealized", header: "Unrealized P&L", align: "right", render: (r) => r.unrealized_pnl_tomans == null ? "—" : <Delta value={r.unrealized_pnl_tomans} format={signedToman} /> },
+    { key: "unrealized", header: "Unrealized P&L", align: "right", render: (r) => r.unrealized_pnl_tomans == null ? "—" : (
+      // On a phone this number stands alone in the card's detail line, so it names itself.
+      <span><span className="me-1 sm:hidden">{t("Gain or loss")}</span><Delta value={r.unrealized_pnl_tomans} format={signedToman} /></span>
+    ) },
   ];
   if (showAccount) {
     columns.splice(1, 0, { key: "portfolio", header: "Portfolio", render: (r) => r.account_name || "—" });

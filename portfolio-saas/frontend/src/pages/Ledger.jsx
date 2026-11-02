@@ -243,6 +243,9 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
   const cash = CASH_KINDS.includes(kind);
   const tradeKind = kind === "buy" || kind === "sell";
   const declaresBasis = kind === "opening_position" || kind === "valuation_mark";
+  // From "Add what you paid": one question, not the whole form. The type picker
+  // in particular can turn the row into a purchase, which moves cash.
+  const costOnly = !!row.focusCost;
   const kindOptions = row.is_house ? ["opening_position", "valuation_mark"] :
     // A dividend is the one cash kind tied to an asset; the server refuses to
     // turn it into a plain deposit or the reverse.
@@ -333,6 +336,7 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
       <div className="space-y-3">
         {error && <p role="alert" className="text-sm text-[var(--c-critical-text)]">{error}</p>}
         {!row.is_synthetic && <>
+          {!costOnly && <>
           <Field label="Portfolio"><Select label="Portfolio" value={targetAccount} onChange={(e) => setTargetAccount(e.target.value)} data-testid="ledger-edit-account" className="w-full">
             {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
           </Select></Field>
@@ -342,15 +346,21 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
           {/* Clearing the picker reads "Today" but the save sends no date, so the
               entry would keep its old one: clearing restores the saved date. */}
           <Field label="When"><JalaliDateField value={when} onChange={(v) => setWhen(v || row.occurred_at || "")} testId="ledger-edit-when" /></Field>
+          </>}
           {cash && <Field label="Amount (Toman)"><Input label="Amount" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} data-testid="ledger-edit-amount" /></Field>}
           {tradeKind && <Field label={translate("Price for one ({unit})", lang, { unit: translate(row.unit_price_currency === "rial" ? "Rial" : row.unit_price_currency === "usd" ? "USD" : "Toman", lang) })}>
             <Input label="Unit price" type="number" step="any" className="w-full" value={price} onChange={(e) => setPrice(e.target.value)} data-testid="ledger-edit-price" />
           </Field>}
           {declaresBasis && <Field label={row.is_house ? "What did you pay per square meter? (millions of Toman)" : translate("What did you pay for one? ({unit})", lang, { unit: translate(row.unit_price_currency === "rial" ? "Rial" : "Toman", lang) })}>
-            <Input label="Purchase price" type="number" step="any" className="w-full" autoFocus={!!row.focusCost} value={costBasis} onChange={(e) => setCostBasis(e.target.value)} data-testid="ledger-edit-cost-basis" />
+            <Input label="Purchase price" type="number" step="any" className="w-full" data-autofocus={costOnly ? "" : undefined} value={costBasis} onChange={(e) => setCostBasis(e.target.value)} data-testid="ledger-edit-cost-basis" />
+            {!row.is_house && Number(costBasis) > 0 && Number(quantity) > 0 && (
+              <p className="mt-1 text-xs text-muted" data-testid="ledger-edit-cost-total">
+                {translate("Total", lang)}: {toman(Number(costBasis) * Number(quantity) / (row.unit_price_currency === "rial" ? 10 : 1))}
+              </p>
+            )}
           </Field>}
         </>}
-        {!cash && <>
+        {!cash && !costOnly && <>
         <div>
           <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">
             {translate(row.is_house ? "Price per square meter (millions of Toman)" : "How many?", lang)}
@@ -371,7 +381,7 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
           )}
         </div>
         </>}
-        {row.is_house && !row.is_synthetic && (
+        {row.is_house && !row.is_synthetic && !costOnly && (
           <div>
             <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">
               {translate("Size (square meters)", lang)}
@@ -388,7 +398,7 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
             />
           </div>
         )}
-        {!row.is_synthetic && (
+        {!row.is_synthetic && !costOnly && (
           <div>
             <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">{translate("Note", lang)}</div>
             <Input
@@ -546,7 +556,10 @@ export default function Ledger() {
       // A bare dash in a card's headline slot reads as a broken row; say why it is empty.
       render: (r) =>
         r.value_tomans == null && r.kind === "opening_position" ? (
-          r.cost_basis_tomans == null ? (
+          r.is_synthetic ? (
+            // No ledger row behind it yet, so its dialog has no cost field.
+            <span className="text-xs font-normal text-muted">{translate("No cost recorded", lang)}</span>
+          ) : r.cost_basis_tomans == null ? (
             // The place to record a cost, offered where its absence is shown.
             <Button variant="link" className="text-xs font-normal" onClick={() => setEditing({ ...r, focusCost: true })} data-testid="ledger-add-cost">
               {translate("Add what you paid", lang)}
@@ -621,7 +634,7 @@ export default function Ledger() {
               onClick={() => { setAdding(true); setError(""); }}
               data-testid="ledger-add"
               className="inline-flex items-center gap-1.5"
-              aria-label="Add transaction"
+              aria-label={translate("Add transaction", lang)}
             >
               <PlusIcon />
               {translate("Add", lang)}

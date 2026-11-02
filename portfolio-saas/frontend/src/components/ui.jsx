@@ -402,7 +402,7 @@ export function Tabs({ options, value, onChange, label, testId, grid = false }) 
   return (
     <div
       role="group"
-      aria-label={label}
+      aria-label={t(label)}
       data-testid={testId}
       // One row that scrolls sideways when it runs out of width. Wrapping put
       // half the options on a second line and the control changed height when
@@ -759,7 +759,7 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
             <h2 className="text-base font-semibold">{t(title)}</h2>
             {subtitle && <p className="mt-1 text-sm text-muted">{t(subtitle)}</p>}
           </div>
-          <Button variant="ghost" onClick={onClose} aria-label="Close" data-testid={testId ? `${testId}-close` : undefined}>
+          <Button variant="ghost" onClick={onClose} aria-label={t("Close")} data-testid={testId ? `${testId}-close` : undefined}>
             ✕
           </Button>
         </header>

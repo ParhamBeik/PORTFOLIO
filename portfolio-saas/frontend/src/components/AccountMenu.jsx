@@ -241,6 +241,7 @@ export default function AccountMenu({
   panelFill = false,
   testId = "user-email",
 }) {
+  const t = useT();
   const lang = useLang();
   const [open, setOpen] = useState(false);
   const [modal, setModal] = useState(null);
@@ -331,7 +332,7 @@ export default function AccountMenu({
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label="Account"
+        aria-label={t("Account")}
         data-testid={testId}
         className={`app-user-chip cursor-pointer transition-all ${triggerClass} ${
           open
