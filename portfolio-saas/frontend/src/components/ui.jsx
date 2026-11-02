@@ -7,6 +7,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useT } from "../i18n.js";
+import { serverText } from "../format.js";
 
 import {
   JALALI_MONTHS,
@@ -642,7 +643,7 @@ export const ErrorState = ({ error, onRetry, testId }) => (
     data-testid={testId}
     className="rounded-lg border border-[var(--c-critical)]/40 bg-[var(--c-critical)]/10 px-4 py-3 text-sm"
   >
-    <span>{error?.message || "Something went wrong."}</span>
+    <span>{serverText(error?.message || "Something went wrong.")}</span>
     {onRetry && (
       <Button variant="link" onClick={onRetry} className="ml-2">
         Retry

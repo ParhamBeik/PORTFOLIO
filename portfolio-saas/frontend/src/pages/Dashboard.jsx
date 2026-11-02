@@ -239,7 +239,7 @@ function InflationNote({ realGrowth, nominalGrowth, cpi, basis }) {
       </p>
       {cpi?.source && (
         <p data-testid="dashboard-trend-cpi-source">
-          {t("Inflation index: {source}.", { source: cpi.source })}
+          {t("Inflation index: {source}", { source: serverText(cpi.source) })}
           {estimated && ` ${t("The current year has no published figure yet, so that part of the line is a projection.")}`}
         </p>
       )}
@@ -889,8 +889,8 @@ const PRICING_TERMS = [
   ["Live", "priced within the last 5 minutes, or the last price from the latest session while that market is shut."],
   ["Manual", "house or real-estate values updated within the last 90 days."],
   ["Stale", "the quote is from a previous session; a fresher one should have arrived."],
-  ["Quota", "the provider refused further requests today; showing the last known price, which is not current."],
-  ["Mixed", "some holdings are stale, quota-blocked, or falling back to an archived price."],
+  ["Daily limit", "our price source's daily limit is reached; showing the last known price, which is not current."],
+  ["Mixed", "some prices are old, limited, or from our archive."],
   ["Real Toman", "adjusted for inflation using the Statistical Center of Iran's published CPI. The year in progress has no release yet, so that stretch is a labelled projection; the \"vs inflation\" view prints the rate it used."],
 ];
 

@@ -82,15 +82,11 @@ describe("company research", () => {
     render(<MemoryRouter initialEntries={["/explore?symbol=فولاد"]}><Explore /></MemoryRouter>);
 
     const question = await screen.findByTestId("explore-research-question");
-    const budget = screen.getByTestId("explore-research-budget");
-    expect(budget).toHaveValue(0.01);
     fireEvent.change(question, { target: { value: "Which month had the highest sales?" } });
-    fireEvent.change(budget, { target: { value: "0.02" } });
     fireEvent.click(screen.getByTestId("explore-research-submit"));
 
-    await waitFor(() => expect(api.runResearch).toHaveBeenCalledWith("فولاد", "Which month had the highest sales?", "0.02"));
+    await waitFor(() => expect(api.runResearch).toHaveBeenCalledWith("فولاد", "Which month had the highest sales?", "0.01"));
     expect(await screen.findByText(/Highest among verified months/)).toBeInTheDocument();
-    expect(screen.getByText(/Model cost: \$0\.0004/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Open saved answer/ })).toHaveAttribute("href", "/research?view=companies&symbol=%D9%81%D9%88%D9%84%D8%A7%D8%AF&run=17");
     expect(screen.getAllByRole("link", { name: /Codal filing/i })[0]).toHaveAttribute("href", source.source_url);
     expect(screen.getByTestId("explore-income-evidence")).toHaveTextContent(/revenue cell B4, profit cell B21/i);

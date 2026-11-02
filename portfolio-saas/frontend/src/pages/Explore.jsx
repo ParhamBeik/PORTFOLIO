@@ -21,14 +21,39 @@ const COVERAGE_LABELS = {
 };
 
 const RESEARCH_GAPS = {
-  no_verified_financial_evidence: "No monthly sales, income statement, or balance sheet for this company has passed source reconciliation in the available window.",
-  question_needs_uncertified_data: "This question needs financial, USD, industry, or other evidence that has not passed validation.",
+  no_verified_financial_evidence: "We could not check any monthly sales, income statement or balance sheet for this company against its filings.",
+  question_needs_uncertified_data: "Answering this needs figures we have not been able to check yet.",
   unsupported_by_verified_tools: "The verified sales and statement observations cannot answer that question yet.",
 };
 
 // The dossier's sentences sit in small helpers below the page's `useLang`; they
 // re-render with it, so reading the current language here is enough.
 const tr = (text, vars) => translate(text, undefined, vars);
+
+// Answers are stored as English sentences built from fixed templates
+// (backend/research/observations.py), so each template has a translatable form.
+const CLAIMS = [
+  [/^Highest among verified months: (.+) at ([\d,.]+) million Rial\.$/, "Highest among verified months: {a}, {b} million Rial."],
+  [/^Lowest among verified months: (.+) at ([\d,.]+) million Rial\.$/, "Lowest among verified months: {a}, {b} million Rial."],
+  [/^Latest verified month (.+): ([\d,.]+) million Rial\.$/, "Latest verified month {a}: {b} million Rial."],
+  [/^(\d+) of (\d+) latest monthly filings have source-reconciled sales; (\d+) are withheld\.$/, "{a} of the latest {b} monthly filings have checked sales; {c} are withheld."],
+  [/^Sales changed ([+\-\d,.]+)% from (.+) to (.+)\.$/, "Sales changed {a}% from {b} to {c}."],
+  [/^Latest verified (\w+), (audited|unaudited) income statement for (.+): (operating revenue|net profit|net profit margin) (.+)\.$/, "Latest checked income statement ({a}, {b}) for {c}: {d} {e}.", [0, 1, 3]],
+  [/^Latest verified (\w+), (audited|unaudited) balance sheet at (.+): ([a-z\- ]+) (.+)\.$/, "Latest checked balance sheet ({a}, {b}) at {c}: {d} {e}.", [0, 1, 3]],
+];
+
+function claimText(statement) {
+  for (const [re, key, words = []] of CLAIMS) {
+    const m = statement.match(re);
+    if (!m) continue;
+    const vars = {};
+    m.slice(1).forEach((value, i) => {
+      vars["abcde"[i]] = words.includes(i) ? tr(value) : value.replace(/ million Rial$/, ` ${tr("million Rial")}`);
+    });
+    return tr(key, vars);
+  }
+  return statement;
+}
 
 function reportedAmount(value) {
   const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(String(value));
@@ -56,7 +81,6 @@ function ArchivedFiling({ symbol, point, days = 365 }) {
     <Button type="button" variant="ghost" onClick={download} disabled={working} className="text-xs" data-testid={`explore-archive-${point.extraction_id}`}>
       {working ? "Checking archive…" : "Download archived filing"}
     </Button>
-    {point.artifact_sha256 && <span className="block break-all text-xs text-muted">{tr("File fingerprint (SHA-256):")} <bdi>{point.artifact_sha256}</bdi></span>}
     {error && <span role="alert" className="block text-xs text-[var(--c-critical-text)]">{error}</span>}
   </>;
 }
@@ -64,7 +88,7 @@ function ArchivedFiling({ symbol, point, days = 365 }) {
 function ResearchClaims({ claims, symbol }) {
   return claims.map((claim) => (
     <div key={claim.id} className="text-sm">
-      <p>{claim.statement}</p>
+      <p>{claimText(claim.statement)}</p>
       <ul className="mt-1 space-y-1 text-xs text-muted">
         {claim.sources.map((source) => (
           <li key={`${claim.id}-${source.extraction_id}`}>
@@ -97,10 +121,7 @@ function SavedResearch({ symbol, runId }) {
           </p>
         )}
         {run.claims?.length > 0 && <ResearchClaims claims={run.claims} symbol={symbol} />}
-        {run.status !== "answered" && <p className="text-sm">{tr("No answer was given:")} {RESEARCH_GAPS[run.failure_code] ? tr(RESEARCH_GAPS[run.failure_code]) : run.failure_code || run.status}</p>}
-        <p className="text-xs text-muted">{run.cost_usd == null
-          ? tr("Model cost unknown; ${n} remains reserved.", { n: run.reserved_usd })
-          : tr("Model cost: ${n}.", { n: num(Number(run.cost_usd), 6) })}</p>
+        {run.status !== "answered" && <p className="text-sm">{tr("No answer was given:")} {tr(RESEARCH_GAPS[run.failure_code] || "We could not get an answer this time. Please try again later.")}</p>}
       </div>
     ) : <p role="alert" className="text-sm">{tr("This saved answer belongs to {a}, not {b}.", { a: run.symbol, b: symbol })}</p>}
   </Async>;
@@ -111,14 +132,9 @@ function ResearchPanel({ symbol }) {
   const runId = params.get("run");
   const settings = useApi(() => researchSettings(), []);
   const [question, setQuestion] = useState("");
-  const [budget, setBudget] = useState("0.01");
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
-
-  useEffect(() => {
-    if (settings.data) setBudget(settings.data.default_run_usd);
-  }, [settings.data]);
 
   async function submit(event) {
     event.preventDefault();
@@ -131,7 +147,7 @@ function ResearchPanel({ symbol }) {
     setError("");
     setResult(null);
     try {
-      setResult(await runResearch(symbol, question.trim(), budget));
+      setResult(await runResearch(symbol, question.trim(), settings.data.default_run_usd));
     } catch (caught) {
       setError(caught.message || tr("Research could not complete."));
     } finally {
@@ -142,7 +158,7 @@ function ResearchPanel({ symbol }) {
   return (
     <Card
       title="Ask about verified sales and statements"
-      subtitle="An AI model picks from calculations checked against the filings. It declines questions about dollars, other companies or valuation."
+      subtitle="An AI model answers from figures checked against the filings. It declines questions about dollars, other companies or valuation."
       testId="explore-research"
     >
       <Async {...settings} testId="explore-research-settings">
@@ -150,17 +166,14 @@ function ResearchPanel({ symbol }) {
           <div className="space-y-3">
             <p className="text-xs text-muted">
               {config.provider_status === "ready"
-                ? tr("Model: {model}. Your question goes to GapGPT; your holdings do not. Set the most one question may cost; there is also a daily limit.", { model: config.provider_model })
+                ? tr("Your question goes to an AI service; your holdings do not. There is a daily limit on questions.")
                 : tr("Research questions are not available yet. The verified charts above still work.")}
             </p>
             <form className="space-y-3" onSubmit={submit}>
               <Field label="Your question" hint="For example: Which verified month had the highest sales?">
                 <Textarea value={question} onChange={(event) => setQuestion(event.target.value)} rows={3} minLength={3} maxLength={600} required className="w-full" label="Sales research question" data-testid="explore-research-question" />
               </Field>
-              <div className="flex flex-wrap items-end gap-3">
-                <Field label="Maximum model cost (USD)" hint={tr("Limit: ${n} per question", { n: config.max_run_usd })}>
-                  <Input type="number" min="0.000001" max={config.max_run_usd} step="0.000001" value={budget} onChange={(event) => setBudget(event.target.value)} required label="Maximum model cost in USD" data-testid="explore-research-budget" />
-                </Field>
+              <div>
                 <Button type="submit" variant="primary" disabled={working || config.provider_status !== "ready"} data-testid="explore-research-submit">
                   {working ? "Checking evidence…" : "Run research"}
                 </Button>
@@ -175,7 +188,7 @@ function ResearchPanel({ symbol }) {
                 {result.claims?.length ? <ResearchClaims claims={result.claims} symbol={symbol} /> : <p className="text-sm">{tr(RESEARCH_GAPS[result.reason] || "The verified evidence cannot answer this question.")}</p>}
                 {result.run_id && <Link to={`/research?${new URLSearchParams({ view: "companies", symbol, run: String(result.run_id) })}`} onClick={() => setResult(null)} className="text-sm text-accent underline">{tr("Open saved answer with a fresh source check")}</Link>}
                 {result.coverage && <p className="text-xs text-muted">{tr("Latest filings checked / withheld: sales {a} / {b}, income {c} / {d}, balance sheet {e} / {f}.", { a: result.coverage.verified_periods, b: result.coverage.withheld_periods, c: result.coverage.income_verified_periods, d: result.coverage.income_withheld_periods, e: result.coverage.balance_verified_periods, f: result.coverage.balance_withheld_periods })}</p>}
-                <p className="text-xs text-muted">{tr("Model cost: ${n}.", { n: num(Number(result.cost_usd), 6) })} {tr("The numbers come from stored calculations; the model only chose which ones answer your question.")}</p>
+                <p className="text-xs text-muted">{tr("The numbers come from stored calculations; the model only chose which ones answer your question.")}</p>
               </div>
             )}
           </div>
@@ -242,7 +255,7 @@ function Company({ symbol }) {
                     date: date(data.company.sector_observed_at),
                   })
                   : translate("Industry is unavailable for this stock.", lang)}{" "}
-                {translate("Monthly sales appear only where the current Codal filing reconciles to its source rows. Income and balance figures appear only for supported statement templates with verified issuer, unit, period, and arithmetic.", lang)}
+                {translate("We only show sales, income and balance figures we could check against the company's Codal filing.", lang)}
               </p>
             </Card>
 
@@ -270,7 +283,7 @@ function Company({ symbol }) {
                   </p>
                 )}
                 <p>
-                  {translate("{n} days checked against the separate unadjusted candle feed; {m} differ by more than 1%.", lang, { n: price.paired_candle_days, m: price.candle_disagreements_over_1pct })}
+                  {translate("{n} days checked against a second price source; {m} differ by more than 1%.", lang, { n: price.paired_candle_days, m: price.candle_disagreements_over_1pct })}
                   {price.candle_disagreements_over_1pct > 0 && ` ${translate("Treat this chart as disputed until those days are reconciled.", lang)}`}
                 </p>
                 <p>{translate("Adjusted prices, USD conversion, and return comparisons are withheld pending source checks.", lang)}</p>
@@ -291,7 +304,7 @@ function Company({ symbol }) {
                   formatAxis={(value) => num(value, 0)}
                   label={tr("{symbol} monthly sales in million Rial", { symbol })}
                 />
-              ) : <Empty testId="explore-no-monthly-sales">No monthly sales total has passed source reconciliation in this window.</Empty>}
+              ) : <Empty testId="explore-no-monthly-sales">No monthly sales could be checked against the filings in this period.</Empty>}
               <p className="mt-3 text-xs text-muted">{tr("Checked means the arithmetic, period, unit and archived file were verified against the filing. It is not an audit of the company’s accounts.")}</p>
               {sales.points.length > 0 && (
                 <details className="mt-3 text-sm" data-testid="explore-sales-evidence">
@@ -300,7 +313,7 @@ function Company({ symbol }) {
                     {sales.points.slice().reverse().map((point) => (
                       <li key={`${point.period_end_jalali}-${point.extraction_id}`} className="border-b border-border pb-2">
                         <span>{point.period_end_jalali}: {num(Number(point.value), 0)} {tr("million Rial")}</span>
-                        <span className="block text-xs text-muted">{tr("Filed {date}", { date: point.published_jalali || tr("date unavailable") })}{point.is_correction ? ` · ${tr("correction")}` : ""} · {tr("report {id}", { id: point.report_id })} · {tr("row {r}, column {c}", { r: point.source_coordinates.row ?? "?", c: point.source_coordinates.column ?? "?" })}</span>
+                        <span className="block text-xs text-muted">{tr("Filed {date}", { date: point.published_jalali || tr("date unavailable") })}{point.is_correction ? ` · ${tr("correction")}` : ""}</span>
                         {point.source_url && <a className="text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">{tr("Original Codal filing")}</a>}
                         {" "}<ArchivedFiling symbol={symbol} point={point} days={Number(days)} />
                       </li>
@@ -321,13 +334,14 @@ function Company({ symbol }) {
                     <div key={`${point.period_end_jalali}-${point.scope}`} className="border-b border-border pb-3 text-sm">
                       <p className="font-medium">{point.period_start_jalali} → {point.period_end_jalali} · {tr(point.scope)} · {tr(point.audited ? "audited" : "unaudited")}</p>
                       <p>{tr("Revenue {a} · net profit {b} million Rial · net margin {c}%", { a: reportedAmount(point.revenue), b: reportedAmount(point.net_profit), c: point.net_margin_pct })}</p>
-                      <p className="text-xs text-muted">{tr("Filed {date}", { date: point.published_jalali || tr("date unavailable") })}{point.is_correction ? ` · ${tr("correction")}` : ""} · {tr("file {id}", { id: point.artifact_id })} · {tr("revenue cell {a}, profit cell {b}", { a: point.source_coordinates.revenue.address, b: point.source_coordinates.net_profit.address })}</p>
+                      <p className="text-xs text-muted">{tr("Filed {date}", { date: point.published_jalali || tr("date unavailable") })}{point.is_correction ? ` · ${tr("correction")}` : ""}</p>
+                      <details className="text-xs text-muted"><summary className="cursor-pointer">{tr("Where this comes from")}</summary>{tr("file {id}", { id: point.artifact_id })} · {tr("revenue cell {a}, profit cell {b}", { a: point.source_coordinates.revenue.address, b: point.source_coordinates.net_profit.address })}</details>
                       {point.source_url && <a className="text-xs text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">{tr("Original Codal filing")}</a>}
                       {" "}<ArchivedFiling symbol={symbol} point={point} days={Number(days)} />
                     </div>
                   ))}
                 </div>
-              ) : <Empty testId="explore-no-income">No income statement has passed source reconciliation in this window.</Empty>}
+              ) : <Empty testId="explore-no-income">No income statement could be checked against the filings in this period.</Empty>}
               <p className="mt-3 text-xs text-muted">{tr("The source cells and arithmetic were checked against the archived filing. This does not audit the company’s accounts or make interim and annual figures comparable.")}</p>
             </Card>
             <Card
@@ -343,13 +357,14 @@ function Company({ symbol }) {
                       <p className="font-medium">{point.period_end_jalali} · {tr(point.scope)} · {tr(point.audited ? "audited" : "unaudited")}</p>
                       <p>{tr("Assets {a} · liabilities {b} · equity {c} million Rial", { a: reportedAmount(point.values.total_assets), b: reportedAmount(point.values.total_liabilities), c: reportedAmount(point.values.total_equity) })}</p>
                       <p>{tr("Cash {a} · short-term borrowings {b} · long-term borrowings {c} million Rial", { a: reportedAmount(point.values.cash), b: reportedAmount(point.values.short_term_borrowings), c: reportedAmount(point.values.long_term_borrowings) })}</p>
-                      <p className="text-xs text-muted">{tr("Filed {date}", { date: point.published_jalali || tr("date unavailable") })}{point.is_correction ? ` · ${tr("correction")}` : ""} · {tr("file {id}", { id: point.artifact_id })} · {tr("assets cell {a}, liabilities cell {b}, equity cell {c}", { a: point.source_coordinates.total_assets.address, b: point.source_coordinates.total_liabilities.address, c: point.source_coordinates.total_equity.address })}</p>
+                      <p className="text-xs text-muted">{tr("Filed {date}", { date: point.published_jalali || tr("date unavailable") })}{point.is_correction ? ` · ${tr("correction")}` : ""}</p>
+                      <details className="text-xs text-muted"><summary className="cursor-pointer">{tr("Where this comes from")}</summary>{tr("file {id}", { id: point.artifact_id })} · {tr("assets cell {a}, liabilities cell {b}, equity cell {c}", { a: point.source_coordinates.total_assets.address, b: point.source_coordinates.total_liabilities.address, c: point.source_coordinates.total_equity.address })}</details>
                       {point.source_url && <a className="text-xs text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">{tr("Original Codal balance sheet")}</a>}
                       {" "}<ArchivedFiling symbol={symbol} point={point} days={Number(days)} />
                     </div>
                   ))}
                 </div>
-              ) : <Empty testId="explore-no-balance">No balance sheet has passed source reconciliation in this window.</Empty>}
+              ) : <Empty testId="explore-no-balance">No balance sheet could be checked against the filings in this period.</Empty>}
               <p className="mt-3 text-xs text-muted">{tr("The archived figures add up: assets = liabilities + equity. This does not audit the company’s accounts or imply a valuation.")}</p>
             </Card>
             <ResearchPanel symbol={symbol} />

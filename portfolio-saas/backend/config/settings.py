@@ -1091,7 +1091,7 @@ CPI_SOURCE = (
     f"{CPI_VERIFIED_THROUGH_YEAR}"
     + (
         f"; {'/'.join(str(year) for year in sorted(CPI_ESTIMATED_YEARS))} are an "
-        f"OPERATOR ESTIMATE at {CPI_ESTIMATED_ANNUAL_RATE_EFFECTIVE:.0%}/year, "
+        f"our own estimate at {CPI_ESTIMATED_ANNUAL_RATE_EFFECTIVE:.0%}/year, "
         f"not a published figure"
         if CPI_ESTIMATED_YEARS
         else ""

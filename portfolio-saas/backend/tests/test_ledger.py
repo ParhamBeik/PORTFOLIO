@@ -285,6 +285,23 @@ def test_csv_preview_recognises_a_file_already_imported(ledger_account):
     assert response.data["already_imported"] is True
 
 
+def test_csv_refuses_a_row_with_more_values_than_columns(ledger_account):
+    occurred_at = (timezone.now() - datetime.timedelta(days=5)).isoformat()
+    content = (
+        "external_id,occurred_at,kind,asset_key,quantity,unit_price_tomans,amount_tomans,note\n"
+        f"cash-1,{occurred_at},opening_cash,,,,1000,first part,second part\n"
+    )
+
+    response = _client(ledger_account.user).post(
+        f"/api/accounts/{ledger_account.id}/imports/preview/",
+        {"file": _csv_upload(content)},
+        format="multipart",
+    )
+
+    assert response.status_code == 400
+    assert response.data["row"] == 1
+
+
 def test_csv_commit_is_atomic_and_idempotent(ledger_account, asset_catalog):
     occurred_at = (timezone.now() - datetime.timedelta(days=5)).isoformat()
     content = (

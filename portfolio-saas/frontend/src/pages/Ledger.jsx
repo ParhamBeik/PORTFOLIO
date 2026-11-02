@@ -749,8 +749,8 @@ export default function Ledger() {
         <Button variant="danger" disabled={busy} onClick={() => removeRow(removing)} data-testid="ledger-remove-confirm">{busy ? "Removing…" : "Remove"}</Button>
       </>}>
         {removeError && <p role="alert" className="mb-2 text-sm text-[var(--c-critical-text)]" data-testid="ledger-remove-error">{removeError}</p>}
-        <p>{jalaliDate(removing.occurred_at)} · {holdingLabel(removing)} · {KIND_LABEL[removing.kind] || humanize(removing.kind)}</p>
-        <p>{removing.account_name} · {quantityCell(removing)} · {toman(removing.value_tomans ?? removing.amount_tomans)}</p>
+        <p>{[jalaliDate(removing.occurred_at), holdingLabel(removing), KIND_LABEL[removing.kind] ? translate(KIND_LABEL[removing.kind], lang) : humanize(removing.kind)].filter((part) => part && part !== "—").join(" · ")}</p>
+        <p>{[removing.account_name, quantityCell(removing), toman(removing.value_tomans ?? removing.amount_tomans)].filter((part) => part && part !== "—").join(" · ")}</p>
         <p className="mt-3 text-sm text-muted">{translate("Holdings and cash will update.", lang)} {translate(removing.is_synthetic ? "If this can be undone, an Undo button appears for 8 seconds." : "You can undo for 8 seconds. Your financial history is retained.", lang)}</p>
       </Modal>}
       {undo && <div role="status" className="fixed bottom-24 inset-x-4 z-40 mx-auto flex max-w-md items-center justify-between gap-3 rounded-lg border border-border bg-panel p-3 shadow-xl" data-testid="ledger-undo-toast">

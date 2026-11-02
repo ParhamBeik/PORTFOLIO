@@ -244,6 +244,8 @@ async function request(path, { method = "GET", body, _retried = false } = {}) {
     });
   } catch (error) {
     recordApi(path, method, 0, perfNow() - startedAt);
+    // fetch rejects with browser wording ("Failed to fetch", "Load failed").
+    if (error instanceof TypeError) throw new Error("Could not reach the server. Check your connection and try again.");
     throw error;
   }
   recordApi(path, method, res.status, perfNow() - startedAt);
