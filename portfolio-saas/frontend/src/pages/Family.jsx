@@ -220,13 +220,15 @@ function PerformanceTable({ accounts, basis }) {
           <>
           <Table
             testId="breakdown-performance-table"
+            mobileCards
             rowKey={(r) => r.id}
             rows={rows}
             columns={[
-              { key: "name", header: "Portfolio", render: (r) => r.name },
+              { key: "name", header: "Portfolio", mobile: "title", render: (r) => r.name },
               {
                 key: "twr",
                 header: perfLabel.twr,
+                mobile: "meta",
                 align: "right",
                 render: (r) =>
                   r.performance_available ? (
@@ -238,6 +240,7 @@ function PerformanceTable({ accounts, basis }) {
               {
                 key: "xirr",
                 header: perfLabel.xirr,
+                mobile: "meta",
                 align: "right",
                 render: (r) =>
                   r.performance_available ? (
@@ -249,6 +252,7 @@ function PerformanceTable({ accounts, basis }) {
               {
                 key: "status",
                 header: "Status",
+                mobile: "meta",
                 render: (r) =>
                   r.performance_available ? (
                     <Badge variant="good">Ready</Badge>
@@ -285,7 +289,7 @@ function AssetMix({ accounts, basis }) {
           if (!groups.length) return null;
           return (
             <Disclosure key={account.id} summary={`${account.name} · ${money(account.total, basis)}`} testId={`breakdown-mix-${account.id}`} open>
-              <Donut data={groups} height={220} valueFormat={(v) => money(v, basis)} testId={`breakdown-donut-${account.id}`} />
+              <Donut data={groups} height={220} totalLabel="Total assets" valueFormat={(v) => money(v, basis)} testId={`breakdown-donut-${account.id}`} />
             </Disclosure>
           );
         })}

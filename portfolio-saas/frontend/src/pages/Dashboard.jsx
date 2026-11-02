@@ -545,6 +545,8 @@ function AllocationCard({ state }) {
             <Donut
               data={groups}
               testId="dashboard-donut"
+              // Before debts, so it can differ from the net worth above it.
+              totalLabel="Total assets"
               valueFormat={(v) => money(v, data.basis)}
             />
           );

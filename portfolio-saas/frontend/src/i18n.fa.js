@@ -213,6 +213,7 @@ export default {
   "Bought": "خریداری‌شده",
   "Already owned": "از قبل موجود",
   "No cost recorded": "بهای خرید ثبت نشده",
+  "Total assets": "جمع دارایی‌ها",
   "Export downloaded.": "فایل داده‌ها دریافت شد.",
   "Export ready to share.": "فایل داده‌ها برای اشتراک‌گذاری آماده است.",
   "By creating an account you accept the": "با ساخت حساب، این موارد را می‌پذیرید:",

@@ -642,7 +642,7 @@ export function GroupedBar({ data, labels, height = 300, label = "Comparison", t
  * light-mode palette slots that sit under 3:1 against white, so identity is
  * never colour-alone.
  */
-export function Donut({ data, height = 260, label = "Allocation breakdown", valueFormat = toman, testId }) {
+export function Donut({ data, height = 260, label = "Allocation breakdown", valueFormat = toman, testId, totalLabel = "Total" }) {
   const t = useChartTokens();
   // Class names ("Gold", "Cash") have Persian entries; a user's own portfolio
   // or holding name has none and comes back unchanged.
@@ -703,7 +703,7 @@ export function Donut({ data, height = 260, label = "Allocation breakdown", valu
           aria-live="polite"
           data-testid={testId ? `${testId}-readout` : undefined}
         >
-          <span className="max-w-full truncate text-xs text-muted">{shown ? tr(shown.name) : tr("Total")}</span>
+          <span className="max-w-full truncate text-xs text-muted">{shown ? tr(shown.name) : tr(totalLabel)}</span>
           <span className="tabular max-w-full truncate text-sm font-semibold text-text">
             {valueFormat(shown ? Number(shown.value) : rows.reduce((s, d) => s + Number(d.value || 0), 0))}
           </span>
