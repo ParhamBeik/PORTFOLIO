@@ -38,7 +38,7 @@ const CLAIMS = [
   [/^Latest verified month (.+): ([\d,.]+) million Rial\.$/, "Latest verified month {a}: {b} million Rial."],
   [/^(\d+) of (\d+) latest monthly filings have source-reconciled sales; (\d+) are withheld\.$/, "{a} of the latest {b} monthly filings have checked sales; {c} are withheld."],
   [/^Sales changed ([+\-\d,.]+)% from (.+) to (.+)\.$/, "Sales changed {a}% from {b} to {c}."],
-  [/^Latest verified (\w+), (audited|unaudited) income statement for (.+): (operating revenue|net profit|net profit margin) (.+)\.$/, "Latest checked income statement ({a}, {b}) for {c}: {d} {e}.", [0, 1, 3]],
+  [/^Latest verified (\w+), (audited|unaudited) income statement for (.+): (operating revenue|net profit margin|net profit) (.+)\.$/, "Latest checked income statement ({a}, {b}) for {c}: {d} {e}.", [0, 1, 3]],
   [/^Latest verified (\w+), (audited|unaudited) balance sheet at (.+): ([a-z\- ]+) (.+)\.$/, "Latest checked balance sheet ({a}, {b}) at {c}: {d} {e}.", [0, 1, 3]],
 ];
 
@@ -48,7 +48,7 @@ function claimText(statement) {
     if (!m) continue;
     const vars = {};
     m.slice(1).forEach((value, i) => {
-      vars["abcde"[i]] = words.includes(i) ? tr(value) : value.replace(/ million Rial$/, ` ${tr("million Rial")}`);
+      vars["abcde"[i]] = words.includes(i) ? tr(value) : value.replace(/ million Rial$/, ` ${tr("million Rial")}`).replace(/ \(net profit \/ revenue\)$/, "");
     });
     return tr(key, vars);
   }
@@ -92,11 +92,14 @@ function ResearchClaims({ claims, symbol }) {
       <ul className="mt-1 space-y-1 text-xs text-muted">
         {claim.sources.map((source) => (
           <li key={`${claim.id}-${source.extraction_id}`}>
-            {source.period_end_jalali} · {source.scope
+            {source.period_end_jalali}
+            <details className="inline-block align-top ms-2"><summary className="cursor-pointer">{tr("Where this comes from")}</summary>
+            {source.scope
               ? source.statement_kind === "balance_sheet"
                 ? tr("{scope} balance sheet cells: assets {a}, liabilities {b}, equity {c}", { scope: tr(source.scope), a: source.source_coordinates.total_assets.address, b: source.source_coordinates.total_liabilities.address, c: source.source_coordinates.total_equity.address })
                 : tr("{scope} income statement cells: {a}, {b}", { scope: tr(source.scope), a: source.source_coordinates.revenue.address, b: source.source_coordinates.net_profit.address })
               : tr("sales table row {r}, column {c}", { r: source.source_coordinates.row ?? "?", c: source.source_coordinates.column ?? "?" })} · {tr("file {id}", { id: source.artifact_id })}
+            </details>
             {source.source_url && <> · <a href={source.source_url} target="_blank" rel="noopener noreferrer" className="text-accent underline">{tr("Codal filing")}</a></>}
             {" "}<ArchivedFiling symbol={symbol} point={source} days={source.scope ? 3650 : 365} />
           </li>

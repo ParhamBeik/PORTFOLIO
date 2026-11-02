@@ -75,7 +75,7 @@ const CLASSES = [
 function HoldingPicker({ value, onChange, holdings }) {
   const t = useT();
   return (
-    <label className="flex flex-col gap-1 text-xs font-medium tracking-wide text-muted uppercase">
+    <label className="flex min-w-0 max-w-full flex-col gap-1 text-xs font-medium tracking-wide text-muted uppercase">
       {t("What you did")}
       <Select
         label="What you did"

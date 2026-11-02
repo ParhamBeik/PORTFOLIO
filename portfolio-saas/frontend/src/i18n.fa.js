@@ -213,6 +213,7 @@ export default {
   "Bought": "خریداری‌شده",
   "Already owned": "از قبل موجود",
   "No cost recorded": "بهای خرید ثبت نشده",
+  "Your session expired. Please sign in again.": "نشست شما منقضی شد. لطفاً دوباره وارد شوید.",
   "Could not reach the server. Check your connection and try again.": "به سرور وصل نشدیم. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
   "Something went wrong on our side. Please try again.": "مشکلی از سمت ما پیش آمد. لطفاً دوباره تلاش کنید.",
   "Too many requests. Wait a moment and try again.": "درخواست‌ها زیاد شد. کمی صبر کنید و دوباره تلاش کنید.",

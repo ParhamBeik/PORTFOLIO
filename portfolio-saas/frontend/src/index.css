@@ -527,3 +527,17 @@ body:has(.app-bottom-tabs) {
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* A long name with no spaces (a nickname, a portfolio) must wrap on a phone, not
+   widen the page. Numbers stay whole: right-aligned cells are nowrap. */
+@media (max-width: 639px) {
+  main {
+    overflow-wrap: anywhere;
+  }
+}
+
+/* A <select> sizes itself to its longest option, however long that is. */
+select {
+  max-width: 100%;
+  min-width: 0;
+}

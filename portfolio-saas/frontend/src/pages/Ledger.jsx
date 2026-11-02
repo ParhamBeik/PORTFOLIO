@@ -622,7 +622,7 @@ export default function Ledger() {
       // name; the full name stays reachable on hover.
       render: (r) =>
         r.asset_key ? (
-          <bdi className="whitespace-nowrap" title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</bdi>
+          <bdi className="sm:whitespace-nowrap" title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</bdi>
         ) : CASH_KINDS.includes(r.kind) ? (
           translate("Cash balance", lang)
         ) : (
