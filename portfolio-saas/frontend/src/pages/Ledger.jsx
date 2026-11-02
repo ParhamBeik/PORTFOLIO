@@ -79,12 +79,15 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
   }, [error]);
   const explain = (e) => {
     const message = serverText(e.message || String(e));
-    return e.row ? t("Row {n}: {message}", { n: e.row, message }) : message;
+    // The server counts data rows; a spreadsheet also counts the header.
+    return e.row ? t("Row {n}: {message}", { n: e.row + 1, message }) : message;
   };
-  const needle = codeQuery.trim().toLowerCase();
+  // Arabic keyboards type ي and ك; the names use ی and ک.
+  const fold = (text) => text.toLowerCase().replace(/ي/g, "ی").replace(/ك/g, "ک");
+  const needle = fold(codeQuery.trim());
   const codeHits = needle
     ? (assets.data || [])
-        .filter((a) => [a.key, a.name, a.name_fa].some((v) => v?.toLowerCase().includes(needle)))
+        .filter((a) => [a.key, a.name, a.name_fa].some((v) => v && fold(v).includes(needle)))
         .slice(0, 6)
     : [];
 
@@ -214,7 +217,7 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
             </Button>
             {preview?.valid && (
               <p className="text-sm" data-testid="ledger-import-preview-result">
-                {t("{n} rows are valid and ready to import.", { n: preview.row_count })}
+                {t(preview.row_count === 1 ? "1 row is valid and ready to import." : "{n} rows are valid and ready to import.", { n: preview.row_count })}
               </p>
             )}
           </>

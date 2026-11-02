@@ -213,6 +213,8 @@ export default {
   "Bought": "خریداری‌شده",
   "Already owned": "از قبل موجود",
   "No cost recorded": "بهای خرید ثبت نشده",
+  "Price omitted and no historical price found for this date.": "قیمت را وارد کنید؛ برای این تاریخ قیمتی نداریم.",
+  "1 row is valid and ready to import.": "۱ ردیف معتبر و آماده ورود است.",
   "Always covers all your portfolios, whichever one is selected above.": "همیشه همه پرتفوی‌های شما را نشان می‌دهد، هر کدام که بالا انتخاب شده باشد.",
   "Row {n}: {message}": "ردیف {n}: {message}",
   "Find an asset code": "یافتن کد دارایی",
