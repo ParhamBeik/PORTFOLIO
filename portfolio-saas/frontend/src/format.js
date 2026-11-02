@@ -112,6 +112,20 @@ const signed = (fn) => (v) => {
   return ltr((Number(v) > 0 ? "+" : "") + text);
 };
 
+/**
+ * The stored decimal written as the shortest string meaning the same number.
+ *
+ * The API serializes Decimals verbatim, so four coins arrive as "4.000000" and
+ * seeded the editor with six meaningless decimals on a row whose spinner steps
+ * by one — the box contradicted the column beside it, which printed "4".
+ * Trimming is string-level on purpose: sending a large Toman price through
+ * Number() to tidy it is how precision gets lost.
+ */
+export const trimZeros = (v) => {
+  const s = String(v);
+  return s.includes(".") ? s.replace(/\.?0+$/, "") : s;
+};
+
 export const signedPct = signed(pct);
 export const signedToman = signed(toman);
 

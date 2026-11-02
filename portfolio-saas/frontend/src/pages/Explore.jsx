@@ -99,9 +99,9 @@ function ResearchClaims({ claims, symbol }) {
                 ? tr("{scope} balance sheet cells: assets {a}, liabilities {b}, equity {c}", { scope: tr(source.scope), a: source.source_coordinates.total_assets.address, b: source.source_coordinates.total_liabilities.address, c: source.source_coordinates.total_equity.address })
                 : tr("{scope} income statement cells: {a}, {b}", { scope: tr(source.scope), a: source.source_coordinates.revenue.address, b: source.source_coordinates.net_profit.address })
               : tr("sales table row {r}, column {c}", { r: source.source_coordinates.row ?? "?", c: source.source_coordinates.column ?? "?" })} · {tr("file {id}", { id: source.artifact_id })}
-            </details>
             {source.source_url && <> · <a href={source.source_url} target="_blank" rel="noopener noreferrer" className="text-accent underline">{tr("Codal filing")}</a></>}
             {" "}<ArchivedFiling symbol={symbol} point={source} days={source.scope ? 3650 : 365} />
+            </details>
           </li>
         ))}
       </ul>

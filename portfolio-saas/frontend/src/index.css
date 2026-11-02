@@ -529,10 +529,19 @@ body:has(.app-bottom-tabs) {
 }
 
 /* A long name with no spaces (a nickname, a portfolio) must wrap on a phone, not
-   widen the page. Numbers stay whole: right-aligned cells are nowrap. */
+   widen the page. Numbers stay whole: right-aligned cells are nowrap. A table
+   that stays a table is exempt: `anywhere` lets its columns collapse to one
+   letter wide, and it already scrolls inside its own box. */
+main {
+  overflow-wrap: break-word;
+}
 @media (max-width: 639px) {
   main {
     overflow-wrap: anywhere;
+  }
+  main table:not(.block),
+  main th {
+    overflow-wrap: normal;
   }
 }
 

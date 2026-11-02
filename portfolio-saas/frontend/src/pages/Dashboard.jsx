@@ -38,6 +38,7 @@ import {
   toman,
   unitPrice,
   isolate,
+  trimZeros,
 } from "../format.js";
 import {
   AreaTrend,
@@ -837,20 +838,6 @@ function isManualPriceEditable(row) {
     row.is_manual || row.quality_status === "manual" || row.source === "manual_valuation"
   );
 }
-
-/**
- * The stored decimal written as the shortest string meaning the same number.
- *
- * The API serializes Decimals verbatim, so four coins arrive as "4.000000" and
- * seeded the editor with six meaningless decimals on a row whose spinner steps
- * by one — the box contradicted the column beside it, which printed "4".
- * Trimming is string-level on purpose: sending a large Toman price through
- * Number() to tidy it is how precision gets lost.
- */
-const trimZeros = (v) => {
-  const s = String(v);
-  return s.includes(".") ? s.replace(/\.?0+$/, "") : s;
-};
 
 // For a property `qty` is the price per square meter in millions of Toman — the
 // column the API stores it in — and `area` is its size. Those are the two numbers

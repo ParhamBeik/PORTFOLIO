@@ -361,15 +361,17 @@ export default function Family() {
                 <Card title="Portfolio summary" testId="breakdown-table-card">
                   <Table
                     testId="breakdown-table"
+                    mobileCards
                     rowKey={(r) => r.id}
                     rows={rows}
                     columns={[
-                      { key: "name", header: "Portfolio", render: (r) => r.name },
-                      { key: "total", header: "Net worth", align: "right", render: (r) => money(r.total, rowBasis) },
+                      { key: "name", header: "Portfolio", mobile: "title", render: (r) => r.name },
+                      { key: "total", header: "Net worth", align: "right", mobile: "value", render: (r) => money(r.total, rowBasis) },
                       {
                         key: "share",
                         header: "Share",
                         align: "right",
+                        mobile: "meta",
                         render: (r) => pct(grand ? Number(r.total) / grand : 0),
                       },
                       {
