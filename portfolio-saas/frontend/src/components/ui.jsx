@@ -515,6 +515,7 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
           {rows.map((row, i) => {
             const key = rowKey ? rowKey(row) : i;
             const expanded = open.has(key);
+            let metaShown = false;
             const card = compact
               ? "mb-2 flex flex-wrap items-baseline rounded-lg border border-border/60 px-2 py-1.5 last:mb-0 sm:mb-0 sm:table-row sm:rounded-none sm:border-x-0 sm:border-t-0 sm:p-0"
               : "mb-3 block rounded-lg border border-border/60 p-2 last:mb-0 sm:mb-0 sm:table-row sm:rounded-none sm:border-x-0 sm:border-t-0 sm:p-0";
@@ -529,13 +530,16 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
               >
                 {columns.map((c) => {
                   const content = c.render ? c.render(row) : row[c.key];
+                  // The "·" joins two details, so the first one showing has none.
+                  const leadsMeta = c.mobile === "meta" && content !== "—" && !metaShown;
+                  if (leadsMeta) metaShown = true;
                   const labelled = mobileCards && c.header && (!compact || !MOBILE_SHOWN.has(c.mobile));
                   return (
                     <td
                       key={c.key}
                       data-meta={c.mobile === "meta" ? "" : undefined}
                       // An empty detail on a phone card is just "· —" noise.
-                      className={`${cellClass(c, expanded)} ${mobileCards && c.mobile === "meta" && content === "—" ? "max-sm:hidden!" : ""}`}
+                      className={`${cellClass(c, expanded)} ${leadsMeta ? "max-sm:before:content-none!" : ""} ${mobileCards && c.mobile === "meta" && content === "—" ? "max-sm:hidden!" : ""}`}
                     >
                       {labelled && <span className="shrink-0 text-xs font-medium uppercase text-muted sm:hidden">{t(c.header)}</span>}
                       {labelled ? (

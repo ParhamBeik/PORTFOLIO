@@ -186,7 +186,7 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
 
   return (
     <Modal
-      title={row ? "Edit liability" : "Add liability"}
+      title={row ? "Edit debt" : "Add a debt"}
       subtitle="Debts are subtracted from your net worth. A loan on a schedule is worked out from its terms, so the balance keeps itself current."
       onClose={onClose}
       testId="liability-dialog"
@@ -519,21 +519,21 @@ export default function LiabilitiesCard({ activeId, accounts, onChanged }) {
 
   return (
     <Card
-      title="Liabilities"
+      title="Debts"
       subtitle="Debts subtracted from the total above."
       testId="dashboard-liabilities"
       actions={
         <Button variant="ghost" onClick={() => setAdding(true)} data-testid="liability-add">
-          Add liability
+          Add a debt
         </Button>
       }
     >
       {error && <p role="alert" className="mb-2 text-sm text-[var(--c-critical-text)]">{error}</p>}
-      <Async {...state} testId="dashboard-liabilities-body" empty="No liabilities recorded.">
+      <Async {...state} testId="dashboard-liabilities-body" empty="No debts recorded.">
         {(rows) => !rows.length ? (
           // `Async` renders `empty` only for a null payload, and an empty list
           // is not null -- without this the card body is simply blank.
-          <Empty testId="dashboard-liabilities-empty">No liabilities recorded.</Empty>
+          <Empty testId="dashboard-liabilities-empty">No debts recorded.</Empty>
         ) : (
           <div className="space-y-2">
             {rows.map((row) => (
