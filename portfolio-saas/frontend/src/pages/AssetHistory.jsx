@@ -106,7 +106,7 @@ export default function AssetHistory() {
                 aria-busy={history.loading || undefined}
               >
                 <MultiLineTrend
-                  series={[{ key: "price", name: `${data.asset.symbol} (${unit})` }]}
+                  series={[{ key: "price", name: `${selected ? catalogLabel(selected) : data.asset.name} (${translate(unit, lang)})` }]}
                   data={rows}
                   longTicks={rows.length > 180}
                   formatValue={(value) => nativePrice(value, unit)}
