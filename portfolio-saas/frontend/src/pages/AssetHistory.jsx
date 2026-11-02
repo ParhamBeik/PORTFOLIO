@@ -114,7 +114,7 @@ export default function AssetHistory() {
                   label={`${data.asset.name} price history`}
                 />
                 <p className="text-xs text-muted" data-testid="asset-history-note">
-                  {translate("Source: {source}. {first} → {last}.", lang, { source: data.source, first: date(data.earliest_date), last: date(data.latest_date) })}
+                  {translate("Source: {source}. {first} → {last}.", lang, { source: translate(data.source, lang), first: date(data.earliest_date), last: date(data.latest_date) })}
                   {data.asset.asset_class === "Crypto" &&
                     " Crypto history begins when this deployment started collecting it; earlier prices are not inferred."}
                 </p>

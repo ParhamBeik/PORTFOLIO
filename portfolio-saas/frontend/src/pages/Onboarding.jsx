@@ -14,7 +14,7 @@ import { Async, Button, Card, ErrorState, Input, Select } from "../components/ui
 export default function Onboarding() {
   const lang = useLang();
   const navigate = useNavigate();
-  const { accounts, reload, setActive } = usePortfolio();
+  const { accounts, activeId, reload, setActive } = usePortfolio();
   const assets = useApi(listAssets, []);
 
   const [name, setName] = useState("My portfolio");
@@ -25,7 +25,13 @@ export default function Onboarding() {
 
   // Reaching this route with an account already present means the account is
   // simply empty — reuse it rather than stacking a second one.
-  const existing = accounts[0];
+  // As the Add holdings tab this must write where the user is looking, not to
+  // whichever portfolio comes first; with "All portfolios" selected it asks.
+  const [chosenId, setChosenId] = useState("");
+  const scoped = accounts.find((a) => a.id === activeId) || (accounts.length === 1 ? accounts[0] : null);
+  const existing = scoped || accounts.find((a) => String(a.id) === chosenId) || null;
+  const mustChoose = accounts.length > 1 && !scoped;
+  const held = new Set((existing?.holdings || []).map((h) => h.asset_key));
   // The account survives a failed holding. Only the successful path reloads the
   // portfolio context, so on a rejected quantity `accounts` was still empty on
   // the retry and the form opened a SECOND portfolio; three attempts left three.
@@ -46,7 +52,8 @@ export default function Onboarding() {
         created.current ||
         (created.current = await createAccount(name.trim() || "My portfolio"));
       await addHolding(account.id, assetKey, quantity);
-      setActive(account.id);
+      // First portfolio only: adding must not move someone off the view they chose.
+      if (!accounts.length) setActive(account.id);
       await reload();
       navigate("/", { replace: true });
     } catch (err) {
@@ -66,7 +73,28 @@ export default function Onboarding() {
         subtitle="Your dashboard, optimizer and universe comparison all read from your holdings. One is enough to get started."
       >
         <form className="space-y-4" onSubmit={submit}>
-          {!existing && (
+          {mustChoose && (
+            <label className="block">
+              <span className="mb-1 block text-sm text-muted">{translate("Portfolio", lang)}</span>
+              <Select
+                label="Portfolio"
+                data-testid="onboarding-account"
+                className="w-full"
+                value={chosenId}
+                onChange={(e) => { setChosenId(e.target.value); setAssetKey(""); }}
+                required
+              >
+                <option value="">{translate("Which portfolio?", lang)}</option>
+                {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </Select>
+            </label>
+          )}
+          {scoped && accounts.length > 1 && (
+            <p className="text-sm text-muted" data-testid="onboarding-target">
+              {translate("Adds to {name}", lang, { name: scoped.name })}
+            </p>
+          )}
+          {!accounts.length && (
             <label className="block">
               <span className="mb-1 block text-sm text-muted">Portfolio name</span>
               <Input
@@ -93,12 +121,17 @@ export default function Onboarding() {
                   required
                 >
                   <option value="">{translate("Select an asset…", lang)}</option>
-                  {list.map((a) => (
+                  {/* Not what is already held here (the server refuses it) nor a
+                      property, which needs a size and price this form lacks. */}
+                  {list.filter((a) => !held.has(a.key) && !a.is_house && a.asset_class !== "Real Estate").map((a) => (
                     <option key={a.key} value={a.key}>{assetLabel(a)}</option>
                   ))}
                 </Select>
               )}
             </Async>
+            <p className="mt-1 text-xs text-muted" data-testid="onboarding-hint">
+              {translate("To add a property or more of something you hold, use the + button.", lang)}
+            </p>
           </div>
 
           <label className="block">
@@ -129,7 +162,7 @@ export default function Onboarding() {
             variant="primary"
             type="submit"
             data-testid="onboarding-submit"
-            disabled={busy || !assetKey || !validQuantity(quantity)}
+            disabled={busy || !assetKey || !validQuantity(quantity) || (mustChoose && !existing)}
             className="w-full"
           >
             {busy ? "Adding…" : "Add holding"}

@@ -100,7 +100,7 @@ function ChangePasswordModal({ onClose, onDone }) {
   return (
     <Modal
       title="Change password"
-      subtitle="Changing it signs out every other device, including this one's other browsers."
+      subtitle="Changing it signs you out on every other device."
       onClose={onClose}
       testId="account-password-modal"
       footer={
@@ -160,6 +160,9 @@ function ChangePasswordModal({ onClose, onDone }) {
 }
 
 function DeleteAccountModal({ onClose, onDeleted }) {
+  const t = useT();
+  // The word in the reader's language: no switching keyboards to confirm.
+  const word = t("DELETE");
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
@@ -191,7 +194,7 @@ function DeleteAccountModal({ onClose, onDeleted }) {
             onClick={submit}
             // The server checks both of these too; requiring them here is what
             // keeps the button from being clickable by accident.
-            disabled={busy || confirmation !== "DELETE" || !password}
+            disabled={busy || confirmation.trim() !== word || !password}
             data-testid="account-delete-submit"
           >
             {busy ? "Deleting…" : "Delete permanently"}
@@ -201,8 +204,7 @@ function DeleteAccountModal({ onClose, onDeleted }) {
     >
       <div className="space-y-3">
         <p className="text-sm text-muted">
-          Download your data first if you want to keep it — once this is done
-          there is nothing left to export.
+          {t("Download your data first if you want to keep it — once this is done there is nothing left to export.")}
         </p>
         <Input
           label="Your password"
@@ -215,8 +217,8 @@ function DeleteAccountModal({ onClose, onDeleted }) {
           data-testid="account-delete-password"
         />
         <Input
-          label="Type DELETE to confirm"
-          placeholder="DELETE"
+          label={t("Type {word} to confirm", { word })}
+          placeholder={word}
           className="w-full"
           value={confirmation}
           onChange={(e) => setConfirmation(e.target.value)}
