@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import { translate, useLang } from "../i18n.js";
-import { guidance, listAssets, setRiskProfile } from "../api.js";
+import { guidance, listAssets, setRiskProfile, valuation } from "../api.js";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
-import { Async, Badge, Card, Empty, PageHeader, Select } from "../components/ui.jsx";
+import { Async, Badge, Card, Empty, Field, PageHeader, Select } from "../components/ui.jsx";
 import { assetLabel, pct } from "../format.js";
 import { useApi } from "../useApi.js";
 
@@ -12,25 +12,32 @@ const PROFILE_OPTIONS = [
   ["growth", "Growth"],
 ];
 
-function Allocation({ title, subtitle, weights, labelFor, testId }) {
+function Allocation({ title, subtitle, weights, labelFor, testId, empty = "Not enough price history yet — this needs about a year of daily prices." }) {
   const rows = Object.entries(weights || {}).sort((a, b) => b[1] - a[1]);
-  if (!rows.length) return <Empty testId={`${testId}-empty`}>Not enough verified history yet.</Empty>;
+  // The empty state keeps its card title: two bare, identical sentences
+  // stacked on the page did not say which model was missing.
   return (
     <Card title={title} subtitle={subtitle}>
-      <ul className="space-y-2" data-testid={testId}>
-        {rows.map(([key, weight]) => (
-          <li key={key} className="flex justify-between gap-4 border-b border-border py-1 text-sm">
-            <span>{labelFor(key)}</span><span className="tabular">{pct(weight)}</span>
-          </li>
-        ))}
-      </ul>
+      {rows.length ? (
+        <ul className="space-y-2" data-testid={testId}>
+          {rows.map(([key, weight]) => (
+            <li key={key} className="flex justify-between gap-4 border-b border-border py-1 text-sm">
+              <span>{labelFor(key)}</span><span className="tabular">{pct(weight)}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <Empty testId={`${testId}-empty`}>{empty}</Empty>
+      )}
     </Card>
   );
 }
 
 export default function Guidance({ user, onUserChange }) {
   const lang = useLang();
-  const { activeId } = usePortfolio();
+  const { activeId, basis } = usePortfolio();
+  // An empty portfolio is short of holdings, not of price history.
+  const held = useApi(() => valuation(activeId, basis), [activeId, basis]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const result = useApi(() => guidance(activeId), [activeId, user.risk_profile], { timeoutMs: 120000 });
@@ -65,21 +72,27 @@ export default function Guidance({ user, onUserChange }) {
         )}
       />
       <div className="mb-5 max-w-xs">
-        <Select label="Risk profile" value={user.risk_profile || "balanced"} onChange={changeProfile} disabled={saving} data-testid="guidance-risk-profile">
-          {PROFILE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{translate(label, lang)}</option>)}
-        </Select>
+        <Field label="Risk profile">
+          <Select label="Risk profile" value={user.risk_profile || "balanced"} onChange={changeProfile} disabled={saving} data-testid="guidance-risk-profile">
+            {PROFILE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{translate(label, lang)}</option>)}
+          </Select>
+        </Field>
         {saveError && <p role="alert" className="text-sm text-[var(--c-warn-text)]">{saveError}</p>}
       </div>
       <Async {...result} testId="guidance-result">
         {(data) => (
           <div className="space-y-5">
             <p className="text-sm text-muted" data-testid="guidance-window">
-              {translate("Personal:", lang)} {data.personal_window_days ? translate(data.personal_window_days === 1095 ? "3 years" : "1 year", lang) : translate("unavailable", lang)}
-              {data.benchmark_window_days ? ` · ${translate("Benchmark:", lang)} ${translate(data.benchmark_window_days === 1095 ? "3 years" : "1 year", lang)}` : ""}
-              {" · "}{translate(data.basis === "nominal_toman" ? "Nominal Toman (inflation data unavailable)" : "Real Toman", lang)}
+              {/* Only the windows that exist: "Personal: unavailable" named a
+                  missing thing without saying what it was. */}
+              {[
+                data.personal_window_days && `${translate("Personal:", lang)} ${translate(data.personal_window_days === 1095 ? "3 years" : "1 year", lang)}`,
+                data.benchmark_window_days && `${translate("Benchmark:", lang)} ${translate(data.benchmark_window_days === 1095 ? "3 years" : "1 year", lang)}`,
+                translate(data.basis === "nominal_toman" ? "Nominal Toman (inflation data unavailable)" : "Real Toman (after inflation)", lang),
+              ].filter(Boolean).join(" · ")}
             </p>
             {data.fallback_reason && <p className="text-sm text-[var(--c-warn-text)]" data-testid="guidance-fallback">{data.fallback_reason}</p>}
-            <Allocation title="For my portfolio" weights={data.personal?.target_weights} labelFor={labelFor} testId="guidance-personal" />
+            <Allocation empty={held.data && !held.data.items?.length ? "Add something to this portfolio first. This model works from what you own." : undefined} title="For my portfolio" weights={data.personal?.target_weights} labelFor={labelFor} testId="guidance-personal" />
             <Allocation title="Market benchmark" subtitle="The market-wide model for your risk profile: the share each listed asset would hold." weights={data.benchmark?.target_weights} labelFor={labelFor} testId="guidance-benchmark" />
           </div>
         )}

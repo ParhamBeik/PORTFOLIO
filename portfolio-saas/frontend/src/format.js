@@ -34,7 +34,7 @@ export const num = (n, d = 2) =>
 const ltr = (text) => "\u2066" + text + "\u2069";
 
 export const toman = (n) =>
-  bad(n) ? "—" : ltr(Number(n).toLocaleString("en-US", nf(0)) + " T");
+  bad(n) ? "—" : ltr(Number(n).toLocaleString("en-US", nf(0)) + "\u00a0T");
 
 // ﷼ is a strong right-to-left character, so whatever follows it in the same
 // line is laid out right-to-left too: the watchlist printed "9,190 ﷼ ·
@@ -52,8 +52,8 @@ export const rial = (n) =>
  * where rounding to the unit is a visible 0.5% error on a small holding.
  */
 const BASIS_MONEY = {
-  nominal_toman: (v) => ltr(v.toLocaleString("en-US", nf(0)) + " T"),
-  real_toman: (v) => ltr(v.toLocaleString("en-US", nf(0)) + " T"),
+  nominal_toman: (v) => ltr(v.toLocaleString("en-US", nf(0)) + "\u00a0T"),
+  real_toman: (v) => ltr(v.toLocaleString("en-US", nf(0)) + "\u00a0T"),
   usd_denominated: (v) => ltr("$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })),
   usdt_denominated: (v) => ltr(v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " USDT"),
 };
@@ -104,8 +104,13 @@ export const pctShare = (f, d = 1) => {
   return Number(f) > 0 && Number(f) < floor ? `<${(floor * 2 * 100).toFixed(d)}%` : pct(f, d);
 };
 
-const signed = (fn) => (v) =>
-  bad(v) ? "—" : (Number(v) > 0 ? "+" : "") + fn(v);
+// The sign goes inside the left-to-right run: outside it, a Persian page drew
+// "23,200,000 T+" and "5%+".
+const signed = (fn) => (v) => {
+  if (bad(v)) return "—";
+  const text = fn(v).replace(/^\u2066|\u2069$/g, "");
+  return ltr((Number(v) > 0 ? "+" : "") + text);
+};
 
 export const signedPct = signed(pct);
 export const signedToman = signed(toman);
@@ -116,14 +121,18 @@ export const signedToman = signed(toman);
  */
 export const indexPoint = (n) => (bad(n) ? "—" : num(n, 1));
 
+// B/M/K mean nothing to a Persian reader; the words do.
+const compactMark = (k) =>
+  currentLang() === "fa" ? { B: " میلیارد", M: " میلیون", K: " هزار" }[k] : k;
+
 /** Compact Toman for chart axes so ticks stay readable. */
 export function tomanCompact(n, digits = 1) {
   if (bad(n)) return "—";
   const v = Number(n);
   const a = Math.abs(v);
-  if (a >= 1e9) return (v / 1e9).toFixed(digits) + "B";
-  if (a >= 1e6) return (v / 1e6).toFixed(digits) + "M";
-  if (a >= 1e3) return (v / 1e3).toFixed(0) + "K";
+  if (a >= 1e9) return (v / 1e9).toFixed(digits) + compactMark("B");
+  if (a >= 1e6) return (v / 1e6).toFixed(digits) + compactMark("M");
+  if (a >= 1e3) return (v / 1e3).toFixed(0) + compactMark("K");
   return String(Math.round(v));
 }
 
@@ -144,9 +153,9 @@ export function moneyCompact(n, basis = "nominal_toman", digits = 1) {
   const a = Math.abs(v);
   const mark = basis === "usd_denominated" ? "$" : "";
   const tail = basis === "usdt_denominated" ? " USDT" : "";
-  if (a >= 1e9) return mark + (v / 1e9).toFixed(digits) + "B" + tail;
-  if (a >= 1e6) return mark + (v / 1e6).toFixed(digits) + "M" + tail;
-  if (a >= 1e3) return mark + (v / 1e3).toFixed(digits) + "K" + tail;
+  if (a >= 1e9) return mark + (v / 1e9).toFixed(digits) + compactMark("B") + tail;
+  if (a >= 1e6) return mark + (v / 1e6).toFixed(digits) + compactMark("M") + tail;
+  if (a >= 1e3) return mark + (v / 1e3).toFixed(digits) + compactMark("K") + tail;
   return money(v, basis);
 }
 
@@ -163,8 +172,18 @@ export function compactAxisDigits(max, interval) {
   return Math.min(3, Math.max(1, Math.ceil(-Math.log10(step) - 1e-9)));
 }
 
-// Gregorian, Tehran wall clock — the backend stores UTC, the reader is in Iran.
-const dtf = (opts) => new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Tehran", ...opts });
+// Tehran wall clock — the backend stores UTC, the reader is in Iran. A Persian
+// reader gets the Persian calendar and month names (Latin digits, as every
+// other number on the page): chart axes read "Sept 30, Oct 06" in Persian mode.
+const dtf = (opts) =>
+  currentLang() === "fa"
+    ? new Intl.DateTimeFormat("fa-IR-u-ca-persian-nu-latn", {
+        timeZone: "Asia/Tehran",
+        ...opts,
+        // "7 آبان", as `jalaliLabel` writes it, not "07 آبان" beside it.
+        ...(opts.day ? { day: "numeric" } : {}),
+      })
+    : new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Tehran", ...opts });
 
 export function date(iso) {
   const d = new Date(iso);
@@ -236,13 +255,19 @@ export const humanize = (code) =>
  * here and re-filled, so the number survives the translation.
  */
 const SERVER_PATTERNS = [
-  [/^Performance available after (\d+) more day\(s\) of tracking\.$/, "Performance available after {n} more day(s) of tracking."],
+  [/^Complete an opening baseline/, "Add what this portfolio holds to start measuring."],
+  [/^Unknown asset_key: (.+)\.$/, "Unknown asset code: {n}."],
+  [/^CSV headers must be exactly/, "The column headers do not match. Start from the template."],
+  // "day(s)" read as unfinished; the count picks the word.
+  [/^Performance available after (\d+) more day\(s\) of tracking\.$/, (n) =>
+    n === "1" ? "Performance available after 1 more day of tracking." : "Performance available after {n} more days of tracking."],
 ];
 export function serverText(text) {
   if (typeof text !== "string") return text;
   for (const [re, key] of SERVER_PATTERNS) {
     const m = text.match(re);
-    if (m) return translate(key, undefined, { n: m[1] });
+    // A count takes Persian digits only as a number (i18n.js `fill`).
+    if (m) return translate(typeof key === "function" ? key(m[1]) : key, undefined, { n: /^\d+$/.test(m[1]) ? Number(m[1]) : m[1] });
   }
   return translate(text);
 }
@@ -314,6 +339,25 @@ export const nativeName = (a) => {
  * Plain strings only -- confirm(), aria-label, title -- where `<bdi>` cannot go.
  */
 export const isolate = (text) => `\u2068${text}\u2069`;
+
+/**
+ * The status word for a holding's price. The server calls a price "live" when
+ * no newer one could exist -- which, with its market shut, is the last close.
+ * "Live" beside "Stocks closed" read as false, so it says "Last close" then.
+ * `markets` is the valuation's per-market clock list.
+ */
+export function isLastClose(item, markets = []) {
+  if (item?.quality_status !== "live") return false;
+  const group =
+    item.symbol || item.class === "Stock" ? "stocks"
+      : item.class === "Gold" || item.class === "Cash" ? "gold_fx"
+        : item.class === "Crypto" ? "crypto" : null;
+  const clock = (markets || []).find((m) => m.market === group);
+  return Boolean(clock && clock.open === false);
+}
+
+export const priceStatus = (item, markets = []) =>
+  isLastClose(item, markets) ? translate("Last close") : humanize(item?.quality_status);
 
 export const holdingLabel = (row) =>
   row?.label || row?.name_fa || row?.asset_name_fa || row?.asset ||

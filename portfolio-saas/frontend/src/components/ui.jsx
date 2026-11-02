@@ -402,7 +402,7 @@ export function Tabs({ options, value, onChange, label, testId, grid = false }) 
   return (
     <div
       role="group"
-      aria-label={label}
+      aria-label={t(label)}
       data-testid={testId}
       // One row that scrolls sideways when it runs out of width. Wrapping put
       // half the options on a second line and the control changed height when
@@ -449,10 +449,11 @@ export function Tabs({ options, value, onChange, label, testId, grid = false }) 
  *   "title"  — first line, left (the asset)
  *   "value"  — first line, right (the amount that matters)
  *   "meta"   — one small muted line under it, joined with "·"
+ *   "action" — a row button, at the end of that line (Save, Delete)
  *   omitted  — hidden until the card is expanded, then a labelled line
  * Expanding is a real button (aria-expanded), so it works without a pointer.
  */
-const MOBILE_SHOWN = new Set(["title", "value", "meta"]);
+const MOBILE_SHOWN = new Set(["title", "value", "meta", "action"]);
 
 export function Table({ columns, rows, rowKey, empty = "No rows.", testId, caption, rowClass, mobileCards = false }) {
   const t = useT();
@@ -460,6 +461,8 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
   if (!rows?.length) return <Empty testId={testId ? `${testId}-empty` : undefined}>{empty}</Empty>;
   const compact = mobileCards && columns.some((c) => c.mobile);
   const hasDetail = compact && columns.some((c) => !MOBILE_SHOWN.has(c.mobile));
+  // Only one thing may push to the end of the line, or a row button floats mid-card.
+  const hasAction = compact && columns.some((c) => c.mobile === "action");
   const toggle = (key) => setOpen((cur) => {
     const next = new Set(cur);
     if (next.has(key)) next.delete(key); else next.add(key);
@@ -478,6 +481,8 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
     const base = `px-3 py-2 sm:table-cell ${align}`;
     if (c.mobile === "title") return `${base} max-sm:order-1 max-sm:min-w-0 max-sm:flex-1 max-sm:px-1 max-sm:py-1 max-sm:font-medium`;
     if (c.mobile === "value") return `${base} max-sm:order-2 max-sm:px-1 max-sm:py-1 max-sm:text-right max-sm:font-medium max-sm:tabular-nums`;
+    // A button among the "·"-joined details read as one more detail.
+    if (c.mobile === "action") return `${base} max-sm:order-5 max-sm:ms-auto max-sm:px-1 max-sm:py-1`;
     if (c.mobile === "meta") {
       const sep = metaKeys.indexOf(c.key) > 0 ? "max-sm:before:me-1 max-sm:before:content-['·']" : "";
       return `${base} max-sm:order-4 max-sm:inline-flex max-sm:items-center max-sm:py-0 max-sm:pe-1 max-sm:ps-1 max-sm:text-xs max-sm:text-muted ${sep}`;
@@ -488,9 +493,9 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
   return (
     <div className={mobileCards ? "sm:overflow-x-auto" : "overflow-x-auto"}>
       <table data-testid={testId} className={`w-full text-sm ${mobileCards ? "block sm:table" : ""}`}>
-        {caption && <caption className="sr-only">{caption}</caption>}
+        {caption && <caption className="sr-only">{t(caption)}</caption>}
         <thead className={mobileCards ? "sr-only sm:not-sr-only" : ""}>
-          <tr className="border-b border-border text-left">
+          <tr className="border-b border-border text-start">
             {columns.map((c) => (
               <th
                 key={c.key}
@@ -510,6 +515,7 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
           {rows.map((row, i) => {
             const key = rowKey ? rowKey(row) : i;
             const expanded = open.has(key);
+            let metaShown = false;
             const card = compact
               ? "mb-2 flex flex-wrap items-baseline rounded-lg border border-border/60 px-2 py-1.5 last:mb-0 sm:mb-0 sm:table-row sm:rounded-none sm:border-x-0 sm:border-t-0 sm:p-0"
               : "mb-3 block rounded-lg border border-border/60 p-2 last:mb-0 sm:mb-0 sm:table-row sm:rounded-none sm:border-x-0 sm:border-t-0 sm:p-0";
@@ -517,15 +523,24 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
               <tr
                 key={key}
                 data-testid={testId ? `${testId}-row` : undefined}
-                className={`group border-b border-border/60 last:border-0 hover:bg-panel-2 ${mobileCards ? card : ""} ${
+                // A phone card keeps its border on the last row; only the desktop table drops it.
+                className={`group border-b border-border/60 ${mobileCards ? "sm:last:border-b-0" : "last:border-0"} hover:bg-panel-2 ${mobileCards ? card : ""} ${
                   rowClass?.(row) || ""
                 }`}
               >
                 {columns.map((c) => {
                   const content = c.render ? c.render(row) : row[c.key];
+                  // The "·" joins two details, so the first one showing has none.
+                  const leadsMeta = c.mobile === "meta" && content !== "—" && !metaShown;
+                  if (leadsMeta) metaShown = true;
                   const labelled = mobileCards && c.header && (!compact || !MOBILE_SHOWN.has(c.mobile));
                   return (
-                    <td key={c.key} data-meta={c.mobile === "meta" ? "" : undefined} className={cellClass(c, expanded)}>
+                    <td
+                      key={c.key}
+                      data-meta={c.mobile === "meta" ? "" : undefined}
+                      // An empty detail on a phone card is just "· —" noise.
+                      className={`${cellClass(c, expanded)} ${leadsMeta ? "max-sm:before:content-none!" : ""} ${mobileCards && c.mobile === "meta" && content === "—" ? "max-sm:hidden!" : ""}`}
+                    >
                       {labelled && <span className="shrink-0 text-xs font-medium uppercase text-muted sm:hidden">{t(c.header)}</span>}
                       {labelled ? (
                         <span className="min-w-0 text-right sm:contents">{content}</span>
@@ -533,11 +548,11 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
                     </td>
                   );
                 })}
+                {/* Ends the first line so the meta cells start a new one. */}
+                {compact && <td aria-hidden="true" className="order-3 basis-full sm:hidden" />}
                 {hasDetail && (
                   <>
-                    {/* Ends the first line so the meta cells start a new one. */}
-                    <td aria-hidden="true" className="order-3 basis-full sm:hidden" />
-                    <td className="order-5 ms-auto sm:hidden">
+                    <td className={`order-5 sm:hidden ${hasAction ? "" : "ms-auto"}`}>
                       <button
                         type="button"
                         aria-expanded={expanded}
@@ -665,7 +680,7 @@ export function Async({ data, error, loading, reload, children, empty, testId, m
  *  showing roughly three rows. */
 const MODAL_WIDTHS = { default: "max-w-lg", wide: "max-w-3xl" };
 
-export function Modal({ title, subtitle, onClose, children, footer, testId, size = "default" }) {
+export function Modal({ title, subtitle, onClose, children, footer, testId, size = "default", keepOnBackdrop = false }) {
   const t = useT();
   const panel = useRef(null);
   // Read through a ref so the effect below runs once per opening. Keyed on
@@ -732,7 +747,7 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
     <div
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:items-center"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget && !keepOnBackdrop) onClose();
       }}
     >
       <div
@@ -748,7 +763,7 @@ export function Modal({ title, subtitle, onClose, children, footer, testId, size
             <h2 className="text-base font-semibold">{t(title)}</h2>
             {subtitle && <p className="mt-1 text-sm text-muted">{t(subtitle)}</p>}
           </div>
-          <Button variant="ghost" onClick={onClose} aria-label="Close" data-testid={testId ? `${testId}-close` : undefined}>
+          <Button variant="ghost" onClick={onClose} aria-label={t("Close")} data-testid={testId ? `${testId}-close` : undefined}>
             ✕
           </Button>
         </header>

@@ -197,9 +197,12 @@ function expireSession() {
   window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
 }
 
-function apiError(message, status) {
+function apiError(message, status, reason) {
   const error = new Error(message);
   error.status = status;
+  // A machine-readable refusal ("no_recorded_cost"), so a page can answer an
+  // expected state with a next step instead of a red error box.
+  if (reason) error.reason = reason;
   return error;
 }
 
@@ -258,10 +261,14 @@ async function request(path, { method = "GET", body, _retried = false } = {}) {
     // any error the body didn't explain arrived as an Error with an empty
     // message, and the UI fell back to a bare "Something went wrong." with
     // nothing to act on. Say at least what the server said.
-    throw apiError(
+    const failure = apiError(
       extractError(detail) || res.statusText || `Request failed (${res.status}).`,
-      res.status
+      res.status,
+      typeof detail?.reason === "string" ? detail.reason : undefined
     );
+    // The CSV importer names the line at fault.
+    if (Number.isInteger(detail?.row)) failure.row = detail.row;
+    throw failure;
   }
   if (res.status === 204) return null;
   const data = await res.json();

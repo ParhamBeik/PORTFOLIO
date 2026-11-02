@@ -9,6 +9,7 @@ import {
   rial,
   money,
   unitPrice,
+  priceStatus,
   pct,
   pctShare,
   signedPct,
@@ -28,8 +29,8 @@ test("num formatters handle valid and invalid numbers gracefully", () => {
 });
 
 test("toman and rial format with correct currency suffixes", () => {
-  assert.equal(toman(50000), "\u206650,000 T\u2069");
-  assert.equal(toman(0), "\u20660 T\u2069");
+  assert.equal(toman(50000), "\u206650,000\u00a0T\u2069");
+  assert.equal(toman(0), "\u20660\u00a0T\u2069");
   assert.equal(toman(null), "—");
 
   assert.equal(rial(500000), "\u2066500,000 ﷼\u2069");
@@ -37,8 +38,8 @@ test("toman and rial format with correct currency suffixes", () => {
 });
 
 test("money formats across currency bases", () => {
-  assert.equal(money(12500, "nominal_toman"), "\u206612,500 T\u2069");
-  assert.equal(money(12500, "real_toman"), "\u206612,500 T\u2069");
+  assert.equal(money(12500, "nominal_toman"), "\u206612,500\u00a0T\u2069");
+  assert.equal(money(12500, "real_toman"), "\u206612,500\u00a0T\u2069");
   assert.equal(money(1250.5, "usd_denominated"), "\u2066$1,250.50\u2069");
   assert.equal(money(1250.5, "usdt_denominated"), "\u20661,250.50 USDT\u2069");
   assert.equal(money(null, "usd_denominated"), "—");
@@ -46,7 +47,7 @@ test("money formats across currency bases", () => {
 
 test("unitPrice formats TSE quotes as rial and others as toman, with USD sub-unit precision", () => {
   assert.equal(unitPrice(3000, "rial", "nominal_toman"), "\u20663,000 ﷼\u2069");
-  assert.equal(unitPrice(300, "toman", "nominal_toman"), "\u2066300 T\u2069");
+  assert.equal(unitPrice(300, "toman", "nominal_toman"), "\u2066300\u00a0T\u2069");
 
   // USD basis: sub-unit share prices (< 1) keep up to 6 decimals
   assert.equal(unitPrice(0.046348, "rial", "usd_denominated"), "\u2066$0.046348\u2069");
@@ -62,12 +63,12 @@ test("pct converts fractions to formatted percentage strings", () => {
 });
 
 test("signed formatters add + prefix to positive numbers only", () => {
-  assert.equal(signedPct(0.05), "+5%");
-  assert.equal(signedPct(-0.05), "-5%");
-  assert.equal(signedPct(0), "0%");
+  assert.equal(signedPct(0.05), "\u2066+5%\u2069");
+  assert.equal(signedPct(-0.05), "\u2066-5%\u2069");
+  assert.equal(signedPct(0), "\u20660%\u2069");
 
-  assert.equal(signedToman(1000), "+\u20661,000 T\u2069");
-  assert.equal(signedToman(-1000), "\u2066-1,000 T\u2069");
+  assert.equal(signedToman(1000), "\u2066+1,000\u00a0T\u2069");
+  assert.equal(signedToman(-1000), "\u2066-1,000\u00a0T\u2069");
 });
 
 test("indexPoint formats unitless rebased series points", () => {
@@ -95,4 +96,11 @@ test("a tiny but real share reads <0.1%, never 0%", () => {
   assert.equal(pctShare(0), "0%");
   assert.equal(pctShare(0.25), "25%");
   assert.equal(pctShare(null), "—");
+});
+
+test("a live price on a shut market reads as its last close", () => {
+  const markets = [{ market: "stocks", open: false }, { market: "gold_fx", open: true }];
+  assert.equal(priceStatus({ quality_status: "live", class: "Stock", symbol: "کاما" }, markets), "Last close");
+  assert.equal(priceStatus({ quality_status: "live", class: "Gold" }, markets), "Live");
+  assert.equal(priceStatus({ quality_status: "stale", class: "Stock" }, markets), "Stale");
 });

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { translate, useT, useLang } from "../i18n.js";
+import { Link } from "react-router-dom";
 import { comparison, ensureAsset, searchAssetCatalog } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
@@ -7,6 +8,7 @@ import {
   Async,
   Card,
   Button,
+  Empty,
   ErrorState,
   Input,
   PageHeader,
@@ -15,17 +17,21 @@ import {
   Table,
   Tabs,
 } from "../components/ui.jsx";
-import { humanize, num, rial, signedPct, toman } from "../format.js";
+import { humanize, isolate, num, rial, signedPct, toman } from "../format.js";
 import { useApi } from "../useApi.js";
+
+// Refusals that mean "nothing paid on record yet", not "something broke".
+const NEEDS_COST = new Set(["no_recorded_cost", "no_purchase_history"]);
 
 // 0 means "as far back as my own purchases go", which is the answer this page is
 // usually asked for. The others are the windows the rest of the app already
 // offers, so a user does not learn a second vocabulary of ranges here.
+// Shortest first, as on Home: the two pages listed the same idea in opposite orders.
 const RANGES = [
-  { value: "0", label: "All" },
-  { value: "365", label: "1Y" },
-  { value: "180", label: "6M" },
   { value: "90", label: "90D" },
+  { value: "180", label: "6M" },
+  { value: "365", label: "1Y" },
+  { value: "0", label: "All" },
 ];
 
 // Whole units are noise on 27M shares, but 0.25 BTC is not "0".
@@ -416,9 +422,16 @@ export default function Comparison() {
                 />
               )}
               {!holdings.length ? (
-                <p className="text-sm text-muted" data-testid="comparison-no-holdings">
-                  {translate("This portfolio has no priced positions to compare yet. Record a purchase in the Ledger first.", lang)}
-                </p>
+                <Empty
+                  testId="comparison-no-holdings"
+                  action={
+                    <Link to="/activity?add=trade" className="inline-flex min-h-10 items-center rounded-md bg-[var(--c-accent-fill)] px-4 text-sm font-medium text-white hover:opacity-90">
+                      {translate("Add something you bought", lang)}
+                    </Link>
+                  }
+                >
+                  This portfolio has no priced positions to compare yet.
+                </Empty>
               ) : (
                 <>
                   <div className="mb-4 flex flex-wrap items-end gap-4">
@@ -461,9 +474,14 @@ export default function Comparison() {
                   .
                 </p>
               )}
-              {failure ? (
-                // Most refusals here are data limits with a sentence attached
-                // — a position with no recorded cost has nothing to replay.
+              {!holdings.length ? null : NEEDS_COST.has(failure?.reason) ? (
+                // Not a fault, and deliberately no call to action: turning an
+                // opening into a purchase would take its cost out of the cash balance.
+                <Empty testId="comparison-needs-cost">
+                  {translate("Compare replays purchases from the day they happened. {name} is recorded as already owned, so it has no purchase date, even if you noted what you paid. Anything you record with “I bought it” can be compared.", lang, { name: isolate(holdings.find((h) => h.key === subject)?.label || "") })}
+                </Empty>
+              ) : failure ? (
+                // Other refusals are data limits with a sentence attached.
                 <ErrorState error={failure} testId="comparison-result" />
               ) : asked.length ? (
                 <div data-testid="comparison-result">

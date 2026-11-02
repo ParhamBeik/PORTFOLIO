@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { translate, useLang } from "../i18n.js";
 import { listAssets, priceHistory } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
+import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { Async, Card, Empty, PageHeader, Select, Tabs } from "../components/ui.jsx";
 import { catalogLabel, date, num, toman } from "../format.js";
 import { useApi } from "../useApi.js";
@@ -23,6 +24,11 @@ function nativePrice(value, unit) {
 export default function AssetHistory() {
   const lang = useLang();
   const assets = useApi(listAssets, []);
+  const { accounts } = usePortfolio();
+  const held = useMemo(
+    () => new Set((accounts || []).flatMap((a) => (a.holdings || []).map((h) => h.asset_key))),
+    [accounts],
+  );
   const [assetKey, setAssetKey] = useState("");
   const [window, setWindow] = useState("365");
 
@@ -32,9 +38,10 @@ export default function AssetHistory() {
   );
 
   useEffect(() => {
-    if (!assetKey && choices.length) setAssetKey(choices[0].key);
+    // Something the user owns, not whichever asset sorts first.
+    if (!assetKey && choices.length) setAssetKey((choices.find((a) => held.has(a.key)) || choices[0]).key);
     if (assetKey && !choices.some((asset) => asset.key === assetKey)) setAssetKey("");
-  }, [assetKey, choices]);
+  }, [assetKey, choices, held]);
 
   const selected = choices.find((asset) => asset.key === assetKey);
   const history = useApi(
@@ -99,7 +106,7 @@ export default function AssetHistory() {
                 aria-busy={history.loading || undefined}
               >
                 <MultiLineTrend
-                  series={[{ key: "price", name: `${data.asset.symbol} (${unit})` }]}
+                  series={[{ key: "price", name: `${selected ? catalogLabel(selected) : data.asset.name} (${translate(unit, lang)})` }]}
                   data={rows}
                   longTicks={rows.length > 180}
                   formatValue={(value) => nativePrice(value, unit)}
@@ -107,7 +114,7 @@ export default function AssetHistory() {
                   label={`${data.asset.name} price history`}
                 />
                 <p className="text-xs text-muted" data-testid="asset-history-note">
-                  {translate("Source: {source}. {first} → {last}.", lang, { source: data.source, first: date(data.earliest_date), last: date(data.latest_date) })}
+                  {translate("Source: {source}. {first} → {last}.", lang, { source: translate(data.source, lang), first: date(data.earliest_date), last: date(data.latest_date) })}
                   {data.asset.asset_class === "Crypto" &&
                     " Crypto history begins when this deployment started collecting it; earlier prices are not inferred."}
                 </p>

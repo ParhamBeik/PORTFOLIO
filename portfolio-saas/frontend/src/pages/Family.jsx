@@ -21,9 +21,9 @@ import { allocationByClass, serverText, money, moneyCompact, pct, perfLabel, sig
 import { useApi } from "../useApi.js";
 
 const RANGES = [
-  { value: "30", label: "30d" },
-  { value: "90", label: "90d" },
-  { value: "365", label: "1y" },
+  { value: "30", label: "30D" },
+  { value: "90", label: "90D" },
+  { value: "365", label: "1Y" },
   { value: "all", label: "All" },
 ];
 
@@ -166,20 +166,27 @@ function HistoryCharts({ accounts, basis }) {
     >
       <Async {...state} testId="breakdown-history-body" empty="Not enough history yet.">
         {(history) => {
-          const chart = collapseForChart(seriesMeta, history.values, history.shares);
+          const collapsed = collapseForChart(seriesMeta, history.values, history.shares);
+          // A portfolio that has never held anything is only a flat line on zero.
+          const chart = {
+            ...collapsed,
+            series: collapsed.series.filter((s) => collapsed.values.some((row) => Number(row[s.key]))),
+          };
           const longTicks = range === "365" || range === "all";
           if (!chart.values.length) return <Empty>No snapshot history for this range.</Empty>;
           return (
             <div className="space-y-6">
-              <div>
-                <h3 className="mb-2 text-sm font-medium text-muted">{translate("Share of combined total", lang)}</h3>
-                <StackedShareTrend
-                  series={chart.series}
-                  data={chart.shares}
-                  longTicks={longTicks}
-                  label="Portfolio share over time"
-                />
-              </div>
+              {chart.series.length > 1 && (
+                <div>
+                  <h3 className="mb-2 text-sm font-medium text-muted">{translate("Share of combined total", lang)}</h3>
+                  <StackedShareTrend
+                    series={chart.series}
+                    data={chart.shares}
+                    longTicks={longTicks}
+                    label="Portfolio share over time"
+                  />
+                </div>
+              )}
               <div>
                 <h3 className="mb-2 text-sm font-medium text-muted">{translate("Absolute net worth", lang)}</h3>
                 <MultiLineTrend
@@ -213,13 +220,15 @@ function PerformanceTable({ accounts, basis }) {
           <>
           <Table
             testId="breakdown-performance-table"
+            mobileCards
             rowKey={(r) => r.id}
             rows={rows}
             columns={[
-              { key: "name", header: "Portfolio", render: (r) => r.name },
+              { key: "name", header: "Portfolio", mobile: "title", render: (r) => r.name },
               {
                 key: "twr",
                 header: perfLabel.twr,
+                mobile: "meta",
                 align: "right",
                 render: (r) =>
                   r.performance_available ? (
@@ -231,6 +240,7 @@ function PerformanceTable({ accounts, basis }) {
               {
                 key: "xirr",
                 header: perfLabel.xirr,
+                mobile: "meta",
                 align: "right",
                 render: (r) =>
                   r.performance_available ? (
@@ -242,6 +252,7 @@ function PerformanceTable({ accounts, basis }) {
               {
                 key: "status",
                 header: "Status",
+                mobile: "meta",
                 render: (r) =>
                   r.performance_available ? (
                     <Badge variant="good">Ready</Badge>
@@ -278,7 +289,7 @@ function AssetMix({ accounts, basis }) {
           if (!groups.length) return null;
           return (
             <Disclosure key={account.id} summary={`${account.name} · ${money(account.total, basis)}`} testId={`breakdown-mix-${account.id}`} open>
-              <Donut data={groups} height={220} valueFormat={(v) => money(v, basis)} testId={`breakdown-donut-${account.id}`} />
+              <Donut data={groups} height={220} totalLabel="Total assets" valueFormat={(v) => money(v, basis)} testId={`breakdown-donut-${account.id}`} />
             </Disclosure>
           );
         })}
@@ -288,6 +299,7 @@ function AssetMix({ accounts, basis }) {
 }
 
 export default function Family() {
+  const lang = useLang();
   const { basis, accounts: portfolioAccounts } = usePortfolio();
   const state = useApi(() => valuation(null, basis), [basis], { pollMs: 60000 });
 
@@ -296,6 +308,7 @@ export default function Family() {
       <PageHeader
         title="Portfolio Breakdown"
         subtitle="How each portfolio contributes to your combined net worth — current allocation, share over time, and performance."
+        meta={<p className="mt-1 text-sm text-muted" data-testid="breakdown-scope">{translate("Always covers all your portfolios, whichever one is selected above.", lang)}</p>}
       />
       <Async {...state} testId="breakdown-body">
         {(data) => {
@@ -322,7 +335,9 @@ export default function Family() {
             );
           }
 
-          const shareDonut = rows.map((r) => ({ name: r.name, value: Number(r.total) || 0 }));
+          const shareDonut = rows
+            .map((r) => ({ name: r.name, value: Number(r.total) || 0 }))
+            .filter((r) => r.value > 0);
 
           return (
             <div className="space-y-5">
@@ -336,10 +351,13 @@ export default function Family() {
                 />
               </div>
 
-              <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-                <Card title="Current allocation" testId="breakdown-allocation">
-                  <Donut data={shareDonut} valueFormat={(v) => money(v, rowBasis)} testId="breakdown-allocation-donut" />
-                </Card>
+              <div className={`grid grid-cols-1 gap-5 ${shareDonut.length > 1 ? "lg:grid-cols-2" : ""}`}>
+                {/* One funded portfolio makes this a plain full ring. */}
+                {shareDonut.length > 1 && (
+                  <Card title="Current allocation" testId="breakdown-allocation">
+                    <Donut data={shareDonut} valueFormat={(v) => money(v, rowBasis)} testId="breakdown-allocation-donut" />
+                  </Card>
+                )}
                 <Card title="Portfolio summary" testId="breakdown-table-card">
                   <Table
                     testId="breakdown-table"

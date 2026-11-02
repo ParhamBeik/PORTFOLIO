@@ -2,7 +2,7 @@ import { accountDataQuality, valuation } from "../api.js";
 import { translate, useLang } from "../i18n.js";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import { Async, Badge, Card, Table } from "../components/ui.jsx";
-import { ago, dateTime, holdingLabel, humanize } from "../format.js";
+import { ago, dateTime, holdingLabel, humanize, isLastClose, priceStatus } from "../format.js";
 import { useApi } from "../useApi.js";
 
 const LIVE_TONE = { live: "good", manual: "neutral", stale: "warn", quota: "warn", fallback: "warn", unavailable: "critical" };
@@ -13,7 +13,7 @@ const REPAIR_TONE = {
 const REPAIR_LABEL = {
   complete: "Complete", refresh_due: "Complete · refresh due", awaiting_data: "Waiting for first data",
   not_tried: "Queued", failed: "Retrying after failures", suspended: "Paused by operator",
-  unfetchable: "Provider has no data", not_scheduled: "No backfill job",
+  unfetchable: "Provider has no data", not_scheduled: "Not scheduled yet",
 };
 
 /**
@@ -42,20 +42,22 @@ export default function DataHealth() {
               rows={data.items || []}
               empty="No holdings to check."
               columns={[
-                { key: "label", header: "Holding", render: (r) => <bdi>{holdingLabel(r)}</bdi> },
-                { key: "source", header: "Source", render: (r) => r.source || "—" },
+                { key: "label", header: "Holding", mobile: "title", render: (r) => <bdi>{holdingLabel(r)}</bdi> },
+                { key: "source", header: "Source", mobile: "meta", render: (r) => r.source || "—" },
                 {
                   key: "priced_at",
                   header: "Priced",
+                  mobile: "meta",
                   render: (r) => (r.priced_at ? <span title={dateTime(r.priced_at)}>{ago(r.age_seconds)}</span> : "—"),
                 },
                 {
                   key: "quality_status",
                   header: "Status",
+                  mobile: "value",
                   align: "right",
                   render: (r) => (
-                    <Badge variant={LIVE_TONE[r.quality_status] || "neutral"}>
-                      {humanize(r.quality_status || "unknown")}
+                    <Badge variant={isLastClose(r, data.markets) ? "neutral" : LIVE_TONE[r.quality_status] || "neutral"}>
+                      {r.quality_status ? priceStatus(r, data.markets) : humanize("unknown")}
                       {r.price_unit_status === "unverified" ? " · unit unverified" : ""}
                     </Badge>
                   ),
@@ -89,16 +91,18 @@ function HistoryHealth({ account }) {
             rows={data.assets || []}
             empty="No priced holdings in this portfolio."
             columns={[
-              { key: "symbol", header: "Holding", render: (r) => <bdi>{r.symbol || r.asset_key}</bdi> },
+              { key: "symbol", header: "Holding", mobile: "title", render: (r) => <bdi>{holdingLabel(r)}</bdi> },
               {
                 key: "gate",
                 header: "History",
+                mobile: "meta",
                 render: (r) =>
                   r.passes_gate == null ? translate("Manual value", lang) : r.passes_gate ? translate("Complete enough", lang) : (r.reason_codes || []).map(humanize).join(", ") || translate("Gaps", lang),
               },
               {
                 key: "repair",
                 header: "Backfill",
+                mobile: "value",
                 align: "right",
                 render: (r) =>
                   r.repair_state ? (

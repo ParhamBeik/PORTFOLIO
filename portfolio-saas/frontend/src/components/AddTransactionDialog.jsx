@@ -320,6 +320,7 @@ export default function AddTransactionDialog({
 
   const canContinue = () => {
     if (!targetAccountId) return false;
+    if (current === "category") return !!category;
     if (current === "asset") return !!assetKey || newProperty;
     if (current === "action") return !!action && (action !== "sell" || Number(holding?.quantity || 0) > 0);
     if (current === "amount") {
@@ -349,7 +350,7 @@ export default function AddTransactionDialog({
     const today = !form.when;
     const when = today ? "" : jalaliLabel(toJalali(new Date(form.when)));
     // Named exactly as the tile the user just clicked, coin included.
-    const name = newProperty ? form.name || t("the property") : isolate(catalogLabel(asset || {}));
+    const name = newProperty ? (form.name ? isolate(form.name) : t("the property")) : isolate(catalogLabel(asset || {}));
     if (isCashMove) {
       const key = { deposit: "Add {amount}", fee: "Pay {amount}" }[action] || "Take out {amount}";
       return t(today ? `${key} — today.` : `${key} — {when}.`, { amount: toman(form.amount), when });
@@ -358,7 +359,8 @@ export default function AddTransactionDialog({
       const sqm = form.areaSqm || holding?.area_sqm;
       const value = Number(sqm || 0) * Number(form.pricePerSqm || 0) * 1e6;
       return t("{name}: {area} at {perSqm} — {value}, as of {when}.", {
-        name, area: area(sqm), perSqm: perSqm(Number(form.pricePerSqm || 0) * 1e6),
+        // Isolated, or "80 m²" and "100,000,000 T / m²" reorder inside a Persian sentence.
+        name, area: isolate(area(sqm)), perSqm: isolate(perSqm(Number(form.pricePerSqm || 0) * 1e6)),
         value: toman(value), when: today ? t("today") : when,
       });
     }
@@ -369,7 +371,18 @@ export default function AddTransactionDialog({
       return t("Record {q} extra {name} shares — {when}.", { q: form.quantity, name, when: today ? t("today") : when });
     }
     if (action === "opening_position") {
-      return t("Record that you already hold {q} {name} — as of {when}.", { q: form.quantity, name, when: today ? t("today") : when });
+      // The server pins an opening to the tracking start, whatever day was picked.
+      const start = targetAccount?.tracking_started_at;
+      const asOf = start ? jalaliLabel(toJalali(new Date(start))) : today ? t("today") : when;
+      // An opening adds to what is held; "already hold 50" read as replacing 100,000.
+      const held = Number(holding?.quantity || 0);
+      if (held > 0) {
+        return t("Add {q} {name} you already owned — {total} in all, as of {when}.", {
+          q: form.quantity, name, when: asOf,
+          total: (held + Number(form.quantity || 0)).toLocaleString("en-US", { maximumFractionDigits: 6 }),
+        });
+      }
+      return t("Record that you already hold {q} {name} — as of {when}.", { q: form.quantity, name, when: asOf });
     }
     const verb = t({ buy: "Buy", sell: "Sell" }[action] || "Record");
     // A stock's unit price is Rial, so the total is Rial/10. Printing both with
@@ -378,6 +391,10 @@ export default function AddTransactionDialog({
       ? (Number(form.quantity) * Number(form.price)) / 10
       : Number(form.quantity) * Number(form.price);
     const vars = { verb, q: form.quantity, name, when };
+    if (priceIsMine && !form.price) {
+      // "at today's market price" was wrong the moment the box was ticked.
+      return t(action === "sell" ? "{verb} {q} {name} — enter the price you sold at." : "{verb} {q} {name} — enter the price you paid.", vars);
+    }
     if (priceIsMine && form.price) {
       // "now" reads as a time, not a date: "at the market price for that
       // date — now" was the sentence this used to print for the commonest case.
@@ -481,11 +498,14 @@ export default function AddTransactionDialog({
     <Modal
       title="Add to this portfolio"
       onClose={onClose}
+      // Past the first step a stray tap outside would throw away what was entered.
+      keepOnBackdrop={step > 0 && !saved}
       testId="add-transaction"
       size="wide"
       footer={
         <>
-          <Button onClick={back} disabled={step === 0 || busy || saved} data-testid="add-transaction-back">
+          {/* Kept in the layout on the first step so Continue does not jump sides. */}
+          <Button onClick={back} disabled={step === 0 || busy || saved} className={step === 0 ? "invisible" : ""} data-testid="add-transaction-back">
             Back
           </Button>
           {saved ? (
@@ -565,11 +585,15 @@ export default function AddTransactionDialog({
           <p className="text-sm text-muted">
             <span data-testid="add-transaction-portfolio">{targetAccount.name}</span>
             {!isCashMove && assetKey && !asset?.is_house && (
-              <span data-testid="add-transaction-owned"> · {t("you hold {n}", { n: Number(holding?.quantity || 0).toLocaleString() })}</span>
+              <span data-testid="add-transaction-owned">
+                {/* Named, so step 3 onward still says which asset this is. */}
+                {" · "}<bdi>{catalogLabel(asset || picked || {})}</bdi>
+                {" · "}{t("you hold {n}", { n: Number(holding?.quantity || 0).toLocaleString() })}
+              </span>
             )}
           </p>
         )}
-        {action === "sell" && Number(form.quantity) > Number(holding?.quantity || 0) && <p role="alert" className="text-sm text-[var(--c-critical-text)]" data-testid="add-transaction-oversell">You cannot sell more than you hold.</p>}
+        {action === "sell" && Number(form.quantity) > Number(holding?.quantity || 0) && <p role="alert" className="text-start text-sm text-[var(--c-critical-text)]" data-testid="add-transaction-oversell">{t("You cannot sell more than you hold.")}</p>}
         {targetAccountId && current === "category" && (
           <Step n={stepNumber} of={totalSteps} title="What kind of thing is it?">
             <div className="grid gap-2 sm:grid-cols-2">
@@ -770,16 +794,28 @@ export default function AddTransactionDialog({
                   )}
                 </Field>
               )}
-              <Field label={targetAccount?.tracking_started_at && action === "opening_position"
-                ? "When? (existing positions use the portfolio's tracking start)"
-                : "When?"}>
-                <JalaliDateField
-                  value={form.when}
-                  onChange={(iso) => setForm((f) => ({ ...f, when: iso }))}
-                  todayLabel="Recorded as of today"
-                  testId="add-transaction-when"
-                />
-              </Field>
+              {/* The server pins an opening to the portfolio's tracking start, so a
+                  calendar here would offer a choice that is silently ignored. */}
+              {targetAccount?.tracking_started_at && action === "opening_position" ? (
+                <p className="text-xs text-muted" data-testid="add-transaction-opening-date">
+                  {t(
+                    // A property is only ever declared, so there is no "I bought it" to point to.
+                    isProperty || newProperty || asset?.is_house
+                      ? "Recorded from this portfolio's tracking start, {date}."
+                      : "Recorded from this portfolio's tracking start, {date}. To keep an older date, choose “I bought it”.",
+                    { date: jalaliLabel(toJalali(new Date(targetAccount.tracking_started_at))) }
+                  )}
+                </p>
+              ) : (
+                <Field label="When?">
+                  <JalaliDateField
+                    value={form.when}
+                    onChange={(iso) => setForm((f) => ({ ...f, when: iso }))}
+                    todayLabel="Recorded as of today"
+                    testId="add-transaction-when"
+                  />
+                </Field>
+              )}
             </div>
           </Step>
         )}
@@ -787,6 +823,14 @@ export default function AddTransactionDialog({
         {current === "review" && (
           <Step n={stepNumber} of={totalSteps} title="Check it over">
             <div className="space-y-3">
+              {/* A warning, not a refusal: the ledger allows cash below zero, and an
+                  extra zero is the mistake this catches. */}
+              {isCashMove && action !== "deposit" && targetAccount?.cash_balance_tomans != null &&
+                Number(form.amount) > Number(targetAccount.cash_balance_tomans) && (
+                <p role="status" className="text-sm text-[var(--c-warn-text)]" data-testid="add-transaction-over-cash">
+                  {t("This is more than the {cash} cash in this portfolio. Check the amount; you can still save it.", { cash: toman(targetAccount.cash_balance_tomans) })}
+                </p>
+              )}
               {needsPrice && (
                 <>
                   {!asset?.is_manual && (
@@ -797,11 +841,11 @@ export default function AddTransactionDialog({
                         onChange={(e) => setOwnPrice(e.target.checked)}
                         data-testid="add-transaction-own-price"
                       />
-                      {t("I paid a different price than the market")}
+                      {t(action === "sell" ? "I sold at a different price than the market" : "I paid a different price than the market")}
                     </label>
                   )}
                   {priceIsMine ? (
-                    <Field label={`Price for one (${priceUnitLabel})`}>
+                    <Field label={t("Price for one ({unit})", { unit: t(priceUnitLabel) })}>
                       <Input
                         label="Unit price"
                         type="number"
@@ -813,7 +857,9 @@ export default function AddTransactionDialog({
                       />
                       {Number(form.price) > 0 && Number(form.quantity) > 0 && (
                         <p className="mt-1 text-xs text-muted" data-testid="add-transaction-total">
-                          {t("Total")}: {(Number(form.price) * Number(form.quantity)).toLocaleString("en-US", { maximumFractionDigits: 0 })} {priceUnitLabel}
+                          {/* In Toman like the summary below it: a Rial total over a Toman
+                              summary read as two different amounts. */}
+                          {t("Total")}: {toman(priceIsRial ? (Number(form.price) * Number(form.quantity)) / 10 : Number(form.price) * Number(form.quantity))}
                         </p>
                       )}
                     </Field>
@@ -835,9 +881,9 @@ export default function AddTransactionDialog({
                   label={
                     isProperty
                       ? "What did you pay per square meter? (millions of Toman, optional)"
-                      : `What did you pay for one? (${priceUnitLabel}, optional)`
+                      : t("What did you pay for one? ({unit}, optional)", { unit: t(priceUnitLabel) })
                   }
-                  hint="Fills in your cost basis and unrealized gain. Leave it blank if you would rather not say."
+                  hint="Lets the app show your profit or loss. Leave it blank if you would rather not say."
                 >
                   <Input
                     label="Purchase price"
@@ -851,10 +897,9 @@ export default function AddTransactionDialog({
                   />
                 </Field>
               )}
-              {action === "opening_position" && targetAccount?.tracking_started_at && form.when && (
+              {action === "opening_position" && targetAccount?.tracking_started_at && form.when && !isProperty && !newProperty && !asset?.is_house && (
                 <p className="text-xs text-muted" data-testid="add-transaction-opening-note">
-                  This portfolio already has a tracking start. The server will use that shared
-                  timestamp for this opening; choose “I bought it” to preserve an older purchase date.
+                  {t("This portfolio already has a tracking start, so this opening is recorded there. Choose “I bought it” to keep an older purchase date.")}
                 </p>
               )}
               <Field label="Note (optional)">

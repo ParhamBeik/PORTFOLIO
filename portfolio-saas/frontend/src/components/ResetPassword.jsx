@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { confirmPasswordReset } from "../api.js";
+import { useT } from "../i18n.js";
 import Logo from "./Logo.jsx";
 import { Button, Field, Input } from "./ui.jsx";
 
 export default function ResetPassword() {
+  const t = useT();
   const [params] = useSearchParams();
   const uid = params.get("uid") || "";
   const token = params.get("token") || "";
@@ -30,7 +32,7 @@ export default function ResetPassword() {
       });
       setDone(true);
     } catch (err) {
-      setError(err.message || "This reset link is invalid or has expired.");
+      setError(err.message || t("This reset link is invalid or has expired."));
     } finally {
       setBusy(false);
     }
@@ -47,13 +49,13 @@ export default function ResetPassword() {
       >
         <h1 className="flex items-center gap-2 text-xl font-semibold text-text">
           <Logo size={36} />
-          <span>Reset password</span>
+          <span>{t("Reset password")}</span>
         </h1>
-        <p className="mt-1 text-sm text-muted">Choose a new password for this account.</p>
+        <p className="mt-1 text-sm text-muted">{t("Choose a new password for this account.")}</p>
 
         {(!uid || !token) && (
           <p className="mt-4 text-sm text-[var(--c-critical-text)]" data-testid="reset-missing-link">
-            This page needs a reset link from your email.
+            {t("This page needs a reset link from your email.")}
           </p>
         )}
 
@@ -65,11 +67,10 @@ export default function ResetPassword() {
 
         {done ? (
           <p className="mt-4 text-sm text-[var(--c-good-text)]" data-testid="reset-done">
-            Password updated.{" "}
+            {t("Password updated.")}{" "}
             <Link to="/" className="underline">
-              Sign in
-            </Link>{" "}
-            with the new password.
+              {t("Sign in with the new password.")}
+            </Link>
           </p>
         ) : (
           <>
@@ -97,7 +98,7 @@ export default function ResetPassword() {
                 />
               </Field>
               {mismatch && (
-                <p className="text-xs text-[var(--c-critical-text)]">The two passwords do not match.</p>
+                <p className="text-xs text-[var(--c-critical-text)]">{t("The two passwords do not match.")}</p>
               )}
             </div>
             <Button
@@ -114,7 +115,7 @@ export default function ResetPassword() {
 
         <p className="mt-4 text-sm">
           <Link to="/" className="text-[var(--c-accent-text)] underline underline-offset-2">
-            Back to sign in
+            {t("Back to sign in")}
           </Link>
         </p>
       </form>

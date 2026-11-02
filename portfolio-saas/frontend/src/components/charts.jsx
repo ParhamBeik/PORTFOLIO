@@ -121,6 +121,7 @@ export function useChartTokens() {
  * leaves the departed series on screen.
  */
 function EChart({ option, height, label, testId, className = "w-full", onReady }) {
+  const tr = useT();
   const host = useRef(null);
   const chart = useRef(null);
   // The newest option, readable from the mount effect. A chart that mounts late
@@ -190,7 +191,7 @@ function EChart({ option, height, label, testId, className = "w-full", onReady }
       className={className}
       style={{ height }}
       role="img"
-      aria-label={label}
+      aria-label={label ? tr(label) : undefined}
       data-testid={testId}
     />
   );
@@ -641,7 +642,7 @@ export function GroupedBar({ data, labels, height = 300, label = "Comparison", t
  * light-mode palette slots that sit under 3:1 against white, so identity is
  * never colour-alone.
  */
-export function Donut({ data, height = 260, label = "Allocation breakdown", valueFormat = toman, testId }) {
+export function Donut({ data, height = 260, label = "Allocation breakdown", valueFormat = toman, testId, totalLabel = "Total" }) {
   const t = useChartTokens();
   // Class names ("Gold", "Cash") have Persian entries; a user's own portfolio
   // or holding name has none and comes back unchanged.
@@ -702,7 +703,7 @@ export function Donut({ data, height = 260, label = "Allocation breakdown", valu
           aria-live="polite"
           data-testid={testId ? `${testId}-readout` : undefined}
         >
-          <span className="max-w-full truncate text-xs text-muted">{shown ? tr(shown.name) : tr("Total")}</span>
+          <span className="max-w-full truncate text-xs text-muted">{shown ? tr(shown.name) : tr(totalLabel)}</span>
           <span className="tabular max-w-full truncate text-sm font-semibold text-text">
             {valueFormat(shown ? Number(shown.value) : rows.reduce((s, d) => s + Number(d.value || 0), 0))}
           </span>
@@ -721,7 +722,7 @@ export function Donut({ data, height = 260, label = "Allocation breakdown", valu
               onFocus={() => select(i)}
               onClick={() => select(i)}
               aria-pressed={active === i}
-              className={`flex min-h-10 w-full items-center gap-2 rounded-md px-2 text-left ${active === i ? "bg-panel-2" : ""}`}
+              className={`flex min-h-10 w-full items-center gap-2 rounded-md px-2 text-start ${active === i ? "bg-panel-2" : ""}`}
             >
               <span
                 aria-hidden="true"

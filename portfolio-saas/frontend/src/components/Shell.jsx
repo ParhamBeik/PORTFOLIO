@@ -140,7 +140,7 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
         id="app-nav-panel"
         role="dialog"
         aria-modal="true"
-        aria-label="Menu"
+        aria-label={t("Menu")}
         data-testid="nav-drawer"
         className="app-drawer"
       >
@@ -149,7 +149,7 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
           <Button
             variant="ghost"
             onClick={onClose}
-            aria-label="Close menu"
+            aria-label={t("Close menu")}
             data-testid="nav-close"
           >
             ✕
@@ -157,7 +157,7 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-4">
-          <nav aria-label="Primary" className="app-nav-stack" data-testid="nav-mobile">
+          <nav aria-label={t("Primary")} className="app-nav-stack" data-testid="nav-mobile">
             <NavLinks admin={user?.role === "admin"} suffix="-mobile" onNavigate={onClose} />
           </nav>
 
@@ -194,7 +194,7 @@ const TABS = PAGES.filter((p) => p.to !== "/risk");
 function BottomTabs() {
   const t = useT();
   return (
-    <nav aria-label="Quick" className="app-bottom-tabs" data-testid="nav-bottom">
+    <nav aria-label={t("Quick")} className="app-bottom-tabs" data-testid="nav-bottom">
       {TABS.slice(0, 2).map((p) => (
         <NavLink key={p.to} to={p.to} end={p.end} data-testid={`tab-${p.label.toLowerCase()}`}
           className={({ isActive }) => `app-bottom-tab${isActive ? " is-active" : ""}`}>
@@ -404,7 +404,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
               both single-class selectors, so the later stylesheet wins and the
               rail rendered stacked inside a phone's header. */}
           <nav
-            aria-label="Primary"
+            aria-label={t("Primary")}
             className="app-nav-rail xl:order-2"
             data-testid="nav"
           >
@@ -424,7 +424,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
             <button
               type="button"
               className="app-header-btn inline-flex items-center justify-center rounded-md border border-border bg-panel-2 p-2 text-text xl:hidden"
-              aria-label={mobileOpen ? "Close menu" : "Open menu"}
+              aria-label={t(mobileOpen ? "Close menu" : "Open menu")}
               aria-expanded={mobileOpen}
               aria-haspopup="dialog"
               aria-controls="app-nav-panel"

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { translate, useLang } from "../i18n.js";
+import { translate, useLang, useT } from "../i18n.js";
 import { useSearchParams } from "react-router-dom";
 import {
   commitLedgerImport,
@@ -7,6 +7,7 @@ import {
   deleteLedgerHolding,
   listLedger,
   restoreLedgerEntry,
+  listAssets,
   previewLedgerImport,
   updateLedgerEntry,
   updateLedgerHolding,
@@ -30,6 +31,7 @@ import {
   Pager,
   Select,
   Table,
+  Disclosure,
 } from "../components/ui.jsx";
 import {
   area,
@@ -42,80 +44,115 @@ import {
   toman,
   unitPrice,
   isolate,
+  serverText,
+  assetLabel,
 } from "../format.js";
 import { useApi } from "../useApi.js";
 import { quantityError, validQuantity } from "../quantity.js";
 
+// Plain words for the CSV's fixed headers; the headers themselves stay as they
+// are because the importer matches them exactly.
+const CSV_COLUMNS = [
+  ["external_id", "Your own reference for the row. Optional; a repeated one is refused."],
+  ["occurred_at", "The date, in the Gregorian calendar: 2026-10-07. Jalali dates are refused."],
+  ["kind", "buy, sell, deposit, withdrawal, dividend or fee."],
+  ["asset_key", "The asset's code, the last part of its page address, such as emami_coin. Empty for money in or out."],
+  ["quantity", "How many units. Empty for money in or out."],
+  ["unit_price_tomans", "The price of one unit. Iranian stocks stay in Rial; everything else is in Toman."],
+  ["amount_tomans", "The total in Toman, for money in or out."],
+  ["note", "Anything you want to remember. Optional."],
+];
+
 function ImportCsvDialog({ accountId, onClose, onImported }) {
+  const t = useT();
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
-  const [busy, setBusy] = useState(false);
+  // "checking" or "importing": a check must never read as the real import.
+  const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
+  const [codeQuery, setCodeQuery] = useState("");
+  const assets = useApi(listAssets, []);
+  const errorRef = useRef(null);
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [error]);
+  const explain = (e) => {
+    const message = serverText(e.message || String(e));
+    // The server counts data rows; a spreadsheet also counts the header.
+    return e.row ? t("Row {n}: {message}", { n: e.row + 1, message }) : message;
+  };
+  // Arabic keyboards type ي and ك; the names use ی and ک.
+  const fold = (text) => text.toLowerCase().replace(/ي/g, "ی").replace(/ك/g, "ک");
+  const needle = fold(codeQuery.trim());
+  const codeHits = needle
+    ? (assets.data || [])
+        .filter((a) => [a.key, a.name, a.name_fa].some((v) => v && fold(v).includes(needle)))
+        .slice(0, 6)
+    : [];
 
   const inspect = async () => {
     if (!file) return;
-    setBusy(true);
+    setBusy("checking");
     setError("");
     try {
       setPreview(await previewLedgerImport(accountId, file));
     } catch (e) {
-      setError(e.message || String(e));
+      setError(explain(e));
       setPreview(null);
     } finally {
-      setBusy(false);
+      setBusy("");
     }
   };
 
   const commit = async () => {
     if (!file || !preview?.valid) return;
-    setBusy(true);
+    setBusy("importing");
     setError("");
     try {
       const result = await commitLedgerImport(accountId, file);
       setDone(true);
       await onImported?.();
-      if (!result.row_count) setError("The import completed without any rows.");
+      if (!result.row_count) setError(t("The import completed without any rows."));
     } catch (e) {
-      setError(e.message || String(e));
+      setError(explain(e));
     } finally {
-      setBusy(false);
+      setBusy("");
     }
   };
 
   return (
     <Modal
       title="Import transaction history"
-      subtitle="Upload a CSV in this app's own columns (a wrong header lists them), review it, then commit it as ledger history."
+      subtitle="Fill in our template, check the file, then import it."
       onClose={onClose}
       testId="ledger-import-dialog"
       footer={
         <>
-          <Button onClick={onClose} disabled={busy}>Close</Button>
+          <Button onClick={onClose} disabled={!!busy}>Close</Button>
           {!done && (
             <Button
               variant="primary"
-              disabled={!preview?.valid || busy}
+              disabled={!preview?.valid || !!busy}
               onClick={commit}
               data-testid="ledger-import-commit"
             >
-              {busy ? "Importing…" : "Import rows"}
+              {busy === "importing" ? "Importing…" : "Import rows"}
             </Button>
           )}
         </>
       }
     >
       <div className="space-y-4">
-        {error && <ErrorState error={new Error(error)} testId="ledger-import-error" />}
         {done ? (
           <p className="text-sm text-[var(--c-good-text)]" data-testid="ledger-import-success">
-            Import complete. The same file can be selected again safely; duplicate files are ignored.
+            {t("Import complete. The same file can be selected again safely; duplicate files are ignored.")}
           </p>
         ) : (
           <>
             <label className="block text-sm">
               <span className="mb-1 block text-xs font-medium tracking-wide text-muted uppercase">
-                CSV file
+                {t("CSV file")}
               </span>
               <input
                 type="file"
@@ -129,25 +166,67 @@ function ImportCsvDialog({ accountId, onClose, onImported }) {
                 className="block w-full rounded-md border border-border bg-panel-2 px-3 py-2 text-sm"
               />
             </label>
-            <p className="text-xs text-muted">
-              Required columns: external_id, occurred_at, kind, asset_key, quantity,
-              unit_price_tomans, amount_tomans, note. Dates must be ISO-8601; TSE stock
-              unit prices stay in Rial, and all other unit prices use Toman.
-            </p>
+            <a
+              href="/transactions-template.csv"
+              download
+              data-testid="ledger-import-template"
+              className="inline-block text-sm text-[var(--c-accent-text)] underline"
+            >
+              {t("Download the template")}
+            </a>
+            <Disclosure summary="What each column means" testId="ledger-import-columns">
+              <dl className="space-y-2 py-2 text-xs text-muted">
+                {CSV_COLUMNS.map(([name, meaning]) => (
+                  <div key={name}>
+                    <dt dir="ltr" className="font-mono text-text rtl:text-right">{name}</dt>
+                    <dd>{t(meaning)}</dd>
+                  </div>
+                ))}
+              </dl>
+            </Disclosure>
+            <Disclosure summary="Find an asset code" testId="ledger-import-codes">
+              <div className="py-2">
+                <Input
+                  label="Asset name or code"
+                  placeholder="Asset name or code"
+                  className="w-full"
+                  value={codeQuery}
+                  onChange={(e) => setCodeQuery(e.target.value)}
+                  data-testid="ledger-import-code-search"
+                />
+                {!!needle && (
+                  <ul className="mt-2 space-y-1 text-xs" data-testid="ledger-import-code-results">
+                    {codeHits.map((a) => (
+                      <li key={a.key} className="flex justify-between gap-3">
+                        <bdi className="min-w-0 text-muted">{assetLabel(a)}</bdi>
+                        <code dir="ltr" className="shrink-0 select-all text-text">{a.key}</code>
+                      </li>
+                    ))}
+                    {!codeHits.length && <li className="text-muted">{t("No matching asset.")}</li>}
+                  </ul>
+                )}
+              </div>
+            </Disclosure>
             <Button
               variant="secondary"
-              disabled={!file || busy}
+              disabled={!file || !!busy}
               onClick={inspect}
               data-testid="ledger-import-preview"
             >
-              {busy ? "Checking…" : "Validate file"}
+              {busy === "checking" ? "Checking…" : "Validate file"}
             </Button>
             {preview?.valid && (
               <p className="text-sm" data-testid="ledger-import-preview-result">
-                {preview.row_count} rows are valid and ready to import.
+                {t(preview.row_count === 1 ? "1 row is valid and ready to import." : "{n} rows are valid and ready to import.", { n: preview.row_count })}
               </p>
             )}
           </>
+        )}
+        {/* Under the button that caused it: above the form it landed off-screen. */}
+        {error && (
+          <div ref={errorRef}>
+            <ErrorState error={new Error(error)} testId="ledger-import-error" />
+          </div>
         )}
       </div>
     </Modal>
@@ -233,6 +312,7 @@ function priceCell(row) {
 const CASH_KINDS = ["opening_cash", "deposit", "withdrawal", "dividend", "fee"];
 
 function EditEntryDialog({ row, accounts, onClose, onSaved }) {
+  const lang = useLang();
   const [kind, setKind] = useState(row.kind);
   const [targetAccount, setTargetAccount] = useState(String(row.account_id));
   const [when, setWhen] = useState(row.occurred_at || "");
@@ -242,6 +322,9 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
   const cash = CASH_KINDS.includes(kind);
   const tradeKind = kind === "buy" || kind === "sell";
   const declaresBasis = kind === "opening_position" || kind === "valuation_mark";
+  // From "Add what you paid": one question, not the whole form. The type picker
+  // in particular can turn the row into a purchase, which moves cash.
+  const costOnly = !!row.focusCost;
   const kindOptions = row.is_house ? ["opening_position", "valuation_mark"] :
     // A dividend is the one cash kind tied to an asset; the server refuses to
     // turn it into a plain deposit or the reverse.
@@ -311,8 +394,8 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
 
   return (
     <Modal
-      title={`Edit ${isolate(holdingLabel(row))}`}
-      subtitle={`${jalaliDate(row.occurred_at)} · ${dateTime(row.occurred_at)}`}
+      title={translate("Edit {name}", lang, { name: isolate(holdingLabel(row)) })}
+      subtitle={lang === "fa" ? dateTime(row.occurred_at) : `${jalaliDate(row.occurred_at)} · ${dateTime(row.occurred_at)}`}
       onClose={onClose}
       testId="ledger-edit-dialog"
       footer={
@@ -332,27 +415,34 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
       <div className="space-y-3">
         {error && <p role="alert" className="text-sm text-[var(--c-critical-text)]">{error}</p>}
         {!row.is_synthetic && <>
+          {!costOnly && <>
           <Field label="Portfolio"><Select label="Portfolio" value={targetAccount} onChange={(e) => setTargetAccount(e.target.value)} data-testid="ledger-edit-account" className="w-full">
             {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
           </Select></Field>
           <Field label="Type"><Select label="Type" value={kind} onChange={(e) => changeKind(e.target.value)} data-testid="ledger-edit-kind" className="w-full">
-            {kindOptions.map((k) => <option key={k} value={k}>{KIND_LABEL[k] || humanize(k)}</option>)}
+            {kindOptions.map((k) => <option key={k} value={k}>{KIND_LABEL[k] ? translate(KIND_LABEL[k], lang) : humanize(k)}</option>)}
           </Select></Field>
           {/* Clearing the picker reads "Today" but the save sends no date, so the
               entry would keep its old one: clearing restores the saved date. */}
           <Field label="When"><JalaliDateField value={when} onChange={(v) => setWhen(v || row.occurred_at || "")} testId="ledger-edit-when" /></Field>
+          </>}
           {cash && <Field label="Amount (Toman)"><Input label="Amount" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} data-testid="ledger-edit-amount" /></Field>}
-          {tradeKind && <Field label={`Price for one (${row.unit_price_currency === "rial" ? "Rial" : row.unit_price_currency === "usd" ? "USD" : "Toman"})`}>
-            <Input label="Unit price" type="number" step="any" value={price} onChange={(e) => setPrice(e.target.value)} data-testid="ledger-edit-price" />
+          {tradeKind && <Field label={translate("Price for one ({unit})", lang, { unit: translate(row.unit_price_currency === "rial" ? "Rial" : row.unit_price_currency === "usd" ? "USD" : "Toman", lang) })}>
+            <Input label="Unit price" type="number" step="any" className="w-full" value={price} onChange={(e) => setPrice(e.target.value)} data-testid="ledger-edit-price" />
           </Field>}
-          {declaresBasis && <Field label={row.is_house ? "What did you pay per square meter? (millions of Toman)" : `What did you pay for one? (${row.unit_price_currency === "rial" ? "Rial" : "Toman"})`}>
-            <Input label="Purchase price" type="number" step="any" value={costBasis} onChange={(e) => setCostBasis(e.target.value)} data-testid="ledger-edit-cost-basis" />
+          {declaresBasis && <Field label={row.is_house ? "What did you pay per square meter? (millions of Toman)" : translate("What did you pay for one? ({unit})", lang, { unit: translate(row.unit_price_currency === "rial" ? "Rial" : "Toman", lang) })}>
+            <Input label="Purchase price" type="number" step="any" className="w-full" data-autofocus={costOnly ? "" : undefined} value={costBasis} onChange={(e) => setCostBasis(e.target.value)} data-testid="ledger-edit-cost-basis" />
+            {!row.is_house && Number(costBasis) > 0 && Number(quantity) > 0 && (
+              <p className="mt-1 text-xs text-muted" data-testid="ledger-edit-cost-total">
+                {translate("Total", lang)}: {toman(Number(costBasis) * Number(quantity) / (row.unit_price_currency === "rial" ? 10 : 1))}
+              </p>
+            )}
           </Field>}
         </>}
-        {!cash && <>
+        {!cash && !costOnly && <>
         <div>
           <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">
-            {row.is_house ? "Price per square meter (millions of Toman)" : "How many"}
+            {translate(row.is_house ? "Price per square meter (millions of Toman)" : "How many?", lang)}
           </div>
           <Input
             label="Quantity"
@@ -370,10 +460,10 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
           )}
         </div>
         </>}
-        {row.is_house && !row.is_synthetic && (
+        {row.is_house && !row.is_synthetic && !costOnly && (
           <div>
             <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">
-              Size (square meters)
+              {translate("Size (square meters)", lang)}
             </div>
             <Input
               label="Size in square meters"
@@ -387,9 +477,9 @@ function EditEntryDialog({ row, accounts, onClose, onSaved }) {
             />
           </div>
         )}
-        {!row.is_synthetic && (
+        {!row.is_synthetic && !costOnly && (
           <div>
-            <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">Note</div>
+            <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">{translate("Note", lang)}</div>
             <Input
               label="Note"
               className="w-full"
@@ -530,14 +620,41 @@ export default function Ledger() {
         r.asset_key ? (
           <bdi className="whitespace-nowrap" title={r.asset_name_fa || r.asset_name || ""}>{holdingLabel(r)}</bdi>
         ) : CASH_KINDS.includes(r.kind) ? (
-          "Cash"
+          translate("Cash balance", lang)
         ) : (
           "—"
         ),
     },
     { key: "qty", header: "Amount|quantity", align: "right", mobile: "meta", render: quantityCell },
     { key: "price", header: "Price", align: "right", render: priceCell },
-    { key: "amt", header: "Value", align: "right", mobile: "value", render: (r) => toman(r.value_tomans) },
+    {
+      key: "amt",
+      header: "Value",
+      align: "right",
+      mobile: "value",
+      // A bare dash in a card's headline slot reads as a broken row; say why it is empty.
+      render: (r) =>
+        r.value_tomans == null && r.kind === "opening_position" ? (
+          r.is_synthetic ? (
+            // No ledger row behind it yet, so its dialog has no cost field.
+            <span className="text-xs font-normal text-muted">{translate("No cost recorded", lang)}</span>
+          ) : r.cost_basis_tomans == null ? (
+            // The place to record a cost, offered where its absence is shown.
+            <Button variant="link" className="text-xs font-normal" onClick={() => setEditing({ ...r, focusCost: true })} data-testid="ledger-add-cost">
+              {translate("Add what you paid", lang)}
+            </Button>
+          ) : (
+            // Once saved, say so -- the link staying put read as a failed save.
+            <span className="text-xs font-normal text-muted" data-testid="ledger-cost-recorded">
+              {r.is_house || !r.quantity
+                ? translate("Cost recorded", lang)
+                : translate("Paid {amount}", lang, { amount: toman(Number(r.cost_basis_tomans) * Number(r.quantity) / (r.unit_price_currency === "rial" ? 10 : 1)) })}
+            </span>
+          )
+        ) : (
+          toman(r.value_tomans)
+        ),
+    },
     {
       key: "pnl",
       header: "P/L",
@@ -556,7 +673,7 @@ export default function Ledger() {
       // buttons on every row were most of the ink in the table; always shown
       // on a touch screen, which has no hover to reveal them.
       render: (r) => (
-        <div className="flex justify-end gap-2 transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:focus-within:opacity-100">
+        <div className="flex justify-end gap-2 transition-opacity [@media(hover:hover)]:opacity-50 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:focus-within:opacity-100">
           {(r.quantity != null || CASH_KINDS.includes(r.kind)) && (
             <Button
               variant="ghost"
@@ -590,7 +707,7 @@ export default function Ledger() {
   return (
     <div>
       <PageHeader
-        title="Ledger"
+        title="Transactions"
         subtitle="Everything you have bought, sold, or already owned. Anything you hold without a recorded purchase is listed too, so you can fill in its details."
         actions={
           <div className="flex flex-wrap gap-2">
@@ -600,7 +717,7 @@ export default function Ledger() {
               onClick={() => { setAdding(true); setError(""); }}
               data-testid="ledger-add"
               className="inline-flex items-center gap-1.5"
-              aria-label="Add transaction"
+              aria-label={translate("Add transaction", lang)}
             >
               <PlusIcon />
               {translate("Add", lang)}
@@ -704,6 +821,7 @@ export default function Ledger() {
                   mobileCards
                   rowKey={(r) => r.id}
                   rows={rows.slice((current - 1) * size, current * size)}
+                  empty="Nothing recorded yet. Use Add to record your first buy, sale, or holding."
                   columns={columns}
                 />
                 {pages > 1 && (

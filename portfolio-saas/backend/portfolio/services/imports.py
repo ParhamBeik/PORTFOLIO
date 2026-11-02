@@ -57,7 +57,7 @@ def _asset(row: dict, row_number: int, user):
     # a CSV is request-supplied data exactly as a JSON body is.
     asset = resolve_asset_key(user, key)
     if asset is None:
-        raise LedgerImportError("Unknown asset_key.", row=row_number)
+        raise LedgerImportError(f"Unknown asset_key: {key}.", row=row_number)
     return asset
 
 

@@ -832,6 +832,8 @@ def test_account_data_quality_is_windowed_and_account_scoped(
 
     assert response.status_code == 200, response.data
     assert response.data["account_id"] == account.id
+    # The page shows the holding's name, never the provider code.
+    assert response.data["assets"][0]["label"] == (asset.name_fa or asset.name)
     # The series starts today, so there are no earlier sessions it is *missing*
     # -- it simply has no history yet. Scoring the four days before its first
     # print as a coverage failure is what dropped 537 clean-but-newly-listed
