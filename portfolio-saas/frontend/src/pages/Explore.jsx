@@ -3,7 +3,7 @@ import { translate, useLang } from "../i18n.js";
 import { Link, useSearchParams } from "react-router-dom";
 import { downloadArchivedFiling, exploreStocks, researchRun, researchSettings, runResearch, stockDossier, unwatch, watch, watchlist } from "../api.js";
 import { MultiLineTrend } from "../components/charts.jsx";
-import { Async, Badge, Button, Card, Empty, Field, Input, PageHeader, Tabs, Textarea } from "../components/ui.jsx";
+import { Async, Badge, Button, Card, Disclosure, Empty, Field, Input, PageHeader, Tabs, Textarea } from "../components/ui.jsx";
 import { date, num, rial } from "../format.js";
 import { useApi } from "../useApi.js";
 
@@ -12,6 +12,12 @@ const WINDOWS = [
   { value: "365", label: "1Y" },
   { value: "1825", label: "5Y" },
   { value: "3650", label: "10Y" },
+];
+
+const FINANCIAL_TABS = [
+  { value: "sales", label: "Monthly sales" },
+  { value: "income", label: "Revenue and net profit" },
+  { value: "balance", label: "Assets, liabilities, and equity" },
 ];
 
 const COVERAGE_LABELS = {
@@ -232,6 +238,7 @@ function WatchButton({ symbol }) {
 function Company({ symbol }) {
   const lang = useLang();
   const [days, setDays] = useState("365");
+  const [financialTab, setFinancialTab] = useState("sales");
   const dossier = useApi(() => stockDossier(symbol, Number(days)), [symbol, days]);
 
   return (
@@ -243,29 +250,52 @@ function Company({ symbol }) {
         const salesRows = sales.points.map((point) => ({ x: point.date, sales: Number(point.value) }));
         const income = data.financial_metrics;
         const balance = data.balance_sheet;
+        const financialInfo = {
+          sales: (
+            <>
+              <p>{tr("Current-month reported sales in million Rial. A later unverified correction withholds the older value.")}</p>
+              <p>{tr("Checked means the arithmetic, period, unit and archived file were verified against the filing. It is not an audit of the company’s accounts.")}</p>
+            </>
+          ),
+          income: (
+            <>
+              <p>{tr("Reported income statement figures in million Rial. Standalone and consolidated filings stay separate; a newer unverified filing withholds an older figure.")}</p>
+              <p>{tr("The source cells and arithmetic were checked against the archived filing. This does not audit the company’s accounts or make interim and annual figures comparable.")}</p>
+            </>
+          ),
+          balance: (
+            <>
+              <p>{tr("Point-in-time balance sheet amounts in million Rial. Standalone and consolidated filings stay separate; a newer unverified filing withholds an older balance.")}</p>
+              <p>{tr("The archived figures add up: assets = liabilities + equity. This does not audit the company’s accounts or imply a valuation.")}</p>
+            </>
+          ),
+        };
+        const activeFinancial = financialTab === "income" ? income : financialTab === "balance" ? balance : sales;
         return (
           <div className="space-y-5" data-testid="explore-company">
             <Card
               title={`${data.company.name || symbol} · ${symbol}`}
               subtitle={[data.company.sector, data.company.subsector, data.company.isin].filter(Boolean).join(" · ")}
               testId="explore-identity"
+              info={(
+                <p>
+                  {data.company.sector
+                    ? translate("Industry is a current provider-reported {kind} label, observed {date}; it does not establish past membership.", lang, {
+                      kind: translate(data.company.sector_source === "symbol_metadata" ? "symbol metadata" : "instrument catalog", lang),
+                      date: date(data.company.sector_observed_at),
+                    })
+                    : translate("Industry is unavailable for this stock.", lang)}{" "}
+                  {translate("We only show sales, income and balance figures we could check against the company's Codal filing.", lang)}
+                </p>
+              )}
               actions={<div className="flex flex-wrap items-center gap-2"><WatchButton symbol={symbol} /><Badge variant={sales.points.length || income?.points?.length || balance?.points?.length ? "good" : "warn"}>{sales.points.length || income?.points?.length || balance?.points?.length ? "Source-checked figures" : "Financial metrics unverified"}</Badge></div>}
-            >
-              <p className="text-sm text-muted">
-                {data.company.sector
-                  ? translate("Industry is a current provider-reported {kind} label, observed {date}; it does not establish past membership.", lang, {
-                    kind: translate(data.company.sector_source === "symbol_metadata" ? "symbol metadata" : "instrument catalog", lang),
-                    date: date(data.company.sector_observed_at),
-                  })
-                  : translate("Industry is unavailable for this stock.", lang)}{" "}
-                {translate("We only show sales, income and balance figures we could check against the company's Codal filing.", lang)}
-              </p>
-            </Card>
+            />
 
             <Card
               title="Daily share price"
               subtitle="Unadjusted last trade close in Rial per share. This is a quoted price, not a total return."
               testId="explore-price"
+              info={<p>{translate("Adjusted prices, USD conversion, and return comparisons are withheld pending source checks.", lang)}</p>}
               actions={<Tabs options={WINDOWS} value={days} onChange={setDays} label="Price window" testId="explore-price-window" />}
             >
               {rows.length ? (
@@ -289,123 +319,129 @@ function Company({ symbol }) {
                   {translate("{n} days checked against a second price source; {m} differ by more than 1%.", lang, { n: price.paired_candle_days, m: price.candle_disagreements_over_1pct })}
                   {price.candle_disagreements_over_1pct > 0 && ` ${translate("Treat this chart as disputed until those days are reconciled.", lang)}`}
                 </p>
-                <p>{translate("Adjusted prices, USD conversion, and return comparisons are withheld pending source checks.", lang)}</p>
               </div>
             </Card>
 
             <Card
-              title="Monthly sales"
-              subtitle="Current-month reported sales in million Rial. A later unverified correction withholds the older value."
-              testId="explore-monthly-sales"
-              actions={<Badge variant={sales.withheld_periods ? "warn" : sales.points.length ? "good" : "warn"}>{tr("{a} checked · {b} withheld", { a: sales.verified_periods, b: sales.withheld_periods })}</Badge>}
-            >
-              {salesRows.length ? (
-                <MultiLineTrend
-                  series={[{ key: "sales", name: `${symbol} (${tr("million Rial")})` }]}
-                  data={salesRows}
-                  formatValue={(value) => `${num(value, 0)} ${tr("million Rial")}`}
-                  formatAxis={(value) => num(value, 0)}
-                  label={tr("{symbol} monthly sales in million Rial", { symbol })}
-                />
-              ) : <Empty testId="explore-no-monthly-sales">No monthly sales could be checked against the filings in this period.</Empty>}
-              <p className="mt-3 text-xs text-muted">{tr("Checked means the arithmetic, period, unit and archived file were verified against the filing. It is not an audit of the company’s accounts.")}</p>
-              {sales.points.length > 0 && (
-                <details className="mt-3 text-sm" data-testid="explore-sales-evidence">
-                  <summary className="cursor-pointer">{tr("Inspect source cells")}</summary>
-                  <ul className="mt-2 max-h-56 space-y-2 overflow-y-auto">
-                    {sales.points.slice().reverse().map((point) => (
-                      <li key={`${point.period_end_jalali}-${point.extraction_id}`} className="border-b border-border pb-2">
-                        <span>{point.period_end_jalali}: {num(Number(point.value), 0)} {tr("million Rial")}</span>
-                        <span className="block text-xs text-muted">{tr("Filed {date}", { date: point.published_jalali || tr("date unavailable") })}{point.is_correction ? ` · ${tr("correction")}` : ""}</span>
-                        {point.source_url && <a className="text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">{tr("Original Codal filing")}</a>}
-                        {" "}<ArchivedFiling symbol={symbol} point={point} days={Number(days)} />
-                      </li>
-                    ))}
-                  </ul>
-                </details>
+              title="Financials"
+              testId="explore-financials"
+              info={financialInfo[financialTab]}
+              actions={(
+                <div className="flex flex-wrap items-center gap-2">
+                  <Tabs
+                    options={FINANCIAL_TABS}
+                    value={financialTab}
+                    onChange={setFinancialTab}
+                    label="Financial statement"
+                    testId="explore-financials-tabs"
+                  />
+                  <Badge variant={activeFinancial?.withheld_periods ? "warn" : activeFinancial?.points?.length ? "good" : "warn"}>
+                    {tr("{a} checked · {b} withheld", { a: activeFinancial?.verified_periods || 0, b: activeFinancial?.withheld_periods || 0 })}
+                  </Badge>
+                </div>
               )}
-            </Card>
-            <Card
-              title="Revenue and net profit"
-              subtitle="Reported income statement figures in million Rial. Standalone and consolidated filings stay separate; a newer unverified filing withholds an older figure."
-              testId="explore-income"
-              actions={<Badge variant={income?.withheld_periods ? "warn" : income?.points?.length ? "good" : "warn"}>{tr("{a} checked · {b} withheld", { a: income?.verified_periods || 0, b: income?.withheld_periods || 0 })}</Badge>}
             >
-              {income?.points?.length ? (
-                <div className="max-h-96 space-y-3 overflow-y-auto" data-testid="explore-income-evidence">
-                  {income.points.slice().reverse().map((point) => (
-                    <div key={`${point.period_end_jalali}-${point.scope}`} className="border-b border-border pb-3 text-sm">
-                      <p className="font-medium">{point.period_start_jalali} → {point.period_end_jalali} · {tr(point.scope)} · {tr(point.audited ? "audited" : "unaudited")}</p>
-                      <p>{tr("Revenue {a} · net profit {b} million Rial · net margin {c}%", { a: reportedAmount(point.revenue), b: reportedAmount(point.net_profit), c: point.net_margin_pct })}</p>
-                      <p className="text-xs text-muted">{tr("Filed {date}", { date: point.published_jalali || tr("date unavailable") })}{point.is_correction ? ` · ${tr("correction")}` : ""}</p>
-                      <details className="text-xs text-muted"><summary className="cursor-pointer">{tr("Where this comes from")}</summary>{tr("file {id}", { id: point.artifact_id })} · {tr("revenue cell {a}, profit cell {b}", { a: point.source_coordinates.revenue.address, b: point.source_coordinates.net_profit.address })}</details>
-                      {point.source_url && <a className="text-xs text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">{tr("Original Codal filing")}</a>}
-                      {" "}<ArchivedFiling symbol={symbol} point={point} days={Number(days)} />
-                    </div>
-                  ))}
+              {financialTab === "sales" && (
+                <div data-testid="explore-monthly-sales">
+                  {salesRows.length ? (
+                    <MultiLineTrend
+                      series={[{ key: "sales", name: `${symbol} (${tr("million Rial")})` }]}
+                      data={salesRows}
+                      formatValue={(value) => `${num(value, 0)} ${tr("million Rial")}`}
+                      formatAxis={(value) => num(value, 0)}
+                      label={tr("{symbol} monthly sales in million Rial", { symbol })}
+                    />
+                  ) : <Empty testId="explore-no-monthly-sales">No monthly sales could be checked against the filings in this period.</Empty>}
+                  {sales.points.length > 0 && (
+                    <details className="mt-3 text-sm" data-testid="explore-sales-evidence">
+                      <summary className="cursor-pointer">{tr("Inspect source cells")}</summary>
+                      <ul className="mt-2 max-h-56 space-y-2 overflow-y-auto">
+                        {sales.points.slice().reverse().map((point) => (
+                          <li key={`${point.period_end_jalali}-${point.extraction_id}`} className="border-b border-border pb-2">
+                            <span>{point.period_end_jalali}: {num(Number(point.value), 0)} {tr("million Rial")}</span>
+                            <span className="block text-xs text-muted">{tr("Filed {date}", { date: point.published_jalali || tr("date unavailable") })}{point.is_correction ? ` · ${tr("correction")}` : ""}</span>
+                            {point.source_url && <a className="text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">{tr("Original Codal filing")}</a>}
+                            {" "}<ArchivedFiling symbol={symbol} point={point} days={Number(days)} />
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
                 </div>
-              ) : <Empty testId="explore-no-income">No income statement could be checked against the filings in this period.</Empty>}
-              <p className="mt-3 text-xs text-muted">{tr("The source cells and arithmetic were checked against the archived filing. This does not audit the company’s accounts or make interim and annual figures comparable.")}</p>
-            </Card>
-            <Card
-              title="Assets, liabilities, and equity"
-              subtitle="Point-in-time balance sheet amounts in million Rial. Standalone and consolidated filings stay separate; a newer unverified filing withholds an older balance."
-              testId="explore-balance"
-              actions={<Badge variant={balance?.withheld_periods ? "warn" : balance?.points?.length ? "good" : "warn"}>{tr("{a} checked · {b} withheld", { a: balance?.verified_periods || 0, b: balance?.withheld_periods || 0 })}</Badge>}
-            >
-              {balance?.points?.length ? (
-                <div className="max-h-96 space-y-3 overflow-y-auto" data-testid="explore-balance-evidence">
-                  {balance.points.slice().reverse().map((point) => (
-                    <div key={`${point.period_end_jalali}-${point.scope}`} className="border-b border-border pb-3 text-sm">
-                      <p className="font-medium">{point.period_end_jalali} · {tr(point.scope)} · {tr(point.audited ? "audited" : "unaudited")}</p>
-                      <p>{tr("Assets {a} · liabilities {b} · equity {c} million Rial", { a: reportedAmount(point.values.total_assets), b: reportedAmount(point.values.total_liabilities), c: reportedAmount(point.values.total_equity) })}</p>
-                      <p>{tr("Cash {a} · short-term borrowings {b} · long-term borrowings {c} million Rial", { a: reportedAmount(point.values.cash), b: reportedAmount(point.values.short_term_borrowings), c: reportedAmount(point.values.long_term_borrowings) })}</p>
-                      <p className="text-xs text-muted">{tr("Filed {date}", { date: point.published_jalali || tr("date unavailable") })}{point.is_correction ? ` · ${tr("correction")}` : ""}</p>
-                      <details className="text-xs text-muted"><summary className="cursor-pointer">{tr("Where this comes from")}</summary>{tr("file {id}", { id: point.artifact_id })} · {tr("assets cell {a}, liabilities cell {b}, equity cell {c}", { a: point.source_coordinates.total_assets.address, b: point.source_coordinates.total_liabilities.address, c: point.source_coordinates.total_equity.address })}</details>
-                      {point.source_url && <a className="text-xs text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">{tr("Original Codal balance sheet")}</a>}
-                      {" "}<ArchivedFiling symbol={symbol} point={point} days={Number(days)} />
+              )}
+              {financialTab === "income" && (
+                <div data-testid="explore-income">
+                  {income?.points?.length ? (
+                    <div className="max-h-96 space-y-3 overflow-y-auto" data-testid="explore-income-evidence">
+                      {income.points.slice().reverse().map((point) => (
+                        <div key={`${point.period_end_jalali}-${point.scope}`} className="border-b border-border pb-3 text-sm">
+                          <p className="font-medium">{point.period_start_jalali} → {point.period_end_jalali} · {tr(point.scope)} · {tr(point.audited ? "audited" : "unaudited")}</p>
+                          <p>{tr("Revenue {a} · net profit {b} million Rial · net margin {c}%", { a: reportedAmount(point.revenue), b: reportedAmount(point.net_profit), c: point.net_margin_pct })}</p>
+                          <p className="text-xs text-muted">{tr("Filed {date}", { date: point.published_jalali || tr("date unavailable") })}{point.is_correction ? ` · ${tr("correction")}` : ""}</p>
+                          <details className="text-xs text-muted"><summary className="cursor-pointer">{tr("Where this comes from")}</summary>{tr("file {id}", { id: point.artifact_id })} · {tr("revenue cell {a}, profit cell {b}", { a: point.source_coordinates.revenue.address, b: point.source_coordinates.net_profit.address })}</details>
+                          {point.source_url && <a className="text-xs text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">{tr("Original Codal filing")}</a>}
+                          {" "}<ArchivedFiling symbol={symbol} point={point} days={Number(days)} />
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  ) : <Empty testId="explore-no-income">No income statement could be checked against the filings in this period.</Empty>}
                 </div>
-              ) : <Empty testId="explore-no-balance">No balance sheet could be checked against the filings in this period.</Empty>}
-              <p className="mt-3 text-xs text-muted">{tr("The archived figures add up: assets = liabilities + equity. This does not audit the company’s accounts or imply a valuation.")}</p>
+              )}
+              {financialTab === "balance" && (
+                <div data-testid="explore-balance">
+                  {balance?.points?.length ? (
+                    <div className="max-h-96 space-y-3 overflow-y-auto" data-testid="explore-balance-evidence">
+                      {balance.points.slice().reverse().map((point) => (
+                        <div key={`${point.period_end_jalali}-${point.scope}`} className="border-b border-border pb-3 text-sm">
+                          <p className="font-medium">{point.period_end_jalali} · {tr(point.scope)} · {tr(point.audited ? "audited" : "unaudited")}</p>
+                          <p>{tr("Assets {a} · liabilities {b} · equity {c} million Rial", { a: reportedAmount(point.values.total_assets), b: reportedAmount(point.values.total_liabilities), c: reportedAmount(point.values.total_equity) })}</p>
+                          <p>{tr("Cash {a} · short-term borrowings {b} · long-term borrowings {c} million Rial", { a: reportedAmount(point.values.cash), b: reportedAmount(point.values.short_term_borrowings), c: reportedAmount(point.values.long_term_borrowings) })}</p>
+                          <p className="text-xs text-muted">{tr("Filed {date}", { date: point.published_jalali || tr("date unavailable") })}{point.is_correction ? ` · ${tr("correction")}` : ""}</p>
+                          <details className="text-xs text-muted"><summary className="cursor-pointer">{tr("Where this comes from")}</summary>{tr("file {id}", { id: point.artifact_id })} · {tr("assets cell {a}, liabilities cell {b}, equity cell {c}", { a: point.source_coordinates.total_assets.address, b: point.source_coordinates.total_liabilities.address, c: point.source_coordinates.total_equity.address })}</details>
+                          {point.source_url && <a className="text-xs text-accent underline underline-offset-2" href={point.source_url} target="_blank" rel="noopener noreferrer">{tr("Original Codal balance sheet")}</a>}
+                          {" "}<ArchivedFiling symbol={symbol} point={point} days={Number(days)} />
+                        </div>
+                      ))}
+                    </div>
+                  ) : <Empty testId="explore-no-balance">No balance sheet could be checked against the filings in this period.</Empty>}
+                </div>
+              )}
             </Card>
             <ResearchPanel symbol={symbol} />
 
-            <div className="grid gap-5 lg:grid-cols-2">
-              <Card title="Data we hold" subtitle="How much we have stored so far, not a promise that every value is right." testId="explore-coverage">
-                <ul className="space-y-3">
-                  {data.coverage.map((row) => (
-                    <li key={row.endpoint} className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-2 text-sm">
-                      <span>{tr(COVERAGE_LABELS[row.endpoint] || row.endpoint)}</span>
-                      <span className="flex items-center gap-2">
-                        <span className="text-muted">{tr("{n} rows", { n: num(row.stored_rows, 0) })}</span>
-                        <Badge variant={row.verified_complete ? "good" : "warn"}>
-                          {row.verified_complete ? "Coverage checked" : "Coverage incomplete"}
-                        </Badge>
-                      </span>
-                      {row.last_success_at && <span className="w-full text-xs text-muted">{tr("Last updated {date}", { date: date(row.last_success_at) })}</span>}
+            <Card title="Original disclosures" subtitle="Source announcements; reconciled sales, income, and balance figures appear above where available." testId="explore-disclosures">
+              {data.disclosures.length ? (
+                <ul className="space-y-3 text-sm">
+                  {data.disclosures.map((item, index) => (
+                    <li key={`${item.published_jalali}-${index}`} className="border-b border-border pb-2">
+                      {item.source_url ? (
+                        <a className="text-accent underline underline-offset-2" href={item.source_url} target="_blank" rel="noopener noreferrer">
+                          {item.title}
+                        </a>
+                      ) : <span>{item.title}</span>}
+                      <span className="mt-1 block text-xs text-muted">{item.published_jalali || tr("Date unavailable")} · {item.category || tr("Unclassified")}</span>
                     </li>
                   ))}
                 </ul>
-              </Card>
-              <Card title="Original disclosures" subtitle="Source announcements; reconciled sales, income, and balance figures appear above where available." testId="explore-disclosures">
-                {data.disclosures.length ? (
-                  <ul className="space-y-3 text-sm">
-                    {data.disclosures.map((item, index) => (
-                      <li key={`${item.published_jalali}-${index}`} className="border-b border-border pb-2">
-                        {item.source_url ? (
-                          <a className="text-accent underline underline-offset-2" href={item.source_url} target="_blank" rel="noopener noreferrer">
-                            {item.title}
-                          </a>
-                        ) : <span>{item.title}</span>}
-                        <span className="mt-1 block text-xs text-muted">{item.published_jalali || tr("Date unavailable")} · {item.category || tr("Unclassified")}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : <Empty testId="explore-no-disclosures">No stored disclosure for this symbol.</Empty>}
-              </Card>
-            </div>
+              ) : <Empty testId="explore-no-disclosures">No stored disclosure for this symbol.</Empty>}
+            </Card>
+            <Disclosure summary="Data we hold" testId="explore-coverage">
+              <p className="mb-3 text-xs text-muted">{tr("How much we have stored so far, not a promise that every value is right.")}</p>
+              <ul className="space-y-3">
+                {data.coverage.map((row) => (
+                  <li key={row.endpoint} className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-2 text-sm text-text">
+                    <span>{tr(COVERAGE_LABELS[row.endpoint] || row.endpoint)}</span>
+                    <span className="flex items-center gap-2">
+                      <span className="text-muted">{tr("{n} rows", { n: num(row.stored_rows, 0) })}</span>
+                      <Badge variant={row.verified_complete ? "good" : "warn"}>
+                        {row.verified_complete ? "Coverage checked" : "Coverage incomplete"}
+                      </Badge>
+                    </span>
+                    {row.last_success_at && <span className="w-full text-xs text-muted">{tr("Last updated {date}", { date: date(row.last_success_at) })}</span>}
+                  </li>
+                ))}
+              </ul>
+            </Disclosure>
             {data.company.metadata_updated_at && (
               <p className="text-xs text-muted">{tr("Company list last updated {date}.", { date: date(data.company.metadata_updated_at) })}</p>
             )}

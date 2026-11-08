@@ -89,11 +89,15 @@ describe("company research", () => {
     expect(await screen.findByText(/Highest among verified months/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Open saved answer/ })).toHaveAttribute("href", "/research?view=companies&symbol=%D9%81%D9%88%D9%84%D8%A7%D8%AF&run=17");
     expect(screen.getAllByRole("link", { name: /Codal filing/i })[0]).toHaveAttribute("href", source.source_url);
-    expect(screen.getByTestId("explore-income-evidence")).toHaveTextContent(/revenue cell B4, profit cell B21/i);
-    expect(screen.getByTestId("explore-balance-evidence")).toHaveTextContent(/assets cell B22, liabilities cell B53, equity cell B35/i);
-    expect(screen.getByRole("link", { name: "Original Codal balance sheet" })).toHaveAttribute("href", `${source.source_url}&sheetId=0`);
     fireEvent.click(screen.getAllByTestId("explore-archive-2")[0]);
     await waitFor(() => expect(api.downloadArchivedFiling).toHaveBeenCalledWith("فولاد", 2, 365));
+
+    fireEvent.click(screen.getByTestId("explore-financials-tabs-income"));
+    expect(screen.getByTestId("explore-income-evidence")).toHaveTextContent(/revenue cell B4, profit cell B21/i);
+
+    fireEvent.click(screen.getByTestId("explore-financials-tabs-balance"));
+    expect(screen.getByTestId("explore-balance-evidence")).toHaveTextContent(/assets cell B22, liabilities cell B53, equity cell B35/i);
+    expect(screen.getByRole("link", { name: "Original Codal balance sheet" })).toHaveAttribute("href", `${source.source_url}&sheetId=0`);
   });
 
   it("shows balance research cells from the archived sheet", async () => {

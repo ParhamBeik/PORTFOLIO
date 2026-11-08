@@ -70,15 +70,17 @@ export default function Guidance({ user, onUserChange }) {
             {translate("Not yet source-verified — a starting point, not advice.", lang)}
           </p>
         )}
+        actions={(
+          <div className="min-w-44">
+            <Field label="Risk profile">
+              <Select label="Risk profile" value={user.risk_profile || "balanced"} onChange={changeProfile} disabled={saving} data-testid="guidance-risk-profile">
+                {PROFILE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{translate(label, lang)}</option>)}
+              </Select>
+            </Field>
+            {saveError && <p role="alert" className="mt-1 text-sm text-[var(--c-warn-text)]">{saveError}</p>}
+          </div>
+        )}
       />
-      <div className="mb-5 max-w-xs">
-        <Field label="Risk profile">
-          <Select label="Risk profile" value={user.risk_profile || "balanced"} onChange={changeProfile} disabled={saving} data-testid="guidance-risk-profile">
-            {PROFILE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{translate(label, lang)}</option>)}
-          </Select>
-        </Field>
-        {saveError && <p role="alert" className="text-sm text-[var(--c-warn-text)]">{saveError}</p>}
-      </div>
       <Async {...result} testId="guidance-result">
         {(data) => (
           <div className="space-y-5">

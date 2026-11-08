@@ -275,21 +275,14 @@ function Rows({ subject, rows }) {
     },
   ];
   return (
-    <>
-      <Table
-        columns={columns}
-        rows={rows}
-        rowKey={(r) => r.key}
-        mobileCards
-        caption={translate("What the same money would be worth in each alternative", lang)}
-        testId="comparison-table"
-      />
-      {subject && (
-        <p className="mt-2 text-xs text-muted" data-testid="comparison-breakeven-note">
-          {translate("Break-even price: what {name} would have to trade at for your position to be worth exactly the same as the alternative.", lang, { name: subject.label })}
-        </p>
-      )}
-    </>
+    <Table
+      columns={columns}
+      rows={rows}
+      rowKey={(r) => r.key}
+      mobileCards
+      caption={translate("What the same money would be worth in each alternative", lang)}
+      testId="comparison-table"
+    />
   );
 }
 
@@ -404,6 +397,13 @@ export default function Comparison() {
         title="Same money elsewhere"
         subtitle="Every purchase you actually made — same dates, same amounts — replayed into something else."
         testId="comparison-panel"
+        info={
+          subjectData ? (
+            <p data-testid="comparison-breakeven-note">
+              {translate("Break-even price: what {name} would have to trade at for your position to be worth exactly the same as the alternative.", lang, { name: subjectData.label })}
+            </p>
+          ) : null
+        }
         actions={
           <Tabs options={RANGES} value={range} onChange={setRange} label="Window" testId="comparison-range" />
         }

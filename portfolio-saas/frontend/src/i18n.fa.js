@@ -912,4 +912,8 @@ export default {
   "Difference|Toman": "تفاوت به تومان",
   "Saved {date}": "ذخیره در {date}",
   "Selected portfolio": "پرتفوی انتخاب‌شده",
+  "Profit & cost": "سود و بهای تمام‌شده",
+  "Holdings view": "نمای دارایی‌ها",
+  "Financials": "گزارش‌های مالی",
+  "Financial statement": "صورت مالی",
 };

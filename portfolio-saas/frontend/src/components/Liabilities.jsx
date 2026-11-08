@@ -25,7 +25,6 @@ import {
   Badge,
   Button,
   Card,
-  Empty,
   ErrorState,
   Field,
   Input,
@@ -533,7 +532,9 @@ export default function LiabilitiesCard({ activeId, accounts, onChanged }) {
         {(rows) => !rows.length ? (
           // `Async` renders `empty` only for a null payload, and an empty list
           // is not null -- without this the card body is simply blank.
-          <Empty testId="dashboard-liabilities-empty">No debts recorded.</Empty>
+          <p className="text-sm text-muted" data-testid="dashboard-liabilities-empty">
+            {t("No debts recorded.")}
+          </p>
         ) : (
           <div className="space-y-2">
             {rows.map((row) => (

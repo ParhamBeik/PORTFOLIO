@@ -82,26 +82,6 @@ const INFLATION_VIEWS = [
 const REAL_BASIS_BASE_YEAR = "1398";
 const REAL_BASIS_NOTE = `In constant ${REAL_BASIS_BASE_YEAR} Tomans`;
 
-// What this card measures, said out loud when it has nothing to show.
-//
-// It reports the return on YOUR money -- cash-flow-boundary TWR and investor
-// XIRR -- which needs a tracked opening baseline and enough elapsed time. The
-// price-based returns on My Optimal and Comparison need neither, so those pages
-// happily printed a 1-year return and a 90-day comparison while this one said
-// "available after 71 more days", and the three read as a contradiction.
-function PerformanceUnavailable({ detail }) {
-  const t = useT();
-  return (
-    <Empty testId="dashboard-performance-empty">
-      <span>{serverText(detail || PERF_UNLOCK_HINT)}</span>
-      <span className="mt-2 block text-xs text-muted">
-        {t("These measure the return on the money put in, so they need a tracked opening balance.")}{" "}
-        <Link to="/compare" className="underline hover:text-text">{t("Price-based returns are on Compare.")}</Link>
-      </span>
-    </Empty>
-  );
-}
-
 const ITEM_BADGE = { live: "good", manual: "warn", stale: "warn", quota: "serious", fallback: "serious", unavailable: "critical" };
 
 // Groups valuation items by asset class for the donut. Palette has 8 fixed
@@ -138,6 +118,13 @@ function MarketClocks({ data }) {
           </span>
         );
       })}
+      <Link
+        to="/?view=health"
+        data-testid="dashboard-data-health-link"
+        className="text-xs underline decoration-border underline-offset-2 hover:text-text"
+      >
+        {t("Data health")}
+      </Link>
     </span>
   );
 }
@@ -218,7 +205,6 @@ function InflationNote({ realGrowth, nominalGrowth, cpi, basis }) {
   const t = useT();
   if (realGrowth == null) return null;
   const rate = cpi?.applied_annual_rate;
-  const estimated = (cpi?.estimated_jalali_years || []).length > 0;
   // Both lines stay in Tomans even when the rest of the page is priced in
   // dollars, because the CPI series measures the Toman. Left unsaid, the chart
   // looks like it ignored the basis selector.
@@ -232,8 +218,7 @@ function InflationNote({ realGrowth, nominalGrowth, cpi, basis }) {
         {rate != null && (
           <>{t("Prices rose {v} a year over the same days.", { v: pct(rate) })}{" "}</>
         )}
-        {t(realGrowth >= 0 ? "In constant Tomans your net worth is up {v}." : "In constant Tomans your net worth is down {v}.", { v: pct(Math.abs(realGrowth)) })}{" "}
-        {t("The gap between the two lines is inflation, not performance.")}
+        {t(realGrowth >= 0 ? "In constant Tomans your net worth is up {v}." : "In constant Tomans your net worth is down {v}.", { v: pct(Math.abs(realGrowth)) })}
         {foreignBasis && (
           <> {t("Both lines are shown in Tomans — an inflation comparison only means something in the currency being inflated.")}</>
         )}
@@ -241,7 +226,6 @@ function InflationNote({ realGrowth, nominalGrowth, cpi, basis }) {
       {cpi?.source && (
         <p data-testid="dashboard-trend-cpi-source">
           {t("Inflation index: {source}", { source: serverText(cpi.source) })}
-          {estimated && ` ${t("The current year has no published figure yet, so that part of the line is a projection.")}`}
         </p>
       )}
     </div>
@@ -687,52 +671,31 @@ function NoCostYet() {
   );
 }
 
-function PerformanceCard({ activeId, basis, accounts }) {
+function PerformanceCard({ activeId, accounts, targets, state }) {
   const t = useT();
-  const targets = performanceTargets(activeId, accounts);
-  // The holdings ride in the key: an edit reloads `accounts` but changes
-  // neither id nor ledger_complete, so resizing a house from 100 to 120 m²
-  // left this card on the old size and value until a page refresh.
-  const accountKey = accounts
-    .map((a) => `${a.id}:${a.ledger_complete}:${JSON.stringify(a.holdings ?? [])}`)
-    .join("|");
-  const state = useApi(
-    () => fetchPerformance(targets, accounts, basis),
-    [activeId, basis, accountKey, targets.ids.join(",")],
-    { enabled: targets.ids.length > 0 }
+  const infoText = (
+    <p>
+      {t("These measure the return on the money put in, so they need a tracked opening balance.")}{" "}
+      <Link to="/compare" className="underline hover:text-text">{t("Price-based returns are on Compare.")}</Link>
+    </p>
   );
 
   if (targets.ids.length === 0) {
     return (
-      <Card title="Performance" testId="dashboard-performance">
+      <Card title="Performance" testId="dashboard-performance" info={infoText}>
         <Empty testId="dashboard-performance-empty">Add a portfolio to track performance.</Empty>
       </Card>
     );
   }
 
   return (
-    <Card title="Performance" testId="dashboard-performance">
+    <Card title="Performance" testId="dashboard-performance" info={infoText}>
       <Async {...state} testId="dashboard-performance-body">
         {(data) => {
           if (data.aggregate) {
             const ready = data.accounts.filter((row) => row.performance_available);
             if (!ready.length) {
-              // Same rule as the single-account branch: the returns are locked,
-              // the positions are not. Rows are tagged with their portfolio,
-              // because two accounts can hold the same asset at different costs.
-              const positions = data.accounts.flatMap((row) =>
-                positionRows(row.assets, row.name)
-              );
-              if (!positions.length) {
-                return <PerformanceUnavailable detail={data.accounts[0]?.detail} />;
-              }
-              if (!hasCostData(positions)) return <NoCostYet />;
-              return (
-                <>
-                  <PerformanceLockedNote detail={data.accounts[0]?.detail} />
-                  <PositionsTable rows={positions} showAccount />
-                </>
-              );
+              return <PerformanceLockedNote detail={data.accounts[0]?.detail} />;
             }
             return (
               <>
@@ -774,25 +737,10 @@ function PerformanceCard({ activeId, basis, accounts }) {
               </>
             );
           }
-          const rows = positionRows(data.assets);
           if (!data.performance_available) {
-            if (!rows.length) return <PerformanceUnavailable detail={data.detail} />;
-            if (!hasCostData(rows)) return <NoCostYet />;
-            return (
-              <>
-                <PerformanceLockedNote detail={data.detail} />
-                <PositionsTable rows={rows} />
-              </>
-            );
+            return <PerformanceLockedNote detail={data.detail} />;
           }
-          return (
-            <>
-              <PerformanceMetrics data={data} />
-              <div className="mt-4">
-                <PositionsTable rows={rows} />
-              </div>
-            </>
-          );
+          return <PerformanceMetrics data={data} />;
         }}
       </Async>
     </Card>
@@ -894,8 +842,14 @@ function PricingGlossary() {
   );
 }
 
-function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
+const HOLDING_VIEWS = [
+  { value: "value", label: "Value" },
+  { value: "return", label: "Profit & cost" },
+];
+
+function HoldingsCard({ activeId, valuationState, performanceState, portfolio, admin }) {
   const t = useT();
+  const [viewMode, setViewMode] = useState("value");
   const [manageMode, setManageMode] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [savingKey, setSavingKey] = useState(null);
@@ -905,6 +859,7 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
 
   const reloadAll = () => {
     valuationState.reload();
+    performanceState?.reload?.();
     portfolio.reload();
   };
 
@@ -1019,25 +974,46 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
   };
 
   const cardActions = (
-    <div className="flex gap-2">
+    <div className="flex flex-wrap items-center gap-2">
+      <Tabs
+        options={HOLDING_VIEWS}
+        value={viewMode}
+        onChange={(next) => {
+          setViewMode(next);
+          if (next !== "value") setManageMode(null);
+        }}
+        label="Holdings view"
+        testId="dashboard-holdings-view"
+      />
+      {viewMode === "value" && (
+        <>
+          <Button
+            variant={manageMode === "edit" ? "primary" : "ghost"}
+            onClick={() => toggleManageMode("edit")}
+            aria-pressed={manageMode === "edit"}
+            data-testid="dashboard-holdings-manage-edit"
+          >
+            Edit
+          </Button>
+          <Button
+            // On, it must look on: the bare `danger` style has no fill, so the
+            // active mode read as the inactive one next to a filled Edit button.
+            variant="ghost"
+            className={manageMode === "delete" ? "border-[var(--c-critical-text)]! text-[var(--c-critical-text)]! bg-[var(--c-critical-text)]/10!" : ""}
+            onClick={() => toggleManageMode("delete")}
+            aria-pressed={manageMode === "delete"}
+            data-testid="dashboard-holdings-manage-delete"
+          >
+            Delete
+          </Button>
+        </>
+      )}
       <Button
-        variant={manageMode === "edit" ? "primary" : "ghost"}
-        onClick={() => toggleManageMode("edit")}
-        aria-pressed={manageMode === "edit"}
-        data-testid="dashboard-holdings-manage-edit"
+        variant="primary"
+        onClick={() => setAdding(true)}
+        data-testid="dashboard-add-button"
       >
-        Edit
-      </Button>
-      <Button
-        // On, it must look on: the bare `danger` style has no fill, so the
-        // active mode read as the inactive one next to a filled Edit button.
-        variant="ghost"
-        className={manageMode === "delete" ? "border-[var(--c-critical-text)]! text-[var(--c-critical-text)]! bg-[var(--c-critical-text)]/10!" : ""}
-        onClick={() => toggleManageMode("delete")}
-        aria-pressed={manageMode === "delete"}
-        data-testid="dashboard-holdings-manage-delete"
-      >
-        Delete
+        Add an asset
       </Button>
     </div>
   );
@@ -1073,36 +1049,39 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
           const staleCount = priceable.filter((i) => i.quality_status && i.quality_status !== "live").length;
           const showStaleBanner = priceable.length > 0 && staleCount / priceable.length >= 0.5;
 
+          const showInclude = manageMode === "edit" || hidden.length > 0;
           const columns = [
-            {
-              key: "include",
-              header: "",
-              render: (r) => {
-                const holding = resolveHolding(r);
-                if (!holding) return null;
-                return (
-                  // Labelled on a phone, where the tooltip below never shows.
-                  <label className="inline-flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={!r.is_hidden}
-                    disabled={savingKey === holdingsRowKey(r)}
-                    aria-label={t("Count {name} in this portfolio", { name: isolate(holdingLabel(r)) })}
-                    title={t(
-                      r.is_hidden
-                        ? "Switched off — not counted anywhere. Tick to include it again."
-                        : "Counted. Untick to leave it out of every figure without deleting it."
-                    )}
-                    data-testid="dashboard-holdings-include"
-                    onChange={(e) =>
-                      patchPresentation(r, holding, { isHidden: !e.target.checked })
-                    }
-                  />
-                  <span className="text-xs text-muted sm:hidden">{t("Count in totals")}</span>
-                  </label>
-                );
-              },
-            },
+            ...(showInclude
+              ? [{
+                  key: "include",
+                  header: "",
+                  render: (r) => {
+                    const holding = resolveHolding(r);
+                    if (!holding) return null;
+                    return (
+                      // Labelled on a phone, where the tooltip below never shows.
+                      <label className="inline-flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={!r.is_hidden}
+                        disabled={savingKey === holdingsRowKey(r)}
+                        aria-label={t("Count {name} in this portfolio", { name: isolate(holdingLabel(r)) })}
+                        title={t(
+                          r.is_hidden
+                            ? "Switched off — not counted anywhere. Tick to include it again."
+                            : "Counted. Untick to leave it out of every figure without deleting it."
+                        )}
+                        data-testid="dashboard-holdings-include"
+                        onChange={(e) =>
+                          patchPresentation(r, holding, { isHidden: !e.target.checked })
+                        }
+                      />
+                      <span className="text-xs text-muted sm:hidden">{t("Count in totals")}</span>
+                      </label>
+                    );
+                  },
+                }]
+              : []),
             {
               key: "asset",
               header: "Asset",
@@ -1131,10 +1110,9 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
                 // A stock reads as its ticker (`Holding.label`); the registered
                 // company name is long enough to break the row and is not how
                 // anyone refers to it, so it lives in the tooltip.
-                return <bdi title={r.name_fa || r.asset}>{holdingLabel(r)}</bdi>;
+                return <bdi title={[r.name_fa || r.asset, r.class ? humanize(r.class) : ""].filter(Boolean).join(" · ")}>{holdingLabel(r)}</bdi>;
               },
             },
-            { key: "class", header: "Class", render: (r) => humanize(r.class) },
             {
               key: "qty",
               header: "Size / quantity",
@@ -1270,20 +1248,23 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
             {
               key: "status",
               header: "Status",
-              render: (r) => (
-                <div className="inline-flex flex-wrap items-center gap-1 align-middle">
-                  {r.is_hidden && <Badge variant="warn">Not counted</Badge>}
-                  {/* A closing price is current but not moving: neutral, not the green of a live feed. */}
-                  <Badge variant={isLastClose(r, data.markets) ? "neutral" : ITEM_BADGE[r.quality_status] || "neutral"}>{priceStatus(r, data.markets)}</Badge>
-                  {r.price_unit_status === "unverified" && <Badge variant="warn">unverified unit</Badge>}
-                </div>
-              ),
+              render: (r) => {
+                const ageText = r.priced_at ? ago(r.age_seconds) : (r.archive_record?.date || "");
+                return (
+                  <div className="inline-flex flex-wrap items-center gap-1 align-middle" title={ageText || undefined}>
+                    {r.is_hidden && <Badge variant="warn">Not counted</Badge>}
+                    {/* A closing price is current but not moving: neutral, not the green of a live feed. */}
+                    <Badge variant={isLastClose(r, data.markets) ? "neutral" : ITEM_BADGE[r.quality_status] || "neutral"}>{priceStatus(r, data.markets)}</Badge>
+                    {r.price_unit_status === "unverified" && <Badge variant="warn">unverified unit</Badge>}
+                  </div>
+                );
+              },
             },
-            { key: "priced_at", header: "As of", render: (r) => r.priced_at ? ago(r.age_seconds) : (r.archive_record?.date || "—") },
           ];
 
           if (activeId == null) {
-            columns.splice(1, 0, {
+            const assetIdx = columns.findIndex((c) => c.key === "asset");
+            columns.splice(assetIdx >= 0 ? assetIdx : 0, 0, {
               key: "portfolio",
               header: "Portfolio",
               // Cut to one line: a long portfolio name doubled every phone card.
@@ -1298,15 +1279,16 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
           if (admin) {
             // The feed a price came from is an operator's question, not an
             // investor's: "SEED" or a provider path is jargon on a holdings row.
-            columns.splice(columns.findIndex((c) => c.key === "priced_at"), 0,
-              { key: "source", header: "Source", render: (r) => r.source || "—" });
-            columns.push({
-              key: "why",
-              header: "",
-              render: (r) => (
-                <Button variant="ghost" onClick={() => setWhyKey(r.key)} data-testid="dashboard-why">Why</Button>
-              ),
-            });
+            columns.push(
+              { key: "source", header: "Source", render: (r) => r.source || "—" },
+              {
+                key: "why",
+                header: "",
+                render: (r) => (
+                  <Button variant="ghost" onClick={() => setWhyKey(r.key)} data-testid="dashboard-why">Why</Button>
+                ),
+              }
+            );
           }
 
           // Save/Delete go FIRST, not last. This table is 12 columns wide and
@@ -1373,60 +1355,67 @@ function HoldingsCard({ activeId, valuationState, portfolio, admin }) {
 
           return (
             <>
-              {showStaleBanner && (
-                <div
-                  role="status"
-                  data-testid="dashboard-stale-banner"
-                  className="mb-3 rounded-lg border border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 px-4 py-3 text-sm"
-                >
-                  {t("{n} of {total} prices aren't live — showing the last known price.", { n: staleCount, total: priceable.length })}
-                </div>
+              {viewMode === "return" ? (
+                <Async {...performanceState} testId="dashboard-holdings-return-body">
+                  {(perfData) => {
+                    const positions = perfData.aggregate
+                      ? perfData.accounts.flatMap((row) => positionRows(row.assets, row.name))
+                      : positionRows(perfData.assets);
+                    if (!positions.length || !hasCostData(positions)) {
+                      return <NoCostYet />;
+                    }
+                    return <PositionsTable rows={positions} showAccount={Boolean(perfData.aggregate)} />;
+                  }}
+                </Async>
+              ) : (
+                <>
+                  {showStaleBanner && (
+                    <div
+                      role="status"
+                      data-testid="dashboard-stale-banner"
+                      className="mb-3 rounded-lg border border-[var(--c-warn)]/40 bg-[var(--c-warn)]/10 px-4 py-3 text-sm"
+                    >
+                      {t("{n} of {total} prices aren't live — showing the last known price.", { n: staleCount, total: priceable.length })}
+                    </div>
+                  )}
+                  {hidden.length > 0 && (
+                    <p className="mb-3 text-sm text-muted" data-testid="dashboard-holdings-hidden-note">
+                      {t(hidden.length === 1 ? "1 asset switched off and left out of every figure." : "{n} assets switched off and left out of every figure.", { n: hidden.length })}
+                      <span className="hidden md:inline"> {t(hidden.length === 1 ? "Tick to count it again." : "Tick to count them again.")}</span>
+                    </p>
+                  )}
+                  {manageMode === "edit" && (
+                    <p className="mb-3 text-xs text-muted" data-testid="dashboard-holdings-edit-hint">
+                      {t("Edit a name, quantity or manual price, then Save. Market prices come from the feed.")}
+                    </p>
+                  )}
+                  {manageMode === "delete" && (
+                    <p className="mb-3 text-xs text-muted" data-testid="dashboard-holdings-delete-hint">
+                      {t("Delete also reverses its ledger entries. To just leave it out, untick it instead.")}
+                    </p>
+                  )}
+                  <Table
+                    testId="dashboard-holdings-table"
+                    caption="Portfolio holdings"
+                    mobileCards
+                    rowKey={holdingsRowKey}
+                    rows={items}
+                    columns={columns}
+                    empty="No holdings priced yet."
+                    // `text-muted` rather than `opacity-50`: opacity dims EVERY descendant,
+                    // including the "Not counted" badge that explains why the row is
+                    // dimmed -- which measured 3.05:1. Muting the text leaves the badge
+                    // at full strength, and `--c-muted` is a token the contrast test
+                    // already guards on every background.
+                    rowClass={(r) => (r.is_hidden ? "text-muted" : "")}
+                  />
+                  {actionError && (
+                    <div className="mt-2">
+                      <ErrorState error={actionError} testId="dashboard-holdings-error" />
+                    </div>
+                  )}
+                </>
               )}
-              {hidden.length > 0 && (
-                <p className="mb-3 text-sm text-muted" data-testid="dashboard-holdings-hidden-note">
-                  {t(hidden.length === 1 ? "1 asset switched off and left out of every figure." : "{n} assets switched off and left out of every figure.", { n: hidden.length })}
-                  <span className="hidden md:inline"> {t(hidden.length === 1 ? "Tick to count it again." : "Tick to count them again.")}</span>
-                </p>
-              )}
-              {manageMode === "edit" && (
-                <p className="mb-3 text-xs text-muted" data-testid="dashboard-holdings-edit-hint">
-                  {t("Edit a name, quantity or manual price, then Save. Market prices come from the feed.")}
-                </p>
-              )}
-              {manageMode === "delete" && (
-                <p className="mb-3 text-xs text-muted" data-testid="dashboard-holdings-delete-hint">
-                  {t("Delete also reverses its ledger entries. To just leave it out, untick it instead.")}
-                </p>
-              )}
-              <Table
-                testId="dashboard-holdings-table"
-                caption="Portfolio holdings"
-                mobileCards
-                rowKey={holdingsRowKey}
-                rows={items}
-                columns={columns}
-                empty="No holdings priced yet."
-                // `text-muted` rather than `opacity-50`: opacity dims EVERY descendant,
-                // including the "Not counted" badge that explains why the row is
-                // dimmed -- which measured 3.05:1. Muting the text leaves the badge
-                // at full strength, and `--c-muted` is a token the contrast test
-                // already guards on every background.
-                rowClass={(r) => (r.is_hidden ? "text-muted" : "")}
-              />
-              {actionError && (
-                <div className="mt-2">
-                  <ErrorState error={actionError} testId="dashboard-holdings-error" />
-                </div>
-              )}
-              <div className="mt-3">
-                <Button
-                  variant="primary"
-                  onClick={() => setAdding(true)}
-                  data-testid="dashboard-add-button"
-                >
-                  Add an asset
-                </Button>
-              </div>
               {adding && (
                 <AddTransactionDialog
                   accountId={activeId}
@@ -1505,6 +1494,15 @@ export default function Dashboard({ user }) {
   const portfolio = usePortfolio();
   const { activeId, basis } = portfolio;
   const valuationState = useApi(() => valuation(activeId, basis), [activeId, basis], { pollMs: 60000 });
+  const perfTargets = performanceTargets(activeId, portfolio.accounts);
+  const accountKey = portfolio.accounts
+    .map((a) => `${a.id}:${a.ledger_complete}:${JSON.stringify(a.holdings ?? [])}`)
+    .join("|");
+  const performanceState = useApi(
+    () => fetchPerformance(perfTargets, portfolio.accounts, basis),
+    [activeId, basis, accountKey, perfTargets.ids.join(",")],
+    { enabled: perfTargets.ids.length > 0 }
+  );
 
   // A portfolio with nothing in it -- just created, most often. Every card
   // below would say "nothing yet" in its own words around a "0 T"; one card
@@ -1564,8 +1562,8 @@ export default function Dashboard({ user }) {
         </div>
         {/* What you hold, then what it made you, then what you owe. History
             quality lives on the Data health tab, not repeated here. */}
-        <HoldingsCard activeId={activeId} valuationState={valuationState} portfolio={portfolio} admin={user?.role === "admin"} />
-        <PerformanceCard activeId={activeId} basis={basis} accounts={portfolio.accounts} />
+        <HoldingsCard activeId={activeId} valuationState={valuationState} performanceState={performanceState} portfolio={portfolio} admin={user?.role === "admin"} />
+        <PerformanceCard activeId={activeId} accounts={portfolio.accounts} targets={perfTargets} state={performanceState} />
         <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} onChanged={valuationState.reload} />
         <ExcludedDisclosure valuationState={valuationState} />
       </div>
