@@ -112,6 +112,20 @@ const signed = (fn) => (v) => {
   return ltr((Number(v) > 0 ? "+" : "") + text);
 };
 
+/**
+ * The stored decimal written as the shortest string meaning the same number.
+ *
+ * The API serializes Decimals verbatim, so four coins arrive as "4.000000" and
+ * seeded the editor with six meaningless decimals on a row whose spinner steps
+ * by one — the box contradicted the column beside it, which printed "4".
+ * Trimming is string-level on purpose: sending a large Toman price through
+ * Number() to tidy it is how precision gets lost.
+ */
+export const trimZeros = (v) => {
+  const s = String(v);
+  return s.includes(".") ? s.replace(/\.?0+$/, "") : s;
+};
+
 export const signedPct = signed(pct);
 export const signedToman = signed(toman);
 
@@ -254,8 +268,21 @@ export const humanize = (code) =>
  * sentences are dictionary entries; the few that carry a number are matched
  * here and re-filled, so the number survives the translation.
  */
+const IMPORT_FIELD = { quantity: "quantity", amount_tomans: "amount", unit_price_tomans: "unit price" };
+const IMPORT_RULE = {
+  "is required": "Enter the {field}.",
+  "must be a number": "The {field} must be a number.",
+  "must be positive": "The {field} must be more than zero.",
+  "must be positive or zero": "The {field} cannot be negative.",
+};
 const SERVER_PATTERNS = [
+  [/^Request failed \(\d+\)\.$/, "Something went wrong on our side. Please try again."],
+  [/^Request was throttled/, "Too many requests. Wait a moment and try again."],
+  [/^Statistical Center of Iran annual CPI releases, verified through (\d+); ([\d/]+) are our own estimate at (\d+%)\/year, not a published figure$/,
+    "Statistical Center of Iran figures through {n}; {b} is our own estimate at {c} a year."],
+  [/^Statistical Center of Iran annual CPI releases, verified through (\d+)$/, "Statistical Center of Iran figures through {n}."],
   [/^Complete an opening baseline/, "Add what this portfolio holds to start measuring."],
+  [/^external_id already exists\.$/, "This row's reference is already in your history."],
   [/^Unknown asset_key: (.+)\.$/, "Unknown asset code: {n}."],
   [/^CSV headers must be exactly/, "The column headers do not match. Start from the template."],
   // "day(s)" read as unfinished; the count picks the word.
@@ -267,8 +294,10 @@ export function serverText(text) {
   for (const [re, key] of SERVER_PATTERNS) {
     const m = text.match(re);
     // A count takes Persian digits only as a number (i18n.js `fill`).
-    if (m) return translate(typeof key === "function" ? key(m[1]) : key, undefined, { n: /^\d+$/.test(m[1]) ? Number(m[1]) : m[1] });
+    if (m) return translate(typeof key === "function" ? key(m[1]) : key, undefined, { n: /^\d+$/.test(m[1]) ? Number(m[1]) : m[1], b: m[2], c: m[3] });
   }
+  const field = text.match(/^(quantity|amount_tomans|unit_price_tomans) (is required|must be a number|must be positive or zero|must be positive)\.$/);
+  if (field) return translate(IMPORT_RULE[field[2]], undefined, { field: translate(IMPORT_FIELD[field[1]]) });
   return translate(text);
 }
 

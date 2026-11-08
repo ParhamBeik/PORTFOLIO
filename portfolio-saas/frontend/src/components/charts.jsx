@@ -317,6 +317,11 @@ function chrome(t) {
       itemWidth: 8,
       itemHeight: 8,
       textStyle: { color: t2.muted, fontSize: 12 },
+      // A portfolio name is user-typed: one long enough to outrun the chart
+      // would otherwise run off both edges with nothing to reach the rest.
+      type: "scroll",
+      pageTextStyle: { color: t2.muted },
+      formatter: (name) => (name.length > 22 ? `${name.slice(0, 21)}…` : name),
     }),
   };
 }

@@ -95,6 +95,13 @@ def _create_rows(account, rows: list[dict], *, batch=None) -> None:
     numbered.sort(key=lambda item: (item[2], item[0]))
 
     for row_number, row, occurred_at in numbered:
+        # DictReader files surplus values under None. A note with an unquoted
+        # comma lands there and would silently lose its tail.
+        if None in row:
+            raise LedgerImportError(
+                "This row has more values than columns. Put quotes around any text with a comma.",
+                row=row_number,
+            )
         external_id = (row.get("external_id") or "").strip()
         if external_id and LedgerEntry.objects.filter(
             account=account, external_id=external_id
@@ -120,7 +127,13 @@ def _create_rows(account, rows: list[dict], *, batch=None) -> None:
 
 @transaction.atomic
 def preview_ledger_import(account, upload) -> dict:
-    _raw, rows = read_csv_upload(upload)
+    raw, rows = read_csv_upload(upload)
+    # Committing this file again is a no-op, so its rows must not be reported
+    # as conflicting with the very entries it created.
+    if ImportBatch.objects.filter(
+        account=account, file_hash=hashlib.sha256(raw).hexdigest()
+    ).exists():
+        return {"valid": True, "row_count": len(rows), "already_imported": True}
     _create_rows(account, rows)
     transaction.set_rollback(True)
     return {"valid": True, "row_count": len(rows)}

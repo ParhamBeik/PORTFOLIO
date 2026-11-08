@@ -60,8 +60,8 @@ export default function AssetHistory() {
         title={selected ? catalogLabel(selected) : "Choose an asset"}
         testId="asset-history-card"
         actions={
-          <div className="flex flex-wrap items-end gap-3">
-            <label className="flex flex-col gap-1 text-xs font-medium tracking-wide text-muted uppercase">
+          <div className="flex min-w-0 max-w-full flex-wrap items-end gap-3">
+            <label className="flex min-w-0 max-w-full flex-col gap-1 text-xs font-medium tracking-wide text-muted uppercase">
               {translate("Asset", lang)}
               <Select
                 label="Asset"

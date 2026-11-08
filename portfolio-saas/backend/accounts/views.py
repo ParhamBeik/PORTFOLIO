@@ -700,7 +700,7 @@ class ExportView(APIView):
             for name, content in files.items():
                 archive.writestr(name, content)
         response = HttpResponse(output.getvalue(), content_type="application/zip")
-        response["Content-Disposition"] = 'attachment; filename="lattice-export.zip"'
+        response["Content-Disposition"] = 'attachment; filename="holdings-export.zip"'
         return response
 
 

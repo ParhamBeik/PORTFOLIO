@@ -29,15 +29,17 @@ function Destination({ choices, initial, testId, user, hidden = [] }) {
   const shown = choices.filter((choice) => choice.value === value || !hidden.includes(choice.value));
 
   return (
-    <div>
-      <Tabs
-        options={shown.map(({ value: item, label }) => ({ value: item, label }))}
-        value={value}
-        onChange={(next) => setParams({ view: next })}
-        label="Section"
-        testId={testId}
-      />
-      <div className="mt-6">{page(<Current user={user} />)}</div>
+    <div data-testid={shown.length <= 1 ? testId : undefined}>
+      {shown.length > 1 && (
+        <Tabs
+          options={shown.map(({ value: item, label }) => ({ value: item, label }))}
+          value={value}
+          onChange={(next) => setParams({ view: next })}
+          label="Section"
+          testId={testId}
+        />
+      )}
+      <div className={shown.length > 1 ? "mt-6" : ""}>{page(<Current user={user} />)}</div>
     </div>
   );
 }
@@ -48,9 +50,11 @@ export function PortfolioDestination({ user }) {
     { value: "breakdown", label: "Breakdown", component: Family },
     { value: "health", label: "Data health", component: DataHealth },
   ];
-  // Breakdown compares portfolios; with one there is nothing to compare.
+  // Breakdown compares portfolios; with one there is nothing to compare, and
+  // Data health is linked from the status line so a single-portfolio user sees
+  // their Net Worth first instead of a two-tab bar.
   const { accounts } = usePortfolio();
-  const hidden = accounts.length < 2 ? ["breakdown"] : [];
+  const hidden = accounts.length < 2 ? ["breakdown", "health"] : [];
   return <Destination choices={choices} initial="summary" testId="portfolio-section" user={user} hidden={hidden} />;
 }
 
@@ -59,7 +63,9 @@ export function ActivityDestination() {
     { value: "transactions", label: "Transactions", component: Ledger },
     { value: "holdings", label: "Add holdings", component: Onboarding },
   ];
-  return <Destination choices={choices} initial="transactions" testId="activity-section" />;
+  // Adding holdings happens in the "+ Add" wizard modal everywhere; keep the
+  // legacy ?view=holdings route reachable without showing a redundant tab bar.
+  return <Destination choices={choices} initial="transactions" testId="activity-section" hidden={["holdings"]} />;
 }
 
 export function ResearchDestination() {

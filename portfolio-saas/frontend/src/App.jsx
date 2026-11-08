@@ -1,3 +1,4 @@
+import { translate } from "./i18n.js";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { auth, me, restoreSession, SESSION_EXPIRED_EVENT } from "./api.js";
@@ -219,7 +220,7 @@ export default function App() {
         <RouteTitle />
         {notice && (
           <p role="alert" className="p-3 text-center text-sm text-[var(--c-warn-text)]">
-            {notice}
+            {translate(notice)}
           </p>
         )}
         <Routes>

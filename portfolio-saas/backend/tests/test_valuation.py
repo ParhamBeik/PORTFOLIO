@@ -1616,7 +1616,7 @@ def test_projected_cpi_years_are_never_counted_as_published():
     assert settings.CPI_VERIFIED_THROUGH_YEAR < min(estimated), (
         "an estimated year was folded into the verified range"
     )
-    assert "ESTIMATE" in settings.CPI_SOURCE, (
+    assert "estimate" in settings.CPI_SOURCE, (
         "CPI_SOURCE is the provenance string shipped in the valuation payload; "
         "it must disclose that a projected index was used"
     )
@@ -2105,7 +2105,7 @@ def test_projected_inflation_stays_in_the_band_the_published_series_lives_in():
         f"CPI_BY_JALALI_YEAR sits between 31% and 46%"
     )
     # And it must still be legible as an estimate wherever it is printed.
-    assert "ESTIMATE" in settings.CPI_SOURCE
+    assert "estimate" in settings.CPI_SOURCE
     assert f"{annual:.0%}/year" in settings.CPI_SOURCE
 
 

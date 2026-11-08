@@ -1090,8 +1090,8 @@ CPI_SOURCE = (
     f"Statistical Center of Iran annual CPI releases, verified through "
     f"{CPI_VERIFIED_THROUGH_YEAR}"
     + (
-        f"; {'/'.join(str(year) for year in sorted(CPI_ESTIMATED_YEARS))} are an "
-        f"OPERATOR ESTIMATE at {CPI_ESTIMATED_ANNUAL_RATE_EFFECTIVE:.0%}/year, "
+        f"; {'/'.join(str(year) for year in sorted(CPI_ESTIMATED_YEARS))} are "
+        f"our own estimate at {CPI_ESTIMATED_ANNUAL_RATE_EFFECTIVE:.0%}/year, "
         f"not a published figure"
         if CPI_ESTIMATED_YEARS
         else ""

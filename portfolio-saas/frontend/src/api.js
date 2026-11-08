@@ -244,6 +244,8 @@ async function request(path, { method = "GET", body, _retried = false } = {}) {
     });
   } catch (error) {
     recordApi(path, method, 0, perfNow() - startedAt);
+    // fetch rejects with browser wording ("Failed to fetch", "Load failed").
+    if (error instanceof TypeError) throw new Error("Could not reach the server. Check your connection and try again.");
     throw error;
   }
   recordApi(path, method, res.status, perfNow() - startedAt);
@@ -378,7 +380,7 @@ export async function downloadExport() {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = "lattice-export.zip";
+  link.download = "holdings-export.zip";
   document.body.appendChild(link);
   link.click();
   link.remove();

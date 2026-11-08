@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { translate } from "../i18n.js";
 import { useApi } from "../useApi.js";
 import {
   acceptCorporateAction,
@@ -59,7 +60,7 @@ export default function CorporateActionsCard({ onBooked }) {
         <input
           className="w-28 rounded border border-border bg-transparent px-2 py-1 text-right"
           inputMode="numeric"
-          aria-label={`New shares of ${r.symbol} on ${r.date}`}
+          aria-label={translate("New shares of {symbol} on {date}", undefined, { symbol: r.symbol, date: r.date })}
           value={drafts[keyOf(r)] ?? r.suggested_quantity}
           onChange={(e) => setDrafts((d) => ({ ...d, [keyOf(r)]: e.target.value }))}
           data-testid="dashboard-corporate-actions-quantity"

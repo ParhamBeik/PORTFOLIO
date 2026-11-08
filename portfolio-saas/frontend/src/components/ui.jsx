@@ -7,6 +7,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useT } from "../i18n.js";
+import { serverText } from "../format.js";
 
 import {
   JALALI_MONTHS,
@@ -282,9 +283,10 @@ export function Input({ label, className = "", placeholder, ...props }) {
 }
 
 export function Textarea({ label, className = "", ...props }) {
+  const t = useT();
   return (
     <textarea
-      aria-label={label}
+      aria-label={t(label)}
       className={`${FIELD} placeholder:text-muted ${className}`}
       {...props}
     />
@@ -580,11 +582,12 @@ export function Table({ columns, rows, rowKey, empty = "No rows.", testId, capti
  * client-sliced one (Ledger) alike -- the caller owns which rows it shows.
  */
 export function Pager({ page, count, pageSize = 25, onPage, testId }) {
+  const t = useT();
   const pages = Math.max(1, Math.ceil((count || 0) / pageSize));
   return (
     <div data-testid={testId} className="mt-3 flex items-center gap-2 text-sm">
       <Button disabled={page <= 1} onClick={() => onPage(page - 1)}>Previous</Button>
-      <span className="text-muted">Page {page} / {pages}</span>
+      <span className="text-muted">{t("Page {page} / {pages}", { page, pages })}</span>
       <Button disabled={page >= pages} onClick={() => onPage(page + 1)}>Next</Button>
     </div>
   );
@@ -640,7 +643,7 @@ export const ErrorState = ({ error, onRetry, testId }) => (
     data-testid={testId}
     className="rounded-lg border border-[var(--c-critical)]/40 bg-[var(--c-critical)]/10 px-4 py-3 text-sm"
   >
-    <span>{error?.message || "Something went wrong."}</span>
+    <span>{serverText(error?.message || "Something went wrong.")}</span>
     {onRetry && (
       <Button variant="link" onClick={onRetry} className="ml-2">
         Retry

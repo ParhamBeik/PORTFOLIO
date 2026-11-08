@@ -130,7 +130,7 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
 
   return (
     <div
-      className="app-drawer-scrim xl:hidden"
+      className="app-drawer-scrim lg:hidden"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -191,6 +191,36 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
  */
 const TABS = PAGES.filter((p) => p.to !== "/risk");
 
+function TabIcon({ to }) {
+  if (to === "/") {
+    return (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <path d="M3.5 9.5L10 4l6.5 5.5v6a1 1 0 0 1-1 1h-3.5v-4.5h-4V16.5H4.5a1 1 0 0 1-1-1v-6Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  if (to === "/activity") {
+    return (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <path d="M4 6h12M4 10h12M4 14h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (to === "/research") {
+    return (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <circle cx="9" cy="9" r="4.75" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M12.5 12.5L16 16" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path d="M4 13l4-4 3 3 5-6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function BottomTabs() {
   const t = useT();
   return (
@@ -198,7 +228,8 @@ function BottomTabs() {
       {TABS.slice(0, 2).map((p) => (
         <NavLink key={p.to} to={p.to} end={p.end} data-testid={`tab-${p.label.toLowerCase()}`}
           className={({ isActive }) => `app-bottom-tab${isActive ? " is-active" : ""}`}>
-          {t(p.label)}
+          <TabIcon to={p.to} />
+          <span>{t(p.label)}</span>
         </NavLink>
       ))}
       <NavLink to="/activity?add=trade" aria-label={t("Record a trade")} data-testid="tab-add-trade"
@@ -206,7 +237,8 @@ function BottomTabs() {
       {TABS.slice(2).map((p) => (
         <NavLink key={p.to} to={p.to} data-testid={`tab-${p.label.toLowerCase()}`}
           className={({ isActive }) => `app-bottom-tab${isActive ? " is-active" : ""}`}>
-          {t(p.label)}
+          <TabIcon to={p.to} />
+          <span>{t(p.label)}</span>
         </NavLink>
       ))}
     </nav>
@@ -367,7 +399,7 @@ export default function Shell({ user, onLogout, onUserChange }) {
               of a sticky header and still cut "All portfolios" to "All portfo".
               Basis is a two-way switch, so it is a toggle, not a dropdown. */}
           <div
-            className="app-toolbar order-2 xl:order-3 xl:ml-auto"
+            className="app-toolbar order-2 lg:order-3 lg:ml-auto"
             data-testid="header-toolbar"
           >
             <Select
@@ -397,33 +429,33 @@ export default function Shell({ user, onLogout, onUserChange }) {
             <BasisToggle basis={basis} setBasis={setBasis} />
           </div>
 
-          {/* From `xl` up there is room for the links inline, and a drawer on
-              desktop would be hiding navigation for no reason.
+          {/* From `lg` up there is room for the links inline, matching the
+              1024px breakpoint where the phone bottom bar steps aside.
               The breakpoint lives on `.app-nav-rail` in index.css, not in a
               `hidden lg:flex` here: that utility and the component class are
               both single-class selectors, so the later stylesheet wins and the
               rail rendered stacked inside a phone's header. */}
           <nav
             aria-label={t("Primary")}
-            className="app-nav-rail xl:order-2"
+            className="app-nav-rail lg:order-2"
             data-testid="nav"
           >
             <NavLinks admin={user?.role === "admin"} />
           </nav>
 
-          <div className="order-3 ml-auto flex shrink-0 items-center gap-2 sm:gap-3 xl:order-4 xl:ml-0">
+          <div className="order-3 ml-auto flex shrink-0 items-center gap-2 sm:gap-3 lg:order-4 lg:ml-0">
             {/* Log out lives INSIDE this menu, next to the rest of the account
                 actions it belongs with — it was the only one that had a home.
-                The language switch is a once-ever setting: below xl it lives
+                The language switch is a once-ever setting: below lg it lives
                 in the drawer rather than taking header width from the scope. */}
-            <div className="hidden xl:block">
+            <div className="hidden lg:block">
               <LanguageToggle />
             </div>
             <AccountMenu user={user} onLogout={onLogout} onUserChange={onUserChange} />
 
             <button
               type="button"
-              className="app-header-btn inline-flex items-center justify-center rounded-md border border-border bg-panel-2 p-2 text-text xl:hidden"
+              className="app-header-btn inline-flex items-center justify-center rounded-md border border-border bg-panel-2 p-2 text-text lg:hidden"
               aria-label={t(mobileOpen ? "Close menu" : "Open menu")}
               aria-expanded={mobileOpen}
               aria-haspopup="dialog"

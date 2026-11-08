@@ -17,7 +17,7 @@ import {
   listLiabilities,
   replaceLiability,
 } from "../api.js";
-import { date, holdingLabel, toman } from "../format.js";
+import { date, holdingLabel, toman, trimZeros } from "../format.js";
 import { dateToIso, isoToDate } from "../jalali.js";
 import { useApi } from "../useApi.js";
 import {
@@ -25,7 +25,6 @@ import {
   Badge,
   Button,
   Card,
-  Empty,
   ErrorState,
   Field,
   Input,
@@ -99,13 +98,13 @@ export function LiabilityDialog({ accountId, accounts, row, onClose, onSaved }) 
     lender: row?.lender || "",
     assetKey: row?.asset_key || "",
     mode: modeFor(row),
-    amount: row?.amount_tomans != null ? String(row.amount_tomans) : "",
-    principal: row?.principal_tomans != null ? String(row.principal_tomans) : "",
-    rate: row?.annual_rate_pct != null ? String(row.annual_rate_pct) : "",
+    amount: row?.amount_tomans != null ? trimZeros(row.amount_tomans) : "",
+    principal: row?.principal_tomans != null ? trimZeros(row.principal_tomans) : "",
+    rate: row?.annual_rate_pct != null ? trimZeros(row.annual_rate_pct) : "",
     termMonths: row?.term_months != null ? String(row.term_months) : "",
     installment:
       row?.monthly_installment_tomans != null
-        ? String(row.monthly_installment_tomans)
+        ? trimZeros(row.monthly_installment_tomans)
         : "",
     // The server holds a plain date; `JalaliDateField` speaks ISO instants.
     // Both conversions go through `jalali.js`, which anchors them to Tehran —
@@ -533,7 +532,9 @@ export default function LiabilitiesCard({ activeId, accounts, onChanged }) {
         {(rows) => !rows.length ? (
           // `Async` renders `empty` only for a null payload, and an empty list
           // is not null -- without this the card body is simply blank.
-          <Empty testId="dashboard-liabilities-empty">No debts recorded.</Empty>
+          <p className="text-sm text-muted" data-testid="dashboard-liabilities-empty">
+            {t("No debts recorded.")}
+          </p>
         ) : (
           <div className="space-y-2">
             {rows.map((row) => (

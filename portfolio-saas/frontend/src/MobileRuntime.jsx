@@ -1,3 +1,4 @@
+import { translate } from "./i18n.js";
 import { useEffect, useState } from "react";
 import { App as NativeApp } from "@capacitor/app";
 import { Network } from "@capacitor/network";
@@ -53,5 +54,5 @@ export default function MobileRuntime() {
   }, []);
 
   if (!isNative || connected) return null;
-  return <div className="native-connection" role="status" data-testid="native-offline-status">No connection · showing saved data where available</div>;
+  return <div className="native-connection" role="status" data-testid="native-offline-status">{translate("No connection · showing saved data where available")}</div>;
 }

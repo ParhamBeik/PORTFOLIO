@@ -135,6 +135,19 @@ describe("Page Rendering Tests", () => {
       twr: 0.15,
       xirr: 0.18,
       is_estimated: false,
+      assets: {
+        kama_stock: {
+          asset_name: "Kama Stock",
+          quantity: "1000",
+          quantity_step: "1",
+          average_cost_tomans: 250,
+          average_cost_currency: "toman",
+          total_cost_basis_tomans: 250000,
+          current_value_tomans: 300000,
+          realized_pnl_tomans: 0,
+          unrealized_pnl_tomans: 50000,
+        },
+      },
     });
     api.listLiabilities.mockResolvedValue([]);
     api.accountDataQuality.mockResolvedValue({
@@ -189,6 +202,10 @@ describe("Page Rendering Tests", () => {
     expect(api.analytics).not.toHaveBeenCalled();
     expect(api.diversifiers).not.toHaveBeenCalled();
     expect(api.insights).not.toHaveBeenCalled();
+
+    // Toggling Holdings to "Profit & cost" displays position cost basis and P&L inside the unified Holdings card
+    fireEvent.click(screen.getByTestId("dashboard-holdings-view-return"));
+    expect(await screen.findByTestId("dashboard-performance-table")).toHaveTextContent("250,000 T");
   });
 
   it("asks before selling all of an edited holding", async () => {

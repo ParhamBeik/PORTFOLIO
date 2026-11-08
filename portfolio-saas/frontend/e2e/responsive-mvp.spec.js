@@ -49,8 +49,8 @@ for (const width of [390, 768, 1366]) {
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       expect(overflow, `${path} overflows at ${width}px`).toBeLessThanOrEqual(1);
     }
-    // The inline rail starts at xl (1280px); below it the links are in the drawer.
-    if (width < 1280) {
+    // The inline rail starts at lg (1024px); below it the links are in the drawer.
+    if (width < 1024) {
       await page.getByTestId("nav-toggle").click();
       await expect(page.getByTestId("nav-drawer")).toBeVisible();
       await expect(page.getByTestId("nav-operations-mobile")).toBeVisible();
