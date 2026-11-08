@@ -27,6 +27,7 @@ sentry-sdk==2.68.1
 # PyPortfolioOpt is the single top-level dep; the rest are pinned for
 # reproducible Docker builds (all ship linux/amd64 py3.11 wheels, no compile).
 PyPortfolioOpt==1.6.0
+packaging==25.0
 numpy==1.26.4
 pandas==2.2.2
 scipy==1.13.1
