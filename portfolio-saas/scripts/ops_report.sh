@@ -25,7 +25,7 @@ awk -F'\t' 'FNR==1{next}
 echo
 echo "== Worst 8 minutes by disk wait"
 # shellcheck disable=SC2086
-awk -F'\t' 'FNR>1{print $7"\t"$1"\tload="$2"\tswapMB="$4"\tdiskR/W MB="$8"/"$9}' ${host_files} | sort -rn | head -8
+awk -F'\t' 'FNR>1{print $7"\t"$1"\tload="$2"\tswapMB="$4"\tdiskR/W MB="$8"/"$9}' ${host_files} | sort -rn | awk "NR<=8"
 
 echo
 echo "== Heaviest containers over the period (cpu-min = CPU minutes used; R/W in GB)"
@@ -35,7 +35,7 @@ if [[ -n "${cfiles}" ]]; then
   awk -F'\t' 'FNR==1{next}
     {c[$2]++; cpu[$2]+=$3/100; if($4>mem[$2])mem[$2]=$4; r[$2]+=$5; w[$2]+=$6}
     END{for(k in c)printf "%-40s cpu-min=%8.0f  peakRAM=%5d MB  R=%7.1f GB  W=%7.1f GB\n",k,cpu[k],mem[k],r[k]/1024,w[k]/1024}' \
-    ${cfiles} | sort -t= -k4 -rn | head -10
+    ${cfiles} | sort -t= -k4 -rn | awk "NR<=10"
 fi
 
 echo
