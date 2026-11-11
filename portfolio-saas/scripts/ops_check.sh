@@ -38,6 +38,11 @@ for service in "${expected_services[@]}"; do
   grep -qx -- "${service}" <<<"${running_services}" || failures+=("service ${service} is not running")
 done
 
+# Encrypted daily backups (vps-backup.sh) must exist and be < 36h old.
+for d in /var/backups/portfolio /var/backups/bama; do
+  [[ -n "$(find "$d" -name "daily-*.dump.enc" -mmin -2160 2>/dev/null | head -1)" ]] || failures+=("no fresh backup in $d")
+done
+
 if ((${#failures[@]})); then
   # host_alert.py reads the ALERT_* keys from the env file. This used to curl
   # "${ALERT_WEBHOOK_URL:-}" straight from its own environment, which cron

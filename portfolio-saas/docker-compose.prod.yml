@@ -129,7 +129,7 @@ services:
     # `VACUUM (ANALYZE) marketdata_stocktransactiontick` failed outright with
     # "could not resize shared memory segment ... No space left on device".
     # Any parallel plan over the big tables hits the same wall.
-    shm_size: 1gb
+    shm_size: 512mb
     # The image ships the compiled-in defaults (shared_buffers 128 MB), which is
     # what the database had been running on. Values below are sized for
     # the 6 GB limit set at the foot of this block, not for the whole host:
@@ -152,9 +152,9 @@ services:
       - -c
       - statement_timeout=900000
       - -c
-      - shared_buffers=1536MB
+      - shared_buffers=1024MB
       - -c
-      - effective_cache_size=4GB
+      - effective_cache_size=2560MB
       - -c
       # 32 MB, not 16: 219 GB of temp files in 13.8k spills (avg ~16 MB each)
       # showed typical sorts/hashes running just over the old limit.
@@ -199,6 +199,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 120s   # WAL replay after a recreate took ~72s
     # CPU priority only matters when the 4 cores are contended: then the
     # database and API win over background workers (default weight is 1024).
     cpu_shares: 2048
@@ -206,7 +207,7 @@ services:
       resources:
         limits:
           cpus: "2"
-          memory: 6g
+          memory: 3584m   # was 6g: db+workers exceeded 7.8 GiB host RAM and swapped
 
   redis:
     image: redis:7.2-alpine
@@ -274,7 +275,7 @@ services:
       resources:
         limits:
           cpus: "0.5"          # was 0.25: the scanner pinned it at the limit
-          memory: 384m         # was 256m: sat at 218 MB, one spike from an OOM kill
+          memory: 512m         # was 384m
 
   migrate:
     build: ./backend
@@ -380,7 +381,7 @@ services:
       minio:
         condition: service_healthy
     environment: *backend-env
-    command: celery -A config worker -l info --concurrency=4 -Q archive -n archive@%h --max-memory-per-child=600000
+    command: celery -A config worker -l info --concurrency=2 -Q archive -n archive@%h --max-memory-per-child=600000
     ulimits: *no-core
     cpu_shares: 256        # background backfill yields to the API and live lane
     healthcheck:
@@ -393,7 +394,7 @@ services:
       resources:
         limits:
           cpus: "1"
-          memory: 2g
+          memory: 1280m
 
   # Codal document download and parsing. Split off the archive worker, which used
   # to serve `-Q archive,codal`: document work is not quota-bound and should run
@@ -423,7 +424,7 @@ services:
       minio:
         condition: service_healthy
     environment: *backend-env
-    command: celery -A config worker -l info --concurrency=4 -Q codal -n codal@%h --max-memory-per-child=600000
+    command: celery -A config worker -l info --concurrency=2 -Q codal -n codal@%h --max-memory-per-child=600000
     ulimits: *no-core
     cpu_shares: 256
     healthcheck:
@@ -436,7 +437,7 @@ services:
       resources:
         limits:
           cpus: "1"
-          memory: 2g
+          memory: 1280m
 
   celery_beat:
     build: ./backend

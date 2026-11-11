@@ -1482,7 +1482,7 @@ def get_deep_tier_symbols(all_symbols: set[str] | None = None) -> set[str]:
         .values_list("asset__tse_symbol", flat=True)
     )
     n = getattr(settings, "MARKETDATA_DEEP_TIER_N", 100)
-    liquid = set(reversal.liquid_symbols(n))
+    liquid = set(reversal.liquid_symbol_set(n))
     if not held and not liquid and all_symbols:
         return all_symbols
     return held | liquid
