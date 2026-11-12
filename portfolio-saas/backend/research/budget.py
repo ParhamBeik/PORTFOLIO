@@ -6,7 +6,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from marketdata.jalali import TEHRAN
+from marketdata.jalali import tehran_day
 
 from .models import ResearchBudgetDay, ResearchRun
 
@@ -16,7 +16,7 @@ class BudgetExceeded(RuntimeError):
 
 
 def _today():
-    return timezone.localdate(timezone.now(), TEHRAN)
+    return tehran_day()
 
 
 @transaction.atomic
@@ -37,7 +37,7 @@ def reserve(user, symbol, question, max_cost_usd, estimated_cost, model, evidenc
 
 @transaction.atomic
 def finish(run, result=None, selected=None, failure_code=""):
-    day = ResearchBudgetDay.objects.select_for_update().get(date=timezone.localtime(run.created_at, TEHRAN).date())
+    day = ResearchBudgetDay.objects.select_for_update().get(date=tehran_day(run.created_at))
     run.finished_at = timezone.now()
     if result is None:
         # A timed-out or malformed response might still have been billed. Keep

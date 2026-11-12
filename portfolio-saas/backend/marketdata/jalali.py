@@ -130,6 +130,31 @@ def recent_days(count):
 TEHRAN = ZoneInfo("Asia/Tehran")
 
 
+def _now():
+    """The one place `tehran_day` reads the clock, so a test can set it."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def tehran_day(moment=None):
+    """The Tehran calendar DATE (a `datetime.date`) of `moment`, default now.
+
+    This is the owner of "what day is it in the market?". The containers run UTC,
+    so the server date is a day behind Tehran from 20:30 to 23:59 UTC (00:00 to
+    03:29 Tehran). Ask this, not the process clock, whenever the answer is a
+    market day, a quota day or a budget day.
+
+    `today()` above is deliberately NOT this: three nightly jobs rely on its UTC
+    lag (see its docstring). Do not route them here without changing them too.
+
+    `moment` must be timezone-aware. A naive datetime would be read as server
+    time, which is exactly the mistake this function exists to prevent.
+    """
+    moment = _now() if moment is None else moment
+    if moment.tzinfo is None:
+        raise ValueError("tehran_day needs a timezone-aware datetime")
+    return moment.astimezone(TEHRAN).date()
+
+
 def to_gregorian(value):
     """Jalali "1405-05-24" -> datetime.date, or None if it is not a Jalali date.
 
