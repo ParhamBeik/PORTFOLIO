@@ -169,9 +169,11 @@ def to_basis(
             "when": pd.to_datetime(usd_series.index, utc=True),
             "rate": usd_series.to_numpy(),
         }).sort_values("when")
+        from .valuation import FX_CARRY_DAYS
+
         aligned = pd.merge_asof(
             target, rates, on="when", direction="backward",
-            tolerance=pd.Timedelta(days=5),
+            tolerance=pd.Timedelta(days=FX_CARRY_DAYS),
         ).sort_values("position")
         usd_aligned = pd.Series(aligned["rate"].to_numpy(), index=series.index)
         usd_aligned = usd_aligned.where(usd_aligned > 0)

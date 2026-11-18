@@ -910,25 +910,12 @@ def refresh_if_stale(account, basis: str = "real_toman", *, force: bool = False)
     """
     from django.utils import timezone
     from portfolio.optimization_models import OptimizationSnapshot
-    from portfolio.services.returns import _price_version_fingerprint
     # From the concern module, not the package root: `views/__init__` is a
     # compatibility layer that re-exports the PUBLIC surface, and this helper is
     # private to the analytics views.
-    from portfolio.views.analytics import _compute_my_optimal_payload
+    from portfolio.views.analytics import _compute_my_optimal_payload, _my_optimal_fingerprint
 
-    holding_q = Holding.objects.filter(account=account)
-    ledger_q = LedgerEntry.objects.filter(account=account)
-    max_ledger_id = ledger_q.order_by("-id").values_list("id", flat=True).first() or 0
-    max_holding_id = holding_q.order_by("-id").values_list("id", flat=True).first() or 0
-    hidden_fp = "-".join(
-        str(i) for i in sorted(
-            holding_q.filter(is_hidden=True).values_list("id", flat=True)
-        )
-    )
-    current_fp = (
-        f"{_price_version_fingerprint(holding_q.values_list('asset__key', flat=True))}"
-        f":{max_ledger_id}:{max_holding_id}:{hidden_fp}"
-    )
+    current_fp = _my_optimal_fingerprint(account.user, account)
 
     snap = (
         OptimizationSnapshot.objects

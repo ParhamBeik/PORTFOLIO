@@ -90,6 +90,11 @@ _CLOSED_BRS_GRACE_SECONDS = 24 * 3600
 # never off a single symbol's own rows. See that helper for why both fail.
 MAX_FORWARD_FILL_SESSIONS = 5
 
+#: Maximum calendar days a dated FX close may be carried forward when converting
+#: a valuation or chart point to USD/USDT (`conversion_rate_as_of`,
+#: `views.valuation._dated_fx_rates`, `deflator.to_basis`).
+FX_CARRY_DAYS = 5
+
 # How far back the session calendar used to age archive closes is built. Only
 # needs to comfortably exceed MAX_FORWARD_FILL_SESSIONS in calendar days --
 # wide enough that Nowruz (~2 weeks shut) still leaves the bound measurable,
@@ -103,18 +108,28 @@ def current_market_state() -> str:
     return market_state()
 
 
+def _market_group_is_open(group: str, state: str) -> bool:
+    """Single owner for whether a market group's desks are actively trading."""
+    if group == "crypto":
+        return True
+    if group == "stocks":
+        return state == OPEN
+    if group == "gold_fx":
+        return state in (OPEN, CLOSED_DAYTIME)
+    return False
+
+
 def _asset_market_is_open(asset, state: str) -> bool:
     """Return whether this asset's live feed should be authoritative now."""
-
     if asset.asset_class == Asset.AssetClass.CRYPTO:
-        return True
+        return _market_group_is_open("crypto", state)
     if asset.asset_class == Asset.AssetClass.STOCK or asset.tse_symbol:
-        return state == OPEN
+        return _market_group_is_open("stocks", state)
     if (
         asset.asset_class in (Asset.AssetClass.GOLD, Asset.AssetClass.CASH)
         or asset.brs_symbol
     ):
-        return state in (OPEN, CLOSED_DAYTIME)
+        return _market_group_is_open("gold_fx", state)
     return False
 
 
@@ -1075,9 +1090,8 @@ def market_clocks(items) -> list[dict]:
     """
     state = current_market_state()
     is_open = {
-        "stocks": state == OPEN,
-        "gold_fx": state in (OPEN, CLOSED_DAYTIME),
-        "crypto": True,
+        group: _market_group_is_open(group, state)
+        for group, _label, _classes in MARKET_GROUPS
     }
     def group_of(item):
         if item.get("symbol") or item.get("class") == Asset.AssetClass.STOCK:
@@ -1933,7 +1947,7 @@ def conversion_rate_as_of(basis: str, as_of) -> Decimal | None:
     except (TypeError, ValueError):
         return None
     requested = as_of.date() if hasattr(as_of, "date") else as_of
-    if (requested - observed).days > 5:
+    if (requested - observed).days > FX_CARRY_DAYS:
         return None
     return Decimal(str(row.close_price))
 
