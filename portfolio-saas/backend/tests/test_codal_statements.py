@@ -580,3 +580,11 @@ def test_every_certified_reading_is_kept_for_comparison(monkeypatch):
         extraction__report=report, fact_code="income.net_profit", verification_status="reconciled",
     )
     assert readings.values("extraction__artifact").distinct().count() == 2
+
+
+def test_numeric_zero_value_in_datasource_is_not_treated_as_blank():
+    zero_num = INTERIM.replace(b'"value":"0"', b'"value":0')
+    assert zero_num != INTERIM
+    facts = {f["fact_code"]: f for f in _parse(zero_num)}
+    assert facts["income.discontinued_profit"]["numeric_value"] == Decimal("0")
+    assert all(f["verification_status"] == "reconciled" for f in facts.values())
