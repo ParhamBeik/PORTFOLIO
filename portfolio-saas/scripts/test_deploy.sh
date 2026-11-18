@@ -2,8 +2,14 @@
 # Exercise deploy.sh's ordering, image handling and pruning, and the watchdog's
 # deploy lock, against a fake Docker. Nothing here talks to a real daemon.
 set -Eeuo pipefail
-if ((BASH_VERSINFO[0] < 4)); then
-  echo "deploy test requires Bash 4+" >&2
+if ((BASH_VERSINFO[0] < 4)) || ! command -v flock >/dev/null 2>&1; then
+  for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if ((BASH_VERSINFO[0] < 4)) && [[ -x "${candidate}" ]] && "${candidate}" -c '((BASH_VERSINFO[0] >= 4))' 2>/dev/null && command -v flock >/dev/null 2>&1; then
+      exec "${candidate}" "$0" "$@"
+    fi
+  done
+  echo "deploy test requires Bash 4+ and flock" >&2
+  [[ "${CI:-}" == "true" || "${REQUIRE_DEPLOY_TEST:-0}" == "1" ]] && exit 1
   exit 0
 fi
 

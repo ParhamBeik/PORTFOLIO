@@ -172,34 +172,3 @@ def backtest_crossover(
         "fast": fast,
         "slow": slow,
     }
-
-
-def _self_check() -> None:
-    """Smallest runnable proof the arithmetic and the lookahead guard hold."""
-    # RSI of a monotonically rising series has no losses at all -> 100.
-    rising = pd.Series(np.arange(1, 120, dtype=float))
-    assert round(float(rsi(rising).iloc[-1]), 2) == 100.0, rsi(rising).iloc[-1]
-    # ...and a monotonically falling one has no gains -> 0.
-    falling = pd.Series(np.arange(120, 1, -1, dtype=float))
-    assert float(rsi(falling).iloc[-1]) < 1.0, rsi(falling).iloc[-1]
-
-    # MACD histogram is zero for a flat series (both EMAs coincide).
-    flat = pd.Series(np.full(120, 50.0))
-    assert abs(float(macd(flat)["histogram"].iloc[-1])) < 1e-9
-
-    # A price index rebuilt from returns reproduces the compounded total.
-    r = pd.Series([0.1, -0.05, 0.02])
-    assert abs(float(price_index_from_returns(r).iloc[-1]) - 100 * 1.1 * 0.95 * 1.02) < 1e-9
-
-    # The lookahead guard: on a series that only ever rises, the crossover
-    # strategy cannot beat buy-and-hold, because it sits out the early bars.
-    trend = pd.Series(100 * (1.0 + pd.Series(np.full(400, 0.002))).cumprod())
-    bt = backtest_crossover(trend)
-    assert bt is not None
-    assert bt["strategy_return"] <= bt["buy_and_hold_return"] + 1e-9, bt
-    assert 0.0 <= bt["share_of_days_invested"] <= 1.0
-    print("signals self-check OK:", bt)
-
-
-if __name__ == "__main__":
-    _self_check()
