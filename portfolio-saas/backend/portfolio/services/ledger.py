@@ -196,7 +196,7 @@ def create_ledger_entry(
                 unit_price = resolve_historical_price(asset, occurred_at)
             except PriceResolutionError as exc:
                 raise LedgerError(str(exc)) from exc
-        if asset.quote_unit != "usd":
+        if asset.key not in USD_QUOTED_KEYS:
             unit_price = _whole_toman(unit_price)
         # A quantity x price product, so it crosses the TSE Rial/Toman boundary
         # exactly like a valuation does. It reads as Toman everywhere
@@ -208,7 +208,7 @@ def create_ledger_entry(
         amount = holding_value_to_toman(
             asset, quantity * unit_price
         ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-    elif unit_price is not None and (asset is None or asset.quote_unit != "usd"):
+    elif unit_price is not None and (asset is None or asset.key not in USD_QUOTED_KEYS):
         unit_price = _whole_toman(unit_price)
     if area is not None or mortgage is not None:
         # A revaluation carries the same terms as the opening it supersedes, so
@@ -1519,8 +1519,10 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
             # Shared helper, not a fourth copy: this branch writes a durable
             # `LedgerEntry.price_tomans`, so a divergent answer here becomes
             # permanent rather than merely displayed.
+            from marketdata.currency import requires_declared_unit
+
             converted = Decimal("0")
-            if history.unit or asset.asset_class != Asset.AssetClass.CRYPTO:
+            if history.unit or not requires_declared_unit(asset):
                 cash_rates, tether_rates = toman_rate_tables(
                     [history.unit], [history.date],
                 )

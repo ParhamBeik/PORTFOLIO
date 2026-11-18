@@ -221,8 +221,9 @@ def _rescale(valuation, factor, *, to_foreign_currency=False):
     valuation["total"] = Decimal(str(valuation.get("total", 0) or 0)) / factor
     if valuation.get("cash_tomans") is not None:
         valuation["cash_tomans"] = Decimal(str(valuation["cash_tomans"])) / factor
-    if valuation.get("total_usd") is not None:
-        valuation["total_usd"] = Decimal(str(valuation["total_usd"])) / factor
+    # `total_usd` is already denominated in dollars: `_express_usd_real`
+    # overwrites it with `valuation["total"]`, and `_express_real_toman`
+    # deflates Toman by Iranian CPI (which must not divide a dollar figure).
     # Debt is money. It is already netted out of `total`, so leaving it in Toman
     # only shows up when something reads the field on its own -- which is exactly
     # the "deflated on one basis but not the other" trap this single walk exists
