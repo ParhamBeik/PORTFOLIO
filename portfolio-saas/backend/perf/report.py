@@ -7,15 +7,15 @@ can be made like for like rather than "Tuesday 10:00 versus Friday 23:00".
 """
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone as dt_timezone
-from zoneinfo import ZoneInfo
 
 import jdatetime
 from django.db import transaction
 
+from marketdata.jalali import TEHRAN, tehran_day, tehran_now
+
 from . import recorder
 from .models import RequestPerfRollup
 
-TEHRAN = ZoneInfo("Asia/Tehran")
 TRADING_WEEKDAYS = frozenset({0, 1, 2, 3, 4})  # jdatetime: Saturday=0 .. Wednesday=4
 
 FLUSH_LOOKBACK_HOURS = 3
@@ -66,8 +66,8 @@ def flush(now_ts: float | None = None, lookback_hours: int = FLUSH_LOOKBACK_HOUR
 
 def tehran_context(bucket: datetime) -> tuple[str, int]:
     """(day_type, tehran_hour) for a UTC hour bucket."""
-    local = bucket.astimezone(TEHRAN)
-    weekday = jdatetime.date.fromgregorian(date=local.date()).weekday()
+    local = tehran_now(bucket)
+    weekday = jdatetime.date.fromgregorian(date=tehran_day(bucket)).weekday()
     return ("trading_day" if weekday in TRADING_WEEKDAYS else "weekend"), local.hour
 
 

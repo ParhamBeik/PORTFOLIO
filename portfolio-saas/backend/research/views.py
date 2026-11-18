@@ -12,7 +12,7 @@ from rest_framework.throttling import ScopedRateThrottle, UserRateThrottle
 from rest_framework.views import APIView
 
 from marketdata.explore_api import _balance_sheets, _income_statements, _instrument, _monthly_sales
-from marketdata.jalali import TEHRAN, from_gregorian
+from marketdata.jalali import from_gregorian, tehran_day
 
 from .budget import BudgetExceeded, finish, reserve
 from .models import ResearchRun
@@ -75,7 +75,7 @@ def _abstain(user, symbol, question, ceiling, evidence, reason):
 
 
 def _current_evidence(symbol):
-    today = timezone.localtime(timezone.now(), TEHRAN).date()
+    today = tehran_day()
     end = from_gregorian(today)
     return (
         _monthly_sales(symbol, from_gregorian(today - timedelta(days=365)), end),

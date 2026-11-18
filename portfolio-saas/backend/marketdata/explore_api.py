@@ -417,7 +417,7 @@ class StockDossierView(APIView):
         if days not in self.WINDOWS:
             raise ValidationError({"days": "Choose 90, 365, 1825, or 3650 days."})
 
-        end = timezone.localtime(timezone.now(), jalali.TEHRAN).date()
+        end = jalali.tehran_day()
         start = jalali.from_gregorian(end - timedelta(days=days))
         end_jalali = jalali.from_gregorian(end)
         tomorrow_jalali = jalali.from_gregorian(end + timedelta(days=1))
@@ -576,7 +576,7 @@ class StockEvidenceView(APIView):
         if days not in StockDossierView.WINDOWS:
             raise ValidationError({"days": "Choose 90, 365, 1825, or 3650 days."})
 
-        end = timezone.localtime(timezone.now(), jalali.TEHRAN).date()
+        end = jalali.tehran_day()
         start, end_jalali = (
             jalali.from_gregorian(end - timedelta(days=days)),
             jalali.from_gregorian(end),

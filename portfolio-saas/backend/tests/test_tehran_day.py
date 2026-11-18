@@ -39,3 +39,37 @@ def test_research_budget_day_follows_tehran(monkeypatch):
 
     monkeypatch.setattr(jalali, "_now", lambda: dt.datetime(2026, 11, 10, 21, 30, tzinfo=UTC))
     assert budget._today() == dt.date(2026, 11, 11)
+
+
+def test_tehran_midnight_places_start_of_market_day_at_20_30_utc(monkeypatch):
+    monkeypatch.setattr(jalali, "_now", lambda: dt.datetime(2026, 11, 10, 21, 30, tzinfo=UTC))
+    expected_utc = dt.datetime(2026, 11, 10, 20, 30, tzinfo=UTC)
+
+    assert jalali.tehran_midnight() == expected_utc
+    assert jalali.tehran_midnight(dt.date(2026, 11, 11)) == expected_utc
+    assert jalali.tehran_midnight("2026-11-11") == expected_utc
+    assert jalali.tehran_midnight("1405-08-20") == expected_utc
+
+
+def test_tehran_midnight_refuses_datetime_instant():
+    with pytest.raises(ValueError):
+        jalali.tehran_midnight(dt.datetime(2026, 11, 10, 21, 30, tzinfo=UTC))
+
+
+def test_all_four_partial_clock_owners_follow_tehran_at_01_00(monkeypatch):
+    # 21:30 Wednesday UTC is 01:00 Thursday in Tehran (2026-11-12 / 1405-08-21).
+    moment = dt.datetime(2026, 11, 11, 21, 30, tzinfo=UTC)
+    monkeypatch.setattr(jalali, "_now", lambda: moment)
+
+    from marketdata import integrity, live_states, market_state, quota
+    from portfolio.services import ledger, returns
+
+    assert quota.quota_day() == dt.date(2026, 11, 12)
+    assert live_states.day_start() == dt.datetime(2026, 11, 11, 20, 30, tzinfo=UTC)
+    assert market_state._now_tehran().date() == dt.date(2026, 11, 12)
+    assert jalali.today() == "1405-08-21"
+    assert jalali.days_ago(1) == "1405-08-20"
+    assert jalali.recent_days(2) == ["1405-08-21", "1405-08-20"]
+    assert returns.to_jalali_str(moment) == "1405-08-21"
+    assert ledger._jalali_date(moment) == "1405-08-21"
+    assert integrity._as_gregorian_date(moment, dt.date(2026, 1, 1)) == dt.date(2026, 11, 12)

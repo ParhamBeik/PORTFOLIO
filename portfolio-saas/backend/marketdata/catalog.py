@@ -247,7 +247,7 @@ def sync_provider_catalog(limit=None):
         h.symbol: h for h in InstrumentListingHistory.objects.all()
     }
 
-    today = jalali.today()
+    today = jalali.from_gregorian(jalali.tehran_day())
     histories_to_update = []
     histories_to_create = []
 

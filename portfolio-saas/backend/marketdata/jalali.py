@@ -80,49 +80,32 @@ def assert_jalali(value, field="date"):
 
 
 def today():
-    """The current date on the PROCESS clock, as Jalali. Read the warning below.
+    """Today's date on the Tehran market calendar, as Jalali YYYY-MM-DD.
 
-    Every container here runs UTC (`TIME_ZONE = "UTC"`, no TZ in the image), so
-    this is the UTC date, not the Tehran one. Tehran is UTC+3:30, which means
-    that between 20:30 and 23:59 UTC -- 00:00 to 03:29 Tehran -- this returns
-    YESTERDAY in Tehran terms. Contrast `from_gregorian`/`from_epoch`/
-    `to_datetime` below, which all deliberately read Tehran and say so.
-
-    That gap is currently LOAD-BEARING, which is why it has not simply been
-    "fixed". `config/celery.py` declares its crontabs in Tehran (CELERY_TIMEZONE
-    = Asia/Tehran), and three nightly jobs land inside exactly that window:
-    nightly_asset_metrics (01:00), nightly_asset_signals (01:20) and
-    aggregate_market_daily_bars_task (01:40). Each one wants the day that just
-    ENDED, and the UTC lag is what hands it to them. Making this Tehran-aware
-    without touching those callers would point
-    `ingest.aggregate_market_daily_bars` at a Tehran day that is 100 minutes old
-    -- it windows on `to_datetime(jalali_date)`, i.e. Tehran midnight -- so the
-    day's real bar would be built from almost no snapshots and the previous
-    complete day would never be aggregated at all.
-
-    So: if you need "the day that just ended", this is it, but say so at the
-    call site. If you need the actual Tehran date, use
-    `from_gregorian(market_state._now_tehran())`, and change the three nightly
-    callers in the same commit.
+    Routes through `tehran_day()`, so it returns the Tehran calendar day even
+    between 20:30 and 23:59 UTC (00:00 to 03:29 Tehran). The three nightly
+    jobs that run after midnight Tehran (`nightly_asset_metrics`,
+    `nightly_asset_signals`, `aggregate_market_daily_bars_task`) ask for the
+    day that just ended via `days_ago(1)`.
     """
-    return jdatetime.date.today().strftime("%Y-%m-%d")
+    return from_gregorian(tehran_day())
 
 
 def days_ago(days):
-    """`days` before `today()`, and therefore on the same UTC clock it is."""
-    return (jdatetime.date.today() - jdatetime.timedelta(days=days)).strftime("%Y-%m-%d")
+    """`days` before `today()` on the Tehran market calendar, as Jalali YYYY-MM-DD."""
+    return from_gregorian(tehran_day() - datetime.timedelta(days=days))
 
 
 def recent_days(count):
-    """Return the `count` most recent Jalali dates, newest first.
+    """Return the `count` most recent Tehran Jalali dates, newest first.
 
     Weekends are not filtered here: the provider simply returns an empty list for
     a non-trading day, and the Iranian holiday calendar is not something we can
     derive locally. Callers that care about cost should keep `count` small.
     """
-    start = jdatetime.date.today()
+    start = tehran_day()
     return [
-        (start - jdatetime.timedelta(days=offset)).strftime("%Y-%m-%d")
+        from_gregorian(start - datetime.timedelta(days=offset))
         for offset in range(count)
     ]
 
@@ -133,6 +116,17 @@ TEHRAN = ZoneInfo("Asia/Tehran")
 def _now():
     """The one place `tehran_day` reads the clock, so a test can set it."""
     return datetime.datetime.now(datetime.timezone.utc)
+
+
+def tehran_now(moment=None):
+    """The current instant (or `moment`) in `Asia/Tehran`.
+
+    `moment` must be timezone-aware when supplied.
+    """
+    moment = _now() if moment is None else moment
+    if moment.tzinfo is None:
+        raise ValueError("tehran_now needs a timezone-aware datetime")
+    return moment.astimezone(TEHRAN)
 
 
 def tehran_day(moment=None):
@@ -153,6 +147,25 @@ def tehran_day(moment=None):
     if moment.tzinfo is None:
         raise ValueError("tehran_day needs a timezone-aware datetime")
     return moment.astimezone(TEHRAN).date()
+
+
+def tehran_midnight(day=None):
+    """00:00:00 `Asia/Tehran` on `day` (a `datetime.date`, ISO/Jalali string, or None for today).
+
+    The pair to `tehran_day`: every start-of-day or end-of-day Tehran boundary
+    routes through this so no caller builds its own `ZoneInfo("Asia/Tehran")`
+    midnight. Refuses a `datetime` so an instant is never silently truncated on
+    the wrong clock before placing midnight.
+    """
+    if day is None:
+        day = tehran_day()
+    elif isinstance(day, datetime.datetime):
+        raise ValueError("tehran_midnight needs a date, not a datetime")
+    elif isinstance(day, str):
+        day = to_gregorian(day) or datetime.date.fromisoformat(day)
+    elif not isinstance(day, datetime.date):
+        raise TypeError("tehran_midnight needs a date or date string")
+    return datetime.datetime.combine(day, datetime.time.min, tzinfo=TEHRAN)
 
 
 def to_gregorian(value):
@@ -183,7 +196,7 @@ def from_gregorian(value):
     if value is None:
         return ""
     if isinstance(value, datetime.datetime):
-        value = value.astimezone(TEHRAN).date() if value.tzinfo else value.date()
+        value = tehran_day(value) if value.tzinfo else value.date()
     jalali = jdatetime.date.fromgregorian(date=value)
     return f"{jalali.year:04d}-{jalali.month:02d}-{jalali.day:02d}"
 
@@ -211,9 +224,8 @@ def to_datetime(date_value, time_value=""):
         hour, minute, second = (int(parts[i]) if i < len(parts) else 0 for i in range(3))
     except (TypeError, ValueError):
         hour = minute = second = 0
-    return datetime.datetime(
-        gregorian.year, gregorian.month, gregorian.day, hour, minute, second,
-        tzinfo=TEHRAN,
+    return tehran_midnight(gregorian).replace(
+        hour=hour, minute=minute, second=second,
     ).astimezone(datetime.timezone.utc)
 
 

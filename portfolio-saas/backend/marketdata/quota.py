@@ -182,17 +182,35 @@ class QuotaExhausted(RuntimeError):
         return self.reason in PACING_REASONS
 
 
-def quota_day():
-    zone = ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE)
-    return timezone.now().astimezone(zone).date()
+def _quota_local(now=None):
+    from . import jalali
+
+    tz_name = getattr(settings, "MARKETDATA_QUOTA_TIMEZONE", "Asia/Tehran")
+    if tz_name == "Asia/Tehran":
+        return jalali.tehran_now(now)
+    moment = jalali._now() if now is None else now
+    return moment.astimezone(ZoneInfo(tz_name))
+
+
+def quota_day(now=None):
+    from . import jalali
+
+    tz_name = getattr(settings, "MARKETDATA_QUOTA_TIMEZONE", "Asia/Tehran")
+    if tz_name == "Asia/Tehran":
+        return jalali.tehran_day(now)
+    return _quota_local(now).date()
 
 
 def _seconds_to_rollover(now=None):
-    now = now or timezone.now()
-    local = now.astimezone(ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE))
-    rollover = (local + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    from . import jalali
+
+    local = _quota_local(now)
+    if getattr(settings, "MARKETDATA_QUOTA_TIMEZONE", "Asia/Tehran") == "Asia/Tehran":
+        rollover = jalali.tehran_midnight(local.date() + timedelta(days=1))
+    else:
+        rollover = (local + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
     return max(60, int((rollover - local).total_seconds()))
 
 
@@ -846,9 +864,7 @@ def other_reserve_remaining(plan, row=None, now=None):
     """
     if plan != TSETMC:
         return 0
-    local = (now or timezone.now()).astimezone(
-        ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE)
-    )
+    local = _quota_local(now)
     if local.hour >= 10:
         return 0
     spent = getattr(row, "other_used", 0) or 0
@@ -865,9 +881,13 @@ def _day_elapsed_fraction(now=None):
     second. Ending the ramp a few hours early leaves real time to finish the day,
     and the leftover hours act as catch-up room after any stall.
     """
-    now = now or timezone.now()
-    local = now.astimezone(ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE))
-    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    from . import jalali
+
+    local = _quota_local(now)
+    if getattr(settings, "MARKETDATA_QUOTA_TIMEZONE", "Asia/Tehran") == "Asia/Tehran":
+        start = jalali.tehran_midnight(local.date())
+    else:
+        start = local.replace(hour=0, minute=0, second=0, microsecond=0)
     full_by = max(1, min(24, int(getattr(settings, "MARKETDATA_ARCHIVE_PACE_FULL_BY_HOUR", 24))))
     return min(1.0, max(0.0, (local - start).total_seconds() / (full_by * 3600.0)))
 
