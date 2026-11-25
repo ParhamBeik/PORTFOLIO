@@ -94,6 +94,27 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
           provenance: false
 
+      # Since 2026-11-25 the VPS reaches ghcr.io but not the CDN that serves its layers
+      # (pkg-containers.githubusercontent.com times out in the TLS handshake from Iran),
+      # while GitHub's artifact storage still answers. So the exact image also travels as a
+      # 1-day artifact. app-release loads it only if its digests equal what ghcr.io serves
+      # for this tag. Runs on a rollback too: it copies the image already in GHCR.
+      - name: Save the image as an archive for the VPS
+        env:
+          REF: ghcr.io/parhambeik/portfolio-${{ matrix.name }}:${{ steps.tag.outputs.value }}
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NAME: ${{ matrix.name }}
+        run: skopeo copy --quiet --src-creds "$ACTOR:$TOKEN" "docker://$REF" "oci-archive:$RUNNER_TEMP/$NAME.tar:$REF"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: image-${{ matrix.name }}
+          path: ${{ runner.temp }}/${{ matrix.name }}.tar
+          retention-days: 1
+          compression-level: 0   # the layers inside are already gzip-compressed
+          if-no-files-found: error
+
   deploy:
     needs: build
     runs-on: [self-hosted, vps]
@@ -109,11 +130,19 @@ jobs:
         id: record
         run: echo "previous=$(cat /opt/apps/portfolio-repo/.release 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
 
+      # The archives saved by the build job; see the note there.
+      - name: Download the image archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: image-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/images
+
       # The runner user has no Docker access. Its one sudo right is this root-owned
       # wrapper: refuse a SHA not on main, check it out, run portfolio-saas/scripts/deploy.sh
       # with IMAGE_TAG=<sha>, record it. Source: /usr/local/sbin/app-release.
       - name: Pull images and restart
-        run: printf '%s\n' "$GHCR_TOKEN" | sudo -n /usr/local/sbin/app-release "$APP" "$TAG" "${{ github.actor }}"
+        run: printf '%s\n' "$GHCR_TOKEN" | sudo -n /usr/local/sbin/app-release "$APP" "$TAG" "${{ github.actor }}" "$RUNNER_TEMP/images"
 
       - name: Smoke-test through the public edge
         run: |
@@ -136,3 +165,9 @@ jobs:
           echo "::warning::deploy failed - redeploying $PREVIOUS"
           printf '%s\n' "$GHCR_TOKEN" | sudo -n /usr/local/sbin/app-release "$APP" "$PREVIOUS" "${{ github.actor }}"
           echo "::notice::rolled back to $PREVIOUS; this run stays red"
+
+      # About 0.5 GB per deploy on a shared 99 GB disk; the runner only clears its temp
+      # directory at the start of the next job.
+      - name: Remove the image archives
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/images"
