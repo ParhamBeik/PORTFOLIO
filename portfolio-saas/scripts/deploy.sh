@@ -60,6 +60,9 @@ if [[ -n "${BACKEND_IMAGE:-}" ]]; then
   # (a single "timeout awaiting response headers" failed a whole deploy on
   # 2026-09-29). Nothing is stopped yet, so retrying is safe.
   for image in "${BACKEND_IMAGE}" ${FRONTEND_IMAGE:+"${FRONTEND_IMAGE}"}; do
+    # app-release may already have loaded this exact image from the deploy run's
+    # artifact (digest-checked against ghcr.io); then there is nothing to pull.
+    docker image inspect "${image}" >/dev/null 2>&1 && continue
     pulled=0
     for attempt in 1 2 3 4; do
       if docker pull "${image}"; then pulled=1; break; fi
