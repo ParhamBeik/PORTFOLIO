@@ -111,6 +111,19 @@ def make_user(db):
 
 
 @pytest.fixture(autouse=True)
+def pin_window_limit(settings):
+    """Decouple the suite from the production 5-minute window default.
+
+    CI has no Redis, so every reservation goes through the degraded
+    per-process window (a tenth of each bucket's share). Tests about day
+    ceilings spend 50-65 archive requests and would trip that window instead
+    of the rule they test whenever the prod default is lowered (1000 -> 500
+    did exactly that). Tests that exercise the window set their own limit.
+    """
+    settings.MARKETDATA_WINDOW_LIMIT = 1000
+
+
+@pytest.fixture(autouse=True)
 def clear_caches():
     """Bust all caches before each test.
 

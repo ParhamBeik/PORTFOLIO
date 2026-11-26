@@ -449,7 +449,7 @@ MARKETDATA_FETCH_DELAY = float(os.getenv("MARKETDATA_FETCH_DELAY", "0.05"))
 # provider products have separate meters (currently 10,000 AIO and 1,500
 # Market CGCC requests/day). The limit comes from a provider observation when
 # available, with a per-product fallback; see marketdata/quota.py.
-MARKETDATA_WINDOW_LIMIT = int(os.getenv("MARKETDATA_WINDOW_LIMIT", "1000"))
+MARKETDATA_WINDOW_LIMIT = int(os.getenv("MARKETDATA_WINDOW_LIMIT", "500"))
 MARKETDATA_WINDOW_SECONDS = int(os.getenv("MARKETDATA_WINDOW_SECONDS", "300"))
 
 # Per-bucket ceilings, applied WITHIN each provider plan. LIVE and OTHER have a

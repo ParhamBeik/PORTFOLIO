@@ -649,7 +649,7 @@ def bucket_budget(bucket, plan=TSETMC, row=None):
 
 
 def _window_limit(bucket):
-    total = getattr(settings, "MARKETDATA_WINDOW_LIMIT", 1000)
+    total = getattr(settings, "MARKETDATA_WINDOW_LIMIT", 500)
     return max(1, int(total * _WINDOW_SHARE.get(bucket, _WINDOW_SHARE[OTHER])))
 
 
@@ -1406,7 +1406,7 @@ def get_quota_status():
     limit = sum(entry["limit"] for entry in plans.values())
 
     window_seconds = getattr(settings, "MARKETDATA_WINDOW_SECONDS", 300)
-    window_limit = getattr(settings, "MARKETDATA_WINDOW_LIMIT", 1000)
+    window_limit = getattr(settings, "MARKETDATA_WINDOW_LIMIT", 500)
     client = get_redis()
     now = time.time()
     window_by_bucket = {}
