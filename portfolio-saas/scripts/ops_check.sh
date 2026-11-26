@@ -38,9 +38,9 @@ for service in "${expected_services[@]}"; do
   grep -qx -- "${service}" <<<"${running_services}" || failures+=("service ${service} is not running")
 done
 
-# Encrypted daily backups (vps-backup.sh) must exist and be < 36h old.
+# Encrypted daily backups (vps-backup.sh) must exist, be non-empty, and be < 36h old.
 for d in /var/backups/portfolio /var/backups/bama; do
-  [[ -n "$(find "$d" -name "daily-*.dump.enc" -mmin -2160 2>/dev/null | head -1)" ]] || failures+=("no fresh backup in $d")
+  [[ -n "$(find "$d" -name "daily-*.dump.enc" -mmin -2160 -size +0c 2>/dev/null | head -1)" ]] || failures+=("no fresh backup in $d")
 done
 
 if ((${#failures[@]})); then
