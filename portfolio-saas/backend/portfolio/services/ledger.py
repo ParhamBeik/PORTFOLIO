@@ -15,6 +15,7 @@ from portfolio.models import (
     Liability,
     Price,
     Snapshot,
+    USD_QUOTED_KEYS,
     positive_price_q,
 )
 from .timeline import house_area_as_of, house_marks_as_of

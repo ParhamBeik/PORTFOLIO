@@ -1840,7 +1840,6 @@ def resolve_asset_point_in_time_price(
         candle_close_qs,
         sessions_between,
     )
-    from portfolio.services.returns import USD_QUOTED_KEYS
 
     price = Decimal("0")
     stale_sessions = 0
