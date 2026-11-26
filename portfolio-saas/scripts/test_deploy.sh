@@ -62,6 +62,8 @@ cat >"${scratch}/bin/docker" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${MOCK_DOCKER_LOG}"
 if [[ " $* " == *" network inspect vps-edge "* ]]; then exit 0; fi
+# Only images listed in MOCK_PRESENT exist locally (app-release preloads them).
+if [[ "$1 $2" == "image inspect" ]]; then [[ " ${MOCK_PRESENT:-} " == *" $3 "* ]]; exit; fi
 if [[ " $* " == *" ps -q celery_beat"* ]]; then printf 'beat-cid\n'; exit 0; fi
 if [[ " $* " == *" inspect -f {{.State.Running}} "* ]]; then printf 'true\n'; exit 0; fi
 if [[ " $* " == *" inspect -f {{.State.StartedAt}} "* ]]; then printf '2026-01-01T00:00:00Z\n'; exit 0; fi
@@ -91,6 +93,13 @@ grep -qx 'pull ghcr.io/parhambeik/portfolio-frontend:cur' "${scratch}/docker.log
 grep -qx 'tag ghcr.io/parhambeik/portfolio-backend:cur portfolio-saas-backend:latest' "${scratch}/docker.log" || fail "backend not tagged"
 grep -qx 'tag ghcr.io/parhambeik/portfolio-frontend:cur portfolio-saas-frontend:latest' "${scratch}/docker.log" || fail "frontend not tagged"
 grep -q ' build' "${scratch}/docker.log" && fail "built on the box despite IMAGE_TAG"
+
+# An image app-release already loaded from the run's artifact is not pulled again.
+: >"${scratch}/docker.log"
+run_deploy IMAGE_TAG=cur MOCK_PRESENT=ghcr.io/parhambeik/portfolio-backend:cur || fail "preloaded deploy did not succeed"
+grep -q '^pull ghcr.io/parhambeik/portfolio-backend:cur' "${scratch}/docker.log" && fail "preloaded backend pulled again"
+grep -qx 'pull ghcr.io/parhambeik/portfolio-frontend:cur' "${scratch}/docker.log" || fail "frontend not pulled next to a preloaded backend"
+grep -qx 'tag ghcr.io/parhambeik/portfolio-backend:cur portfolio-saas-backend:latest' "${scratch}/docker.log" || fail "preloaded backend not tagged"
 stop_at="$(line_of ' stop celery_beat')"; migrate_at="$(line_of ' run --rm migrate')"; up_at="$(line_of ' up -d --remove-orphans')"
 [[ -n "${stop_at}" && -n "${migrate_at}" && -n "${up_at}" ]] || fail "stop, migrate or up missing"
 (( stop_at < migrate_at && migrate_at < up_at )) || fail "stop -> migrate -> up out of order"
