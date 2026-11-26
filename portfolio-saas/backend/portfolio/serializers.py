@@ -397,12 +397,17 @@ class TransactionSerializer(serializers.ModelSerializer):
 
     asset_key = serializers.CharField(source="asset.key", read_only=True)
     asset_name = serializers.CharField(source="asset.name", read_only=True)
+    unit_price_currency = serializers.SerializerMethodField()
     is_latest_for_asset = serializers.SerializerMethodField()
 
     class Meta:
         model = Transaction
         fields = ("id", "asset_key", "asset_name", "side", "quantity",
-                  "price_tomans", "note", "timestamp", "is_latest_for_asset")
+                  "price_tomans", "unit_price_currency", "note", "timestamp",
+                  "is_latest_for_asset")
+
+    def get_unit_price_currency(self, obj) -> str:
+        return "rial" if obj.asset and obj.asset.tse_symbol else "toman"
 
     def get_is_latest_for_asset(self, obj) -> bool:
         # A list view precomputes every (account, asset) answer in one query

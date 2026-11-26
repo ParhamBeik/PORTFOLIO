@@ -415,7 +415,7 @@ def _fetch_and_ingest(state):
     elif endpoint == ArchiveFetchState.Endpoint.CODAL_ANNOUNCEMENTS:
         payload, result, expected, stored = _fetch_codal_pages(symbol)
     elif endpoint == ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS:
-        day = jalali.today()
+        day = jalali.from_gregorian(jalali.tehran_day())
         payload = fetch_shareholders(settings.TSETMC_API_KEY, symbol=symbol)
         result = ingest.ingest_shareholders(symbol, payload, date=day)
         expected = _shareholder_keys(payload, day)
@@ -1513,7 +1513,7 @@ def grow_tick_windows(step_days=90):
             symbol__in=[symbol for symbol, _ in done]
         ).values_list("symbol", "first_seen")
     )
-    today = jalali.to_gregorian(jalali.today())
+    today = jalali.tehran_day()
     to_grow = []
     for symbol, window in done:
         if symbol not in deep_tier:

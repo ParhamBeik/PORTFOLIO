@@ -19,7 +19,6 @@ pays twice.
 import datetime as dt
 import getpass
 from decimal import ROUND_DOWN, Decimal
-from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -30,6 +29,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 
 from accounts.models import User
 from marketdata.currency import holding_value_to_toman
+from marketdata.jalali import TEHRAN, tehran_day
 from portfolio.models import Account, Asset, Holding, LedgerEntry, Snapshot, WatchlistItem
 from portfolio.services.catalog import ensure_asset
 from portfolio.services.ledger import (
@@ -40,7 +40,6 @@ from portfolio.services.ledger import (
     resolve_historical_price,
 )
 
-TEHRAN = ZoneInfo("Asia/Tehran")
 DEFAULT_EMAIL = "demo@parhambm.ir"
 MONTHS = 18
 # Sat-Wed: a date the TSE could have traded on.
@@ -150,7 +149,7 @@ class Command(BaseCommand):
         WatchlistItem.objects.filter(user=user).delete()
 
     def _start_day(self):
-        today = timezone.now().astimezone(TEHRAN).date()
+        today = tehran_day()
         return self._trading_day(today - dt.timedelta(days=MONTHS * 30 + 10))
 
     @staticmethod
@@ -161,7 +160,7 @@ class Command(BaseCommand):
 
     def _at(self, start, month, back=0):
         day = self._trading_day(start + dt.timedelta(days=month * 30) - dt.timedelta(days=back))
-        today = timezone.now().astimezone(TEHRAN).date()
+        today = tehran_day()
         day = min(day, self._trading_day(today - dt.timedelta(days=1)))
         return dt.datetime.combine(day, dt.time(11, 0), tzinfo=TEHRAN)
 
@@ -271,7 +270,7 @@ class Command(BaseCommand):
         from portfolio.tasks import _rebuild_snapshot_day
 
         written, day = 0, start
-        yesterday = timezone.now().astimezone(TEHRAN).date() - dt.timedelta(days=1)
+        yesterday = tehran_day() - dt.timedelta(days=1)
         accounts = [Account.objects.get(pk=a.pk) for a in accounts]
         while day <= yesterday:
             written += _rebuild_snapshot_day(user, accounts, day, value_as_of)

@@ -912,12 +912,10 @@ class TestOnlyThePaidProbeCanCloseTheSession:
         monkeypatch.setattr(market_state, "get_redis", lambda: fake)
         monkeypatch.setattr(market_state, "_now_tehran", lambda: self.NOW)
 
-        class _Clock(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return TestOnlyThePaidProbeCanCloseTheSession.NOW
+        # The fetcher reads Tehran time through the shared clock now.
+        from marketdata import jalali
 
-        monkeypatch.setattr(fetcher, "datetime", _Clock)
+        monkeypatch.setattr(jalali, "_now", lambda: self.NOW)
 
         def paid_probe(_key):
             payload = {"date": "1405-07-13", "time": "10:00:00",

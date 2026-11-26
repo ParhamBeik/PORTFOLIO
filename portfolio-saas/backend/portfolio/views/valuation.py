@@ -5,7 +5,6 @@ All of it reads; none of it writes."""
 import bisect
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.db.models import Avg, Q
 from django.db.models.functions import TruncDate
@@ -19,6 +18,7 @@ from ..models import Holding, LedgerEntry, Price, Snapshot, Transaction, USD_QUO
 from ..services import get_latest_prices, value_account, value_user
 from ..services.catalog import resolve_asset_key
 from ..services.valuation import (
+    FX_CARRY_DAYS,
     HIDDEN_ADJUSTMENT_MAX_DAYS,
     SYNTHETIC_HISTORY_MAX_DAYS,
     compute_dynamic_net_worth_series,
@@ -29,9 +29,9 @@ from ..services.performance import account_performance
 from ._common import _express_real_toman, _express_usd_real, _fx_rate, _int_param, _scope, _with_usd
 from marketdata import jalali
 from marketdata.codal_discovery import promoting
-from marketdata.currency import is_tse_priced, to_toman
-from marketdata.integrity import compute_symbol_integrity
-from marketdata.jalali import from_gregorian
+from marketdata.currency import is_tse_priced, requires_declared_unit, to_toman
+from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS, MIN_COVERAGE, compute_symbol_integrity
+from marketdata.jalali import from_gregorian, tehran_day, tehran_midnight
 from marketdata.models import (
     DailyStockHistory,
     GoldCurrencyHistory,
@@ -42,11 +42,6 @@ from marketdata.models import (
 from marketdata.provenance import (
     daily_bar_price, toman_per_dollar, toman_per_tether, toman_rate_kwargs, toman_rate_tables,
 )
-
-
-#: How far a dated FX close may be carried forward to a chart day, matching
-#: `conversion_rate_as_of`. Beyond it the day has no dollar value, not today's.
-FX_CARRY_DAYS = 5
 
 
 def _dated_fx_rates(days, symbol):
@@ -283,17 +278,15 @@ def _subtract_hidden_holdings(user, account, series, now) -> None:
     if not hidden_asset_ids(accounts):
         return
     earliest = min(row["date"] for row in series)
-    span = (now.date() - datetime.strptime(earliest, "%Y-%m-%d").date()).days + 1
+    span = (tehran_day(now) - datetime.strptime(earliest, "%Y-%m-%d").date()).days + 1
     span = max(1, min(span, HIDDEN_ADJUSTMENT_MAX_DAYS))
     hidden = compute_dynamic_net_worth_series(
         user, account=account, days=span, only_hidden=True, max_days=span
     )
     if not hidden:
         return
-    # Both sides key on a "%Y-%m-%d" string: the snapshot rows via TruncDate, the
-    # subtrahend via strftime on an aware datetime. They agree only because
-    # settings.TIME_ZONE is UTC. Change that and this join silently misses,
-    # leaving totals unadjusted (and flagged approximate) on the shifted days.
+    # Both sides key on the Tehran calendar day ("%Y-%m-%d"): the snapshot rows
+    # via Snapshot.day (set from tehran_day) and the subtrahend via tehran_day(now).
     by_date = {row["date"]: row for row in hidden}
     oldest = min(by_date)
     for row in series:
@@ -360,9 +353,9 @@ def _net_flows_after(accounts, series, basis):
     from ..services.ledger import active_entries
     from ..services.performance import _flow_amount
 
-    tehran = ZoneInfo("Asia/Tehran")
     # The first point is that day's close, so a flow on the same day is inside it.
-    start = datetime.strptime(series[0]["date"], "%Y-%m-%d").replace(tzinfo=tehran) + timedelta(days=1)
+    first_day = datetime.strptime(series[0]["date"], "%Y-%m-%d").date()
+    start = tehran_midnight(first_day + timedelta(days=1))
     kinds = [LedgerEntry.Kind.DEPOSIT, LedgerEntry.Kind.WITHDRAWAL, LedgerEntry.Kind.OPENING_CASH]
     net = Decimal("0")
     for entry in active_entries(accounts, kinds=kinds):
@@ -392,7 +385,7 @@ class SnapshotListView(APIView):
                 days = 30
             days = max(1, min(days, 3650))
         now = timezone.now()
-        today = timezone.localtime(now, ZoneInfo("Asia/Tehran")).date()
+        today = tehran_day(now)
         account = _scope(request)
         basis = request.query_params.get("basis") or "nominal_toman"
         snapshots = Snapshot.objects.filter(user=request.user, day__lt=today)
@@ -500,6 +493,7 @@ class SnapshotListView(APIView):
                 "asset_name": t.asset.name,
                 "quantity": str(t.quantity),
                 "price_tomans": str(t.price_tomans),
+                "unit_price_currency": "rial" if is_tse_priced(t.asset) else "toman",
             }
             for t in trades
         ]
@@ -566,9 +560,8 @@ def _real_divisor(row):
 def _divide_series(series, divisor):
     for row in series:
         rate = divisor(row)
-        for field in ("total", "total_usd"):
-            if row.get(field) is not None:
-                row[field] = float(Decimal(str(row[field])) / rate) if rate else None
+        if row.get("total") is not None:
+            row["total"] = float(Decimal(str(row["total"])) / rate) if rate else None
 
 
 def _real_payload(series):
@@ -701,7 +694,7 @@ def _brs_price_history(asset, since_jalali):
             # An unlabelled row on a foreign-quoted asset is a refusal, not a
             # pass-through: `to_toman` hands an unlabelled number back
             # unchanged, which is right for a Toman quote and catastrophic here.
-            if not row["unit"] and (asset.key == "usd_cash" or asset.key in USD_QUOTED_KEYS):
+            if not row["unit"] and requires_declared_unit(asset):
                 continue
             price = to_toman(
                 asset.brs_symbol,
@@ -828,10 +821,20 @@ class PriceHistoryView(APIView):
         caveats = []
         if integrity:
             if not integrity.passes_gate and integrity.reason:
-                caveats.append(integrity.reason)
-            if integrity.coverage_ratio and integrity.coverage_ratio < 0.70:
+                for code in integrity.reason.split(","):
+                    if code and code not in caveats:
+                        caveats.append(code)
+            if (
+                integrity.coverage_ratio
+                and integrity.coverage_ratio < MIN_COVERAGE
+                and "low_coverage" not in caveats
+            ):
                 caveats.append("low_coverage")
-            if integrity.max_gap_days and integrity.max_gap_days > 14:
+            if (
+                integrity.max_gap_days
+                and integrity.max_gap_days > MAX_FORWARD_FILL_SESSIONS
+                and "price_gap_exceeded" not in caveats
+            ):
                 caveats.append("price_gap_exceeded")
 
         return Response({

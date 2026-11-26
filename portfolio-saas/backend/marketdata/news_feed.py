@@ -26,6 +26,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
 
+from . import jalali
 from .sources import tgju
 from .sources.http import SourceError, fetch
 
@@ -159,8 +160,9 @@ def market_open(item, now=None):
 def _observed_at(day: date, item) -> datetime:
     # A daily close belongs at the END of its market day: anchoring it at the
     # start would put the close before the news that moved it.
-    tz = ZoneInfo("Asia/Tehran") if item.provider == "tgju" else UTC
-    return datetime.combine(day + timedelta(days=1), time.min, tzinfo=tz)
+    if item.provider == "tgju":
+        return jalali.tehran_midnight(day + timedelta(days=1))
+    return datetime.combine(day + timedelta(days=1), time.min, tzinfo=UTC)
 
 
 def _rows_for(days: int) -> int:

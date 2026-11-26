@@ -62,9 +62,11 @@ def cpi_for_date(value) -> float:
     if isinstance(value, str):
         value = dt.date.fromisoformat(value[:10])
     if isinstance(value, pd.Timestamp):
-        value = value.date()
+        value = value.to_pydatetime() if value.tzinfo is not None else value.date()
     if isinstance(value, dt.datetime):
-        value = value.date()
+        from marketdata.jalali import tehran_day
+
+        value = tehran_day(value) if value.tzinfo is not None else value.date()
     jdate = jdatetime.date.fromgregorian(date=value)
     start = settings.CPI_FOR(jdate.year)
     try:
@@ -169,9 +171,11 @@ def to_basis(
             "when": pd.to_datetime(usd_series.index, utc=True),
             "rate": usd_series.to_numpy(),
         }).sort_values("when")
+        from .valuation import FX_CARRY_DAYS
+
         aligned = pd.merge_asof(
             target, rates, on="when", direction="backward",
-            tolerance=pd.Timedelta(days=5),
+            tolerance=pd.Timedelta(days=FX_CARRY_DAYS),
         ).sort_values("position")
         usd_aligned = pd.Series(aligned["rate"].to_numpy(), index=series.index)
         usd_aligned = usd_aligned.where(usd_aligned > 0)

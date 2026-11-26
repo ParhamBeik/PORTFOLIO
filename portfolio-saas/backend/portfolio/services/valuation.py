@@ -90,6 +90,11 @@ _CLOSED_BRS_GRACE_SECONDS = 24 * 3600
 # never off a single symbol's own rows. See that helper for why both fail.
 MAX_FORWARD_FILL_SESSIONS = 5
 
+#: Maximum calendar days a dated FX close may be carried forward when converting
+#: a valuation or chart point to USD/USDT (`conversion_rate_as_of`,
+#: `views.valuation._dated_fx_rates`, `deflator.to_basis`).
+FX_CARRY_DAYS = 5
+
 # How far back the session calendar used to age archive closes is built. Only
 # needs to comfortably exceed MAX_FORWARD_FILL_SESSIONS in calendar days --
 # wide enough that Nowruz (~2 weeks shut) still leaves the bound measurable,
@@ -103,18 +108,28 @@ def current_market_state() -> str:
     return market_state()
 
 
+def _market_group_is_open(group: str, state: str) -> bool:
+    """Single owner for whether a market group's desks are actively trading."""
+    if group == "crypto":
+        return True
+    if group == "stocks":
+        return state == OPEN
+    if group == "gold_fx":
+        return state in (OPEN, CLOSED_DAYTIME)
+    return False
+
+
 def _asset_market_is_open(asset, state: str) -> bool:
     """Return whether this asset's live feed should be authoritative now."""
-
     if asset.asset_class == Asset.AssetClass.CRYPTO:
-        return True
+        return _market_group_is_open("crypto", state)
     if asset.asset_class == Asset.AssetClass.STOCK or asset.tse_symbol:
-        return state == OPEN
+        return _market_group_is_open("stocks", state)
     if (
         asset.asset_class in (Asset.AssetClass.GOLD, Asset.AssetClass.CASH)
         or asset.brs_symbol
     ):
-        return state in (OPEN, CLOSED_DAYTIME)
+        return _market_group_is_open("gold_fx", state)
     return False
 
 
@@ -1075,9 +1090,8 @@ def market_clocks(items) -> list[dict]:
     """
     state = current_market_state()
     is_open = {
-        "stocks": state == OPEN,
-        "gold_fx": state in (OPEN, CLOSED_DAYTIME),
-        "crypto": True,
+        group: _market_group_is_open(group, state)
+        for group, _label, _classes in MARKET_GROUPS
     }
     def group_of(item):
         if item.get("symbol") or item.get("class") == Asset.AssetClass.STOCK:
@@ -1300,8 +1314,7 @@ def compute_dynamic_net_worth_series(
     close to read and its live price stood in. On the hidden series that is the
     signal the chart uses to say the adjustment is an estimate.
     """
-    from datetime import datetime as dt, time as dtime, timedelta
-    import jdatetime
+    from datetime import timedelta
     from django.utils import timezone
     from marketdata.calendars import (
         candle_close_qs,
@@ -1354,12 +1367,13 @@ def compute_dynamic_net_worth_series(
         acc.pk: load_house_marks(acc) for acc in accounts
     } if house_keys else {}
 
+    from marketdata.jalali import from_gregorian, tehran_day, tehran_midnight
+
     stock_symbols = {a.tse_symbol: a.key for a in assets.values() if a.tse_symbol}
     brs_symbols = {a.brs_symbol: a.key for a in assets.values() if a.brs_symbol}
 
-    window_start_jalali = jdatetime.date.fromgregorian(
-        date=(now - timedelta(days=days - 1)).date()
-    ).strftime("%Y-%m-%d")
+    today = tehran_day(now)
+    window_start_jalali = from_gregorian(today - timedelta(days=days - 1))
 
     # These two maps answer two different questions, which is why each table is
     # read twice rather than once without a bound.
@@ -1463,9 +1477,7 @@ def compute_dynamic_net_worth_series(
     # Bounded a month before the window so the priming pass below still finds a
     # close at-or-before it. Reaching further back is pointless: past
     # MAX_FORWARD_FILL_SESSIONS the staleness guard drops the asset anyway.
-    bars_since = jdatetime.date.fromgregorian(
-        date=(now - timedelta(days=days + 30)).date()
-    ).strftime("%Y-%m-%d")
+    bars_since = from_gregorian(today - timedelta(days=days + 30))
     keys_by_symbol = {
         (a.tse_symbol or a.brs_symbol): a.key for a in assets.values()
     }
@@ -1512,7 +1524,7 @@ def compute_dynamic_net_worth_series(
     # start -- an asset last priced before the window opened is measured from
     # that older date, and a calendar starting later would undercount the gap
     # and keep forward-filling a price that should already have been dropped.
-    today_jalali = jdatetime.date.fromgregorian(date=now.date()).strftime("%Y-%m-%d")
+    today_jalali = from_gregorian(today)
     calendar_start = min([window_start_jalali, *last_priced_date.values()])
     calendars = {
         market: session_calendar(market, start=calendar_start, end=today_jalali)
@@ -1557,13 +1569,10 @@ def compute_dynamic_net_worth_series(
                 by_key[key] = by_key.get(key, Decimal("0")) + owed
         return total, by_key, unattached
 
-    # Marks are "in force that calendar day", not at today's clock on that date.
+    # Marks are "in force that Tehran calendar day", not at today's clock on that date.
     # A purchase at 17:40 was missing from the 16:30 reading of Aug 9.
     day_ends = [
-        timezone.make_aware(
-            dt.combine((now - timedelta(days=i)).date(), dtime.max),
-            timezone.get_current_timezone(),
-        )
+        tehran_midnight(today - timedelta(days=i) + timedelta(days=1)) - timedelta(microseconds=1)
         for i in range(days - 1, -1, -1)
     ]
     # Cash is part of net worth -- `value_account` and the nightly snapshot both
@@ -1600,9 +1609,10 @@ def compute_dynamic_net_worth_series(
     prev_day_prices: dict = {}
     prev_house_values: dict = {}
     for i in range(days - 1, -1, -1):
+        target_day = today - timedelta(days=i)
         target_date = now - timedelta(days=i)
-        date_str = target_date.strftime("%Y-%m-%d")
-        jalali_str = jdatetime.date.fromgregorian(date=target_date.date()).strftime("%Y-%m-%d")
+        date_str = target_day.isoformat()
+        jalali_str = from_gregorian(target_day)
 
         total = Decimal("0")
         day_prices: dict = {}
@@ -1766,7 +1776,7 @@ def compute_dynamic_net_worth_series(
         prev_inflows = inflows_today
 
         total_liabilities, liability_by_key, unattached_liabilities = liabilities_on(
-            target_date
+            target_day
         )
         total -= total_liabilities
         # The pair has to net out debt for the same reason `total` does: the
@@ -1840,7 +1850,6 @@ def resolve_asset_point_in_time_price(
         candle_close_qs,
         sessions_between,
     )
-    from portfolio.services.returns import USD_QUOTED_KEYS
 
     price = Decimal("0")
     stale_sessions = 0
@@ -1876,8 +1885,10 @@ def resolve_asset_point_in_time_price(
             .first()
         )
         if hist:
+            from marketdata.currency import requires_declared_unit
+
             raw_price = Decimal(str(hist.close_price))
-            if hist.unit or asset.key not in USD_QUOTED_KEYS:
+            if hist.unit or not requires_declared_unit(asset):
                 cash_rates, tether_rates = toman_rate_tables([hist.unit], [hist.date])
                 price = to_toman(
                     hist.symbol, raw_price, hist.unit,
@@ -1932,8 +1943,15 @@ def conversion_rate_as_of(basis: str, as_of) -> Decimal | None:
         observed = jdatetime.date(year, month, day).togregorian()
     except (TypeError, ValueError):
         return None
-    requested = as_of.date() if hasattr(as_of, "date") else as_of
-    if (requested - observed).days > 5:
+    from datetime import datetime
+
+    from marketdata.jalali import tehran_day
+
+    if isinstance(as_of, datetime):
+        requested = tehran_day(as_of) if as_of.tzinfo is not None else as_of.date()
+    else:
+        requested = as_of
+    if (requested - observed).days > FX_CARRY_DAYS:
         return None
     return Decimal(str(row.close_price))
 

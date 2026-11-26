@@ -801,9 +801,11 @@ def portfolio_diagnostics(
     basis = normalize_basis(basis)
     import jdatetime
     from django.utils import timezone
+    from marketdata.jalali import tehran_day
 
     rate_date = as_of_dt or timezone.now()
-    rate_year = jdatetime.date.fromgregorian(date=rate_date.date()).year
+    rate_day = tehran_day(rate_date) if rate_date.tzinfo else rate_date.date()
+    rate_year = jdatetime.date.fromgregorian(date=rate_day).year
     risk_free_annual = settings.RATE_FOR(rate_year)
 
     # Held assets drive the query, not the whole catalog: they set the universe

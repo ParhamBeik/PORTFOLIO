@@ -14,14 +14,12 @@ from marketdata.fetchers import (
 )
 from marketdata.quota import BRS, LIVE, TSETMC, QuotaExhausted
 from portfolio.live import find_symbol_record
-from datetime import datetime
 from django.core.cache import cache
-from marketdata import ingest
+from marketdata import ingest, jalali
 from marketdata.sources import nobitex, tgju, wallex
 from marketdata.sources.http import SourceError
 from marketdata.workflows import submit_with_context
 from portfolio.models import Asset
-from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -397,7 +395,7 @@ def fetch_all_markets(api_settings):
 
     ignore_hours = getattr(settings, "MARKETDATA_IGNORE_MARKET_HOURS", False)
 
-    tehran_now = datetime.now(ZoneInfo("Asia/Tehran"))
+    tehran_now = jalali.tehran_now()
     index_probe_claimed = claim_provider_state_probe(tehran_now)
 
     # The index probe is bought for its STATE, not for its number, so BrsApi

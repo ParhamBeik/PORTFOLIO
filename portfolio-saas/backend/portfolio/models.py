@@ -10,14 +10,16 @@ Scale design:
 - `Snapshot` keeps one Tehran-day close per scope. Current value is computed
   live from holdings x latest prices, without persisting intraday points.
 """
+import datetime as dt
 from decimal import Decimal, ROUND_HALF_UP
-from zoneinfo import ZoneInfo
 
 import jdatetime
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
+
+from marketdata.jalali import tehran_day
 
 # Import optimization models to register OptimizationSnapshot with Django's app registry
 from . import optimization_models  # noqa: F401
@@ -959,7 +961,7 @@ class Snapshot(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        self.day = timezone.localtime(self.timestamp, ZoneInfo("Asia/Tehran")).date()
+        self.day = tehran_day(self.timestamp)
         if kwargs.get("update_fields") is not None:
             kwargs["update_fields"] = set(kwargs["update_fields"]) | {"day"}
         return super().save(*args, **kwargs)
@@ -1144,8 +1146,12 @@ class Liability(models.Model):
         """
         if self.started_on is None or not self.term_months:
             return 0
-        as_of = as_of or timezone.now()
-        as_of_date = getattr(as_of, "date", lambda: as_of)()
+        if as_of is None:
+            as_of_date = tehran_day()
+        elif isinstance(as_of, dt.datetime):
+            as_of_date = tehran_day(as_of) if timezone.is_aware(as_of) else as_of.date()
+        else:
+            as_of_date = getattr(as_of, "date", lambda: as_of)()
         start = jdatetime.date.fromgregorian(date=self.started_on)
         now = jdatetime.date.fromgregorian(date=as_of_date)
         months = (now.year - start.year) * 12 + (now.month - start.month)
