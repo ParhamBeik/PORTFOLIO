@@ -29,7 +29,7 @@ from ..services.performance import account_performance
 from ._common import _express_real_toman, _express_usd_real, _fx_rate, _int_param, _scope, _with_usd
 from marketdata import jalali
 from marketdata.codal_discovery import promoting
-from marketdata.currency import is_tse_priced, to_toman
+from marketdata.currency import is_tse_priced, requires_declared_unit, to_toman
 from marketdata.integrity import compute_symbol_integrity
 from marketdata.jalali import from_gregorian
 from marketdata.models import (
@@ -500,6 +500,7 @@ class SnapshotListView(APIView):
                 "asset_name": t.asset.name,
                 "quantity": str(t.quantity),
                 "price_tomans": str(t.price_tomans),
+                "unit_price_currency": "rial" if is_tse_priced(t.asset) else "toman",
             }
             for t in trades
         ]
@@ -566,9 +567,8 @@ def _real_divisor(row):
 def _divide_series(series, divisor):
     for row in series:
         rate = divisor(row)
-        for field in ("total", "total_usd"):
-            if row.get(field) is not None:
-                row[field] = float(Decimal(str(row[field])) / rate) if rate else None
+        if row.get("total") is not None:
+            row["total"] = float(Decimal(str(row["total"])) / rate) if rate else None
 
 
 def _real_payload(series):
@@ -701,7 +701,7 @@ def _brs_price_history(asset, since_jalali):
             # An unlabelled row on a foreign-quoted asset is a refusal, not a
             # pass-through: `to_toman` hands an unlabelled number back
             # unchanged, which is right for a Toman quote and catastrophic here.
-            if not row["unit"] and (asset.key == "usd_cash" or asset.key in USD_QUOTED_KEYS):
+            if not row["unit"] and requires_declared_unit(asset):
                 continue
             price = to_toman(
                 asset.brs_symbol,

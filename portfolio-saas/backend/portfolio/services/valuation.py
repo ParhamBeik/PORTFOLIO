@@ -1840,7 +1840,6 @@ def resolve_asset_point_in_time_price(
         candle_close_qs,
         sessions_between,
     )
-    from portfolio.services.returns import USD_QUOTED_KEYS
 
     price = Decimal("0")
     stale_sessions = 0
@@ -1876,8 +1875,10 @@ def resolve_asset_point_in_time_price(
             .first()
         )
         if hist:
+            from marketdata.currency import requires_declared_unit
+
             raw_price = Decimal(str(hist.close_price))
-            if hist.unit or asset.key not in USD_QUOTED_KEYS:
+            if hist.unit or not requires_declared_unit(asset):
                 cash_rates, tether_rates = toman_rate_tables([hist.unit], [hist.date])
                 price = to_toman(
                     hist.symbol, raw_price, hist.unit,

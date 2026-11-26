@@ -107,7 +107,9 @@ def to_toman(price, unit):
         return None
     if unit == "ریال":
         return value / Decimal("10")
-    return value
+    if unit in ("", "تومان", "toman", "irt"):
+        return value
+    return None
 
 
 #: How far two venues may disagree before we call it a fault.
