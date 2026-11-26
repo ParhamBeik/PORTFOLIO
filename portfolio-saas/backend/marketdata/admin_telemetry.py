@@ -611,14 +611,15 @@ def _archive():
     )
     for key in ("total", "complete", "failed", "missing", "known_gaps"):
         summary[key] = summary[key] or 0
+    from .archive import _RETIRED_ARCHIVE_ENDPOINTS
+    from .coverage_report import _pct
+
     threshold = settings.ARCHIVE_WEDGED_FAILURE_THRESHOLD
     summary["pending"] = max(0, summary["total"] - summary["complete"])
     summary["wedged"] = ArchiveFetchState.objects.filter(
         consecutive_failures__gte=threshold
     ).count()
-    summary["progress_pct"] = round(
-        summary["complete"] / summary["total"] * 100, 1
-    ) if summary["total"] else 0
+    summary["progress_pct"] = _pct(summary["complete"], summary["total"]) if summary["total"] else 0
 
     grouped = {
         row["endpoint"]: row
@@ -631,8 +632,6 @@ def _archive():
             expected=Sum("expected_rows"),
         )
     }
-    from .archive import _RETIRED_ARCHIVE_ENDPOINTS
-    from .coverage_report import _pct
 
     summary["categories"] = []
     for endpoint, label in ArchiveFetchState.Endpoint.choices:
@@ -647,7 +646,7 @@ def _archive():
             "pending": max(0, total - complete),
             "failed": row.get("failed", 0) or 0,
             "missing": row.get("missing", 0) or 0,
-            "progress_pct": round(complete / total * 100, 1) if total else 0,
+            "progress_pct": _pct(complete, total) if total else 0,
             # "Do we have the data?" -- rows stored against rows the provider
             # says exist. `progress_pct` answers a stricter question (re-verified
             # since the last session) and read as "half missing" at 99.8% stored.
@@ -708,6 +707,8 @@ def _tick_coverage():
         window_max=Max("target_window_days"),
         window_avg=Avg("target_window_days"),
     )
+    from .coverage_report import _pct
+
     total = summary["total"] or 0
     complete = summary["complete"] or 0
     return {
@@ -717,7 +718,7 @@ def _tick_coverage():
         "window_days_avg": round(summary["window_avg"] or 0),
         "total": total,
         "complete": complete,
-        "progress_pct": round(complete / total * 100, 1) if total else 0,
+        "progress_pct": _pct(complete, total) if total else 0,
         "oldest": summary["oldest"] or "",
         "newest": summary["newest"] or "",
     }
@@ -1050,7 +1051,7 @@ def _db_connection_metrics() -> dict:
     except Exception:
         pass
     return {
-        "ok": True,
+        "ok": False,
         "status": "unknown",
         "active": None,
         "max": None,

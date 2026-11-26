@@ -69,10 +69,16 @@ def _clean(value):
 
 _MAX_DECIMAL = Decimal("1e26")
 _NUMBER = re.compile(r"-?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?\Z")
+_BIDI_AND_SPACE = re.compile(r"[\u200c\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff\xa0]")
+
+
+def _norm_persian_label(text):
+    """Normalize Arabic glyphs and whitespace in Codal row/channel labels."""
+    return " ".join(str(text or "").replace("ي", "ی").replace("ك", "ک").split())
 
 
 def parse_number(value):
-    normalized = _clean(value).translate(PERSIAN_DIGITS)
+    normalized = _BIDI_AND_SPACE.sub("", _clean(value)).translate(PERSIAN_DIGITS).strip()
     normalized = normalized.replace("٬", ",").replace("٫", ".").replace("−", "-")
     if normalized.startswith("(") and normalized.endswith(")"):
         normalized = "-" + normalized[1:-1].strip()
@@ -394,7 +400,7 @@ def reconcile_monthly_sales(facts):
         return None
 
     def normalized(fact):
-        return fact["dimensions"]["product"].replace("ي", "ی").replace("ك", "ک").strip()
+        return _norm_persian_label(fact["dimensions"]["product"])
 
     by_label = {}
     for fact in revenue:
@@ -416,7 +422,7 @@ def reconcile_monthly_sales(facts):
         products = [
             fact["numeric_value"] for fact in revenue
             if fact["dimensions"].get("row_kind") == "product"
-            and fact["dimensions"].get("channel", "").replace("ي", "ی") == channel
+            and _norm_persian_label(fact["dimensions"].get("channel", "")) == channel
         ]
         subtotal = by_label[label][0]["numeric_value"]
         if (products and sum(products) != subtotal) or (not products and subtotal != 0):
