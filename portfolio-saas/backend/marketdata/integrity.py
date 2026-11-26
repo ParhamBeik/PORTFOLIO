@@ -4,7 +4,6 @@ import datetime as dt
 from typing import Any
 
 import jdatetime
-from django.utils import timezone
 
 from .calendars import (
     actual_trading_days,

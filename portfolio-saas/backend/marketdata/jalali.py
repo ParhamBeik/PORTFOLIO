@@ -114,8 +114,16 @@ TEHRAN = ZoneInfo("Asia/Tehran")
 
 
 def _now():
-    """The one place `tehran_day` reads the clock, so a test can set it."""
-    return datetime.datetime.now(datetime.timezone.utc)
+    """The one place `tehran_day` reads the clock, so a test can set it.
+
+    Reads Django's `timezone.now()` (aware UTC under USE_TZ) rather than the
+    system clock, so a test that freezes `timezone.now` freezes every caller
+    that moved onto `tehran_day` too -- otherwise those callers silently see
+    the real date while the rest of the test sees the frozen one.
+    """
+    from django.utils import timezone
+
+    return timezone.now()
 
 
 def tehran_now(moment=None):

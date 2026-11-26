@@ -25,6 +25,7 @@ from decimal import Decimal
 import pandas as pd
 from django.utils import timezone
 
+from marketdata import jalali
 from marketdata.currency import (
     TSE_RIAL_PER_TOMAN, holding_value_to_toman, is_tse_priced,
 )

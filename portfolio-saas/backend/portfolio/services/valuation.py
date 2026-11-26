@@ -1300,8 +1300,7 @@ def compute_dynamic_net_worth_series(
     close to read and its live price stood in. On the hidden series that is the
     signal the chart uses to say the adjustment is an estimate.
     """
-    from datetime import datetime as dt, time as dtime, timedelta
-    import jdatetime
+    from datetime import timedelta
     from django.utils import timezone
     from marketdata.calendars import (
         candle_close_qs,
@@ -1929,6 +1928,8 @@ def conversion_rate_as_of(basis: str, as_of) -> Decimal | None:
         observed = jdatetime.date(year, month, day).togregorian()
     except (TypeError, ValueError):
         return None
+    from datetime import datetime
+
     from marketdata.jalali import tehran_day
 
     if isinstance(as_of, datetime):

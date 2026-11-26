@@ -21,7 +21,8 @@ from datetime import timedelta, timezone as dt_timezone
 import jdatetime
 from django.conf import settings
 
-from marketdata.jalali import TEHRAN, tehran_day, tehran_now
+# TEHRAN is re-exported: archive, live_states and valuation read market_state.TEHRAN.
+from marketdata.jalali import TEHRAN, tehran_day, tehran_now  # noqa: F401
 from portfolio.live.redis_client import get_redis
 
 logger = logging.getLogger(__name__)

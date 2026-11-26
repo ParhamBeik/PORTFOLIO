@@ -19,7 +19,7 @@ import re
 import time
 import uuid
 from collections import Counter
-from datetime import datetime, time as dtime, timedelta
+from datetime import timedelta
 
 from celery import group, shared_task
 from django.conf import settings
@@ -74,7 +74,6 @@ from portfolio.models import Asset, Price
 from portfolio.services import signals as signal_math
 from portfolio.services.diagnostics import _load_index_returns
 from portfolio.services.returns import invalidate_returns_cache
-from zoneinfo import ZoneInfo
 import math
 
 

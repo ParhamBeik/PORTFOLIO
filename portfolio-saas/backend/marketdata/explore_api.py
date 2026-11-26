@@ -14,7 +14,6 @@ from urllib.parse import urlparse
 from django.conf import settings
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import HttpResponse
-from django.utils import timezone
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView

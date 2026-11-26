@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 import jdatetime
 from django.db import transaction
 
-from marketdata.jalali import TEHRAN, tehran_day, tehran_now
+from marketdata.jalali import tehran_day, tehran_now
 
 from . import recorder
 from .models import RequestPerfRollup
