@@ -312,7 +312,8 @@ def _sheet_facts(kind, sheet, table, *, end, start, months, unit, is_consolidate
                            for key in ("rowCode", "rowSequence")
                            if key in value_cell or key in label_cell)):
                 break
-            raw = str(value_cell.get("value") or "").strip()
+            raw_val = value_cell.get("value")
+            raw = "" if raw_val is None else str(raw_val).strip()
             blank = raw in ("", "-", "--")
             number = None if blank else parse_number(raw)
             if number is None and not (blank and code == "income.discontinued_profit"):

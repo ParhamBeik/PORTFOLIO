@@ -45,6 +45,27 @@ def test_parse_number_handles_persian_digits_and_thousands_separators():
 
 def test_parse_number_handles_parenthesized_negatives():
     assert codal_parsers.parse_number("(500)") == Decimal("-500")
+    assert codal_parsers.parse_number("\u200f(۱٬۲۳۴)\xa0") == Decimal("-1234")
+
+
+def test_reconcile_monthly_sales_normalizes_arabic_kaf_and_channel_whitespace():
+    base = {
+        "fact_code": "sales.revenue",
+        "unit": "million_rial",
+        "currency": "IRR",
+        "period_start": "1405-03-01",
+        "period_end": "1405-03-31",
+    }
+    facts = [
+        {**base, "numeric_value": Decimal("100"), "dimensions": {"product": "محصول A", "channel": "  فروش  داخلی ", "row_kind": "product", "period_basis": "one_month"}},
+        {**base, "numeric_value": Decimal("100"), "dimensions": {"product": "جمع فروش داخلی", "channel": "", "row_kind": "subtotal", "period_basis": "one_month"}},
+        {**base, "numeric_value": Decimal("0"), "dimensions": {"product": "جمع فروش صادراتی", "channel": "", "row_kind": "subtotal", "period_basis": "one_month"}},
+        {**base, "numeric_value": Decimal("0"), "dimensions": {"product": "جمع درآمد ارائه خدمات", "channel": "", "row_kind": "subtotal", "period_basis": "one_month"}},
+        {**base, "numeric_value": Decimal("0"), "dimensions": {"product": "جمع برگشت از فروش", "channel": "", "row_kind": "subtotal", "period_basis": "one_month"}},
+        {**base, "numeric_value": Decimal("0"), "dimensions": {"product": "تخفیفات", "channel": "", "row_kind": "subtotal", "period_basis": "one_month"}},
+        {**base, "numeric_value": Decimal("100"), "dimensions": {"product": "جمع", "channel": "", "row_kind": "total", "period_basis": "one_month"}},
+    ]
+    assert codal_parsers.reconcile_monthly_sales(facts) is facts[-1]
 
 
 def test_parse_number_returns_none_for_non_numeric():
