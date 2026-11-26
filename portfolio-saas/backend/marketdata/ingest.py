@@ -609,7 +609,7 @@ def ingest_shareholders(symbol: str, payload, date: str = "") -> tuple[int, int]
     """
     if not isinstance(payload, list):
         return 0, 0 if payload is None else 1
-    day = normalize_jalali(date) or jalali.today()
+    day = normalize_jalali(date) or jalali.from_gregorian(jalali.tehran_day())
     rows = []
     accepted, bad = screen(
         "shareholder", payload, "shareholder_records", symbol, default_date=day

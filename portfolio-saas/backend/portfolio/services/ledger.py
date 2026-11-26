@@ -1307,14 +1307,11 @@ def _jalali_date(when) -> str:
     stored as Tehran midnight, 20:30 UTC on the 14th, and was priced at the 14th's
     close -- every backdated trade booked at the session before the one chosen.
     """
-    from zoneinfo import ZoneInfo
-
-    import jdatetime
+    from marketdata.jalali import from_gregorian, tehran_day
 
     try:
-        if timezone.is_aware(when):
-            when = timezone.localtime(when, ZoneInfo("Asia/Tehran"))
-        return jdatetime.date.fromgregorian(date=when.date()).strftime("%Y-%m-%d")
+        day = tehran_day(when) if timezone.is_aware(when) else when.date()
+        return from_gregorian(day)
     except Exception as exc:
         raise PriceResolutionError(
             "Could not convert to Jalali date.", field="timestamp"

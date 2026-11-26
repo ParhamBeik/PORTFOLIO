@@ -2511,8 +2511,13 @@ def test_house_series_is_zero_before_the_purchase_mark(asset_catalog, make_user)
     )
     series = compute_dynamic_net_worth_series(user, account, days=10)
     valued = Decimal("9100000000")
-    before = [row for row in series if row["date"] < purchased.date().isoformat()]
-    after = [row for row in series if row["date"] >= purchased.date().isoformat()]
+    # The series is dated in Tehran days; the UTC date of `purchased` is a day
+    # behind it from 20:30 to 24:00 UTC, which made this test fail nightly.
+    from marketdata.jalali import tehran_day
+
+    mark_day = tehran_day(purchased).isoformat()
+    before = [row for row in series if row["date"] < mark_day]
+    after = [row for row in series if row["date"] >= mark_day]
     assert before and after
     assert all(Decimal(row["total"]) == 0 for row in before)
     assert all(Decimal(row["total"]) == valued for row in after)

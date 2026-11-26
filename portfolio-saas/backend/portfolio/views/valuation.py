@@ -5,7 +5,6 @@ All of it reads; none of it writes."""
 import bisect
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.db.models import Avg, Q
 from django.db.models.functions import TruncDate
@@ -31,7 +30,7 @@ from marketdata import jalali
 from marketdata.codal_discovery import promoting
 from marketdata.currency import is_tse_priced, requires_declared_unit, to_toman
 from marketdata.integrity import compute_symbol_integrity
-from marketdata.jalali import from_gregorian
+from marketdata.jalali import from_gregorian, tehran_day, tehran_midnight
 from marketdata.models import (
     DailyStockHistory,
     GoldCurrencyHistory,
@@ -283,17 +282,15 @@ def _subtract_hidden_holdings(user, account, series, now) -> None:
     if not hidden_asset_ids(accounts):
         return
     earliest = min(row["date"] for row in series)
-    span = (now.date() - datetime.strptime(earliest, "%Y-%m-%d").date()).days + 1
+    span = (tehran_day(now) - datetime.strptime(earliest, "%Y-%m-%d").date()).days + 1
     span = max(1, min(span, HIDDEN_ADJUSTMENT_MAX_DAYS))
     hidden = compute_dynamic_net_worth_series(
         user, account=account, days=span, only_hidden=True, max_days=span
     )
     if not hidden:
         return
-    # Both sides key on a "%Y-%m-%d" string: the snapshot rows via TruncDate, the
-    # subtrahend via strftime on an aware datetime. They agree only because
-    # settings.TIME_ZONE is UTC. Change that and this join silently misses,
-    # leaving totals unadjusted (and flagged approximate) on the shifted days.
+    # Both sides key on the Tehran calendar day ("%Y-%m-%d"): the snapshot rows
+    # via Snapshot.day (set from tehran_day) and the subtrahend via tehran_day(now).
     by_date = {row["date"]: row for row in hidden}
     oldest = min(by_date)
     for row in series:
@@ -360,9 +357,9 @@ def _net_flows_after(accounts, series, basis):
     from ..services.ledger import active_entries
     from ..services.performance import _flow_amount
 
-    tehran = ZoneInfo("Asia/Tehran")
     # The first point is that day's close, so a flow on the same day is inside it.
-    start = datetime.strptime(series[0]["date"], "%Y-%m-%d").replace(tzinfo=tehran) + timedelta(days=1)
+    first_day = datetime.strptime(series[0]["date"], "%Y-%m-%d").date()
+    start = tehran_midnight(first_day + timedelta(days=1))
     kinds = [LedgerEntry.Kind.DEPOSIT, LedgerEntry.Kind.WITHDRAWAL, LedgerEntry.Kind.OPENING_CASH]
     net = Decimal("0")
     for entry in active_entries(accounts, kinds=kinds):
@@ -392,7 +389,7 @@ class SnapshotListView(APIView):
                 days = 30
             days = max(1, min(days, 3650))
         now = timezone.now()
-        today = timezone.localtime(now, ZoneInfo("Asia/Tehran")).date()
+        today = tehran_day(now)
         account = _scope(request)
         basis = request.query_params.get("basis") or "nominal_toman"
         snapshots = Snapshot.objects.filter(user=request.user, day__lt=today)

@@ -361,15 +361,13 @@ WATCHLIST_CLOSE_LOOKBACK_DAYS = 30
 def _watchlist_rows(user):
     from datetime import timedelta
 
-    from django.utils import timezone
-
     from marketdata.calendars import candle_close_qs
-    from marketdata.jalali import from_gregorian
+    from marketdata.jalali import from_gregorian, tehran_day
 
     items = list(user.watchlist.all())
     if not items:
         return []
-    since = from_gregorian((timezone.now() - timedelta(days=WATCHLIST_CLOSE_LOOKBACK_DAYS)).date())
+    since = from_gregorian(tehran_day() - timedelta(days=WATCHLIST_CLOSE_LOOKBACK_DAYS))
     last = {}
     for row in (
         candle_close_qs([item.symbol for item in items], since=since)

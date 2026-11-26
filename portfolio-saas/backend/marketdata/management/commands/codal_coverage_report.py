@@ -10,6 +10,7 @@ import jdatetime
 from django.core.management.base import BaseCommand
 from django.db.models import Count, Max, Min
 
+from marketdata import jalali
 from marketdata.codal_classification import TIER_1
 from marketdata.models import CodalAnnouncement
 
@@ -21,7 +22,8 @@ def _age_days(jalali_date: str | None) -> int | None:
         return None
     try:
         year, month, day = (int(p) for p in jalali_date.split("-"))
-        return (jdatetime.date.today() - jdatetime.date(year, month, day)).days
+        today = jdatetime.date.fromgregorian(date=jalali.tehran_day())
+        return (today - jdatetime.date(year, month, day)).days
     except ValueError:
         return None
 

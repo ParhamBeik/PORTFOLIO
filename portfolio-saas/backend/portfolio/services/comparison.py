@@ -25,6 +25,7 @@ from decimal import Decimal
 import pandas as pd
 from django.utils import timezone
 
+from marketdata import jalali
 from marketdata.currency import (
     TSE_RIAL_PER_TOMAN, holding_value_to_toman, is_tse_priced,
 )
@@ -597,7 +598,7 @@ def compare(user, *, account=None, subject=None, targets=None, days=None) -> dic
             "price": _price_in_quote(holding, per_unit) if per_unit else None,
             "priced_live": bool(live),
             "end_date": (
-                timezone.now().date().isoformat() if live
+                jalali.tehran_day().isoformat() if live
                 else latest["end_date"] if latest else None
             ),
         },
