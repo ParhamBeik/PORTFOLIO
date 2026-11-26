@@ -45,18 +45,30 @@ def normalize_asset_class(value: str | None) -> str:
 
 
 def classify_from_market_instrument(mi) -> str:
+    from marketdata.catalog import CASH_LIKE_SYMBOLS
     from marketdata.models import MarketInstrument
 
     group = (mi.provider_group or "").lower()
-    symbol = (mi.symbol or "").lower()
+    raw_symbol = (mi.symbol or "").strip()
+    symbol = raw_symbol.lower()
     if mi.category == MarketInstrument.Category.STOCK:
         return "Stock"
+    if (
+        mi.category == MarketInstrument.Category.CRYPTO
+        or "crypto" in group
+        or "bitcoin" in symbol
+        or "btc" in symbol
+    ):
+        return "Crypto"
+    if (
+        "currency" in group
+        or "cash" in group
+        or raw_symbol in CASH_LIKE_SYMBOLS
+        or symbol in ("usd", "usdt", "usdt_irt", "eur")
+    ):
+        return "Cash"
     if mi.category == MarketInstrument.Category.GOLD:
         return "Gold"
-    if "crypto" in group or "bitcoin" in symbol or "btc" in symbol:
-        return "Crypto"
-    if "currency" in group or "cash" in group or symbol in ("usd", "usdt", "eur"):
-        return "Cash"
     return "Other"
 
 

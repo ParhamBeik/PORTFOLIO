@@ -18,6 +18,7 @@ from ..models import Holding, LedgerEntry, Price, Snapshot, Transaction, USD_QUO
 from ..services import get_latest_prices, value_account, value_user
 from ..services.catalog import resolve_asset_key
 from ..services.valuation import (
+    FX_CARRY_DAYS,
     HIDDEN_ADJUSTMENT_MAX_DAYS,
     SYNTHETIC_HISTORY_MAX_DAYS,
     compute_dynamic_net_worth_series,
@@ -29,7 +30,7 @@ from ._common import _express_real_toman, _express_usd_real, _fx_rate, _int_para
 from marketdata import jalali
 from marketdata.codal_discovery import promoting
 from marketdata.currency import is_tse_priced, requires_declared_unit, to_toman
-from marketdata.integrity import compute_symbol_integrity
+from marketdata.integrity import MAX_FORWARD_FILL_SESSIONS, MIN_COVERAGE, compute_symbol_integrity
 from marketdata.jalali import from_gregorian, tehran_day, tehran_midnight
 from marketdata.models import (
     DailyStockHistory,
@@ -41,11 +42,6 @@ from marketdata.models import (
 from marketdata.provenance import (
     daily_bar_price, toman_per_dollar, toman_per_tether, toman_rate_kwargs, toman_rate_tables,
 )
-
-
-#: How far a dated FX close may be carried forward to a chart day, matching
-#: `conversion_rate_as_of`. Beyond it the day has no dollar value, not today's.
-FX_CARRY_DAYS = 5
 
 
 def _dated_fx_rates(days, symbol):
@@ -825,10 +821,20 @@ class PriceHistoryView(APIView):
         caveats = []
         if integrity:
             if not integrity.passes_gate and integrity.reason:
-                caveats.append(integrity.reason)
-            if integrity.coverage_ratio and integrity.coverage_ratio < 0.70:
+                for code in integrity.reason.split(","):
+                    if code and code not in caveats:
+                        caveats.append(code)
+            if (
+                integrity.coverage_ratio
+                and integrity.coverage_ratio < MIN_COVERAGE
+                and "low_coverage" not in caveats
+            ):
                 caveats.append("low_coverage")
-            if integrity.max_gap_days and integrity.max_gap_days > 14:
+            if (
+                integrity.max_gap_days
+                and integrity.max_gap_days > MAX_FORWARD_FILL_SESSIONS
+                and "price_gap_exceeded" not in caveats
+            ):
                 caveats.append("price_gap_exceeded")
 
         return Response({

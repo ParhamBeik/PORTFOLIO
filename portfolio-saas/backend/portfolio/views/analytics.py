@@ -17,6 +17,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from ..models import Account, Holding, LedgerEntry
 from ..services import value_account, value_user
+from ..services.classification import classify_from_market_instrument
 from ..services.deflator import normalize_basis
 from ..services.diagnostics import portfolio_diagnostics
 from ..services.insights import _liquid_items, _total, build_insights
@@ -450,6 +451,28 @@ def _compute_my_optimal_payload(
     }
 
 
+def _my_optimal_fingerprint(user, account=None) -> str:
+    """Single owner for the MyOptimal holding/ledger/price cache fingerprint."""
+    from ..services.returns import _price_version_fingerprint
+
+    ledger_q = LedgerEntry.objects.filter(account__user=user)
+    holding_q = Holding.objects.filter(account__user=user)
+    if account is not None:
+        ledger_q = ledger_q.filter(account=account)
+        holding_q = holding_q.filter(account=account)
+    max_ledger_id = ledger_q.order_by("-id").values_list("id", flat=True).first() or 0
+    max_holding_id = holding_q.order_by("-id").values_list("id", flat=True).first() or 0
+    hidden_fp = "-".join(
+        str(i) for i in sorted(
+            holding_q.filter(is_hidden=True).values_list("id", flat=True)
+        )
+    )
+    return (
+        f"{_price_version_fingerprint(holding_q.values_list('asset__key', flat=True))}"
+        f":{max_ledger_id}:{max_holding_id}:{hidden_fp}"
+    )
+
+
 class MyOptimalView(APIView):
     """"if a quant had optimized MY existing assets, what would it
     look like?" -- per lookback window, max-Sharpe and min-volatility weights
@@ -477,33 +500,7 @@ class MyOptimalView(APIView):
 
     @staticmethod
     def _cache_key(user, account, basis, max_assets=None, target_volatility=None):
-        from ..services.returns import _price_version_fingerprint
-
-        ledger_q = LedgerEntry.objects.filter(account__user=user)
-        holding_q = Holding.objects.filter(account__user=user)
-        if account is not None:
-            ledger_q = ledger_q.filter(account=account)
-            holding_q = holding_q.filter(account=account)
-        max_ledger_id = ledger_q.order_by("-id").values_list("id", flat=True).first() or 0
-        max_holding_id = holding_q.order_by("-id").values_list("id", flat=True).first() or 0
-        # Ticking a holding off changes the answer without inserting a row, so the
-        # highest ids alone cannot see it and the cached analytics would outlive
-        # the toggle for the full TTL.
-        hidden_fp = "-".join(
-            str(i) for i in sorted(
-                holding_q.filter(is_hidden=True).values_list("id", flat=True)
-            )
-        )
-        # This page optimizes the user's OWN assets, so an ingest for anything
-        # they do not hold cannot change the answer. Scoping the price half of
-        # the key to their symbols is what lets the TTL below actually hold --
-        # globally it rotated on every archive insert, which is continuous.
-        # The ledger/holding ids stay unscoped and exact: a trade must
-        # invalidate immediately, with no staleness window at all.
-        fingerprint = (
-            f"{_price_version_fingerprint(holding_q.values_list('asset__key', flat=True))}"
-            f":{max_ledger_id}:{max_holding_id}:{hidden_fp}"
-        )
+        fingerprint = _my_optimal_fingerprint(user, account)
         account_key = account.id if account is not None else "all"
         # Both knobs change every target in the body, so they have to key the
         # cache too -- otherwise the first request of a TTL decides the position
@@ -517,7 +514,6 @@ class MyOptimalView(APIView):
 
     @concurrency_cap
     def get(self, request):
-        from ..services.returns import _price_version_fingerprint
         from django.utils import timezone
 
         account = _scope(request)
@@ -544,24 +540,7 @@ class MyOptimalView(APIView):
             return Response(cached)
 
         is_default_knobs = (max_assets is None and target_volatility is None)
-
-        # Build current fingerprint for staleness checks
-        holding_q = Holding.objects.filter(account__user=request.user)
-        ledger_q = LedgerEntry.objects.filter(account__user=request.user)
-        if account is not None:
-            holding_q = holding_q.filter(account=account)
-            ledger_q = ledger_q.filter(account=account)
-        max_ledger_id = ledger_q.order_by("-id").values_list("id", flat=True).first() or 0
-        max_holding_id = holding_q.order_by("-id").values_list("id", flat=True).first() or 0
-        hidden_fp = "-".join(
-            str(i) for i in sorted(
-                holding_q.filter(is_hidden=True).values_list("id", flat=True)
-            )
-        )
-        fingerprint = (
-            f"{_price_version_fingerprint(holding_q.values_list('asset__key', flat=True))}"
-            f":{max_ledger_id}:{max_holding_id}:{hidden_fp}"
-        )
+        fingerprint = _my_optimal_fingerprint(request.user, account)
 
         if is_default_knobs and account is not None:
             snap = (
@@ -842,7 +821,7 @@ def _asset_class_leaders():
     leaders = {}
     for row in snapshots.filter(as_of=latest).order_by("-sharpe"):
         instrument = instruments.get(row.symbol)
-        category = instrument.get_category_display() if instrument else "Other"
+        category = classify_from_market_instrument(instrument) if instrument else "Other"
         leaders.setdefault(category, []).append({
             "symbol": row.symbol,
             "name": instrument.name if instrument else row.symbol,
