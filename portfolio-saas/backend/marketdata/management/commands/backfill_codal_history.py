@@ -58,7 +58,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         start_year = options["start_year"]
         end_year = options["end_year"]
-        current_year = int(jalali.from_gregorian(timezone.now().astimezone(jalali.TEHRAN))[:4])
+        current_year = int(jalali.from_gregorian(jalali.tehran_day())[:4])
         if not 1300 <= start_year <= end_year < current_year:
             raise CommandError("Choose completed Jalali years in ascending order.")
         max_pages = options["max_pages"]

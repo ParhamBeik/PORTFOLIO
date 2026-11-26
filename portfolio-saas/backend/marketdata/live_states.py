@@ -147,10 +147,14 @@ def day_start(now=None):
     from datetime import time as dtime
     from zoneinfo import ZoneInfo
 
-    zone = ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE)
-    return datetime.combine(
-        (now or timezone.now()).astimezone(zone).date(), dtime.min, tzinfo=zone
-    )
+    from . import jalali
+
+    tz_name = getattr(settings, "MARKETDATA_QUOTA_TIMEZONE", "Asia/Tehran")
+    if tz_name == "Asia/Tehran":
+        return jalali.tehran_midnight(jalali.tehran_day(now))
+    zone = ZoneInfo(tz_name)
+    moment = jalali._now() if now is None else now
+    return datetime.combine(moment.astimezone(zone).date(), dtime.min, tzinfo=zone)
 
 
 def full_day_cost(states=None):

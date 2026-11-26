@@ -387,8 +387,10 @@ def normalize_as_of(as_of) -> dt.datetime | None:
 
 def to_jalali_str(greg_date: dt.date | dt.datetime) -> str:
     """Convert a Gregorian date/datetime to a Jalali YYYY-MM-DD string."""
+    from marketdata.jalali import tehran_day
+
     if isinstance(greg_date, dt.datetime):
-        greg_date = greg_date.date()
+        greg_date = tehran_day(greg_date) if greg_date.tzinfo is not None else greg_date.date()
     jday = jdatetime.date.fromgregorian(date=greg_date)
     return f"{jday.year:04d}-{jday.month:02d}-{jday.day:02d}"
 

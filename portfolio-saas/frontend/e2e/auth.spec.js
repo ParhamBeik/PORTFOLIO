@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { appReachable, e2eCreds, login } from "./helpers.js";
+import { appReachable, requireLogin } from "./helpers.js";
 
 test.describe("auth", () => {
   test.beforeEach(async ({ request }) => {
@@ -35,30 +35,23 @@ test.describe("auth", () => {
     await page.goto("/");
     await page.getByTestId("auth-toggle-register").click();
     await page.getByTestId("auth-password-input").fill("Abcd1234!");
-    await expect.soft(page.getByTestId("auth-strength-meter")).toBeVisible();
+    await expect(page.getByTestId("auth-strength-meter")).toBeVisible();
   });
 
   test("happy-path login when credentials set", async ({ page }) => {
-    const creds = e2eCreds();
-    if (!creds) {
-      test.skip(true, "set E2E_EMAIL and E2E_PASSWORD for happy-path login");
-    }
-    const result = await login(page, creds);
-    if (result !== "ok") {
-      test.skip(true, `login failed (${result}) — backend down or bad credentials`);
-    }
+    await requireLogin(page, test);
     await expect(page.getByTestId("nav")).toBeVisible();
-    await expect.soft(page.getByTestId("scope-account")).toBeVisible();
-    await expect.soft(page.getByTestId("scope-basis")).toBeVisible();
+    await expect(page.getByTestId("scope-account")).toBeVisible();
+    await expect(page.getByTestId("scope-basis")).toBeVisible();
 
     // Log out now lives inside the account menu, with the rest of the account
     // actions. Opening the chip is what proves both: the menu exists, and the
     // one action that used to sit alone in the header is still reachable.
     await page.getByTestId("user-email").click();
     await expect(page.getByTestId("account-menu")).toBeVisible();
-    await expect.soft(page.getByTestId("account-role")).toBeVisible();
-    await expect.soft(page.getByTestId("account-change-password")).toBeVisible();
-    await expect.soft(page.getByTestId("account-logout")).toBeVisible();
+    await expect(page.getByTestId("account-role")).toBeVisible();
+    await expect(page.getByTestId("account-change-password")).toBeVisible();
+    await expect(page.getByTestId("account-logout")).toBeVisible();
 
     // Escape closes it — a panel that can only be dismissed by finding the
     // trigger again is a panel people leave open over the page.

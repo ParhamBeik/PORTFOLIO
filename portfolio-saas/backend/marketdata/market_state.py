@@ -16,12 +16,13 @@ Two signals, in priority order:
 # refreshes the cached state. Fixing it properly means a holiday table.
 """
 import logging
-from datetime import datetime, timedelta, timezone as dt_timezone
-from zoneinfo import ZoneInfo
+from datetime import timedelta, timezone as dt_timezone
 
 import jdatetime
 from django.conf import settings
 
+# TEHRAN is re-exported: archive, live_states and valuation read market_state.TEHRAN.
+from marketdata.jalali import TEHRAN, tehran_day, tehran_now  # noqa: F401
 from portfolio.live.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
@@ -29,8 +30,6 @@ logger = logging.getLogger(__name__)
 OPEN = "open"
 CLOSED_DAYTIME = "closed_daytime"
 OVERNIGHT = "overnight"
-
-TEHRAN = ZoneInfo("Asia/Tehran")
 
 # jdatetime weekday(): 0 = Saturday ... 5 = Thursday, 6 = Friday.
 TRADING_WEEKDAYS = frozenset({0, 1, 2, 3, 4})
@@ -52,7 +51,7 @@ _PROBE_KEY = "marketdata:tse_state_probe"
 
 
 def _now_tehran():
-    return datetime.now(dt_timezone.utc).astimezone(TEHRAN)
+    return tehran_now()
 
 
 def _within(now, start, end):
@@ -133,7 +132,8 @@ def _provider_says_closed():
 
 def market_state_at(now, *, provider_closed=False):
     """Return the market state for one Tehran-local timestamp."""
-    jalali_weekday = jdatetime.date.fromgregorian(date=now.date()).weekday()
+    day = tehran_day(now) if now.tzinfo is not None else now.date()
+    jalali_weekday = jdatetime.date.fromgregorian(date=day).weekday()
     trading_day = jalali_weekday in TRADING_WEEKDAYS
     if trading_day and _within(now, SESSION_START, SESSION_END) and not provider_closed:
         return OPEN
@@ -202,8 +202,7 @@ POST_CLOSE_REFRESH = (14, 30)
 
 def next_post_close(now=None):
     """UTC datetime of the next post-close refresh window, always in the future."""
-    now = now or datetime.now(dt_timezone.utc)
-    local = now.astimezone(TEHRAN)
+    local = tehran_now(now)
     target = local.replace(
         hour=POST_CLOSE_REFRESH[0], minute=POST_CLOSE_REFRESH[1],
         second=0, microsecond=0,

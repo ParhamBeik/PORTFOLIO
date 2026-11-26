@@ -37,17 +37,15 @@ it is the only thing standing between us and a six-year-old price.
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from zoneinfo import ZoneInfo
-
 from django.conf import settings
 
 from .. import jalali
+from ..jalali import TEHRAN, tehran_now
 from .http import SourceResponseError, fetch
 
 logger = logging.getLogger(__name__)
 
 ORIGIN = "tgju"
-TEHRAN = ZoneInfo("Asia/Tehran")
 
 #: Quotes older than this are refused. TGJU keeps retired instruments in the
 #: payload indefinitely (see the module docstring), and the coin slugs legitimately
@@ -165,7 +163,7 @@ def quote(current, slug, *, now=None):
     if stamped is None:
         logger.warning("tgju_quote_undated slug=%s; refusing.", slug)
         return None, None
-    age = (now or datetime.now(TEHRAN)) - stamped
+    age = (now or tehran_now()) - stamped
     if age > MAX_QUOTE_AGE:
         logger.warning(
             "tgju_quote_stale slug=%s age_days=%.1f ts=%s; refusing.",
@@ -306,7 +304,7 @@ def live_tedpix_payload(current=None, *, now=None):
     stamped = _parse_ts(row.get("ts"))
     if price is None or price <= 0 or stamped is None:
         return None
-    moment = now or datetime.now(TEHRAN)
+    moment = now or tehran_now()
     age = moment - stamped
     if age < -timedelta(minutes=5) or age > MAX_QUOTE_AGE:
         return None

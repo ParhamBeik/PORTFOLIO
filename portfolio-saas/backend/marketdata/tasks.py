@@ -19,7 +19,7 @@ import re
 import time
 import uuid
 from collections import Counter
-from datetime import datetime, time as dtime, timedelta
+from datetime import timedelta
 
 from celery import group, shared_task
 from django.conf import settings
@@ -74,7 +74,6 @@ from portfolio.models import Asset, Price
 from portfolio.services import signals as signal_math
 from portfolio.services.diagnostics import _load_index_returns
 from portfolio.services.returns import invalidate_returns_cache
-from zoneinfo import ZoneInfo
 import math
 
 
@@ -193,12 +192,11 @@ def _market_snapshot_payload(asset_class, endpoint_key, api_key):
 
 @shared_task(ignore_result=True)
 def aggregate_market_daily_bars_task(jalali_date=None):
-    """Distill today's live snapshots into `MarketDailyBar` OHLC rows -- one
-    call per asset class covered by the unified live->historical mechanism.
-    `MarketDailyBar`'s own row-existence is the completeness signal for these
-    classes, so this must run once per day, after the day's snapshots exist.
+    """Distill the just-completed Tehran day's live snapshots into `MarketDailyBar`
+    OHLC rows -- one call per asset class covered by the unified live->historical
+    mechanism. Scheduled at 01:40 Tehran, so the default target is `jalali.days_ago(1)`.
     """
-    target_date = jalali_date or jalali.today()
+    target_date = jalali_date or jalali.days_ago(1)
     results = {}
     for asset_class in (
         "crypto", "commodity", "index", "tse_option",
@@ -1218,9 +1216,10 @@ def _quota_attribution_drift():
 
 
     try:
+        from .live_states import day_start
+
         day = quota_day()
-        zone = ZoneInfo(settings.MARKETDATA_QUOTA_TIMEZONE)
-        start = datetime.combine(day, dtime.min, tzinfo=zone)
+        start = day_start()
         # Summed across plans: `attributed` counts every workflow run regardless
         # of which subscription it billed, so the charged side has to match.
         charged = ApiRequestQuota.objects.filter(day=day).aggregate(
@@ -1697,7 +1696,7 @@ def nightly_asset_metrics(window_days=365):
     )
     benchmark = _load_index_returns(returns.index) if not returns.empty else None
     reference = returns["USD"] if "USD" in returns else None
-    as_of = jalali.today()
+    as_of = jalali.days_ago(1)
     written = 0
     for symbol in returns.columns:
         series = returns[symbol].dropna()
@@ -1820,7 +1819,7 @@ def nightly_asset_signals(window_days=365):
         gates = dict(
             SymbolIntegrity.objects.values_list("symbol", "passes_gate")
         )
-        as_of = jalali.today()
+        as_of = jalali.days_ago(1)
         written = skipped = 0
         stances = {}
         for symbol in returns.columns:

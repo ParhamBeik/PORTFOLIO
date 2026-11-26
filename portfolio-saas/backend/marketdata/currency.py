@@ -74,11 +74,30 @@ TSE_PRICE_UNIT = "rial"
 #: Units that mean "this number is Rial" -- the only ones that get divided.
 RIAL_QUOTE_UNITS = frozenset({"ریال".casefold(), "rial", "irr"})
 #: Units that mean "this number is already Toman" -- returned as-is.
-TOMAN_QUOTE_UNITS = frozenset({"تومان".casefold(), "toman"})
+TOMAN_QUOTE_UNITS = frozenset({"تومان".casefold(), "toman", "irt"})
 IRR_QUOTE_UNITS = RIAL_QUOTE_UNITS | TOMAN_QUOTE_UNITS
 USD_QUOTE_UNITS = frozenset({"دلار".casefold(), "dollar", "usd"})
-TETHER_QUOTE_UNITS = frozenset({"تتر".casefold(), "tether", "usdt"})
+TETHER_QUOTE_UNITS = frozenset({"تتر".casefold(), "تتر/usdt".casefold(), "tether", "usdt"})
 FOREIGN_QUOTE_UNITS = USD_QUOTE_UNITS | TETHER_QUOTE_UNITS
+
+
+def requires_declared_unit(asset) -> bool:
+    """Whether an unlabelled (`unit == ""`) historical quote must be refused for `asset`.
+
+    Shared across `services.valuation.resolve_asset_point_in_time_price`,
+    `services.ledger.resolve_historical_price`, and `views.valuation._brs_price_history`
+    so catalog-minted `brs-*` crypto rows and seeded foreign-quoted rows obey the
+    same blank-unit refusal rule.
+    """
+    from portfolio.models import Asset, USD_QUOTED_KEYS
+
+    if asset is None:
+        return False
+    return (
+        asset.key == "usd_cash"
+        or asset.key in USD_QUOTED_KEYS
+        or asset.asset_class == Asset.AssetClass.CRYPTO
+    )
 
 
 def tse_unit_verified() -> bool:
@@ -165,6 +184,8 @@ def to_toman(symbol, price, unit="", *, usd_rate=None, usdt_rate=None):
         return value * Decimal(str(usd_rate)) if usd_rate else Decimal("0")
     if unit in TETHER_QUOTE_UNITS:
         return value * Decimal(str(usdt_rate)) if usdt_rate else Decimal("0")
+    if unit and unit not in TOMAN_QUOTE_UNITS:
+        return Decimal("0")
     return value
 
 

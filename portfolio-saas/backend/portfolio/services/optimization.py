@@ -1365,9 +1365,11 @@ def optimize(
     from portfolio.services.returns import normalize_as_of, get_universe_by_mode
     as_of_dt = normalize_as_of(as_of)
     import jdatetime
+    from marketdata.jalali import tehran_day
 
     rate_date = as_of_dt or timezone.now()
-    jalali_year = jdatetime.date.fromgregorian(date=rate_date.date()).year
+    rate_day = tehran_day(rate_date) if rate_date.tzinfo else rate_date.date()
+    jalali_year = jdatetime.date.fromgregorian(date=rate_day).year
     risk_free_annual = settings.RATE_FOR(jalali_year)
 
     if universe is None:
@@ -2134,10 +2136,12 @@ def _efficient_frontier(
     from portfolio.services.returns import normalize_as_of
     as_of_dt = normalize_as_of(as_of)
     import jdatetime
+    from marketdata.jalali import tehran_day
 
     rate_date = as_of_dt or timezone.now()
+    rate_day = tehran_day(rate_date) if rate_date.tzinfo else rate_date.date()
     risk_free_annual = settings.RATE_FOR(
-        jdatetime.date.fromgregorian(date=rate_date.date()).year
+        jdatetime.date.fromgregorian(date=rate_day).year
     )
 
     returns, _ = daily_returns_matrix(

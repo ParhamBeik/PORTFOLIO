@@ -15,6 +15,7 @@ from portfolio.models import (
     Liability,
     Price,
     Snapshot,
+    USD_QUOTED_KEYS,
     positive_price_q,
 )
 from .timeline import house_area_as_of, house_marks_as_of
@@ -196,7 +197,7 @@ def create_ledger_entry(
                 unit_price = resolve_historical_price(asset, occurred_at)
             except PriceResolutionError as exc:
                 raise LedgerError(str(exc)) from exc
-        if asset.quote_unit != "usd":
+        if asset.key not in USD_QUOTED_KEYS:
             unit_price = _whole_toman(unit_price)
         # A quantity x price product, so it crosses the TSE Rial/Toman boundary
         # exactly like a valuation does. It reads as Toman everywhere
@@ -208,7 +209,7 @@ def create_ledger_entry(
         amount = holding_value_to_toman(
             asset, quantity * unit_price
         ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-    elif unit_price is not None and (asset is None or asset.quote_unit != "usd"):
+    elif unit_price is not None and (asset is None or asset.key not in USD_QUOTED_KEYS):
         unit_price = _whole_toman(unit_price)
     if area is not None or mortgage is not None:
         # A revaluation carries the same terms as the opening it supersedes, so
@@ -1306,14 +1307,11 @@ def _jalali_date(when) -> str:
     stored as Tehran midnight, 20:30 UTC on the 14th, and was priced at the 14th's
     close -- every backdated trade booked at the session before the one chosen.
     """
-    from zoneinfo import ZoneInfo
-
-    import jdatetime
+    from marketdata.jalali import from_gregorian, tehran_day
 
     try:
-        if timezone.is_aware(when):
-            when = timezone.localtime(when, ZoneInfo("Asia/Tehran"))
-        return jdatetime.date.fromgregorian(date=when.date()).strftime("%Y-%m-%d")
+        day = tehran_day(when) if timezone.is_aware(when) else when.date()
+        return from_gregorian(day)
     except Exception as exc:
         raise PriceResolutionError(
             "Could not convert to Jalali date.", field="timestamp"
@@ -1519,8 +1517,10 @@ def resolve_historical_price(asset: Asset, when) -> Decimal:
             # Shared helper, not a fourth copy: this branch writes a durable
             # `LedgerEntry.price_tomans`, so a divergent answer here becomes
             # permanent rather than merely displayed.
+            from marketdata.currency import requires_declared_unit
+
             converted = Decimal("0")
-            if history.unit or asset.asset_class != Asset.AssetClass.CRYPTO:
+            if history.unit or not requires_declared_unit(asset):
                 cash_rates, tether_rates = toman_rate_tables(
                     [history.unit], [history.date],
                 )

@@ -375,6 +375,8 @@ def account_performance(account, *, basis=None) -> dict:
     # Dividends are portfolio-generated return, not external investor capital.
     # Reversal pairs net to nothing, or a reversed deposit shows up as a real
     # cash flow into TWR/XIRR -- `ledger.active_entries` owns that rule.
+    from marketdata.jalali import tehran_day
+
     from .ledger import active_entries
 
     flows = active_entries(
@@ -382,7 +384,7 @@ def account_performance(account, *, basis=None) -> dict:
     )
     factor = Decimal("1")
     segment_start = start_value
-    investor_cashflows = [(start.date(), -start_value)]
+    investor_cashflows = [(tehran_day(start) if start.tzinfo else start.date(), -start_value)]
     for entry in flows:
         before = value_as_of(
             account.user,
@@ -414,7 +416,9 @@ def account_performance(account, *, basis=None) -> dict:
             }
         signed_flow = flow if entry.kind == LedgerEntry.Kind.DEPOSIT else -flow
         segment_start = before_value + signed_flow
-        investor_cashflows.append((entry.timestamp.date(), -signed_flow))
+        investor_cashflows.append(
+            (tehran_day(entry.timestamp) if entry.timestamp.tzinfo else entry.timestamp.date(), -signed_flow)
+        )
 
     if segment_start <= 0:
         return {
@@ -423,7 +427,7 @@ def account_performance(account, *, basis=None) -> dict:
             "detail": "A TWR segment start value was zero or negative.",
         }
     factor *= current_value / segment_start
-    investor_cashflows.append((timezone.now().date(), current_value))
+    investor_cashflows.append((tehran_day(), current_value))
 
     xirr_value = xirr(investor_cashflows)
     if xirr_value is None:

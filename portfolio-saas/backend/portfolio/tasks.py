@@ -282,10 +282,10 @@ def _write_prices(
 
 def _write_snapshots(prices: dict, *, day, session_close_keys: set[str]) -> int:
     """Write one completed Tehran day per scope; retries update the same rows."""
-    from zoneinfo import ZoneInfo
+    from marketdata.jalali import tehran_midnight
 
-    close_at = dt.datetime.combine(
-        day, dt.time.max, tzinfo=ZoneInfo("Asia/Tehran")
+    close_at = (
+        tehran_midnight(day + dt.timedelta(days=1)) - dt.timedelta(microseconds=1)
     ).astimezone(dt.timezone.utc)
     users = (
         User.objects.filter(accounts__isnull=False)
@@ -336,9 +336,9 @@ def _write_snapshots(prices: dict, *, day, session_close_keys: set[str]) -> int:
 @shared_task(ignore_result=True, autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
 def write_daily_net_worth_snapshot():
     """At 00:01 Tehran, seal the previous day; today's point stays dynamic."""
-    from zoneinfo import ZoneInfo
+    from marketdata.jalali import tehran_day
 
-    day = timezone.localtime(timezone.now(), ZoneInfo("Asia/Tehran")).date() - dt.timedelta(days=1)
+    day = tehran_day() - dt.timedelta(days=1)
     latest = get_latest_prices()
     verified_close_keys = set()
     replacements = _archive_replacements(
@@ -370,17 +370,16 @@ def backfill_missing_snapshots(last_day, *, lookback=SNAPSHOT_BACKFILL_DAYS) -> 
     either side (`_interpolated_value`); one with no real price on BOTH sides
     leaves the day missing, because a partial total would draw a fake dip.
     """
-    from zoneinfo import ZoneInfo
+    from marketdata.jalali import tehran_day
 
     from .services.valuation import value_as_of
 
-    tehran = ZoneInfo("Asia/Tehran")
     first_day = last_day - dt.timedelta(days=lookback - 1)
     written = 0
     users = User.objects.filter(accounts__isnull=False).distinct()
     for user in users.iterator(chunk_size=200):
         accounts = list(user.accounts.all())
-        started = min(a.created_at for a in accounts).astimezone(tehran).date()
+        started = tehran_day(min(a.created_at for a in accounts))
         have = set(Snapshot.objects.filter(
             user=user, account=None, day__gte=first_day, day__lte=last_day,
         ).values_list("day", flat=True))
@@ -395,12 +394,12 @@ def backfill_missing_snapshots(last_day, *, lookback=SNAPSHOT_BACKFILL_DAYS) -> 
 
 
 def _rebuild_snapshot_day(user, accounts, day, value_as_of) -> int:
-    from zoneinfo import ZoneInfo
+    from marketdata.jalali import tehran_day, tehran_midnight
 
-    close_at = dt.datetime.combine(day, dt.time.max, tzinfo=ZoneInfo("Asia/Tehran"))
+    close_at = tehran_midnight(day + dt.timedelta(days=1)) - dt.timedelta(microseconds=1)
     rows = []
     for account in accounts:
-        if account.created_at.astimezone(close_at.tzinfo).date() > day:
+        if tehran_day(account.created_at) > day:
             continue
         result = value_as_of(user, account=account, as_of=close_at, include_hidden=True)
         total = Decimal(str(result["total"]))
@@ -507,9 +506,11 @@ def _interpolated_value(user, account, close_at, excluded) -> Decimal | None:
                 return distance, price
         return None
 
+    from marketdata.jalali import tehran_day
+
     holdings = holdings_as_of(user, account, close_at)
     assets = {a.key: a for a in Asset.objects.filter(key__in=[e.get("asset_key") for e in excluded])}
-    today = timezone.localdate()
+    today = tehran_day()
     filled = Decimal("0")
     for entry in excluded:
         asset = assets.get(entry.get("asset_key"))
@@ -606,15 +607,15 @@ def aggregate_daily_price_averages(date_str: str | None = None):
     fallback-to-warehouse writes, see _persistable_prices) are not a live
     observation and must not inflate sample_count or skew the average.
     """
-    import jdatetime
     from datetime import timedelta
     from django.db.models import Avg, Count
     from django.utils import timezone
+    from marketdata.jalali import from_gregorian, tehran_day
 
     outcome = WorkflowOutcome(
         "aggregate_daily_price_averages", destination_table="DailyPriceAverage"
     )
-    today_jalali = date_str or jdatetime.date.today().strftime("%Y-%m-%d")
+    today_jalali = date_str or from_gregorian(tehran_day())
     since = timezone.now() - timedelta(hours=24)
 
     written = 0

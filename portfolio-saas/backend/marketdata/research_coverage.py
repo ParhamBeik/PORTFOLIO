@@ -22,7 +22,7 @@ def refresh_research_coverage(window_days=365):
     if window_days not in {90, 365, 1825, 3650}:
         raise ValueError("window_days must be 90, 365, 1825, or 3650")
     started_at = timezone.now()
-    end_date = timezone.localtime(started_at, jalali.TEHRAN).date()
+    end_date = jalali.tehran_day(started_at)
     start = jalali.from_gregorian(end_date - timedelta(days=window_days))
     end = jalali.from_gregorian(end_date)
     universe = list(MarketInstrument.objects.filter(

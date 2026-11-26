@@ -62,9 +62,11 @@ def cpi_for_date(value) -> float:
     if isinstance(value, str):
         value = dt.date.fromisoformat(value[:10])
     if isinstance(value, pd.Timestamp):
-        value = value.date()
+        value = value.to_pydatetime() if value.tzinfo is not None else value.date()
     if isinstance(value, dt.datetime):
-        value = value.date()
+        from marketdata.jalali import tehran_day
+
+        value = tehran_day(value) if value.tzinfo is not None else value.date()
     jdate = jdatetime.date.fromgregorian(date=value)
     start = settings.CPI_FOR(jdate.year)
     try:

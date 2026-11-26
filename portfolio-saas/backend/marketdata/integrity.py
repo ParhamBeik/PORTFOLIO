@@ -4,7 +4,6 @@ import datetime as dt
 from typing import Any
 
 import jdatetime
-from django.utils import timezone
 
 from .calendars import (
     actual_trading_days,
@@ -13,6 +12,7 @@ from .calendars import (
     market_closure_days,
     symbol_halt_days,
 )
+from .jalali import tehran_day
 from .models import (
     GoldCurrencyHistory,
     MarketCandle,
@@ -49,7 +49,7 @@ def _as_gregorian_date(value, default: dt.date) -> dt.date:
     if value is None:
         return default
     if isinstance(value, dt.datetime):
-        return value.date()
+        return tehran_day(value) if value.tzinfo is not None else value.date()
     if isinstance(value, dt.date):
         return value
     year, month, day = (int(part) for part in str(value).split("-")[:3])
@@ -103,7 +103,7 @@ def compute_symbol_integrity(
             "reason_codes": ["unknown_symbol"],
         }
 
-    end_date = _as_gregorian_date(end, timezone.now().date())
+    end_date = _as_gregorian_date(end, tehran_day())
     start_date = _as_gregorian_date(start, end_date - dt.timedelta(days=179))
     tse_calendar = instrument.source == MarketInstrument.Source.TSETMC
     if tse_calendar:
@@ -307,7 +307,7 @@ def market_outage_windows(start=None, end=None) -> list[tuple[dt.date, dt.date]]
     AIO wallet while ticks starved. Days `market_closure_days` proves shut
     (zero volume AND zero trades market-wide) count as accounted for too.
     """
-    end_date = _as_gregorian_date(end, timezone.now().date())
+    end_date = _as_gregorian_date(end, tehran_day())
     start_date = _as_gregorian_date(start, end_date - dt.timedelta(days=730))
     first, last = _jalali_text(start_date), _jalali_text(end_date)
     stored_days = set(
@@ -329,7 +329,7 @@ def market_outage_windows(start=None, end=None) -> list[tuple[dt.date, dt.date]]
 
 def update_all_symbols_integrity():
     """Persist current-window assessments for all eligible instruments."""
-    end_date = timezone.now().date()
+    end_date = tehran_day()
     start_date = end_date - dt.timedelta(days=179)
     instruments = list(
         MarketInstrument.objects.filter(eligible=True).values_list("symbol", "source")
