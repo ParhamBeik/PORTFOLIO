@@ -18,7 +18,6 @@ Two deliberate constraints:
 """
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 # Wilder's default periods. Named so a caller overriding them reads as
