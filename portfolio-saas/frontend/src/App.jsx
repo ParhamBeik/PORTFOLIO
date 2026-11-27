@@ -8,6 +8,7 @@ import { Network } from "@capacitor/network";
 import OfflinePortfolio from "./OfflinePortfolio.jsx";
 import Auth from "./components/Auth.jsx";
 import ResetPassword from "./components/ResetPassword.jsx";
+import VerifyEmail from "./components/VerifyEmail.jsx";
 import Legal from "./components/Legal.jsx";
 import { PortfolioProvider, usePortfolio } from "./components/PortfolioContext.jsx";
 import { hasAnyHoldings } from "./holdingsGate.js";
@@ -41,6 +42,7 @@ const PAGE_TITLES = {
   "/privacy": "Privacy",
   "/terms": "Terms",
   "/reset-password": "Reset password",
+  "/verify-email": "Confirm your email",
   "/login": "Sign in",
   "/signup": "Create account",
 };
@@ -232,6 +234,7 @@ export default function App() {
           <Route path="/privacy" element={<Legal kind="privacy" />} />
           <Route path="/terms" element={<Legal kind="terms" />} />
           <Route path="/reset-password" element={<ResetPassword />} />
+          <Route path="/verify-email" element={<VerifyEmail />} />
           {/* Real routes, not just a catch-all: /signup is a URL you can hand
               someone, and `Legal`'s "Back to sign in" link targets /login,
               which previously resolved only by accident. */}
@@ -256,6 +259,8 @@ export default function App() {
         <Suspense fallback={<Loading testId="route-loading" />}>
           <Routes>
             <Route path="/reset-password" element={<ResetPassword />} />
+            <Route path="/verify-email" element={<VerifyEmail />} />
+          <Route path="/verify-email" element={<VerifyEmail />} />
             {/* A signed-in visitor has no business on the auth card -- and one
                 lands here whenever sign-in did not rewrite the URL. */}
             <Route path="/login" element={<Navigate to="/" replace />} />

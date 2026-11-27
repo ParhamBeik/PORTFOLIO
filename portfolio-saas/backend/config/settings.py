@@ -236,7 +236,7 @@ REST_FRAMEWORK = {
         # brute-force attempt still got 30 guesses a minute. Env-tunable so a
         # room full of guests can be accommodated without a deploy.
         "login": os.getenv("LOGIN_THROTTLE", "20/min"),
-        "register": os.getenv("REGISTER_THROTTLE", "10/min"),
+        "register": os.getenv("REGISTER_THROTTLE", "5/hour"),
         # Browser timing beacons: unauthenticated (sendBeacon carries no
         # Authorization header), so per IP. A tab flushes about four times a
         # minute; this leaves room for a full office behind one NAT.
@@ -298,6 +298,12 @@ SIMPLE_JWT = {
 }
 JWT_COOKIE_SECURE = not DEBUG
 REGISTRATION_OPEN = os.getenv("REGISTRATION_OPEN", "1") == "1"
+# Sign-up closes on its own below this much free disk (existing members keep working).
+SIGNUP_MIN_FREE_GB = float(os.getenv("SIGNUP_MIN_FREE_GB", "10"))
+# Public sign-up guards: at most this many new members per rolling 24 h, and a
+# sign-up that never confirms its email is deleted after UNCONFIRMED_USER_DAYS.
+REGISTRATION_DAILY_CAP = int(os.getenv("REGISTRATION_DAILY_CAP", "50"))
+UNCONFIRMED_USER_DAYS = int(os.getenv("UNCONFIRMED_USER_DAYS", "7"))
 
 # Mail. `.env.production.example` has named these for some time; Django does
 # not read EMAIL_* from the environment on its own, so a filled-in env file

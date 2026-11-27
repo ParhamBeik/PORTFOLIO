@@ -77,6 +77,10 @@ app.conf.update(
 # Crontab times are declared directly in Tehran local time. ZoneInfo owns any
 # future timezone-policy changes; no hand-converted UTC hours are duplicated.
 app.conf.beat_schedule = {
+    "delete-unconfirmed-users": {
+        "task": "accounts.tasks.delete_unconfirmed_users",
+        "schedule": crontab(hour=2, minute=20),
+    },
     "write-daily-net-worth": {
         "task": "portfolio.tasks.write_daily_net_worth_snapshot",
         "schedule": crontab(hour=0, minute=1),

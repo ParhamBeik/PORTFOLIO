@@ -7,6 +7,7 @@ import {
   register,
   registrationStatus,
   requestPasswordReset,
+  resendConfirmation,
   sessionExpiry,
 } from "../api.js";
 import { useApi } from "../useApi.js";
@@ -74,6 +75,12 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
   const [fieldError, setFieldError] = useState({});
   const [busy, setBusy] = useState(false);
   const [resetSent, setResetSent] = useState(false);
+  // "signup" after an account was created, "resend" after a link was re-sent:
+  // both mean "go and open your inbox", and both lock the form until the mode
+  // changes so a second click cannot create a second pending account.
+  const [confirmSent, setConfirmSent] = useState("");
+  const [unconfirmed, setUnconfirmed] = useState(false);
+  const [website, setWebsite] = useState("");
 
   const registering = mode === "signup";
   const forgetting = mode === "forgot";
@@ -95,6 +102,8 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
     setError("");
     setFieldError({});
     setResetSent(false);
+    setConfirmSent("");
+    setUnconfirmed(false);
   };
 
   const handleEmailChange = (value) => {
@@ -135,13 +144,24 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
         setResetSent(true);
         return;
       }
-      const data = registering
-        ? await register(email.trim(), password)
-        : await login(email.trim(), password);
+      if (registering) {
+        await register(email.trim(), password, website);
+        setConfirmSent("signup");
+        return;
+      }
+      const data = await login(email.trim(), password);
       auth.tokens = data;
       sessionExpiry.set(data.session_expires_at);
       onAuthed(await me());
     } catch (err) {
+      if (err.reason === "email_unconfirmed") {
+        setUnconfirmed(true);
+        return;
+      }
+      if (err.reason === "signup_daily_cap") {
+        setError("Sign-ups are full for today. Please try again tomorrow.");
+        return;
+      }
       const msg = err.message || "";
       const lower = msg.toLowerCase();
       if (lower.includes("email")) {
@@ -150,6 +170,20 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
         setFieldError({ password: msg });
       }
       setError(friendlyError(msg));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resend() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await resendConfirmation(email.trim());
+      setUnconfirmed(false);
+      setConfirmSent("resend");
+    } catch (err) {
+      setError(friendlyError(err.message || ""));
     } finally {
       setBusy(false);
     }
@@ -244,6 +278,51 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
             className="mb-4 rounded-lg border border-[var(--c-good-text)] bg-panel-2 px-4 py-3 text-sm text-[var(--c-good-text)]"
           >
             {t("If an account exists for that email, a reset link has been sent.")}
+          </div>
+        )}
+
+        {confirmSent && (
+          <div
+            data-testid="auth-confirm-sent"
+            role="status"
+            className="mb-4 rounded-lg border border-[var(--c-good-text)] bg-panel-2 px-4 py-3 text-sm text-[var(--c-good-text)]"
+          >
+            {t("We sent a confirmation link to your email. Open it to finish creating your account, then sign in.")}
+          </div>
+        )}
+
+        {unconfirmed && (
+          <div
+            data-testid="auth-unconfirmed"
+            role="alert"
+            className="mb-4 rounded-lg border border-[var(--c-warn)] bg-panel-2 px-4 py-3 text-sm text-text"
+          >
+            <p>{t("Please confirm your email address first. Check your inbox for the link we sent.")}</p>
+            <Button
+              type="button"
+              data-testid="auth-resend"
+              disabled={busy}
+              onClick={resend}
+              className="mt-2"
+            >
+              {t("Send the link again")}
+            </Button>
+          </div>
+        )}
+
+        {registering && (
+          // Honeypot: off-screen and out of the tab order, so only a bot fills it.
+          <div aria-hidden="true" style={{ position: "absolute", left: "-10000px", width: 1, height: 1, overflow: "hidden" }}>
+            <label htmlFor="auth-website">Website</label>
+            <input
+              id="auth-website"
+              name="website"
+              type="text"
+              tabIndex={-1}
+              autoComplete="off"
+              value={website}
+              onChange={(e) => setWebsite(e.target.value)}
+            />
           </div>
         )}
 
@@ -408,7 +487,7 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
           type="submit"
           variant="primary"
           data-testid="auth-submit"
-          disabled={busy || !canSubmit || resetSent}
+          disabled={busy || !canSubmit || resetSent || Boolean(confirmSent)}
           className="w-full py-1.5"
         >
           {t(busy ? "Working…" : forgetting ? "Send reset link" : registering ? "Create account" : "Sign in")}

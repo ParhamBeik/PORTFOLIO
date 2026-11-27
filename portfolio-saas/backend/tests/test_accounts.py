@@ -48,6 +48,20 @@ def test_register_is_closed_without_creating_a_user():
     assert not User.objects.filter(email="new@test.test").exists()
 
 
+def test_signup_closes_by_itself_when_the_disk_is_nearly_full():
+    # Above any real disk's free space, so the guard must trip.
+    with override_settings(REGISTRATION_OPEN=True, SIGNUP_MIN_FREE_GB=10**9):
+        status_resp = APIClient().get("/api/auth/registration/")
+        resp = APIClient().post(
+            "/api/auth/register/",
+            {"email": "full@test.test", "password": "Sup3rSecret!"},
+            format="json",
+        )
+    assert status_resp.json()["registration_open"] is False
+    assert resp.status_code == 403
+    assert not User.objects.filter(email="full@test.test").exists()
+
+
 @pytest.mark.parametrize("is_open", [False, True])
 def test_registration_status_matches_the_server_gate(is_open):
     with override_settings(REGISTRATION_OPEN=is_open):
@@ -294,43 +308,149 @@ def register(email="newcomer@test.test", password="Str0ng-Passw0rd!", **extra):
     )
 
 
-def as_registered_user(response):
-    """An API client carrying a freshly registered user's access token."""
+def confirm_from_outbox(email):
+    """Open the confirmation link from the last email sent to `email`, as the member does."""
+    import re
+    from urllib.parse import parse_qs, urlparse
+
+    from django.core import mail
+
+    body = [m for m in mail.outbox if email in m.to][-1].body
+    query = parse_qs(urlparse(re.search(r"https?://\S+", body).group(0)).query)
+    return APIClient().post(
+        "/api/auth/verify-email/",
+        {"uid": query["uid"][0], "token": query["token"][0]},
+        format="json",
+    )
+
+
+def as_registered_user(response, password="Str0ng-Passw0rd!"):
+    """An API client for a freshly registered member: confirm the email, then sign in."""
+    email = response.json()["email"]
+    assert confirm_from_outbox(email).status_code == 200
+    signed_in = APIClient().post(
+        "/api/auth/login/", {"email": email, "password": password}, format="json"
+    )
     client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.json()['access']}")
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {signed_in.json()['access']}")
     return client
 
 
 @override_settings(REGISTRATION_OPEN=True)
-def test_signup_creates_a_usable_session_in_one_round_trip():
-    """201 with an access token AND the refresh cookie, not a bare user row.
+def test_signup_asks_for_confirmation_and_signs_in_only_after_it():
+    """202 and an email -- no tokens. Sign-in is refused until the link is opened.
 
-    The card signs the new member straight in -- if this ever returned only the
-    user, registration would look like it worked and drop the person back on the
-    sign-in form with no session.
+    Public sign-up: an address nobody controls must not become a working account.
     """
+    from django.core import mail
+
     response = register(first_name="New", last_name="Comer")
 
-    assert response.status_code == 201
+    assert response.status_code == 202
     body = response.json()
-    assert body["access"]
-    assert body["user"]["email"] == "newcomer@test.test"
-    assert body["user"]["role"] == "user"
-    assert "is_staff" not in body["user"] and "is_superuser" not in body["user"]
-    assert body["session_expires_at"]
-    assert "ps_refresh" in response.cookies, "no refresh cookie: the session dies on reload"
-    # Never echo the credential back, in any form.
-    assert "password" not in body["user"]
+    assert body["email"] == "newcomer@test.test"
+    assert "access" not in body and "ps_refresh" not in response.cookies
+    assert "password" not in body
+    assert [m.to for m in mail.outbox] == [["newcomer@test.test"]]
 
     user = User.objects.get(email="newcomer@test.test")
-    assert user.is_active
+    assert user.is_active and user.email_confirmed_at is None
     assert not user.is_staff and not user.is_superuser
     assert user.check_password("Str0ng-Passw0rd!"), "password stored unhashed or unset"
+
+    login = {"email": "newcomer@test.test", "password": "Str0ng-Passw0rd!"}
+    refused = APIClient().post("/api/auth/login/", login, format="json")
+    assert refused.status_code == 401
+    assert refused.json()["reason"] == "email_unconfirmed"
+
+    assert confirm_from_outbox("newcomer@test.test").status_code == 200
+    # Single-use: the token hashes email_confirmed_at, which just changed; a
+    # second click is answered as "already confirmed", not as an error.
+    assert confirm_from_outbox("newcomer@test.test").status_code == 200
+    signed_in = APIClient().post("/api/auth/login/", login, format="json")
+    assert signed_in.status_code == 200 and signed_in.json()["access"]
+    assert "ps_refresh" in signed_in.cookies
+
+
+def test_a_wrong_password_never_reveals_that_an_address_is_unconfirmed():
+    User.objects.create_user(email="pending@test.test", password="Str0ng-Passw0rd!", email_confirmed_at=None)
+    response = APIClient().post(
+        "/api/auth/login/", {"email": "pending@test.test", "password": "wrong"}, format="json"
+    )
+    assert response.status_code == 401
+    assert "reason" not in response.json()
+
+
+def test_a_forged_confirmation_token_is_refused():
+    user = User.objects.create_user(email="forge@test.test", password="x", email_confirmed_at=None)
+    from django.utils.encoding import force_bytes
+    from django.utils.http import urlsafe_base64_encode
+
+    response = APIClient().post(
+        "/api/auth/verify-email/",
+        {"uid": urlsafe_base64_encode(force_bytes(user.pk)), "token": "abc-def"},
+        format="json",
+    )
+    assert response.status_code == 400
+    user.refresh_from_db()
+    assert user.email_confirmed_at is None
+
+
+@override_settings(REGISTRATION_OPEN=True)
+def test_resend_answers_the_same_for_every_address_and_mails_only_the_pending_one():
+    from django.core import mail
+
+    register(email="waiting@test.test")
+    User.objects.create_user(email="done@test.test", password="x")
+    mail.outbox.clear()
+    answers = {
+        APIClient().post("/api/auth/verify-email/resend/", {"email": e}, format="json").json()["detail"]
+        for e in ("waiting@test.test", "done@test.test", "nobody@test.test")
+    }
+    assert len(answers) == 1
+    assert [m.to for m in mail.outbox] == [["waiting@test.test"]]
+
+
+@override_settings(REGISTRATION_OPEN=True)
+def test_the_honeypot_answers_like_a_signup_and_creates_nothing():
+    response = register(email="bot@test.test", website="http://spam.example")
+    assert response.status_code == 202
+    assert not User.objects.filter(email="bot@test.test").exists()
+
+
+@override_settings(REGISTRATION_OPEN=True, REGISTRATION_DAILY_CAP=2)
+def test_signups_stop_at_the_daily_cap():
+    assert register(email="one@test.test").status_code == 202
+    assert register(email="two@test.test").status_code == 202
+    full = register(email="three@test.test")
+    assert full.status_code == 429 and full.json()["reason"] == "signup_daily_cap"
+    assert not User.objects.filter(email="three@test.test").exists()
+
+
+@override_settings(
+    REGISTRATION_OPEN=True, EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend", EMAIL_HOST=""
+)
+def test_signup_closes_when_no_confirmation_mail_can_be_sent():
+    assert register(email="nomail@test.test").status_code == 403
+    assert APIClient().get("/api/auth/registration/").json()["registration_open"] is False
+
+
+def test_unconfirmed_signups_are_deleted_after_the_grace_period():
+    from accounts.tasks import delete_unconfirmed_users
+
+    old = User.objects.create_user(email="stale@test.test", password="x", email_confirmed_at=None)
+    User.objects.filter(pk=old.pk).update(date_joined=timezone.now() - timedelta(days=8))
+    User.objects.create_user(email="fresh@test.test", password="x", email_confirmed_at=None)
+    User.objects.create_user(email="member@test.test", password="x")
+    User.objects.filter(email="member@test.test").update(date_joined=timezone.now() - timedelta(days=90))
+
+    assert delete_unconfirmed_users() == 1
+    assert set(User.objects.values_list("email", flat=True)) == {"fresh@test.test", "member@test.test"}
 
 
 @override_settings(REGISTRATION_OPEN=True)
 def test_a_second_signup_on_the_same_email_is_refused():
-    assert register(email="taken@test.test").status_code == 201
+    assert register(email="taken@test.test").status_code == 202
 
     response = register(email="taken@test.test", password="An0ther-Passw0rd!")
 
@@ -350,7 +470,7 @@ def test_an_address_is_one_identity_whatever_case_it_is_typed_in():
     password for an address you could not sign in with.
     """
     first = register(email="Case@Example.com")
-    assert first.status_code == 201
+    assert first.status_code == 202
     assert User.objects.get().email == "case@example.com", "stored uncanonicalised"
 
     duplicate = register(email="case@example.com", password="An0ther-Passw0rd!")
@@ -364,6 +484,7 @@ def test_an_address_is_one_identity_whatever_case_it_is_typed_in():
 @pytest.mark.parametrize("typed", ["case@example.com", "Case@Example.com", "CASE@EXAMPLE.COM"])
 def test_sign_in_accepts_the_address_in_any_case(typed):
     register(email="Case@Example.com", password="Str0ng-Passw0rd!")
+    confirm_from_outbox("case@example.com")
 
     response = APIClient().post(
         "/api/auth/login/", {"email": typed, "password": "Str0ng-Passw0rd!"}, format="json"
@@ -377,6 +498,7 @@ def test_sign_in_accepts_the_address_in_any_case(typed):
 def test_signing_in_by_a_case_variant_still_stamps_last_login():
     """The Ops member list reads last_login; it must not miss a real sign-in."""
     register(email="Stamp@Example.com", password="Str0ng-Passw0rd!")
+    confirm_from_outbox("stamp@example.com")
 
     APIClient().post(
         "/api/auth/login/",
@@ -1125,6 +1247,11 @@ PUBLIC_ROUTES = {
     "api/auth/password-reset/confirm/",
     # Gated separately by settings.REGISTRATION_OPEN.
     "api/auth/register/",
+    # Reached from the confirmation email by someone who cannot sign in yet;
+    # the resend answers identically for every address. Both use the
+    # `password_reset` throttle scope.
+    "api/auth/verify-email/",
+    "api/auth/verify-email/resend/",
     # Lets the signed-out UI mirror that server gate without duplicating it.
     "api/auth/registration/",
     # Probes. The compose healthcheck, the on-VPS watchdog and the GitHub
