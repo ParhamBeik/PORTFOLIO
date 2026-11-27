@@ -17,11 +17,13 @@ import {
   deleteAccount,
   downloadExport,
   logoutSession,
+  registrationStatus,
   sessionExpiry,
   updateProfile,
 } from "../api.js";
 import { dateTime } from "../format.js";
 import { isNative } from "../mobile.js";
+import { useApi } from "../useApi.js";
 import { Badge, Button, ErrorState, Field, Input, Modal } from "./ui.jsx";
 
 /** Staff is a real capability here — it is what puts Ops in the nav. */
@@ -248,6 +250,8 @@ export default function AccountMenu({
 }) {
   const t = useT();
   const lang = useLang();
+  // The contact address lives in the environment, sent on the public status route.
+  const status = useApi(registrationStatus, []);
   const [open, setOpen] = useState(false);
   const [modal, setModal] = useState(null);
   const [notice, setNotice] = useState("");
@@ -329,6 +333,8 @@ export default function AccountMenu({
       onLogout();
     }
   };
+
+  const contact = status.data?.contact_email || "";
 
   return (
     <div className="relative" ref={wrap}>
@@ -433,6 +439,16 @@ export default function AccountMenu({
             >
               Download my data
             </MenuItem>
+            {/* A plain email to the contact address: nothing stored, no form.
+                Hidden until CONTACT_EMAIL is set on the server. */}
+            {contact && (
+              <MenuItem
+                onClick={() => { window.location.href = `mailto:${contact}?subject=${encodeURIComponent("Portfolio feedback")}`; }}
+                testId="account-feedback"
+              >
+                Send feedback
+              </MenuItem>
+            )}
             <MenuItem onClick={() => run(() => logoutSession().then(onLogout))} testId="account-logout">
               Log out
             </MenuItem>

@@ -20,6 +20,7 @@ vi.mock("../api.js", () => ({
   deleteAccount: vi.fn(),
   downloadExport: vi.fn(),
   logoutSession: vi.fn(),
+  registrationStatus: vi.fn(() => Promise.resolve({ contact_email: "hello@example.com" })),
   sessionExpiry: { value: null },
   updateProfile: vi.fn(),
 }));
