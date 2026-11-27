@@ -926,4 +926,5 @@ export default {
   "Sign in to get a new link.": "برای دریافت پیوند تازه وارد شوید.",
   "Your email is confirmed.": "ایمیل شما تأیید شد.",
   "Sign in now.": "اکنون وارد شوید.",
+  "Too many failed sign-ins for this address. Try again in 15 minutes, or reset your password.": "برای این نشانی تلاش ناموفق ورود زیاد بوده است. ۱۵ دقیقه دیگر دوباره امتحان کنید یا رمز خود را بازنشانی کنید.",
 };

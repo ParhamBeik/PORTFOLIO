@@ -232,6 +232,41 @@ def test_login_wrong_password_rejected():
     assert resp.status_code == 401
 
 
+def test_one_address_locks_after_repeated_failures_and_a_reset_unlocks_it(settings):
+    """Slow guessing from many IPs never trips the per-IP throttle; this does."""
+    import re
+    from django.core import mail
+    from accounts.models import User
+
+    settings.LOGIN_LOCK_FAILURES = 3
+    User.objects.create_user(email="lock@test.test", password="Sup3rSecret!")
+    client = APIClient()
+
+    def login(email, password):
+        return client.post("/api/auth/login/", {"email": email, "password": password}, format="json")
+
+    for _ in range(3):
+        assert login("lock@test.test", "nope").status_code == 401
+    # Locked: even the right password is refused, and the reason says why.
+    locked = login("LOCK@test.test", "Sup3rSecret!")
+    assert locked.status_code == 401
+    assert locked.json()["reason"] == "login_locked"
+    # The lock is per address: another member signs in normally.
+    User.objects.create_user(email="other@test.test", password="Sup3rSecret!")
+    assert login("other@test.test", "Sup3rSecret!").status_code == 200
+
+    # Password reset still works while locked, and clears the lock.
+    client.post("/api/auth/password-reset/", {"email": "lock@test.test"}, format="json")
+    uid, token = re.search(r"uid=([^&\s]+).*token=([^\s]+)", mail.outbox[-1].body).groups()
+    reset = client.post(
+        "/api/auth/password-reset/confirm/",
+        {"uid": uid, "token": token, "new_password": "N3wSecret!!", "confirm_password": "N3wSecret!!"},
+        format="json",
+    )
+    assert reset.status_code == 200
+    assert login("lock@test.test", "N3wSecret!!").status_code == 200
+
+
 def test_me_requires_authentication():
     assert APIClient().get("/api/auth/me/").status_code == 401
 

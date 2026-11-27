@@ -302,6 +302,10 @@ REGISTRATION_OPEN = os.getenv("REGISTRATION_OPEN", "1") == "1"
 # sign-up that never confirms its email is deleted after UNCONFIRMED_USER_DAYS.
 REGISTRATION_DAILY_CAP = int(os.getenv("REGISTRATION_DAILY_CAP", "50"))
 UNCONFIRMED_USER_DAYS = int(os.getenv("UNCONFIRMED_USER_DAYS", "7"))
+# Per-address sign-in lock (on top of the per-IP `login` throttle): this many
+# wrong passwords for one address locks it for this many seconds.
+LOGIN_LOCK_FAILURES = int(os.getenv("LOGIN_LOCK_FAILURES", "10"))
+LOGIN_LOCK_SECONDS = int(os.getenv("LOGIN_LOCK_SECONDS", "900"))
 
 # Mail. `.env.production.example` has named these for some time; Django does
 # not read EMAIL_* from the environment on its own, so a filled-in env file
