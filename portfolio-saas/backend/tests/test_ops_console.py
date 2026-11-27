@@ -2187,3 +2187,24 @@ def test_nearly_complete_data_type_never_reads_100():
     )
     row = next(c for c in _archive()["categories"] if c["endpoint"] == ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS)
     assert row["row_pct"] == 99.9
+
+
+@pytest.mark.django_db
+def test_daily_summary_counts_member_activity_without_naming_anyone(django_user_model):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from config.observability import format_alert
+    from marketdata.tasks import member_activity
+    from portfolio.models import Account
+
+    user = django_user_model.objects.create_user(email="new@example.com", password="x-Strong-12345")
+    Account.objects.create(user=user, name="Mine")
+
+    counts = member_activity()
+    assert counts["signups"] == 1 and counts["portfolios"] == 1 and counts["members"] == 1
+    assert member_activity(timezone.now() + timedelta(days=2))["signups"] == 0
+    title, text = format_alert("member-activity", counts)
+    assert title == "Members, last 24 h" and "1 sign-ups" in text
+    assert "@" not in text

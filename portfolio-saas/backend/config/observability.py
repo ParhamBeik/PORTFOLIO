@@ -120,6 +120,10 @@ def _causes(causes):
 # blob (`{"codal_bytes": 22064086717, ...}`), which nobody reads on a phone.
 # An event missing here still sends: title from its name, details as key: value.
 ALERT_TEXT = {
+    "member-activity": ("Members, last 24 h", lambda d: (
+        f"{d.get('signups', 0)} sign-ups, {d.get('portfolios', 0)} new portfolios, "
+        f"{d.get('ledger_rows', 0)} ledger rows, {d.get('imports', 0)} imports. "
+        f"Busiest member: {d.get('top_member_rows', 0)} rows ({d.get('members', 0)} members in all).")),
     "stale-prices": ("Prices frozen", lambda d: f"No new price for {_minutes(d.get('age_seconds'))} while the market is open."),
     "disk-projection": ("Disk filling up", lambda d: (
         f"80% full in ~{d.get('days_to_80pct')} days. "

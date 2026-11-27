@@ -685,10 +685,42 @@ def operational_health_check():
     return {"alerts": [event for event, _details in alerts]}
 
 
+def member_activity(now=None):
+    """Counts for the last 24 h: the cheap early sign of a stranger filling
+    the shared disk or making fake accounts. Counts only, never an address."""
+    from datetime import timedelta
+
+    from django.contrib.auth import get_user_model
+    from django.db.models import Count
+    from django.utils import timezone
+
+    from portfolio.models import Account, ImportBatch, LedgerEntry
+
+    since = (now or timezone.now()) - timedelta(hours=24)
+    rows = LedgerEntry.all_objects.filter(created_at__gte=since)
+    top = (
+        rows.values("account__user_id").annotate(n=Count("id")).order_by("-n").values_list("n", flat=True).first()
+    )
+    users = get_user_model().objects
+    return {
+        "signups": users.filter(date_joined__gte=since).count(),
+        "members": users.count(),
+        "portfolios": Account.objects.filter(created_at__gte=since).count(),
+        "ledger_rows": rows.count(),
+        "top_member_rows": top or 0,
+        "imports": ImportBatch.objects.filter(created_at__gte=since).count(),
+    }
+
+
 @shared_task(ignore_result=True)
 def send_alert_digest_task():
-    from config.observability import send_alert_digest
+    from config.observability import queue_for_digest, send_alert_digest
 
+    # One line every day, so a quiet day reads as quiet rather than as silence.
+    try:
+        queue_for_digest("member-activity", member_activity())
+    except Exception:
+        logger.warning("could not count member activity for the daily summary")
     return send_alert_digest()
 
 
