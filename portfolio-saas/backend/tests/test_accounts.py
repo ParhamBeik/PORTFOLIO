@@ -48,6 +48,20 @@ def test_register_is_closed_without_creating_a_user():
     assert not User.objects.filter(email="new@test.test").exists()
 
 
+def test_signup_closes_by_itself_when_the_disk_is_nearly_full():
+    # Above any real disk's free space, so the guard must trip.
+    with override_settings(REGISTRATION_OPEN=True, SIGNUP_MIN_FREE_GB=10**9):
+        status_resp = APIClient().get("/api/auth/registration/")
+        resp = APIClient().post(
+            "/api/auth/register/",
+            {"email": "full@test.test", "password": "Sup3rSecret!"},
+            format="json",
+        )
+    assert status_resp.json()["registration_open"] is False
+    assert resp.status_code == 403
+    assert not User.objects.filter(email="full@test.test").exists()
+
+
 @pytest.mark.parametrize("is_open", [False, True])
 def test_registration_status_matches_the_server_gate(is_open):
     with override_settings(REGISTRATION_OPEN=is_open):
