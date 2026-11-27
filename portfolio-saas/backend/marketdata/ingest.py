@@ -38,6 +38,8 @@ from .models import (
     ShareholderRecord,
     StockSymbolMetadata,
     StockTransactionTick,
+    TickDaySummary,
+    TickSummaryCoverage,
 )
 from .workflows import current_correlation_id
 from datetime import timedelta
@@ -551,9 +553,74 @@ def ingest_transactions(
             StockTransactionTick, rows, scope={"symbol": symbol, "date": day}
         )
         if created or conflicts or replace:
+            refresh_tick_day_summary(symbol, day)
             present = bool(created or conflicts)
             transaction.on_commit(lambda: _note_tick_day(symbol, day, present))
     return created, conflicts + bad
+
+
+def _lock_tick_summary(symbol):
+    """Serialize summary writes for one symbol (ingest vs. backfill) until commit."""
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [f"tick-summary:{symbol}"])
+
+
+def _tick_day_rows(symbol, days=None):
+    """Aggregate stored ticks by day -- from the tick table, so this is the truth."""
+    from django.db.models import Count, Sum
+
+    qs = StockTransactionTick.objects.filter(symbol=symbol)
+    if days is not None:
+        qs = qs.filter(date__in=list(days))
+        window = jalali.ts_window(days)
+        if window:
+            qs = qs.filter(ts__gte=window[0], ts__lt=window[1])
+    live = Q(canceled=False)
+    return qs.order_by().values("date").annotate(
+        ticks=Count("id"), live_ticks=Count("id", filter=live), live_volume=Sum("volume", filter=live),
+    )
+
+
+def refresh_tick_day_summary(symbol, day):
+    """Recompute one day's `TickDaySummary` from what is stored, inside the caller's transaction.
+
+    From the stored rows, never the payload: `_bulk` skips conflicting rows, so
+    a non-replace ingest can store something other than what it was handed.
+    """
+    _lock_tick_summary(symbol)
+    found = list(_tick_day_rows(symbol, [day]))
+    if not found:
+        TickDaySummary.objects.filter(symbol=symbol, date=day).delete()
+        return
+    row = found[0]
+    TickDaySummary.objects.update_or_create(
+        symbol=symbol, date=day,
+        defaults={"ticks": row["ticks"], "live_ticks": row["live_ticks"], "live_volume": row["live_volume"] or 0},
+    )
+
+
+def backfill_tick_summary(symbol) -> int:
+    """Rebuild a symbol's whole summary from its ticks and mark it covered. Off-hours only:
+    this is the one full read of the symbol's history the summary exists to avoid."""
+    with transaction.atomic():
+        _lock_tick_summary(symbol)
+        rows = [
+            TickDaySummary(
+                symbol=symbol, date=row["date"], ticks=row["ticks"],
+                live_ticks=row["live_ticks"], live_volume=row["live_volume"] or 0,
+            )
+            for row in _tick_day_rows(symbol)
+        ]
+        TickDaySummary.objects.filter(symbol=symbol).delete()
+        TickDaySummary.objects.bulk_create(rows, batch_size=1000)
+        TickSummaryCoverage.objects.get_or_create(symbol=symbol)
+    return len(rows)
+
+
+def tick_summary_covers(symbol) -> bool:
+    return TickSummaryCoverage.objects.filter(symbol=symbol).exists()
 
 
 #: How long a symbol's set of tick days is trusted before it is re-read.
@@ -577,12 +644,15 @@ def stored_tick_days(symbol) -> set[str]:
     key = _tick_days_key(symbol)
     days = cache.get(key)
     if days is None:
-        days = set(
-            StockTransactionTick.objects.filter(symbol=symbol)
-            .order_by()
-            .values_list("date", flat=True)
-            .distinct()
-        )
+        if tick_summary_covers(symbol):
+            days = set(TickDaySummary.objects.filter(symbol=symbol).values_list("date", flat=True))
+        else:
+            days = set(
+                StockTransactionTick.objects.filter(symbol=symbol)
+                .order_by()
+                .values_list("date", flat=True)
+                .distinct()
+            )
         cache.set(key, days, timeout=TICK_DAYS_TTL_SECONDS)
     return set(days)
 
