@@ -824,6 +824,7 @@ export default {
   "Change password": "تغییر گذرواژه",
   "Sign out on every device": "خروج از همه دستگاه‌ها",
   "Download my data": "دریافت داده‌های من",
+  "Send feedback": "ارسال بازخورد",
   "Log out": "خروج",
   "Delete account": "حذف حساب",
   "Standard account": "حساب عادی",
