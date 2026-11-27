@@ -224,11 +224,12 @@ def _latest_tick_day():
     return StockTransactionTick.objects.aggregate(value=Max("date"))["value"]
 
 
+TABLE_BYTES_CACHE_KEY = "db_table_bytes_diagnostics"
 TABLE_BYTES_CACHE_TTL = 60 * 60
 
 
 def get_cached_table_bytes():
-    cached = cache.get("db_table_bytes_diagnostics")
+    cached = cache.get(TABLE_BYTES_CACHE_KEY)
     if cached is not None:
         return cached
 
@@ -253,7 +254,7 @@ def get_cached_table_bytes():
     # window -- the health check, the metrics job and the Ops page each paid it.
     # On-disk size does not move meaningfully inside an hour, and the metrics
     # job that charts it runs hourly too.
-    cache.set("db_table_bytes_diagnostics", sizes, TABLE_BYTES_CACHE_TTL)
+    cache.set(TABLE_BYTES_CACHE_KEY, sizes, TABLE_BYTES_CACHE_TTL)
     return sizes
 
 
@@ -1402,6 +1403,7 @@ def invalidate_ops_cache():
         "admin_database_history",
         "admin_workflow_history",
         "db_counts_diagnostics",
-        "db_table_bytes_diagnostics",
+        # Not TABLE_BYTES_CACHE_KEY: sizes are re-measured only by the hourly
+        # metrics job. A retry or a Refresh click does not change them.
         "admin_worker_status",
     ])

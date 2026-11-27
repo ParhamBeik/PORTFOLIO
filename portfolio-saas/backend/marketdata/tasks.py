@@ -41,6 +41,7 @@ from .archive import (
 from .catalog import sync_provider_catalog
 from .fetchers import fetch_symbol_data
 from .admin_telemetry import (
+    TABLE_BYTES_CACHE_KEY,
     collect_metric_payload,
     get_ops_overview,
     invalidate_ops_cache,
@@ -1143,7 +1144,15 @@ def weekly_warehouse_audit():
 
 @shared_task(ignore_result=True)
 def capture_operational_metrics():
-    """Capture one idempotent 15-minute ops point and retain 90 days."""
+    """Capture one idempotent ops point (hourly beat) and retain 90 days.
+
+    The one place table byte sizes are re-measured: `invalidate_ops_cache` no
+    longer clears them, so the Ops Refresh button and admin actions reuse the
+    hour-old figure instead of walking every hypertable chunk again.
+    """
+    from django.core.cache import cache
+
+    cache.delete(TABLE_BYTES_CACHE_KEY)
 
     outcome = WorkflowOutcome(
         "capture_operational_metrics",
