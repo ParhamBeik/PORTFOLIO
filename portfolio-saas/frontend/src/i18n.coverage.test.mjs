@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 const root = dirname(fileURLToPath(import.meta.url));
 const dictionary = readFileSync(join(root, "i18n.fa.js"), "utf8");
 // Staff-only and unrouted pages stay English.
-const SKIP = /spec|Ops\.jsx|BestOverall|MyOptimal/;
+const SKIP = /spec|Ops\.jsx/;
 const LABEL =
   /(?:\b(?:title|subtitle|hint|empty|summary|caption|header|blurb|label)\s*[=:]\s*\{?|\b(?:translate|tr|t)\(\s*)"([^"\n]*[A-Za-z]{2}[^"\n]*)"/g;
 const EMPTY = /<Empty[^>]*>\s*([A-Z][^<>{}]+?)\s*<\/Empty>/g;

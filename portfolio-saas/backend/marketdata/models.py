@@ -603,6 +603,38 @@ class StockTransactionTick(models.Model):
         ]
 
 
+class TickDaySummary(models.Model):
+    """One row per (symbol, Jalali day) that has ticks: what the archive asks of them.
+
+    Reading "which days does this symbol have" or "what volume traded each day"
+    from `StockTransactionTick` decompresses the symbol's whole history (8.5 s and
+    10-22 s a call on prod, 2026-11-27). `ingest_transactions` -- the only tick
+    writer -- recomputes the day's row from the stored ticks in the same
+    transaction, so a reader right after an ingest sees it. Derived data: it can
+    always be rebuilt with `manage.py backfill_tick_summary`.
+    """
+
+    symbol = models.CharField(max_length=64)
+    date = models.CharField(max_length=10)
+    ticks = models.PositiveIntegerField()  # all stored rows, cancelled included
+    live_ticks = models.PositiveIntegerField()  # rows with canceled=False
+    live_volume = models.BigIntegerField()  # SUM(volume) over canceled=False
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["symbol", "date"], name="uniq_tick_day_summary"),
+        ]
+
+
+class TickSummaryCoverage(models.Model):
+    """A symbol whose `TickDaySummary` rows are complete. Without a row here,
+    readers fall back to the tick table, so a missing summary never reads as
+    "no ticks"."""
+
+    symbol = models.CharField(max_length=64, unique=True)
+    backfilled_at = models.DateTimeField(auto_now_add=True)
+
+
 class ShareholderRecord(models.Model):
     """Institutional shareholder ownership records and changes."""
 

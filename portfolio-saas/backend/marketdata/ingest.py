@@ -38,6 +38,8 @@ from .models import (
     ShareholderRecord,
     StockSymbolMetadata,
     StockTransactionTick,
+    TickDaySummary,
+    TickSummaryCoverage,
 )
 from .workflows import current_correlation_id
 from datetime import timedelta
@@ -246,9 +248,25 @@ def _bulk(
     if not rows:
         return 0, 0
     qs = model.objects.filter(**scope) if scope else model.objects.all()
-    before = qs.count()
-    model.objects.bulk_create(rows, batch_size=500, ignore_conflicts=True)
-    landed = qs.count() - before
+    if scope and unique_fields:
+        # Re-sent history is mostly rows we already hold. Reading the scope's
+        # keys once is one index scan; offering every row to INSERT ... ON
+        # CONFLICT DO NOTHING probed the unique index per row and was the top
+        # write statement on prod (DailyStockHistory: 152,799 calls, 151 ms
+        # each, 386 min in 19 days, 2026-11-27). Rows that land between this
+        # read and the insert still conflict harmlessly.
+        existing = set(qs.values_list(*unique_fields))
+        before = len(existing)
+        fresh = [row for row in rows if tuple(getattr(row, f) for f in unique_fields) not in existing]
+        if fresh:
+            model.objects.bulk_create(fresh, batch_size=500, ignore_conflicts=True)
+            landed = qs.count() - before
+        else:
+            landed = 0
+    else:
+        before = qs.count()
+        model.objects.bulk_create(rows, batch_size=500, ignore_conflicts=True)
+        landed = qs.count() - before
     if update_fields:
         recent_values = sorted({getattr(row, recent_field) for row in rows})[-recent_limit:]
         recent_rows = {
@@ -411,6 +429,22 @@ _REAL_LEGAL_FIELDS = {
 }
 
 
+def _real_legal_differs(current, values) -> bool:
+    """Would writing `values` change the stored real/legal columns?
+
+    Compared as the column would store them (`to_python`), so a provider float
+    like 1200.0 matches a stored 1200. Anything that does not convert counts as
+    changed and is written, which is the old behaviour.
+    """
+    for field_name, stored in zip(_REAL_LEGAL_FIELDS, current):
+        try:
+            if DailyStockHistory._meta.get_field(field_name).to_python(values[field_name]) != stored:
+                return True
+        except Exception:
+            return True
+    return False
+
+
 def ingest_real_legal(symbol: str, payload) -> tuple[int, int]:
     """History.php?type=1 payload -> independent real/legal daily rows.
 
@@ -424,23 +458,37 @@ def ingest_real_legal(symbol: str, payload) -> tuple[int, int]:
         return 0, 0 if payload is None else 1
     accepted, bad = screen("real_legal", payload, "real_legal_history", symbol)
     rows = []
-    updated_daily = 0
-    skipped_daily = 0
+    incoming = {}
     for rec in accepted:
         date_val = normalize_jalali(rec["date"])
         fields_to_update = {field: rec.get(key) for field, key in _REAL_LEGAL_FIELDS.items()}
-
-        updated_rows = DailyStockHistory.objects.filter(
-            symbol=symbol, date=date_val,
-        ).update(**fields_to_update)
-        updated_daily += int(updated_rows > 0)
-        skipped_daily += int(updated_rows == 0)
-
+        incoming[date_val] = fields_to_update  # a repeated day: the last one wins, as before
         rows.append(RealLegalHistory(
             symbol=symbol,
             date=date_val,
             **fields_to_update,
         ))
+    # One read of the symbol's stored breakdown, then a bulk write of only the
+    # days that differ. This used to be one UPDATE per day of history on every
+    # fetch -- ~18.5M single-row UPDATEs in 19 days on prod (2026-11-27), nearly
+    # all of them rewriting identical values (each one still a new row version).
+    columns = tuple(_REAL_LEGAL_FIELDS)
+    stored = {
+        row[0]: row[1:]
+        for row in DailyStockHistory.objects.filter(symbol=symbol, date__in=list(incoming))
+        .values_list("date", "id", *columns)
+    }
+    changed = []
+    for date_val, values in incoming.items():
+        if date_val not in stored:
+            continue
+        pk, *current = stored[date_val]
+        if _real_legal_differs(current, values):
+            changed.append(DailyStockHistory(id=pk, **values))
+    if changed:
+        DailyStockHistory.objects.bulk_update(changed, columns, batch_size=500)
+    updated_daily = len(stored)
+    skipped_daily = len(incoming) - len(stored)
     _bulk(RealLegalHistory, rows, scope={"symbol": symbol})
     release("real_legal_history", symbol, (row.date for row in rows))
     return updated_daily, skipped_daily + bad
@@ -551,9 +599,75 @@ def ingest_transactions(
             StockTransactionTick, rows, scope={"symbol": symbol, "date": day}
         )
         if created or conflicts or replace:
+            refresh_tick_day_summary(symbol, day)
             present = bool(created or conflicts)
             transaction.on_commit(lambda: _note_tick_day(symbol, day, present))
     return created, conflicts + bad
+
+
+def _lock_tick_summary(symbol):
+    """Serialize summary writes for one symbol (ingest vs. backfill) until commit."""
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [f"tick-summary:{symbol}"])
+
+
+def _tick_day_rows(symbol, days=None):
+    """Aggregate stored ticks by day -- from the tick table, so this is the truth."""
+    from django.db.models import Count, Sum
+
+    qs = StockTransactionTick.objects.filter(symbol=symbol)
+    if days is not None:
+        qs = qs.filter(date__in=list(days))
+        window = jalali.ts_window(days)
+        if window:
+            qs = qs.filter(ts__gte=window[0], ts__lt=window[1])
+    live = Q(canceled=False)
+    return qs.order_by().values("date").annotate(
+        ticks=Count("id"), live_ticks=Count("id", filter=live), live_volume=Sum("volume", filter=live),
+    )
+
+
+def refresh_tick_day_summary(symbol, day):
+    """Recompute one day's `TickDaySummary` from what is stored, inside the caller's transaction.
+
+    From the stored rows, never the payload: `_bulk` skips conflicting rows, so
+    a non-replace ingest can store something other than what it was handed.
+    """
+    _lock_tick_summary(symbol)
+    found = list(_tick_day_rows(symbol, [day]))
+    if not found:
+        TickDaySummary.objects.filter(symbol=symbol, date=day).delete()
+        return
+    row = found[0]
+    TickDaySummary.objects.update_or_create(
+        symbol=symbol, date=day,
+        defaults={"ticks": row["ticks"], "live_ticks": row["live_ticks"], "live_volume": row["live_volume"] or 0},
+    )
+
+
+def backfill_tick_summary(symbol) -> int:
+    """Rebuild a symbol's whole summary from its ticks and mark it covered. Off-hours only:
+    this is the one full read of the symbol's history the summary exists to avoid."""
+    with transaction.atomic():
+        _lock_tick_summary(symbol)
+        rows = [
+            TickDaySummary(
+                symbol=symbol, date=row["date"], ticks=row["ticks"],
+                live_ticks=row["live_ticks"], live_volume=row["live_volume"] or 0,
+            )
+            for row in _tick_day_rows(symbol)
+        ]
+        TickDaySummary.objects.filter(symbol=symbol).delete()
+        TickDaySummary.objects.bulk_create(rows, batch_size=1000)
+        TickSummaryCoverage.objects.get_or_create(symbol=symbol)
+    cache.delete(_tick_days_key(symbol))  # a --force rebuild must not serve the old set
+    return len(rows)
+
+
+def tick_summary_covers(symbol) -> bool:
+    return TickSummaryCoverage.objects.filter(symbol=symbol).exists()
 
 
 #: How long a symbol's set of tick days is trusted before it is re-read.
@@ -577,12 +691,15 @@ def stored_tick_days(symbol) -> set[str]:
     key = _tick_days_key(symbol)
     days = cache.get(key)
     if days is None:
-        days = set(
-            StockTransactionTick.objects.filter(symbol=symbol)
-            .order_by()
-            .values_list("date", flat=True)
-            .distinct()
-        )
+        if tick_summary_covers(symbol):
+            days = set(TickDaySummary.objects.filter(symbol=symbol).values_list("date", flat=True))
+        else:
+            days = set(
+                StockTransactionTick.objects.filter(symbol=symbol)
+                .order_by()
+                .values_list("date", flat=True)
+                .distinct()
+            )
         cache.set(key, days, timeout=TICK_DAYS_TTL_SECONDS)
     return set(days)
 
