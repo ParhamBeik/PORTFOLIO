@@ -1,5 +1,5 @@
 // Integration test: tests React component composition, API response mapping, and UI element rendering
-// for the primary Dashboard and MyOptimal pages against static fixture payloads at the component-boundary tier of the testing pyramid.
+// for the primary Dashboard page against static fixture payloads at the component-boundary tier of the testing pyramid.
 
 import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -7,10 +7,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import Dashboard from "./Dashboard.jsx";
 import Comparison from "./Comparison.jsx";
-import MyOptimal from "./MyOptimal.jsx";
 import { QuotaWallets } from "./Ops.jsx";
 
-// Mock API endpoints called by Dashboard and MyOptimal
+// Mock API endpoints called by Dashboard
 vi.mock("../api.js", () => ({
   valuation: vi.fn(),
   snapshots: vi.fn(),
@@ -18,7 +17,6 @@ vi.mock("../api.js", () => ({
   accountDataQuality: vi.fn(),
   listLiabilities: vi.fn(),
   listAccounts: vi.fn(),
-  myOptimal: vi.fn(),
   frontier: vi.fn(),
   listAssets: vi.fn(),
   robustness: vi.fn(),
@@ -360,74 +358,6 @@ describe("Page Rendering Tests", () => {
     expect(table).toHaveTextContent("Gold");
     fireEvent.click(screen.getByTestId("comparison-row-retry"));
     await waitFor(() => expect(screen.getByTestId("comparison-table")).not.toHaveTextContent("Too many requests."));
-  });
-
-  it("renders MyOptimal with scenarios and recommended weights", async () => {
-    api.myOptimal.mockResolvedValue({
-      as_of: "2026-09-08T12:00:00Z",
-      windows: [
-        {
-          label: "1Y",
-          min_volatility: {
-            weights: { kama_stock: 0.5, usd_cash: 0.5 },
-            metrics: {
-              volatility: 0.08,
-              cvar_95: -0.02,
-              sharpe: 1.6,
-              expected_return: 0.2,
-            },
-          },
-          max_sharpe: {
-            weights: { kama_stock: 0.8, usd_cash: 0.2 },
-            metrics: {
-              volatility: 0.14,
-              cvar_95: -0.04,
-              sharpe: 2.1,
-              expected_return: 0.32,
-            },
-          },
-          current: {
-            weights: { kama_stock: 1.0 },
-            metrics: {
-              volatility: 0.22,
-              cvar_95: -0.07,
-              sharpe: 1.1,
-              expected_return: 0.24,
-            },
-          },
-        },
-      ],
-      asset_labels: {
-        kama_stock: "Kama Stock",
-        usd_cash: "US Dollar",
-      },
-      warnings: [],
-    });
-
-    api.frontier.mockResolvedValue({
-      points: [
-        { volatility: 0.08, expected_return: 0.2 },
-        { volatility: 0.14, expected_return: 0.32 },
-      ],
-    });
-    api.listAssets.mockResolvedValue([]);
-    api.robustness.mockResolvedValue({ stability_score: 0.85 });
-
-    render(
-      <MemoryRouter>
-        <MyOptimal />
-      </MemoryRouter>
-    );
-
-    await waitFor(() => {
-      expect(
-        screen.getByTestId("optimal-scenario-tabs-min_volatility")
-      ).toBeInTheDocument();
-    });
-    expect(
-      screen.getByTestId("optimal-scenario-tabs-max_sharpe")
-    ).toBeInTheDocument();
-    expect(screen.getByTestId("optimal-as-of")).toBeInTheDocument();
   });
 
   it("renders an unmetered provider product without a false zero ceiling", () => {

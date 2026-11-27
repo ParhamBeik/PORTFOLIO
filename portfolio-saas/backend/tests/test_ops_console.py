@@ -2187,3 +2187,61 @@ def test_nearly_complete_data_type_never_reads_100():
     )
     row = next(c for c in _archive()["categories"] if c["endpoint"] == ArchiveFetchState.Endpoint.SHAREHOLDER_RECORDS)
     assert row["row_pct"] == 99.9
+
+
+class _FakeHashRedis:
+    """Just enough of redis-py for the quiet-skip tally: hashes and a pipeline."""
+
+    def __init__(self):
+        self.hashes = {}
+        self.ttls = {}
+
+    def pipeline(self):
+        return self
+
+    def hincrby(self, key, field, amount):
+        bucket = self.hashes.setdefault(key, {})
+        bucket[field] = str(int(bucket.get(field, 0)) + amount)
+
+    def expire(self, key, seconds):
+        self.ttls[key] = seconds
+
+    def execute(self):
+        return []
+
+    def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
+
+def test_quiet_skips_are_counted_not_written(monkeypatch):
+    """The two "nothing to do yet" skips were ~8.5k ledger rows a day; they are a tally now."""
+    from marketdata.workflows import quiet_skips_today
+
+    client = _FakeHashRedis()
+    monkeypatch.setattr("portfolio.live.redis_client.get_redis", lambda: client)
+
+    WorkflowOutcome("live_prices").finish(
+        "skipped", metadata={"reason": "cadence_not_elapsed", "market_state": "OPEN"}
+    )
+    WorkflowOutcome("archive_tick").finish("skipped", metadata={"reason": "no_due_states"})
+    WorkflowOutcome("archive_tick").finish("skipped", metadata={"reason": "no_due_states"})
+    # Skips an operator reads keep their row.
+    WorkflowOutcome("archive_tick").finish("skipped", metadata={"reason": "queue_full"})
+    WorkflowOutcome("archive_tick").finish(
+        "skipped", error_code="archive_paced", metadata={"reason": "no_quota_headroom"}
+    )
+
+    assert list(WorkflowRun.objects.values_list("metadata__reason", flat=True).order_by("id")) == [
+        "queue_full", "no_quota_headroom",
+    ]
+    assert quiet_skips_today() == {
+        "archive_tick:no_due_states": 2,
+        "live_prices:cadence_not_elapsed": 1,
+    }
+    assert all(ttl > 24 * 3600 for ttl in client.ttls.values())
+
+
+def test_quiet_skip_falls_back_to_a_row_without_redis(monkeypatch):
+    monkeypatch.setattr("portfolio.live.redis_client.get_redis", lambda: None)
+    WorkflowOutcome("archive_tick").finish("skipped", metadata={"reason": "no_due_states"})
+    assert WorkflowRun.objects.filter(workflow="archive_tick", outcome="skipped").count() == 1

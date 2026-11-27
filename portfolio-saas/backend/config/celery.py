@@ -178,9 +178,11 @@ app.conf.beat_schedule = {
         "task": "perf.tasks.flush_perf_rollups",
         "schedule": 300.0,
     },
-    "capture-operational-metrics-every-15-minutes": {
+    # Hourly: every run sums the Codal volume and every hypertable's size, and
+    # the charts it feeds are read per day. Four samples an hour bought nothing.
+    "capture-operational-metrics-hourly": {
         "task": "marketdata.tasks.capture_operational_metrics",
-        "schedule": crontab(minute="*/15"),
+        "schedule": crontab(minute=7),
     },
     "capture-research-coverage-daily": {
         "task": "marketdata.tasks.capture_research_coverage",
