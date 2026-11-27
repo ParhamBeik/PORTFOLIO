@@ -5,12 +5,27 @@ from decimal import Decimal, ROUND_HALF_UP
 from .models import Account, Asset, Holding, LedgerEntry, Liability, Price
 
 
-class HoldingInline(admin.TabularInline):
+class ReadOnlyAdmin:
+    """Look, never write. A member's money moves only through the ledger
+    service, which validates, replays and keeps history; an admin form
+    bypasses all three. Staff fix problems through the app or a command."""
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class HoldingInline(ReadOnlyAdmin, admin.TabularInline):
     model = Holding
-    extra = 1
+    extra = 0
 
 
-class LiabilityInline(admin.TabularInline):
+class LiabilityInline(ReadOnlyAdmin, admin.TabularInline):
     model = Liability
     extra = 0
 
@@ -27,7 +42,7 @@ class AssetAdmin(admin.ModelAdmin):
 
 
 @admin.register(Account)
-class AccountAdmin(admin.ModelAdmin):
+class AccountAdmin(ReadOnlyAdmin, admin.ModelAdmin):
     list_display = ("name", "user", "broker", "created_at")
     list_filter = ("broker",)
     search_fields = ("name", "user__email")
@@ -35,24 +50,15 @@ class AccountAdmin(admin.ModelAdmin):
 
 
 @admin.register(Price)
-class PriceAdmin(admin.ModelAdmin):
+class PriceAdmin(ReadOnlyAdmin, admin.ModelAdmin):
     list_display = ("asset", "price", "price_unit", "price_unit_verified", "source", "fetched_at")
     list_filter = ("source", "price_unit", "price_unit_verified")
     search_fields = ("asset__key",)
     readonly_fields = ("fetched_at",)
 
-    def has_add_permission(self, request):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False
-
-    def has_delete_permission(self, request, obj=None):
-        return False
-
 
 @admin.register(LedgerEntry)
-class LedgerEntryAdmin(admin.ModelAdmin):
+class LedgerEntryAdmin(ReadOnlyAdmin, admin.ModelAdmin):
     list_display = ("timestamp", "account", "asset", "kind", "quantity_display", "amount_display", "removed_at")
     list_filter = ("kind", "asset__asset_class", ("removed_at", admin.EmptyFieldListFilter))
     search_fields = ("account__name", "asset__key", "account__user__email")
@@ -79,22 +85,13 @@ class LedgerEntryAdmin(admin.ModelAdmin):
         return str(int(rounded)) if value == rounded else f"{int(rounded)} (from {value})"
 
 
-class PortfolioDiagnosticsAdmin(admin.ModelAdmin):
+class PortfolioDiagnosticsAdmin(ReadOnlyAdmin, admin.ModelAdmin):
     """Expose historical and supporting tables without bypassing domain writes."""
 
     list_per_page = 50
 
     def get_readonly_fields(self, request, obj=None):
         return tuple(field.name for field in self.model._meta.fields)
-
-    def has_add_permission(self, request):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False
-
-    def has_delete_permission(self, request, obj=None):
-        return False
 
 
 for model in apps.get_app_config("portfolio").get_models():
