@@ -10,6 +10,7 @@ Every letter lands in CodalLetter (market-wide, a faithful copy). With
 promoted into CodalAnnouncement, which is what the extraction pipeline reads;
 BrsApi's Codal list is then switched off (`archive.disabled_endpoints`).
 """
+import hashlib
 import re
 from datetime import timedelta
 
@@ -363,21 +364,46 @@ def _promotable_symbols():
     return {symbol for symbol in tracked_tse_symbols() if not re.search(r"\d$", symbol)}
 
 
+def _backlog_cursor_key(symbols):
+    """Where the backlog walk stopped, per (history scope, catalog).
+
+    A changed scope or a newly tracked symbol can make letters behind the old
+    cursor promotable, so either one starts a fresh walk from the first id.
+    """
+    digest = hashlib.sha1("\n".join(sorted(symbols)).encode()).hexdigest()[:16]
+    return f"codal_discovery:backlog_cursor:{settings.CODAL_HISTORY_DOCUMENTS}:{digest}"
+
+
 def promote_backlog(limit=200):
     """Promote letters crawled before promotion was on (shadow mode), a slice at a time.
 
-    Cheap and idempotent: a letter whose `tracing_no` is already on an
-    announcement is never selected again, so this converges and then costs
-    one indexed query per tick.
+    Walks `CodalLetter.id` forward from a cursor kept in the cache, so every
+    letter is offered to `promote()` once per (scope, catalog). The walk used to
+    re-select "everything not yet on an announcement" every tick, but `promote()`
+    rightly skips some letters for good (a serial already claimed by another
+    tracing number, a held filing). On prod 37 such letters kept the backlog from
+    ever emptying, and the query ran every tick for 3.4 s, reading 341 GB in
+    18 days (2026-11-27). Fresh letters do not need this walk: `step()`
+    promotes them as they are crawled. Losing the cache only costs one re-walk.
     """
     if not promoting():
         return 0
+    from django.core.cache import cache
+
+    symbols = _promotable_symbols()
+    key = _backlog_cursor_key(symbols)
+    cursor = cache.get(key, 0)
+    newest = CodalLetter.objects.order_by("-id").values_list("id", flat=True).first()
+    if newest is None or newest <= cursor:
+        return 0
     pending = (
-        CodalLetter.objects.filter(symbol__in=list(_promotable_symbols()))
+        CodalLetter.objects.filter(id__gt=cursor, symbol__in=list(symbols))
         .exclude(held_letters())
         .exclude(tracing_no__in=CodalAnnouncement.objects.filter(tracing_no__isnull=False).values("tracing_no"))
-        .order_by("-date_publish", "-time_publish")
+        .order_by("id")
     )
-    fields = [f for f in _UPDATE_FIELDS if f not in ("raw", "last_seen_at")] + ["tracing_no"]
+    fields = [f for f in _UPDATE_FIELDS if f not in ("raw", "last_seen_at")] + ["tracing_no", "id"]
     letters = list(pending.values(*fields)[:limit])
+    # A short slice means nothing is pending up to `newest`; a full one stops at its last id.
+    cache.set(key, letters[-1]["id"] if len(letters) == limit else newest, timeout=None)
     return promote(letters) if letters else 0

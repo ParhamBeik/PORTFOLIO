@@ -328,7 +328,9 @@ class MarketCandleAdmin(admin.ModelAdmin):
 
 
 @admin.register(StockTransactionTick)
-class StockTransactionTickAdmin(admin.ModelAdmin):
+class StockTransactionTickAdmin(StaffReadOnlyAdmin):
+    # Read-only: TickDaySummary is maintained by ingest_transactions, so an
+    # admin edit or delete here would leave the summary disagreeing with ticks.
     list_display = ("symbol", "date", "time", "row", "price", "volume", "canceled")
     list_filter = ("symbol", "canceled")
     search_fields = ("symbol",)

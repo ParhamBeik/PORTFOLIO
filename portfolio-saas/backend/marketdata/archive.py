@@ -44,6 +44,7 @@ from .models import (
     RejectedRecord,
     ShareholderRecord,
     StockTransactionTick,
+    TickDaySummary,
 )
 from .quota import (
     ARCHIVE,
@@ -731,13 +732,21 @@ def _tick_days_unreconciled(symbol, days):
     # Same partition-pruning bound as the ingest delete: `date__in` says nothing
     # about `ts`, so without this the verifier scans every chunk to total a
     # handful of days. See `jalali.ts_window`.
-    stored = StockTransactionTick.objects.filter(
-        symbol=symbol, date__in=days, canceled=False
-    )
-    window = jalali.ts_window(days)
-    if window:
-        stored = stored.filter(ts__gte=window[0], ts__lt=window[1])
-    tick_totals = dict(stored.values_list("date").annotate(total=Sum("volume")))
+    if ingest.tick_summary_covers(symbol):
+        # Same numbers, kept by the writer: a day with only cancelled trades has
+        # no live total, exactly as the GROUP BY below leaves it out.
+        tick_totals = dict(
+            TickDaySummary.objects.filter(symbol=symbol, date__in=list(days), live_ticks__gt=0)
+            .values_list("date", "live_volume")
+        )
+    else:
+        stored = StockTransactionTick.objects.filter(
+            symbol=symbol, date__in=days, canceled=False
+        )
+        window = jalali.ts_window(days)
+        if window:
+            stored = stored.filter(ts__gte=window[0], ts__lt=window[1])
+        tick_totals = dict(stored.values_list("date").annotate(total=Sum("volume")))
     candle_totals = _symbol_candle_volumes(symbol, days)
     broken = set()
     for day, candle_volume in candle_totals.items():
