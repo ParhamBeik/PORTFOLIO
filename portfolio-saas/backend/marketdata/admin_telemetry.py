@@ -51,6 +51,7 @@ from .models import (
 )
 from .coverage_report import build_coverage_report
 from .quota import get_quota_status
+from .workflows import quiet_skips_today
 
 
 DATABASE_MODELS = {
@@ -75,7 +76,7 @@ OVERVIEW_CACHE_KEY = "admin_ops_overview"
 # and every operator paid the full cost -- the entire reason the Ops page felt
 # broken. The payload carries `generated_at`, and the view still honours
 # `?refresh=1`, so staleness is both visible and escapable.
-OVERVIEW_CACHE_TTL = 15 * 60
+OVERVIEW_CACHE_TTL = 60 * 60
 
 
 def _iso(value):
@@ -223,8 +224,12 @@ def _latest_tick_day():
     return StockTransactionTick.objects.aggregate(value=Max("date"))["value"]
 
 
+TABLE_BYTES_CACHE_KEY = "db_table_bytes_diagnostics"
+TABLE_BYTES_CACHE_TTL = 60 * 60
+
+
 def get_cached_table_bytes():
-    cached = cache.get("db_table_bytes_diagnostics")
+    cached = cache.get(TABLE_BYTES_CACHE_KEY)
     if cached is not None:
         return cached
 
@@ -244,11 +249,12 @@ def get_cached_table_bytes():
                 sizes[key] = int(row[0]) if row and row[0] is not None else 0
             except Exception:
                 sizes[key] = 0
-    # 5 minutes, not 30 seconds: hypertable_size() alone costs ~1.8 s because it
-    # walks every chunk, and on-disk size does not move meaningfully inside a
-    # single ops-page visit. The 30 s window mostly guaranteed each visit paid
-    # the full price again.
-    cache.set("db_table_bytes_diagnostics", sizes, 300)
+    # One hour: hypertable_size() walks every chunk (2.9 s mean on prod), and
+    # pg_stat_statements counted 3,532 calls in 18 days under the old 5-minute
+    # window -- the health check, the metrics job and the Ops page each paid it.
+    # On-disk size does not move meaningfully inside an hour, and the metrics
+    # job that charts it runs hourly too.
+    cache.set(TABLE_BYTES_CACHE_KEY, sizes, TABLE_BYTES_CACHE_TTL)
     return sizes
 
 
@@ -1386,6 +1392,8 @@ def _workflows_24h():
         "rows_accepted": int(sums["accepted"] or 0),
         "rows_rejected": int(sums["rejected"] or 0),
         "total_runs": sum(outcomes.values()),
+        # Counted in Redis, not written as rows -- see workflows.QUIET_SKIPS.
+        "quiet_skips_today": quiet_skips_today(),
     }
 
 
@@ -1395,6 +1403,7 @@ def invalidate_ops_cache():
         "admin_database_history",
         "admin_workflow_history",
         "db_counts_diagnostics",
-        "db_table_bytes_diagnostics",
+        # Not TABLE_BYTES_CACHE_KEY: sizes are re-measured only by the hourly
+        # metrics job. A retry or a Refresh click does not change them.
         "admin_worker_status",
     ])

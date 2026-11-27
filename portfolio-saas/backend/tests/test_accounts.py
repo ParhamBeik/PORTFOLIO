@@ -48,6 +48,20 @@ def test_register_is_closed_without_creating_a_user():
     assert not User.objects.filter(email="new@test.test").exists()
 
 
+def test_signup_closes_by_itself_when_the_disk_is_nearly_full():
+    # Above any real disk's free space, so the guard must trip.
+    with override_settings(REGISTRATION_OPEN=True, SIGNUP_MIN_FREE_GB=10**9):
+        status_resp = APIClient().get("/api/auth/registration/")
+        resp = APIClient().post(
+            "/api/auth/register/",
+            {"email": "full@test.test", "password": "Sup3rSecret!"},
+            format="json",
+        )
+    assert status_resp.json()["registration_open"] is False
+    assert resp.status_code == 403
+    assert not User.objects.filter(email="full@test.test").exists()
+
+
 @pytest.mark.parametrize("is_open", [False, True])
 def test_registration_status_matches_the_server_gate(is_open):
     with override_settings(REGISTRATION_OPEN=is_open):
@@ -2088,3 +2102,16 @@ def test_admin_sign_in_still_works_under_the_limit(make_user):
     )
     assert response.status_code == 302
     assert response["Location"] == "/admin/"
+
+
+def test_deploy_warns_when_production_mail_is_unconfigured(settings):
+    """`migrate` runs the system checks, so a deploy with EMAIL_HOST=localhost says so."""
+    from accounts.apps import mail_configured_check
+
+    settings.DEBUG = False
+    settings.EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    settings.EMAIL_HOST = "localhost"
+    assert [w.id for w in mail_configured_check()] == ["accounts.W001"]
+
+    settings.EMAIL_HOST = "smtp-relay.brevo.com"
+    assert mail_configured_check() == []

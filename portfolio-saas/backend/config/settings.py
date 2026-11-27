@@ -298,6 +298,8 @@ SIMPLE_JWT = {
 }
 JWT_COOKIE_SECURE = not DEBUG
 REGISTRATION_OPEN = os.getenv("REGISTRATION_OPEN", "1") == "1"
+# Sign-up closes on its own below this much free disk (existing members keep working).
+SIGNUP_MIN_FREE_GB = float(os.getenv("SIGNUP_MIN_FREE_GB", "10"))
 # Public sign-up guards: at most this many new members per rolling 24 h, and a
 # sign-up that never confirms its email is deleted after UNCONFIRMED_USER_DAYS.
 REGISTRATION_DAILY_CAP = int(os.getenv("REGISTRATION_DAILY_CAP", "50"))

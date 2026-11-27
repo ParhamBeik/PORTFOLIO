@@ -2,6 +2,7 @@
 import csv
 from datetime import timedelta
 import hashlib
+import os
 import io
 import json
 import logging
@@ -406,6 +407,25 @@ class MobileLogoutAllView(MobileOriginMixin, APIView):
         return Response(status=204)
 
 
+def disk_has_room():
+    """False once the shared disk is down to SIGNUP_MIN_FREE_GB.
+
+    New members are the one growth we can refuse without hurting anyone who
+    is already here, so sign-up closes first and existing members keep
+    working. One statvfs call, no socket: safe on the public status route.
+    An unreadable disk keeps sign-up open; the disk alert covers that case.
+    """
+    try:
+        stat = os.statvfs(getattr(settings, "DISK_USAGE_PATH", "/"))
+    except OSError:
+        return True
+    return stat.f_bavail * stat.f_frsize >= settings.SIGNUP_MIN_FREE_GB * 1024**3
+
+
+def signup_open():
+    return settings.REGISTRATION_OPEN and mail_is_deliverable() and disk_has_room()
+
+
 class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
@@ -416,7 +436,7 @@ class RegisterView(generics.CreateAPIView):
     def create(self, request, *args, **kwargs):
         # Confirmation is mandatory, so a relay that cannot send closes sign-up
         # rather than creating members who can never get in.
-        if not settings.REGISTRATION_OPEN or not mail_is_deliverable():
+        if not signup_open():
             return Response(
                 {"detail": "New memberships are currently closed."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -462,7 +482,7 @@ class RegistrationStatusView(APIView):
 
     def get(self, request):
         return Response({
-            "registration_open": settings.REGISTRATION_OPEN and mail_is_deliverable(),
+            "registration_open": signup_open(),
             "self_service_reset": mail_is_deliverable(),
         })
 

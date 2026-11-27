@@ -2178,3 +2178,37 @@ def test_stored_tick_days_reads_the_table_once_and_follows_the_writer(
         ingest.ingest_transactions("SYM", "1405-05-24", [], replace=True)
     with django_assert_num_queries(0):
         assert ingest.stored_tick_days("SYM") == {"1405-05-25"}
+
+
+def _writes(captured, table, verb):
+    return [q["sql"] for q in captured if q["sql"].startswith(verb) and f'"{table}"' in q["sql"]]
+
+
+def test_resent_history_skips_the_conflict_insert():
+    """VPS load fix P3: rows we already hold are not re-offered to INSERT ... DO NOTHING."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    ingest.ingest_daily_history("فملی", HISTORY_PAYLOAD)
+    with CaptureQueriesContext(connection) as captured:
+        created, _ = ingest.ingest_daily_history("فملی", HISTORY_PAYLOAD)
+    assert created == 0
+    inserts = _writes(captured, "marketdata_dailystockhistory", "INSERT")
+    assert inserts and all("DO UPDATE" in sql for sql in inserts)  # only the recent-days upsert
+
+
+def test_real_legal_rewrites_only_days_that_changed():
+    """VPS load fix P3: an unchanged breakdown costs no UPDATE; a changed one is written."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    DailyStockHistory.objects.create(symbol="فملی", date="1405-04-29", pl=20470)
+    ingest.ingest_real_legal("فملی", REAL_LEGAL_PAYLOAD)
+    with CaptureQueriesContext(connection) as captured:
+        assert ingest.ingest_real_legal("فملی", REAL_LEGAL_PAYLOAD) == (1, 0)
+    assert _writes(captured, "marketdata_dailystockhistory", "UPDATE") == []
+
+    changed = [{**REAL_LEGAL_PAYLOAD[0], "Buy_CountI": 6000}]
+    assert ingest.ingest_real_legal("فملی", changed) == (1, 0)
+    row = DailyStockHistory.objects.get(symbol="فملی")
+    assert row.buy_count_i == 6000 and row.pl == 20470
