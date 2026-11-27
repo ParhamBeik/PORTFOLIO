@@ -2,6 +2,7 @@
 
 import pytest
 from django.core.cache import cache
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import User
@@ -60,7 +61,13 @@ def test_mobile_registration_and_password_change_revoke_old_session():
     registered = client.post("/api/auth/mobile/register/", {
         "email": "newmobile@test.test", "password": "Sup3rSecret!"
     }, format="json")
-    assert registered.status_code == 201
+    assert registered.status_code == 202
+    assert "refresh" not in registered.json(), "mobile sign-up must also wait for confirmation"
+    User.objects.filter(email="newmobile@test.test").update(email_confirmed_at=timezone.now())
+    registered = client.post("/api/auth/mobile/login/", {
+        "email": "newmobile@test.test", "password": "Sup3rSecret!"
+    }, format="json")
+    assert registered.status_code == 200
     old = registered.json()["refresh"]
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {registered.json()['access']}")
     changed = client.post("/api/auth/mobile/change-password/", {

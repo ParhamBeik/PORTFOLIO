@@ -295,16 +295,17 @@ function extractError(detail) {
 
 // Auth
 export const registrationStatus = () => api("/api/auth/registration/");
-export const register = (email, password) =>
+// Sign-up answers 202 with no tokens: the account exists but cannot sign in
+// until the emailed link is opened. `website` is the honeypot -- a person never
+// sees the field, so anything in it is a bot and the server quietly drops it.
+export const register = (email, password, website = "") =>
   api(isNative ? "/api/auth/mobile/register/" : "/api/auth/register/", {
-    method: "POST", body: { email, password },
-  }).then(async (data) => {
-    if (isNative) {
-      await prepareMobileAccount(data.user.id);
-      await setRefreshToken(data.refresh);
-    }
-    return data;
+    method: "POST", body: { email, password, website },
   });
+export const confirmEmail = ({ uid, token }) =>
+  api("/api/auth/verify-email/", { method: "POST", body: { uid, token } });
+export const resendConfirmation = (email) =>
+  api("/api/auth/verify-email/resend/", { method: "POST", body: { email } });
 export const login = (email, password) =>
   api(isNative ? "/api/auth/mobile/login/" : "/api/auth/login/", {
     method: "POST", body: { email, password },

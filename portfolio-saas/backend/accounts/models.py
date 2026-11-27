@@ -6,6 +6,7 @@ crash `create_user(email=..., password=...)`.
 """
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
+from django.utils import timezone
 
 
 class UserManager(BaseUserManager):
@@ -45,6 +46,9 @@ class UserManager(BaseUserManager):
         if not email:
             raise ValueError("An email address is required.")
         email = self.normalize_email(email)
+        # Anything an operator creates (admin, createsuperuser, seed_demo) is
+        # confirmed on creation. Only public sign-up passes None explicitly.
+        extra_fields.setdefault("email_confirmed_at", timezone.now())
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
@@ -90,6 +94,11 @@ class User(AbstractUser):
     # Dead: the payment integration and its Payment model are gone, and nothing has
     # ever written this. Dropped in the Phase 3 schema migration.
     customer_id = models.CharField(max_length=64, blank=True, default="")
+    # Null until the member opens the link in their confirmation email. Sign-in
+    # refuses a null value; `delete_unconfirmed_users` removes the account
+    # after UNCONFIRMED_USER_DAYS. Not `is_active`: that is the ban lever, and a
+    # banned member must not be able to lift a ban by confirming an address.
+    email_confirmed_at = models.DateTimeField(null=True, blank=True)
 
     objects = UserManager()
 
