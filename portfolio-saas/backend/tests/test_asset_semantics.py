@@ -140,3 +140,24 @@ def test_ledger_admin_hides_padding_without_hiding_real_fraction():
     row.amount_tomans = "1.5000"
     assert admin.quantity_display(row) == "0.000001"
     assert admin.amount_display(row) == "2 (from 1.5000)"
+
+
+def test_member_money_is_read_only_in_the_django_admin():
+    # A member's portfolios and ledger change only through the ledger service;
+    # an admin form would skip its validation, replay and history.
+    from django.contrib import admin as django_admin
+    from portfolio.models import Account, Holding, LedgerEntry, Liability
+
+    request = SimpleNamespace(user=SimpleNamespace(is_active=True, is_staff=True, is_superuser=True))
+    model_admin = django_admin.site._registry
+    for model in (Account, LedgerEntry):
+        site_admin = model_admin[model]
+        assert not site_admin.has_add_permission(request)
+        assert not site_admin.has_change_permission(request)
+        assert not site_admin.has_delete_permission(request)
+    for inline in model_admin[Account].inlines:
+        assert inline.model in (Holding, Liability)
+        inline_admin = inline(Account, django_admin.site)
+        assert not inline_admin.has_add_permission(request, None)
+        assert not inline_admin.has_change_permission(request)
+        assert not inline_admin.has_delete_permission(request)
