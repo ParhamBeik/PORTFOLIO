@@ -53,7 +53,9 @@ jobs:
           - name: frontend
             context: portfolio-saas/frontend
             file: portfolio-saas/frontend/Dockerfile.prod
-            build-args: ""
+            # A browser DSN is public by design (it ships inside the JS), so a
+            # repository variable, not a secret. Empty = Sentry stays off.
+            build-args: VITE_SENTRY_DSN=${{ vars.VITE_SENTRY_DSN }}
     steps:
       # The commit CI tested, not whatever main points at by now.
       - uses: actions/checkout@v7

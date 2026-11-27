@@ -211,7 +211,7 @@ REST_FRAMEWORK = {
     # basis-accepting endpoint can raise into honest responses instead of 500s.
     "EXCEPTION_HANDLER": "config.api.handle",
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "accounts.authentication.SentryUserJWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     # H5: throttle anonymous endpoints (login/register) by IP. Authenticated
