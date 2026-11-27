@@ -77,6 +77,10 @@ app.conf.update(
 # Crontab times are declared directly in Tehran local time. ZoneInfo owns any
 # future timezone-policy changes; no hand-converted UTC hours are duplicated.
 app.conf.beat_schedule = {
+    "delete-unconfirmed-users": {
+        "task": "accounts.tasks.delete_unconfirmed_users",
+        "schedule": crontab(hour=2, minute=20),
+    },
     "write-daily-net-worth": {
         "task": "portfolio.tasks.write_daily_net_worth_snapshot",
         "schedule": crontab(hour=0, minute=1),
@@ -178,9 +182,11 @@ app.conf.beat_schedule = {
         "task": "perf.tasks.flush_perf_rollups",
         "schedule": 300.0,
     },
-    "capture-operational-metrics-every-15-minutes": {
+    # Hourly: every run sums the Codal volume and every hypertable's size, and
+    # the charts it feeds are read per day. Four samples an hour bought nothing.
+    "capture-operational-metrics-hourly": {
         "task": "marketdata.tasks.capture_operational_metrics",
-        "schedule": crontab(minute="*/15"),
+        "schedule": crontab(minute=7),
     },
     "capture-research-coverage-daily": {
         "task": "marketdata.tasks.capture_research_coverage",

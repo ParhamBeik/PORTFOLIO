@@ -211,7 +211,7 @@ REST_FRAMEWORK = {
     # basis-accepting endpoint can raise into honest responses instead of 500s.
     "EXCEPTION_HANDLER": "config.api.handle",
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "accounts.authentication.SentryUserJWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     # H5: throttle anonymous endpoints (login/register) by IP. Authenticated
@@ -236,7 +236,7 @@ REST_FRAMEWORK = {
         # brute-force attempt still got 30 guesses a minute. Env-tunable so a
         # room full of guests can be accommodated without a deploy.
         "login": os.getenv("LOGIN_THROTTLE", "20/min"),
-        "register": os.getenv("REGISTER_THROTTLE", "10/min"),
+        "register": os.getenv("REGISTER_THROTTLE", "5/hour"),
         # Browser timing beacons: unauthenticated (sendBeacon carries no
         # Authorization header), so per IP. A tab flushes about four times a
         # minute; this leaves room for a full office behind one NAT.
@@ -301,6 +301,12 @@ REGISTRATION_OPEN = os.getenv("REGISTRATION_OPEN", "1") == "1"
 # Shown on the terms and privacy pages. Kept in the environment, not the code,
 # because it is a real person's mailbox until the service has its own domain.
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "")
+# Sign-up closes on its own below this much free disk (existing members keep working).
+SIGNUP_MIN_FREE_GB = float(os.getenv("SIGNUP_MIN_FREE_GB", "10"))
+# Public sign-up guards: at most this many new members per rolling 24 h, and a
+# sign-up that never confirms its email is deleted after UNCONFIRMED_USER_DAYS.
+REGISTRATION_DAILY_CAP = int(os.getenv("REGISTRATION_DAILY_CAP", "50"))
+UNCONFIRMED_USER_DAYS = int(os.getenv("UNCONFIRMED_USER_DAYS", "7"))
 
 # Mail. `.env.production.example` has named these for some time; Django does
 # not read EMAIL_* from the environment on its own, so a filled-in env file

@@ -1,6 +1,8 @@
 """Authentication and account endpoints."""
 import csv
+from datetime import timedelta
 import hashlib
+import os
 import io
 import json
 import logging
@@ -30,6 +32,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from config.mail import mail_is_deliverable
@@ -62,6 +65,22 @@ logger = logging.getLogger(__name__)
 RESET_TOKEN = PasswordResetTokenGenerator()
 RESET_ACCEPTED = "If an account exists for that email, a reset link has been sent."
 RESET_INVALID = "This reset link is invalid or has expired."
+
+
+class EmailConfirmTokenGenerator(PasswordResetTokenGenerator):
+    """Single-use: confirming changes `email_confirmed_at`, which is in the hash."""
+
+    key_salt = "accounts.views.EmailConfirmTokenGenerator"
+
+    def _make_hash_value(self, user, timestamp):
+        return f"{user.pk}{user.email}{user.email_confirmed_at}{timestamp}"
+
+
+CONFIRM_TOKEN = EmailConfirmTokenGenerator()
+CONFIRM_SENT = "Check your inbox: we sent a link to confirm your email address."
+CONFIRM_INVALID = "This confirmation link is invalid or has expired."
+EMAIL_UNCONFIRMED = "Confirm your email address first. Open the link we sent to your inbox."
+SIGNUP_FULL = "Sign-ups are full for today. Please try again tomorrow."
 
 
 REFRESH_COOKIE = "ps_refresh"
@@ -119,7 +138,16 @@ def _set_refresh_cookie(response, request, refresh: str):
     return response
 
 
+class ConfirmedTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        if self.user.email_confirmed_at is None:
+            raise AuthenticationFailed({"detail": EMAIL_UNCONFIRMED, "reason": "email_unconfirmed"})
+        return data
+
+
 class CookieTokenObtainPairView(TokenObtainPairView):
+    serializer_class = ConfirmedTokenObtainPairSerializer
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "login"
 
@@ -148,6 +176,7 @@ class MobileOriginMixin:
 
 
 class MobileTokenObtainPairView(MobileOriginMixin, TokenObtainPairView):
+    serializer_class = ConfirmedTokenObtainPairSerializer
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "login"
 
@@ -336,6 +365,25 @@ class MobileLogoutAllView(MobileOriginMixin, APIView):
         return Response(status=204)
 
 
+def disk_has_room():
+    """False once the shared disk is down to SIGNUP_MIN_FREE_GB.
+
+    New members are the one growth we can refuse without hurting anyone who
+    is already here, so sign-up closes first and existing members keep
+    working. One statvfs call, no socket: safe on the public status route.
+    An unreadable disk keeps sign-up open; the disk alert covers that case.
+    """
+    try:
+        stat = os.statvfs(getattr(settings, "DISK_USAGE_PATH", "/"))
+    except OSError:
+        return True
+    return stat.f_bavail * stat.f_frsize >= settings.SIGNUP_MIN_FREE_GB * 1024**3
+
+
+def signup_open():
+    return settings.REGISTRATION_OPEN and mail_is_deliverable() and disk_has_room()
+
+
 class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
@@ -344,38 +392,36 @@ class RegisterView(generics.CreateAPIView):
     throttle_scope = "register"
 
     def create(self, request, *args, **kwargs):
-        if not settings.REGISTRATION_OPEN:
+        # Confirmation is mandatory, so a relay that cannot send closes sign-up
+        # rather than creating members who can never get in.
+        if not signup_open():
             return Response(
                 {"detail": "New memberships are currently closed."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        if isinstance(request.data, dict) and request.data.get("website"):
+            # Honeypot: the field is hidden from people, so only a form-filling
+            # bot sends it. Answer exactly like a real sign-up and create nothing.
+            logger.info("register: honeypot filled; nothing created")
+            return Response({"detail": CONFIRM_SENT}, status=status.HTTP_202_ACCEPTED)
+        since = timezone.now() - timedelta(days=1)
+        if User.objects.filter(date_joined__gte=since).count() >= settings.REGISTRATION_DAILY_CAP:
+            return Response(
+                {"detail": SIGNUP_FULL, "reason": "signup_daily_cap"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
-        access, refresh = _tokens(user)
-        return self.registered(request, user, access, refresh)
-
-    def registered(self, request, user, access, refresh):
-        """The answer once a member exists. Web keeps the refresh in a cookie."""
-        response = Response(
-            {
-                "user": UserSerializer(user).data,
-                "access": access,
-                "session_expires_at": _session_expires_at(),
-            },
-            status=status.HTTP_201_CREATED,
+        _send_confirm_mail_safely(user)
+        # No tokens: the member signs in once the address is confirmed.
+        return Response(
+            {"detail": CONFIRM_SENT, "email": user.email}, status=status.HTTP_202_ACCEPTED
         )
-        return _set_refresh_cookie(response, request, refresh)
 
 
 class MobileRegisterView(MobileOriginMixin, RegisterView):
-    def registered(self, request, user, access, refresh):
-        return Response({
-            "user": UserSerializer(user).data,
-            "access": access,
-            "refresh": refresh,
-            "session_expires_at": _session_expires_at(),
-        }, status=201)
+    """Same answer as the web: confirm by email, then sign in."""
 
 
 class RegistrationStatusView(APIView):
@@ -394,7 +440,7 @@ class RegistrationStatusView(APIView):
 
     def get(self, request):
         return Response({
-            "registration_open": settings.REGISTRATION_OPEN,
+            "registration_open": signup_open(),
             "self_service_reset": mail_is_deliverable(),
             "contact_email": settings.CONTACT_EMAIL,
         })
@@ -483,6 +529,77 @@ def _send_reset_mail(user: User) -> None:
         recipient_list=[user.email],
         fail_silently=False,
     )
+
+
+def _confirm_link(user: User) -> str:
+    uid = urlsafe_base64_encode(force_bytes(user.pk))
+    token = CONFIRM_TOKEN.make_token(user)
+    return f"{settings.FRONTEND_VERIFICATION_URL}?uid={uid}&token={token}"
+
+
+def _send_confirm_mail_safely(user: User) -> None:
+    try:
+        send_mail(
+            subject="Confirm your Holdings email address",
+            message=(
+                "Welcome to Holdings. Confirm your email address by opening this link. "
+                "It expires in three days.\n\n"
+                f"{_confirm_link(user)}\n\n"
+                "If you did not sign up, you can ignore this email; the account is "
+                f"deleted after {settings.UNCONFIRMED_USER_DAYS} days."
+            ),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[user.email],
+            fail_silently=False,
+        )
+    except Exception:
+        # The member can ask for the link again from the sign-in screen.
+        logger.exception("register: failed to send confirmation mail to uid=%s", user.pk)
+
+
+class EmailConfirmView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_reset"
+
+    @transaction.atomic
+    def post(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        uid, token = data.get("uid"), data.get("token")
+        if not isinstance(uid, str) or not isinstance(token, str):
+            return Response({"detail": CONFIRM_INVALID}, status=400)
+        user = _user_from_uid(uid)
+        if user is None:
+            return Response({"detail": CONFIRM_INVALID}, status=400)
+        if user.email_confirmed_at is not None:
+            # A second click on the same link: already done, not an error.
+            return Response({"detail": "Email confirmed. You can sign in now."})
+        if not CONFIRM_TOKEN.check_token(user, token):
+            return Response({"detail": CONFIRM_INVALID}, status=400)
+        user.email_confirmed_at = timezone.now()
+        user.save(update_fields=["email_confirmed_at"])
+        return Response({"detail": "Email confirmed. You can sign in now."})
+
+
+class EmailConfirmResendView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_reset"
+
+    def post(self, request):
+        email = request.data.get("email") if isinstance(request.data, dict) else None
+        if isinstance(email, str) and email.strip() and mail_is_deliverable():
+            user = User.objects.filter(
+                email=User.objects.normalize_email(email.strip()),
+                is_active=True,
+                email_confirmed_at__isnull=True,
+            ).first()
+            if user is not None:
+                _send_confirm_mail_safely(user)
+        # Identical for every address, or this endpoint enumerates accounts.
+        return Response({"detail": "If that address is waiting for confirmation, we sent a new link."})
 
 
 class PasswordResetRequestView(APIView):
@@ -599,7 +716,11 @@ class PasswordResetConfirmView(APIView):
         )
         serializer.is_valid(raise_exception=True)
         user.set_password(serializer.validated_data["new_password"])
-        user.save(update_fields=["password"])
+        fields = ["password"]
+        if user.email_confirmed_at is None:
+            user.email_confirmed_at = timezone.now()
+            fields.append("email_confirmed_at")
+        user.save(update_fields=fields)
         _revoke_all(user)
         return Response({"detail": "Password updated. Sign in with the new password."})
 

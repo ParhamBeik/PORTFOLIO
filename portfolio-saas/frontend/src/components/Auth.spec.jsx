@@ -14,6 +14,7 @@ vi.mock("../api.js", () => ({
   register: vi.fn(),
   registrationStatus: vi.fn(),
   requestPasswordReset: vi.fn(),
+  resendConfirmation: vi.fn(),
   sessionExpiry: { set: vi.fn() },
 }));
 
@@ -45,8 +46,7 @@ describe("Auth recovery", () => {
   });
 
   it("creates an account only after every password requirement passes", async () => {
-    api.register.mockResolvedValue({ access: "token", session_expires_at: "2026-10-01" });
-    api.me.mockResolvedValue({ id: 2, email: "new@example.com" });
+    api.register.mockResolvedValue({ detail: "sent", email: "new@example.com" });
     const onAuthed = vi.fn();
     render(<MemoryRouter><Auth onAuthed={onAuthed} /></MemoryRouter>);
 
@@ -63,8 +63,33 @@ describe("Auth recovery", () => {
     });
     fireEvent.click(screen.getByTestId("auth-submit"));
 
-    await waitFor(() => expect(api.register).toHaveBeenCalledWith("new@example.com", "StrongPass1!"));
-    expect(onAuthed).toHaveBeenCalledWith({ id: 2, email: "new@example.com" });
+    await waitFor(() => expect(api.register).toHaveBeenCalledWith("new@example.com", "StrongPass1!", ""));
+    // No tokens come back: the visitor is told to open the link, not signed in.
+    expect(await screen.findByTestId("auth-confirm-sent")).toBeInTheDocument();
+    expect(onAuthed).not.toHaveBeenCalled();
+    expect(screen.getByTestId("auth-submit")).toBeDisabled();
+  });
+
+  it("offers to resend the link when an unconfirmed user signs in", async () => {
+    const err = new Error("Please confirm your email address before signing in.");
+    err.reason = "email_unconfirmed";
+    api.login.mockRejectedValue(err);
+    api.resendConfirmation.mockResolvedValue({ detail: "sent" });
+    const onAuthed = vi.fn();
+    render(<MemoryRouter><Auth onAuthed={onAuthed} /></MemoryRouter>);
+
+    fireEvent.change(screen.getByTestId("auth-email-input"), {
+      target: { value: "new@example.com" },
+    });
+    fireEvent.change(screen.getByTestId("auth-password-input"), {
+      target: { value: "StrongPass1!" },
+    });
+    fireEvent.click(screen.getByTestId("auth-submit"));
+
+    fireEvent.click(await screen.findByTestId("auth-resend"));
+    await waitFor(() => expect(api.resendConfirmation).toHaveBeenCalledWith("new@example.com"));
+    expect(await screen.findByTestId("auth-confirm-sent")).toBeInTheDocument();
+    expect(onAuthed).not.toHaveBeenCalled();
   });
 
   it("sends a reset request without revealing whether the email exists", async () => {

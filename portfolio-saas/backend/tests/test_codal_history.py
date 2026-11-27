@@ -451,6 +451,38 @@ def test_shadow_letters_are_promoted_later_in_slices(monkeypatch, settings):
     assert codal_discovery.promote_backlog(limit=10) == 0
 
 
+def test_backlog_walk_offers_each_letter_once(monkeypatch, settings):
+    """A letter promote() skips for good must not be re-read every tick (P2, 2026-11-27).
+
+    37 such letters kept the old "everything not yet promoted" query from ever
+    emptying: 3.4 s a tick, 341 GB read in 18 days.
+    """
+    letters = _page()["Letters"]
+    _serve(monkeypatch, letters, total=4, pages=1)
+    codal_discovery.step(CodalDiscoveryDay.objects.create(date="1404-07-02"))  # shadow
+    rows = [codal_search.normalize_letter(letter) for letter in letters]
+    _promote_on(settings, monkeypatch, {row["symbol"] for row in rows})
+    offered = []
+    monkeypatch.setattr(codal_discovery, "promote", lambda batch: offered.extend(batch) or 0)
+
+    assert codal_discovery.promote_backlog() == 0  # promote skipped every one
+    assert len(offered) == 4
+    assert codal_discovery.promote_backlog() == 0
+    assert len(offered) == 4  # not offered again
+
+    # A letter crawled later lies past the cursor and is still picked up.
+    CodalLetter.objects.create(**{**{k: rows[0][k] for k in (
+        "letter_serial", "symbol", "company_name", "title", "letter_code",
+        "date_publish", "time_publish", "url")}, "tracing_no": rows[0]["tracing_no"] + 99})
+    codal_discovery.promote_backlog()
+    assert [row["tracing_no"] for row in offered[4:]] == [rows[0]["tracing_no"] + 99]
+
+    # A new catalog symbol restarts the walk.
+    monkeypatch.setattr(codal_discovery, "_promotable_symbols", lambda: {row["symbol"] for row in rows} | {"NEW"})
+    codal_discovery.promote_backlog()
+    assert len(offered) == 4 + 1 + 5
+
+
 def test_a_failed_write_backs_the_day_off(monkeypatch):
     _serve(monkeypatch, _page()["Letters"], total=4, pages=1)
     monkeypatch.setattr(CodalLetter.objects, "bulk_create", lambda *a, **k: (_ for _ in ()).throw(ValueError("too long")))
