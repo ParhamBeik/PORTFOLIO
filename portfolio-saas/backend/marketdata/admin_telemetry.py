@@ -224,6 +224,9 @@ def _latest_tick_day():
     return StockTransactionTick.objects.aggregate(value=Max("date"))["value"]
 
 
+TABLE_BYTES_CACHE_TTL = 60 * 60
+
+
 def get_cached_table_bytes():
     cached = cache.get("db_table_bytes_diagnostics")
     if cached is not None:
@@ -245,11 +248,12 @@ def get_cached_table_bytes():
                 sizes[key] = int(row[0]) if row and row[0] is not None else 0
             except Exception:
                 sizes[key] = 0
-    # 5 minutes, not 30 seconds: hypertable_size() alone costs ~1.8 s because it
-    # walks every chunk, and on-disk size does not move meaningfully inside a
-    # single ops-page visit. The 30 s window mostly guaranteed each visit paid
-    # the full price again.
-    cache.set("db_table_bytes_diagnostics", sizes, 300)
+    # One hour: hypertable_size() walks every chunk (2.9 s mean on prod), and
+    # pg_stat_statements counted 3,532 calls in 18 days under the old 5-minute
+    # window -- the health check, the metrics job and the Ops page each paid it.
+    # On-disk size does not move meaningfully inside an hour, and the metrics
+    # job that charts it runs hourly too.
+    cache.set("db_table_bytes_diagnostics", sizes, TABLE_BYTES_CACHE_TTL)
     return sizes
 
 
