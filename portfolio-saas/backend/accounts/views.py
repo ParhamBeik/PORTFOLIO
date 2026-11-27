@@ -396,6 +396,7 @@ class RegistrationStatusView(APIView):
         return Response({
             "registration_open": settings.REGISTRATION_OPEN,
             "self_service_reset": mail_is_deliverable(),
+            "contact_email": settings.CONTACT_EMAIL,
         })
 
 

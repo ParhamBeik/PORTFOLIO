@@ -298,6 +298,9 @@ SIMPLE_JWT = {
 }
 JWT_COOKIE_SECURE = not DEBUG
 REGISTRATION_OPEN = os.getenv("REGISTRATION_OPEN", "1") == "1"
+# Shown on the terms and privacy pages. Kept in the environment, not the code,
+# because it is a real person's mailbox until the service has its own domain.
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "")
 
 # Mail. `.env.production.example` has named these for some time; Django does
 # not read EMAIL_* from the environment on its own, so a filled-in env file

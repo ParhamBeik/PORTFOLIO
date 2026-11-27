@@ -50,14 +50,19 @@ def test_register_is_closed_without_creating_a_user():
 
 @pytest.mark.parametrize("is_open", [False, True])
 def test_registration_status_matches_the_server_gate(is_open):
-    with override_settings(REGISTRATION_OPEN=is_open):
+    with override_settings(REGISTRATION_OPEN=is_open, CONTACT_EMAIL="help@example.com"):
         resp = APIClient().get("/api/auth/registration/")
 
     assert resp.status_code == 200
     # The test settings use the locmem mail backend, which counts as
     # deliverable -- mail is captured, and a developer reading a reset link out
     # of `mail.outbox` is a working flow.
-    assert resp.json() == {"registration_open": is_open, "self_service_reset": True}
+    assert resp.json() == {
+        "registration_open": is_open,
+        "self_service_reset": True,
+        # Printed on /terms and /privacy; it comes from the environment.
+        "contact_email": "help@example.com",
+    }
 
 
 @pytest.mark.parametrize(
