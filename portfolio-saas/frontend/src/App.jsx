@@ -5,6 +5,7 @@ import { auth, me, restoreSession, SESSION_EXPIRED_EVENT } from "./api.js";
 import { clearMobileData, hasOfflineSnapshot, isNative } from "./mobile.js";
 import { beginPage } from "./perf.js";
 import { Network } from "@capacitor/network";
+import * as Sentry from "@sentry/react";
 import OfflinePortfolio from "./OfflinePortfolio.jsx";
 import Auth from "./components/Auth.jsx";
 import ResetPassword from "./components/ResetPassword.jsx";
@@ -134,6 +135,9 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [notice, setNotice] = useState("");
   const [offline, setOffline] = useState(false);
+  // Errors say which member hit them, by id only (never the email). A no-op
+  // when Sentry was never initialised, i.e. no VITE_SENTRY_DSN at build time.
+  useEffect(() => { Sentry.setUser(user?.id ? { id: String(user.id) } : null); }, [user]);
   const [offlineAvailable, setOfflineAvailable] = useState(false);
 
   useEffect(() => {

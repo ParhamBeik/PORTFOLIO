@@ -213,4 +213,14 @@ docker compose -f docker-compose.prod.yml exec backend python manage.py seed_ass
 curl https://portfolio.example.com/api/health/            # -> ok
 ```
 
+**When to merge.** Every merge to `main` deploys within about 20 minutes and
+restarts the app briefly. Members watch prices during the trading session, so
+merge only off-hours: Thursday or Friday, or after 12:30 Tehran time on a market
+day. A rollback (`deploy.yml`, manual run with the previous SHA) may run at any time.
+
+**Error reports (Sentry).** Off unless configured. The backend reads `SENTRY_DSN`
+from `.env.production`; the browser bundle gets its DSN at build time from the
+repository variable `VITE_SENTRY_DSN`. Both send the member's numeric id only,
+never an email or IP (`send_default_pii` stays off).
+
 The storage baseline keeps the live PostgreSQL and MinIO data on the VPS. Backup production is paused until a new backup design is approved.
