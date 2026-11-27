@@ -138,9 +138,51 @@ def _set_refresh_cookie(response, request, refresh: str):
     return response
 
 
+LOGIN_LOCKED = (
+    "Too many failed sign-ins for this address. Try again in 15 minutes, "
+    "or reset your password."
+)
+
+
+def _login_fail_key(email: str) -> str:
+    # Hashed so the cache never holds a raw address; normalized so Case@x and
+    # case@x share one counter, exactly as they share one account.
+    ident = User.objects.normalize_email(email or "")
+    return "login-fail:" + hashlib.sha256(ident.encode()).hexdigest()
+
+
+def clear_login_failures(email: str) -> None:
+    cache.delete(_login_fail_key(email))
+
+
 class ConfirmedTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """Sign-in, plus a per-address lock against slow guessing.
+
+    The `login` throttle counts per IP, so guesses spread over many IPs at one
+    address never trip it. This counts failures per address instead: after
+    LOGIN_LOCK_FAILURES wrong passwords the address refuses every attempt, a
+    right one included, for LOGIN_LOCK_SECONDS. The lock is short on purpose --
+    an attacker can trigger it for someone else -- and password reset still
+    works, and clears it. It applies to addresses with no account too, so the
+    lock itself says nothing about who is a member.
+    """
+
     def validate(self, attrs):
-        data = super().validate(attrs)
+        key = _login_fail_key(attrs.get(self.username_field, ""))
+        if (cache.get(key) or 0) >= settings.LOGIN_LOCK_FAILURES:
+            raise AuthenticationFailed({"detail": LOGIN_LOCKED, "reason": "login_locked"})
+        try:
+            data = super().validate(attrs)
+        except AuthenticationFailed:
+            # add() starts the window on the first failure; incr() never
+            # extends it, so the lock ends LOGIN_LOCK_SECONDS after it began.
+            if not cache.add(key, 1, settings.LOGIN_LOCK_SECONDS):
+                try:
+                    cache.incr(key)
+                except ValueError:  # expired between add and incr
+                    cache.add(key, 1, settings.LOGIN_LOCK_SECONDS)
+            raise
+        cache.delete(key)
         if self.user.email_confirmed_at is None:
             raise AuthenticationFailed({"detail": EMAIL_UNCONFIRMED, "reason": "email_unconfirmed"})
         return data
@@ -715,6 +757,7 @@ class PasswordResetConfirmView(APIView):
         )
         serializer.is_valid(raise_exception=True)
         user.set_password(serializer.validated_data["new_password"])
+        clear_login_failures(user.email)
         fields = ["password"]
         if user.email_confirmed_at is None:
             user.email_confirmed_at = timezone.now()

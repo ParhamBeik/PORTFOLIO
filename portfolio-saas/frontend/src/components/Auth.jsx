@@ -158,6 +158,10 @@ export default function Auth({ onAuthed, initialMode = "login" }) {
         setUnconfirmed(true);
         return;
       }
+      if (err.reason === "login_locked") {
+        setError("Too many failed sign-ins for this address. Try again in 15 minutes, or reset your password.");
+        return;
+      }
       if (err.reason === "signup_daily_cap") {
         setError("Sign-ups are full for today. Please try again tomorrow.");
         return;

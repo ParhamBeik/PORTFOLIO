@@ -304,6 +304,10 @@ SIGNUP_MIN_FREE_GB = float(os.getenv("SIGNUP_MIN_FREE_GB", "10"))
 # sign-up that never confirms its email is deleted after UNCONFIRMED_USER_DAYS.
 REGISTRATION_DAILY_CAP = int(os.getenv("REGISTRATION_DAILY_CAP", "50"))
 UNCONFIRMED_USER_DAYS = int(os.getenv("UNCONFIRMED_USER_DAYS", "7"))
+# Per-address sign-in lock (on top of the per-IP `login` throttle): this many
+# wrong passwords for one address locks it for this many seconds.
+LOGIN_LOCK_FAILURES = int(os.getenv("LOGIN_LOCK_FAILURES", "10"))
+LOGIN_LOCK_SECONDS = int(os.getenv("LOGIN_LOCK_SECONDS", "900"))
 
 # Per-member caps for public sign-up, so one account cannot fill a shared disk
 # or a shared worker. `User.limit_multiplier` scales all three for one member.
