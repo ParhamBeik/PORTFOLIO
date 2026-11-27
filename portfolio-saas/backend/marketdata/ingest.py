@@ -246,9 +246,25 @@ def _bulk(
     if not rows:
         return 0, 0
     qs = model.objects.filter(**scope) if scope else model.objects.all()
-    before = qs.count()
-    model.objects.bulk_create(rows, batch_size=500, ignore_conflicts=True)
-    landed = qs.count() - before
+    if scope and unique_fields:
+        # Re-sent history is mostly rows we already hold. Reading the scope's
+        # keys once is one index scan; offering every row to INSERT ... ON
+        # CONFLICT DO NOTHING probed the unique index per row and was the top
+        # write statement on prod (DailyStockHistory: 152,799 calls, 151 ms
+        # each, 386 min in 19 days, 2026-11-27). Rows that land between this
+        # read and the insert still conflict harmlessly.
+        existing = set(qs.values_list(*unique_fields))
+        before = len(existing)
+        fresh = [row for row in rows if tuple(getattr(row, f) for f in unique_fields) not in existing]
+        if fresh:
+            model.objects.bulk_create(fresh, batch_size=500, ignore_conflicts=True)
+            landed = qs.count() - before
+        else:
+            landed = 0
+    else:
+        before = qs.count()
+        model.objects.bulk_create(rows, batch_size=500, ignore_conflicts=True)
+        landed = qs.count() - before
     if update_fields:
         recent_values = sorted({getattr(row, recent_field) for row in rows})[-recent_limit:]
         recent_rows = {
@@ -411,6 +427,22 @@ _REAL_LEGAL_FIELDS = {
 }
 
 
+def _real_legal_differs(current, values) -> bool:
+    """Would writing `values` change the stored real/legal columns?
+
+    Compared as the column would store them (`to_python`), so a provider float
+    like 1200.0 matches a stored 1200. Anything that does not convert counts as
+    changed and is written, which is the old behaviour.
+    """
+    for field_name, stored in zip(_REAL_LEGAL_FIELDS, current):
+        try:
+            if DailyStockHistory._meta.get_field(field_name).to_python(values[field_name]) != stored:
+                return True
+        except Exception:
+            return True
+    return False
+
+
 def ingest_real_legal(symbol: str, payload) -> tuple[int, int]:
     """History.php?type=1 payload -> independent real/legal daily rows.
 
@@ -424,23 +456,37 @@ def ingest_real_legal(symbol: str, payload) -> tuple[int, int]:
         return 0, 0 if payload is None else 1
     accepted, bad = screen("real_legal", payload, "real_legal_history", symbol)
     rows = []
-    updated_daily = 0
-    skipped_daily = 0
+    incoming = {}
     for rec in accepted:
         date_val = normalize_jalali(rec["date"])
         fields_to_update = {field: rec.get(key) for field, key in _REAL_LEGAL_FIELDS.items()}
-
-        updated_rows = DailyStockHistory.objects.filter(
-            symbol=symbol, date=date_val,
-        ).update(**fields_to_update)
-        updated_daily += int(updated_rows > 0)
-        skipped_daily += int(updated_rows == 0)
-
+        incoming[date_val] = fields_to_update  # a repeated day: the last one wins, as before
         rows.append(RealLegalHistory(
             symbol=symbol,
             date=date_val,
             **fields_to_update,
         ))
+    # One read of the symbol's stored breakdown, then a bulk write of only the
+    # days that differ. This used to be one UPDATE per day of history on every
+    # fetch -- ~18.5M single-row UPDATEs in 19 days on prod (2026-11-27), nearly
+    # all of them rewriting identical values (each one still a new row version).
+    columns = tuple(_REAL_LEGAL_FIELDS)
+    stored = {
+        row[0]: row[1:]
+        for row in DailyStockHistory.objects.filter(symbol=symbol, date__in=list(incoming))
+        .values_list("date", "id", *columns)
+    }
+    changed = []
+    for date_val, values in incoming.items():
+        if date_val not in stored:
+            continue
+        pk, *current = stored[date_val]
+        if _real_legal_differs(current, values):
+            changed.append(DailyStockHistory(id=pk, **values))
+    if changed:
+        DailyStockHistory.objects.bulk_update(changed, columns, batch_size=500)
+    updated_daily = len(stored)
+    skipped_daily = len(incoming) - len(stored)
     _bulk(RealLegalHistory, rows, scope={"symbol": symbol})
     release("real_legal_history", symbol, (row.date for row in rows))
     return updated_daily, skipped_daily + bad
