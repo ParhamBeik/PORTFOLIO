@@ -616,6 +616,7 @@ def backfill_tick_summary(symbol) -> int:
         TickDaySummary.objects.filter(symbol=symbol).delete()
         TickDaySummary.objects.bulk_create(rows, batch_size=1000)
         TickSummaryCoverage.objects.get_or_create(symbol=symbol)
+    cache.delete(_tick_days_key(symbol))  # a --force rebuild must not serve the old set
     return len(rows)
 
 
