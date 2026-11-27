@@ -67,6 +67,14 @@ class AccountListCreateView(generics.ListCreateAPIView):
         return self.request.user.accounts.all().prefetch_related("holdings__asset")
 
     def perform_create(self, serializer):
+        from accounts.limits import limit
+
+        cap = limit(self.request.user, "accounts")
+        if self.request.user.accounts.count() >= cap:
+            raise ValidationError(
+                f"You have reached the limit of {cap} portfolios. "
+                "Ask an admin if you need more."
+            )
         serializer.save(user=self.request.user)
 
 

@@ -10,6 +10,8 @@ from rest_framework.exceptions import NotFound
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from accounts.limits import limit
 from ..models import Account, Holding, LedgerEntry, Transaction
 from ..serializers import (
     LedgerEntryInputSerializer,
@@ -246,6 +248,15 @@ class LedgerImportView(APIView):
         account = request.user.accounts.filter(pk=account_id).first()
         if account is None:
             return Response({"detail": "Account not found."}, status=404)
+        if self.commit and self._imports_today(request.user) >= limit(request.user, "imports_per_day"):
+            # Preview stays free: it writes nothing. Only a committed batch counts.
+            return Response(
+                {
+                    "detail": "You have used today's imports. Please try again tomorrow.",
+                    "reason": "import_daily_cap",
+                },
+                status=429,
+            )
         try:
             if not self.commit:
                 return Response(preview_ledger_import(account, request.FILES.get("file")))
@@ -259,6 +270,14 @@ class LedgerImportView(APIView):
             {"batch_id": batch.id, "row_count": batch.row_count},
             status=201 if created else 200,
         )
+
+
+    @staticmethod
+    def _imports_today(user) -> int:
+        from ..models import ImportBatch
+
+        since = timezone.now() - timedelta(hours=24)
+        return ImportBatch.objects.filter(account__user=user, created_at__gte=since).count()
 
 
 class LedgerImportCommitView(LedgerImportView):

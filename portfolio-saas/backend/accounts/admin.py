@@ -65,7 +65,7 @@ class UserAdmin(DjangoUserAdmin):
         ("Personal info", {"fields": ("first_name", "last_name")}),
         (
             "Permissions",
-            {"fields": ("is_active", "role")},
+            {"fields": ("is_active", "role", "limit_multiplier")},
         ),
         ("Dates", {"fields": ("last_login", "date_joined")}),
     )

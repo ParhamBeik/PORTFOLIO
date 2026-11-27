@@ -52,7 +52,7 @@ class Command(BaseCommand):
                         f"stored={drift['stored']} ledger={drift['ledger']}"
                     )
             if options["fix"]:
-                rebuild_projections(account)
+                rebuild_projections(account, enforce_limits=False)
                 fixed += 1
                 self.stdout.write(
                     self.style.WARNING(f"Rebuilt projections for account {account.id}")
