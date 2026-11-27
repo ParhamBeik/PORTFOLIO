@@ -51,6 +51,7 @@ from .models import (
 )
 from .coverage_report import build_coverage_report
 from .quota import get_quota_status
+from .workflows import quiet_skips_today
 
 
 DATABASE_MODELS = {
@@ -75,7 +76,7 @@ OVERVIEW_CACHE_KEY = "admin_ops_overview"
 # and every operator paid the full cost -- the entire reason the Ops page felt
 # broken. The payload carries `generated_at`, and the view still honours
 # `?refresh=1`, so staleness is both visible and escapable.
-OVERVIEW_CACHE_TTL = 15 * 60
+OVERVIEW_CACHE_TTL = 60 * 60
 
 
 def _iso(value):
@@ -1386,6 +1387,8 @@ def _workflows_24h():
         "rows_accepted": int(sums["accepted"] or 0),
         "rows_rejected": int(sums["rejected"] or 0),
         "total_runs": sum(outcomes.values()),
+        # Counted in Redis, not written as rows -- see workflows.QUIET_SKIPS.
+        "quiet_skips_today": quiet_skips_today(),
     }
 
 

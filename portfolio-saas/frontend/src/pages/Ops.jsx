@@ -29,7 +29,11 @@ import {
 } from "../components/ui.jsx";
 import { dateTime, humanize, num } from "../format.js";
 
-const POLL_MS = 10000;
+// One operator, a payload the metrics worker rebuilds hourly, and a Refresh
+// button for anything sooner: polling four endpoints every 10 s was load for
+// nothing. The "generated N ago" clock only needs to move a few times a minute.
+const POLL_MS = 60000;
+const CLOCK_MS = 15000;
 
 // Every status-ish string this console renders lands on one of four badge
 // tones. Five near-identical mappers disagreed about the overlap (is "partial"
@@ -809,6 +813,7 @@ function WorkflowsPanel({ overview, wf, wfPage, setWfPage }) {
     blocked_storage: "Blocked storage",
   });
   const ingest = overview?.workflow_15m || {};
+  const quietSkips = overview?.workflows_24h?.quiet_skips_today || {};
   const rows = wf.results || [];
 
   return (
@@ -819,6 +824,12 @@ function WorkflowsPanel({ overview, wf, wfPage, setWfPage }) {
         <StatTile label="Last 15 min" value={num(ingest.total_runs)} sub={`${num(ingest.rows_accepted)} accepted`} />
         <StatTile label="Failed runs" value={num(overview?.workflows_24h?.outcomes?.failed)} sub="Last 24 hours" valueTone={(overview?.workflows_24h?.outcomes?.failed || 0) > 0 ? "critical" : "good"} />
       </div>
+      {Object.keys(quietSkips).length > 0 && (
+        <p className="text-sm text-muted" data-testid="ops-quiet-skips">
+          Idle checks today (counted, not logged):{" "}
+          {Object.entries(quietSkips).map(([key, count]) => `${key.replace(":", " · ")} ${num(count)}×`).join(" — ")}
+        </p>
+      )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card title="Outcomes (24h)" subtitle="Terminal state of every workflow run.">
@@ -2445,7 +2456,7 @@ export default function Ops({ user }) {
   }, [loadTables]);
 
   useEffect(() => {
-    const id = setInterval(() => setClock(Date.now()), 1000);
+    const id = setInterval(() => setClock(Date.now()), CLOCK_MS);
     return () => clearInterval(id);
   }, []);
 

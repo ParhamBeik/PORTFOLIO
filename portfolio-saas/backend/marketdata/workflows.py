@@ -129,6 +129,64 @@ def record_http_attempt(*, quota=False):
         counters.record(quota=quota)
 
 
+# Skips that mean "nothing to do yet", not "something stood down". Together
+# they were 8,552 of ~18,000 ledger rows a day (measured 2026-11-27): the live
+# loop's 20 s cadence gate and the archive scheduler finding an empty queue.
+# Each is counted per Tehran day in Redis instead of written as a row. Any other
+# skip -- queue_full, archive_paced, quota_exhausted, codal_disabled -- still
+# writes its row, because those are the ones an operator reads.
+QUIET_SKIPS = frozenset({
+    ("live_prices", "cadence_not_elapsed"),
+    ("archive_tick", "no_due_states"),
+})
+QUIET_SKIP_KEY = "workflow:quiet_skips:{day}"
+QUIET_SKIP_TTL_SECONDS = 8 * 24 * 3600
+
+
+def _quiet_skip_reason(payload):
+    if payload["outcome"] != "skipped" or payload["error_code"]:
+        return None
+    metadata = payload["metadata"] if isinstance(payload["metadata"], dict) else {}
+    reason = metadata.get("reason")
+    return reason if (payload["workflow"], reason) in QUIET_SKIPS else None
+
+
+def _tally_quiet_skip(workflow, reason):
+    """Count one quiet skip; True when Redis took it, False to fall back to a row."""
+    from portfolio.live.redis_client import get_redis
+
+    from .jalali import tehran_day
+
+    client = get_redis()
+    if client is None:
+        return False
+    key = QUIET_SKIP_KEY.format(day=tehran_day().isoformat())
+    try:
+        pipe = client.pipeline()
+        pipe.hincrby(key, f"{workflow}:{reason}", 1)
+        pipe.expire(key, QUIET_SKIP_TTL_SECONDS)
+        pipe.execute()
+    except Exception:
+        return False
+    return True
+
+
+def quiet_skips_today():
+    """{"workflow:reason": count} for the current Tehran day; {} without Redis."""
+    from portfolio.live.redis_client import get_redis
+
+    from .jalali import tehran_day
+
+    client = get_redis()
+    if client is None:
+        return {}
+    try:
+        raw = client.hgetall(QUIET_SKIP_KEY.format(day=tehran_day().isoformat()))
+    except Exception:
+        return {}
+    return {field: int(value) for field, value in sorted(raw.items())}
+
+
 @dataclass
 class WorkflowOutcome:
     workflow: str
@@ -199,8 +257,13 @@ class WorkflowOutcome:
         # row. Rendered as flat `key=value` pairs on the same line, with newlines
         # collapsed, so one workflow is one greppable log line rather than a JSON
         # blob a human has to unpick in `docker compose logs`.
-        logger.info(" ".join(filter(None, (summary, _flatten(safe["metadata"])))))
+        line = " ".join(filter(None, (summary, _flatten(safe["metadata"]))))
         try:
+            quiet = _quiet_skip_reason(safe)
+            if quiet and _tally_quiet_skip(safe["workflow"], quiet):
+                logger.debug(line)
+                return None
+            logger.info(line)
             return WorkflowRun.objects.create(**safe)
         except Exception:
             logger.exception(

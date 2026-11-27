@@ -717,15 +717,6 @@ export const frontier = (account = null, { window } = {}) => {
   const qs = params.toString();
   return api(`/api/optimization/frontier/${qs ? `?${qs}` : ""}`);
 };
-// `maxAssets` caps how many positions the answer may hold; `targetVolatility`
-// is risk tolerance as an annualized number (0.25 = 25%). Omit either for none.
-export const myOptimal = (account = null, { maxAssets, targetVolatility } = {}) => {
-  const params = new URLSearchParams(accountParam(account) || "");
-  if (maxAssets != null) params.set("max_assets", String(maxAssets));
-  if (targetVolatility != null) params.set("target_volatility", String(targetVolatility));
-  const s = params.toString();
-  return api(`/api/optimization/my-optimal/${s ? `?${s}` : ""}`);
-};
 // ~200 bootstrap re-solves. Never fetched with the page — the caller gates it
 // behind an explicit request and gives it a longer timeout than the default.
 export const robustness = (account = null, { scenario, window, targetVolatility } = {}) => {
@@ -736,8 +727,6 @@ export const robustness = (account = null, { scenario, window, targetVolatility 
   const s = params.toString();
   return api(`/api/optimization/robustness/${s ? `?${s}` : ""}`);
 };
-export const bestOverall = (account = null) =>
-  api(`/api/optimization/best-overall/${qs({ account })}`);
 export const guidance = (account = null) => api(`/api/guidance/${qs({ account })}`);
 
 function qs(params) {
