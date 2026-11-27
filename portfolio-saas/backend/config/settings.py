@@ -305,6 +305,12 @@ SIGNUP_MIN_FREE_GB = float(os.getenv("SIGNUP_MIN_FREE_GB", "10"))
 REGISTRATION_DAILY_CAP = int(os.getenv("REGISTRATION_DAILY_CAP", "50"))
 UNCONFIRMED_USER_DAYS = int(os.getenv("UNCONFIRMED_USER_DAYS", "7"))
 
+# Per-member caps for public sign-up, so one account cannot fill a shared disk
+# or a shared worker. `User.limit_multiplier` scales all three for one member.
+MAX_ACCOUNTS_PER_USER = int(os.getenv("MAX_ACCOUNTS_PER_USER", "5"))
+MAX_HOLDINGS_PER_USER = int(os.getenv("MAX_HOLDINGS_PER_USER", "300"))
+MAX_IMPORTS_PER_USER_PER_DAY = int(os.getenv("MAX_IMPORTS_PER_USER_PER_DAY", "20"))
+
 # Mail. `.env.production.example` has named these for some time; Django does
 # not read EMAIL_* from the environment on its own, so a filled-in env file
 # previously configured nothing. Console in DEBUG when no host is set, so a

@@ -3482,3 +3482,63 @@ def test_csv_dates_without_a_zone_are_tehran_days_and_jalali_is_refused(ledger_a
 
     assert refused.status_code == 400
     assert "Jalali" in str(refused.data)
+
+
+# ----------------------------------------------------------------------
+# Per-member caps (accounts.limits): public sign-up means a stranger can create
+# an account, so each write path that adds a row asks the cap first.
+
+
+def test_member_caps_refuse_the_row_past_the_limit_and_honour_the_multiplier(
+    ledger_account, settings
+):
+    settings.MAX_ACCOUNTS_PER_USER = 1
+    settings.MAX_HOLDINGS_PER_USER = 1
+    settings.MAX_IMPORTS_PER_USER_PER_DAY = 1
+    user = ledger_account.user
+    client = _client(user)
+    occurred_at = (timezone.now() - datetime.timedelta(days=5)).isoformat()
+
+    # Portfolios: the fixture already owns one.
+    refused = client.post("/api/accounts/", {"name": "Second"}, format="json")
+    assert refused.status_code == 400
+    assert Account.objects.filter(user=user).count() == 1
+
+    # Imports: one committed batch a day; preview stays free.
+    def commit(external_id, asset_key):
+        content = (
+            "external_id,occurred_at,kind,asset_key,quantity,unit_price_tomans,amount_tomans,note\n"
+            f"{external_id},{occurred_at},opening_position,{asset_key},1,,,\n"
+        )
+        return client.post(
+            f"/api/accounts/{ledger_account.id}/imports/commit/",
+            {"file": _csv_upload(content)},
+            format="multipart",
+        )
+
+    assert commit("p-1", "emami_coin").status_code == 201
+    second = commit("p-2", "half_coin")
+    assert second.status_code == 429
+    assert second.data["reason"] == "import_daily_cap"
+
+    # Holdings: the import above used the only slot, and the ledger path that
+    # every write shares refuses a second asset -- the entry is rolled back too.
+    ledger_account.refresh_from_db()
+    with pytest.raises(LedgerError, match="limit of 1 holdings"):
+        create_ledger_entry(
+            account=ledger_account,
+            kind=LedgerEntry.Kind.OPENING_POSITION,
+            # Openings must share the tracking start the import just set.
+            occurred_at=ledger_account.tracking_started_at,
+            asset=Asset.objects.get(key="half_coin"),
+            quantity=1,
+        )
+    assert Holding.objects.filter(account__user=user).count() == 1
+    assert not LedgerEntry.objects.filter(asset__key="half_coin").exists()
+
+    # An admin raises one member's caps without lifting them for everybody.
+    user.limit_multiplier = 2
+    user.save(update_fields=["limit_multiplier"])
+    assert client.post("/api/accounts/", {"name": "Second"}, format="json").status_code == 201
+    assert commit("p-2", "half_coin").status_code == 201
+    assert Holding.objects.filter(account__user=user).count() == 2

@@ -602,12 +602,25 @@ def restore_ledger_entry(*, user, account_id: int, entry_id: int) -> LedgerEntry
     return entry
 
 
+def _assert_holding_room(account: Account, adding: int) -> None:
+    """Refuse a write that would take the member past their holdings cap."""
+    if adding <= 0:
+        return
+    from accounts.limits import HOLDINGS_FULL, holding_count, limit
+
+    cap = limit(account.user, "holdings")
+    if holding_count(account.user) + adding > cap:
+        raise LedgerError(HOLDINGS_FULL.format(n=cap))
+
+
 @transaction.atomic
 def set_orphan_holding(*, account: Account, asset: Asset, quantity) -> Holding:
     """Set quantity on a holding that has no ledger history."""
     if LedgerEntry.objects.filter(account=account, asset=asset).exists():
         raise LedgerError("This holding has ledger history; edit a buy/sell row instead.")
     qty = _decimal(quantity, "quantity", required=True, allow_zero=True)
+    if not Holding.objects.filter(account=account, asset=asset).exists():
+        _assert_holding_room(account, 1)
     holding, _ = Holding.objects.update_or_create(
         account=account, asset=asset, defaults={"quantity": qty}
     )
@@ -947,7 +960,7 @@ def compute_projections(account: Account) -> tuple[dict[int, Decimal], Decimal]:
 
 
 @transaction.atomic
-def rebuild_projections(account: Account) -> dict:
+def rebuild_projections(account: Account, *, enforce_limits: bool = True) -> dict:
     """Rewrite Holding rows and cash_balance_tomans from the ledger."""
     account = Account.objects.select_for_update().get(pk=account.pk)
     state = _projection_state(account)
@@ -961,6 +974,17 @@ def rebuild_projections(account: Account) -> dict:
     Holding.objects.filter(account=account, asset_id__in=managed_asset_ids).exclude(
         asset_id__in=expected_holdings
     ).delete()
+    # Every ledger path (trade, import, house mark, restore) lands here, so the
+    # holdings cap is checked once, on rows this rebuild is about to ADD. A
+    # member already over the cap can still sell, edit or remove.
+    present = set(
+        Holding.objects.filter(account=account, asset_id__in=expected_holdings)
+        .values_list("asset_id", flat=True)
+    )
+    # `reconcile_ledger` turns it off: repairing drift restores rows the
+    # ledger already says exist, and a cap must never block a repair.
+    if enforce_limits:
+        _assert_holding_room(account, len(set(expected_holdings) - present))
     for asset_id, quantity in expected_holdings.items():
         defaults = {"quantity": quantity}
         defaults.update(state["real_estate"].get(asset_id, {}))

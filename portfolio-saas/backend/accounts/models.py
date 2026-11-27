@@ -88,6 +88,10 @@ class User(AbstractUser):
     username = None
     email = models.EmailField(unique=True)
     role = models.CharField(max_length=5, choices=Role.choices, default=Role.USER)
+    # Scales every per-member cap in `accounts.limits` (accounts, holdings,
+    # imports a day). 1 is the public default; an admin raises it for one member
+    # in the Django admin rather than lifting the cap for everybody.
+    limit_multiplier = models.PositiveSmallIntegerField(default=1)
     risk_profile = models.CharField(
         max_length=12, choices=RiskProfile.choices, default=RiskProfile.BALANCED
     )
