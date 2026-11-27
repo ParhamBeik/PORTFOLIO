@@ -264,6 +264,14 @@ services:
       # disk in 3 weeks. "slowest" makes it pause between objects; the only
       # cost is that usage/quota figures refresh more slowly.
       MINIO_SCANNER_SPEED: slowest
+      # Measured 2026-11-27 (VPS load fix P5): since the 2026-11-08 restart the
+      # MinIO process read 248 GB from disk (/proc/<pid>/io read_bytes) but only
+      # 13 GB through read calls (rchar), so no app task re-reads the bucket --
+      # app GETs are ~5% of it. The rest is the scanner's small metadata reads
+      # amplified by readahead inside this 512 MB limit, which also holds MinIO's
+      # page cache. Live rate that day: ~4 GB/day, about 1.7% of the Portfolio
+      # DB's disk reads. Not worth more RAM on a 7.8 GB box; re-measure after
+      # the DB query fixes (P2-P4) lower memory pressure.
     volumes:
       - codaldata:/data
     healthcheck:
