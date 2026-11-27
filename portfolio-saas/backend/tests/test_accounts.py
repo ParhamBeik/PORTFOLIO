@@ -2109,14 +2109,19 @@ def test_admin_sign_in_still_works_under_the_limit(make_user):
     assert response["Location"] == "/admin/"
 
 
-def test_deploy_warns_when_production_mail_is_unconfigured(settings):
+def test_deploy_notes_but_does_not_fail_when_production_mail_is_unconfigured(settings):
     """`migrate` runs the system checks, so a deploy with EMAIL_HOST=localhost says so."""
+    from django.core import checks
+
     from accounts.apps import mail_configured_check
 
     settings.DEBUG = False
     settings.EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
     settings.EMAIL_HOST = "localhost"
-    assert [w.id for w in mail_configured_check()] == ["accounts.W001"]
+    assert [w.id for w in mail_configured_check()] == ["accounts.I001"]
+
+    # Below WARNING, so `check --deploy --fail-level WARNING` in deploy.sh passes.
+    assert all(m.level < checks.WARNING for m in mail_configured_check())
 
     settings.EMAIL_HOST = "smtp-relay.brevo.com"
     assert mail_configured_check() == []
