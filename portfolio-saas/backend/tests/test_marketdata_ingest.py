@@ -923,56 +923,29 @@ def test_retired_aggregate_check_is_clean_when_none_remain(tmp_path):
 
 
 @pytest.mark.django_db
-def test_fetch_gold_currency_free():
-    mock_payload = {
-        "gold": [
-            {"symbol": "IR_GOLD_18K", "name": "طلای 18 عیار", "price": 6214700, "unit": "تومان"}
-        ],
-        "currency": [
-            {"symbol": "USD", "name": "دلار", "price": 81650, "unit": "تومان"}
-        ]
-    }
+def test_retired_gold_currency_endpoints_refuse_without_http_calls():
+    from marketdata.fetchers import (
+        RetiredEndpointError,
+        fetch_gold_currency_pro,
+        fetch_gold_currency_pro_history_24h,
+        fetch_json,
+    )
+
     with patch("marketdata.fetchers.requests.get") as mock_get:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = mock_payload
+        with pytest.raises(RetiredEndpointError):
+            fetch_gold_currency_free("test_key")
+        with pytest.raises(RetiredEndpointError):
+            fetch_gold_currency_pro("test_key")
+        with pytest.raises(RetiredEndpointError):
+            fetch_gold_currency_pro_history_24h("test_key", "USDT")
+        with pytest.raises(RetiredEndpointError):
+            fetch_gold_currency_pro_history_daily("test_key", "IR_COIN_EMAMI")
+        with pytest.raises(RetiredEndpointError):
+            fetch_json("https://Api.BrsApi.ir/Market/Gold_Currency.php", params={"key": "k"})
+        with pytest.raises(RetiredEndpointError):
+            fetch_json("https://Api.BrsApi.ir/Market/Gold_Currency_Pro.php", params={"key": "k"})
 
-        res = fetch_gold_currency_free("test_key")
-        assert res == mock_payload
-        assert len(res["gold"]) == 1
-        assert res["currency"][0]["symbol"] == "USD"
-
-
-@pytest.mark.django_db
-def test_fetch_gold_currency_pro_history_daily():
-    mock_payload = {
-        "symbol": "IR_COIN_EMAMI",
-        "name": "سکه امامی",
-        "unit": "تومان",
-        "history_daily": [
-            {"date": "1404/03/21", "open": 73290000, "high": 73610000, "low": 73080000, "close": 73385000}
-        ]
-    }
-    with patch("marketdata.fetchers.requests.get") as mock_get:
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = mock_payload
-
-        res = fetch_gold_currency_pro_history_daily("test_key", "IR_COIN_EMAMI")
-        assert res == mock_payload
-        record = res["history_daily"][0]
-
-        # Test model persistence
-        obj = GoldCurrencyHistory.objects.create(
-            symbol=res["symbol"],
-            name=res["name"],
-            unit=res["unit"],
-            date=record["date"],
-            open_price=record["open"],
-            high_price=record["high"],
-            low_price=record["low"],
-            close_price=record["close"],
-        )
-        assert obj.symbol == "IR_COIN_EMAMI"
-        assert obj.close_price == 73385000
+    mock_get.assert_not_called()
 
 
 @pytest.mark.django_db
@@ -1925,7 +1898,6 @@ def test_the_catalog_and_the_snapshot_ingest_read_a_symbol_the_same_way(db):
     stored = MarketSnapshot.objects.get(asset_class="crypto")
 
     with patch.object(catalog, "fetch_all_symbols", return_value=[]), \
-         patch.object(catalog, "fetch_gold_currency_free", return_value={}), \
          patch.object(
              catalog, "fetch_derivatives",
              side_effect=lambda _key, endpoint: payload if endpoint == "crypto" else [],
@@ -1956,7 +1928,6 @@ def test_a_provider_duplicate_does_not_take_down_the_whole_catalog_sync(db):
         {"name_en": "Bitcoin", "id": 3, "price": 3},
     ]
     with patch.object(catalog, "fetch_all_symbols", return_value=[]), \
-         patch.object(catalog, "fetch_gold_currency_free", return_value={}), \
          patch.object(
              catalog, "fetch_derivatives",
              side_effect=lambda _key, endpoint: payload if endpoint == "crypto" else [],

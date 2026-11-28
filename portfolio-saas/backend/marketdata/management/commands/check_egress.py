@@ -129,8 +129,8 @@ class Command(BaseCommand):
         from marketdata.fetchers import DEFAULT_HEADERS
 
         response = requests.get(
-            "https://Api.BrsApi.ir/Market/Gold_Currency.php",
-            params={"key": settings.BRS_API_KEY or "probe"},
+            "https://Api.BrsApi.ir/Tsetmc/Index.php",
+            params={"key": settings.TSETMC_API_KEY or "probe", "type": "1"},
             headers=DEFAULT_HEADERS,
             timeout=(5, 15),
         )

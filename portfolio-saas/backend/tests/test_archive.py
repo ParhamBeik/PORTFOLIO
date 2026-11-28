@@ -1321,18 +1321,43 @@ def test_gold_archive_prefers_tgju_before_paid_brs_fallback(settings):
             }
         ],
     }
-    with patch("marketdata.sources.tgju.gold_history_payload", return_value=direct), \
-         patch.object(
-             archive,
-             "fetch_gold_currency_pro_history_daily",
-             side_effect=AssertionError("paid BrsApi fallback was called"),
-         ):
+    with patch("marketdata.sources.tgju.gold_history_payload", return_value=direct):
         result, expected, stored = archive._fetch_and_ingest(state)
 
     assert result[0] == 1
     assert expected == {"1405-06-09"}
     assert stored == {"1405-06-09"}
     assert GoldCurrencyHistory.objects.get(symbol="USD").origin == GoldCurrencyHistory.Origin.TGJU
+
+
+def test_gold_daily_never_calls_brsapi_for_non_tgju_symbol_or_tgju_error(db, settings):
+    from marketdata import archive
+    from marketdata.fetchers import MarketDataFetchError
+    from marketdata.sources.http import SourceResponseError
+
+    settings.TGJU_ENABLED = True
+    unsupported = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.GOLD_DAILY,
+        symbol="IR_COIN_BAHAR",
+    )
+    with patch("marketdata.fetchers.requests.get") as mock_get:
+        result, expected, stored = archive._fetch_and_ingest(unsupported)
+    assert result == (0, 0)
+    assert expected == set()
+    assert stored == set()
+    mock_get.assert_not_called()
+
+    supported = ArchiveFetchState.objects.create(
+        endpoint=ArchiveFetchState.Endpoint.GOLD_DAILY,
+        symbol="USD",
+    )
+    with (
+        patch("marketdata.sources.tgju.gold_history_payload", side_effect=SourceResponseError("down", origin="tgju")),
+        patch("marketdata.fetchers.requests.get") as mock_get,
+    ):
+        with pytest.raises(MarketDataFetchError):
+            archive._fetch_and_ingest(supported)
+    mock_get.assert_not_called()
 
 
 def test_banking_a_day_counts_as_progress_even_when_the_gap_does_not_shrink():
@@ -1603,25 +1628,27 @@ def test_catalog_accepts_shares_and_rejects_rights_and_funds():
     assert not is_ordinary_stock({"isin": "IRT1TEST0001"})
 
 
-def test_catalog_accepts_all_provider_currencies(settings):
-    """We choose an integration test because provider catalog sync crosses fetcher payload parsing and DB persistence."""
+def test_catalog_preserves_existing_brs_instruments_without_calling_gold_currency(settings):
+    """Gold_Currency.php is retired; sync_provider_catalog must not call it and must preserve existing BRS rows."""
     settings.TSETMC_API_KEY = "test-key"
     settings.BRS_API_KEY = "test-key"
+    MarketInstrument.objects.create(
+        source=MarketInstrument.Source.BRS,
+        symbol="USD",
+        name="Dollar",
+        category=MarketInstrument.Category.GOLD,
+        provider_group="currency",
+        eligible=True,
+    )
     with (
         patch("marketdata.catalog.fetch_all_symbols", return_value=[]),
-        patch("marketdata.catalog.fetch_gold_currency_free", return_value={
-            "currency": [
-                {"symbol": "USD", "name": "Dollar"},
-                {"symbol": "EUR", "name": "Euro"},
-            ],
-            "crypto": [{"symbol": "BTC", "name": "Bitcoin"}],
-        }),
-        patch("marketdata.catalog.fetch_derivatives", return_value=[]),
+        patch("marketdata.catalog.fetch_derivatives", return_value=[{"name_en": "BTC", "price": 1}]),
+        patch("marketdata.fetchers.requests.get") as mock_get,
     ):
         sync_provider_catalog()
 
+    mock_get.assert_not_called()
     assert MarketInstrument.objects.filter(source="brs", symbol="USD", eligible=True).exists()
-    assert MarketInstrument.objects.filter(source="brs", symbol="EUR", eligible=True).exists()
     assert MarketInstrument.objects.filter(source="brs", symbol="BTC", eligible=True).exists()
 
 
@@ -1636,7 +1663,6 @@ def test_catalog_classifies_irt_isin_rows_as_etf_not_excluded(settings):
             {"l18": "اهرم", "l30": "صندوق س سهامی کاریزما- اهرمی", "isin": "IRT1TEST0001", "cs": "صندوق سرمایه‌گذاری قابل معامله"},
             {"l18": "فملی", "l30": "ملی صنایع مس ایران", "isin": "IRO1MSMI0001", "cs": "فلزات اساسی"},
         ]),
-        patch("marketdata.catalog.fetch_gold_currency_free", return_value={}),
         patch("marketdata.catalog.fetch_derivatives", return_value=[]),
     ):
         sync_provider_catalog()
