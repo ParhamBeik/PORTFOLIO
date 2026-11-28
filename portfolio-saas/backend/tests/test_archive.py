@@ -1338,7 +1338,7 @@ def test_gold_daily_never_calls_brsapi_for_non_tgju_symbol_or_tgju_error(db, set
     settings.TGJU_ENABLED = True
     unsupported = ArchiveFetchState.objects.create(
         endpoint=ArchiveFetchState.Endpoint.GOLD_DAILY,
-        symbol="IR_COIN_BAHAR",
+        symbol="UNKNOWN_GOLD_SYM",
     )
     with patch("marketdata.fetchers.requests.get") as mock_get:
         result, expected, stored = archive._fetch_and_ingest(unsupported)

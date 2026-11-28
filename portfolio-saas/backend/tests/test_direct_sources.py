@@ -142,7 +142,12 @@ class TestTgjuTedpixHistory:
         assert payload["history_daily"][0]["high"] == Decimal("2100")
 
     def test_gold_history_adapter_leaves_unmapped_symbols_for_fallback(self):
-        assert tgju.gold_history_payload("IR_GOLD_MELTED", []) is None
+        assert tgju.gold_history_payload("UNKNOWN_GOLD_SYM", []) is None
+        assert tgju.supports_history("IR_GOLD_MELTED")
+        assert tgju.supports_history("IR_COIN_BAHAR")
+        assert tgju.supports_history("GBP")
+        assert tgju.supports_history("USDT_IRT")
+        assert not tgju.supports_history("UNKNOWN_GOLD_SYM")
 
 
 def test_fetch_all_markets_never_calls_brs_gold_currency_even_when_blend_flag_set(monkeypatch, settings):
@@ -719,13 +724,13 @@ class TestPaidFallbackSkipIsKeyedToWhatTheAppNeeds:
         from portfolio.live.fetcher import _required_symbols
         from portfolio.models import Asset
 
-        Asset.objects.create(key="gbp_cash", name="GBP", brs_symbol="GBP",
+        Asset.objects.create(key="unmapped_cash", name="Unmapped", brs_symbol="UNMAPPED_TEST_SYM",
                              asset_class=Asset.AssetClass.CASH, is_active=True)
 
         # Everything TGJU maps, and nothing else -- the old completeness test.
         direct = {s.upper() for s in tgju.BRS_TO_SLUG}
         assert not _required_symbols() <= direct, (
-            "GBP is unpriced by the direct board, so BrsApi must still run"
+            "UNMAPPED_TEST_SYM is unpriced by the direct board"
         )
 
 
