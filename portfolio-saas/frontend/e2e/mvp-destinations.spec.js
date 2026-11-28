@@ -1,33 +1,25 @@
 import { test, expect } from "@playwright/test";
 import { requireLogin } from "./helpers.js";
 
-test.describe("five-destination app", () => {
+test.describe("four-destination app", () => {
   test.beforeEach(async ({ page }) => {
     await requireLogin(page, test);
   });
 
-  test("shows Home, Activity, Research, Compare, and Risk only", async ({ page }) => {
-    for (const destination of ["home", "activity", "research", "compare", "risk"]) {
+  test("shows Home, Activity, Research, and Compare only", async ({ page }) => {
+    for (const destination of ["home", "activity", "research", "compare"]) {
       await expect(page.getByTestId(`nav-${destination}`)).toBeVisible();
     }
-    await expect(page.getByTestId("nav").locator("a")).toHaveCount(5);
+    await expect(page.getByTestId("nav").locator("a")).toHaveCount(4);
     await page.getByTestId("nav-activity").click();
     await expect(page.getByTestId("activity-section")).toBeVisible();
     await page.getByTestId("nav-research").click();
     await expect(page.getByTestId("research-section")).toBeVisible();
   });
 
-  test("Guidance gives a profile and discloses its data window", async ({ page }) => {
-    test.setTimeout(120000);
-    await page.getByTestId("nav-risk").click();
-    await expect(page.getByTestId("guidance-risk-profile")).toHaveValue("balanced");
-    await expect(page.getByTestId("guidance-window")).toBeVisible({ timeout: 90000 });
-    await expect(
-      page.getByTestId("guidance-personal").or(page.getByTestId("guidance-personal-empty"))
-    ).toBeVisible();
-    await expect(
-      page.getByTestId("guidance-benchmark").or(page.getByTestId("guidance-benchmark-empty"))
-    ).toBeVisible();
+  test("legacy /risk redirects to Compare", async ({ page }) => {
+    await page.goto("/risk");
+    await expect(page).toHaveURL(/\/compare$/);
   });
 
   test("ordinary users cannot open Operations", async ({ page }) => {
