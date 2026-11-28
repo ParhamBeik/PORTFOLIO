@@ -14,12 +14,11 @@ import {
   adminUsers,
   adminWorkflows,
 } from "../api.js";
-import { CountTrend, Donut, SparkBars, StackedStatusBar } from "../components/charts.jsx";
+import { CountTrend, Donut } from "../components/charts.jsx";
 import {
   Badge,
   Button,
   Card,
-  Delta,
   Input,
   PageHeader,
   Pager,
@@ -81,23 +80,6 @@ function archiveJobVariant(row) {
   return "partial";
 }
 
-function historySeries(history, key) {
-  return (history || []).map((row) => ({
-    x: row.captured_at,
-    y: nullable(row.counts?.[key]),
-  }));
-}
-
-const LIVE_TABLE_KEYS = new Set(["prices", "snapshots"]);
-const WH_TABLE_KEYS = new Set([
-  "market_instruments",
-  "stock_history_rows",
-  "gold_currency_rows",
-  "candles",
-  "stock_transaction_ticks",
-  "announcements",
-  "shareholders",
-]);
 
 function SortHeader({ label, field, ordering, onSort }) {
   const active = ordering === field || ordering === `-${field}`;
@@ -489,17 +471,6 @@ function AssetInspector() {
 
 
 
-const WAREHOUSE_SERIES = [
-  { key: "complete", name: "Complete" },
-  { key: "refresh_due", name: "Refresh due" },
-  { key: "partial", name: "Rows missing" },
-  { key: "failed", name: "Failing" },
-  { key: "awaiting_data", name: "No payload yet" },
-  { key: "not_tried", name: "Not tried" },
-  { key: "unfetchable", name: "Unfetchable" },
-  { key: "suspended", name: "Suspended" },
-];
-
 function totalsToDonut(totals, labels) {
   return Object.entries(totals || {})
     .filter(([, v]) => Number(v) > 0)
@@ -573,236 +544,7 @@ function LiveCoveragePanel({ coverage }) {
   );
 }
 
-// eslint-disable-next-line no-unused-vars
-function WarehouseCoveragePanel({ warehouse }) {
-  if (!warehouse) return null;
-  const barData = (warehouse.by_endpoint || [])
-    .filter((row) => row.total > 0)
-    .map((row) => ({
-      name: row.label.replace(/^Stock /, "").slice(0, 28),
-      complete: row.counts?.complete || 0,
-      refresh_due: row.counts?.refresh_due || 0,
-      partial: row.counts?.partial || 0,
-      failed: row.counts?.failed || 0,
-      awaiting_data: row.counts?.awaiting_data || 0,
-      not_tried: row.counts?.not_tried || 0,
-      unfetchable: row.counts?.unfetchable || 0,
-      suspended: row.counts?.suspended || 0,
-    }));
-  const backlog = warehouse.refresh_backlog || {};
-  const census = warehouse.symbol_census || {};
 
-  return (
-    <div className="space-y-4" data-testid="ops-warehouse">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatTile
-          label="Rows stored"
-          value={`${warehouse.row_fill_pct ?? 0}%`}
-          sub={`${num(warehouse.missing_rows)} missing`}
-          valueTone={(warehouse.row_fill_pct ?? 0) >= 99 ? "good" : "warn"}
-          testId="ops-warehouse-rows"
-        />
-        <StatTile
-          label="Jobs short of rows"
-          value={num(warehouse.counts?.partial)}
-          valueTone={(warehouse.counts?.partial || 0) > 0 ? "warn" : "good"}
-        />
-        <StatTile
-          label="Jobs failing"
-          value={num(warehouse.counts?.failed)}
-          valueTone={(warehouse.counts?.failed || 0) > 0 ? "critical" : "good"}
-        />
-        <StatTile
-          label="No payload yet"
-          value={num((warehouse.counts?.awaiting_data || 0) + (warehouse.counts?.not_tried || 0))}
-        />
-      </div>
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-5" data-testid="ops-warehouse-census">
-        <StatTile
-          label="Symbols fetched"
-          value={num(census.fetched)}
-          sub={`${census.fetched_pct ?? 0}% of ${num(census.symbols_total)}`}
-          valueTone={(census.fetched_pct ?? 0) >= 90 ? "good" : "warn"}
-          testId="ops-warehouse-census-fetched"
-        />
-        <StatTile label="Never fetched" value={num(census.never_fetched)} valueTone={(census.never_fetched || 0) > 0 ? "warn" : "good"} testId="ops-warehouse-census-never" />
-        <StatTile label="Tried, still empty" value={num(census.attempted_never_landed)} valueTone={(census.attempted_never_landed || 0) > 0 ? "warn" : "good"} testId="ops-warehouse-census-empty" />
-        <StatTile label="Given up" value={num(census.unfetchable)} valueTone={(census.unfetchable || 0) > 0 ? "warn" : "good"} testId="ops-warehouse-census-unfetchable" />
-        <StatTile label="Partly given up" value={num(census.partially_unfetchable)} testId="ops-warehouse-census-partial" />
-      </div>
-      {/* The refresh queue's own health. A completed job is deliberately
-          re-armed so it picks up newly printed sessions, so the question that
-          matters is not "is anything unverified" but "how far behind is the
-          furthest-behind symbol". */}
-      <Card
-        title="Refresh backlog"
-        info="Days since each job last landed a payload — the order the re-fetch queue drains in."
-        testId="ops-warehouse-backlog"
-      >
-        <p className="text-sm">
-          {num(backlog.tracked)} jobs tracked · median {num(backlog.median_days)}d behind · oldest {num(backlog.max_days)}d
-        </p>
-        {(backlog.oldest || []).length > 0 && (
-          <ul className="mt-2 space-y-1 text-xs" data-testid="ops-warehouse-backlog-list">
-            {backlog.oldest.map((row) => (
-              <li key={`${row.symbol}:${row.endpoint}`} className="flex items-center justify-between gap-3">
-                <span className="truncate">{row.symbol} · <span className="text-muted">{humanize(row.endpoint)}</span></span>
-                <Badge variant={tone(row.status)}>{num(row.stale_days)}d</Badge>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
-      {barData.length > 0 && (
-        <Card title="Jobs by data type" testId="ops-completeness">
-          <StackedStatusBar data={barData} series={WAREHOUSE_SERIES} label="Archive jobs by endpoint and status" testId="ops-warehouse-stack" />
-        </Card>
-      )}
-      <Table
-        testId="ops-warehouse-endpoints"
-        rows={warehouse.by_endpoint || []}
-        rowKey={(r) => r.endpoint}
-        columns={[
-          { key: "label", header: "Endpoint" },
-          { key: "total", header: "Jobs", align: "right", render: (r) => num(r.total) },
-          { key: "complete", header: "Complete", align: "right", render: (r) => num(r.counts?.complete) },
-          { key: "refresh_due", header: "Refresh due", align: "right", render: (r) => num(r.counts?.refresh_due) },
-          { key: "partial", header: "Rows missing", align: "right", render: (r) => num(r.counts?.partial) },
-          { key: "failed", header: "Failing", align: "right", render: (r) => num(r.counts?.failed) },
-          { key: "awaiting_data", header: "No payload", align: "right", render: (r) => num((r.counts?.awaiting_data || 0) + (r.counts?.not_tried || 0)) },
-          { key: "unfetchable", header: "Unfetchable", align: "right", render: (r) => num(r.counts?.unfetchable) },
-          { key: "suspended", header: "Suspended", align: "right", render: (r) => num(r.counts?.suspended) },
-          { key: "row_fill", header: "Row fill", align: "right", render: (r) => (r.row_fill_pct != null ? `${r.row_fill_pct}%` : "—") },
-        ]}
-      />
-    </div>
-  );
-}
-
-// eslint-disable-next-line no-unused-vars
-function TablesPanel({ overview }) {
-  const tables = overview?.coverage?.tables;
-  const rows = overview?.database_rows || [];
-  const inventory = overview?.admin_model_inventory || [];
-  if (!tables) return null;
-
-  const liveRows = rows.filter((r) => LIVE_TABLE_KEYS.has(r.key));
-  const whRows = rows.filter((r) => WH_TABLE_KEYS.has(r.key));
-  const delta24 = rows.reduce((s, r) => s + (Number(r.delta_24h) || 0), 0);
-  const splitDonut = [
-    { name: "Live pipeline", value: tables.live_row_total || 0 },
-    { name: "Warehouse", value: tables.warehouse_row_total || 0 },
-  ].filter((d) => d.value > 0);
-  const domainDonut = Object.entries(inventory.reduce((counts, row) => {
-    counts[row.app] = (counts[row.app] || 0) + 1;
-    return counts;
-  }, {})).map(([name, value]) => ({ name, value }));
-
-  const tableCol = [
-    { key: "label", header: "Table" },
-    { key: "count", header: "Rows", align: "right", render: (r) => num(r.count) },
-    { key: "bytes", header: "Size", align: "right", render: (r) => gb(r.bytes) },
-    {
-      key: "delta_24h",
-      header: "24h Δ",
-      align: "right",
-      render: (r) => (r.delta_24h == null ? "—" : <Delta value={r.delta_24h} format={(v) => num(v)} />),
-    },
-    {
-      key: "delta_7d",
-      header: "7d Δ",
-      align: "right",
-      // A table cannot shed more rows than it holds through ordinary churn, so a
-      // delta that large is a deletion -- a purge or a migration -- not a
-      // collapsing ingest. Candles showed -5,786,949 against 1,734,366 stored
-      // and read as a catastrophe with nothing to say otherwise.
-      render: (r) =>
-        r.delta_7d == null ? (
-          "—"
-        ) : (
-          <span
-            title={
-              Number(r.delta_7d) < -Number(r.count || 0)
-                ? "Larger than the table itself — rows were deleted in bulk (a purge or migration), not lost by the ingest."
-                : undefined
-            }
-          >
-            <Delta value={r.delta_7d} format={(v) => num(v)} />
-            {Number(r.delta_7d) < -Number(r.count || 0) && (
-              <span className="ml-1 text-muted" data-testid="ops-tables-bulk-delete">
-                (bulk delete)
-              </span>
-            )}
-          </span>
-        ),
-    },
-    { key: "latest", header: "Latest data", render: (r) => dateTime(r.latest) },
-  ];
-
-  const history = overview.database_history || [];
-
-  return (
-    <div className="space-y-4" data-testid="ops-tables">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatTile label="Total tracked rows" value={num((tables.live_row_total || 0) + (tables.warehouse_row_total || 0))} sub={`${num(liveRows.length + whRows.length)} tables`} />
-        <StatTile label="Live pipeline" value={num(tables.live_row_total)} sub="prices + snapshots" />
-        <StatTile label="Warehouse" value={num(tables.warehouse_row_total)} sub="marketdata history" />
-        <StatTile label="24h net growth" value={num(delta24)} sub="rows across all tables" valueTone={delta24 >= 0 ? "good" : "critical"} />
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {splitDonut.length > 0 && (
-          <Card title="Row split" subtitle="Live valuation tables vs warehouse storage." testId="ops-tables-split">
-            <Donut data={splitDonut} valueFormat={(v) => String(v)} />
-          </Card>
-        )}
-        <Card title="Prices row growth" subtitle="Append-only live price table over time." testId="ops-tables-prices-chart">
-          <CountTrend data={historySeries(history, "prices")} label="Price rows" color="var(--c-s2)" />
-        </Card>
-      </div>
-
-      <Card title="Live pipeline tables" subtitle="What feeds portfolio valuation and snapshots." testId="ops-tables-live">
-        <Table rows={liveRows} rowKey={(r) => r.key} columns={tableCol} empty="No live table stats." />
-      </Card>
-      <Card title="Warehouse tables" subtitle="Historical marketdata persisted from archive endpoints." testId="ops-tables-warehouse">
-        <Table rows={whRows} rowKey={(r) => r.key} columns={tableCol} empty="No warehouse table stats." />
-      </Card>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card title="Candles growth" testId="ops-tables-candles-chart">
-          <CountTrend data={historySeries(history, "candles")} label="Candle rows" color="var(--c-s3)" />
-        </Card>
-        <Card title="Transaction ticks growth" testId="ops-tables-ticks-chart">
-          <CountTrend data={historySeries(history, "stock_transaction_ticks")} label="Tick rows" color="var(--c-s4)" />
-        </Card>
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card title="All admin models" subtitle="Every registered table, grouped by application." testId="ops-tables-inventory-summary">
-          <StatTile label="Inspectable models" value={num(inventory.length)} sub="Open a row in Django admin for records and filters" />
-        </Card>
-        {domainDonut.length > 0 && (
-          <Card title="Models by application" testId="ops-tables-inventory-chart">
-            <Donut data={domainDonut} valueFormat={(value) => num(value)} />
-          </Card>
-        )}
-      </div>
-      <Card title="All tables" subtitle="Row counts are PostgreSQL estimates; a dash means not measured. Token secrets are never shown here." testId="ops-tables-inventory">
-        <Table
-          rows={inventory}
-          rowKey={(row) => row.admin_path}
-          empty="No admin models available."
-          columns={[
-            { key: "model", header: "Model", render: (row) => <a href={row.admin_path} className="text-link hover:underline">{row.model}</a> },
-            { key: "app", header: "Application" },
-            { key: "rows_estimated", header: "Approx. rows", align: "right", render: (row) => row.rows_estimated == null ? "—" : num(row.rows_estimated) },
-            { key: "bytes", header: "Size", align: "right", render: (row) => gb(row.bytes) },
-          ]}
-        />
-      </Card>
-    </div>
-  );
-}
 
 function WorkflowsPanel({ overview, wf, wfPage, setWfPage }) {
   const outcomes = totalsToDonut(overview?.workflows_24h?.outcomes, {
@@ -1158,159 +900,9 @@ function JobsHealthPanel({
   );
 }
 
-function ResearchCoveragePanel({ coverage }) {
-  if (!coverage) {
-    return (
-      <Card title="Research evidence coverage" testId="ops-research-coverage">
-        <p className="text-sm text-muted">No completed stock-universe scan yet.</p>
-      </Card>
-    );
-  }
-  const families = [
-    ["Monthly sales", "monthly_sales"],
-    ["Income", "income"],
-    ["Balance sheet", "balance_sheet"],
-  ];
-  const ageMs = Date.now() - Date.parse(coverage.finished_at);
-  const stale = Number.isFinite(ageMs) && ageMs > 36 * 60 * 60 * 1000;
-  return (
-    <Card title="Research evidence coverage" subtitle={`${num(coverage.window_days)}-day filing window · Jalali ${coverage.start_jalali} → ${coverage.end_jalali}`} testId="ops-research-coverage">
-      <p className="text-sm text-muted">Scanned {num(coverage.universe_size)} eligible TSE stocks from {dateTime(coverage.started_at)} to {dateTime(coverage.finished_at)}{stale ? " · stale scan" : ""}.</p>
-      <div className="mt-3 grid gap-3 md:grid-cols-3">
-        {families.map(([label, key]) => {
-          const counts = coverage.summary?.[key] || {};
-          return (
-            <div key={key} className="rounded-lg border border-border bg-panel-2 p-3 text-sm">
-              <h3 className="font-medium">{label}</h3>
-              <p className="mt-2">{num(counts.symbols_with_verified)} stocks with ≥1 verified period</p>
-              <p className="text-muted">{num(counts.symbols_fully_verified)} with every observed period verified</p>
-              <p className="text-muted">{num(counts.withheld_periods)} withheld filing periods</p>
-              <p className="text-muted">{num(counts.symbols_without_filing)} stocks with no qualifying period-end filing</p>
-            </div>
-          );
-        })}
-      </div>
-      <p className="mt-3 text-xs text-muted">This uses Explore eligibility at scan time. It does not re-read archived bytes or certify peer comparisons.</p>
-    </Card>
-  );
-}
 
-function CodalDirectPanel({ crawl }) {
-  if (!crawl || !crawl.enabled) return null;
-  return (
-    <Card
-      title="Filing list from codal.ir"
-      subtitle={crawl.promoting ? "codal.ir writes the filing list; BrsApi's Codal list is off." : "Shadow mode: crawled and compared, not yet the filing list."}
-      testId="ops-codal-direct"
-    >
-      <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-        <div><strong>{num(crawl.complete)}</strong> days reconciled <span className="text-muted">of {num(crawl.days)} crawled</span></div>
-        <div><strong>{num(crawl.failing)}</strong> days failing</div>
-        <div><strong>{num(crawl.letters)}</strong> letters crawled</div>
-        <div><strong>{num(crawl.promoted)}</strong> filings added from codal.ir</div>
-      </div>
-      <p className="mt-3 text-xs text-muted">
-        Crawled {crawl.oldest || "—"} → {crawl.newest || "—"}. Last reconciled day {crawl.last_success_at ? dateTime(crawl.last_success_at) : "never"}.
-      </p>
-    </Card>
-  );
-}
 
-function CodalHistoryPanel({ history }) {
-  if (!history) return null;
-  return (
-    <Card title="Historical announcement discovery" subtitle="Source-date windows; separate from verified financial figures." testId="ops-codal-history">
-      {history.leaf_windows ? (
-        <>
-          <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-            <div><strong>{num(history.symbols_started)}</strong> symbols with windows <span className="text-muted">· {num(history.catalog_stocks)} currently eligible stocks</span></div>
-            <div><strong>{num(history.verified_leaf_windows)}</strong> source-reconciled windows <span className="text-muted">of {num(history.leaf_windows)} leaf windows</span></div>
-            <div><strong>{num(history.open_leaf_windows)}</strong> open windows <span className="text-muted">({num(history.failed_leaf_windows)} failed)</span></div>
-            <div><strong>{num(history.stale_verified_leaf_windows)}</strong> verifications older than one year</div>
-          </div>
-          <p className="mt-3 text-xs text-muted">
-            Requested Jalali range {history.earliest_date} → {history.latest_date}; {num(history.split_parent_windows)} oversized windows split.
-            Last reconciled {history.last_verified_at ? dateTime(history.last_verified_at) : "never"}.
-          </p>
-        </>
-      ) : (
-        <p className="text-sm text-muted">No historical discovery windows have been created.</p>
-      )}
-      <p className="mt-3 text-xs text-muted">A source-reconciled window means its returned announcement keys were stored when checked. It does not certify complete issuer history, archived documents, or parsed financial statements.</p>
-      <a className="mt-2 inline-block text-sm text-link hover:underline" href="/admin/marketdata/codalhistorywindow/">Inspect source windows</a>
-    </Card>
-  );
-}
 
-// eslint-disable-next-line no-unused-vars
-function CodalPanel({ codal }) {
-  if (!codal) return null;
-  if (!codal.enabled) {
-    return (
-      <div className="space-y-4" data-testid="ops-codal">
-        <Card title="Codal is dormant" subtitle="The subsystem is switched off; nothing is running.">
-          <p className="text-sm text-muted">
-            No Codal extraction worker or schedule is active. Stored announcements
-            and {gb(codal.artifact_bytes)} of artifacts are kept untouched.
-            Re-enable with CODAL_ENABLED=1 once the origin is reachable from the host.
-          </p>
-        </Card>
-        <CodalDirectPanel crawl={codal.direct_discovery} />
-      <CodalHistoryPanel history={codal.history_discovery} />
-        <ResearchCoveragePanel coverage={codal.research_coverage} />
-      </div>
-    );
-  }
-  const statusDonut = totalsToDonut(codal.status_counts, {});
-  const blockedRate = codal.extract_runs_24h
-    ? Math.round((codal.blocked_network_24h / codal.extract_runs_24h) * 100)
-    : 0;
-
-  return (
-    <div className="space-y-4" data-testid="ops-codal">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatTile
-          label="Codal worker"
-          value={codal.worker_enabled ? "Enabled" : "Paused"}
-          sub={codal.worker_enabled ? "Extraction consumer configured" : "Queued jobs retained; no extraction consumer"}
-          valueTone={codal.worker_enabled ? "good" : "warn"}
-        />
-        <StatTile label="Extract runs (24h)" value={num(codal.extract_runs_24h)} sub={`${num(codal.blocked_network_24h)} blocked network`} />
-        <StatTile label="Blocked rate" value={`${blockedRate}%`} sub="Network blocks / runs" valueTone={blockedRate > 10 ? "warn" : "good"} />
-        <StatTile label="Artifact storage" value={gb(codal.artifact_bytes)} sub="On-disk Codal files" />
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card title="Report status mix" subtitle="CodalReport rows by parse state.">
-          {statusDonut.length ? (
-            <Donut data={statusDonut} valueFormat={(v) => String(v)} />
-          ) : (
-            <p className="text-sm text-muted">No Codal reports ingested yet.</p>
-          )}
-        </Card>
-        <Card title="Pipeline health">
-          <dl className="space-y-2 text-sm">
-            <div className="flex justify-between gap-3">
-              <dt className="text-muted">Last successful parse</dt>
-              <dd>{codal.last_success ? dateTime(codal.last_success) : "—"}</dd>
-            </div>
-            <div className="flex justify-between gap-3">
-              <dt className="text-muted">Blocked network (24h)</dt>
-              <dd>{num(codal.blocked_network_24h)} / {num(codal.extract_runs_24h)}</dd>
-            </div>
-            <div className="flex justify-between gap-3">
-              <dt className="text-muted">Queue</dt>
-              <dd>{codal.worker_enabled ? "Codal worker configured" : "Codal worker paused"}</dd>
-            </div>
-          </dl>
-        </Card>
-      </div>
-      <CodalDirectPanel crawl={codal.direct_discovery} />
-      <CodalHistoryPanel history={codal.history_discovery} />
-      <ResearchCoveragePanel coverage={codal.research_coverage} />
-    </div>
-  );
-}
 
 
 
@@ -2150,14 +1742,6 @@ function RecentAlertsCard({ alerts }) {
   );
 }
 
-function compact(n) {
-  if (n == null) return "—";
-  const v = Number(n);
-  if (Math.abs(v) >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
-  if (Math.abs(v) >= 1e3) return `${(v / 1e3).toFixed(1)}k`;
-  return String(v);
-}
-
 const LIGHT_DOT = {
   good: "bg-[var(--c-good)]",
   warn: "bg-[var(--c-warn)]",
@@ -2198,57 +1782,6 @@ function HealthLights({ overview, depths }) {
   );
 }
 
-function rowTone(pct) {
-  if (pct == null) return "neutral";
-  if (pct >= 99) return "good";
-  if (pct >= 90) return "warn";
-  return "critical";
-}
-
-/** "Do we have the data?" -- rows stored vs rows the provider says exist. */
-// eslint-disable-next-line no-unused-vars
-function VerifiedDataCard({ archive, warehouse }) {
-  const rows = (archive?.categories || [])
-    .filter((c) => (c.expected_rows || 0) > 0)
-    .sort((a, b) => (b.row_pct ?? 0) - (a.row_pct ?? 0));
-  return (
-    <Card
-      title="Data stored"
-      info="Bar: rows we hold out of rows the provider has. Small text: jobs re-checked since the last session."
-      actions={<span className="text-sm font-medium tabular">{warehouse?.row_fill_pct ?? "—"}%</span>}
-      testId="ops-picture-verified"
-    >
-      <div className="space-y-3">
-        {rows.map((c) => (
-          <InfraMeter
-            key={c.endpoint}
-            label={c.retired ? `${c.label} · live capture` : c.label}
-            valueLabel={`${c.row_pct ?? 0}%`}
-            pct={Math.round(c.row_pct ?? 0)}
-            tone={rowTone(c.row_pct)}
-            sub={`${compact(c.stored_rows)} / ${compact(c.expected_rows)} rows · ${c.progress_pct}% re-checked`}
-            testId={`ops-verified-${c.endpoint}`}
-          />
-        ))}
-        {!rows.length && <p className="text-sm text-muted">No archive jobs yet.</p>}
-      </div>
-    </Card>
-  );
-}
-
-const INGEST_KEYS = [
-  ["stock_transaction_ticks", "Trade ticks"],
-  ["stock_history_rows", "Stock daily"],
-  ["candles", "Candles"],
-  ["gold_currency_rows", "Gold & FX"],
-  ["announcements", "Codal filings"],
-  ["shareholders", "Shareholders"],
-];
-
-/** Rows added per day, from the 8-hourly count samples. A day with no sample
- *  stays a null slot, and a delta is taken only between ADJACENT measured days:
- *  bridging a collector outage would pile several days of growth onto one bar
- *  and let "last 7 days" span more than seven days. */
 export function dailyAdds(history, key, days = 30) {
   const lastByDay = new Map();
   for (const row of history || []) {
@@ -2274,68 +1807,6 @@ export function dailyAdds(history, key, days = 30) {
   return out.slice(-days);
 }
 
-// eslint-disable-next-line no-unused-vars
-function IngestCard({ history }) {
-  return (
-    <Card
-      title="Rows added per day"
-      info="Last 30 days. Big number = last 7 days. A flat run of empty bars means that feed stopped."
-      testId="ops-picture-ingest"
-    >
-      <div className="space-y-3">
-        {INGEST_KEYS.map(([key, label], i) => {
-          const series = dailyAdds(history, key);
-          const week = series.slice(-7).reduce((sum, d) => sum + (d.y || 0), 0);
-          return (
-            <div key={key} className="grid grid-cols-[7rem_1fr_4rem] items-center gap-3" data-testid={`ops-ingest-${key}`}>
-              <span className="text-sm text-muted">{label}</span>
-              {series.length ? (
-                <SparkBars data={series} label={`${label} added per day`} color={`var(--c-s${(i % 4) + 1})`} />
-              ) : (
-                <span className="text-xs text-muted">no samples</span>
-              )}
-              <span className="text-right text-sm font-medium tabular">+{compact(week)}</span>
-            </div>
-          );
-        })}
-      </div>
-    </Card>
-  );
-}
-
-const SOURCE_LABEL = { tsetmc: "TSE stocks", brs: "Gold, FX & crypto" };
-
-/** Who passes the data-quality gate, per source -- and why the rest don't. */
-// eslint-disable-next-line no-unused-vars
-function UsableCard({ integrity }) {
-  const sources = Object.entries(integrity?.by_source || {}).sort((a, b) => b[1].assessed - a[1].assessed);
-  return (
-    <Card
-      title="Usable by features"
-      info="Passing symbols feed Risk, Optimize and charts. Grey = never backfilled (no history yet). Red = history has gaps."
-      testId="ops-picture-usable"
-    >
-      <div className="space-y-4">
-        {sources.map(([source, b]) => (
-          <InfraMeter
-            key={source}
-            label={SOURCE_LABEL[source] || source}
-            valueLabel={`${num(b.passing)} / ${num(b.assessed)}`}
-            pct={pctOf(b.passing, b.assessed)}
-            segments={[
-              { key: "pass", pct: pctOf(b.passing, b.assessed), color: "bg-[var(--c-good)]", title: `Usable ${num(b.passing)}` },
-              { key: "nobf", pct: pctOf(b.not_backfilled, b.assessed), color: "bg-muted", title: `Not backfilled ${num(b.not_backfilled)}` },
-              { key: "gap", pct: pctOf(b.gappy, b.assessed), color: "bg-[var(--c-critical)]", title: `Gaps ${num(b.gappy)}` },
-            ]}
-            sub={`${pctOf(b.passing, b.assessed)}% usable · ${num(b.not_backfilled)} not backfilled · ${num(b.gappy)} with gaps`}
-            testId={`ops-usable-${source}`}
-          />
-        ))}
-        {!sources.length && <p className="text-sm text-muted">No symbols assessed yet.</p>}
-      </div>
-    </Card>
-  );
-}
 
 function OverviewPanel({ overview, depths, onNavigate, user }) {
   const cov = overview.coverage;
