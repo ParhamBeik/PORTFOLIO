@@ -433,7 +433,7 @@ services:
       minio:
         condition: service_healthy
     environment: *backend-env
-    command: celery -A config worker -l info --concurrency=2 -Q codal -n codal@%h --max-memory-per-child=600000
+    command: celery -A config worker -l info --concurrency=4 -Q codal -n codal@%h --max-memory-per-child=600000
     ulimits: *no-core
     cpu_shares: 256
     healthcheck:
@@ -445,8 +445,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1"
-          memory: 1280m
+          cpus: "1.5"
+          memory: 1536m
 
   celery_beat:
     build: ./backend
