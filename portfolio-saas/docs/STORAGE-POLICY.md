@@ -11,13 +11,20 @@ backups**. Portfolio features compute from its full history, so its data is
 2. **Compress losslessly, transparently.**
    - Ticks: TimescaleDB compresses chunks older than 7 days
      (`marketdata/0020`). Queries and inserts into old days still work.
+   - Derivative & market snapshots: `DerivativeSnapshot` and `MarketSnapshot`
+     are TimescaleDB hypertables compressed after 7 days (`marketdata/0027`).
    - Codal files: MinIO compresses on write
      (`MINIO_COMPRESSION_*` in `docker-compose.prod.yml`). Readers get identical
      bytes; `checksum_sha256` stays valid.
    - Any new large hypertable gets a compression policy in its migration; any
      new bucket stores through the same MinIO.
-3. **No backups or second copies** on the VPS, the Mac or external drives,
-   until a backup plan is written down and approved.
+3. **External-USB backup policy (approved 2026-11-28).**
+   - The VPS keeps strictly **one** rolling `zstd`-compressed encrypted
+     PostgreSQL dump in `/var/backups/portfolio/` (no multi-day retention on
+     the shared 99 GB SSD).
+   - Pull backups and cold archives onto an external USB drive via
+     `scripts/pull_vps_archive_to_usb.sh /Volumes/<DRIVE>` (never onto the
+     Mac's internal SSD).
 
 ## Why
 

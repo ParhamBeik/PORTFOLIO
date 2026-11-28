@@ -122,5 +122,9 @@ def test_ops_reads_the_newest_tick_day_from_chunk_metadata(timescale):
     ingest.ingest_transactions("SYM", "1405-05-24", payload, replace=True)
     ingest.ingest_transactions("SYM", "1405-05-26", payload, replace=True)
 
-    assert admin_telemetry._hypertables() == {_TICK}
+    assert admin_telemetry._hypertables() == {
+        _TICK,
+        "marketdata_derivativesnapshot",
+        "marketdata_marketsnapshot",
+    }
     assert admin_telemetry._latest_tick_day() == "1405-05-26"
