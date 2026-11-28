@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { translate, useLang } from "../i18n.js";
 import { Link } from "react-router-dom";
 import { getPerformance, snapshots, valuation } from "../api.js";
-import { Donut, MultiLineTrend, StackedShareTrend } from "../components/charts.jsx";
+import { Donut, MultiLineTrend } from "../components/charts.jsx";
 import { usePortfolio } from "../components/PortfolioContext.jsx";
 import {
   Async,
@@ -146,7 +146,6 @@ async function fetchAllPerformance(accounts, basis) {
 }
 
 function HistoryCharts({ accounts, basis }) {
-  const lang = useLang();
   const [range, setRange] = useState("90");
   const days = range === "all" ? "all" : Number(range);
   const accountKey = accounts.map((a) => a.id).join(",");
@@ -175,29 +174,15 @@ function HistoryCharts({ accounts, basis }) {
           const longTicks = range === "365" || range === "all";
           if (!chart.values.length) return <Empty>No snapshot history for this range.</Empty>;
           return (
-            <div className="space-y-6">
-              {chart.series.length > 1 && (
-                <div>
-                  <h3 className="mb-2 text-sm font-medium text-muted">{translate("Share of combined total", lang)}</h3>
-                  <StackedShareTrend
-                    series={chart.series}
-                    data={chart.shares}
-                    longTicks={longTicks}
-                    label="Portfolio share over time"
-                  />
-                </div>
-              )}
-              <div>
-                <h3 className="mb-2 text-sm font-medium text-muted">{translate("Absolute net worth", lang)}</h3>
-                <MultiLineTrend
-                  series={chart.series}
-                  data={chart.values}
-                  longTicks={longTicks}
-                  label="Portfolio values over time"
-                  formatValue={(v) => money(v, history.basis)}
-                  formatAxis={(v) => moneyCompact(v, history.basis)}
-                />
-              </div>
+            <div>
+              <MultiLineTrend
+                series={chart.series}
+                data={chart.values}
+                longTicks={longTicks}
+                label="Portfolio values over time"
+                formatValue={(v) => money(v, history.basis)}
+                formatAxis={(v) => moneyCompact(v, history.basis)}
+              />
             </div>
           );
         }}
@@ -288,7 +273,7 @@ function AssetMix({ accounts, basis }) {
           const groups = allocationByClass(account.items, account.cash_tomans);
           if (!groups.length) return null;
           return (
-            <Disclosure key={account.id} summary={`${account.name} · ${money(account.total, basis)}`} testId={`breakdown-mix-${account.id}`} open>
+            <Disclosure key={account.id} summary={`${account.name} · ${money(account.total, basis)}`} testId={`breakdown-mix-${account.id}`}>
               <Donut data={groups} height={220} totalLabel="Total assets" valueFormat={(v) => money(v, basis)} testId={`breakdown-donut-${account.id}`} />
             </Disclosure>
           );

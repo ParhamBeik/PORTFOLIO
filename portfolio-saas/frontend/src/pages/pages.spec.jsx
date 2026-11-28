@@ -36,14 +36,8 @@ vi.mock("../api.js", () => ({
 // Mock charts component to avoid canvas context dependencies in jsdom
 vi.mock("../components/charts.jsx", () => ({
   AreaTrend: () => <div data-testid="chart-area-trend" />,
-  CorrelationHeatmap: () => <div data-testid="chart-correlation-heatmap" />,
-  DiversifierScatter: () => <div data-testid="chart-diversifier-scatter" />,
   Donut: () => <div data-testid="chart-donut" />,
-  MoneyVsRisk: () => <div data-testid="chart-money-vs-risk" />,
   MultiLineTrend: () => <div data-testid="chart-multi-line-trend" />,
-  DriftBars: () => <div data-testid="chart-drift-bars" />,
-  GroupedBar: () => <div data-testid="chart-grouped-bar" />,
-  RiskScatter: () => <div data-testid="chart-risk-scatter" />,
   STATUS_COLOR: { good: "#3fb950", warn: "#d29922", critical: "#f85149" },
   useChartTokens: () => ({
     text: "#ffffff",
@@ -181,19 +175,11 @@ describe("Page Rendering Tests", () => {
       expect(screen.getByText(/500,000,000 T/i)).toBeInTheDocument();
     });
     expect(screen.getByText(/Kama Stock/i)).toBeInTheDocument();
-    const holdings = await screen.findByTestId("dashboard-holdings");
+    expect(await screen.findByTestId("dashboard-holdings")).toBeInTheDocument();
     expect(screen.getByTestId("dashboard-trend")).toBeInTheDocument();
     expect(screen.getByTestId("dashboard-allocation")).toBeInTheDocument();
-    expect(screen.getByTestId("dashboard-performance")).toBeInTheDocument();
-    // Holdings, then returns, then debts. History quality has its own tab.
-    const performance = screen.getByTestId("dashboard-performance");
-    const liabilities = await screen.findByTestId("dashboard-liabilities");
-    expect(
-      holdings.compareDocumentPosition(performance) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
-    expect(
-      performance.compareDocumentPosition(liabilities) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
+    expect(screen.getByTestId("dashboard-more")).toBeInTheDocument();
+    expect(screen.queryByTestId("dashboard-performance")).toBeNull();
     expect(screen.queryByTestId("dashboard-quality")).toBeNull();
     expect(screen.queryByTestId("dashboard-risk")).toBeNull();
     expect(screen.queryByTestId("dashboard-insights")).toBeNull();
@@ -204,47 +190,6 @@ describe("Page Rendering Tests", () => {
     // Toggling Holdings to "Profit & cost" displays position cost basis and P&L inside the unified Holdings card
     fireEvent.click(screen.getByTestId("dashboard-holdings-view-return"));
     expect(await screen.findByTestId("dashboard-performance-table")).toHaveTextContent("250,000 T");
-  });
-
-  it("asks before selling all of an edited holding", async () => {
-    api.valuation.mockResolvedValue({
-      total: 500000000,
-      items: [{
-        key: "kama_stock",
-        name: "Kama Stock",
-        quantity: "1000",
-        quantity_step: "1",
-        unit_price: 3000,
-        value: 300000,
-        quality_status: "complete",
-      }],
-    });
-    api.snapshots.mockResolvedValue({ series: [] });
-    api.getPerformance.mockResolvedValue({ performance_available: false });
-    api.accountDataQuality.mockResolvedValue({ quality_status: "complete", assets: [] });
-    api.analytics.mockResolvedValue({});
-    api.diversifiers.mockResolvedValue([]);
-    api.benchmarks.mockResolvedValue({ benchmarks: [] });
-    api.insights.mockResolvedValue({});
-    api.updateHolding.mockResolvedValue({});
-    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
-
-    render(<MemoryRouter><Dashboard /></MemoryRouter>);
-    fireEvent.click(await screen.findByTestId("dashboard-holdings-manage-edit"));
-    fireEvent.change(screen.getByTestId("dashboard-holdings-edit-qty"), {
-      target: { value: "0" },
-    });
-    fireEvent.click(screen.getByTestId("dashboard-holdings-save"));
-
-    expect(confirm).toHaveBeenCalledWith(
-      "Sell all of \u2068Kama Stock\u2069? This records a sale in your ledger and removes it from holdings."
-    );
-    expect(api.updateHolding).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByTestId("dashboard-holdings-save"));
-    await waitFor(() => expect(api.updateHolding).toHaveBeenCalledWith(1, 42, {
-      quantity: "0", confirmSellAll: true, areaSqm: undefined, unitPriceTomans: undefined,
-    }));
   });
 
   it("builds the table one target at a time and follows adds and removals", async () => {

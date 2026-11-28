@@ -573,6 +573,7 @@ function LiveCoveragePanel({ coverage }) {
   );
 }
 
+// eslint-disable-next-line no-unused-vars
 function WarehouseCoveragePanel({ warehouse }) {
   if (!warehouse) return null;
   const barData = (warehouse.by_endpoint || [])
@@ -678,6 +679,7 @@ function WarehouseCoveragePanel({ warehouse }) {
   );
 }
 
+// eslint-disable-next-line no-unused-vars
 function TablesPanel({ overview }) {
   const tables = overview?.coverage?.tables;
   const rows = overview?.database_rows || [];
@@ -1240,6 +1242,7 @@ function CodalHistoryPanel({ history }) {
   );
 }
 
+// eslint-disable-next-line no-unused-vars
 function CodalPanel({ codal }) {
   if (!codal) return null;
   if (!codal.enabled) {
@@ -1721,12 +1724,16 @@ function MembersPanel() {
   const [search, setSearch] = useState("");
   const [searchDebounced, setSearchDebounced] = useState("");
   const [members, setMembers] = useState([]);
+  const [page, setPage] = useState(1);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState(0);
 
   useEffect(() => {
-    const id = setTimeout(() => setSearchDebounced(search.trim()), 250);
+    const id = setTimeout(() => {
+      setSearchDebounced(search.trim());
+      setPage(1);
+    }, 250);
     return () => clearTimeout(id);
   }, [search]);
 
@@ -1852,12 +1859,20 @@ function MembersPanel() {
       )}
       <Table
         columns={columns}
-        rows={members}
+        rows={members.slice((page - 1) * 20, page * 20)}
         rowKey={(row) => row.id}
         empty="No members match that search."
         testId="ops-members-table"
         caption="Registered members and their access status"
       />
+      {members.length > 20 && (
+        <Pager
+          page={page}
+          totalPages={Math.ceil(members.length / 20)}
+          onPage={setPage}
+          testId="ops-members-pager"
+        />
+      )}
     </Card>
   );
 }
@@ -2191,6 +2206,7 @@ function rowTone(pct) {
 }
 
 /** "Do we have the data?" -- rows stored vs rows the provider says exist. */
+// eslint-disable-next-line no-unused-vars
 function VerifiedDataCard({ archive, warehouse }) {
   const rows = (archive?.categories || [])
     .filter((c) => (c.expected_rows || 0) > 0)
@@ -2258,6 +2274,7 @@ export function dailyAdds(history, key, days = 30) {
   return out.slice(-days);
 }
 
+// eslint-disable-next-line no-unused-vars
 function IngestCard({ history }) {
   return (
     <Card
@@ -2289,6 +2306,7 @@ function IngestCard({ history }) {
 const SOURCE_LABEL = { tsetmc: "TSE stocks", brs: "Gold, FX & crypto" };
 
 /** Who passes the data-quality gate, per source -- and why the rest don't. */
+// eslint-disable-next-line no-unused-vars
 function UsableCard({ integrity }) {
   const sources = Object.entries(integrity?.by_source || {}).sort((a, b) => b[1].assessed - a[1].assessed);
   return (
@@ -2324,14 +2342,22 @@ function OverviewPanel({ overview, depths, onNavigate, user }) {
   return (
     <div className="space-y-4" data-testid="ops-overview">
       <HealthLights overview={overview} depths={depths} />
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
-        <VerifiedDataCard archive={overview.archive} warehouse={cov?.warehouse} />
-        <IngestCard history={overview.database_history} />
-        <UsableCard integrity={overview.integrity} />
-      </div>
       <AttentionPanel liveHeld={cov?.live?.held} warehouse={cov?.warehouse} onNavigate={onNavigate} />
       <RecentAlertsCard alerts={overview.recent_alerts} />
-      <Card title="People" testId="ops-overview-users">
+      <Card
+        title="People"
+        testId="ops-overview-users"
+        actions={(
+          <a
+            href="/admin/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-accent underline underline-offset-2"
+          >
+            Open Django Admin
+          </a>
+        )}
+      >
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
           <StatTile label="Users" value={num(overview.users?.total)} sub={`${num(overview.users?.active)} active`} testId="ops-overview-users-total" />
           <StatTile label="Portfolios" value={num(overview.users?.accounts)} sub={`${num(overview.users?.holdings)} holdings`} />
@@ -2536,10 +2562,9 @@ export default function Ops({ user }) {
         value={tab}
         onChange={setTab}
         options={[
-          { value: "overview", label: "Overview" },
-          { value: "data", label: "Data" },
-          { value: "jobs", label: "Jobs" },
-          { value: "asset", label: "Asset" },
+          { value: "overview", label: "Health & Alerts" },
+          { value: "jobs", label: "Jobs & Failures" },
+          { value: "asset", label: "Asset Inspector" },
         ]}
       />
 
@@ -2548,35 +2573,9 @@ export default function Ops({ user }) {
           <OverviewPanel
             overview={overview}
             depths={depths}
-            onNavigate={setTab}
+            onNavigate={(next) => setTab(next === "data" ? "jobs" : next)}
             user={user}
           />
-        )}
-
-        {tab === "data" && overview?.coverage && (
-          <>
-            <WarehouseCoveragePanel warehouse={overview.coverage.warehouse} />
-            {/* Windows GROW: every state starts at the seed and
-                `grow_tick_windows` widens it toward the clamp. This
-                card used to print the seed setting alone, so it read "90d
-                window" while symbols were already holding 12,000 days. */}
-            <Card
-              title="Tick window"
-              info="Per-symbol windows widen as each symbol completes; the seed is only where they start."
-              testId="ops-tick-coverage"
-            >
-              <p className="text-sm">
-                {num(overview.tick_coverage?.complete)} verified / {num(overview.tick_coverage?.total)} jobs ({overview.tick_coverage?.progress_pct || 0}%)
-              </p>
-              <p className="text-sm text-muted">
-                Window {num(overview.tick_coverage?.window_days_min)}–{num(overview.tick_coverage?.window_days_max)}d
-                (avg {num(overview.tick_coverage?.window_days_avg)}d, seed {num(overview.tick_coverage?.window_days_seed)}d)
-              </p>
-              <p className="text-sm text-muted">{overview.tick_coverage?.oldest || "—"} → {overview.tick_coverage?.newest || "—"}</p>
-            </Card>
-            <TablesPanel overview={overview} />
-            <CodalPanel codal={overview.codal} />
-          </>
         )}
 
         {tab === "jobs" && overview && <SystemPanel overview={overview} depths={depths} tickSeries={tickSeries} />}

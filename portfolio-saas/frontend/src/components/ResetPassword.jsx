@@ -68,7 +68,7 @@ export default function ResetPassword() {
         {done ? (
           <p className="mt-4 text-sm text-[var(--c-good-text)]" data-testid="reset-done">
             {t("Password updated.")}{" "}
-            <Link to="/" className="underline">
+            <Link to="/login" className="underline">
               {t("Sign in with the new password.")}
             </Link>
           </p>
@@ -114,7 +114,7 @@ export default function ResetPassword() {
         )}
 
         <p className="mt-4 text-sm">
-          <Link to="/" className="text-[var(--c-accent-text)] underline underline-offset-2">
+          <Link to="/login" className="text-[var(--c-accent-text)] underline underline-offset-2">
             {t("Back to sign in")}
           </Link>
         </p>

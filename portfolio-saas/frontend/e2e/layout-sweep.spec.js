@@ -122,7 +122,7 @@ async function settle(page) {
 }
 
 const WIDTHS = [360, 390, 768, 1280, 1920];
-const ROUTES = ["/", "/?view=breakdown", "/activity", "/compare", "/risk"];
+const ROUTES = ["/", "/?view=breakdown", "/activity", "/compare"];
 
 for (const width of WIDTHS) {
   for (const scheme of ["light", "dark"]) {
@@ -242,20 +242,16 @@ test("the Persian sign-in page leaves no English, and offers the language switch
 });
 
 test("switching language on an open page re-renders all of its text", async ({ page }) => {
-  // A component that calls translate() directly, without useT/useLang, keeps
-  // the old language until something else re-renders it. Price history did.
   await page.setViewportSize({ width: 1440, height: 900 });
   await fixtureApi(page, { lang: "en" });
-  await page.route("**/api/prices/history/**", (route) =>
+  await page.route("**/api/research/**", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
   );
-  await page.goto("/research?view=prices");
-  const picker = page.getByRole("combobox", { name: "Asset", exact: true });
-  await expect(picker).toBeVisible();
+  await page.goto("/research?view=companies");
+  await expect(page.getByTestId("research-section-companies")).toHaveText("Companies");
   await page.getByTestId("lang-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
-  await expect(picker).toHaveCount(0);
-  await expect(page.locator("option", { hasText: "Choose…" })).toHaveCount(0);
+  await expect(page.getByTestId("research-section-companies")).not.toHaveText("Companies");
 });
 
 test("a portfolio emptied to zero keeps its history; a new one gets the first-step card", async ({ page }) => {

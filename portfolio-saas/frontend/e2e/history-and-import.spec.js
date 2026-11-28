@@ -9,12 +9,9 @@ test.describe("history and import surfaces", () => {
     }
   });
 
-  test("shows a single-asset history answer", async ({ page }) => {
-    await page.goto("/research?view=prices");
-    await expect(page.getByTestId("asset-history-card")).toBeVisible({ timeout: 20000 });
-    await expect(
-      page.getByTestId("asset-history-result").or(page.getByTestId("asset-history-empty")).first()
-    ).toBeVisible({ timeout: 30000 });
+  test("shows company research", async ({ page }) => {
+    await page.goto("/research?view=companies");
+    await expect(page.getByTestId("research-section")).toBeVisible({ timeout: 20000 });
   });
 
   test("validates a CSV before offering import", async ({ page }) => {

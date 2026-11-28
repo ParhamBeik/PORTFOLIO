@@ -41,7 +41,7 @@ for (const width of [390, 768, 1366]) {
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.setViewportSize({ width, height: 850 });
     await fixtureApi(page);
-    for (const path of ["/", "/activity", "/research", "/compare", "/risk", "/ops", "/onboarding"]) {
+    for (const path of ["/", "/activity", "/research", "/compare", "/ops", "/onboarding"]) {
       await page.goto(path);
       // The scope controls are the header's one fixture at every width; the
       // brand steps aside on a phone, where the Home tab is the way home.

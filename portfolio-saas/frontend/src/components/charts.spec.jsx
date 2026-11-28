@@ -20,15 +20,9 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   AreaTrend,
-  CorrelationHeatmap,
   CountTrend,
-  DiversifierScatter,
   Donut,
-  DriftBars,
-  GroupedBar,
-  MoneyVsRisk,
   MultiLineTrend,
-  RiskScatter,
   StackedShareTrend,
   StackedStatusBar,
 } from "./charts.jsx";
@@ -143,22 +137,8 @@ describe("every chart wrapper completes a real render pass", () => {
       />,
     ],
     [
-      "GroupedBar",
-      <GroupedBar
-        data={[{ name: "Mine", values: [1, 2] }, { name: "Optimal", values: [2, 1] }]}
-        labels={["Gold", "Stock"]}
-      />,
-    ],
-    [
       "Donut",
       <Donut data={[{ name: "Gold", value: 60 }, { name: "Stock", value: 40 }]} />,
-    ],
-    [
-      "RiskScatter",
-      <RiskScatter
-        frontier={[{ risk: 0.1, ret: 0.05 }, { risk: 0.2, ret: 0.09 }]}
-        points={[{ name: "Mine", risk: 0.15, ret: 0.06 }]}
-      />,
     ],
     ["CountTrend", <CountTrend data={[{ date: "1405-05-01", value: 5 }, { date: "1405-05-02", value: 7 }]} />],
     [
@@ -166,34 +146,6 @@ describe("every chart wrapper completes a real render pass", () => {
       <StackedStatusBar
         data={[{ label: "candles", ok: 10, partial: 2, missing: 1 }]}
         seriesKeys={["ok", "partial", "missing"]}
-      />,
-    ],
-    [
-      "MoneyVsRisk",
-      <MoneyVsRisk
-        rows={[
-          { key: "Gold", weight_share: 0.6, risk_share: 0.45, gap: -0.15 },
-          { key: "Stock", weight_share: 0.4, risk_share: 0.55, gap: 0.15 },
-        ]}
-        valueFor={() => 1000}
-      />,
-    ],
-    [
-      "CorrelationHeatmap",
-      <CorrelationHeatmap assets={["Gold", "Stock"]} matrix={[[1, 0.3], [0.3, 1]]} />,
-    ],
-    [
-      "DriftBars",
-      <DriftBars rows={[{ name: "Gold", drift: 0.05 }, { name: "Stock", drift: -0.03 }]} />,
-    ],
-    [
-      "DiversifierScatter",
-      <DiversifierScatter
-        candidates={[
-          { key: "Gold", vol_reduction: 0.08, total_return: 0.22, correlation: 0.15 },
-          { key: "Stock", vol_reduction: 0.03, total_return: 0.11, correlation: 0.62 },
-        ]}
-        held={[{ key: "Cash", vol_reduction: 0.01, total_return: 0.02, correlation: 0.05 }]}
       />,
     ],
   ];

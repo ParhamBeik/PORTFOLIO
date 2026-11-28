@@ -15,9 +15,6 @@ const PAGES = [
   { to: "/activity", label: "Activity" },
   { to: "/research", label: "Research" },
   { to: "/compare", label: "Compare" },
-  // Beta: its models have not passed the source checks the rest of the app
-  // is held to, and the label says so wherever the link appears.
-  { to: "/risk", label: "Risk", beta: true },
 ];
 
 // Nominal Toman and verified USD only. Real Toman (CPI) and USDT read as two
@@ -40,7 +37,7 @@ function MenuIcon({ open }) {
   );
 }
 
-function NavItem({ to, end, testId, children, onClick, beta }) {
+function NavItem({ to, end, testId, children, onClick }) {
   const t = useT();
   return (
     <NavLink
@@ -51,17 +48,7 @@ function NavItem({ to, end, testId, children, onClick, beta }) {
       className={({ isActive }) => `app-nav-link${isActive ? " is-active" : ""}`}
     >
       {t(children)}
-      {beta && <BetaTag />}
     </NavLink>
-  );
-}
-
-function BetaTag() {
-  const t = useT();
-  return (
-    <span className="ms-1.5 rounded border border-border px-1 py-px text-[10px] font-medium tracking-wide text-muted uppercase">
-      {t("Beta")}
-    </span>
   );
 }
 
@@ -79,7 +66,7 @@ function NavLinks({ admin, suffix = "", onNavigate }) {
   return (
     <>
       {PAGES.map((p) => (
-        <NavItem key={p.to} to={p.to} end={p.end} beta={p.beta} testId={id(p.label)} onClick={onNavigate}>
+        <NavItem key={p.to} to={p.to} end={p.end} testId={id(p.label)} onClick={onNavigate}>
           {p.label}
         </NavItem>
       ))}
@@ -113,7 +100,11 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
     if (!open) return undefined;
     const opener = document.activeElement;
     const onKey = (e) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      // Don't close the drawer if a modal dialog is open above it.
+      const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
+      if (dialogs.length > 1) return;
+      onClose();
     };
     document.addEventListener("keydown", onKey);
     const previous = document.body.style.overflow;
@@ -189,7 +180,7 @@ function NavDrawer({ open, onClose, user, onLogout, onUserChange }) {
  * "+ trade" button -- recording a trade right after the broker fills it is the
  * one task that has to take seconds. The drawer still holds everything else.
  */
-const TABS = PAGES.filter((p) => p.to !== "/risk");
+const TABS = PAGES;
 
 function TabIcon({ to }) {
   if (to === "/") {

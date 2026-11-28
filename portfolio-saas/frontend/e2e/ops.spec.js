@@ -22,16 +22,6 @@ test.describe("ops center", () => {
     await expect(page.getByTestId("ops-overview")).toBeVisible();
     await expect(page.getByTestId("ops-overview-alerts")).toBeVisible();
     await expect(page.getByTestId("ops-health-lights")).toBeVisible();
-    await expect(page.getByTestId("ops-picture-verified")).toBeVisible();
-    await expect(page.getByTestId("ops-picture-ingest")).toBeVisible();
-    await expect(page.getByTestId("ops-picture-usable")).toBeVisible();
-    await page.getByTestId("ops-tabs-data").click();
-    await expect(page.getByTestId("ops-warehouse")).toBeVisible();
-    await expect(page.getByTestId("ops-warehouse-census")).toBeVisible();
-    await expect(page.getByTestId("ops-warehouse-census-fetched")).toBeVisible();
-    await expect(page.getByTestId("ops-tables")).toBeVisible();
-    await expect(page.getByTestId("ops-codal")).toBeVisible();
-    await expect(page.getByTestId("ops-research-coverage")).toBeVisible();
     await page.getByTestId("ops-tabs-jobs").click();
     await expect(page.getByTestId("ops-live-held")).toBeVisible();
     await expect(page.getByTestId("ops-overview-quota")).toBeVisible();

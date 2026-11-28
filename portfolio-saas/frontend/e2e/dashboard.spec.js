@@ -1,23 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { clickTab, requireLogin } from "./helpers.js";
 
-/**
- * `toBeVisible()` is not enough for a cell in a horizontally scrolling table.
- *
- * The holdings table is 12 columns wide and overflows its card, so a Save or
- * Delete button appended as the LAST column sat hundreds of pixels past the
- * right edge — present, non-empty, "visible" to Playwright, and unreachable to
- * the reader, who concluded the buttons did nothing. This asserts the thing the
- * user actually needs: the control is inside the scrolled viewport, unscrolled.
- */
-async function expectWithinScrollView(locator, containerTestId, page) {
-  const box = await locator.boundingBox();
-  const container = await page.getByTestId(containerTestId).boundingBox();
-  expect(box, "control has no box").not.toBeNull();
-  expect(box.x).toBeGreaterThanOrEqual(container.x - 1);
-  expect(box.x + box.width).toBeLessThanOrEqual(container.x + container.width + 1);
-}
-
 test.describe("dashboard", () => {
   test.beforeEach(async ({ page }) => {
     await requireLogin(page, test);
@@ -124,21 +107,7 @@ test.describe("dashboard", () => {
     await expect(scope).toBeVisible({ timeout: 15000 });
     await scope.selectOption("");
 
-    await expect.soft(page.getByTestId("dashboard-holdings-manage-edit")).toBeVisible({ timeout: 15000 });
-    await expect.soft(page.getByTestId("dashboard-holdings-manage-delete")).toBeVisible();
-
-    await page.getByTestId("dashboard-holdings-manage-edit").click();
-    const qtyEdit = page.getByTestId("dashboard-holdings-edit-qty").first();
-    if (await qtyEdit.count()) {
-      await expect.soft(qtyEdit).toBeVisible();
-      const save = page.getByTestId("dashboard-holdings-save").first();
-      await expect.soft(save).toBeVisible();
-      await expectWithinScrollView(save, "dashboard-holdings", page);
-    }
-    // Every holding is renamable, not just house and manual rows.
-    await expect
-      .soft(page.getByTestId("dashboard-holdings-edit-name").first())
-      .toBeVisible();
+    await expect.soft(page.getByTestId("dashboard-holdings-manage-link")).toBeVisible({ timeout: 15000 });
   });
 
   test("basis switch if present", async ({ page }) => {
@@ -175,50 +144,6 @@ test.describe("dashboard", () => {
     await expect(page.getByTestId("add-transaction-category-gold")).toBeVisible();
     await page.getByTestId("add-transaction-close").click();
     await expect(page.getByTestId("add-transaction")).toHaveCount(0);
-
-    await expect.soft(page.getByTestId("dashboard-holdings-manage-edit")).toBeVisible();
-    await page.getByTestId("dashboard-holdings-manage-edit").click();
-    const qtyEdit = page.getByTestId("dashboard-holdings-edit-qty").first();
-    const priceEdit = page.getByTestId("dashboard-holdings-edit-price").first();
-    const saveBtn = page.getByTestId("dashboard-holdings-save").first();
-    if (await qtyEdit.count()) {
-      await expect.soft(qtyEdit).toBeVisible();
-      await expect.soft(saveBtn).toBeVisible();
-      await expect.soft(saveBtn).toBeDisabled();
-    }
-    if (await priceEdit.count()) {
-      await expect.soft(priceEdit).toBeVisible();
-    }
-
-    // The quantity spinner has to move in whole units for a counted asset. A
-    // step of "any" walked stock positions in fractions of a share, and the
-    // arrow key is the fastest way to prove which one the box is offering:
-    // a counted row goes 12 -> 13, never 12 -> 12.0001.
-    if (await qtyEdit.count()) {
-      const step = await qtyEdit.getAttribute("step");
-      expect.soft(step, "quantity box declares a step").not.toBe("any");
-      if (step === "1") {
-        // Seeded from the API's Decimal string, so a holding of four coins
-        // opened the editor reading "4.000000" beside a column printing "4".
-        expect.soft(await qtyEdit.inputValue()).not.toMatch(/\.\d*0$/);
-        const before = Number(await qtyEdit.inputValue());
-        await qtyEdit.press("ArrowUp");
-        const after = Number(await qtyEdit.inputValue());
-        expect.soft(after).toBe(before + 1);
-        await qtyEdit.press("ArrowDown");
-        expect.soft(Number(await qtyEdit.inputValue())).toBe(before);
-      }
-    }
-
-    await page.getByTestId("dashboard-holdings-manage-delete").click();
-    // Deleting is destructive, so the mode says what it does before you click.
-    await expect
-      .soft(page.getByTestId("dashboard-holdings-delete-hint"))
-      .toBeVisible();
-    const del = page.getByTestId("dashboard-holdings-delete").first();
-    if (await del.count()) {
-      await expect.soft(del).toBeVisible();
-      await expectWithinScrollView(del, "dashboard-holdings", page);
-    }
+    await expect.soft(page.getByTestId("dashboard-holdings-manage-link")).toBeVisible();
   });
 });

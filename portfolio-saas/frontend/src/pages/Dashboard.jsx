@@ -10,8 +10,6 @@ import {
   valuation,
   snapshots,
   getPerformance,
-  updateHolding,
-  removeHolding,
   adminAssetEvidence,
   benchmarks,
 } from "../api.js";
@@ -23,22 +21,18 @@ import {
   holdingLabel,
   humanize,
   indexPoint,
-  isWholeUnit,
   money,
   num,
   pct,
   pctShare,
   isLastClose,
   priceStatus,
-  perfLabel,
   perSqm,
-  PERF_UNLOCK_HINT,
   quantity,
   signedToman,
   toman,
   unitPrice,
   isolate,
-  trimZeros,
 } from "../format.js";
 import {
   AreaTrend,
@@ -47,14 +41,12 @@ import {
 } from "../components/charts.jsx";
 import {
   Card,
-  StatTile,
   Badge,
   Button,
   Delta,
   Tabs,
   Table,
   Empty,
-  ErrorState,
   Async,
   Disclosure,
   toneClass,
@@ -121,7 +113,7 @@ function MarketClocks({ data }) {
       <Link
         to="/?view=health"
         data-testid="dashboard-data-health-link"
-        className="text-xs underline decoration-border underline-offset-2 hover:text-text"
+        className="inline-flex items-center gap-1 rounded-full border border-border bg-panel-2 px-2.5 py-0.5 text-xs font-medium text-text hover:border-accent"
       >
         {t("Data health")}
       </Link>
@@ -336,7 +328,7 @@ function TrendCard({ activeId, basis }) {
       info={<p>{translate(TREND_INFO[mode], lang)}</p>}
       className="h-full"
       actions={(
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="flex flex-wrap items-center gap-2">
           <Tabs
             options={INFLATION_VIEWS}
             value={mode}
@@ -545,15 +537,6 @@ async function fetchPerformance(targets, accounts, basis) {
   return getPerformance(targets.ids[0], basis);
 }
 
-function PerformanceMetrics({ data }) {
-  return (
-    <div className="grid grid-cols-2 gap-3 sm:max-w-md">
-      <StatTile label={perfLabel.twr} value={pct(data.twr)} valueTone={toneFor(data.twr)} testId="dashboard-performance-twr" />
-      <StatTile label={perfLabel.xirr} value={pct(data.xirr)} valueTone={toneFor(data.xirr)} testId="dashboard-performance-xirr" />
-    </div>
-  );
-}
-
 /** `assets` map -> rows, plus the account name when several are merged. */
 function positionRows(assets, accountName) {
   return Object.entries(assets || {}).map(([key, v]) => ({
@@ -641,15 +624,6 @@ function PositionsTable({ rows, showAccount }) {
   );
 }
 
-/** The two annualized numbers are still locked; say so above the table. */
-function PerformanceLockedNote({ detail }) {
-  return (
-    <p className="mb-3 text-xs text-muted" data-testid="dashboard-performance-locked-note">
-      {serverText(detail || PERF_UNLOCK_HINT)}
-    </p>
-  );
-}
-
 /**
  * A positions table is only worth showing when it says something the holdings
  * table above does not: what was paid. With no purchases recorded every cost
@@ -669,92 +643,6 @@ function NoCostYet() {
       Record what you paid to see profit and loss.
     </Empty>
   );
-}
-
-function PerformanceCard({ activeId, accounts, targets, state }) {
-  const t = useT();
-  const infoText = (
-    <p>
-      {t("These measure the return on the money put in, so they need a tracked opening balance.")}{" "}
-      <Link to="/compare" className="underline hover:text-text">{t("Price-based returns are on Compare.")}</Link>
-    </p>
-  );
-
-  if (targets.ids.length === 0) {
-    return (
-      <Card title="Performance" testId="dashboard-performance" info={infoText}>
-        <Empty testId="dashboard-performance-empty">Add a portfolio to track performance.</Empty>
-      </Card>
-    );
-  }
-
-  return (
-    <Card title="Performance" testId="dashboard-performance" info={infoText}>
-      <Async {...state} testId="dashboard-performance-body">
-        {(data) => {
-          if (data.aggregate) {
-            const ready = data.accounts.filter((row) => row.performance_available);
-            if (!ready.length) {
-              return <PerformanceLockedNote detail={data.accounts[0]?.detail} />;
-            }
-            return (
-              <>
-                {activeId == null && accounts.length > 1 && (
-                  <p className="mb-3 text-xs text-muted">{t("All portfolios with a starting balance.")}</p>
-                )}
-                <Table
-                  testId="dashboard-performance-table"
-                  caption="Portfolio performance"
-                  mobileCards
-                  rowKey={(r) => r.id}
-                  rows={data.accounts}
-                  columns={[
-                    { key: "name", header: "Portfolio", render: (r) => r.name },
-                    {
-                      key: "twr",
-                      header: perfLabel.twr,
-                      align: "right",
-                      render: (r) => (r.performance_available ? pct(r.twr) : "—"),
-                    },
-                    {
-                      key: "xirr",
-                      header: perfLabel.xirr,
-                      align: "right",
-                      render: (r) => (r.performance_available ? pct(r.xirr) : "—"),
-                    },
-                    {
-                      key: "status",
-                      header: "Status",
-                      render: (r) =>
-                        r.performance_available ? (
-                          <Badge variant="good">Ready</Badge>
-                        ) : (
-                          <span className="text-xs text-muted">{serverText(r.detail || "Needs ledger")}</span>
-                        ),
-                    },
-                  ]}
-                />
-              </>
-            );
-          }
-          if (!data.performance_available) {
-            return <PerformanceLockedNote detail={data.detail} />;
-          }
-          return <PerformanceMetrics data={data} />;
-        }}
-      </Async>
-    </Card>
-  );
-}
-
-function holdingsByAccountAsset(accounts) {
-  const map = new Map();
-  for (const account of accounts) {
-    for (const holding of account.holdings || []) {
-      map.set(`${account.id}:${holding.asset_key}`, holding);
-    }
-  }
-  return map;
 }
 
 function holdingsRowKey(row) {
@@ -780,44 +668,6 @@ function sortHoldingsByPortfolioValue(items) {
     })
   );
 }
-
-function isManualPriceEditable(row) {
-  return !row.is_house && (
-    row.is_manual || row.quality_status === "manual" || row.source === "manual_valuation"
-  );
-}
-
-// For a property `qty` is the price per square meter in millions of Toman — the
-// column the API stores it in — and `area` is its size. Those are the two numbers
-// a property is described by; the raw `quantity` is never shown on its own.
-function originalDraft(row) {
-  return {
-    qty: row.quantity == null ? "" : trimZeros(row.quantity),
-    price: row.unit_price != null && row.unit_price !== "" ? trimZeros(row.unit_price) : "",
-    area: row.area_sqm != null ? trimZeros(row.area_sqm) : "",
-  };
-}
-
-function draftForRow(row, drafts) {
-  return drafts[holdingsRowKey(row)] ?? originalDraft(row);
-}
-
-function hasDraftChanges(row, draft) {
-  // Compared against the same trimmed strings the editor was seeded with, or
-  // opening the editor would look like an unsaved change on every row.
-  const { qty: origQty, price: origPrice, area: origArea } = originalDraft(row);
-  if (draft.qty.trim() !== origQty) return true;
-  if (row.is_house) return draft.area.trim() !== origArea;
-  return isManualPriceEditable(row) && draft.price.trim() !== origPrice;
-}
-
-// Every holding is renamable. `display_name` lives on the HOLDING, not on the
-// shared Asset (see models.Holding.display_name), so naming your copy "Dad's
-// gold" or "کاما - بلندمدت" cannot rename anything for another user. Restricting
-// it to house/manual rows was a guess at where nicknames were wanted, and it
-// left most of the book with a name the owner could not change.
-
-const inlineInputClass = "w-full min-w-[5rem] rounded-md border border-border bg-panel px-2 py-1 text-right text-sm tabular";
 
 // The status words in the holdings table, behind the card's (i).
 const PRICING_TERMS = [
@@ -850,10 +700,6 @@ const HOLDING_VIEWS = [
 function HoldingsCard({ activeId, valuationState, performanceState, portfolio, admin }) {
   const t = useT();
   const [viewMode, setViewMode] = useState("value");
-  const [manageMode, setManageMode] = useState(null);
-  const [drafts, setDrafts] = useState({});
-  const [savingKey, setSavingKey] = useState(null);
-  const [actionError, setActionError] = useState(null);
   const [whyKey, setWhyKey] = useState(null);
   const [adding, setAdding] = useState(false);
 
@@ -863,151 +709,28 @@ function HoldingsCard({ activeId, valuationState, performanceState, portfolio, a
     portfolio.reload();
   };
 
-  const holdingsMap = holdingsByAccountAsset(portfolio.accounts);
   // Flat holding rows with their owning account attached — what the add dialog
   // needs to revalue a property it already holds.
   const allHoldings = portfolio.accounts.flatMap((a) =>
     (a.holdings || []).map((h) => ({ ...h, account_id: a.id }))
   );
 
-  const resolveHolding = (row) => {
-    const accountId = row.account_id ?? activeId;
-    if (accountId == null) return null;
-    return holdingsMap.get(`${accountId}:${row.key}`) ?? null;
-  };
-
-  const toggleManageMode = (mode) => {
-    // The next mode is derived here rather than inside a `setManageMode`
-    // updater. React runs an updater *during render* -- twice under
-    // StrictMode -- so calling `portfolio.reload()` from inside one set state
-    // on PortfolioProvider mid-render (React's "Cannot update a component while
-    // rendering a different component") and issued the accounts request twice
-    // on every click of Edit.
-    const next = manageMode === mode ? null : mode;
-    setManageMode(next);
-    if (next === "edit") portfolio.reload();
-    setDrafts({});
-    setActionError(null);
-  };
-
-  const setDraftField = (row, field, value) => {
-    const key = holdingsRowKey(row);
-    setDrafts((cur) => ({
-      ...cur,
-      [key]: { ...draftForRow(row, cur), [field]: value },
-    }));
-  };
-
-  const saveInline = async (row, holding) => {
-    const accountId = row.account_id ?? activeId;
-    if (!holding || accountId == null) return;
-    const draft = draftForRow(row, drafts);
-    const qty = draft.qty.trim();
-    if (!qty) return;
-    if (!hasDraftChanges(row, draft)) return;
-    // A counted asset typed as a fraction is refused, not rounded. The spinner
-    // already steps by one; someone who types 3.5 shares means something, and
-    // quietly saving 3 or 4 of them is the kind of silent correction that makes
-    // a portfolio stop matching the brokerage statement it came from.
-    if (!row.is_house && isWholeUnit(row.quantity_step) && !Number.isInteger(Number(qty))) {
-      setActionError(
-        new Error(
-          `${isolate(holdingLabel(row))} is counted in whole units — enter a whole number.`
-        )
-      );
-      return;
-    }
-    if (!row.is_house && Number(qty) === 0 && !window.confirm(
-      `Sell all of ${isolate(holdingLabel(row))}? This records a sale in your ledger and removes it from holdings.`
-    )) {
-      return;
-    }
-    const key = holdingsRowKey(row);
-    setSavingKey(key);
-    setActionError(null);
-    try {
-      await updateHolding(accountId, holding.id, {
-        quantity: qty,
-        confirmSellAll: !row.is_house && Number(qty) === 0,
-        areaSqm: row.is_house ? draft.area : undefined,
-        unitPriceTomans: isManualPriceEditable(row) ? draft.price : undefined,
-      });
-      setDrafts((cur) => {
-        const next = { ...cur };
-        delete next[key];
-        return next;
-      });
-      reloadAll();
-    } catch (e) {
-      setActionError(e);
-    } finally {
-      setSavingKey(null);
-    }
-  };
-
-  /** Rename and visibility are saved on their own, the moment they change. */
-  const patchPresentation = async (row, holding, body) => {
-    const accountId = row.account_id ?? activeId;
-    if (!holding || accountId == null) return;
-    const key = holdingsRowKey(row);
-    setSavingKey(key);
-    setActionError(null);
-    try {
-      await updateHolding(accountId, holding.id, body);
-      reloadAll();
-    } catch (e) {
-      setActionError(e);
-    } finally {
-      setSavingKey(null);
-    }
-  };
-
-  const handleDelete = async (holding, accountId) => {
-    if (!window.confirm(translate("Remove this holding?"))) return;
-    setActionError(null);
-    try {
-      await removeHolding(accountId, holding.id);
-      reloadAll();
-    } catch (e) {
-      setActionError(e);
-    }
-  };
-
   const cardActions = (
     <div className="flex flex-wrap items-center gap-2">
       <Tabs
         options={HOLDING_VIEWS}
         value={viewMode}
-        onChange={(next) => {
-          setViewMode(next);
-          if (next !== "value") setManageMode(null);
-        }}
+        onChange={setViewMode}
         label="Holdings view"
         testId="dashboard-holdings-view"
       />
-      {viewMode === "value" && (
-        <>
-          <Button
-            variant={manageMode === "edit" ? "primary" : "ghost"}
-            onClick={() => toggleManageMode("edit")}
-            aria-pressed={manageMode === "edit"}
-            data-testid="dashboard-holdings-manage-edit"
-          >
-            Edit
-          </Button>
-          <Button
-            // On, it must look on: the bare `danger` style has no fill, so the
-            // active mode read as the inactive one next to a filled Edit button.
-            variant="ghost"
-            className={manageMode === "delete" ? "border-[var(--c-critical-text)]! text-[var(--c-critical-text)]! bg-[var(--c-critical-text)]/10!" : ""}
-            onClick={() => toggleManageMode("delete")}
-            aria-pressed={manageMode === "delete"}
-            data-testid="dashboard-holdings-manage-delete"
-          >
-            Delete
-          </Button>
-        </>
-      )}
+      <Link
+        to="/activity"
+        data-testid="dashboard-holdings-manage-link"
+        className="inline-flex min-h-9 items-center rounded-md border border-border bg-panel-2 px-3 text-xs font-medium text-text hover:border-accent"
+      >
+        {t("Edit in Activity")}
+      </Link>
       <Button
         variant="primary"
         onClick={() => setAdding(true)}
@@ -1022,211 +745,32 @@ function HoldingsCard({ activeId, valuationState, performanceState, portfolio, a
     <Card title="Holdings" testId="dashboard-holdings" actions={cardActions} info={<PricingGlossary />}>
       <Async {...valuationState} testId="dashboard-holdings-body">
         {(data) => {
-          // The basis these rows were priced in, not the one the picker shows:
-          // the previous payload stays on screen while the next loads.
           const rowBasis = data.basis || portfolio.basis;
           const visible = data.items || [];
           const hidden = data.hidden_items || [];
-          // Switched-off rows stay on screen, dimmed, so the user can see what
-          // they are leaving out and switch it back on. They are excluded from
-          // the weight base for the same reason they are excluded from the
-          // total: they are not part of the portfolio being measured.
           const items = sortHoldingsByPortfolioValue([...visible, ...hidden]);
-          // `data.total` is the NET figure (liabilities and real estate netted
-          // off), while these rows are gross holding values. Dividing by it gave
-          // a 945M holding a 109.7% weight. Weight is a share of what is listed
-          // plus cash, as the Allocation donut splits it: without the cash one
-          // coin read 61.7% beside a donut putting all gold at 58%. The server
-          // rescales `cash_tomans` to the basis with every other figure.
           const weightBase =
             visible.reduce((sum, i) => sum + Number(i.value || 0), 0) +
               Math.max(Number(data.cash_tomans) || 0, 0) || 1;
-          // A house or other hand-valued holding is never live; counting it
-          // put "1 of 2 prices aren't live" permanently on every portfolio that
-          // owns a property. Past 90 days the API reports it as "stale", which
-          // still counts.
           const priceable = visible.filter((i) => i.quality_status !== "manual");
           const staleCount = priceable.filter((i) => i.quality_status && i.quality_status !== "live").length;
           const showStaleBanner = priceable.length > 0 && staleCount / priceable.length >= 0.5;
 
-          const showInclude = manageMode === "edit" || hidden.length > 0;
           const columns = [
-            ...(showInclude
-              ? [{
-                  key: "include",
-                  header: "",
-                  render: (r) => {
-                    const holding = resolveHolding(r);
-                    if (!holding) return null;
-                    return (
-                      // Labelled on a phone, where the tooltip below never shows.
-                      <label className="inline-flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={!r.is_hidden}
-                        disabled={savingKey === holdingsRowKey(r)}
-                        aria-label={t("Count {name} in this portfolio", { name: isolate(holdingLabel(r)) })}
-                        title={t(
-                          r.is_hidden
-                            ? "Switched off — not counted anywhere. Tick to include it again."
-                            : "Counted. Untick to leave it out of every figure without deleting it."
-                        )}
-                        data-testid="dashboard-holdings-include"
-                        onChange={(e) =>
-                          patchPresentation(r, holding, { isHidden: !e.target.checked })
-                        }
-                      />
-                      <span className="text-xs text-muted sm:hidden">{t("Count in totals")}</span>
-                      </label>
-                    );
-                  },
-                }]
-              : []),
             {
               key: "asset",
               header: "Asset",
-              render: (r) => {
-                const holding = resolveHolding(r);
-                if (manageMode === "edit" && holding) {
-                  return (
-                    <input
-                      className={`${inlineInputClass} text-left`}
-                      defaultValue={r.display_name || ""}
-                      // The name it falls back to when cleared — the ticker for
-                      // a stock, the catalog name otherwise.
-                      placeholder={r.symbol || r.name_fa || r.asset}
-                      aria-label={t("Name for {name}", { name: isolate(holdingLabel(r)) })}
-                      data-testid="dashboard-holdings-edit-name"
-                      disabled={savingKey === holdingsRowKey(r)}
-                      onBlur={(e) => {
-                        const next = e.target.value.trim();
-                        if (next !== (r.display_name || "")) {
-                          patchPresentation(r, holding, { displayName: next });
-                        }
-                      }}
-                    />
-                  );
-                }
-                // A stock reads as its ticker (`Holding.label`); the registered
-                // company name is long enough to break the row and is not how
-                // anyone refers to it, so it lives in the tooltip.
-                return <bdi title={[r.name_fa || r.asset, r.class ? humanize(r.class) : ""].filter(Boolean).join(" · ")}>{holdingLabel(r)}</bdi>;
-              },
+              render: (r) => (
+                <bdi title={[r.name_fa || r.asset, r.class ? humanize(r.class) : ""].filter(Boolean).join(" · ")}>
+                  {holdingLabel(r)}
+                </bdi>
+              ),
             },
             {
               key: "qty",
               header: "Size / quantity",
               align: "right",
-              render: (r) => {
-                const holding = resolveHolding(r);
-                const editing = manageMode === "edit" && holding;
-                const draft = draftForRow(r, drafts);
-                const rk = holdingsRowKey(r);
-                // A property's stored "quantity" is its price per square meter,
-                // so what belongs in this column is its size, not that number.
-                if (r.is_house) {
-                  return editing ? (
-                    <input
-                      type="number"
-                      step="any"
-                      className={`${inlineInputClass} max-sm:w-24`}
-                      value={draft.area}
-                      aria-label={t("Size in square meters for {name}", { name: isolate(holdingLabel(r)) })}
-                      data-testid="dashboard-holdings-edit-area"
-                      disabled={savingKey === rk}
-                      onChange={(e) => setDraftField(r, "area", e.target.value)}
-                    />
-                  ) : (
-                    area(r.area_sqm)
-                  );
-                }
-                if (editing) {
-                  // `step` comes from the server, so the arrow keys and the
-                  // spinner move by one share / one coin / one note instead of
-                  // offering a fraction of something you cannot hold a fraction
-                  // of. Crypto, gold by the gram and tether keep a fine step.
-                  const step = r.quantity_step || "any";
-                  return (
-                    <input
-                      type="number"
-                      step={step}
-                      min="0"
-                      className={`${inlineInputClass} max-sm:w-24`}
-                      value={draft.qty}
-                      aria-label={t("Quantity for {name}", { name: isolate(holdingLabel(r)) })}
-                      title={
-                        isWholeUnit(step)
-                          ? t("Counted in whole units")
-                          : t("This asset can be held in fractions")
-                      }
-                      data-testid="dashboard-holdings-edit-qty"
-                      disabled={savingKey === rk}
-                      onChange={(e) => setDraftField(r, "qty", e.target.value)}
-                    />
-                  );
-                }
-                return quantity(r.quantity, r.quantity_step);
-              },
-            },
-            {
-              key: "price",
-              header: "Unit price",
-              align: "right",
-              render: (r) => {
-                const holding = resolveHolding(r);
-                const draft = draftForRow(r, drafts);
-                const rk = holdingsRowKey(r);
-                if (r.is_house) {
-                  // Editing a property means editing what a meter is worth --
-                  // entered in millions, the unit the market quotes in.
-                  return manageMode === "edit" && holding ? (
-                    <input
-                      type="number"
-                      step="any"
-                      className={inlineInputClass}
-                      value={draft.qty}
-                      aria-label={t("Price per square meter, in millions, for {name}", { name: isolate(holdingLabel(r)) })}
-                      title="Millions of Toman per square meter"
-                      data-testid="dashboard-holdings-edit-price-per-sqm"
-                      disabled={savingKey === rk}
-                      onChange={(e) => setDraftField(r, "qty", e.target.value)}
-                    />
-                  ) : (
-                    perSqm(r.price_per_sqm_tomans)
-                  );
-                }
-                if (manageMode === "edit" && isManualPriceEditable(r) && holding) {
-                  return (
-                    <input
-                      type="number"
-                      step="any"
-                      className={inlineInputClass}
-                      value={draft.price}
-                      aria-label={t("Unit price for {name}", { name: isolate(holdingLabel(r)) })}
-                      data-testid="dashboard-holdings-edit-price"
-                      disabled={savingKey === rk}
-                      onChange={(e) => setDraftField(r, "price", e.target.value)}
-                    />
-                  );
-                }
-                const shown = unitPrice(r.unit_price, r.unit_price_currency, rowBasis);
-                // Say WHY this one is not a box. A market-priced asset takes its
-                // quote from the feed, and any number typed here would be
-                // overwritten by the next fetch while quietly mispricing the
-                // portfolio in the meantime — so the field stays read-only and
-                // explains itself instead of looking broken.
-                if (manageMode === "edit" && holding) {
-                  return (
-                    <span
-                      className="text-muted"
-                      title={t("Priced from the market feed — not editable. Only manual assets and property take a price you type.")}
-                    >
-                      {shown}
-                    </span>
-                  );
-                }
-                return shown;
-              },
+              render: (r) => (r.is_house ? area(r.area_sqm) : quantity(r.quantity, r.quantity_step)),
             },
             {
               key: "value",
@@ -1253,7 +797,6 @@ function HoldingsCard({ activeId, valuationState, performanceState, portfolio, a
                 return (
                   <div className="inline-flex flex-wrap items-center gap-1 align-middle" title={ageText || undefined}>
                     {r.is_hidden && <Badge variant="warn">Not counted</Badge>}
-                    {/* A closing price is current but not moving: neutral, not the green of a live feed. */}
                     <Badge variant={isLastClose(r, data.markets) ? "neutral" : ITEM_BADGE[r.quality_status] || "neutral"}>{priceStatus(r, data.markets)}</Badge>
                     {r.price_unit_status === "unverified" && <Badge variant="warn">unverified unit</Badge>}
                   </div>
@@ -1263,11 +806,9 @@ function HoldingsCard({ activeId, valuationState, performanceState, portfolio, a
           ];
 
           if (activeId == null) {
-            const assetIdx = columns.findIndex((c) => c.key === "asset");
-            columns.splice(assetIdx >= 0 ? assetIdx : 0, 0, {
+            columns.unshift({
               key: "portfolio",
               header: "Portfolio",
-              // Cut to one line: a long portfolio name doubled every phone card.
               render: (r) => (
                 <span dir="auto" className="inline-block max-w-[11rem] truncate align-bottom" title={r.account_name || ""}>
                   {r.account_name || "—"}
@@ -1277,79 +818,18 @@ function HoldingsCard({ activeId, valuationState, performanceState, portfolio, a
           }
 
           if (admin) {
-            // The feed a price came from is an operator's question, not an
-            // investor's: "SEED" or a provider path is jargon on a holdings row.
-            columns.push(
-              { key: "source", header: "Source", render: (r) => r.source || "—" },
-              {
-                key: "why",
-                header: "",
-                render: (r) => (
-                  <Button variant="ghost" onClick={() => setWhyKey(r.key)} data-testid="dashboard-why">Why</Button>
-                ),
-              }
-            );
-          }
-
-          // Save/Delete go FIRST, not last. This table is 12 columns wide and
-          // already overflows its card on any normal screen, so a button
-          // appended at the end landed hundreds of pixels off the right edge
-          // behind a horizontal scrollbar nobody looks for -- which is why
-          // clicking Edit or Delete read as "nothing happened". Playwright's
-          // toBeVisible() passes on an off-screen cell inside a scroll
-          // container, so the e2e suite never caught it either.
-          if (manageMode === "edit") {
-            columns.unshift({
-              key: "actions",
+            columns.push({
+              key: "why",
               header: "",
-              render: (r) => {
-                const holding = resolveHolding(r);
-                if (!holding) return <span className="text-xs text-muted">—</span>;
-                const draft = draftForRow(r, drafts);
-                const rk = holdingsRowKey(r);
-                const changed = hasDraftChanges(r, draft);
-                return (
-                  <Button
-                    variant="success"
-                    disabled={!changed || !draft.qty.trim() || savingKey === rk}
-                    onClick={() => saveInline(r, holding)}
-                    data-testid="dashboard-holdings-save"
-                  >
-                    {savingKey === rk ? "Saving…" : "Save"}
-                  </Button>
-                );
-              },
+              render: (r) => (
+                <Button variant="ghost" onClick={() => setWhyKey(r.key)} data-testid="dashboard-why">Why</Button>
+              ),
             });
           }
 
-          if (manageMode === "delete") {
-            columns.unshift({
-              key: "actions",
-              header: "",
-              render: (r) => {
-                const holding = resolveHolding(r);
-                if (!holding) return null;
-                const accountId = r.account_id ?? activeId;
-                return (
-                  <Button variant="danger" onClick={() => handleDelete(holding, accountId)} data-testid="dashboard-holdings-delete">
-                    Delete
-                  </Button>
-                );
-              },
-            });
-          }
-
-          // Phone card roles (see Table in ui.jsx): "title" and "value" share the
-          // first line, "meta" columns join into one small line under it, and
-          // any column left out waits behind the card's "More" button.
-          // Column keys: include, actions, portfolio, asset, class, qty, price,
-          // value, weight, status, source, priced_at, why.
-          // Two lines at a glance: what it is and what it's worth, then where it
-          // sits, how much, and whether its price is live. Edit/Delete mode's
-          // buttons stay visible; everything else waits behind "More".
           const MOBILE_ROLES = {
             asset: "title", value: "value",
-            portfolio: "meta", qty: "meta", status: "meta", actions: "action",
+            portfolio: "meta", qty: "meta", status: "meta",
           };
           columns.forEach((c) => { if (MOBILE_ROLES[c.key]) c.mobile = MOBILE_ROLES[c.key]; });
 
@@ -1381,17 +861,6 @@ function HoldingsCard({ activeId, valuationState, performanceState, portfolio, a
                   {hidden.length > 0 && (
                     <p className="mb-3 text-sm text-muted" data-testid="dashboard-holdings-hidden-note">
                       {t(hidden.length === 1 ? "1 asset switched off and left out of every figure." : "{n} assets switched off and left out of every figure.", { n: hidden.length })}
-                      <span className="hidden md:inline"> {t(hidden.length === 1 ? "Tick to count it again." : "Tick to count them again.")}</span>
-                    </p>
-                  )}
-                  {manageMode === "edit" && (
-                    <p className="mb-3 text-xs text-muted" data-testid="dashboard-holdings-edit-hint">
-                      {t("Edit a name, quantity or manual price, then Save. Market prices come from the feed.")}
-                    </p>
-                  )}
-                  {manageMode === "delete" && (
-                    <p className="mb-3 text-xs text-muted" data-testid="dashboard-holdings-delete-hint">
-                      {t("Delete also reverses its ledger entries. To just leave it out, untick it instead.")}
                     </p>
                   )}
                   <Table
@@ -1402,18 +871,8 @@ function HoldingsCard({ activeId, valuationState, performanceState, portfolio, a
                     rows={items}
                     columns={columns}
                     empty="No holdings priced yet."
-                    // `text-muted` rather than `opacity-50`: opacity dims EVERY descendant,
-                    // including the "Not counted" badge that explains why the row is
-                    // dimmed -- which measured 3.05:1. Muting the text leaves the badge
-                    // at full strength, and `--c-muted` is a token the contrast test
-                    // already guards on every background.
                     rowClass={(r) => (r.is_hidden ? "text-muted" : "")}
                   />
-                  {actionError && (
-                    <div className="mt-2">
-                      <ErrorState error={actionError} testId="dashboard-holdings-error" />
-                    </div>
-                  )}
                 </>
               )}
               {adding && (
@@ -1560,12 +1019,13 @@ export default function Dashboard({ user }) {
           </div>
           <AllocationCard state={valuationState} />
         </div>
-        {/* What you hold, then what it made you, then what you owe. History
-            quality lives on the Data health tab, not repeated here. */}
         <HoldingsCard activeId={activeId} valuationState={valuationState} performanceState={performanceState} portfolio={portfolio} admin={user?.role === "admin"} />
-        <PerformanceCard activeId={activeId} accounts={portfolio.accounts} targets={perfTargets} state={performanceState} />
-        <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} onChanged={valuationState.reload} />
-        <ExcludedDisclosure valuationState={valuationState} />
+        <Disclosure summary="Debts & excluded assets" testId="dashboard-more">
+          <div className="space-y-4">
+            <LiabilitiesCard activeId={activeId} accounts={portfolio.accounts} onChanged={valuationState.reload} />
+            <ExcludedDisclosure valuationState={valuationState} />
+          </div>
+        </Disclosure>
       </div>
     </div>
   );
