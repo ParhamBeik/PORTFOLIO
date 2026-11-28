@@ -239,6 +239,7 @@ function Company({ symbol }) {
   const lang = useLang();
   const [days, setDays] = useState("365");
   const [financialTab, setFinancialTab] = useState("sales");
+  const [researchTab, setResearchTab] = useState("ai");
   const dossier = useApi(() => stockDossier(symbol, Number(days)), [symbol, days]);
 
   return (
@@ -275,7 +276,7 @@ function Company({ symbol }) {
           <div className="space-y-5" data-testid="explore-company">
             <Card
               title={`${data.company.name || symbol} · ${symbol}`}
-              subtitle={[data.company.sector, data.company.subsector, data.company.isin].filter(Boolean).join(" · ")}
+              subtitle={[data.company.sector, data.company.subsector, data.company.isin].filter(Boolean).join(" · ") || "Unadjusted last trade close in Rial per share."}
               testId="explore-identity"
               info={(
                 <p>
@@ -285,40 +286,42 @@ function Company({ symbol }) {
                       date: date(data.company.sector_observed_at),
                     })
                     : translate("Industry is unavailable for this stock.", lang)}{" "}
-                  {translate("We only show sales, income and balance figures we could check against the company's Codal filing.", lang)}
+                  {translate("Adjusted prices, USD conversion, and return comparisons are withheld pending source checks.", lang)}
                 </p>
               )}
-              actions={<div className="flex flex-wrap items-center gap-2"><WatchButton symbol={symbol} /><Badge variant={sales.points.length || income?.points?.length || balance?.points?.length ? "good" : "warn"}>{sales.points.length || income?.points?.length || balance?.points?.length ? "Source-checked figures" : "Financial metrics unverified"}</Badge></div>}
-            />
-
-            <Card
-              title="Daily share price"
-              subtitle="Unadjusted last trade close in Rial per share. This is a quoted price, not a total return."
-              testId="explore-price"
-              info={<p>{translate("Adjusted prices, USD conversion, and return comparisons are withheld pending source checks.", lang)}</p>}
-              actions={<Tabs options={WINDOWS} value={days} onChange={setDays} label="Price window" testId="explore-price-window" />}
+              actions={(
+                <div className="flex flex-wrap items-center gap-2">
+                  <WatchButton symbol={symbol} />
+                  <Badge variant={sales.points.length || income?.points?.length || balance?.points?.length ? "good" : "warn"}>
+                    {sales.points.length || income?.points?.length || balance?.points?.length ? "Source-checked figures" : "Financial metrics unverified"}
+                  </Badge>
+                  <Tabs options={WINDOWS} value={days} onChange={setDays} label="Price window" testId="explore-price-window" />
+                </div>
+              )}
             >
-              {rows.length ? (
-                <MultiLineTrend
-                  series={[{ key: "close", name: `${symbol} (${tr("Rial")})` }]}
-                  data={rows}
-                  longTicks={rows.length > 180}
-                  formatValue={rial}
-                  formatAxis={rial}
-                  label={tr("{symbol} daily closes in Rial", { symbol })}
-                />
-              ) : <Empty testId="explore-no-prices">No daily close in this period.</Empty>}
-              <div className="mt-3 space-y-1 text-xs text-muted" data-testid="explore-price-evidence">
-                <p>{translate("Source: {source}. {n} dated closes; {first} → {last} (Jalali).", lang, { source: price.source, n: price.points.length, first: price.first_date || "—", last: price.last_date || "—" })}</p>
-                {price.halted_days > 0 && (
-                  <p data-testid="explore-price-halted">
-                    {translate("{n} days without a trade (a halt or market closure) are left out, not drawn as a flat price.", lang, { n: price.halted_days })}
+              <div data-testid="explore-price">
+                {rows.length ? (
+                  <MultiLineTrend
+                    series={[{ key: "close", name: `${symbol} (${tr("Rial")})` }]}
+                    data={rows}
+                    longTicks={rows.length > 180}
+                    formatValue={rial}
+                    formatAxis={rial}
+                    label={tr("{symbol} daily closes in Rial", { symbol })}
+                  />
+                ) : <Empty testId="explore-no-prices">No daily close in this period.</Empty>}
+                <div className="mt-3 space-y-1 text-xs text-muted" data-testid="explore-price-evidence">
+                  <p>{translate("Source: {source}. {n} dated closes; {first} → {last} (Jalali).", lang, { source: price.source, n: price.points.length, first: price.first_date || "—", last: price.last_date || "—" })}</p>
+                  {price.halted_days > 0 && (
+                    <p data-testid="explore-price-halted">
+                      {translate("{n} days without a trade (a halt or market closure) are left out, not drawn as a flat price.", lang, { n: price.halted_days })}
+                    </p>
+                  )}
+                  <p>
+                    {translate("{n} days checked against a second price source; {m} differ by more than 1%.", lang, { n: price.paired_candle_days, m: price.candle_disagreements_over_1pct })}
+                    {price.candle_disagreements_over_1pct > 0 && ` ${translate("Treat this chart as disputed until those days are reconciled.", lang)}`}
                   </p>
-                )}
-                <p>
-                  {translate("{n} days checked against a second price source; {m} differ by more than 1%.", lang, { n: price.paired_candle_days, m: price.candle_disagreements_over_1pct })}
-                  {price.candle_disagreements_over_1pct > 0 && ` ${translate("Treat this chart as disputed until those days are reconciled.", lang)}`}
-                </p>
+                </div>
               </div>
             </Card>
 
@@ -407,41 +410,62 @@ function Company({ symbol }) {
                 </div>
               )}
             </Card>
-            <ResearchPanel symbol={symbol} />
-
-            <Card title="Original disclosures" subtitle="Source announcements; reconciled sales, income, and balance figures appear above where available." testId="explore-disclosures">
-              {data.disclosures.length ? (
-                <ul className="space-y-3 text-sm">
-                  {data.disclosures.map((item, index) => (
-                    <li key={`${item.published_jalali}-${index}`} className="border-b border-border pb-2">
-                      {item.source_url ? (
-                        <a className="text-accent underline underline-offset-2" href={item.source_url} target="_blank" rel="noopener noreferrer">
-                          {item.title}
-                        </a>
-                      ) : <span>{item.title}</span>}
-                      <span className="mt-1 block text-xs text-muted">{item.published_jalali || tr("Date unavailable")} · {item.category || tr("Unclassified")}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : <Empty testId="explore-no-disclosures">No stored disclosure for this symbol.</Empty>}
+            <Card
+              title="Research & disclosures"
+              testId="explore-research-block"
+              actions={(
+                <Tabs
+                  options={[
+                    { value: "ai", label: "AI research" },
+                    { value: "filings", label: `Filings (${data.disclosures.length})` },
+                  ]}
+                  value={researchTab}
+                  onChange={setResearchTab}
+                  label="Research section"
+                  testId="explore-research-tabs"
+                />
+              )}
+            >
+              {researchTab === "ai" ? (
+                <ResearchPanel symbol={symbol} />
+              ) : (
+                <div data-testid="explore-disclosures">
+                  {data.disclosures.length ? (
+                    <ul className="space-y-3 text-sm">
+                      {data.disclosures.map((item, index) => (
+                        <li key={`${item.published_jalali}-${index}`} className="border-b border-border pb-2">
+                          {item.source_url ? (
+                            <a className="text-accent underline underline-offset-2" href={item.source_url} target="_blank" rel="noopener noreferrer">
+                              {item.title}
+                            </a>
+                          ) : <span>{item.title}</span>}
+                          <span className="mt-1 block text-xs text-muted">{item.published_jalali || tr("Date unavailable")} · {item.category || tr("Unclassified")}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : <Empty testId="explore-no-disclosures">No stored disclosure for this symbol.</Empty>}
+                </div>
+              )}
+              <div className="mt-4 border-t border-border pt-3">
+                <Disclosure summary="Data we hold" testId="explore-coverage">
+                  <p className="mb-3 text-xs text-muted">{tr("How much we have stored so far, not a promise that every value is right.")}</p>
+                  <ul className="space-y-3">
+                    {data.coverage.map((row) => (
+                      <li key={row.endpoint} className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-2 text-sm text-text">
+                        <span>{tr(COVERAGE_LABELS[row.endpoint] || row.endpoint)}</span>
+                        <span className="flex items-center gap-2">
+                          <span className="text-muted">{tr("{n} rows", { n: num(row.stored_rows, 0) })}</span>
+                          <Badge variant={row.verified_complete ? "good" : "warn"}>
+                            {row.verified_complete ? "Coverage checked" : "Coverage incomplete"}
+                          </Badge>
+                        </span>
+                        {row.last_success_at && <span className="w-full text-xs text-muted">{tr("Last updated {date}", { date: date(row.last_success_at) })}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                </Disclosure>
+              </div>
             </Card>
-            <Disclosure summary="Data we hold" testId="explore-coverage">
-              <p className="mb-3 text-xs text-muted">{tr("How much we have stored so far, not a promise that every value is right.")}</p>
-              <ul className="space-y-3">
-                {data.coverage.map((row) => (
-                  <li key={row.endpoint} className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-2 text-sm text-text">
-                    <span>{tr(COVERAGE_LABELS[row.endpoint] || row.endpoint)}</span>
-                    <span className="flex items-center gap-2">
-                      <span className="text-muted">{tr("{n} rows", { n: num(row.stored_rows, 0) })}</span>
-                      <Badge variant={row.verified_complete ? "good" : "warn"}>
-                        {row.verified_complete ? "Coverage checked" : "Coverage incomplete"}
-                      </Badge>
-                    </span>
-                    {row.last_success_at && <span className="w-full text-xs text-muted">{tr("Last updated {date}", { date: date(row.last_success_at) })}</span>}
-                  </li>
-                ))}
-              </ul>
-            </Disclosure>
             {data.company.metadata_updated_at && (
               <p className="text-xs text-muted">{tr("Company list last updated {date}.", { date: date(data.company.metadata_updated_at) })}</p>
             )}

@@ -282,8 +282,10 @@ export default function AccountMenu({
   // Close on Escape or on a click that lands outside. Both listeners are only
   // mounted while the menu is open, so a closed menu costs the page nothing.
   useEffect(() => {
-    if (!open) return undefined;
-    const onKey = (e) => e.key === "Escape" && setOpen(false);
+    if (!open || panelFill) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape" && !modal) setOpen(false);
+    };
     const onDown = (e) => {
       if (wrap.current && !wrap.current.contains(e.target)) setOpen(false);
     };
@@ -293,7 +295,7 @@ export default function AccountMenu({
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("mousedown", onDown);
     };
-  }, [open]);
+  }, [open, panelFill, modal]);
 
   const role = roleOf(user);
   const initial = (user?.email || "?").charAt(0).toUpperCase();
@@ -365,14 +367,14 @@ export default function AccountMenu({
 
       {open && (
         <div
-          role="dialog"
-          aria-label={translate("Account", lang)}
+          role={panelFill ? undefined : "dialog"}
+          aria-label={panelFill ? undefined : translate("Account", lang)}
           data-testid="account-menu"
-          className={`absolute z-40 mt-2 rounded-xl border border-border bg-panel p-3 shadow-2xl ${
+          className={
             panelFill
-              ? "inset-x-0 origin-top"
-              : `w-80 ${alignLeft ? "left-0 origin-top-left" : "right-0 origin-top-right"}`
-          }`}
+              ? "mt-2 rounded-xl border border-border bg-panel-2 p-3"
+              : `absolute z-40 mt-2 w-80 rounded-xl border border-border bg-panel p-3 shadow-2xl ${alignLeft ? "left-0 origin-top-left" : "right-0 origin-top-right"}`
+          }
         >
           <div className="flex items-center gap-3 border-b border-border pb-3">
             <span className="app-user-avatar !h-10 !w-10 !text-base" aria-hidden="true">{initial}</span>

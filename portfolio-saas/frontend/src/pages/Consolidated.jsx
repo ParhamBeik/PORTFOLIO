@@ -10,10 +10,7 @@ const Dashboard = lazy(() => import("./Dashboard.jsx"));
 const DataHealth = lazy(() => import("./DataHealth.jsx"));
 const Family = lazy(() => import("./Family.jsx"));
 const Ledger = lazy(() => import("./Ledger.jsx"));
-const Onboarding = lazy(() => import("./Onboarding.jsx"));
-const AssetHistory = lazy(() => import("./AssetHistory.jsx"));
 const Comparison = lazy(() => import("./Comparison.jsx"));
-const Guidance = lazy(() => import("./Guidance.jsx"));
 const Explore = lazy(() => import("./Explore.jsx"));
 const Watchlist = lazy(() => import("./Watchlist.jsx"));
 
@@ -59,28 +56,17 @@ export function PortfolioDestination({ user }) {
 }
 
 export function ActivityDestination() {
-  const choices = [
-    { value: "transactions", label: "Transactions", component: Ledger },
-    { value: "holdings", label: "Add holdings", component: Onboarding },
-  ];
-  // Adding holdings happens in the "+ Add" wizard modal everywhere; keep the
-  // legacy ?view=holdings route reachable without showing a redundant tab bar.
-  return <Destination choices={choices} initial="transactions" testId="activity-section" hidden={["holdings"]} />;
+  return page(<Ledger />);
 }
 
 export function ResearchDestination() {
   const choices = [
     { value: "companies", label: "Companies", component: Explore },
     { value: "watchlist", label: "Watchlist", component: Watchlist },
-    { value: "prices", label: "Price history", component: AssetHistory },
   ];
   return <Destination choices={choices} initial="companies" testId="research-section" />;
 }
 
 export function CompareDestination() {
   return page(<Comparison />);
-}
-
-export function GuidanceDestination({ user, onUserChange }) {
-  return page(<Guidance user={user} onUserChange={onUserChange} />);
 }

@@ -22,22 +22,16 @@ const PortfolioDestination = lazy(() => import("./pages/Consolidated.jsx").then(
 const ActivityDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.ActivityDestination })));
 const ResearchDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.ResearchDestination })));
 const CompareDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.CompareDestination })));
-const GuidanceDestination = lazy(() => import("./pages/Consolidated.jsx").then((m) => ({ default: m.GuidanceDestination })));
 
 const PAGE_TITLES = {
   "/": "Portfolio",
   "/activity": "Activity",
   "/research": "Research",
   "/compare": "Compare",
-  "/risk": "Risk",
   "/ledger": "Ledger",
   "/family": "Breakdown",
   "/breakdown": "Breakdown",
   "/comparison": "Comparison",
-  "/prices": "Price history",
-  "/optimal": "My Optimal",
-  "/universe": "Best Overall",
-  "/best-overall": "Best Overall",
   "/ops": "Operations",
   "/onboarding": "Onboarding",
   "/privacy": "Privacy",
@@ -78,12 +72,10 @@ function LoginRedirect() {
   );
 }
 
-// Markets was two unrelated tools under one tab; they now live where the plan
-// puts them -- price history under Research, comparison as its own tab.
 function MarketsRedirect() {
   const { search } = useLocation();
   const view = new URLSearchParams(search).get("view");
-  return <Navigate to={view === "comparison" ? "/compare" : "/research?view=prices"} replace />;
+  return <Navigate to={view === "comparison" ? "/compare" : "/research?view=companies"} replace />;
 }
 
 function LegacyRedirect({ to }) {
@@ -264,7 +256,6 @@ export default function App() {
           <Routes>
             <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/verify-email" element={<VerifyEmail />} />
-          <Route path="/verify-email" element={<VerifyEmail />} />
             {/* A signed-in visitor has no business on the auth card -- and one
                 lands here whenever sign-in did not rewrite the URL. */}
             <Route path="/login" element={<Navigate to="/" replace />} />
@@ -283,24 +274,24 @@ export default function App() {
                   onto a bare page whose only way out said "Back to sign in". */}
               <Route path="/privacy" element={<Legal kind="privacy" authed />} />
               <Route path="/terms" element={<Legal kind="terms" authed />} />
-              <Route path="/research" element={<ResearchDestination />} />
-              <Route path="/explore" element={<LegacyRedirect to="/research?view=companies" />} />
               <Route element={<HoldingsGate user={user} />}>
                 <Route index element={<PortfolioDestination user={user} />} />
                 <Route path="/activity" element={<ActivityDestination />} />
+                <Route path="/research" element={<ResearchDestination />} />
+                <Route path="/explore" element={<LegacyRedirect to="/research?view=companies" />} />
                 <Route path="/compare" element={<CompareDestination />} />
-                <Route path="/risk" element={<GuidanceDestination user={user} onUserChange={setUser} />} />
+                <Route path="/risk" element={<LegacyRedirect to="/compare" />} />
                 <Route path="/markets" element={<MarketsRedirect />} />
-                <Route path="/guidance" element={<LegacyRedirect to="/risk" />} />
-                <Route path="/optimal" element={<LegacyRedirect to="/risk?view=personal" />} />
-                <Route path="/universe" element={<LegacyRedirect to="/risk?view=benchmark" />} />
-                <Route path="/best-overall" element={<LegacyRedirect to="/risk?view=benchmark" />} />
+                <Route path="/guidance" element={<LegacyRedirect to="/compare" />} />
+                <Route path="/optimal" element={<LegacyRedirect to="/compare" />} />
+                <Route path="/universe" element={<LegacyRedirect to="/compare" />} />
+                <Route path="/best-overall" element={<LegacyRedirect to="/compare" />} />
                 <Route path="/onboarding" element={<Onboarding />} />
                 <Route path="/ledger" element={<LegacyRedirect to="/activity" />} />
                 <Route path="/family" element={<LegacyRedirect to="/?view=breakdown" />} />
                 <Route path="/breakdown" element={<LegacyRedirect to="/?view=breakdown" />} />
                 <Route path="/comparison" element={<LegacyRedirect to="/compare" />} />
-                <Route path="/prices" element={<LegacyRedirect to="/research?view=prices" />} />
+                <Route path="/prices" element={<LegacyRedirect to="/research?view=companies" />} />
                 <Route path="/ops" element={<Ops user={user} />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>
@@ -322,10 +313,7 @@ function HoldingsGate({ user }) {
   const { pathname } = useLocation();
   const { accounts, loading, error } = usePortfolio();
   const onOnboarding = pathname === "/onboarding";
-  const exempt =
-    pathname === "/privacy" ||
-    pathname === "/terms" ||
-    (pathname === "/ops" && user?.role === "admin");
+  const exempt = pathname === "/ops" && user?.role === "admin";
 
   if (loading || exempt) return <Outlet />;
 
