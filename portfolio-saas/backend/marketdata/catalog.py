@@ -4,7 +4,7 @@ from django.conf import settings
 from django.db.models import Max, Min, Q
 
 from .currency import canonical_symbol
-from .fetchers import fetch_all_symbols, fetch_derivatives, fetch_gold_currency_free
+from .fetchers import fetch_all_symbols, fetch_derivatives
 from .ingest import flatten_records, provider_symbol
 from . import jalali
 from .models import (
@@ -70,9 +70,9 @@ def sync_provider_catalog(limit=None):
         for row in MarketInstrument.objects.all()
     }
     
-    # Fetch payloads
+    # Fetch payloads (BrsApi Gold_Currency.php is retired; existing BRS
+    # MarketInstrument rows remain preserved in DB).
     stock_payload = fetch_all_symbols(settings.TSETMC_API_KEY)
-    gold_payload = fetch_gold_currency_free(settings.BRS_API_KEY)
     
     # Bounded test mode slicing
     if limit is not None:
@@ -108,18 +108,6 @@ def sync_provider_catalog(limit=None):
         ))
 
     gold_items = []
-    if isinstance(gold_payload, dict):
-        for provider_group, instruments in gold_payload.items():
-            if not isinstance(instruments, list):
-                continue
-            for record in instruments:
-                if not isinstance(record, dict):
-                    continue
-                symbol = str(record.get("symbol", "")).strip()
-                if not symbol:
-                    continue
-                eligible = provider_group in ("gold", "currency") or symbol in CASH_LIKE_SYMBOLS or symbol in CRYPTO_SYMBOLS
-                gold_items.append((symbol, record, provider_group, eligible))
 
     if limit is not None:
         gold_items = gold_items[:limit]

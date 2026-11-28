@@ -102,6 +102,15 @@ BRS_TO_SLUG = {
 HISTORY_SLUGS = ("price_dollar_rl", "price_eur", "sekee", "nim", "rob", "gerami",
                  "geram18", "ons")
 
+HISTORY_BRS_SYMBOLS = tuple(
+    sym for sym, slug in BRS_TO_SLUG.items() if slug in HISTORY_SLUGS
+)
+
+
+def supports_history(brs_symbol: str) -> bool:
+    """Whether TGJU supplies daily history for `brs_symbol`."""
+    return BRS_TO_SLUG.get(brs_symbol) in HISTORY_SLUGS
+
 # TGJU's measured daily TEDPIX series (2,751 observations on 2026-09-01).
 TEDPIX_HISTORY_SLUG = "bourse"
 

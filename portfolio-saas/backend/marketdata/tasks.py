@@ -847,7 +847,8 @@ def tracked_tse_symbols() -> list[str]:
 
 
 def tracked_brs_symbols() -> list[str]:
-    """BrsApi gold/currency symbols to sync: active portfolio assets + all catalog-eligible BRS gold/currency symbols."""
+    """Gold/currency symbols to sync in GOLD_DAILY: restricted to TGJU-supported history symbols."""
+    from .sources import tgju
 
     symbols = list(
         Asset.objects.filter(
@@ -872,7 +873,7 @@ def tracked_brs_symbols() -> list[str]:
     for sym in catalog_symbols:
         if sym not in symbols:
             symbols.append(sym)
-    return symbols
+    return [sym for sym in symbols if tgju.supports_history(sym)]
 
 
 def _invalidate_returns():

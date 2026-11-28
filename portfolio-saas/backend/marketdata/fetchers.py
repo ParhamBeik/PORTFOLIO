@@ -50,6 +50,16 @@ class TransientMarketDataError(MarketDataFetchError):
     pass
 
 
+class RetiredEndpointError(PermanentMarketDataError):
+    pass
+
+
+_RETIRED_URL_FRAGMENTS = (
+    "market/gold_currency.php",
+    "market/gold_currency_pro.php",
+)
+
+
 def _safe_params(params):
     return {
         key: "***" if "key" in str(key).lower() else value
@@ -107,6 +117,11 @@ def fetch_json(
     A quota-exhaustion response trips the plan's circuit breaker, which is what
     stops the day now that no hardcoded daily ceiling exists.
     """
+    lowered_url = str(url or "").lower()
+    if any(fragment in lowered_url for fragment in _RETIRED_URL_FRAGMENTS):
+        raise RetiredEndpointError(
+            f"Refusing request to retired BrsApi gold/currency URL: {url}"
+        )
     # Archive failures are rescheduled by ArchiveFetchState. Retrying inline
     # only holds a worker and can spend the provider quota several times for
     # one logical job. Live/other calls retain one short retry.
@@ -305,9 +320,13 @@ def _call(endpoint_key, api_key, **params):
     omitted, which reads as a genuinely quiet day and marks a backfill converged
     on zero rows. Raise instead.
     """
+    endpoint = endpoints.get(endpoint_key)
+    if endpoint.retired:
+        raise RetiredEndpointError(
+            f"{endpoint_key} ({endpoint.path}) is retired by BrsApi; refusing request."
+        )
     if not api_key:
         return None
-    endpoint = endpoints.get(endpoint_key)
     query = {k: v for k, v in params.items() if v is not None and v != ""}
     for name in endpoint.required_params:
         if name not in query:

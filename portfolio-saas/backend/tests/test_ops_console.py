@@ -1198,7 +1198,7 @@ def test_archive_source_names_the_provider_path():
     E = ArchiveFetchState.Endpoint
     assert source_for(E.STOCK_CANDLE_ADJUSTED) == "brsapi:Tsetmc/Candlestick.php"
     assert source_for(E.STOCK_HISTORY_UNADJUSTED) == "brsapi:Tsetmc/History.php"
-    assert source_for(E.GOLD_DAILY) == "brsapi:Market/Gold_Currency_Pro.php"
+    assert source_for(E.GOLD_DAILY) == "tgju"
     assert source_for(E.STOCK_TRANSACTION_TICKS) == "brsapi:Tsetmc/Transaction.php"
     assert source_for(E.CRYPTO_DAILY) == ""
 

@@ -768,22 +768,12 @@ MARKETDATA_LIVE_INTERVAL_OPEN = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OPEN", "
 MARKETDATA_LIVE_INTERVAL_DAYTIME = int(os.getenv("MARKETDATA_LIVE_INTERVAL_DAYTIME", "90"))
 MARKETDATA_LIVE_INTERVAL_OVERNIGHT = int(os.getenv("MARKETDATA_LIVE_INTERVAL_OVERNIGHT", "180"))
 
-# How often the provider gold/FX board is fetched even when direct origins already
-# cover every symbol the app prices. Normally `fetch_all_markets` skips BrsApi
-# whenever TGJU's board is complete, which is correct and is most of why the
-# Market/* call volume stayed low -- but it means a TGJU slug that goes stale while
-# still answering (a known failure mode of that feed) would never be contradicted
-# by anything. This is the second opinion: one provider board every N seconds,
-# ~96/day at 900s.
-# 0 disables it and restores the old always-skip behaviour.
+# BrsApi discontinued its gold/currency endpoints in 1405; keep both flags off
+# by default so live pricing relies solely on TGJU + Wallex.
 MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS = int(
-    os.getenv("MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS", "900")
+    os.getenv("MARKETDATA_BRS_VERIFY_INTERVAL_SECONDS", "0")
 )
-# Buy the provider gold/FX board on EVERY cycle rather than only as a fallback,
-# and let the extractor blend it with the direct origins. Costs ~890 metered
-# Market requests on a trading day, and
-# BrsApi declares a unit string per row where TGJU needs slug mapping.
-MARKETDATA_BLEND_PAID_BOARD = os.getenv("MARKETDATA_BLEND_PAID_BOARD", "1") == "1"
+MARKETDATA_BLEND_PAID_BOARD = os.getenv("MARKETDATA_BLEND_PAID_BOARD", "0") == "1"
 # The live loop's USDT/IRT fallback quote (`Gold_Currency_Pro.php?history=1`)
 # calls the Market/* product once per cycle. At the tightened cadence that is ~900
 # requests/day for a number the main board already carries and the warehouse

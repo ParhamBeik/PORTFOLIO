@@ -27,7 +27,6 @@ from .fetchers import (
     fetch_candlesticks,
     fetch_codal_announcements,
     fetch_daily_history,
-    fetch_gold_currency_pro_history_daily,
     fetch_shareholders,
     fetch_transactions,
 )
@@ -275,7 +274,8 @@ _ENDPOINT_REGISTRY_KEY = {
 
 def source_for(endpoint):
     """Provider path the archive job actually calls, or empty if it calls none."""
-
+    if endpoint == ArchiveFetchState.Endpoint.GOLD_DAILY:
+        return "tgju"
     return endpoint_registry.source_for(_ENDPOINT_REGISTRY_KEY.get(endpoint, ""))
 
 
@@ -517,32 +517,26 @@ def _fetch_and_ingest(state):
         stored = _tick_dates_stored(symbol)
         expected = set(pending) | stored
     else:
-        direct_payload = None
-        if getattr(settings, "TGJU_ENABLED", False):
-            from .sources import tgju
-            try:
-                direct_payload = tgju.gold_history_payload(symbol)
-                if direct_payload is not None:
-                    logger.info(
-                        "Using TGJU history for %s (%s rows); skipping BrsApi.",
-                        symbol, len(direct_payload["history_daily"]),
-                    )
-            except Exception as exc:  # noqa: BLE001 - paid fallback is intentional
-                logger.warning(
-                    "TGJU history failed for %s; using BrsApi fallback: %s",
-                    symbol, exc,
-                )
-        if direct_payload is not None:
-            payload = direct_payload
-        else:
-            increment_historical_full_used()
-            payload = fetch_gold_currency_pro_history_daily(settings.TSETMC_API_KEY, symbol)
+        from .sources import tgju
+        from .sources.http import SourceError
+
+        if not tgju.supports_history(symbol):
+            return (0, 0), set(), set()
+        if not getattr(settings, "TGJU_ENABLED", False):
+            raise MarketDataFetchError(
+                "TGJU is disabled and BrsApi gold/currency history is retired."
+            )
+        try:
+            payload = tgju.gold_history_payload(symbol)
+        except SourceError as exc:
+            raise MarketDataFetchError(
+                f"TGJU history failed for {symbol}: {exc}"
+            ) from exc
+        if payload is None:
+            return (0, 0), set(), set()
         result = ingest.ingest_gold_currency_history(
             payload,
-            origin=(
-                GoldCurrencyHistory.Origin.TGJU if direct_payload is not None
-                else GoldCurrencyHistory.Origin.BRSAPI
-            ),
+            origin=GoldCurrencyHistory.Origin.TGJU,
         )
         expected = _gold_dates(payload)
         stored = set(GoldCurrencyHistory.objects.filter(
@@ -1255,7 +1249,9 @@ def reopen_states_with_gaps(symbols=None):
     This is that way.
     """
     states = ArchiveFetchState.objects.filter(
-        endpoint__in=_GAP_REFETCHABLE_ENDPOINTS, verified_complete=True
+        endpoint__in=_GAP_REFETCHABLE_ENDPOINTS,
+        verified_complete=True,
+        suspended_at__isnull=True,
     )
     if symbols is not None:
         symbols = list(symbols)

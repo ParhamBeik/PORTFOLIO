@@ -55,6 +55,7 @@ class Endpoint:
     rows_per_request: int = 1
     notes: str = ""
     valid_types: tuple = field(default=())
+    retired: bool = False
 
     @property
     def url(self):
@@ -72,6 +73,8 @@ REGISTRY = {
             nature=Nature.LIVE,
             bucket=LIVE,
             rows_per_request=60,
+            retired=True,
+            notes="Discontinued by BrsApi in 1405 due to legal restrictions; never call.",
         ),
         Endpoint(
             key="gold_currency_pro",
@@ -80,7 +83,8 @@ REGISTRY = {
             nature=Nature.LIVE,
             bucket=LIVE,
             rows_per_request=120,
-            notes="Per-symbol time_unix shows feeds refresh at different cadences.",
+            retired=True,
+            notes="Discontinued by BrsApi in 1405 due to legal restrictions; never call.",
         ),
         Endpoint(
             key="market_index",
@@ -179,9 +183,10 @@ REGISTRY = {
             required_params=("symbol", "history"),
             jalali_params=("date_start", "date_end"),
             rows_per_request=4792,
+            retired=True,
             notes=(
-                "history=2 with NO date params returns the entire series back to "
-                "1390 in one request. Date-walking this endpoint is pure waste."
+                "Discontinued by BrsApi in 1405 due to legal restrictions; never call. "
+                "Gold/currency daily history now comes from TGJU only."
             ),
         ),
         # ------------------------------------------------------ HISTORICAL_RANGE
