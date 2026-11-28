@@ -1,23 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { clickTab, requireLogin } from "./helpers.js";
 
-/**
- * `toBeVisible()` is not enough for a cell in a horizontally scrolling table.
- *
- * The holdings table is 12 columns wide and overflows its card, so a Save or
- * Delete button appended as the LAST column sat hundreds of pixels past the
- * right edge — present, non-empty, "visible" to Playwright, and unreachable to
- * the reader, who concluded the buttons did nothing. This asserts the thing the
- * user actually needs: the control is inside the scrolled viewport, unscrolled.
- */
-async function expectWithinScrollView(locator, containerTestId, page) {
-  const box = await locator.boundingBox();
-  const container = await page.getByTestId(containerTestId).boundingBox();
-  expect(box, "control has no box").not.toBeNull();
-  expect(box.x).toBeGreaterThanOrEqual(container.x - 1);
-  expect(box.x + box.width).toBeLessThanOrEqual(container.x + container.width + 1);
-}
-
 test.describe("dashboard", () => {
   test.beforeEach(async ({ page }) => {
     await requireLogin(page, test);
